@@ -28,6 +28,7 @@ from brutex.data.session import (
     in_session,
     is_all_filtered,
     is_session_exempt,
+    ist_offset_duration,
     observe_all_filtered,
 )
 from hypothesis import given
@@ -141,6 +142,46 @@ class TestFilterToTradingSession:
         verdict = filter_to_trading_session([saturday_budget])
         assert verdict.kept == [saturday_budget]
         assert verdict.dropped == 0
+
+    def test_extended_session_bar_2021_02_24_is_kept(self) -> None:
+        # SANCTIONED BEHAVIOR CHANGE (DEC-EXTENDED-SESSION-OUTAGE-001): a real
+        # 16:30 IST bar on the 2021-02-24 NSE-outage EXTENDED day (close 17:00
+        # at NSE + BSE + MSEI per the SEBI press releases, verified 2026-07-11)
+        # is now KEPT — the pre-fix resolver fabricated a 15:30 close and
+        # silently dropped it. FAILS on the pre-fix source (the reversion gate).
+        extended_bar = _ist_bar(2021, 2, 24, 16, 30)
+        assert filter_intraday_session([extended_bar]) == []  # the old defect, pinned
+        verdict = filter_to_trading_session([extended_bar])
+        assert verdict.kept == [extended_bar]
+        assert verdict.dropped == 0
+
+    def test_extended_session_close_is_half_open_at_1700(self) -> None:
+        # [open, close): 16:59 is the last kept minute; 17:00:00 drops.
+        last_minute = _ist_bar(2021, 2, 24, 16, 59)
+        at_close = _ist_bar(2021, 2, 24, 17, 0)
+        verdict = filter_to_trading_session([last_minute, at_close])
+        assert verdict.kept == [last_minute]
+        assert verdict.dropped_off_session == 1
+
+    def test_extended_hours_bar_on_a_neighbor_date_still_drops(self) -> None:
+        # The extension is ONE date only — a 15:45 bar on the EVE (2021-02-23,
+        # a regular Tuesday) stays post-close junk and drops.
+        verdict = filter_to_trading_session([_ist_bar(2021, 2, 23, 15, 45)])
+        assert verdict.kept == []
+        assert verdict.dropped_off_session == 1
+
+    def test_circuit_halt_day_bars_kept_unchanged(self) -> None:
+        # DEC-HALT-DAY-TREATMENT-001 — ANNOTATE, never drop: the 2020-03-23
+        # market-wide-halt day stays a full REGULAR session; its real bars
+        # (including one printed inside the 09:58→~10:58 halt window's wall
+        # clock — the filter judges [open, close) only, never intra-day halts)
+        # pass the boundary exactly as before.
+        in_session = _ist_bar(2020, 3, 23, 10, 30)
+        post_close = _ist_bar(2020, 3, 23, 15, 45)
+        verdict = filter_to_trading_session([in_session, post_close])
+        assert verdict.kept == [in_session]
+        assert verdict.dropped_off_session == 1
+        assert verdict.dropped_non_trading_date == 0
 
     def test_pre_open_bar_is_dropped_and_counted(self) -> None:
         verdict = filter_to_trading_session([_ist_bar(2024, 1, 2, 9, 0)])
@@ -326,3 +367,56 @@ class TestFormatIstClock:
     def test_unparseable_string_returned_unchanged(self) -> None:
         # A free-text note (e.g. last_error) is not a timestamp — left as-is.
         assert format_ist_clock("DhanRateLimitError") == "DhanRateLimitError"
+
+
+class TestIstOffsetDuration:
+    """`ist_offset_duration` — the ONE polars-family IST offset representation.
+
+    DEC-TIMESTAMP-IST-SINGLESOURCE-001: the helper is the polars-duration
+    family's single source, DERIVED from the canonical
+    `brutex.calendars.nse.IST_UTC_OFFSET` root — its built expression tree is
+    byte-identical to the historical `pl.duration(hours=5, minutes=30)`
+    literal every consumer used to re-mint.
+    """
+
+    def test_expr_tree_identical_to_historical_literal(self) -> None:
+        import polars as pl
+
+        assert str(ist_offset_duration()) == str(pl.duration(hours=5, minutes=30))
+
+    def test_shift_values_equal_both_literal_forms(self) -> None:
+        # Applying the helper to real UTC instants yields the SAME shifted
+        # instants as BOTH historical literal spellings (hours+minutes and
+        # whole-minutes) — the value-level byte-identity law.
+        import polars as pl
+
+        ts = [
+            datetime(2024, 1, 2, 3, 45, tzinfo=UTC),  # 09:15 IST
+            datetime(2024, 6, 28, 10, 0, tzinfo=UTC),  # 15:30 IST
+            datetime(2020, 1, 1, 18, 30, tzinfo=UTC),  # midnight IST next day
+        ]
+        frame = pl.DataFrame({"ts_utc": ts})
+        via_helper = frame.select((pl.col("ts_utc") + ist_offset_duration()).alias("v"))
+        via_hm = frame.select((pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).alias("v"))
+        via_min = frame.select((pl.col("ts_utc") + pl.duration(minutes=330)).alias("v"))
+        assert via_helper.equals(via_hm)
+        assert via_helper.equals(via_min)
+
+    def test_ist_date_of_shift_matches_zoneinfo_conversion(self) -> None:
+        # The frame-level (+05:30).date() idiom agrees with the ZoneInfo-family
+        # astimezone(IST).date() conversion on the same instants.
+        import polars as pl
+        from brutex.data.session import IST as SESSION_IST
+
+        ts = [
+            datetime(2024, 1, 2, 3, 45, tzinfo=UTC),
+            datetime(2024, 12, 31, 18, 29, tzinfo=UTC),  # 23:59 IST same day
+            datetime(2024, 12, 31, 18, 30, tzinfo=UTC),  # 00:00 IST NEXT day
+        ]
+        frame = pl.DataFrame({"ts_utc": ts})
+        got = (
+            frame.select((pl.col("ts_utc") + ist_offset_duration()).dt.date().alias("d"))
+            .get_column("d")
+            .to_list()
+        )
+        assert got == [t.astimezone(SESSION_IST).date() for t in ts]

@@ -189,3 +189,32 @@ class TestPoisonedMonthDedup:
         assert frame is not None
         assert frame.height == 2
         assert frame.get_column("close").to_list() == [1.0, 2.0]
+
+
+class TestGlobMetacharSymbolDir:
+    """DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 (the #1594 round-15 metachar law
+    on the bars tree) — FAILS-BEFORE: a symbol dir named ``NSE-X[12]`` beside
+    real ``NSE-X1``/``NSE-X2`` siblings made ``read_day_month_frame``'s
+    ``pl.read_parquet(path)`` glob-interpret the concrete month-file path and
+    silently serve the SIBLINGS' bars as this symbol's day view."""
+
+    def test_bracket_symbol_dir_reads_literal_file_only(self, tmp_path: Path) -> None:
+        bars_root = tmp_path / "bars" / "NSE" / "CASH"
+        _seed_month(bars_root / "NSE-X1" / "1minute", year=2024, month=6, rows=2)
+        _seed_month(bars_root / "NSE-X2" / "1minute", year=2024, month=6, rows=2)
+        own = bars_root / "NSE-X[12]" / "1minute"
+        target = own / "2024" / "06.parquet"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import UTC, datetime
+
+        pl.DataFrame(
+            {
+                "timestamp": [datetime(2024, 6, 3, 4, 30, tzinfo=UTC)],
+                "close": [100.55],
+                "volume": [7],
+            }
+        ).write_parquet(target)
+        frame = read_day_month_frame(own, date(2024, 6, 3))
+        assert frame is not None
+        assert frame.height == 1
+        assert frame.get_column("close").to_list() == [100.55]  # the literal file's OWN bars

@@ -1,0 +1,79 @@
+SLUG: function-getsnapshot-2
+LINK: https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/function-getsnapshot-2/
+TITLE: GetSnapshot
+MODIFIED: 2024-09-11T16:20:17
+-----DECODED-----
+
+<h3 class="wp-block-heading">GetSnapshot : Returns latest Snapshot Data of multiple Symbols – max 25 in single call</h3>
+
+
+
+<div><b><span style="color: #dd3333;">Supported parameters</span></b></div>
+
+
+
+<figure class="wp-block-table"><table class="has-fixed-layout"><tbody><tr><td><b>Exchange</b></td><td><i>String value like MCX</i></td><td>Name of supported exchange. How to get list of supported exchanges you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/function-getexchanges-2/">here</a></td></tr><tr><td><b>Periodicity</b></td><td><i>[“MINUTE”]/[“HOUR”], default = [“MINUTE”]</i></td><td>String value of required periodicity.</td></tr><tr><td><b>Period</b></td><td><i>Numerical value 1, 2, 3…l default = 1</i></td><td>Optional parameter of required period for historical data. Can be applied for [MINUTE]/[HOUR] periodicity types</td></tr><tr><td><b>InstrumentIdentifiers</b></td><td><i>Values of instrument identifiers, max. limit is 25 instruments per single request</i></td><td>How to get list of available instruments and identifiers you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getinstruments/">here</a></td></tr><tr><td><b>isShortIdentifiers</b></td><td><i>[true]/[false], default = [false]</i></td><td>Optional parameter. By default function will use long instrument identifier format. Functions will use short instrument identifier format if set as [true]. Example of ShortIdentifiers are NIFTY25MAR21FUT, RELIANCE25MAR21FUT, NIFTY25MAR2115000CE, etc.</td></tr></tbody></table></figure>
+
+
+
+<div><b><span style="color: #dd3333;">What is returned ?</span></b></div>
+
+
+
+<figure class="wp-block-table"><table class="has-fixed-layout"><tbody><tr><td><strong>InstrumentIdentifier</strong> (Symbol), <strong>Exchange, LastTradeTime, TradedQty, OpenInterest, Open, High, Low, Close</strong></td></tr><tr><td>LastTradeTime : This value is expressed as no. of seconds since Epoch time (i.e. 1st January 1970). Also known as Unix Time. Please Visit <a href="https://www.epochconverter.com/" target="_blank" rel="noopener noreferrer">https://www.epochconverter.com/</a> to get formulae to convert human readable time to Epoch and vice versa (scroll to end of their home page)</td></tr></tbody></table></figure>
+
+
+
+<div><b><span style="color: #dd3333;">Sample request(JavaScript)</span></b></div>
+
+
+
+<pre class="wp-block-preformatted">            {
+                MessageType: "GetSnapshot",
+                Exchange: "MCX",
+                Periodicity: "MINUTE",
+                Period: 1,
+				isShortIdentifiers: "true",
+                InstrumentIdentifiers: [{Value:"CRUDEOIL19MAR21FUT"}, {Value:"NATURALGAS26MAR21FUT"}]
+            };
+     doSend(request);
+</pre>
+
+
+
+<div><b><span style="color: #dd3333;">Example of returned data in JSON format</span></b></div>
+
+
+
+<pre class="wp-block-preformatted">{"Result":[
+{"InstrumentIdentifier":"CRUDEOIL19MAR21FUT",
+"Exchange":"MCX",
+"LastTradeTime":1593008580,
+"TradedQty":167,
+"OpenInterest":3760,
+"Open":3001.0,
+"High":3003.0,
+"Low":2998.0,
+"Close":3000.0},
+{"InstrumentIdentifier":"NATURALGAS26MAR21FUT",
+"Exchange":"MCX",
+"LastTradeTime":1593008580,
+"TradedQty":57,
+"OpenInterest":10824,
+"Open":129.8,
+"High":129.9,
+"Low":129.7,
+"Close":129.8}],
+"MessageType":"SnapshotResult"}
+</pre>
+
+
+
+<div><b><span style="color: #dd3333;">Important Note:</span></b></div>
+
+
+<div class="gb-container gb-container-a718481f">
+
+<p class="has-base-2-background-color has-background wp-block-paragraph">GetSnapshot , the time when request is sent is very important.                                                                                                                                                                                            For example  : If user sends request for 1minute snapshot data at 9:20:01, he will get record of trade data between 9:19:00 to 9:20:00. However, if request is sent at 9:19:58 i.e. before minute is complete, user will get trade data between 9:18:00 to 9:19:00.                                                                                                                                                 In both cases, timestamp of the returned data will be start timestamp of the period. So when data between 9:15:00 to 9:20:00 is returned, it will have timestamp of 9:15:00.                                                                                                                                                                                                                                                                                                Also if a user subscribes for snapshot data of any symbol for a period and if no trades happen during that period, no data is sent by the server</p>
+
+</div>

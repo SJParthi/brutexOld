@@ -82,7 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 import structlog
 
-from brutex.calendars.nse import daily_derive_cutoff
+from brutex.calendars.nse import IST_FIXED_OFFSET, daily_derive_cutoff
 from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.catalog import Catalog
 from brutex.data.derive_stamp import remove_derive_stamp
@@ -96,6 +96,7 @@ from brutex.data.errors import (
 from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.guarded_read import read_regular_bytes, read_regular_text
 from brutex.data.lake_invariants import (
     OPTIONS_DIR_NAME,
     ForeignMonthRows,
@@ -146,8 +147,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 _LOG = structlog.get_logger("brutex.data.lake_heal")
 
-#: IST is a fixed +05:30 offset (no DST) — the forming-session cutoff timezone.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+#: IST is a fixed +05:30 offset (no DST) — the forming-session cutoff timezone;
+#: the ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[timezone] = IST_FIXED_OFFSET
 
 # ── mode + throttle env ──────────────────────────────────────────────────────
 
@@ -477,6 +480,10 @@ _PER_FINDING_HEAL_ERRORS: Final[tuple[type[BaseException], ...]] = (
 #: the sweep daemon thread (the "boot never crashes" contract). The scan gate
 #: + ``_PER_FINDING_HEAL_ERRORS`` stop it upstream; this is the last-line rail
 #: (OverflowError is already an ``Exception`` — the fold only ADDS the panic).
+#: ALSO consumed by ``_rebuild_tf_months``'s per-symbol isolation
+#: (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): the recall's months-bounded
+#: re-materialise converts bars Python-side, so the SAME panic class escaped
+#: its former bare ``except Exception`` and aborted the whole recall batch.
 #: A named constant because mypy --strict rejects a starred-unpack tuple
 #: DISPLAY in an ``except`` clause while accepting a tuple-typed expression.
 _SWEEP_GUARD_ERRORS: Final[tuple[type[BaseException], ...]] = (
@@ -667,7 +674,7 @@ def _remove_dataset_stats_for(lake_root: Path, source: Path) -> None:
 def _quarantine_move(state: _BatchState, source: Path) -> Path:
     """Quarantine-COPY *source* then unlink it (a whole-file move, audited)."""
     dest = state.quarantine_path(source)
-    content = source.read_bytes()
+    content = read_regular_bytes(source)
     with lake_write_guard():
         dest.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_via(dest, lambda tmp: tmp.write_bytes(content))
@@ -1471,7 +1478,15 @@ def _rebuild_tf_months(
         )
     except LakeWriteHalt:
         raise
-    except Exception as exc:  # pylint: disable=broad-exception-caught — per-symbol isolation
+    # _SWEEP_GUARD_ERRORS = Exception + the out-of-range-timestamp conversion
+    # panics (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the round-18 idiom): a
+    # planted 2**62-us stored stamp panics the rebuild's Rust→Python conversion
+    # as a BaseException that sailed PAST the former bare `except Exception`
+    # and aborted the WHOLE recall batch; the read-boundary gate refuses it
+    # FIRST as ResampleInputError — this is the defense-in-depth rail so any
+    # residual panic stays per-symbol isolation. KeyboardInterrupt/SystemExit
+    # still propagate (the guard is never a blanket BaseException).
+    except _SWEEP_GUARD_ERRORS as exc:  # pylint: disable=broad-exception-caught — per-symbol isolation
         _LOG.warning(
             "lake_heal.tf_rebuild_failed", symbol=symbol, tfs=sorted(tf_labels), error=str(exc)
         )
@@ -1632,7 +1647,7 @@ def load_heal_stats(lake_root: Path) -> dict[str, Any]:
     """
     path = lake_root / STATS_RELPATH
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_regular_text(path))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -1647,7 +1662,7 @@ def load_last_sweep(lake_root: Path) -> dict[str, Any] | None:
     """
     path = lake_root / SENTINEL_RELPATH
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_regular_text(path))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -1664,7 +1679,7 @@ def load_last_attempt(lake_root: Path) -> dict[str, Any] | None:
     """
     path = lake_root / ATTEMPT_RELPATH
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_regular_text(path))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None

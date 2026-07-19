@@ -27,16 +27,27 @@ Complexity (honest): O(1) per call — a fixed count of transcendentals plus
 the verified Jäckel "Let's Be Rational" inversion (bounded by construction)
 with a deterministic, iteration-capped bracketed fallback. NOT an
 O(1)-total claim for batch callers.
+
+Batch face (`DEC-GREEKS-RUST-BATCH-001`): :func:`compute_greeks_batch` routes
+N frozen :class:`GreeksSolveRequest` tuples through ONE
+``trading_core.greeks_batch`` FFI call — the compiled side calls the SAME
+frozen scalar kernel per element, so every outcome is bit-identical to the
+scalar entry's; per-element rejects travel as :class:`GreeksBatchOutcome`
+DATA instead of exceptions. Consumed by the default-OFF
+``BRUTEX_GREEKS_RUST_BATCH`` seam in :mod:`brutex.data.greeks_enrich`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import trading_core
 
 from brutex.options.risk_free import RiskFreeRate
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 __all__ = [
     "DELTA_ADMISSION_FLOOR",
@@ -44,9 +55,12 @@ __all__ = [
     "IV_CLAMP_MIN",
     "T_FLOOR_YEARS",
     "VEGA_ADMISSION_FLOOR",
+    "GreeksBatchOutcome",
     "GreeksInputError",
     "GreeksResult",
+    "GreeksSolveRequest",
     "compute_greeks",
+    "compute_greeks_batch",
 ]
 
 #: Hard time-to-expiry floor (600 s in Act/365 years) — below it the kernel
@@ -210,3 +224,125 @@ def compute_greeks(
         rate_source=rate.source,
         rate_version=rate.version,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class GreeksSolveRequest:
+    """One already-screened solve tuple for :func:`compute_greeks_batch`.
+
+    The exact argument set of :func:`compute_greeks`, frozen as data so N
+    requests can cross the FFI in ONE columnar call
+    (`DEC-GREEKS-RUST-BATCH-001`). ``sigma`` given → direct pricing (the
+    live / vendor-IV path; ``price`` ignored); ``sigma`` omitted → IV is
+    solved from ``price`` first (the historical enrich path).
+    """
+
+    price: float | None
+    forward: float
+    strike: float
+    t_years: float
+    rate: RiskFreeRate
+    is_call: bool
+    sigma: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GreeksBatchOutcome:
+    """One request's outcome — the data mirror of :func:`compute_greeks`.
+
+    Exactly three legal shapes, mirroring the scalar entry's contract:
+
+    * ``result`` set — solved (the scalar return value);
+    * both ``None`` — the honest ``no_solution`` NA (the scalar ``None``);
+    * ``invalid_input`` set — the caller-contract reject message the scalar
+      entry would raise as :class:`GreeksInputError` (per-element DATA here,
+      so one bad row never aborts its batch siblings).
+
+    ``__post_init__`` refuses the impossible both-set shape loudly.
+    """
+
+    result: GreeksResult | None
+    invalid_input: str | None
+
+    def __post_init__(self) -> None:
+        if self.result is not None and self.invalid_input is not None:
+            msg = (
+                "GreeksBatchOutcome cannot carry BOTH a result and an "
+                "invalid_input — the kernel contract is exactly-one-of"
+            )
+            raise ValueError(msg)
+
+
+def compute_greeks_batch(
+    requests: Sequence[GreeksSolveRequest],
+) -> list[GreeksBatchOutcome]:
+    """Price N requests through ONE ``trading_core.greeks_batch`` FFI call.
+
+    The columnar batch face of :func:`compute_greeks`
+    (`DEC-GREEKS-RUST-BATCH-001`): the compiled kernel routes each element
+    through the SAME frozen scalar ``greeks`` entry (zero math duplication),
+    so element ``i``'s outcome is bit-identical to
+    ``compute_greeks(**requests[i])`` — solved values, the honest-``None``
+    ``no_solution`` family, and the ``invalid_input`` reject message alike
+    (the latter carried as per-element DATA instead of an exception, so one
+    unsolvable strike never aborts its siblings). Classification uses the
+    SAME :data:`_NO_SOLUTION_PREFIX` ``startswith`` the scalar wrapper uses;
+    ``rate_source`` / ``rate_version`` are stamped Python-side from each
+    request's :class:`~brutex.options.risk_free.RiskFreeRate`, exactly as the
+    scalar wrapper stamps them.
+
+    Complexity (honest): O(len(requests)) kernel solves — a constant-factor
+    FFI-overhead win over N scalar calls, NEVER an O(1) claim.
+
+    Raises
+    ------
+    GreeksInputError
+        Whole-call, BEFORE any FFI crossing, when any request's ``rate`` is
+        not a :class:`RiskFreeRate` (the scalar entry's seam guard, applied
+        per element up front — a bare float must never reach ``.rate``).
+    """
+    for req in requests:
+        rate_obj: object = req.rate
+        if not isinstance(rate_obj, RiskFreeRate):
+            msg = (
+                "rate must be a stamped RiskFreeRate from the PR-1 "
+                "RiskFreeSource seam (DEC-GREEKS-ENGINE-PR1-001), got "
+                f"{type(rate_obj).__name__}"
+            )
+            raise GreeksInputError(msg)
+    raw = trading_core.greeks_batch(
+        [req.price for req in requests],
+        [req.sigma for req in requests],
+        [req.forward for req in requests],
+        [req.strike for req in requests],
+        [req.t_years for req in requests],
+        [req.rate.rate for req in requests],
+        [req.is_call for req in requests],
+    )
+    outcomes: list[GreeksBatchOutcome] = []
+    for req, (values, error) in zip(requests, raw, strict=True):
+        if error is not None:
+            if error.startswith(_NO_SOLUTION_PREFIX):
+                outcomes.append(GreeksBatchOutcome(result=None, invalid_input=None))
+            else:
+                outcomes.append(GreeksBatchOutcome(result=None, invalid_input=error))
+            continue
+        iv, delta, gamma, theta, vega, rho, model_price, admissible = values
+        outcomes.append(
+            GreeksBatchOutcome(
+                result=GreeksResult(
+                    iv=iv,
+                    delta=delta,
+                    gamma=gamma,
+                    theta=theta,
+                    vega=vega,
+                    rho=rho,
+                    price=model_price,
+                    admissible=admissible,
+                    rate_source=req.rate.source,
+                    rate_version=req.rate.version,
+                ),
+                invalid_input=None,
+            )
+        )
+    return outcomes

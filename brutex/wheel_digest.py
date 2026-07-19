@@ -150,9 +150,13 @@ def crate_source_digest(crate_root: Path) -> str:
     OSError
         A digested file or directory cannot be read.
     """
+    from brutex.data.guarded_read import (
+        read_regular_bytes,
+    )
+
     hasher = blake3.blake3()
     for rel, path in collect_digest_files(crate_root):
-        contents = path.read_bytes()
+        contents = read_regular_bytes(path)
         hasher.update(rel.encode("utf-8"))
         hasher.update(b"\x00")
         hasher.update(len(contents).to_bytes(8, "little"))

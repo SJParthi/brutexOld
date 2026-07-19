@@ -100,6 +100,59 @@ def _spec(**overrides: object) -> cw.CascadeTupleSpec:
     return cw.CascadeTupleSpec(**base)  # type: ignore[arg-type]
 
 
+class TestSpecFillModeManifestLaw:
+    """DEC-FILL-WORST-CASE-ONLY-001: the unconditional manifest token + the
+    precise-era refusal law (worst-case is the ONLY fill model)."""
+
+    def test_spec_dict_carries_the_permanent_worst_case_token(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        assert payload["fill_mode"] == "worst_case"
+        assert cw._spec_from_dict(payload) == _spec()
+
+    def test_absent_key_refuses_as_precise_era(self) -> None:
+        # Fails-before pin: a pre-DEC manifest (no fill_mode key — the old
+        # PRECISE elide) must refuse LOUDLY naming the DEC, never replay.
+        payload = cw._spec_to_dict(_spec())
+        del payload["fill_mode"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_literal_precise_token_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "precise"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"re-run the sweep to produce a worst-case manifest",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_junk_fill_mode_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "worst"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_spec_carries_no_fill_mode_field(self) -> None:
+        # Killed-token pin: the config object carries NO mode — the law is
+        # global, so nothing can thread a per-spec fill choice back in.
+        from dataclasses import fields
+
+        assert "fill_mode" not in {f.name for f in fields(cw.CascadeTupleSpec)}
+
+    def test_candidates_for_spec_runs_the_one_law_deterministically(self) -> None:
+        bars = _session_bars()
+        a = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        b = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        assert len(a) == 1
+        assert a[0].returns == b[0].returns  # no hidden mode input survives
+
+
 def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
     """Return a ``bars_for`` that serves *bars* for NIFTY/1minute, else empty."""
 
@@ -216,28 +269,33 @@ def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
 
 
 def _fat_tailed_bars() -> list[CandleBar]:
-    """A 40-bar session with a few extreme spikes → fat-tailed realised trade PnL.
+    """A 40-bar gap-up session with two down-spikes → fat-tailed WORST-CASE PnL.
 
-    The wide intrabar ranges let an SL/TP exit fill at different prices across
-    trades, and the four spike bars (10/24 up, 16/30 down) inject the heavy
-    tails, so a reconstruction over these bars yields a DEFINED, non-zero
-    (excess) kurtosis — the regime where the excess-vs-non-excess distinction
-    is material to the DSR. The pattern is deterministic (no RNG): a fixed
-    ``±`` swing list plus the spike overrides.
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (the one hardcoded adverse-max
+    law): a long ENTERS at the bar HIGH and a triggered TP fills at
+    ``min(level, low)``, so a positive-Sharpe fixture needs the TRIGGER bar's
+    LOW to clear the target — every regular bar GAPS UP (open = prior close
+    + 3.00, low = open − 0.20, close = open + 1.00, high = close + 0.30), so
+    the next bar's low (prior close + 2.80) sits above the TP level (entry
+    high + 2.00 = prior close + 2.30 relative to its own bar) and the win
+    banks exactly +200 paisa. The two down-spike bars (16: −4.00, 30: −6.00)
+    inject the heavy tail: bar 30's dip breaches the entry-relative floor and
+    the trade closes at the adverse ``min(level, low)`` for −330 paisa.
+    Measured on this tree: 13 trades = twelve +200 and one −330 → Sharpe
+    ≈ 1.127 (> the test's SR_0 ≈ 0.207) with a DEFINED, non-zero excess
+    kurtosis ≈ 8.083 — the regime where the excess-vs-non-excess distinction
+    is material to the DSR. Deterministic (no RNG).
     """
-    swings = [1.0, 1.2, 0.8, 1.5, -0.9, -1.1, 1.0, 1.2, 0.8, 1.5]
     seq: list[tuple[str, str, str, str]] = []
     price = 100.0
     for i in range(40):
-        o = price
-        if i in (10, 24):  # fat UPSIDE spikes
-            high, low, c = o + 15.0, o - 0.5, o + 12.0
-        elif i in (16, 30):  # fat DOWNSIDE spikes
-            high, low, c = o + 0.5, o - 15.0, o - 12.0
+        o = price + 3.0
+        if i in (16, 30):  # fat DOWNSIDE spikes (different depths → tail variety)
+            depth = 4.0 if i == 16 else 6.0
+            high, low, c = o + 0.1, o - depth, o - depth + 1.0
         else:
-            delta = swings[i % len(swings)]
-            c = o + delta
-            high, low = max(o, c) + 1.5, min(o, c) - 1.5
+            c = o + 1.0
+            high, low = c + 0.3, o - 0.2
         seq.append((f"{o:.2f}", f"{high:.2f}", f"{low:.2f}", f"{c:.2f}"))
         price = c
 
@@ -260,9 +318,9 @@ def _fat_tailed_bars() -> list[CandleBar]:
 def _fat_tailed_candidate() -> Any:
     """Reconstruct one fat-tailed :class:`CandidateInput` over :func:`_fat_tailed_bars`.
 
-    ``sl=500 / tp=200`` over the spike session produces 15 trades with a
-    defined, non-zero excess kurtosis (≈1.73) — the fixture the
-    DSR-kurtosis-convention regression tests share.
+    ``sl=500 / tp=200`` over the gap-up session produces 13 worst-case trades
+    (twelve +200, one −330) with a defined, non-zero excess kurtosis (≈8.08)
+    — the fixture the DSR-kurtosis-convention regression tests share.
     """
     bars = _fat_tailed_bars()
     bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
@@ -595,9 +653,12 @@ class TestBuildCandidateInput:
         the old ``0.0``, which the DSR would have mis-read as a non-excess
         kurtosis of zero).
         """
-        bars = _session_bars()
+        # A FLAT session (o == h == l == c on every bar): under the one
+        # worst-case law every fill lands at the same price, so the
+        # reconstructed PnL is constant (zero) → kurtosis undefined.
+        flat = [_bar(16 + i, "100.00", "100.00", "100.00", "100.00") for i in range(6)]
+        bars = flat
         bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
-        # Tight identical SL hits → constant per-trade PnL → kurtosis undefined.
         cand = cw.build_candidate_input(
             run_id=_rid(1),
             mask=0,
@@ -1739,6 +1800,38 @@ class TestBuildStage2CascadeSpecs:
         assert specs
         assert all(len(spec.winners) == 1 for spec in specs)
 
+    def test_corrupt_store_raises_typed_cascade_error(self, tmp_path: Path) -> None:
+        """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
+
+        A corrupt / old-schema Stage-2 finalist store surfaces as a typed
+        ``CascadeWireError`` naming the UNREADABLE file — never a raw error and
+        never a silent skip (dropping a tuple's finalists would change Stage-2
+        selection invisibly, a false green).
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import (
+            TUPLE_STORE_CORRUPT_REMEDIATION,
+            iter_sweep_tuples,
+            tuple_store_path,
+        )
+
+        grid = _two_anchor_grid()
+        first = next(iter_sweep_tuples(grid))
+        _seed_tuple_store(tmp_path, first, grid, rows=[_result_row(1, mask=1, sharpe=0.5)])
+        # Corrupt the persisted store parquet (VECTOR: overwrite *.parquet).
+        store_path = tuple_store_path(tmp_path, first, grid)
+        store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+        with pytest.raises(cw.CascadeWireError, match="UNREADABLE") as excinfo:
+            cw.build_stage2_cascade_specs(tmp_path, grid, top_k=None)
+        message = str(excinfo.value)
+        assert str(store_path) in message
+        # Review round 1 MINOR-1: the message carries the ONE shared RUNNABLE
+        # remediation chain (real flags — TestRemediationFlagsRunnable pins them
+        # against the live argparse surface), never the fictional --out-root.
+        assert TUPLE_STORE_CORRUPT_REMEDIATION in message
+        assert "--results-root" in message
+        assert "--out-root" not in message
+
 
 @dataclass(frozen=True)
 class _FakeRefinedCell:
@@ -2231,6 +2324,79 @@ class TestEndToEnd:
         path = cw.write_report(tmp_path, _manual_report())
         assert path.exists()
         assert path.read_bytes() == cw.serialize_wire_report(_manual_report())
+
+
+class TestCascadeSidecarAtomicWrite:
+    """R2N-08 (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1923).
+
+    The manifest / report writes are atomic (tmp→fsync→os.replace); a crash /
+    ENOSPC mid-write leaves the prior complete copy INTACT (never torn), maps to a
+    typed ``CascadeWireError`` (NOT the lake-wide ``LakeWriteHalt`` escalation), and
+    leaves no orphan ``.brutex-write-*`` temp.
+    """
+
+    def test_manifest_write_atomic_enospc_preserves_prior(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        from brutex.data.errors import LakeWriteHalt
+
+        # Pre-seed a good manifest.
+        good = _manifest()
+        cw.write_manifest(tmp_path, good)
+        prior_bytes = cw.manifest_path(tmp_path).read_bytes()
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        # A DIFFERENT manifest write now fails mid-replace.
+        with pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.write_manifest(tmp_path, _manifest(specs=(_spec(),)))
+        # Typed cascade abort — NOT a lake-wide halt escalation.
+        assert not isinstance(excinfo.value, LakeWriteHalt)
+        assert str(cw.manifest_path(tmp_path)) in str(excinfo.value)
+        # The prior manifest bytes are UNCHANGED (the atomic replace never landed).
+        monkeypatch.undo()
+        assert cw.manifest_path(tmp_path).read_bytes() == prior_bytes
+        # No orphan .brutex-write-* temp left behind.
+        assert list(cw.manifest_path(tmp_path).parent.glob(".brutex-write-*")) == []
+
+    def test_report_write_atomic_enospc_typed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        from brutex.data.errors import LakeWriteHalt
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        with pytest.raises(cw.CascadeWireError, match="cascade report") as excinfo:
+            cw.write_report(tmp_path, _manual_report())
+        assert not isinstance(excinfo.value, LakeWriteHalt)
+        monkeypatch.undo()
+        assert list((tmp_path / cw.CASCADE_DIRNAME).glob(".brutex-write-*")) == []
+
+    def test_kill_mid_write_load_manifest_returns_old(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        good = _manifest()
+        cw.write_manifest(tmp_path, good)
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        with pytest.raises(cw.CascadeWireError):
+            cw.write_manifest(tmp_path, _manifest(specs=(_spec(),)))
+        monkeypatch.undo()
+        # load_manifest still serves the OLD complete cascade.
+        assert cw.load_manifest(tmp_path) == good
 
     def test_auto_path_writes_manifest_and_report(self, tmp_path: Path) -> None:
         bars = _session_bars()

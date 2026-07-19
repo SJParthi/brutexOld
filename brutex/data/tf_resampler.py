@@ -44,6 +44,21 @@ NEVER shift it (the prior first-bar anchoring could). A 5m bar at
 For daily TF: one bar per trading day, covering [session_open,
 session_close), labeled at the 09:15 IST session open.
 
+## Seconds-keyed grid (DEC-TF-REGISTRY-DYNAMIC-001)
+
+The bucket arithmetic is SECONDS-keyed over
+:class:`brutex.data.timeframes.TfSpec` (``duration_s``), so any registry
+spec — including a config-added minute TF like 20m, or a sub-minute spec
+over second-stamped input — buckets through the ONE
+:func:`resample_frame_to_spec` engine. For whole-minute-stamped input the
+seconds arithmetic is BIT-IDENTICAL to the historical minute arithmetic
+(``offset_s == 60 * offset_minutes`` exactly, and ``floor(60x / 60y) * 60y
+== 60 * (floor(x / y) * y)`` under the same polars Int64 floor division) —
+pinned by the frozen-oracle parity suite
+(``tests/unit/test_tf_resampler_registry_parity.py``). HONEST GATE: no
+production feed emits sub-minute bars (Groww is 1-minute-only) — the
+sub-minute arm is a framework capability proven on synthetic input only.
+
 ## Polars implementation
 
 Uses `pl.DataFrame.group_by_dynamic()` for minute-multiple TFs (Polars
@@ -82,8 +97,9 @@ if TYPE_CHECKING:
     import polars as pl
 
 from brutex.data.errors import ResampleInputError
+from brutex.data.lake_rust_resample import lake_rust_resample_enabled, resample_frame_via_rust
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
-from brutex.data.timeframes import ALL_TF_MINUTES, is_intraday
+from brutex.data.timeframes import ALL_TF_MINUTES, TfAnchor, TfSpec, spec_for_minutes
 
 # Required schema for input 1m DataFrame.
 REQUIRED_COLUMNS: tuple[str, ...] = (
@@ -166,6 +182,110 @@ def _validate_input(df_1m) -> None:  # type: ignore[no-untyped-def]
             )
 
 
+def _resample_validated(df_1m, spec: TfSpec):  # type: ignore[no-untyped-def]
+    """Bucket a VALIDATED frame onto *spec*'s grid — the ONE shared engine.
+
+    Callers must run :func:`_validate_input` first. The aggregation rules
+    (OHLCV + optional OI carry-last + Greeks-overlay carry-last) are
+    byte-identical to the pre-registry implementation; only the bucket
+    arithmetic moved from minutes to seconds (DEC-TF-REGISTRY-DYNAMIC-001).
+    """
+    import polars as pl
+
+    # F&O frames carry an ``open_interest`` column; spot/index do not. Carry it
+    # through with carry-last (snapshot) semantics ONLY when present, so the
+    # spot output stays byte-identical to the OHLCV-6 (purely additive).
+    has_oi = OPEN_INTEREST_COLUMN in df_1m.columns
+
+    # FIXED-ARITHMETIC session anchor (DEC-RESAMPLE-ANCHOR-002, hardening
+    # DEC-RESAMPLE-ANCHOR-001): each row's bucket label is its IST date's
+    # 09:15 session open plus floor-of-elapsed-time-over-duration whole
+    # buckets. Pure column math — the grid depends ONLY on the calendar TIME,
+    # never on which bars happen to exist. The prior ``group_by_dynamic(
+    # start_by="datapoint")`` anchored each session's grid to its FIRST BAR,
+    # so a vendor gap at the 09:15 open silently shifted the WHOLE day's grid
+    # for every timeframe (the hazard the 2026-06-11 4-agent review flagged).
+    # Buckets can never straddle sessions: every label shares the bar's IST
+    # trading date by construction. IST is a fixed +05:30 (no DST), so the
+    # arithmetic needs no calendar module for Track 1's intraday TFs.
+    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    session_open_ist = ist.dt.truncate("1d") + pl.duration(hours=9, minutes=15)
+
+    if spec.anchor is TfAnchor.SESSION_OPEN:
+        # SECONDS-keyed bucket arithmetic (DEC-TF-REGISTRY-DYNAMIC-001). For a
+        # whole-minute-stamped input this is BIT-IDENTICAL to the pre-registry
+        # minute arithmetic: offset_s == 60 * offset_minutes exactly, and
+        # floor(60x / 60y) * 60y == 60 * (floor(x / y) * y) under the SAME
+        # polars Int64 floor division on both sides — pinned by the frozen
+        # oracle-parity suite (test_tf_resampler_registry_parity.py).
+        offset_s = (ist - session_open_ist).dt.total_seconds()
+        bucket_s = (offset_s // spec.duration_s) * spec.duration_s
+        bucket_utc = (session_open_ist + pl.duration(seconds=bucket_s)) - pl.duration(
+            hours=5, minutes=30
+        )
+    else:
+        # IST_DAY (the daily TF): one bucket per IST trading day, labeled at
+        # the 09:15 IST session open (NOT the first bar — same gap immunity).
+        bucket_utc = session_open_ist - pl.duration(hours=5, minutes=30)
+
+    aggregations = [
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+        pl.col("volume").sum().alias("volume"),
+    ]
+    if has_oi:
+        # Carry-last OI: maintain_order=True over caller-sorted input makes
+        # ``.last()`` deterministically the latest-timestamp bar's OI (a STOCK
+        # snapshot, never the volume FLOW). A null last bar yields null OI.
+        aggregations.append(pl.col(OPEN_INTEREST_COLUMN).last().alias(OPEN_INTEREST_COLUMN))
+    # Greeks CLOSE-SNAPSHOT propagation (plan §15.10, semantics LOCKED by
+    # DEC-GREEKS-ENGINE-PR1-001; implemented by DEC-GREEKS-ENGINE-PR3-001):
+    # when the input frame carries any of the ten stored Greeks-overlay
+    # columns (an ENRICHED option 1-minute read — DEC-GREEKS-ENGINE-PR2B-001),
+    # each propagates by LAST-VALUE — a derived bar's iv/delta/gamma/theta/
+    # vega/rho (+ inputs + provenance stamp) are EXACTLY its last constituent
+    # 1-minute bar's stored values. Greeks are STATE, not FLOW: never summed,
+    # never averaged, never OHLC-aggregated — the same rule ``close`` and OI
+    # already obey, so it is zero-recompute, O(1) per derived bar, and
+    # bit-identical across every TF. A NULL last constituent (an honest §15.8
+    # stamped-NA minute) stays NULL — NEVER backfilled from an earlier
+    # constituent minute (that would be a stale-spot fabrication). Spot /
+    # futures / legacy frames carry none of these columns, so the output is
+    # byte-identical for them (purely additive, exactly like the OI branch).
+    for overlay_column in GREEKS_OVERLAY_FIELDS:
+        if overlay_column in df_1m.columns:
+            aggregations.append(pl.col(overlay_column).last().alias(overlay_column))
+
+    return (
+        df_1m.with_columns(bucket_utc.alias("_bucket_ts"))
+        .group_by("_bucket_ts", maintain_order=True)
+        .agg(*aggregations)
+        .rename({"_bucket_ts": "ts_utc"})
+        .sort("ts_utc")
+    )
+
+
+def resample_frame_to_spec(df_1m, spec: TfSpec):  # type: ignore[no-untyped-def]
+    """Resample a base-granularity bar DataFrame onto *spec*'s bucket grid.
+
+    The registry-driven entry (DEC-TF-REGISTRY-DYNAMIC-001): *spec* is the
+    authority — any :class:`~brutex.data.timeframes.TfSpec` buckets here,
+    including one NOT in the default 21-TF registry (a config-added ``20m``,
+    or a sub-minute spec over second-stamped input). Unlike
+    :func:`resample_1m_to_tf` there is NO identity shortcut — the frame is
+    always bucketed onto *spec*'s grid.
+
+    HONEST GATE (Golden Rule #10): sub-minute bucketing is a FRAMEWORK
+    capability proven on synthetic second-stamped input only — no production
+    feed emits sub-minute bars (Groww is 1-minute-only), so no production
+    caller passes a sub-minute spec today.
+    """
+    _validate_input(df_1m)
+    return _resample_validated(df_1m, spec)
+
+
 def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped-def]
     """Resample a 1-minute bar DataFrame to a target timeframe.
 
@@ -221,88 +341,39 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         >>> int(df_5m.get_column("volume")[0])
         30
     """
-    import polars as pl
-
     _validate_input(df_1m)
     if target_tf_minutes not in ALL_TF_MINUTES:
         raise ValueError(
             f"Unsupported target TF: {target_tf_minutes} minutes. "
             f"Must be one of {sorted(ALL_TF_MINUTES)}."
         )
+    if lake_rust_resample_enabled():
+        # ADR-0020 Wave-B seam (DEC-LAKE-RUST-RESAMPLE-001, default OFF):
+        # route the validated frame through the brutex_lake crate, with the
+        # verbatim Python body below as the LIVE parity oracle — every
+        # guard/degrade/burn-in-mismatch path serves it, so resampled
+        # values never depend on the wheel being present or correct.
+        return resample_frame_via_rust(df_1m, target_tf_minutes, oracle=_resample_1m_to_tf_python)
+    return _resample_1m_to_tf_python(df_1m, target_tf_minutes)
 
+
+def _resample_1m_to_tf_python(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped-def]
+    """The verbatim pre-seam resample body (Slice-0-style decomposition).
+
+    Extracted token-for-token from :func:`resample_1m_to_tf` by
+    DEC-LAKE-RUST-RESAMPLE-001 so the public fn can gate the Rust seam
+    while the OFF (default) path stays byte-identical — AND the live
+    parity oracle every seam degrade path serves. Assumes an
+    ALREADY-validated frame and an ``ALL_TF_MINUTES`` member (the public
+    fn's contract; never call this directly from production code).
+    """
     # 1m -> 1m is a no-op (shallow copy preserves immutability semantics) —
     # it carries WHATEVER columns the input has (OI present for F&O, absent
     # for spot), unchanged.
     if target_tf_minutes == 1:
         return df_1m.clone()
 
-    # F&O frames carry an ``open_interest`` column; spot/index do not. Carry it
-    # through with carry-last (snapshot) semantics ONLY when present, so the
-    # spot output stays byte-identical to the OHLCV-6 (purely additive).
-    has_oi = OPEN_INTEREST_COLUMN in df_1m.columns
-
-    # FIXED-ARITHMETIC session anchor (DEC-RESAMPLE-ANCHOR-002, hardening
-    # DEC-RESAMPLE-ANCHOR-001): each row's bucket label is its IST date's
-    # 09:15 session open plus floor-of-elapsed-minutes-over-tf whole buckets.
-    # Pure column math — the grid depends ONLY on the calendar TIME, never on
-    # which bars happen to exist. The prior ``group_by_dynamic(start_by=
-    # "datapoint")`` anchored each session's grid to its FIRST BAR, so a
-    # vendor gap at the 09:15 open silently shifted the WHOLE day's grid for
-    # every timeframe (the hazard the 2026-06-11 4-agent review flagged).
-    # Buckets can never straddle sessions: every label shares the bar's IST
-    # trading date by construction. IST is a fixed +05:30 (no DST), so the
-    # arithmetic needs no calendar module for Track 1's intraday TFs.
-    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
-    session_open_ist = ist.dt.truncate("1d") + pl.duration(hours=9, minutes=15)
-
-    if is_intraday(target_tf_minutes):
-        offset_minutes = (ist - session_open_ist).dt.total_minutes()
-        bucket_minutes = (offset_minutes // target_tf_minutes) * target_tf_minutes
-        bucket_utc = (session_open_ist + pl.duration(minutes=bucket_minutes)) - pl.duration(
-            hours=5, minutes=30
-        )
-    else:
-        # Daily TF (375 minutes): one bucket per IST trading day, labeled at
-        # the 09:15 session open (NOT the first bar — same gap immunity).
-        bucket_utc = session_open_ist - pl.duration(hours=5, minutes=30)
-
-    aggregations = [
-        pl.col("open").first().alias("open"),
-        pl.col("high").max().alias("high"),
-        pl.col("low").min().alias("low"),
-        pl.col("close").last().alias("close"),
-        pl.col("volume").sum().alias("volume"),
-    ]
-    if has_oi:
-        # Carry-last OI: maintain_order=True over caller-sorted input makes
-        # ``.last()`` deterministically the latest-timestamp bar's OI (a STOCK
-        # snapshot, never the volume FLOW). A null last bar yields null OI.
-        aggregations.append(pl.col(OPEN_INTEREST_COLUMN).last().alias(OPEN_INTEREST_COLUMN))
-    # Greeks CLOSE-SNAPSHOT propagation (plan §15.10, semantics LOCKED by
-    # DEC-GREEKS-ENGINE-PR1-001; implemented by DEC-GREEKS-ENGINE-PR3-001):
-    # when the input frame carries any of the ten stored Greeks-overlay
-    # columns (an ENRICHED option 1-minute read — DEC-GREEKS-ENGINE-PR2B-001),
-    # each propagates by LAST-VALUE — a derived bar's iv/delta/gamma/theta/
-    # vega/rho (+ inputs + provenance stamp) are EXACTLY its last constituent
-    # 1-minute bar's stored values. Greeks are STATE, not FLOW: never summed,
-    # never averaged, never OHLC-aggregated — the same rule ``close`` and OI
-    # already obey, so it is zero-recompute, O(1) per derived bar, and
-    # bit-identical across every TF. A NULL last constituent (an honest §15.8
-    # stamped-NA minute) stays NULL — NEVER backfilled from an earlier
-    # constituent minute (that would be a stale-spot fabrication). Spot /
-    # futures / legacy frames carry none of these columns, so the output is
-    # byte-identical for them (purely additive, exactly like the OI branch).
-    for overlay_column in GREEKS_OVERLAY_FIELDS:
-        if overlay_column in df_1m.columns:
-            aggregations.append(pl.col(overlay_column).last().alias(overlay_column))
-
-    return (
-        df_1m.with_columns(bucket_utc.alias("_bucket_ts"))
-        .group_by("_bucket_ts", maintain_order=True)
-        .agg(*aggregations)
-        .rename({"_bucket_ts": "ts_utc"})
-        .sort("ts_utc")
-    )
+    return _resample_validated(df_1m, spec_for_minutes(target_tf_minutes))
 
 
 def resample_all_21_tfs(df_1m) -> dict[int, pl.DataFrame]:  # type: ignore[no-untyped-def]

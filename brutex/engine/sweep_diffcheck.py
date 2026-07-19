@@ -18,37 +18,43 @@ The production leg is INJECTED into :class:`DiffCheckHook` by the run core
 (``simulate_trades`` + the equity/drawdown fold), so even the hook side of
 this module stays structurally clean of the banned imports. What IS reused
 are canonical INPUT seams only (design R45 note): the NSE session calendar
-(session facts are data, not simulator logic) and the canonical mask
+(session facts are data, not simulator logic), the canonical mask
 enumeration order (:func:`brutex.engine.combo_mask.iter_masks_k_of_bits` +
-conflict pruning — the addressing, not the simulation). The signal
-projection, rupee→paisa snap, entry/exit state machine, equity fold,
-drawdown scan and the float bit-compare key are all RE-DERIVED here in a
-flat forward loop (the ``tests/unit/test_surface_trial_results.py``
+conflict pruning — the addressing, not the simulation).
+The signal projection, rupee→paisa snap, entry/exit state machine, equity
+fold, drawdown scan and the float bit-compare key are all RE-DERIVED here
+in a flat forward loop (the ``tests/unit/test_surface_trial_results.py``
 independent-recomputation bar).
 
 ## Rules re-derived (the spec — ``trade_sim`` module docstring / sim-map c.1)
 
-Signal on bar N (``(bar_bits[N] & mask) == mask``) ⇒ enter at bar N+1
-OPEN, only within the SAME IST session date (an overnight-gap fill is
-DROPPED — R2-OC-2) and never on a forced-exit bar; forced session-close
-exit fills at the OPEN of the first bar whose ``[open, open+tf)`` window
-passes the session's close − 10 min boundary and overrides everything;
-SL/TP touch on the bar's ``[low, high]`` in int paisa with the pessimistic
-same-bar SL-first tie-break and exact-level (``AT_LEVEL``) fills — the
-production sweep's locked DEFAULT policy (``SweepRunConfig`` carries no
-policy field); MFE/MAE fold per in-position bar (forced bars fold
-``(open, open)`` only); an open position never survives an IST
-session-date change (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md
-#1743) — on the FIRST bar whose IST session date differs (pure ``!=``,
-either direction) from the position's entry-session date it closes
-retroactively at the PRIOR session's last managed bar (that bar's CLOSE /
-timestamp / index; NO excursion fold from the boundary bar) under
-``session_gap``, and the boundary bar never arms an entry (earliest
-re-arm ``i+1``, earliest fill ``i+2``); a position still open at end of
-data closes at the LAST bar's CLOSE — for the same prefix, bit-identical
-to the ``session_gap`` record modulo the reason label (the truncation
-equivalence). P&L is the per-unit directional move in int64 paisa —
-NO costs of any kind (Track-1 spot is signal-only; CLAUDE.md §7).
+Signal on bar N (``(bar_bits[N] & mask) == mask``) ⇒ fill on bar N+1,
+only within the SAME IST session date (an overnight-gap fill is DROPPED —
+R2-OC-2) and never on a forced-exit bar. Every fill PRICE follows the
+independently RE-STATED worst-case adverse-max law — the ONLY law
+(DEC-FILL-WORST-CASE-ONLY-001): entry fills at the entry bar's adverse
+extreme (BUY at HIGH / SELL at LOW — SL/TP levels then anchor on that
+actual entry fill); SL/TP touch on the bar's ``[low, high]`` in int paisa
+with the pessimistic same-bar SL-first tie-break, and the triggered SL
+**or TP** fills at ``min(level, bar low)`` for a BUY / ``max(level, bar
+high)`` for a SELL (a gap-through bar fills at the extreme; a bar gapping
+PAST the level in the trade's favour stays clamped AT the level — never
+an overstated favourable gap); the forced session-close exit — the first
+bar whose ``[open, open+tf)`` window passes the session's close − 10 min
+boundary, overriding everything — fills at the forced bar's adverse
+extreme (its ``(open, open)`` excursion fold unchanged); MFE/MAE fold per
+in-position bar; an open position never survives an IST session-date
+change (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743) — on the
+FIRST bar whose IST session date differs (pure ``!=``, either direction)
+from the position's entry-session date it closes retroactively at the
+PRIOR session's last managed bar's adverse extreme (that bar's timestamp
+/ index; NO excursion fold from the boundary bar) under ``session_gap``,
+and the boundary bar never arms an entry (earliest re-arm ``i+1``,
+earliest fill ``i+2``); a position still open at end of data closes at
+the LAST managed bar's adverse extreme — for the same prefix,
+bit-identical to the ``session_gap`` record modulo the reason label (the
+truncation equivalence). P&L is the per-unit directional move in int64
+paisa — NO costs of any kind (Track-1 spot is signal-only; CLAUDE.md §7).
 
 ## Determinism (design D-11)
 
@@ -68,9 +74,20 @@ result byte, mirroring the burn-in ship-the-oracle stance and the
 ## Honest envelope (Golden Rule #10)
 
 Per tuple the hook's simulation work is bounded by K (bench-pinned flat
-vs mask count), but the canonical enumeration it samples from is
-O(n_masks) — a cheap integer walk strictly dominated by the tuple's own
-production sweep (which simulates ALL n_masks). K=200 is a sampling
+vs mask count), and the population it samples from is the tuple's
+EXECUTED mask population: on the LEGACY arm (``mask_population=None``)
+that is the canonical raw enumeration — an O(n_masks) integer walk
+strictly dominated by the tuple's own production sweep (which simulates
+ALL n_masks; the legacy ``max_combos`` preflight bounds it); on the
+APRIORI arm (DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 3) the caller
+injects the tuple's Apriori CANDIDATE list and the envelope is
+O(candidates) — never the raw C(n, k) walk, which the extinction-mode
+``effective_max_combos`` auto-raise UNBOUNDS (Σ C(60, k) ≈ 1.18e17;
+pre-fix an EXTINCT k=6 tuple paid a measured ~128 s materialising
+C(60,6)=50,063,860 masks, k=8 ≈ 5 h + a ~20 GB list). An extinct tuple
+(zero executed masks) SKIPS with one counted
+``sweep_diffcheck.apriori_empty_skip`` INFO — there is no executed work
+to verify, and skipping never consumes the K budget. K=200 is a sampling
 assurance, not a proof (~0.004% of a 5M-mask grid); the reference verifies
 projection + trade sim + drawdown from CERTIFIED ``bar_bits`` — NOT the 60
 indicator evaluators (they carry their own golden/property/shared-crate
@@ -185,7 +202,14 @@ class RefTrade:
 
 @dataclass(slots=True)
 class _RefPosition:
-    """Mutable open-position state for the naive forward loop (int paisa)."""
+    """Mutable open-position state for the naive forward loop (int paisa).
+
+    ``last_exit_basis`` is the price a retroactive ``session_gap`` /
+    ``end_of_data`` close prices against — the last managed bar's CLOSE
+    under PRECISE, its direction-resolved ADVERSE extreme (LOW for a BUY,
+    HIGH for a SELL) under WORST_CASE (DEC-FILL-WORST-CASE-ONLY-001) — resolved
+    per managed bar so the close site never re-reads a bar.
+    """
 
     entry_idx: int
     entry_paisa: int
@@ -196,7 +220,7 @@ class _RefPosition:
     mfe: int
     mae: int
     last_idx: int
-    last_close: Decimal
+    last_exit_basis: Decimal
     last_ts: datetime
 
 
@@ -271,9 +295,10 @@ def reference_simulate(
 ) -> list[RefTrade]:
     """Naive forward-loop re-simulation of the locked Track-1 fill rules.
 
-    Implements the sweep's DEFAULT policy exactly (AT_LEVEL SL/TP fills,
-    pessimistic same-bar SL-first tie, no Mode-B exit signals) — see the
-    module docstring for the full re-derived rule list.
+    Implements the ONE hardcoded worst-case fill law exactly (adverse-max
+    fills, pessimistic same-bar SL-first tie, no Mode-B exit signals —
+    DEC-FILL-WORST-CASE-ONLY-001) — see the module docstring for the full
+    independently re-derived rule list.
 
     Parameters
     ----------
@@ -348,7 +373,11 @@ def reference_simulate(
                 same_session = day == pending_day
                 pending_day = None
                 if not forced and same_session:
-                    entry_paisa = _to_paisa(bar.open)
+                    # The re-stated adverse-max law: the entry fills at the
+                    # entry bar's ADVERSE extreme — BUY at HIGH, SELL at LOW
+                    # (DEC-FILL-WORST-CASE-ONLY-001). The SL/TP levels anchor
+                    # on the ACTUAL worst entry fill.
+                    entry_paisa = _to_paisa(bar.high if buy else bar.low)
                     if buy:
                         sl_level = None if sl_paisa is None else entry_paisa - sl_paisa
                         tp_level = None if tp_paisa is None else entry_paisa + tp_paisa
@@ -367,7 +396,7 @@ def reference_simulate(
                         mfe=0,
                         mae=0,
                         last_idx=i,
-                        last_close=bar.close,
+                        last_exit_basis=bar.low if buy else bar.high,
                         last_ts=bar.timestamp,
                     )
 
@@ -389,7 +418,7 @@ def reference_simulate(
                 # re-arm ``i+1``, earliest new fill ``i+2``).
                 closed = _close_position(
                     pos,
-                    exit_paisa=_to_paisa(pos.last_close),
+                    exit_paisa=_to_paisa(pos.last_exit_basis),
                     exit_ts=pos.last_ts,
                     exit_idx=pos.last_idx,
                     reason="session_gap",
@@ -400,14 +429,18 @@ def reference_simulate(
             # (B) Manage the open position on this bar (entry bar included).
             elif pos is not None:
                 pos.last_idx = i
-                pos.last_close = bar.close
+                pos.last_exit_basis = bar.low if buy else bar.high
                 pos.last_ts = bar.timestamp
                 if forced:
                     open_paisa = _to_paisa(bar.open)
+                    # The excursion fold stays the legacy (open, open) —
+                    # only the fill PRICE is worst-case (the forced bar's
+                    # adverse extreme; an open-anchored event, no level).
                     _fold_excursion(pos, open_paisa, open_paisa, buy=buy)
+                    forced_paisa = _to_paisa(bar.low if buy else bar.high)
                     closed = _close_position(
                         pos,
-                        exit_paisa=open_paisa,
+                        exit_paisa=forced_paisa,
                         exit_ts=bar.timestamp,
                         exit_idx=i,
                         reason="forced_1520",
@@ -422,12 +455,19 @@ def reference_simulate(
                     tp = pos.tp_level
                     sl_hit = sl is not None and (low_paisa <= sl if buy else high_paisa >= sl)
                     tp_hit = tp is not None and (high_paisa >= tp if buy else low_paisa <= tp)
-                    # Pessimistic same-bar tie: the stop fills first (SL_FIRST).
+                    # Pessimistic same-bar tie: the stop fills first
+                    # (SL-first, hardcoded). The chosen level fills with the
+                    # adverse-max clamp — min(level, low) for a BUY exit /
+                    # max(level, high) for a SELL exit: a gap-through bar
+                    # fills at the extreme, a bar gapping PAST the level in
+                    # the trade's favour stays AT the level (never
+                    # overstating) — DEC-FILL-WORST-CASE-ONLY-001.
                     if sl_hit:
+                        # sl is narrowed non-None by sl_hit's construction.
+                        level = sl if sl is not None else 0
                         closed = _close_position(
                             pos,
-                            # sl is narrowed non-None by sl_hit's construction.
-                            exit_paisa=sl if sl is not None else 0,
+                            exit_paisa=min(level, low_paisa) if buy else max(level, high_paisa),
                             exit_ts=bar.timestamp,
                             exit_idx=i,
                             reason="stop_loss",
@@ -435,9 +475,10 @@ def reference_simulate(
                         )
                         pos = None
                     elif tp_hit:
+                        level = tp if tp is not None else 0
                         closed = _close_position(
                             pos,
-                            exit_paisa=tp if tp is not None else 0,
+                            exit_paisa=min(level, low_paisa) if buy else max(level, high_paisa),
                             exit_ts=bar.timestamp,
                             exit_idx=i,
                             reason="take_profit",
@@ -453,12 +494,13 @@ def reference_simulate(
             pending = True
             pending_day = bar_day if bar_day is not None else bar.timestamp.astimezone(IST).date()
 
-    # End of data: a still-open position closes at the LAST bar's CLOSE.
+    # End of data: a still-open position closes at the LAST managed bar's
+    # adverse extreme — the resolved exit basis.
     if pos is not None:
         trades.append(
             _close_position(
                 pos,
-                exit_paisa=_to_paisa(pos.last_close),
+                exit_paisa=_to_paisa(pos.last_exit_basis),
                 exit_ts=pos.last_ts,
                 exit_idx=pos.last_idx,
                 reason="end_of_data",
@@ -689,11 +731,19 @@ class DiffCheckReport:
         How many of them diverged.
     masks_mismatched
         Mismatching mask hexes, capped at :data:`MASKS_MISMATCHED_CAP`.
+    skipped_empty
+        ``True`` when an INJECTED executed population held zero
+        conflict-free masks (an EXTINCT Apriori tuple —
+        DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 3): the tuple was
+        honestly SKIPPED (one ``sweep_diffcheck.apriori_empty_skip``
+        INFO), never silently, and no budget was spent. Defaulted so
+        every legacy constructor/compare site is byte-identical.
     """
 
     checked: int
     mismatches: int
     masks_mismatched: tuple[str, ...]
+    skipped_empty: bool = False
 
 
 class _TimeframeLike(Protocol):
@@ -887,18 +937,23 @@ class DiffCheckHook:
         tuple_: DiffCheckTupleLike,
         grid: DiffCheckGridLike,
         budget_left: int,
+        mask_population: Sequence[int] | None = None,
     ) -> DiffCheckReport:
         """Spot-check up to *budget_left* sampled masks of one tuple.
 
-        Enumerates the tuple's masks in the canonical production order
-        (:func:`iter_masks_k_of_bits` + conflict pruning — an O(n_masks)
-        integer walk, honest envelope), samples deterministically, then for
-        each sampled mask re-derives the signal projection inline
-        (``(bits & mask) == mask``) and compares the injected production
-        legs against the reference field-for-field (ints/datetimes exact;
-        drawdown 4-tuple by bit key). Fail-soft: an internal error is
-        WARNed and the accumulated report returned — never raised into the
-        sweep (I-3).
+        Builds the tuple's EXECUTED mask population — the canonical raw
+        enumeration (:func:`iter_masks_k_of_bits` + conflict pruning, an
+        O(n_masks) integer walk the legacy ``max_combos`` preflight bounds)
+        when *mask_population* is ``None``, else the INJECTED population
+        (the Apriori candidate list, conflict-pruned exactly like the
+        production enumeration loop — O(candidates),
+        DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 3) — samples
+        deterministically, then for each sampled mask re-derives the signal
+        projection inline (``(bits & mask) == mask``) and compares the
+        injected production legs against the reference field-for-field
+        (ints/datetimes exact; drawdown 4-tuple by bit key). Fail-soft: an
+        internal error is WARNed and the accumulated report returned —
+        never raised into the sweep (I-3).
 
         Parameters
         ----------
@@ -908,6 +963,18 @@ class DiffCheckHook:
             The sweep tuple + owning grid (structural views).
         budget_left
             Remaining run-level K budget; ``<= 0`` returns an empty report.
+        mask_population
+            The tuple's executed mask population, or ``None`` (the legacy
+            default — byte-identical raw enumeration). An injected
+            population with ZERO conflict-free masks (an extinct Apriori
+            tuple) returns an honest ``skipped_empty`` report after one
+            counted ``sweep_diffcheck.apriori_empty_skip`` INFO — never the
+            raw C(n, k) walk, never a silent skip. The D-11 seeding law is
+            unchanged (:func:`sample_masks` — run identity only); the
+            sampler draws ``min(K, len(population))`` masks, so the SAME
+            identity over the SAME population always picks the SAME masks
+            (a different population legitimately re-keys the picks — the
+            population length feeds the deterministic index draw).
         """
         if budget_left <= 0:
             return DiffCheckReport(checked=0, mismatches=0, masks_mismatched=())
@@ -915,11 +982,24 @@ class DiffCheckHook:
         mismatches = 0
         hexes: list[str] = []
         try:
-            masks = [
-                mask
-                for mask in iter_masks_k_of_bits(grid.condition_bits, tuple_.k)
-                if not has_conflict(mask)
-            ]
+            if mask_population is None:
+                masks = [
+                    mask
+                    for mask in iter_masks_k_of_bits(grid.condition_bits, tuple_.k)
+                    if not has_conflict(mask)
+                ]
+            else:
+                masks = [mask for mask in mask_population if not has_conflict(mask)]
+                if not masks:
+                    _LOG.info(
+                        "sweep_diffcheck.apriori_empty_skip",
+                        tuple_digest=self._tuple_digest_of(tuple_, grid),
+                        k=tuple_.k,
+                        population=len(mask_population),
+                    )
+                    return DiffCheckReport(
+                        checked=0, mismatches=0, masks_mismatched=(), skipped_empty=True
+                    )
             digest = self._tuple_digest_of(tuple_, grid)
             picked = sample_masks(
                 sweep_id=self._sweep_id,

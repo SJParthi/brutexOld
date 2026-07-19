@@ -10,8 +10,10 @@ test type). Inputs are plain Python lists so the oracle is dependency-light.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from brutex.metrics.cpcv import cpcv_pass_rate, cpcv_splits, sharpe_of_returns
 from brutex.metrics.wfo import WFOScheme, walk_forward_splits, wfo_pass_rate, wfo_pass_rates
+from structlog.testing import capture_logs
 
 # ─────────────────────────────────────────────────────────────────────
 # CPCV splits — n=8, S=4 (groups [0,1] [2,3] [4,5] [6,7]), k=2,
@@ -35,13 +37,31 @@ def test_cpcv_splits_golden() -> None:
     assert actual == _EXPECTED_CPCV
 
 
-def test_cpcv_pass_rate_golden() -> None:
+@pytest.mark.parametrize("flag", ["0", "1"])
+def test_cpcv_pass_rate_golden(flag: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # n=4, S=4, k=2 → 4 singleton groups; each fold is two returns.
     # returns [1, 2, -3, -4]; Sharpe sign == mean sign (population std > 0):
     #   (0,1)[1,2] +  (0,2)[1,-3] -  (0,3)[1,-4] -
     #   (1,2)[2,-3] - (1,3)[2,-4] - (2,3)[-3,-4] -  → 1 of 6 pass.
-    rate = cpcv_pass_rate([1.0, 2.0, -3.0, -4.0], n_groups=4, n_test_groups=2)
+    #
+    # Parametrized over BOTH ``BRUTEX_STATS_RUST`` arms
+    # (DEC-METRICS-RUST-STATS-001): the OFF arm is pinned by an EXPLICIT
+    # setenv "0" (flip-proof against a future default change), and the ON
+    # arm must genuinely ENGAGE the Rust kernel — a wheel-absent silent
+    # fallback fails this test loudly, never passes vacuously.
+    from brutex.metrics import rust_stats
+
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, flag)
+    rust_stats.reset_self_check_for_tests("cpcv")
+    rust_stats.reset_observability_memo_for_tests()
+    with capture_logs() as logs:
+        rate = cpcv_pass_rate([1.0, 2.0, -3.0, -4.0], n_groups=4, n_test_groups=2)
     assert rate == 1.0 / 6.0
+    engaged = [e for e in logs if e["event"] == "rust_stats.engaged"]
+    if flag == "1":
+        assert engaged, "the ON arm must engage the Rust kernel (anti-vacuous-pass law)"
+    else:
+        assert not engaged
 
 
 # ─────────────────────────────────────────────────────────────────────

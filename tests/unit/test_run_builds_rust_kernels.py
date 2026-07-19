@@ -20,6 +20,24 @@ recur for THIS kernel OR any future one:
 It is DYNAMIC (CLAUDE.md §11): the native kernels are DISCOVERED from
 ``rust/*/pyproject.toml`` (maturin crates), not hard-coded — add a third
 PyO3 crate and import it, and this guard covers it automatically.
+
+Two kernel classes (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1796):
+
+- REQUIRED — module-top imported by ``brutex/`` ⇒ a build PREREQUISITE, so
+  the turnkey build path (``make run-raw`` + ``bootstrap.sh``) must build it
+  (the original #479 invariant, unchanged).
+- OPTIONAL — registered in ``OPTIONAL_KERNELS`` with a documented reason:
+  NEVER module-top imported (consumed only through an import-GUARDED facade
+  that degrades gracefully when the crate is absent), deliberately NOT in the
+  turnkey build path, and built by its OWN dedicated CI lane. The inverse
+  invariants are pinned below so the classification cannot silently rot: a
+  future module-top import of an optional kernel FAILS here and forces its
+  promotion into the required class (where the build-path guards then fire).
+  A facade-LESS variant exists for a kernel shipped deliberately INERT
+  (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — no Python facade
+  until the flip PR): its facade slot is ``None``, legal ONLY with a
+  DEC-cited reason in ``INERT_FACADELESS_REASONS``; the CI-lane pin and the
+  never-module-top-imported inverse pin stay LIVE for it.
 """
 
 from __future__ import annotations
@@ -108,23 +126,258 @@ def _make_target_body(makefile: str, target: str) -> str:
 
 KERNELS = _discover_maturin_kernels()
 
+# OPTIONAL kernels: {import_name: (guarded_facade_relpath, ci_lane_relpath)}.
+# Registration REQUIRES a documented reason — an unregistered new crate that
+# nothing imports still fails test_kernel_is_imported_by_brutex loudly.
+#
+# FACADE-LESS INERT variant: the facade slot may be ``None`` ONLY for a
+# kernel that ships deliberately INERT (consumed by NOTHING — no Python
+# facade exists yet because the flip PR has not landed), and ONLY when
+# ``INERT_FACADELESS_REASONS`` carries a documented reason CITING the
+# licensing DEC id (enforced by
+# test_facadeless_optional_kernel_cites_a_dec — a None facade with no
+# DEC-cited reason FAILS). The CI-lane pin + the never-module-top-imported
+# inverse pin stay LIVE for such kernels, so "INERT" holds mechanically
+# until the flip PR consciously re-points the registration at a real facade.
+OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
+    # DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796 PR-1 / ADR-0020):
+    # brutex_lake is the default-OFF lake render crate. It is consumed ONLY
+    # through the import-guarded facade brutex/data/lake_rust_render.py
+    # (`importlib.import_module("brutex_lake")` inside the guard — an absent
+    # or broken install latches the flag OFF with one loud WARN and the
+    # Python render serves, byte-identical). It is deliberately NOT a build
+    # prerequisite: in NO cargo workspace, built ONLY by its own CI lane
+    # (.github/workflows/lake-rust-parity.yml). A module-top
+    # `import brutex_lake` anywhere in brutex/ would make a clean clone
+    # crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_lake": (
+        "brutex/data/lake_rust_render.py",
+        ".github/workflows/lake-rust-parity.yml",
+    ),
+    # DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940 / ADR-0020 slice T10):
+    # brutex_data is the default-OFF data pure-law crate (the fno_symbol
+    # structural grammar). It is consumed ONLY through the import-guarded
+    # facade brutex/data/fno_symbol_rust.py
+    # (`importlib.import_module("brutex_data")` inside the guard — an
+    # absent or broken install latches BRUTEX_DATA_RUST OFF with one loud
+    # WARN and the Python oracle serves, byte-identical). Deliberately NOT
+    # a turnkey build prerequisite: in NO cargo workspace, built ONLY by
+    # its own CI lane (.github/workflows/data-rust-parity.yml). A
+    # module-top `import brutex_data` anywhere in brutex/ would reclassify
+    # it REQUIRED — the inverse pin below forbids exactly that.
+    "brutex_data": (
+        "brutex/data/fno_symbol_rust.py",
+        ".github/workflows/data-rust-parity.yml",
+    ),
+    # DEC-CONFIG-RUST-LEAVES-001 (MIGRATION.md #1943 / slice T35):
+    # brutex_core is the default-OFF config-leaf crate (money / hwenv /
+    # paths / dotenv / backupenv laws). It is consumed ONLY through FIVE
+    # default-OFF import-guarded facades that resolve it lazily via
+    # `importlib.import_module("brutex_core")` — brutex/money_rust.py's
+    # own guard, brutex/config/hardware_envelope_rust.py's, and the
+    # shared brutex/config/seam_core.py ConfigRustSeam guard serving
+    # paths_rust/dotenv_rust/backup_env_rust (an absent or broken
+    # install latches `crate_unavailable` with one loud WARN and the
+    # Python oracle serves, behavior-identical). It is deliberately NOT
+    # a build prerequisite: never module-top imported, in NO cargo
+    # workspace, built ONLY by its own CI lane
+    # (.github/workflows/core-rust-parity.yml). A module-top
+    # `import brutex_core` anywhere in brutex/ would make a clean clone
+    # crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_core": (
+        "brutex/money_rust.py",
+        ".github/workflows/core-rust-parity.yml",
+    ),
+    # DEC-STRATEGIES-RUST-COMBO-001 (MIGRATION.md #1955): brutex_strategies is
+    # the default-OFF combo canonical-JSON + unit-separator crate. It is
+    # consumed ONLY through the import-guarded facade
+    # brutex/strategies/combo_rust.py (`importlib.import_module("brutex_strategies")`
+    # inside `_resolve_crate` — an absent or stale wheel latches the
+    # `BRUTEX_STRATEGIES_RUST_COMBO` flag OFF with one loud WARN and the Python
+    # oracle serves, byte-identical). It is deliberately NOT a build
+    # prerequisite (a verified engine import cycle forbids a module-top import;
+    # a clean clone runs the Python oracle with the flag OFF). It is built by
+    # its OWN CI lane — the `rust-brutex-strategies` job + the wheel-install
+    # steps in .github/workflows/ci.yml. A module-top `import brutex_strategies`
+    # anywhere in brutex/ would make a clean clone crash-prone again — the
+    # inverse pin (test_optional_kernel_never_module_top_imported) forbids it.
+    "brutex_strategies": (
+        "brutex/strategies/combo_rust.py",
+        ".github/workflows/ci.yml",
+    ),
+    # DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): brutex_calendar is
+    # the calendar-leaf pure-law crate (classify_month_drift /
+    # validate_settle_evidence / parse_observed_sidecar), shipped INERT —
+    # consumed by NOTHING: it has NO Python facade yet (deliberate; the
+    # facade lands with the flip PR — the default-ON BRUTEX_CALENDAR_RUST
+    # facade flip + oracle deletion are a LATER PR). The facade slot is
+    # therefore None, licensed ONLY by the DEC-cited reason in
+    # INERT_FACADELESS_REASONS below. It is deliberately NOT a turnkey
+    # build prerequisite: in NO cargo workspace, built ONLY by its own CI
+    # lane (the `rust-brutex-calendar` job in .github/workflows/ci.yml).
+    # THE FLIP PR MUST UPDATE THIS REGISTRATION: re-point the facade slot
+    # at the real guarded facade (`importlib.import_module("brutex_calendar")`
+    # inside its guard) and delete the INERT_FACADELESS_REASONS entry. A
+    # module-top `import brutex_calendar` anywhere in brutex/ would make a
+    # clean clone crash-prone — the inverse pin below forbids exactly that.
+    "brutex_calendar": (
+        None,
+        ".github/workflows/ci.yml",
+    ),
+}
 
-def test_at_least_the_two_known_kernels_are_discovered() -> None:
-    """Sanity: the two known PyO3 kernels are present (guards the discovery)."""
-    assert "fno_math" in KERNELS, KERNELS
-    assert "trading_core" in KERNELS, KERNELS
+# Facade-less INERT optional kernels: {import_name: reason}. A ``None``
+# facade slot in OPTIONAL_KERNELS is legal ONLY with a reason here that
+# cites the licensing DEC id (the enforcement lives in
+# test_facadeless_optional_kernel_cites_a_dec + the registry-consistency
+# pin). The flip PR that lands a kernel's real facade must DELETE its
+# entry here and re-point the OPTIONAL_KERNELS facade slot.
+INERT_FACADELESS_REASONS: dict[str, str] = {
+    "brutex_calendar": (
+        "DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): PR-1 ships the "
+        "crate INERT — consumed by NOTHING; the guarded Python facade lands "
+        "with the flip PR, which must re-point OPTIONAL_KERNELS at it."
+    ),
+}
+
+REQUIRED_KERNELS = {
+    name: crate_dir for name, crate_dir in KERNELS.items() if name not in OPTIONAL_KERNELS
+}
 
 
-@pytest.mark.parametrize("import_name", sorted(KERNELS))
+def test_known_kernels_are_discovered() -> None:
+    """Sanity: the known PyO3 kernels are present (guards the discovery)."""
+    assert "fno_math" in REQUIRED_KERNELS, KERNELS
+    assert "trading_core" in REQUIRED_KERNELS, KERNELS
+    assert "brutex_lake" in KERNELS, KERNELS
+    assert "brutex_core" in KERNELS, KERNELS
+    assert "brutex_calendar" in KERNELS, KERNELS
+
+
+@pytest.mark.parametrize("import_name", sorted(REQUIRED_KERNELS))
 def test_kernel_is_imported_by_brutex(import_name: str) -> None:
-    """Every discovered kernel is a real runtime dependency of ``brutex/``."""
+    """Every REQUIRED kernel is a real runtime dependency of ``brutex/``."""
     assert _module_top_imports(import_name), (
         f"{import_name} is a maturin crate but no brutex/ module imports it "
-        "at module top — discovery is stale, update this guard."
+        "at module top — discovery is stale: update this guard, or (only if "
+        "the crate is deliberately import-guarded + built by its own CI lane) "
+        "register it in OPTIONAL_KERNELS with a documented reason."
     )
 
 
-@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(KERNELS.items()))
+@pytest.mark.parametrize("import_name", sorted(OPTIONAL_KERNELS))
+def test_optional_kernel_is_discovered(import_name: str) -> None:
+    """A stale OPTIONAL_KERNELS registration (crate deleted/renamed) fails."""
+    assert import_name in KERNELS, (
+        f"OPTIONAL_KERNELS registers {import_name} but no rust/*/pyproject.toml "
+        "maturin crate exports that module — remove the stale registration."
+    )
+
+
+@pytest.mark.parametrize("import_name", sorted(OPTIONAL_KERNELS))
+def test_optional_kernel_never_module_top_imported(import_name: str) -> None:
+    """The inverse invariant: an optional kernel must stay import-guarded.
+
+    A module-top ``import <name>`` would make the crate a hard runtime
+    dependency that the turnkey build path never builds (exactly the #479
+    bug). This pin forces the author of such an import to PROMOTE the kernel
+    out of OPTIONAL_KERNELS — at which point the run-raw/bootstrap build
+    guards below start firing for it.
+    """
+    assert not _module_top_imports(import_name), (
+        f"{import_name} is registered OPTIONAL (import-guarded, not in the "
+        "turnkey build path) but a brutex/ module now imports it at module "
+        "top — a clean clone would crash. Either remove the module-top import "
+        "(use the guarded facade) or promote the kernel out of "
+        "OPTIONAL_KERNELS and wire it into make run-raw + bootstrap.sh."
+    )
+
+
+@pytest.mark.parametrize(
+    ("import_name", "facade_relpath"),
+    sorted((name, spec[0]) for name, spec in OPTIONAL_KERNELS.items() if spec[0] is not None),
+)
+def test_optional_kernel_consumed_via_guarded_facade(import_name: str, facade_relpath: str) -> None:
+    """The registered facade really guard-imports the optional kernel.
+
+    Facade-less INERT kernels (facade slot ``None``) are exempt HERE only —
+    they are instead pinned by test_facadeless_optional_kernel_cites_a_dec
+    (DEC-cited reason required) + the registry-consistency pin, and keep the
+    CI-lane + never-module-top-imported pins LIVE.
+    """
+    facade = REPO_ROOT / facade_relpath
+    assert facade.is_file(), f"guarded facade {facade_relpath} does not exist"
+    source = facade.read_text(encoding="utf-8")
+    assert f'importlib.import_module("{import_name}")' in source, (
+        f"{facade_relpath} no longer guard-imports {import_name} via "
+        f'importlib.import_module("{import_name}") — the optional kernel is '
+        "unconsumed (dead crate) or the guard moved; update OPTIONAL_KERNELS."
+    )
+
+
+def test_facadeless_registry_is_consistent() -> None:
+    """INERT_FACADELESS_REASONS ⟺ the None-facade OPTIONAL_KERNELS entries.
+
+    Both directions: a None facade WITHOUT a reason entry FAILS (the
+    enforcement the facade-less variant demands), and a stale reason entry
+    for a kernel that has since gained a real facade (or left
+    OPTIONAL_KERNELS) FAILS — the flip PR must delete the reason when it
+    re-points the registration (DEC-RUST-CALENDAR-LEAVES-001 precedent).
+    """
+    facadeless = sorted(name for name, spec in OPTIONAL_KERNELS.items() if spec[0] is None)
+    assert facadeless == sorted(INERT_FACADELESS_REASONS), (
+        "facade-less OPTIONAL_KERNELS entries and INERT_FACADELESS_REASONS "
+        f"disagree: None-facade={facadeless} vs reasons="
+        f"{sorted(INERT_FACADELESS_REASONS)} — a None facade is legal ONLY "
+        "with a DEC-cited reason, and a reason may not outlive its "
+        "facade-less registration."
+    )
+
+
+@pytest.mark.parametrize("import_name", sorted(INERT_FACADELESS_REASONS))
+def test_facadeless_optional_kernel_cites_a_dec(import_name: str) -> None:
+    """A facade-less INERT kernel's reason must CITE a DEC id.
+
+    Per DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): the crate ships
+    INERT — the guarded facade lands with the flip PR. Until then the ONLY
+    licence for a None facade slot is a documented reason naming the DEC
+    that shipped the crate INERT; an undocumented None facade fails the
+    registry-consistency pin above, and a reason WITHOUT a DEC citation
+    fails here.
+    """
+    reason = INERT_FACADELESS_REASONS[import_name]
+    assert re.search(r"\bDEC-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d{3}\b", reason), (
+        f"INERT_FACADELESS_REASONS[{import_name!r}] does not cite a DEC id "
+        f"(DEC-…-NNN) — an INERT facade-less registration must name the "
+        f"decision that licensed it. Reason: {reason!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("import_name", "lane_relpath"),
+    sorted((name, spec[1]) for name, spec in OPTIONAL_KERNELS.items()),
+)
+def test_optional_kernel_built_by_its_own_ci_lane(import_name: str, lane_relpath: str) -> None:
+    """An optional kernel is still BUILT somewhere: its dedicated CI lane."""
+    crate_dir = KERNELS.get(import_name)
+    assert crate_dir is not None, (
+        f"OPTIONAL_KERNELS registers {import_name} but no maturin crate "
+        "exports that module — remove the stale registration."
+    )
+    lane = REPO_ROOT / lane_relpath
+    assert lane.is_file(), (
+        f"{import_name} is optional (excluded from the turnkey build path) "
+        f"but its registered CI lane {lane_relpath} does not exist — the "
+        "crate would never be built anywhere."
+    )
+    lane_text = lane.read_text(encoding="utf-8")
+    assert f"rust/{crate_dir}" in lane_text, (
+        f"CI lane {lane_relpath} never references rust/{crate_dir} — the "
+        "optional kernel's own lane no longer builds it."
+    )
+
+
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(REQUIRED_KERNELS.items()))
 def test_make_run_raw_builds_kernel(import_name: str, crate_dir: str) -> None:
     """``make run-raw`` must build each kernel (cd rust/<crate> + maturin develop).
 
@@ -145,7 +398,7 @@ def test_make_run_raw_builds_kernel(import_name: str, crate_dir: str) -> None:
     )
 
 
-@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(KERNELS.items()))
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(REQUIRED_KERNELS.items()))
 def test_bootstrap_builds_kernel(import_name: str, crate_dir: str) -> None:
     """``bootstrap.sh`` must build each kernel (cd rust/<crate> + maturin)."""
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")

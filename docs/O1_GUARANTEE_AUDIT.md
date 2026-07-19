@@ -88,6 +88,7 @@ tests/bench file and the tier it asserts at (see §3 for the tier split);
 | D25 | Pre-open export rows memo (#1719 fix 2) | O(1)-on-repeat per (basis, range, symbols)@generation | `_preopen_rows_cache` `app.py:1833` (capacity 8) | Fresh compute = O(report rows) render + span-bounded month-file reads; CLOSE maps deliberately whole-partition (#1649a diagnostics) | NEW `test_preopen_export_memo_o1.py` (warm click: ZERO further `read_parquet` statements + ZERO row builds, bytes identical; `.zip` shares the memo coordinate) — closes a reader-C missing-gate finding |
 | D26 | Corrupt-lake degraded read path | O(files) **stats** per degraded click; probe QUERIES latched | `_READABLE_SUBSET_CACHE` `db_view.py:1458-1494` (capped FIFO 64) | A persistent corrupt/alien file costs zero probe queries per repeat click; the stat sweep itself recurs (honest) | unit-pinned (spy call counts); no dedicated bench |
 | D27 | Rate-bridge cache (#1522) | O(1)-on-repeat (2 s TTL + stat token) | `brutex/dashboard/rate_bridge_cache.py` | Post-TTL refresh under a 0.5 s deadline, non-blocking single-flight; at most one abandoned daemon per outage | `test_rate_bridge_cache_perf_o1.py` |
+| D28 | Prebuild derived-TF partition WRITE (DEC-PREBUILD-FRAME-WRITE-001 — flag-gated, default OFF in PR-1) | O(bars) per partition EITHER lane — never O(1); the flag-ON lane moves the per-bar work from GIL-held Python (CandleBar convert + `_tick_round` + DF-rebuild) to COLUMNAR polars (`ParquetWriter.write_frame` — the G0–G9 verify-or-degrade admission); the warm merge no-op verdict is reached frame-direct (decode+snap remains — sub-split unmeasured) | `brutex/data/parquet_writer.py` (`write_frame`); `brutex/data/sink.py` (`append_frame`); `brutex/data/frame_write_gate.py` | First merge read is O(existing partition) both lanes; a `merge_delta` degrade re-enters legacy + one extra small stored read; burn-in/shadow writes pay BOTH lanes; fsync/encode/locks/manifest hooks unchanged (op-count-pinned equal); tiny frames carry polars per-call fixed overhead (sandbox: a 375-bar symbol measured SLOWER flag-ON — the honest small-symbol envelope; crossover ≈ few×10³ bars) | `test_prebuild_frame_write_ab.py` (bench — op-count parity, ZERO CandleBar constructions on admitted fresh writes, warm 0/0/0 both arms, degrade-storm ratio) |
 
 ### 1.3 Frontend (templates + static JS)
 
@@ -277,3 +278,106 @@ Fixes (each one line; test files named):
   deliberate for a live pull watch; recorded as an asymmetry, not changed.
 - **app.py `_INDEX_HTML_TEMPLATE`** — dead, unreferenced legacy inline page
   with a fixed-cadence ws-reconnect; deletion candidate, not a runtime gap.
+
+---
+
+## Assurance verification evidence (2026-07-18)
+
+**Decision ID:** DEC-O1-GUARANTEE-VERIFY-001 · **Ledger:** MIGRATION.md #2012
+
+This section RECORDS an independent, evidence-based re-verification of the
+O(1) guarantee classified above — it does not change any row. Executed
+read-only on a purpose-built `.venv` (Python 3.12.3, both abi3 Rust wheels
+`fno_math`/`trading_core` loaded) at detached HEAD `c220870641` (PR #1621,
+the mega-club integration merge = `origin/main~1`). PROVENANCE: this docs
+commit itself sits one commit above the executed tree, on `origin/main`
+`415e863ec` (PR #1631 — a CI-workflow + ledger + one-new-unit-test delta
+over `c220870641`, zero `brutex/` source, affecting no executed gate here).
+`BRUTEX_M4PRO_STRICT` and
+`BRUTEX_M4PRO_ABS` were UNSET, so only the robust shared-CI tier
+(`ratio_ceiling(default)` = 3–10×, the merge-blocking tier) was runnable;
+the strict/absolute tiers are recorded self-hosted-only below. The
+anti-illusion rule stated in §"The anti-illusion rule" above is unchanged —
+this pass CONFIRMS it holds, it does not relax it.
+
+### A. Executed bench result (robust shared-CI tier)
+
+- Full bench dir, ceilings enforced by `tests/bench/_o1_tiers.py`:
+  `env -u BRUTEX_M4PRO_STRICT -u BRUTEX_M4PRO_ABS pytest tests/bench -q`
+  → **389 passed, 12 skipped in 698.93 s. ZERO failures.** All 12 skips are
+  the `BRUTEX_M4PRO_ABS` self-hosted class (verbatim skip reason captured —
+  `test_throughput_absolute.py:135: BRUTEX_M4PRO_ABS=1 not set … skipping on
+  shared GHA to avoid chronic flake per DEC-P0-020`).
+- Corroborating subset run (independent second worker):
+  `pytest tests/bench -k "o1 or O1 or ratio or dedup or bloom or mask or
+  count_cache or latency or revision or blake3"` → **275 passed, 1 skipped,
+  125 deselected**, plus the SPACE/bounded-memory benches (not caught by the
+  `-k` filter) **11 passed** — **286 (275 + 11) passed, 0 failed.** The 1
+  skip is the same `BRUTEX_M4PRO_ABS` `test_throughput_absolute.py:135` gate.
+- Targeted verbose re-runs (per-test evidence): engine core (Bloom / LMDB /
+  sweep-cache / option-dedup / u64 + u128 mask / canary / ResultsStore /
+  audit-chain / Bloom-rebuild) **42/42 PASSED**; DB/lake/movers/oneclick
+  count-cache + revision + SWR + page memos **54/54 PASSED in 72.47 s**;
+  RAM-budget unit tier (`hardware_envelope` + `sweep_mem_budget` (+workers) +
+  `config_hardware_envelope` + `orchestrator_bloom`) **125 + 139 PASSED**.
+
+### B. Per-path measured ratios (flatness = O(1)), two independent runs
+
+Enforced law is the internal `ratio_ceiling`/`cache_tier_ceiling` assertion
+(ratios print only on FAILURE — none printed; all passed). Measured medians:
+
+| Path | small N | large N | measured | class |
+|---|---|---|---|---|
+| `ResultsStore.get` | **199.0 ns** @ 1k | **95.0 ns/call** @ 100k | flat vs 100× depth | genuine-O(1) (E9/D-get) |
+| `ResultsStore.append` (dup-noop) | **1,125 ns** | **1,141 ns** | **≈ 1.01×** | genuine-O(1) amortized (E9) |
+| Bloom `might_contain` | **493 ns** @ small | — | flat, ratio gate < 5× | genuine-O(1) (E3) |
+| audit-chain append (batch) | 918.5 µs | 785.2 µs | flat vs chain length | genuine-O(1) (E14) |
+| db page (metadata-sweep tier) | ≈ 16.2 ms small | ≈ 32.7 ms large | inside the D2 O(page-files)+O(D) tier | O(page) |
+
+Subset-run MIN-time corroboration (verbatim): `ResultsStore.get` 686 ns
+(N=40) vs 689 ns (N=4000) ≈ 1.00×; SweepCache dedup 684 ns vs 684 ns flat;
+LMDB membership 745 ns vs 790 ns ≈ 1.06×; dedup dup-noop 1028 ns vs 1034 ns
+flat; DEEP get 8644 ns (1k) vs 8573 ns (10k) ≈ 0.99× (flat at 10× depth).
+
+### C. Row-level honesty CONFIRMED (no bare-O(1) hiding an O(files)/O(rows) read)
+
+Both independent runs swept the classification table (and the `tests/bench`
+docstrings) and found **NO dishonest bare-O(1) claim — offenders: NONE.**
+The load-bearing honest rows were each re-checked against their own wording:
+
+- **D1** `/db` candle page DATA query — reads **"O(rows) per fresh click"**,
+  NOT O(1). Honest.
+- **D3 / D7** count/span & registry COUNT — **"O(1)-on-repeat"**, each NAMING
+  its first cost ("first compute per generation = O(rows) COUNT(DISTINCT)" /
+  "first click per revision = O(filtered rows) COUNT (~89k legs)"). Honest.
+- **D10** dataset discovery — **"O(files) walk on absent/stale manifest"**,
+  with the measured **29.7-min O(files) walk cited in-source**. Named, not
+  hidden.
+- **D12** freshness probe — **"O(dirs) per poll — NOT O(1)", disclosed.**
+- **E4** LMDB point get — **"O(1) effective; O(log_B N) B+tree worst-case,
+  honestly."**
+- **E15** `combo_hash` — **"O(payload bytes) … flat-vs-payload is NOT
+  claimed."**
+- **§2** the reported **"1.87×" `ResultsStore.get`** strict-tier reading is
+  re-affirmed **verified-NOT-a-regression** — a one-line dict probe measured
+  **flat 51.7 / 53.5 / 51.7 ns at 1k / 10k / 100k** (the 2026-07-13 triage),
+  the #1301 cache-tier re-gate absorbs the sub-2.11× dict band, and the NEW
+  `test_get_ratio_is_o1_deep_depth` 100k-vs-1k pin carries the triage.
+
+### D. Strict / absolute tiers — self-hosted-only, NOT re-measured here (honest)
+
+- The **strict 1.1× M4-Pro tier** (`BRUTEX_M4PRO_STRICT=1`) and the
+  **`BRUTEX_M4PRO_ABS` absolute floors** (≥ 50 M ops/s canary, sweep
+  wall-time SLA, write A/B budgets) are set ONLY in
+  `.github/workflows/bench-m4pro.yml:146,149` on the self-hosted M4-Pro
+  runner. They are **NOT runnable in this environment and were NOT
+  re-measured** — enforced there, **never green-by-assumption**. That
+  workflow is post-merge + non-required by design
+  (DEC-PREMERGE-M4PRO-NONBLOCK-001 #1753 / #382), so the robust shared-CI
+  tier above is the merge-blocking guarantee.
+
+**Verdict:** the O(1) guarantee is CONFIRMED at the robust shared-CI tier
+(389 + 286 executed passes, 0 failures, across two independent runs); the
+audit's anti-illusion honesty holds with no offender; the strict/absolute
+tiers remain honestly self-hosted-only. No audit row changed; no source
+touched.

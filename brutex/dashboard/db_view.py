@@ -62,7 +62,12 @@ from brutex.adapters.groww.constants import (
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
-from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
+from brutex.calendars.nse import (
+    IST,
+    IST_OFFSET_MINUTES,
+    MUHURAT_SESSIONS,
+    previous_trading_session,
+)
 from brutex.config.hardware_envelope import memory_budget_bytes
 
 # NO lake_revision import — module-level OR lazy (AST-pinned by
@@ -99,10 +104,12 @@ from brutex.data.lake_stats_manifest import (
     FALLBACK_REL_LOG_CAP,
     KIND_BARS,
     KIND_OPTIONS,
+    TOKEN_SWEEP_MOVED,
+    TOKEN_SWEEP_OK,
     DatasetStats,
     StatsFileRow,
-    file_token_matches,
-    load_valid_dataset_stats,
+    bounded_token_sweep,
+    load_valid_dataset_stats_guarded,
     parse_rel_month,
     rel_month_bounds,
     scan_dataset_rels,
@@ -131,6 +138,7 @@ from brutex.data.window_ledger import (
     DEMOTED_SETTLE_REASONS,
     EMPTY_TERMINAL_THRESHOLD,
     is_expired_window_settle_reason,
+    streak_provenance_counts,
 )
 from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
@@ -383,8 +391,10 @@ def clamp_limit(n: int) -> int:
 #: IST — the market wall-clock the candle viewer renders bar times in. The
 #: lake stores bar time as a UTC ``TIMESTAMPTZ``; we display the Indian-market
 #: local time explicitly (not the ambient DuckDB session ``TimeZone``) so the
-#: rendered string is deterministic regardless of where the server runs.
-_IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
+#: rendered string is deterministic regardless of where the server runs. The
+#: ONE canonical :data:`brutex.calendars.nse.IST` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[ZoneInfo] = IST
 
 #: The daily-bar partition interval — its bars render DATE-ONLY (no noise
 #: ``00:00:00`` suffix) in the candle viewer (DEC-DB-CANDLE-DERIVED-001).
@@ -393,10 +403,15 @@ _DAILY_INTERVAL: Final[str] = "1day"
 #: The SQL fragment for a bar's **IST wall-clock instant** (a naive TIMESTAMP on
 #: the Indian-market clock). Adds the fixed +05:30 IST offset (330 minutes; India
 #: has no DST — CLAUDE.md §6) to the UTC wall-clock, so it is independent of the
-#: ambient DuckDB session ``TimeZone`` (the operator runs Asia/Kolkata). The ONE
-#: place the 330-minute offset lives — :data:`_IST_DATE_EXPR` derives from it so
-#: no second literal can drift (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
-_IST_TS_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')"
+#: ambient DuckDB session ``TimeZone`` (the operator runs Asia/Kolkata). The
+#: minute count is INTERPOLATED from the ONE canonical
+#: :data:`brutex.calendars.nse.IST_OFFSET_MINUTES` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001; SQL text byte-identical) —
+#: :data:`_IST_DATE_EXPR` derives from this fragment so no second literal can
+#: drift (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
+_IST_TS_EXPR: Final[str] = (
+    f"((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '{IST_OFFSET_MINUTES} minutes')"
+)
 
 #: The SQL fragment for a bar's **IST calendar date** — the market wall-clock day
 #: the candle grid renders (:func:`_format_candle_timestamp`). Derived from
@@ -438,8 +453,10 @@ _INTRADAY_BASE_INTERVAL: Final[str] = "1minute"
 
 #: 09:15:00 IST — the regular NSE/BSE session open. The overnight ``open_gap_pct``
 #: derived column (DEC-DB-CANDLE-DERIVED-001) is computed ONLY for the bar at
-#: this instant; mirrors ``brutex.data.spot_features._SESSION_OPEN`` (§11 COMMON).
-_SESSION_OPEN_IST: Final[time] = time(9, 15)
+#: this instant; DERIVED from the ONE COMMON
+#: :data:`brutex.data.session.SESSION_OPEN` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001 — the former ``time(9, 15)`` mirror).
+_SESSION_OPEN_IST: Final[time] = SESSION_OPEN
 
 #: The canonical session open as minutes-past-midnight-IST (555), DERIVED from the
 #: ONE COMMON :data:`brutex.data.session.SESSION_OPEN` constant — never a fourth
@@ -2392,6 +2409,7 @@ class _StatsReadContext:
     effective: tuple[tuple[StatsFileRow, int], ...] = ()
     straddlers: tuple[StatsFileRow, ...] = ()
     served: bool = False
+    consult_timed_out: bool = False
 
     @property
     def should_seed(self) -> bool:
@@ -2399,9 +2417,16 @@ class _StatsReadContext:
 
         ``True`` only when the shard failed validation outright (absent /
         corrupt / stale) — a mid-request degrade keeps the existing shard (the
-        next request revalidates it; the writers keep it fresh).
+        next request revalidates it; the writers keep it fresh). A TIMED-OUT
+        consult (DEC-DASHBOARD-COLD-IO-DEADLINE-001) suppresses the seed: the
+        volume is WEDGED, so launching ``_seed_stats_manifest``'s three
+        unbounded stat sweeps + grouped scan against it would re-create the
+        very hang the deadline just bounded — and because no ``statseed|``
+        latch entry is written, a genuinely-absent shard still seeds on the
+        next HEALTHY click (recovery not poisoned; the suppression is
+        timeout-scoped, never drift-scoped).
         """
-        return self.stats is None
+        return self.stats is None and not self.consult_timed_out
 
     @property
     def total(self) -> int:
@@ -2505,7 +2530,10 @@ def _stats_read_context(
     no fallback is logged, no seed will run — byte-identical legacy behaviour.
 
     Otherwise the shard goes through the FULL anti-illusion validation
-    (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats`) and,
+    (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats_guarded`
+    — deadline-bounded per DEC-DASHBOARD-COLD-IO-DEADLINE-001: a
+    wedged-volume timeout builds a ``consult_timed_out`` context whose
+    ``should_seed`` is suppressed) and,
     when it holds, every file is classified against the bounds via the ONE
     shared :func:`_stats_file_verdict`; each straddler pays ONE bounded
     ``COUNT(DISTINCT …)`` over ONLY its own file (the identical WHERE the
@@ -2515,7 +2543,8 @@ def _stats_read_context(
     """
     if not use_stats_manifest or not stats_manifest_enabled():
         return None
-    stats = load_valid_dataset_stats(lake_root, kind=kind, key=key)
+    consult = load_valid_dataset_stats_guarded(lake_root, kind=kind, key=key)
+    stats = consult.stats
     ctx = _StatsReadContext(
         conn=conn,
         lake_root=lake_root,
@@ -2524,6 +2553,7 @@ def _stats_read_context(
         base=base,
         identity=identity,
         stats=stats,
+        consult_timed_out=consult.timed_out,
     )
     if stats is None:
         return ctx
@@ -2623,23 +2653,38 @@ def _stats_tokens_intact(ctx: _StatsReadContext, planned: Sequence[StatsFileRow]
 
     Re-stats the pruned page sublist (*planned*) AND the straddler-counted
     files (their live bounded counts fed the manifest total, so a straddler
-    replaced between its ``COUNT`` and the response must degrade too). ANY
-    moved token logs the ``stat_token_moved`` fallback clause, flips
-    ``ctx.served`` off (the whole-request degrade law), and returns ``False``
-    — the caller discards the pruned result and re-runs on the legacy path.
+    replaced between its ``COUNT`` and the response must degrade too) via ONE
+    deadline-bounded
+    :func:`~brutex.data.lake_stats_manifest.bounded_token_sweep` pass
+    (DEC-DASHBOARD-COLD-IO-DEADLINE-001 — same gate + key as the consult, so
+    a mid-request wedge that latched the consult fails this fast with no
+    second daemon). ANY moved token logs the ``stat_token_moved`` fallback
+    clause (payload byte-preserved — the FIRST moved rel in today's exact
+    iteration order); a wedged-volume timeout logs ``restat_deadline`` (NO
+    ``rel`` key — never a fabricated field). Either flips ``ctx.served`` off
+    (the whole-request degrade law) and returns ``False`` — the caller
+    discards the pruned result and re-runs on the legacy path.
     """
-    for row in (*planned, *ctx.straddlers):
-        if not file_token_matches(ctx.base / row.rel, row):
-            _LOG.info(
-                _STATS_FALLBACK_EVENT,
-                kind=ctx.kind,
-                key=dict(ctx.key),
-                clause="stat_token_moved",
-                rel=row.rel,
-            )
-            ctx.served = False
-            return False
-    return True
+    verdict, rel = bounded_token_sweep(ctx.lake_root, ctx.base, (*planned, *ctx.straddlers))
+    if verdict == TOKEN_SWEEP_OK:
+        return True
+    if verdict == TOKEN_SWEEP_MOVED:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="stat_token_moved",
+            rel=rel,
+        )
+    else:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="restat_deadline",
+        )
+    ctx.served = False
+    return False
 
 
 def _stats_pruned_page(
@@ -4110,7 +4155,7 @@ def _bars_file_windows(
     files that can hold their rows:
 
     * **Manifest arm** — a VALIDATED stats shard
-      (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats`,
+      (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats_guarded`,
       full anti-illusion validation; kill switch off / absent / stale shard
       → the grammar arm) gives each file's EXACT stamped ``[min_ts, max_ts]``
       (hi made exclusive with +1µs); rows are already strictly-increasing
@@ -4121,10 +4166,14 @@ def _bars_file_windows(
       canonical UTC-month name
       (:func:`~brutex.data.lake_stats_manifest.rel_month_bounds` — the
       partition law: a month file holds only its own UTC month's bars). ONE
-      O(files) listing, ZERO footer opens.
+      O(files) listing, ZERO footer opens. A TIMED-OUT consult
+      (DEC-DASHBOARD-COLD-IO-DEADLINE-001) returns ``None`` BEFORE this arm —
+      the wedged volume must not pay the next O(files) ``rglob`` listing
+      against itself.
 
     ``None`` = cannot bound (a non-canonical filename in the tree / a listing
-    fault) — the caller degrades to the legacy whole-glob bind, byte-identical
+    fault / a wedged-volume consult timeout) — the caller degrades to the
+    legacy whole-glob bind, byte-identical
     behaviour. HONEST envelope (Golden Rule #10): the grammar arm's bounds
     assume the UTC-month partition invariant; a month-invariant-VIOLATING lake
     (foreign rows — the ``lake_invariants``/``lake_heal`` finding class) may
@@ -4132,16 +4181,23 @@ def _bars_file_windows(
     month-bounds validation refuses such a shard; the invariant scanners are
     the remediation, not this reader.
     """
-    stats = load_valid_dataset_stats(
+    consult = load_valid_dataset_stats_guarded(
         lake_root,
         kind=KIND_BARS,
         key={"exchange": exchange, "segment": segment, "symbol": symbol, "interval": interval},
     )
+    stats = consult.stats
     if stats is not None:
         return [
             ((base / row.rel).as_posix(), row.min_ts, row.max_ts + timedelta(microseconds=1))
             for row in stats.files
         ]
+    if consult.timed_out:
+        # The volume is WEDGED: falling through to the grammar arm would run
+        # the O(files) ``base.rglob`` listing against the SAME wedged volume
+        # (the D1 hole). ``None`` is this function's existing "cannot bound →
+        # legacy whole-glob bind" contract.
+        return None
     try:
         listed = sorted(base.rglob("*.parquet"))
     except OSError:
@@ -5591,7 +5647,12 @@ def _decode_option_window(
     return (f"{label} · {segment}", f"{flag}#{code} {strike} {opt_type} · 1m")
 
 
-def window_status_label(status: str, empty_streak: int, last_error: str | None = None) -> str:
+def window_status_label(
+    status: str,
+    empty_streak: int,
+    last_error: str | None = None,
+    streak_provenance: str | None = None,
+) -> str:
     """The honest, spelled-out meaning of a window's bare *status* — pure, O(1).
 
     DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (empty-vs-failed honesty on
@@ -5608,11 +5669,13 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       as ``last_error``) → that stamp verbatim, suffixed ``— settled``: the
       streak-derived count would LIE (the settle forces the streak to the
       threshold), so the honest ``"vendor confirmed no trades (1 clean
-      attempt, expired window) — settled"`` comes from the stamp.
+      attempt, expired window) — settled"`` comes from the stamp (which is
+      itself provenance-honest at WRITE time since DEC-STREAK-PROVENANCE-001).
     * ``EMPTY`` → ``"vendor confirmed no trades (N clean attempt(s))"`` — N is
       the row's genuine clean-empty streak, floored at 1 (a legacy record with
       no streak column still had at least the one clean attempt that classified
-      it EMPTY).
+      it EMPTY). A provenance-KNOWN row with flagged bumps additionally names
+      them: ``"… (N clean attempt(s); M completeness-flagged)"``.
     * ``SKIPPED`` carrying a data-completeness DEMOTION reason
       (:data:`~brutex.data.window_ledger.DEMOTED_SETTLE_REASONS` —
       ``ALL_FILTERED`` / ``INTERIOR_GAP`` / ``SUSPECTED_PARTIAL`` plus the
@@ -5622,13 +5685,7 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       (DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the generic "vendor confirmed
       no trades" wording is factually WRONG for these rows — the vendor
       RETURNED bars every time; they were boundary-filtered / hole-flagged /
-      truncation-flagged, never a clean no-trades answer. HONEST envelope:
-      the label keys on the row's FINAL ``last_error`` only — degraded and
-      clean-EMPTY bumps share ONE un-provenance'd streak
-      (:meth:`~brutex.data.window_ledger.WindowLedger.record`), so a
-      MIXED-evidence settle attributes all N attempts to the final channel
-      (documented beside the streak arms; a per-channel count needs the named
-      streak-provenance follow-up, NOT claimed).
+      truncation-flagged, never a clean no-trades answer.
     * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
       ``— settled`` (the ledger promoted it; no further re-pull).
     * ``FAILED`` carrying :data:`~brutex.data.today_completeness.TODAY_INCOMPLETE`
@@ -5637,23 +5694,59 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       streak-exempt deferral, honest that the vendor simply has not settled
       today yet (not an error, not a data hole).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
-      no-data; the window stays re-pullable.
+      no-data; the window stays re-pullable (a mass-rescinded
+      ``ALL_FILTERED_MASS_RESCINDED`` row and a ``REOPENED`` row read exactly
+      this — retryable, never settled).
     * ``SUCCESS`` / ``PLANNED`` / anything else → the bare status name
       (self-explanatory; unknown statuses degrade to themselves, never raise).
+
+    *streak_provenance* (DEC-STREAK-PROVENANCE-001 — the mixed-evidence
+    honesty fix): with a provenance-KNOWN lineage
+    (:func:`~brutex.data.window_ledger.streak_provenance_counts` returns a
+    ``(clean, flagged)`` split), a MIXED-evidence settle is rendered PER
+    CHANNEL instead of attributing every attempt to whichever channel landed
+    the FINAL record — the ``ALL_FILTERED,ALL_FILTERED,EMPTY`` settle now
+    reads "1 clean attempt(s); 2 completeness-flagged" (was the lie "3 clean
+    attempt(s)") and the symmetric ``EMPTY,EMPTY,ALL_FILTERED`` settle reads
+    "1 flagged + 2 clean attempt(s)" (was "3 flagged"). LEGACY back-compat
+    pin: ``None`` provenance (unknown lineage) renders BYTE-IDENTICALLY to the
+    pre-column wording on EVERY branch, and a pure-channel lineage renders the
+    byte-identical string too (on natural paths the channel count equals the
+    streak).
     """
+    counts = streak_provenance_counts(streak_provenance)
     if status == "EMPTY":
-        return f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s))"
+        if counts is not None and counts[1] > 0:
+            clean, flagged = counts
+            return (
+                f"vendor confirmed no trades ({max(clean, 1)} clean attempt(s); "
+                f"{flagged} completeness-flagged)"
+            )
+        clean_count = counts[0] if counts is not None else int(empty_streak)
+        return f"vendor confirmed no trades ({max(clean_count, 1)} clean attempt(s))"
     if status == "SKIPPED":
         if is_expired_window_settle_reason(last_error):
             return f"{last_error} — settled"
         if last_error in DEMOTED_SETTLE_REASONS:
+            if counts is not None and counts[0] > 0:
+                clean, flagged = counts
+                return (
+                    f"completeness gap accepted ({last_error}, "
+                    f"{flagged} flagged + {clean} clean attempt(s)) — settled"
+                )
+            flagged_count = counts[1] if counts is not None else int(empty_streak)
             return (
                 f"completeness gap accepted ({last_error}, "
-                f"{max(int(empty_streak), 1)} flagged attempt(s)) — settled"
+                f"{max(flagged_count, 1)} flagged attempt(s)) — settled"
             )
-        return (
-            f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
-        )
+        if counts is not None and counts[1] > 0:
+            clean, flagged = counts
+            return (
+                f"vendor confirmed no trades ({max(clean, 1)} clean attempt(s); "
+                f"{flagged} completeness-flagged) — settled"
+            )
+        clean_count = counts[0] if counts is not None else int(empty_streak)
+        return f"vendor confirmed no trades ({max(clean_count, 1)} clean attempt(s) — settled)"
     if status == "FAILED" and last_error == TODAY_INCOMPLETE:
         # DEC-PULL-TODAY-COMPLETENESS-GATE-001: a covers-today window demoted
         # because the vendor has not settled TODAY's session yet — the honest
@@ -5703,6 +5796,10 @@ def _window_row(
             str(record.status),
             getattr(record, "empty_streak", 0),
             getattr(record, "last_error", None),
+            # The per-bump lineage (DEC-STREAK-PROVENANCE-001) — the mixed-evidence
+            # honest split; the legacy status log / a legacy ledger row has none
+            # (getattr → None ⇒ the byte-identical legacy wording).
+            getattr(record, "streak_provenance", None),
         ),
         "bars": record.bars,
         "attempts": record.attempts,
@@ -5719,6 +5816,10 @@ def _window_row(
         # so the page now SHOWS that "attempts 1" already meant up to 3 fetches. The
         # legacy status log has no such field — getattr keeps ONE row shape (CLAUDE.md §11).
         "in_pull_fetches": getattr(record, "in_pull_fetches", 0),
+        # The per-bump streak lineage (DEC-STREAK-PROVENANCE-001): None = legacy
+        # unknown, "" = known-zero, else the `<channel>@<pull_id>` history — the
+        # getattr keeps ONE row shape across both record sources (CLAUDE.md §11).
+        "streak_provenance": getattr(record, "streak_provenance", None),
         "last_error": record.last_error,
         # Display the stored UTC stamps as clean IST (CLAUDE.md §6 store-UTC /
         # display-IST; §11 COMMON via `format_ist_clock`) so /coverage/windows
@@ -6765,7 +6866,7 @@ def _window_counts_since(
     return _fold_status_counts(cursor.fetchall())
 
 
-#: The canonical 16-column ledger row projection, in ``LedgerRowTuple`` order
+#: The canonical 17-column ledger row projection, in ``LedgerRowTuple`` order
 #: (DEC-DB-LATENCY-HARDENING-001). MUST equal ``window_ledger_store._COLUMNS``
 #: — pinned by test, not imported (the :data:`_WINDOW_KEY_COLUMNS` precedent:
 #: this module deliberately carries no module-level ``window_ledger_store``
@@ -6783,6 +6884,7 @@ _LEDGER_ROW_COLUMNS: Final[tuple[str, ...]] = (
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "streak_provenance",
 )
 
 
@@ -6791,8 +6893,10 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
 
     DEC-DB-LATENCY-HARDENING-001: the EXACT per-cell coercion the legacy Python
     parse applies (``window_ledger_store._rows_to_records`` — ``str``/``int`` on
-    the required cells, ``None``-passthrough on the optional trio), so the fast
-    path's tuples are byte-equal to :func:`window_ledger_rows_cached`'s. A
+    the required cells, ``None``-passthrough on the optional
+    ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` /
+    ``streak_provenance`` columns), so the fast path's tuples are byte-equal to
+    :func:`window_ledger_rows_cached`'s. A
     ``None`` in ANY column the legacy parse either requires or DERIVES
     (``empty_streak`` / ``in_pull_fetches`` carry legacy per-row derivation
     rules this projection deliberately does not duplicate) raises ``ValueError``
@@ -6816,6 +6920,7 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
         bars_net_new,
         empty_retries,
         transient_retries,
+        streak_provenance,
     ) = raw
     required = (
         market,
@@ -6852,6 +6957,7 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
         None if bars_net_new is None else int(bars_net_new),
         None if empty_retries is None else int(empty_retries),
         None if transient_retries is None else int(transient_retries),
+        None if streak_provenance is None else str(streak_provenance),
     )
 
 
@@ -7454,9 +7560,14 @@ def _build_window_payload_duckdb(
         # legacy base's missing columns until the int() projection below crashed. A wrong-shape
         # Parquet (missing a core column) also fails the subset → defers. When the base is
         # ABSENT (a first pull's delta-only checkpoint) the probe is SKIPPED — every delta is
-        # written by `append_ledger_delta` with the full 14-column schema (writer-pinned), so
-        # the residual union NULL-fill is `bars_net_new`-only on a base that predates that
-        # optional column — equal to the Python fold's honest ``None``, never fed to ``int()``.
+        # written by `append_ledger_delta` with the full 17-column schema (writer-pinned;
+        # DEC-RETRY-COUNTER-SPLIT-001 appended `empty_retries`/`transient_retries`, then
+        # DEC-STREAK-PROVENANCE-001 the trailing `streak_provenance`), so the residual
+        # union NULL-fill is the four optional trailing columns — `bars_net_new` +
+        # `empty_retries` + `transient_retries` + `streak_provenance` — on a base that
+        # predates them, each equal to the Python fold's honest ``None`` (none of the four
+        # is ever fed to ``int()`` here; the provenance cell is read via ``cell.get`` and
+        # the retry split rides `SELECT *` unread by this projection).
         # ISOLATED cursor + close (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
         # deadlock fix): this description-only probe was the LAST remaining
         # statement on the request's SHARED ``_LockedReadConn`` view — with no
@@ -7630,7 +7741,9 @@ def _build_window_payload_duckdb(
                 # empty_streak/in_pull_fetches: a legacy pre-R1 BASE that lacks them was already
                 # deferred to the pyarrow derive path by the base-only probe, and a base-LESS
                 # delta-only scan reads files `append_ledger_delta` writes with the full
-                # 14-column schema (writer-pinned) — so read them directly.
+                # 17-column schema (writer-pinned; trailing `empty_retries`/`transient_retries`
+                # per DEC-RETRY-COUNTER-SPLIT-001, then `streak_provenance`,
+                # DEC-STREAK-PROVENANCE-001) — so read them directly.
                 cell = dict(zip(out_columns, raw, strict=True))
                 record = SimpleNamespace(
                     market=cell["market"],
@@ -7645,6 +7758,12 @@ def _build_window_payload_duckdb(
                     last_attempt_at=cell["last_attempt_at"],
                     empty_streak=int(cell["empty_streak"]),
                     in_pull_fetches=int(cell["in_pull_fetches"]),
+                    # streak_provenance (DEC-STREAK-PROVENANCE-001) is OPTIONAL on disk:
+                    # the page reads `SELECT *`, so a LEGACY file that predates the column
+                    # simply has no such key — `.get` reads the honest None (the legacy
+                    # label fallback) instead of erroring the SELECT. A NULL cell in a
+                    # NEW file reads None the same way (never a fabricated "").
+                    streak_provenance=cell.get("streak_provenance"),
                 )
                 page.append(
                     _window_row(

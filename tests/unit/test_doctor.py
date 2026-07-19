@@ -538,6 +538,41 @@ class TestDerivedFreshness:
         result = check_derived_freshness(tmp_path)
         assert result.status == "FAIL"
         assert "5minute" in result.detail
+        # The FAIL detail names the ghost-bucket escape (the ONE stale shape a
+        # prebuild re-run can never clear — DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001;
+        # the prune is the named follow-up).
+        assert "ghost bucket" in result.detail
+        assert "DEC-DERIVED-GHOST-BUCKET-PRUNE-001" in result.detail
+
+    def test_pass_on_screened_spike_lake(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILS-BEFORE (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001, the B-1 doctor
+        false wedge): a stored 1-minute holding ONE self-consistent >=4x
+        in-session spike (write-side guards accept it; the bad-tick screen drops
+        it) beside a derived table built from the SCREENED 1-minute — exactly
+        what the production prebuild writes (DEC-READ-GUARD-PARITY-001) — read a
+        permanent FAIL because the doctor's re-derivation was UNSCREENED. With
+        screen parity it PASSes."""
+        import polars as pl
+        from brutex.data.bad_tick import screen_frame_bad_ticks
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        spiked = df_1m.with_columns(
+            pl.when(pl.int_range(pl.len()) == 9).then(pl.col(c) * 5.0).otherwise(pl.col(c)).alias(c)
+            for c in ("open", "high", "low", "close")
+        )
+        _write_lake_partition(tmp_path, "1minute", spiked)
+        # The prebuild's stored output: derived from the SCREENED 1-minute.
+        _write_lake_partition(
+            tmp_path, "5minute", resample_1m_to_tf(screen_frame_bad_ticks(spiked), 5)
+        )
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "PASS"
+        assert "NIFTY" in result.detail
 
     def test_skip_when_symbol_has_derived_but_no_1minute_base(self, tmp_path: Path) -> None:
         # A derived partition with NO 1minute base: the symbol cannot be

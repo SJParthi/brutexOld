@@ -39,14 +39,18 @@ from brutex.engine.sweep_verify import (
     SweepVerifyError,
     TreeVerifyReport,
     VerifyFinding,
+    _census_fields_only_differ,
     _is_pre_vix_schema_migration,
     _non_hash_fields_equal,
     _sentinel_diff_is_the_vix_repair,
+    _sidecar_diff_is_the_mode_census_residue,
     _stores_differ_only_in_vix,
     compare_recount,
     plan_expected_stores,
+    recorded_apriori_from_audit,
     recorded_audit_facts,
     recorded_context_from_audit,
+    recorded_overfit_from_audit,
     recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
     stale_roll_schedule_refusal,
@@ -54,6 +58,8 @@ from brutex.engine.sweep_verify import (
     verify_structural,
 )
 from brutex.engine.trial_stats import (
+    MODE_CENSUS_FIELDS,
+    TupleTrialStats,
     read_tuple_trial_stats,
     trial_stats_sidecar_path,
     tuple_trial_stats_from_sharpes,
@@ -66,6 +72,7 @@ from brutex.engine.tuple_complete import (
     write_completion_sentinel,
 )
 from brutex.orchestrator.audit import AuditWriter
+from brutex.ranking import OverfitGateConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import has_conflict
 
@@ -90,13 +97,44 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
 
 
 def _trending_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
+    # The worst-case-rankable gap-up recipe (DEC-FILL-WORST-CASE-ONLY-001):
+    # narrow gap-up bars (range 0.50 < the SL 0.80 — no same-bar stop-out;
+    # the next gap-up's low clears the TP level → +50 wins), a shallow
+    # bearish bar each cycle and a DEEP bearish bar (range 0.85) every 4th
+    # cycle whose stop-out keeps profit_factor finite — this suite's masks
+    # (bits 0/2/3, k=1) all clear the hard rank gates under sl=80/tp=50.
     bars: list[CandleBar] = []
+    cycle = 0
     for d in range(n_days):
         price = 100.0
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
-            bars.append(_bar(d, m, price, close))
-            price = close
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar (below-EMA bits fire)
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(c, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = c
     return bars
 
 
@@ -178,6 +216,19 @@ def tree(clean_tree: Path, tmp_path: Path) -> Path:
 def _store_path(root: Path, grid: SweepGridConfig) -> Path:
     (tuple_,) = iter_sweep_tuples(grid)
     return tuple_store_path(root, tuple_, grid)
+
+
+def _alt_gate_store_path(root: Path, grid: SweepGridConfig) -> Path:
+    """THIS single tuple's store address under the ONE divergent overfit family.
+
+    The digest-precise (a)-floor probe's exact target
+    (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 review fix round): ``overfit=None``
+    when *grid* is gated, the default :class:`OverfitGateConfig` when ungated —
+    re-planned through the SAME ``tuple_store_path`` address law.
+    """
+    (tuple_,) = iter_sweep_tuples(grid)
+    alternate = None if grid.overfit is not None else OverfitGateConfig()
+    return tuple_store_path(root, tuple_, dataclasses.replace(grid, overfit=alternate))
 
 
 def _codes(report: TreeVerifyReport) -> set[str]:
@@ -346,6 +397,137 @@ class TestRecordedContext:
         assert ctx.data_snapshot_hash == "x"
 
 
+# ── Recorded fill mode (DEC-FILL-WORST-CASE-ONLY-001) ──
+
+
+class TestWorstCaseGenerationRefusal:
+    """DEC-FILL-WORST-CASE-ONLY-001: `_require_worst_case_entries` via the
+    facts seam — a scoped generation whose recorded params lack
+    ``fill_mode == "worst_case"`` refuses LOUDLY at fact-derivation time
+    (before any tier), naming the DEC; the remediation is a fresh sweep.
+    Generation-scoping (round-5 finding 6) is PRESERVED: only the ONE scoped
+    generation's context entries are judged.
+    """
+
+    _CTX: ClassVar[dict[str, str]] = {
+        "data_snapshot_hash": "snap0001",
+        "indicator_version": "ind-v1",
+        "code_commit_sha": "deadbeef",
+    }
+
+    def _append(
+        self,
+        audit: AuditWriter,
+        *,
+        params: dict[str, object] | None,
+        snapshot: str = "snap0001",
+        action: str = "SWEEP_START",
+    ) -> None:
+        payload: dict[str, object] = {
+            **self._CTX,
+            "data_snapshot_hash": snapshot,
+            "instrument": "NIFTY",
+        }
+        if params is not None:
+            payload["params"] = params
+        audit.append(action=action, subject="s", payload=payload)
+
+    _REFUSAL = r"precise-era sweep tree refused \(DEC-FILL-WORST-CASE-ONLY-001\)"
+
+    def test_absent_audit_returns_empty_facts_without_refusal(self, tmp_path: Path) -> None:
+        # Nothing recorded → nothing to refuse (the caller supplies flags).
+        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {}, ())
+
+    def test_no_key_generation_refuses_as_precise_era(self, tmp_path: Path) -> None:
+        # Fails-before pin: a pre-DEC audit (params without fill_mode — the
+        # retired elide law recorded PRECISE by key ABSENCE) refuses loudly.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"sl_paisa": 80})
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_paramsless_entry_refuses_as_precise_era(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params=None)
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_literal_precise_token_refuses(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "precise"})
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_junk_token_refuses_identically(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst"})
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_worst_case_generation_reads_clean(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst_case", "sl_paisa": 80})
+            self._append(audit, params={"fill_mode": "worst_case"})
+        context, _schedules, others = recorded_audit_facts(path)
+        assert context is not None
+        assert context.data_snapshot_hash == "snap0001"
+        assert others == ()
+
+    def test_refusal_is_generation_scoped(self, tmp_path: Path) -> None:
+        # Generation A is precise-era (no key), generation B is worst-case:
+        # the scoped B read succeeds, the scoped A read refuses, and the
+        # unscoped read (latest = B) succeeds — the refusal never folds the
+        # whole file (the round-5 scoping law preserved).
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"sl_paisa": 80}, snapshot="snap0001")
+            self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0002")
+        context, _schedules, others = recorded_audit_facts(path, snapshot="snap0002")
+        assert context is not None
+        assert context.data_snapshot_hash == "snap0002"
+        assert others == ("snap0001",)
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path, snapshot="snap0001")
+        assert recorded_audit_facts(path)[0] is not None  # unscoped = latest = B
+
+    def test_non_context_action_params_stay_inert(self, tmp_path: Path) -> None:
+        # A NON-context action's params are never consulted (junk stays inert).
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="OTHER", subject="s", payload={"params": {"fill_mode": "junk"}})
+            self._append(audit, params={"fill_mode": "worst_case"})
+        assert recorded_audit_facts(path)[0] is not None
+
+    def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
+        # The verdict-grade read is chain-verified FIRST (round-8 finding 12
+        # of the facts seam), so trailing junk refuses at verification.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst_case"})
+        path.write_text(path.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="failed hash-chain verification"):
+            recorded_audit_facts(path)
+
+    def test_real_swept_tree_records_worst_case_and_verifies(self, tmp_path: Path) -> None:
+        # End-to-end: the CURRENT writers record the unconditional token, so
+        # a real swept tree derives facts refusal-free AND verifies clean.
+        root = tmp_path / "results"
+        root.mkdir()
+        grid = _grid()
+        _sweep(root, grid)
+        context, _schedules, others = recorded_audit_facts(root / "audit.jsonl")
+        assert context is not None
+        assert others == ()
+        report = verify_identity(root, grid)
+        assert report.checked_stores == 1
+        assert not report.corrupt, report.findings
+
+
 # ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──
 
 
@@ -498,7 +680,8 @@ class TestRecordedAuditFacts:
                     "code_commit_sha": code_sha,
                     "instrument": "NSE-NIFTY-FUT",
                     "params": {
-                        "roll_schedule": list(schedule if schedule is not None else self._SCHEDULE)
+                        "fill_mode": "worst_case",
+                        "roll_schedule": list(schedule if schedule is not None else self._SCHEDULE),
                     },
                 },
             )
@@ -702,7 +885,7 @@ class TestRecordedAuditFacts:
                     "data_snapshot_hash": "snap0001",
                     "indicator_version": "ind-v1",
                     "code_commit_sha": "deadbeef",
-                    "params": {"roll_schedule": list(self._SCHEDULE)},
+                    "params": {"fill_mode": "worst_case", "roll_schedule": list(self._SCHEDULE)},
                 },
             )
         context, schedules, others = recorded_audit_facts(path)
@@ -1606,6 +1789,15 @@ class TestIdentity:
         with pytest.raises(SweepVerifyError, match="results root not found"):
             verify_identity(tmp_path / "nope", _grid())
 
+    def test_no_fill_modes_seam_survives(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 killed-token pin: the round-3 mode-SET
+        # union planning is DELETED — verify_identity carries NO fill_modes
+        # kwarg (worst-case is the only fill model; precise-era generations
+        # refuse at fact-derivation, before any plan exists).
+        import inspect
+
+        assert "fill_modes" not in inspect.signature(verify_identity).parameters
+
     def test_clean_tree_is_clean(self, tree: Path) -> None:
         report = verify_identity(tree, _grid())
         assert report.checked_stores == 1
@@ -1899,6 +2091,147 @@ class TestRecountCompare:
         assert "recount_original_absent" in _codes(report)
         assert report.clean is True
 
+    # ── the (a) honesty floor (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001) ──
+
+    def test_original_absent_with_mixed_gate_sibling_reads_unverifiable(
+        self, tmp_path: Path
+    ) -> None:
+        """A GRID tuple absent at the planned (recovered gate-config) address
+        while THIS EXACT tuple's store exists at the DIVERGENT gate-config
+        address (digest-PRECISE — the review fix round's MAJOR) is a
+        MIXED-gate-config tree — the honest
+        ``recount_mixed_mode_unverifiable`` WARN, never the pending-tuple
+        ``recount_original_absent`` read (which would let a whole digest
+        family pass as CLEAN-by-silence)."""
+        original, scratch, grid = self._two_trees(tmp_path)
+        store = _store_path(original, grid)
+        # THIS tuple's store at the ONE divergent gate-config address (the
+        # recovered grid is UNGATED, so the divergent family is default-gated).
+        _alt_gate_store_path(original, grid).write_bytes(store.read_bytes())
+        store.unlink()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_mixed_mode_unverifiable" in codes
+        assert "recount_original_absent" not in codes
+        assert report.clean is True  # honesty (rc-4 via cmd_verify), never condemned
+
+    def test_incomplete_single_config_sibling_stays_original_absent(self, tmp_path: Path) -> None:
+        """THE review-fix-round MAJOR regression (fails-before on the
+        prefix-glob probe): ``_tuple_digest`` folds the FULL tuple — a
+        single-config grid with ≥2 SL values legitimately writes TWO
+        same-``{direction}_k{k}_`` different-digest stores. Deleting ONE of
+        them is a benign INCOMPLETE tree, NOT mixed gate configs: the verdict
+        must stay the pending-tuple ``recount_original_absent``, never the
+        rc-4 ``recount_mixed_mode_unverifiable`` false positive."""
+        original, scratch, grid = self._two_trees(tmp_path, stop_losses=[80, 120])
+        plan = plan_expected_stores(original, grid)
+        assert len(plan) == 2  # two SL tuples — naturally same-prefix siblings
+        victim = sorted(plan)[0]
+        prefix = victim.name.rsplit("_", 1)[0]
+        # The surviving sibling genuinely shares the {direction}_k{k}_ prefix
+        # (the exact shape the pre-fix glob mis-read as mixed gate configs).
+        assert any(p != victim and p.name.startswith(f"{prefix}_") for p in plan)
+        victim.unlink()
+        trial_stats_sidecar_path(victim).unlink()
+        completion_sentinel_path(victim).unlink()
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_original_absent" in codes
+        assert "recount_mixed_mode_unverifiable" not in codes
+        assert report.clean is True
+
+    def test_original_absent_without_divergent_gate_store_stays_original_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """An absent original with NO store at the divergent gate-config
+        address (the pairing ``….trials.json`` / ``….complete.json``
+        artifacts still beside it) keeps the pending-tuple
+        ``recount_original_absent`` read — the digest-precise probe checks
+        for exactly ONE file and it is absent."""
+        original, scratch, grid = self._two_trees(tmp_path)
+        store = _store_path(original, grid)
+        store.unlink()
+        # The pairing artifacts are genuinely still in the partition dir.
+        assert sorted(p.name for p in store.parent.glob("*.json")) == [
+            f"{store.name}.complete.json",
+            f"{store.name}.trials.json",
+        ]
+        assert not _alt_gate_store_path(original, grid).exists()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_original_absent" in codes
+        assert "recount_mixed_mode_unverifiable" not in codes
+
+    def test_all_three_absent_artifacts_consult_the_sibling_memo_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The divergent-address probe is memoised PER TUPLE: when all THREE
+        artifacts (store + trial-stats sidecar + completion sentinel) are
+        absent from the original tree beside the divergent-gate store, each
+        artifact reads ``recount_mixed_mode_unverifiable`` — but the
+        alternate address is RE-PLANNED exactly ONCE (the second and third
+        consultations return the cached verdict, the ``mixed_sibling_memo``
+        short-circuit)."""
+        from brutex.engine import sweep_verify as sweep_verify_module
+
+        original, scratch, grid = self._two_trees(tmp_path)
+        store = _store_path(original, grid)
+        _alt_gate_store_path(original, grid).write_bytes(store.read_bytes())
+        trial_stats_sidecar_path(store).unlink()
+        completion_sentinel_path(store).unlink()
+        store.unlink()
+        plan = plan_expected_stores(original, grid)  # BEFORE the spy — plan calls it too
+        probe_calls: list[Path] = []
+        real_tuple_store_path = sweep_verify_module.tuple_store_path
+
+        def counting_tuple_store_path(
+            root: Path, tuple_: SweepTuple, grid_: SweepGridConfig
+        ) -> Path:
+            probe_calls.append(root)
+            return real_tuple_store_path(root, tuple_, grid_)
+
+        monkeypatch.setattr(sweep_verify_module, "tuple_store_path", counting_tuple_store_path)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        code_list = [f.code for f in report.findings]
+        assert code_list.count("recount_mixed_mode_unverifiable") == 3
+        assert "recount_original_absent" not in code_list
+        assert probe_calls == [original]  # ONE re-plan per tuple
+        assert report.clean is True
+
+    def test_cell_original_absent_with_sibling_stays_original_absent(self, tmp_path: Path) -> None:
+        """``is_grid_tuple`` gates the (a) floor OFF for Stage-3 CELL stores —
+        a cell address rides the stage-3 knob fold, not the gate-config fold,
+        so even a store planted at the tuple's DIVERGENT gate-config address
+        (the exact target a grid-arm probe would find) must keep the
+        pending-tuple ``recount_original_absent`` read for an absent cell —
+        the ``is_grid_tuple and`` guard's mutant-killer."""
+        original, scratch, grid = self._two_trees(tmp_path)
+        record = _stage3_record()
+        plan = plan_expected_stores(original, grid, stage3=record)  # type: ignore[arg-type]
+        (cell_rel,) = [
+            p.relative_to(original) for p, (_, _, is_grid) in plan.items() if not is_grid
+        ]
+        template = ResultsStore.load(_store_path(scratch, grid)).rows()[0]
+        dest = scratch / cell_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        cell_store = ResultsStore(path=dest)
+        cell_store.append(template)
+        cell_store.flush()
+        # Plant the store the (a)-floor probe would target for this tuple —
+        # a dropped ``is_grid_tuple`` guard would fire mixed-gate on the cell.
+        (cell_tuple, cell_grid, _) = plan[original / cell_rel]
+        alt = tuple_store_path(
+            original, cell_tuple, dataclasses.replace(cell_grid, overfit=OverfitGateConfig())
+        )
+        alt.parent.mkdir(parents=True, exist_ok=True)
+        alt.write_bytes(dest.read_bytes())
+        report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
+        codes = _codes(report)
+        assert "recount_original_absent" in codes
+        assert "recount_mixed_mode_unverifiable" not in codes
+
     def test_absent_in_both_worlds_is_silent(self, tmp_path: Path) -> None:
         # A tuple with no artifacts ANYWHERE (e.g. no-bars in both sweeps)
         # contributes nothing — not even a count.
@@ -1992,14 +2325,19 @@ class TestRecountVixDivergence:
             str(_store_path(scratch, grid)),
         }
         counts: dict[str, int] = {}
-        real_read_bytes = Path.read_bytes
+        # DEC-LAKE-READ-INODE-GUARD-001: sweep_verify reads store bytes via
+        # the guarded module-level seam, not Path.read_bytes — count there via
+        # the string-target monkeypatch (the #1810 CodeQL convention). The
+        # delegate is guarded_read's identity-pinned object — the SAME function
+        # sweep_verify binds (`from brutex.data.guarded_read import ...`).
+        from brutex.data.guarded_read import read_regular_bytes as real_read_bytes
 
-        def counting_read_bytes(self: Path) -> bytes:
-            if str(self) in store_strs:
-                counts[str(self)] = counts.get(str(self), 0) + 1
-            return real_read_bytes(self)
+        def counting_read_bytes(path: Path) -> bytes:
+            if str(path) in store_strs:
+                counts[str(path)] = counts.get(str(path), 0) + 1
+            return real_read_bytes(path)
 
-        monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+        monkeypatch.setattr("brutex.engine.sweep_verify.read_regular_bytes", counting_read_bytes)
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
         assert _codes(report) == {"recount_vix_divergence"}  # attribution unchanged
@@ -2655,3 +2993,660 @@ class TestCellRecountCodes:
         assert record.knobs is None
         assert record.consistent is True
         assert record.optimizer_versions == ()
+
+
+class TestRecordedAprioriFromAudit:
+    """DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752): the tree's OWN
+    recorded exploration mode, read off the first mode-carrying START record
+    (EMIT-ON-apriori law: key absent == legacy — pre-flip trees classify
+    correctly for free; no record == None abstain)."""
+
+    @staticmethod
+    def _write_start(root: Path, chain: str, action: str, payload: dict[str, object]) -> None:
+        path = root / "audit" / chain
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with AuditWriter.open(path) as audit:
+            audit.append(action=action, subject="sweep-all", payload=payload)
+
+    def test_no_audit_files_abstains(self, tmp_path: Path) -> None:
+        assert recorded_apriori_from_audit(tmp_path) is None
+
+    def test_apriori_supervisor_start_reads_true(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        path.parent.mkdir(parents=True)
+        with SweepAuditWriter.open(path) as sup:
+            sup.append(
+                action="SUPERVISOR_START",
+                subject="sweep-all",
+                payload={"apriori": {"enabled": True, "max_mask_bars": 42}},
+            )
+        assert recorded_apriori_from_audit(tmp_path) is True
+
+    def test_start_without_key_reads_legacy_false(self, tmp_path: Path) -> None:
+        # The EMIT-ON-apriori law: absence == legacy — every pre-flip tree.
+        self._write_start(tmp_path, "sweep-all.jsonl", "GRID_SWEEP_START", {"sweep_id": "x"})
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_grid_start_with_key_reads_true(self, tmp_path: Path) -> None:
+        self._write_start(
+            tmp_path,
+            "sweep-all.jsonl",
+            "GRID_SWEEP_START",
+            {"apriori": {"enabled": True, "max_mask_bars": 7}},
+        )
+        assert recorded_apriori_from_audit(tmp_path) is True
+
+    def test_disabled_or_malformed_key_reads_false(self, tmp_path: Path) -> None:
+        # A present-but-not-enabled key is NOT an apriori tree (never a guess).
+        self._write_start(
+            tmp_path,
+            "sweep-all.jsonl",
+            "GRID_SWEEP_START",
+            {"apriori": {"enabled": False}},
+        )
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_non_mapping_key_reads_false(self, tmp_path: Path) -> None:
+        self._write_start(tmp_path, "sweep-all.jsonl", "GRID_SWEEP_START", {"apriori": "yes"})
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_per_tuple_start_lines_are_not_the_mode_family(self, tmp_path: Path) -> None:
+        # A chain holding ONLY per-tuple SWEEP_START lines carries no mode —
+        # the scan falls through to the supervisor chain.
+        self._write_start(tmp_path, "sweep-all.jsonl", "SWEEP_START", {"k": 2})
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_no_mode_record_in_either_chain_abstains(self, tmp_path: Path) -> None:
+        self._write_start(tmp_path, "sweep-all.jsonl", "SWEEP_START", {"k": 2})
+        assert recorded_apriori_from_audit(tmp_path) is None
+
+    @staticmethod
+    def _write_both_chains(root: Path, *, ingest_ts: float, supervisor_ts: float) -> None:
+        """An apriori GRID_SWEEP_START (ingest chain) + a mode-LESS legacy
+        SUPERVISOR_START (supervisor chain), each at an explicit ``ts_utc``."""
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        path = root / "audit" / "sweep-all.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="GRID_SWEEP_START",
+                subject="sweep-all",
+                payload={"apriori": {"enabled": True, "max_mask_bars": 9}},
+                ts_utc=ingest_ts,
+            )
+        sup_path = root / "audit" / "sweep-all-supervisor.jsonl"
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(
+                action="SUPERVISOR_START",
+                subject="sweep-all",
+                payload={"w": 2},
+                ts_utc=supervisor_ts,
+            )
+
+    def test_newer_supervisor_start_wins_over_an_older_ingest_start(self, tmp_path: Path) -> None:
+        """Review fix round 2 probe D, direction 1: an OLD library
+        ``GRID_SWEEP_START`` (apriori) must never shadow the strictly NEWER
+        production ``SUPERVISOR_START`` (legacy) — the winner is the latest
+        ``ts_utc`` ACROSS chains, regardless of chain (the pre-fix per-chain
+        ingest-first precedence permanently pinned this tree apriori)."""
+        self._write_both_chains(tmp_path, ingest_ts=100.0, supervisor_ts=200.0)
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_newer_ingest_start_wins_over_an_older_supervisor_start(self, tmp_path: Path) -> None:
+        """Probe D, direction 2 (the reverse): a strictly NEWER ingest-chain
+        mode START outranks an older supervisor record."""
+        self._write_both_chains(tmp_path, ingest_ts=200.0, supervisor_ts=100.0)
+        assert recorded_apriori_from_audit(tmp_path) is True
+
+    def test_exact_ts_tie_keeps_the_supervisor_record(self, tmp_path: Path) -> None:
+        """An exact ``ts_utc`` tie keeps the SUPERVISOR chain's record (the
+        production launchers' chain) — the ingest chain overrides only on a
+        STRICTLY later launch."""
+        self._write_both_chains(tmp_path, ingest_ts=150.0, supervisor_ts=150.0)
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_unreadable_audit_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "audit" / "sweep-all.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_apriori_from_audit(tmp_path)
+
+    def test_last_mode_start_in_a_chain_wins_after_a_mode_flip(self, tmp_path: Path) -> None:
+        """Review fix round 1 M2 — the multi-launch daemon root: a LEGACY tree
+        whose supervisor chain later accretes an extinction-cycle
+        SUPERVISOR_START (appended via the REAL ``SweepAuditWriter`` resume,
+        exactly like a second daemon launch) must read the LATEST launch's
+        mode — the first-record-wins read permanently downgraded every
+        recount after the flip."""
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        sup_path.parent.mkdir(parents=True)
+        # Launch 1: legacy (mode-less START — the EMIT-ON-apriori law).
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+        assert recorded_apriori_from_audit(tmp_path) is False
+        # Launch 2: the extinction cycle appends onto the SAME chain.
+        with SweepAuditWriter.open(sup_path, resume=True) as sup:
+            sup.append(
+                action="SUPERVISOR_START",
+                subject="sweep-all",
+                payload={"apriori": {"enabled": True, "max_mask_bars": 42}},
+            )
+        assert recorded_apriori_from_audit(tmp_path) is True
+
+    def test_mode_flip_back_to_legacy_reads_legacy(self, tmp_path: Path) -> None:
+        # The symmetric flip: extinction then legacy → the LAST (legacy) wins.
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        sup_path.parent.mkdir(parents=True)
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(
+                action="SUPERVISOR_START",
+                subject="sweep-all",
+                payload={"apriori": {"enabled": True, "max_mask_bars": 42}},
+            )
+        with SweepAuditWriter.open(sup_path, resume=True) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+        assert recorded_apriori_from_audit(tmp_path) is False
+
+    def test_each_chain_is_streamed_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review fix round 1 m4: ONE streaming ``iter_entries`` pass per present
+        chain — never a materialised ``read_entries`` list, never a second
+        pass (the last-wins fold happens in-stream)."""
+        from brutex.orchestrator import audit as audit_mod
+
+        self._write_start(tmp_path, "sweep-all.jsonl", "SWEEP_START", {"k": 2})
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        with SweepAuditWriter.open(sup_path) as sup:
+            sup.append(action="SUPERVISOR_START", subject="sweep-all", payload={"w": 2})
+
+        iter_calls: list[Path] = []
+        real_iter = audit_mod.iter_entries
+
+        def _spy_iter(path: Path) -> object:
+            iter_calls.append(path)
+            return real_iter(path)
+
+        def _no_read(path: Path) -> object:
+            raise AssertionError("recorded_apriori_from_audit must stream, never materialise")
+
+        monkeypatch.setattr(audit_mod, "iter_entries", _spy_iter)
+        monkeypatch.setattr(audit_mod, "read_entries", _no_read)
+        assert recorded_apriori_from_audit(tmp_path) is False
+        assert iter_calls.count(tmp_path / "audit" / "sweep-all.jsonl") == 1
+        assert iter_calls.count(sup_path) == 1
+
+
+class TestRecordedOverfitFromAudit:
+    """DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001: the tree's OWN recorded
+    OVERFIT gate config, read off the last START record per chain (latest
+    ``ts_utc`` across chains wins; the supervisor chain keeps an exact tie —
+    the ``recorded_apriori_from_audit`` law), with the PER-CHAIN TOLERANT
+    read: an unreadable chain is skipped WHOLE with one loud warning, never a
+    raise — the recovery is consulted UNCONDITIONALLY by ``cmd_verify``, so a
+    raise would hard-fail EVERY verify over one bit-rotted chain (the m2
+    survival law). The surviving READABLE chain supplies the config when it
+    carries a START record (GRID_SWEEP_START is minted by the LIBRARY
+    ``run_sweep_grid`` entry; a ``cmd_sweep_all`` tree carries the config on
+    SUPERVISOR_START only — its corrupt-supervisor shape is the honest
+    config-unrecoverable ``None``, pinned in the e2e m2 test)."""
+
+    _LEG: ClassVar[list[float]] = [0.9, 0.07, 0.1, 0.2]
+
+    @staticmethod
+    def _write_grid_start(
+        root: Path, payload: dict[str, object], *, ts_utc: float | None = None
+    ) -> None:
+        path = root / "audit" / "sweep-all.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with AuditWriter.open(path, resume=path.exists()) as audit:
+            audit.append(
+                action="GRID_SWEEP_START", subject="sweep-all", payload=payload, ts_utc=ts_utc
+            )
+
+    @staticmethod
+    def _write_supervisor_start(
+        root: Path, payload: dict[str, object], *, ts_utc: float | None = None
+    ) -> None:
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        path = root / "audit" / "sweep-all-supervisor.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with SweepAuditWriter.open(path, resume=path.exists()) as sup:
+            sup.append(
+                action="SUPERVISOR_START", subject="sweep-all", payload=payload, ts_utc=ts_utc
+            )
+
+    def test_no_audit_files_returns_none(self, tmp_path: Path) -> None:
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_supervisor_gate_config_recovers_in_fragment_order(self, tmp_path: Path) -> None:
+        # The [dsr_min, weight, default_skew, default_excess_kurtosis]
+        # fragment order is pinned FIELD-FOR-FIELD (kills order-swap mutants).
+        self._write_supervisor_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        cfg = recorded_overfit_from_audit(tmp_path)
+        assert cfg is not None
+        assert cfg.dsr_min == 0.9
+        assert cfg.weight == 0.07
+        assert cfg.default_skew == 0.1
+        assert cfg.default_excess_kurtosis == 0.2
+
+    def test_grid_gate_config_recovers(self, tmp_path: Path) -> None:
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        cfg = recorded_overfit_from_audit(tmp_path)
+        assert cfg is not None
+        assert cfg.dsr_min == 0.9
+
+    def test_start_without_gate_config_returns_none(self, tmp_path: Path) -> None:
+        # The EMIT-ON-active law: absence == an ungated / pre-channel tree.
+        self._write_grid_start(tmp_path, {"sweep_id": "x"})
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_non_mapping_gate_config_reads_none(self, tmp_path: Path) -> None:
+        self._write_grid_start(tmp_path, {"gate_config": "junk"})
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_per_tuple_start_lines_are_not_the_start_family(self, tmp_path: Path) -> None:
+        path = tmp_path / "audit" / "sweep-all.jsonl"
+        path.parent.mkdir(parents=True)
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="sweep-all", payload={"k": 2})
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_newer_ungated_start_wins_over_an_older_gated_start(self, tmp_path: Path) -> None:
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}}, ts_utc=100.0)
+        self._write_supervisor_start(tmp_path, {"w": 2}, ts_utc=200.0)
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_newer_gated_start_wins_over_an_older_ungated_start(self, tmp_path: Path) -> None:
+        self._write_supervisor_start(tmp_path, {"w": 2}, ts_utc=100.0)
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}}, ts_utc=200.0)
+        cfg = recorded_overfit_from_audit(tmp_path)
+        assert cfg is not None
+        assert cfg.dsr_min == 0.9
+
+    def test_exact_ts_tie_keeps_the_supervisor_record(self, tmp_path: Path) -> None:
+        self._write_supervisor_start(tmp_path, {"w": 2}, ts_utc=150.0)
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}}, ts_utc=150.0)
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_last_start_in_a_chain_wins_after_a_gate_flip(self, tmp_path: Path) -> None:
+        # Launch 1 gated, launch 2 ungated on the SAME chain → the LAST wins.
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        self._write_grid_start(tmp_path, {"w": 2})
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_corrupt_supervisor_chain_is_skipped_and_the_grid_chain_supplies_the_config(
+        self, tmp_path: Path
+    ) -> None:
+        """THE tolerant-read pin (fails-before: the pre-tolerant read RAISED
+        ``SweepVerifyError: unreadable audit log`` here): a bit-rotted
+        supervisor chain is skipped with ONE loud warning and an intact grid
+        chain carrying a GRID_SWEEP_START gate_config (the LIBRARY
+        ``run_sweep_grid`` mint) still supplies the recovered config; no
+        raise, so a verify never hard-fails on the corrupt chain."""
+        from structlog.testing import capture_logs
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        sup_path.parent.mkdir(parents=True)
+        sup_path.write_text("{not jsonl\n", encoding="utf-8")
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        with capture_logs() as logs:
+            cfg = recorded_overfit_from_audit(tmp_path)
+        assert cfg is not None
+        assert cfg.dsr_min == 0.9
+        warned = [e for e in logs if e["event"] == "sweep_verify.overfit_recovery_chain_unreadable"]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+        assert str(sup_path) == warned[0]["audit_path"]
+
+    def test_both_chains_unreadable_returns_none_with_a_warning_per_chain(
+        self, tmp_path: Path
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        audit_dir = tmp_path / "audit"
+        audit_dir.mkdir(parents=True)
+        (audit_dir / "sweep-all-supervisor.jsonl").write_text("{not jsonl\n", encoding="utf-8")
+        (audit_dir / "sweep-all.jsonl").write_text("{not jsonl\n", encoding="utf-8")
+        with capture_logs() as logs:
+            assert recorded_overfit_from_audit(tmp_path) is None
+        warned = [e for e in logs if e["event"] == "sweep_verify.overfit_recovery_chain_unreadable"]
+        assert len(warned) == 2
+
+    def test_unreadable_chain_partial_records_are_discarded_whole(self, tmp_path: Path) -> None:
+        # A gated START followed by mid-chain corruption: the chain is skipped
+        # WHOLE — a broken hash chain is never trusted piecemeal, so the
+        # pre-corruption gated record must NOT be adopted.
+        from structlog.testing import capture_logs
+
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        path = tmp_path / "audit" / "sweep-all.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("{not jsonl\n")
+        with capture_logs() as logs:
+            assert recorded_overfit_from_audit(tmp_path) is None
+        warned = [e for e in logs if e["event"] == "sweep_verify.overfit_recovery_chain_unreadable"]
+        assert len(warned) == 1
+
+    def test_malformed_leg_shape_raises(self, tmp_path: Path) -> None:
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": [0.9, 0.05]}})
+        with pytest.raises(SweepVerifyError, match="malformed gate_config.overfit leg"):
+            recorded_overfit_from_audit(tmp_path)
+
+    def test_string_leg_raises(self, tmp_path: Path) -> None:
+        # A str IS a Sequence — the explicit str/bytes exclusion must refuse it.
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": "junk"}})
+        with pytest.raises(SweepVerifyError, match="malformed gate_config.overfit leg"):
+            recorded_overfit_from_audit(tmp_path)
+
+    def test_bool_leg_member_raises(self, tmp_path: Path) -> None:
+        # bool is an int subclass — the explicit bool exclusion must refuse it.
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": [True, 0.05, 0.0, 0.0]}})
+        with pytest.raises(SweepVerifyError, match="malformed gate_config.overfit leg"):
+            recorded_overfit_from_audit(tmp_path)
+
+    def test_out_of_range_leg_values_raise(self, tmp_path: Path) -> None:
+        # OverfitGateConfig.__post_init__'s ValueError is wrapped, never raw.
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": [2.0, 0.05, 0.0, 0.0]}})
+        with pytest.raises(SweepVerifyError, match="invalid recorded overfit gate config"):
+            recorded_overfit_from_audit(tmp_path)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_leg_member_raises(self, tmp_path: Path, bad: float) -> None:
+        """MINOR-1 (review fix round): the supervisor chain's ``json.dumps``
+        rides the ``allow_nan=True`` default, so a ``NaN``/``Infinity`` leg
+        member is REACHABLE end-to-end through a hash-valid chain — and
+        ``OverfitGateConfig.__post_init__`` never finiteness-refuses the
+        ``weight`` slot, so an adopted non-finite member would crash
+        ``cmd_verify`` later at its ``json.dumps(allow_nan=False)`` summary
+        (an uncaught ``ValueError``). The leg predicate's ``math.isfinite``
+        must refuse it LOUDLY here instead."""
+        self._write_supervisor_start(tmp_path, {"gate_config": {"overfit": [0.9, bad, 0.0, 0.0]}})
+        with pytest.raises(SweepVerifyError, match="malformed gate_config.overfit leg"):
+            recorded_overfit_from_audit(tmp_path)
+
+
+# ── recount_mode_divergence (DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 2) ──
+
+
+class TestRecountModeDivergence:
+    """The MIXED-MODE census residue is warn-attributed, never CORRUPT.
+
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) review fix round 2:
+    the mode-blind tuple digest legitimately resume-skips cross-mode tuples,
+    so a matched-mode recount of a MIXED tree byte-diverges the trial-stats
+    sidecar on the exploration-mode census triple over a byte-identical store
+    — the comparator must attribute the CONFINED shape precisely instead of
+    condemning a provably-reproduced tuple as heal-grade corruption. Anything
+    beyond the confined shape stays verdict-grade on the normal ladder.
+    """
+
+    def _two_identical_trees(self, tmp_path: Path) -> tuple[Path, Path, SweepGridConfig]:
+        grid = _grid()
+        original, scratch = tmp_path / "original", tmp_path / "scratch"
+        for root in (original, scratch):
+            root.mkdir()
+            _sweep(root, grid)
+        return original, scratch, grid
+
+    @staticmethod
+    def _mutate_sidecar(store_path: Path, **deltas: int) -> None:
+        """Rewrite the sidecar with per-field integer DELTAS (invariant-safe)."""
+        sidecar = trial_stats_sidecar_path(store_path)
+        stats = read_tuple_trial_stats(sidecar)
+        changes = {name: getattr(stats, name) + delta for name, delta in deltas.items()}
+        write_tuple_trial_stats(sidecar, dataclasses.replace(stats, **changes))
+
+    def test_confined_triple_divergence_is_warn_never_corrupt(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(_store_path(scratch, grid), n_enumerated=9)
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_mode_divergence"}
+        assert len(report.findings) == 1
+        assert report.clean is True  # warn-grade — NEVER heal-grade
+        (finding,) = report.findings
+        assert finding.severity == "warn"
+        assert finding.detail.startswith(
+            "ONLY the exploration-MODE-dependent census triple "
+            "(n_enumerated/n_conflict_pruned/n_minhits_dropped) diverge"
+        )
+        assert "MIXED-mode" in finding.detail
+        assert "never heal-grade" in finding.detail
+
+    def test_every_triple_field_divergence_is_attributed(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(
+            _store_path(scratch, grid), n_enumerated=9, n_conflict_pruned=1, n_minhits_dropped=1
+        )
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_mode_divergence"}
+        assert report.clean is True
+
+    def test_mode_divergence_under_context_mismatch_keeps_the_precise_code(
+        self, tmp_path: Path
+    ) -> None:
+        # The VIX-precedent law: a PROVEN confined attribution is more
+        # informative than a generic inconclusive, regardless of the context
+        # gate — the --allow-context-mismatch legacy-recount-of-an-apriori-tree
+        # path reads the SAME precise code.
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(_store_path(scratch, grid), n_enumerated=9)
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=False)
+        assert _codes(report) == {"recount_mode_divergence"}
+        assert "recount_divergence_inconclusive" not in _codes(report)
+
+    def test_triple_plus_mode_invariant_field_stays_corrupt(self, tmp_path: Path) -> None:
+        # Condition (c) violated: n_backtested is mode-INVARIANT, so a triple
+        # + n_backtested divergence is never the census residue.
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(_store_path(scratch, grid), n_enumerated=9, n_backtested=1)
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_divergence"}
+        assert not report.clean
+
+    def test_tampered_store_byte_stays_corrupt(self, tmp_path: Path) -> None:
+        # Condition (a) violated: the store-byte equality is the proof
+        # obligation — a tampered store byte keeps EVERYTHING verdict-grade.
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(_store_path(scratch, grid), n_enumerated=9)
+        store = _store_path(original, grid)
+        store.write_bytes(store.read_bytes() + b"x")
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_divergence"}
+        assert "recount_mode_divergence" not in _codes(report)
+        assert not report.clean
+
+    @pytest.mark.parametrize("which", ["original", "scratch"])
+    def test_absent_store_stays_on_the_ladder(self, tmp_path: Path, which: str) -> None:
+        # Condition (a) unprovable: with either world's store ABSENT the
+        # sidecar divergence can never be mode-attributed.
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(_store_path(scratch, grid), n_enumerated=9)
+        root = original if which == "original" else scratch
+        _store_path(root, grid).unlink()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_mode_divergence" not in codes
+        assert "recount_divergence" in codes  # the sidecar stays verdict-grade
+        assert f"recount_{which}_absent" in codes  # the store's own honest arm
+
+    def test_sentinel_byte_drift_stays_corrupt(self, tmp_path: Path) -> None:
+        # Condition (b) violated: a sentinel drift is never mode-attributable.
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(_store_path(scratch, grid), n_enumerated=9)
+        sentinel = completion_sentinel_path(_store_path(scratch, grid))
+        sentinel.write_bytes(sentinel.read_bytes() + b" ")
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_mode_divergence" not in codes
+        assert "recount_divergence" in codes
+        assert not report.clean
+
+    def test_one_sided_sentinel_stays_corrupt(self, tmp_path: Path) -> None:
+        # Condition (b) violated the other way: a one-sided sentinel is a
+        # MISMATCH (present vs absent), never "both absent".
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(_store_path(scratch, grid), n_enumerated=9)
+        completion_sentinel_path(_store_path(scratch, grid)).unlink()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_mode_divergence" not in codes
+        assert "recount_divergence" in codes
+
+    def test_both_absent_sentinels_still_attribute(self, tmp_path: Path) -> None:
+        # Both-absent sentinels MATCH by definition (a mid-sweep PENDING tuple
+        # in both worlds) — the confined sidecar diff still attributes.
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        self._mutate_sidecar(_store_path(scratch, grid), n_enumerated=9)
+        for root in (original, scratch):
+            completion_sentinel_path(_store_path(root, grid)).unlink()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_mode_divergence"}
+        assert len(report.findings) == 1
+        assert report.clean is True
+
+    def test_unreadable_scratch_sidecar_stays_corrupt(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        trial_stats_sidecar_path(_store_path(scratch, grid)).write_bytes(b"{garbage")
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_divergence"}
+        assert not report.clean
+
+    def test_equal_stats_byte_only_diff_stays_on_the_ladder(self, tmp_path: Path) -> None:
+        # Fully-EQUAL parsed stats over byte-different files: the diff has an
+        # unknown non-field cause — NEVER attributed (no census field differs).
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        sidecar = trial_stats_sidecar_path(_store_path(scratch, grid))
+        sidecar.write_bytes(sidecar.read_bytes() + b"\n")
+        assert read_tuple_trial_stats(sidecar) is not None  # still readable
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_divergence"}
+        assert not report.clean
+
+    def test_cell_sidecar_confined_diff_keeps_the_cell_ladder(self, tmp_path: Path) -> None:
+        # The gate is GRID-only: a Stage-3 CELL sidecar's confined diff stays
+        # on the DISTINCT cell code family (the heal consumes only the grid
+        # code, and cells carry no mode census contract).
+        original, scratch, grid = self._two_identical_trees(tmp_path)
+        record = _stage3_record()
+        plan = plan_expected_stores(original, grid, stage3=record)  # type: ignore[arg-type]
+        (cell_rel,) = [
+            p.relative_to(original) for p, (_, _, is_grid) in plan.items() if not is_grid
+        ]
+        grid_store = _store_path(original, grid)
+        for root in (original, scratch):
+            dest = root / cell_rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(root / grid_store.relative_to(original), dest)
+            shutil.copyfile(
+                trial_stats_sidecar_path(root / grid_store.relative_to(original)),
+                trial_stats_sidecar_path(dest),
+            )
+        self._mutate_sidecar(scratch / cell_rel, n_enumerated=9)
+        report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
+        codes = _codes(report)
+        assert "recount_mode_divergence" not in codes
+        assert "cell_recount_divergence" in codes
+
+    def test_census_fields_only_differ_arms(self) -> None:
+        """The pure helper: census-only diff → True; equal / mode-invariant
+        diff / mixed diff → False (the must-equal side is fields()-driven)."""
+        base = TupleTrialStats(
+            n_backtested=2,
+            n_finite=2,
+            sum_sharpe=1.0,
+            sum_sharpe_sq=1.0,
+            n_enumerated=8,
+            n_conflict_pruned=1,
+            n_minhits_dropped=1,
+            tuple_digest="ab" * 8,
+            store_content_hash="cd" * 32,
+        )
+        assert _census_fields_only_differ(base, base) is False  # nothing differs
+        assert _census_fields_only_differ(base, dataclasses.replace(base, n_enumerated=9)) is True
+        assert (
+            _census_fields_only_differ(
+                base,
+                dataclasses.replace(base, n_conflict_pruned=2, n_minhits_dropped=2),
+            )
+            is True
+        )
+        # A mode-INVARIANT field difference fails the must-equal side — alone
+        # AND alongside a census diff.
+        assert _census_fields_only_differ(base, dataclasses.replace(base, sum_sharpe=2.0)) is False
+        assert (
+            _census_fields_only_differ(
+                base, dataclasses.replace(base, n_enumerated=9, sum_sharpe=2.0)
+            )
+            is False
+        )
+
+    def test_sidecar_residue_helper_reads_and_gates(self, tmp_path: Path) -> None:
+        """The IO half: an unreadable sidecar is never attributable; a valid
+        confined pair is; a valid non-confined pair is not."""
+        base = TupleTrialStats(
+            n_backtested=2,
+            n_finite=2,
+            sum_sharpe=1.0,
+            sum_sharpe_sq=1.0,
+            n_enumerated=5,
+            n_conflict_pruned=1,
+            n_minhits_dropped=1,
+            tuple_digest="ab" * 8,
+            store_content_hash="cd" * 32,
+        )
+        ours = tmp_path / "ours.trials.json"
+        theirs = tmp_path / "theirs.trials.json"
+        write_tuple_trial_stats(ours, base)
+        write_tuple_trial_stats(theirs, dataclasses.replace(base, n_enumerated=9))
+        assert _sidecar_diff_is_the_mode_census_residue(ours, theirs) is True
+        garbage = tmp_path / "garbage.trials.json"
+        garbage.write_bytes(b"{not json")
+        assert _sidecar_diff_is_the_mode_census_residue(ours, garbage) is False
+        write_tuple_trial_stats(theirs, dataclasses.replace(base, n_finite=1, sum_sharpe=0.5))
+        assert _sidecar_diff_is_the_mode_census_residue(ours, theirs) is False
+
+
+class TestModeCensusFieldsSingleSource:
+    """MODE_CENSUS_FIELDS is the ONE cross-module owner (the VIX_FIELDS law)."""
+
+    def test_constant_value(self) -> None:
+        assert MODE_CENSUS_FIELDS == ("n_conflict_pruned", "n_enumerated", "n_minhits_dropped")
+
+    def test_exported_in_all(self) -> None:
+        from brutex.engine import trial_stats as trial_stats_mod
+
+        assert "MODE_CENSUS_FIELDS" in trial_stats_mod.__all__
+
+    def test_every_census_field_is_a_real_sidecar_field(self) -> None:
+        # fields()-consistency: a renamed sidecar field can never silently
+        # orphan the census constant (the gate would stop matching anything).
+        field_names = {field.name for field in dataclasses.fields(TupleTrialStats)}
+        assert set(MODE_CENSUS_FIELDS) <= field_names

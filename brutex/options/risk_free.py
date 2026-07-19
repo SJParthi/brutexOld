@@ -355,8 +355,10 @@ def load_risk_free_csv(path: Path) -> CsvRateSource:
         date), or the file carries zero data rows (an empty curve is a
         configuration defect — fail fast, never a silent always-``None``).
     """
+    from brutex.data.guarded_read import read_regular_text
+
     try:
-        text = path.read_text(encoding="utf-8")
+        text = read_regular_text(path)
     except (OSError, UnicodeDecodeError) as exc:
         # UnicodeDecodeError (a UTF-16 / binary / Excel-saved file) maps into
         # the SAME loud RiskFreeError as an I/O failure, so the documented

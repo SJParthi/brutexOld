@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.models import BruteXError
 
 __all__ = [
@@ -303,7 +304,7 @@ def probe_sweep_liveness(
     progress_mtime = 0.0
     with contextlib.suppress(OSError, ValueError):
         stat_result = progress_path.stat()
-        loaded = json.loads(progress_path.read_text(encoding="utf-8"))
+        loaded = json.loads(read_regular_text(progress_path))
         if isinstance(loaded, dict):
             snapshot = loaded
             progress_mtime = stat_result.st_mtime
