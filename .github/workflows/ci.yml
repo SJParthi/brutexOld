@@ -165,6 +165,11 @@ jobs:
           set -euo pipefail
           DOCS_ONLY="false"
           write_output() {
+            # Trap belt: an unanticipated crash (non-zero exit under set -e)
+            # after DOCS_ONLY="true" must never publish a stale true.
+            if [ "$?" -ne 0 ]; then
+              DOCS_ONLY="false"
+            fi
             echo "docs_only=${DOCS_ONLY}" >> "$GITHUB_OUTPUT"
             echo "detect-changes verdict: docs_only=${DOCS_ONLY}"
           }
@@ -194,7 +199,7 @@ jobs:
           else
             RANGE_FROM="$BASE"
           fi
-          CHANGED="$(git diff --name-only "$RANGE_FROM" "$HEAD_SHA")" || fail_closed "git diff failed"
+          CHANGED="$(git diff --no-renames --name-only "$RANGE_FROM" "$HEAD_SHA")" || fail_closed "git diff failed"
           [ -n "$CHANGED" ] || fail_closed "empty diff (nothing to classify)"
           echo "changed files (${RANGE_FROM} -> ${HEAD_SHA}):"
           printf '%s\n' "$CHANGED" | sed 's/^/  /'
@@ -202,7 +207,6 @@ jobs:
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             case "$f" in
-              docs/*) : ;;
               *.md)   : ;;
               *)
                 echo "non-docs change detected: $f"
@@ -5427,6 +5431,8 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutex-feed.result }}" \
+            "${{ needs.rust-brutex-strategies.result }}" \
             "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
