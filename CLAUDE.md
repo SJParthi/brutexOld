@@ -3553,7 +3553,8 @@ hostile-review pass._
   threading:** `cpcv_pass_rate(label_span=0, embargo=0)` kw-only — the HONESTY clause: the
   model-free rate scores TEST folds only, so the CPCV rate is PROVABLY embargo-INVARIANT
   (property-pinned over [0..10_000] + a 10**9 never-raises pin + kernel-arm parity; NO
-  tightening claimed on #3); the WFO arm genuinely shifts walks (`walk_forward_report(embargo=)`;
+  tightening claimed on #3); the WFO arm genuinely shifts walks (`wfo_pass_rate(embargo=)` →
+  `walk_forward_splits(embargo=)`;
   zero-walks → the existing WALK_FORWARD degrade arm, mirror-pinned);
   `CascadeConfig.wfo_embargo: int | None = None` (None = AUTO, negative refused) +
   `run_stage4_cascade(embargo_bars=)` + NEW `cascade_wire.resolve_cascade_embargo_bars(tf,
@@ -3598,7 +3599,7 @@ hostile-review pass._
   (linear ≈12.6 ms/extra column); the real pipeline fixture's family width measured 12 pairs.
   GATES (executed): `cascade.py` 355/118 + `cpcv.py` 132/44 at 100.00% on their exact ci.yml
   stanzas; the whole-engine gate 100.00% (the first run caught the ONE uncovered stage3_wire
-  defensive arm — closed by a real test, recorded honestly); test batteries 93 + 61 + 219 + 65 +
+  defensive arm — closed by a real test, recorded honestly); test batteries 93 + 61 + 221 + 65 +
   60 passed; the spa/cpcv_wfo/pbo golden + property suites pass UNMODIFIED; ruff/ruff-format
   clean; `mypy --strict brutex` clean (the venv `cma` gap closed by installing the optimize
   extra — env action, not source); pyright 0 NEW vs baseline. HOSTILE-REVIEW ROUND 1 folded
