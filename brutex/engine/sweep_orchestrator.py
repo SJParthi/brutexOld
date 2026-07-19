@@ -83,7 +83,12 @@ import blake3
 import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
-from brutex.engine.results_store import ResultsStore, ResultsStoreError, VixTrioConflictError
+from brutex.engine.results_store import (
+    ResultsStore,
+    ResultsStoreError,
+    ResultsStoreSchemaError,
+    VixTrioConflictError,
+)
 from brutex.engine.stage1a import apply_1day_mask_for
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_identity import (
@@ -129,6 +134,34 @@ _ACTION_GRID_COMPLETE: Final[str] = "GRID_SWEEP_COMPLETE"
 #: Audit action for a tuple that raised mid-evaluation and was SKIPPED
 #: ("Resilient: skip + continue") — names the exact offending combo + error.
 _ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
+
+#: Remediation string for a per-tuple CORRUPT / old-schema finalist store
+#: (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921). A store that raises
+#: :class:`~brutex.engine.results_store.ResultsStoreSchemaError` at LOAD is
+#: CONTAINED to a ``TUPLE_FAILED`` skip (exit 6), never a whole-grid abort — but
+#: it stays in place (un-quarantined, un-sentineled), so every resume re-counts it
+#: failed until the operator heals it. Deliberately NOT auto-quarantined: a fresh
+#: empty store flushed over a still-populated grid-wide MASK dedup would silently
+#: drop the tuple's finalists (the #650 / sweep_heal C5 empty-flush wedge).
+#:
+#: The command chain is COPY-PASTE RUNNABLE against the real CLI (review round 1
+#: MAJOR-1 — the prior text named a nonexistent ``--out-root`` flag and skipped
+#: the required verify→emit-plan→heal steps): the ``--`` flags below are pinned
+#: against the LIVE argparse surface by
+#: ``tests/unit/test_engine_sweep_orchestrator.py::TestRemediationFlagsRunnable``
+#: so the string can never rot again.
+TUPLE_STORE_CORRUPT_REMEDIATION: Final[str] = (
+    "finalist store unreadable — run 'brutex sweep-verify --results-root "
+    "<results-root> --recount --emit-heal-plan' with the SAME grid flags the "
+    "sweep ran with (writes the heal plan under <results-root>/heal/), then "
+    "'brutex sweep-heal <results-root>/heal/<plan>.json --results-root "
+    "<results-root> --execute' (quarantines the store AND wipes checkpoint/ and "
+    "dedup-cache/ so the tuple genuinely recomputes) — or move the corrupt store "
+    "file aside and wipe both skip-tier dirs manually; NOTE: when the plan "
+    "condemns >= 50% of the grid's expected stores (e.g. a single-tuple grid), "
+    "'sweep-heal' refuses until --allow-mass-quarantine is also passed (the C7 "
+    "mass-quarantine gate)"
+)
 
 #: Default ceiling on the number of tuples a grid may enumerate (the honest
 #: opt-in guard — a grid this large is a conscious choice, raise it explicitly).
@@ -1288,11 +1321,18 @@ def run_sweep_grid(
     store is left un-sentineled so it redoes next run), counted in
     ``tuples_failed``, and recorded as a ``TUPLE_FAILED`` audit line naming the
     exact offending combo; the grid finishes the remaining tuples and a non-zero
-    ``tuples_failed`` makes the run's verdict NON-ZERO. Every OTHER exception
-    still propagates uncaught (global abort) — including the PLAIN
-    :class:`~brutex.engine.results_store.ResultsStoreError` run-identity
-    conflict (a genuine reproducibility breach); only the two typed
-    tuple-scoped errors above are caught.
+    ``tuples_failed`` makes the run's verdict NON-ZERO. A
+    :class:`~brutex.engine.results_store.ResultsStoreSchemaError` — a CORRUPT /
+    old-schema finalist store raised at its LOAD boundary on resume — is CONTAINED
+    identically (DB-02, DEC-SWEEP-STORE-CORRUPT-CONTAIN-001) so one damaged store
+    can never abort the whole grid; it also fires a ``sweep_grid.tuple_store_corrupt``
+    WARN carrying the store path + heal remediation, and
+    :class:`~brutex.engine.results_store.VixTrioConflictError` rides the SAME
+    tuple-scoped skip (DEC-VIX-STAMP-WIRE-001). Every OTHER exception still
+    propagates uncaught (global abort) — only ``SweepComboError`` + the G14
+    ``ResultsStoreSchemaError`` + ``VixTrioConflictError`` are caught (NOT the
+    parent ``ResultsStoreError`` run-identity conflict, a genuine
+    reproducibility breach).
 
     Honest envelope (Golden Rule #10): the loop is O(T) tuples, each O(N) masks;
     no part is O(1) total. This function's own memory is O(1) in ``T`` (scalar
@@ -1419,12 +1459,18 @@ def run_sweep_grid(
         # not a transient single combo), count it, audit the fingerprint, and
         # finish the remaining tuples; the failed tuple is left un-sentineled
         # (run_persisted_sweep raised before its flush/mark/sentinel writes) so
-        # it redoes deterministically next run. VixTrioConflictError rides the
-        # SAME skip (DEC-VIX-STAMP-WIRE-001): a redo whose REFERENCE-ONLY VIX
-        # trio disagrees with the stored one means the VIX lake moved between
-        # runs — tuple-scoped by construction, never grounds to abort the
-        # grid. Every other exception still propagates (global abort),
-        # including the PLAIN ResultsStoreError run-identity conflict.
+        # it redoes deterministically next run. SweepComboError (a combo bug /
+        # corrupt bar window) AND ResultsStoreSchemaError (a CORRUPT / old-schema
+        # finalist store surfaced at its LOAD boundary) are per-tuple
+        # containment classes — DELIBERATELY widened (DB-02,
+        # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921): one damaged
+        # store must never abort the WHOLE grid on resume. VixTrioConflictError
+        # rides the SAME skip (DEC-VIX-STAMP-WIRE-001): a redo whose
+        # REFERENCE-ONLY VIX trio disagrees with the stored one means the VIX
+        # lake moved between runs — tuple-scoped by construction. Only the G14
+        # schema class is caught, NOT its parent ResultsStoreError (a
+        # run-identity CONFLICT / missing-polars env fault keeps the documented
+        # global abort). Every OTHER exception still propagates (global abort).
         try:
             summary = run_one_tuple(
                 grid,
@@ -1440,7 +1486,7 @@ def run_sweep_grid(
                 roll_schedule_by_instrument=roll_schedule_by_instrument,
                 reference_stamper=reference_stamper,
             )
-        except (SweepComboError, VixTrioConflictError) as exc:
+        except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
             tuples_failed += 1
             label = (
                 f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"
@@ -1456,6 +1502,17 @@ def run_sweep_grid(
                 payload={"tuple": label, "error": error},
             )
             _LOG.warning("sweep_grid.tuple_failed", subject=subject, tuple=label, error=error)
+            if isinstance(exc, ResultsStoreSchemaError):
+                # The error string already NAMES the store path (the G14 load
+                # contract) — carry it + the heal remediation on the dedicated
+                # corrupt-store WARN so the completeness hole is loud + fixable.
+                _LOG.warning(
+                    "sweep_grid.tuple_store_corrupt",
+                    subject=subject,
+                    tuple=label,
+                    error=error,
+                    remediation=TUPLE_STORE_CORRUPT_REMEDIATION,
+                )
             continue
         if summary is None:
             tuples_skipped_no_bars += 1

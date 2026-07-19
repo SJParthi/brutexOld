@@ -49,6 +49,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TypeVar
 from urllib.parse import urlsplit
 
+if TYPE_CHECKING:
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
+
 import structlog
 
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
@@ -308,6 +311,7 @@ from brutex.dashboard.sweep_runner import (
     resolve_oneclick_sweep_plan,
     resolve_sweep_request,
     run_sweep_from_request,
+    sweep_finish_note,
     sweep_progress_file,
 )
 from brutex.dashboard.universe_cache import (
@@ -8878,26 +8882,43 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: run the grid sweep; the live tick streams to the progress file.
 
-            A round-12 adversarial-refuter review found this returned the
-            bare exit code with no check — ``BackgroundPullJob`` silently
-            discards a non-zero int, so a genuine internal
-            ``cmd_sweep_all`` failure (e.g. the engine's own
-            ``max_combos``/grid-size construction guards, ADR-0007
-            condition 3) reported the SAME "done" finish detail as full
-            success, with ``on_success``/``mark_dirty`` firing on a run
-            that did nothing — the exact failure mode rounds 5-8 already
-            fixed for the multi-exchange one-click route's own ``_work``,
-            left open here. Mirrors that fix: a non-zero exit becomes a
-            named ``{"note": ...}`` finish detail (the SAME
-            ``BackgroundPullJob``/``_finish_detail`` contract), and
-            ``on_success`` (below) only fires on a REAL success.
+            Captures the run's ``SupervisedGridSummary`` (G5b) and returns a
+            Mapping carrying an honest ``"note"`` (rendered by
+            :func:`~brutex.dashboard.sweep_runner.sweep_finish_note`), so
+            ``_finish_detail`` surfaces the failed / quarantined-prior tuple
+            counts instead of a bare "done". The int exit code (the nightly/cron
+            red contract) is unchanged upstream — only the RENDER is richer.
+
+            Round-12 adversarial-refuter fold (club O): a genuine internal
+            ``cmd_sweep_all`` failure (e.g. the engine's own ``max_combos``/grid
+            construction guards, ADR-0007 condition 3) that captured NO summary
+            surfaces a named ``cmd_sweep_all FAILED (exit N)`` note — never a
+            false "done" — and ``on_success``/``mark_dirty`` (below) only fires
+            on a REAL success (``exit == 0``), the rounds 5-8 law the
+            multi-exchange one-click route's own ``_work`` already carries.
             """
             nonlocal sweep_succeeded
-            code = run_sweep_from_request(request, lake_root=lake, results_root=results_root)
-            if code != 0:
-                return {"note": f"sweep {request.symbols}: cmd_sweep_all FAILED (exit {code})"}
-            sweep_succeeded = True
-            return 0
+            captured: list[SupervisedGridSummary] = []
+            exit_code = run_sweep_from_request(
+                request,
+                lake_root=lake,
+                results_root=results_root,
+                on_summary=captured.append,
+            )
+            summary = captured[0] if captured else None
+            if exit_code == 0:
+                sweep_succeeded = True
+            elif summary is None:
+                return {"note": f"sweep {request.symbols}: cmd_sweep_all FAILED (exit {exit_code})"}
+            return {
+                "note": sweep_finish_note(
+                    exit_code=exit_code,
+                    tuples_failed=(summary.tuples_failed if summary is not None else None),
+                    tuples_quarantined_prior=(
+                        summary.tuples_quarantined_prior if summary is not None else None
+                    ),
+                )
+            }
 
         def _on_success() -> None:
             """Bump the write-generation iff the sweep genuinely succeeded (rounds 5-8 law)."""
