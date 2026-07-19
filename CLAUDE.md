@@ -3617,7 +3617,12 @@ hostile-review pass._
   one-liner, the noteworthy/error arms byte-identical, the bare ok-empty
   pin consciously flipped; 1 ship-over NIT recorded as the named follow-up
   DEC-NIGHTLY-LEG-BASEEXC-REPORT-001 — per-item record in MIGRATION.md
-  #1981/#1982).
+  #1981/#1982). HOSTILE-REVIEW ROUND 3: SHIP (zero MINOR+; one ship-over
+  wording NIT — the trailing-save over-warn on a transitions-quiet night,
+  safe-direction) + ADVERSARIAL REFUTER ROUND: ZERO refutations (all 8
+  claims upheld under executed attack) — the review protocol is COMPLETE at
+  2 consecutive clean rounds; the per-round record lives in MIGRATION.md
+  #1981/#1982 — this blurb carries the pointer, never the story.
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
