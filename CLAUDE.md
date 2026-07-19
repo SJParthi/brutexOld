@@ -29,9 +29,9 @@ threads end-to-end with the AUTO one-trading-day law
 a tightening; the WFO walks genuinely shift), and filter #5 gains the
 PER-CANDIDATE Bailey-CSCV PBO over each finalist's REAL Stage-3 search
 family (the condition-6 refined-cell stores → the NEW spec field
-`family_sl_tp`, cap 256, EMIT-ON-PRESENT manifest key). ZERO golden
-flips; additive-at-REPORT_VERSION-1 keys; measured survivor delta OLD 41
-→ NEW 38 on the synthetic A/B corpus. ENGINE UNCHANGED —
+`family_sl_tp`, cap 256, EMIT-ON-PRESENT manifest key). ZERO
+committed-golden flips; additive-at-REPORT_VERSION-1 keys; measured
+survivor delta OLD 41 → NEW 38 on the synthetic A/B corpus. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX — the cascade is strictly downstream of run
 identity. The per-item record lives in the §1 Active-branch blurb +
 MIGRATION.md #1986 — this header carries the pointer, never the story.)
@@ -3581,10 +3581,13 @@ hostile-review pass._
   field cannot express per-mask families — never a fabricated union); the CPCV threading is
   `_validate_params`-only (no split construction exists in the model-free rate). **(4)
   Serialization:** `_report_to_dict` adds the two pool keys + per-verdict `candidate_pbo` —
-  ADDITIVE at REPORT_VERSION 1; ZERO golden flips anywhere (the auto==manual cascade golden
-  passes UNMODIFIED — the golden pools pass SPA at p=0.0); `cascade_join` tolerates the new keys
+  ADDITIVE at REPORT_VERSION 1; ZERO COMMITTED-golden flips — the claim SCOPED honestly (r1):
+  every committed golden fixture/suite byte-unchanged, the auto==manual golden proves RELATIVE
+  equality of the two paths only (a real production cascade CAN legitimately yield a different
+  WFO survivor set vs origin/main — the intended embargo de-leakage; the golden pools pass SPA
+  at p=0.0); `cascade_join` tolerates the new keys
   with zero skips (pinned via fixtures AND real writer bytes); display surfaces deliberately NOT
-  extended (out of lane). **(5) MEASURED (never assumed):** the A/B survivor-delta harness
+  extended (out of lane — the named follow-up DEC-CASCADE-STAT-DISPLAY-001). **(5) MEASURED (never assumed):** the A/B survivor-delta harness
   (scratchpad, NOT shipped; worktree old-vs-new over a bit-identical seeded 3-pool ×
   20-candidate corpus with per-candidate independent RNG) reads OLD 41 → NEW 38 survivors (7.3%
   fewer — the honest number, the brief's ~10-30% expectation NOT claimed): pbo −3, cpcv +0 and
@@ -3598,7 +3601,11 @@ hostile-review pass._
   defensive arm — closed by a real test, recorded honestly); test batteries 93 + 61 + 219 + 65 +
   60 passed; the spa/cpcv_wfo/pbo golden + property suites pass UNMODIFIED; ruff/ruff-format
   clean; `mypy --strict brutex` clean (the venv `cma` gap closed by installing the optimize
-  extra — env action, not source); pyright 0 NEW vs baseline. ENGINE UNCHANGED —
+  extra — env action, not source); pyright 0 NEW vs baseline. HOSTILE-REVIEW ROUND 1 folded
+  (3 lenses, all SHIP — the two boundary-pin test gaps mutant-verified killed (`>`→`>=` cap ·
+  `<`→`<=` family floor) + the CPCV kernel-engagement spy (skip-when-unavailable, wrap-never-
+  replace) + the `candidates_for_spec` `family_cap < 1` typed-refusal alignment + the doc/scoping
+  NITs; per-item record in MIGRATION.md #1986). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; the cascade consumes persisted results strictly DOWNSTREAM of run
   identity (no canonical_trade_params key, no store-address change); F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes/env vars.)
@@ -10863,8 +10870,9 @@ hostile-review pass._
   MANIFEST_VERSION 1; family re-sim through the SAME trade-sim path; cap
   256 with loud truncation WARNs; ambiguous multi-mask cells abstain
   loudly, never a fabricated family; the VIX AST pin count stays 2 via the
-  shared `_trades_for_legs` closure); ZERO golden flips (auto==manual
-  golden + spa/cpcv_wfo/pbo goldens + property suites pass UNMODIFIED);
+  shared `_trades_for_legs` closure); ZERO committed-golden flips
+  (auto==manual golden + spa/cpcv_wfo/pbo goldens + property suites pass
+  UNMODIFIED — relative-equality scope, hostile review r1 folded);
   measured survivor delta OLD 41 → NEW 38 on the synthetic A/B corpus;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX — the cascade is strictly
   downstream of run identity; matches §1's Active branch line — see §1 +
