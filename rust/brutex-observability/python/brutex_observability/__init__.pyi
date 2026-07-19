@@ -58,3 +58,47 @@ def stamp_verdict(
     stamped_snapshot: str | None,
     expected_snapshot: str | None,
 ) -> str: ...
+def tripwire_reconcile_counts(
+    in_flight: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    total: int,
+    prev_evaluated: int | None,
+    is_done: bool,
+) -> int: ...
+def tripwire_throughput_watch(
+    rate: float,
+    peak: float,
+    below: int,
+    fraction: float,
+    dwell: int,
+) -> tuple[float, int, float, int]: ...
+def tripwire_memory_budget(
+    rss: int,
+    ram_total: int,
+    fraction: float,
+) -> tuple[float, int]: ...
+def tripwire_memory_slope(
+    rss: int,
+    evaluated: int,
+    prev_rss: int,
+    prev_evaluated: int,
+    slope_threshold: float,
+    slope_high: int,
+    dwell: int,
+) -> tuple[float, int, int]: ...
+def tripwire_summary_classify(
+    values: list[float],
+    screened: list[bool],
+    absurd_threshold: float,
+) -> tuple[list[int], list[int]]: ...
+def tripwire_stage_missing(
+    required_sorted: list[str],
+    present: list[str],
+) -> list[bool]: ...
+def tripwire_ru_maxrss_bytes(
+    ru_maxrss: int,
+    platform: str,
+) -> int: ...

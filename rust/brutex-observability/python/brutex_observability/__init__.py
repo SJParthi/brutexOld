@@ -20,6 +20,21 @@ materialize-in-Python):
   (first-false index, ``-1`` accept).
 * ``stamp_verdict`` — law D2, the validate verdict matrix
   (``"ok"`` / ``"hash_mismatch"``).
+* ``tripwire_reconcile_counts`` — law T2, the count-reconciliation
+  violation bitmask (DEC-RUST-OBSERVABILITY-TRIPWIRES-002; bit order = the
+  ``_reconcile_counts`` append order).
+* ``tripwire_throughput_watch`` — law T3, the throughput floor/dwell watch
+  (``(new_peak, new_below, floor, code)``).
+* ``tripwire_memory_budget`` — law T4a, the RSS budget arm
+  (``(budget, code)``).
+* ``tripwire_memory_slope`` — law T4b, the RSS growth-slope arm
+  (``(slope, new_high, code)``).
+* ``tripwire_summary_classify`` — law T5, the batch NaN/absurd screen
+  (``(nan_codes, absurd_codes)``, aligned with the input order).
+* ``tripwire_stage_missing`` — law T6, the stage-prerequisite membership
+  mask over the pre-sorted required list.
+* ``tripwire_ru_maxrss_bytes`` — law T9, the ``ru_maxrss`` platform unit
+  law (``darwin`` → bytes verbatim, else KiB × 1024).
 * ``PanicException`` — THIS wheel's own pyo3 panic class. pyo3's
   ``PanicException`` is a PER-EXTENSION-MODULE static (each abi3 wheel
   lazily inits its OWN type object), so a name-resolved class from
@@ -69,6 +84,13 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "sla_decide",
     "stamp_shape_index",
     "stamp_verdict",
+    "tripwire_memory_budget",
+    "tripwire_memory_slope",
+    "tripwire_reconcile_counts",
+    "tripwire_ru_maxrss_bytes",
+    "tripwire_stage_missing",
+    "tripwire_summary_classify",
+    "tripwire_throughput_watch",
     "watchdog_decide",
 )
 
@@ -110,6 +132,13 @@ from ._brutex_observability import (  # noqa: E402
     sla_decide,
     stamp_shape_index,
     stamp_verdict,
+    tripwire_memory_budget,
+    tripwire_memory_slope,
+    tripwire_reconcile_counts,
+    tripwire_ru_maxrss_bytes,
+    tripwire_stage_missing,
+    tripwire_summary_classify,
+    tripwire_throughput_watch,
     watchdog_decide,
 )
 
@@ -132,5 +161,12 @@ __all__ = [
     "sla_decide",
     "stamp_shape_index",
     "stamp_verdict",
+    "tripwire_memory_budget",
+    "tripwire_memory_slope",
+    "tripwire_reconcile_counts",
+    "tripwire_ru_maxrss_bytes",
+    "tripwire_stage_missing",
+    "tripwire_summary_classify",
+    "tripwire_throughput_watch",
     "watchdog_decide",
 ]

@@ -5,10 +5,11 @@
 # COMMON; the trading-core/brutex-feed toml precedent).
 #
 # Scope: the ENTIRE decision core — the law-A tiered stall state machine +
-# the law-B/C detectors (src/detector.rs) and the law-D1/D2 stamp laws
-# (src/stamp.rs). The in-crate tests/edge_matrix.rs hand-derived matrix +
-# tests/proptest_detector.rs / tests/proptest_stamp.rs invariants are the
-# killing suite; zero-survivor is the standard (DEC-MUTATION-RUNTIME-003).
+# the law-B/C detectors (src/detector.rs), the law-D1/D2 stamp laws
+# (src/stamp.rs) and the T2-T6/T9 tripwire laws (src/tripwires.rs,
+# DEC-RUST-OBSERVABILITY-TRIPWIRES-002). The in-crate tests/edge_matrix*.rs
+# hand-derived matrices + tests/proptest_*.rs invariants are the killing
+# suite; zero-survivor is the standard (DEC-MUTATION-RUNTIME-003).
 #
 # DELIBERATELY OUT (documented, not silent — Golden Rule #10; the
 # trading-core toml sets the disclosure standard):
@@ -19,4 +20,4 @@
 #                   differential/parity lane).
 #   src/lib.rs    — re-exports + the baked SOURCE_DIGEST const only; nothing
 #                   behavioural for cargo-mutants to perturb.
-examine_globs = ["src/detector.rs", "src/stamp.rs"]
+examine_globs = ["src/detector.rs", "src/stamp.rs", "src/tripwires.rs"]

@@ -16,7 +16,7 @@ build-backend = "maturin"
 
 [project]
 name = "brutex-observability"
-version = "0.1.0"
+version = "0.2.0"
 description = "Observability decision-law kernel (stall/hung/SLA detectors + stage-stamp laws) for BruteX."
 readme = "README.md"
 license = { text = "Proprietary" }

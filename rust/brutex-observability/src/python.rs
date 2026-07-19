@@ -1,9 +1,11 @@
 //! PyO3 binding (feature `python`) — the thin scalar-mapping edge.
 //!
-//! Five `#[pyfunction]`s delegate to the pure core and map its outcomes to
-//! plain Python tuples / strings of SCALARS. No datetime, no PyAny, no
-//! dicts, no callables cross the boundary — every conversion is documented
-//! on the facade side (`brutex/observability/observability_rust.py`).
+//! Twelve `#[pyfunction]`s (the five A-D detector/stamp laws + the seven
+//! T2-T6/T9 tripwire laws of `DEC-RUST-OBSERVABILITY-TRIPWIRES-002`)
+//! delegate to the pure core and map its outcomes to plain Python tuples /
+//! lists / strings of SCALARS. No datetime, no PyAny, no dicts, no
+//! callables cross the boundary — every conversion is documented on the
+//! facade side (`brutex/observability/observability_rust.py`).
 //!
 //! Argument-conversion faults (a non-float where f64 is expected, a
 //! negative/huge int where u64 is expected, a lone-surrogate string where
@@ -24,7 +26,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-use crate::{detector, stamp};
+use crate::{detector, stamp, tripwires};
 
 /// The law-A wire shape — the 12-scalar decomposition of `WatchdogVerdict`:
 /// `(tier, stall_started_beat, last_logged_at, last_alerted_at, episodes,
@@ -166,6 +168,123 @@ fn stamp_verdict(
     )
 }
 
+/// Law T2 — the count-reconciliation violation bitmask (bit order = the
+/// `_reconcile_counts` append order; bit-4 sum in i128 — lossless).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (in_flight, enumerated, evaluated, skipped, survivors, total, prev_evaluated, is_done))]
+fn tripwire_reconcile_counts(
+    in_flight: i64,
+    enumerated: i64,
+    evaluated: i64,
+    skipped: i64,
+    survivors: i64,
+    total: i64,
+    prev_evaluated: Option<i64>,
+    is_done: bool,
+) -> u32 {
+    tripwires::tripwire_reconcile_counts(
+        in_flight,
+        enumerated,
+        evaluated,
+        skipped,
+        survivors,
+        total,
+        prev_evaluated,
+        is_done,
+    )
+}
+
+/// Law T3 — the throughput floor/dwell watch:
+/// `(new_peak, new_below, floor, code)`. A dwell-counter overflow maps to
+/// `ValueError` (the facade degrade set serves the oracle's unbounded int).
+#[pyfunction]
+#[pyo3(signature = (rate, peak, below, fraction, dwell))]
+fn tripwire_throughput_watch(
+    rate: f64,
+    peak: f64,
+    below: i64,
+    fraction: f64,
+    dwell: i64,
+) -> PyResult<(f64, i64, f64, u8)> {
+    tripwires::tripwire_throughput_watch(rate, peak, below, fraction, dwell)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
+/// Law T4a — the RSS budget arm: `(budget, code)`.
+#[pyfunction]
+#[pyo3(signature = (rss, ram_total, fraction))]
+fn tripwire_memory_budget(rss: i64, ram_total: i64, fraction: f64) -> (f64, u8) {
+    tripwires::tripwire_memory_budget(rss, ram_total, fraction)
+}
+
+/// Law T4b — the RSS growth-slope arm: `(slope, new_high, code)`. A
+/// dwell-counter overflow maps to `ValueError` (same degrade route as T3).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (rss, evaluated, prev_rss, prev_evaluated, slope_threshold, slope_high, dwell))]
+fn tripwire_memory_slope(
+    rss: i64,
+    evaluated: i64,
+    prev_rss: i64,
+    prev_evaluated: i64,
+    slope_threshold: f64,
+    slope_high: i64,
+    dwell: i64,
+) -> PyResult<(f64, i64, u8)> {
+    tripwires::tripwire_memory_slope(
+        rss,
+        evaluated,
+        prev_rss,
+        prev_evaluated,
+        slope_threshold,
+        slope_high,
+        dwell,
+    )
+    .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
+/// Law T5 — the batch NaN/absurd screen: `(nan_codes, absurd_codes)`,
+/// aligned with the input order. A length mismatch maps to `ValueError`
+/// (belt — the facade builds both arrays from one iteration). The code
+/// vecs cross as `Vec<i64>` (widened from the core's `u8`) because pyo3
+/// special-cases `Vec<u8>` into Python `bytes` — the facade's output gate
+/// demands exact `list[int]`.
+#[pyfunction]
+#[pyo3(signature = (values, screened, absurd_threshold))]
+fn tripwire_summary_classify(
+    values: Vec<f64>,
+    screened: Vec<bool>,
+    absurd_threshold: f64,
+) -> PyResult<(Vec<i64>, Vec<i64>)> {
+    tripwires::tripwire_summary_classify(&values, &screened, absurd_threshold)
+        .map(|(nan_codes, absurd_codes)| {
+            (
+                nan_codes.into_iter().map(i64::from).collect(),
+                absurd_codes.into_iter().map(i64::from).collect(),
+            )
+        })
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
+/// Law T6 — the stage-prerequisite membership law: the per-token MISSING
+/// mask over the Python-pre-sorted required list.
+#[pyfunction]
+#[pyo3(signature = (required_sorted, present))]
+fn tripwire_stage_missing(required_sorted: Vec<String>, present: Vec<String>) -> Vec<bool> {
+    tripwires::tripwire_stage_missing(&required_sorted, &present)
+}
+
+/// Law T9 — the `ru_maxrss` platform unit law (`darwin` → bytes verbatim,
+/// else KiB × 1024; a `checked_mul` overflow maps to `ValueError` — the
+/// facade degrades to the oracle's unbounded-int product).
+#[pyfunction]
+#[pyo3(signature = (ru_maxrss, platform))]
+fn tripwire_ru_maxrss_bytes(ru_maxrss: i64, platform: &str) -> PyResult<i64> {
+    tripwires::normalized_ru_maxrss_bytes(ru_maxrss, platform)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
 #[pymodule]
 fn _brutex_observability(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -190,5 +309,12 @@ fn _brutex_observability(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sla_decide, m)?)?;
     m.add_function(wrap_pyfunction!(stamp_shape_index, m)?)?;
     m.add_function(wrap_pyfunction!(stamp_verdict, m)?)?;
+    m.add_function(wrap_pyfunction!(tripwire_reconcile_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(tripwire_throughput_watch, m)?)?;
+    m.add_function(wrap_pyfunction!(tripwire_memory_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(tripwire_memory_slope, m)?)?;
+    m.add_function(wrap_pyfunction!(tripwire_summary_classify, m)?)?;
+    m.add_function(wrap_pyfunction!(tripwire_stage_missing, m)?)?;
+    m.add_function(wrap_pyfunction!(tripwire_ru_maxrss_bytes, m)?)?;
     Ok(())
 }

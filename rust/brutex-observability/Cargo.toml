@@ -25,7 +25,12 @@
 
 [package]
 name = "brutex-observability"
-version = "0.1.0"
+# 0.2.0 — DEC-RUST-OBSERVABILITY-TRIPWIRES-002 grows the compiled surface by
+# the seven tripwire laws. Real 0.1.0 wheels exist once the -001 lane lands,
+# so the version moves (the brutex-core 0.1→0.2 masquerade precedent); the
+# handshake SYMBOL set (shim `_EXPECTED_COMPILED_SYMBOLS` + the facade
+# `_CRATE_API`) stays the crate_stale teeth, the version is the belt.
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93.1"
 description = "Observability decision-law kernel (stall/hung/SLA detectors + stage-stamp laws) for BruteX"
