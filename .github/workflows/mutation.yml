@@ -514,6 +514,7 @@ jobs:
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/data/stat_deadline.py:tests/unit/test_stat_deadline.py:" \
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \
+            "brutex/data/lake_rust_resample_daily.py:tests/unit/test_lake_rust_resample_daily.py:" \
             "brutex/data/fno_symbol_rust.py:tests/unit/test_fno_symbol_rust.py:" \
             "brutex/money_rust.py:tests/unit/test_money_rust.py:" \
             "brutex/config/hardware_envelope_rust.py:tests/unit/test_hardware_envelope_rust.py:" \
@@ -525,6 +526,7 @@ jobs:
             "brutex/data/lake_rust_ledger_render.py:tests/unit/test_lake_rust_ledger_render.py:" \
             "brutex/data/detectors_rust.py:tests/unit/test_detectors_rust.py:" \
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
+            "brutex/notifications/notify_rust.py:tests/unit/test_notify_rust.py:" \
             "brutex/nightly/box_update.py:tests/unit/test_nightly_box_update.py:" \
             "brutex/nightly/env_preflight.py:tests/unit/test_nightly_env_preflight.py:" \
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
@@ -534,6 +536,7 @@ jobs:
             "brutex/acceptance/report.py:tests/unit/test_acceptance_report.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
+            "brutex/observability/observability_rust.py:tests/unit/test_observability_rust.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/strategies/combo_rust.py:tests/unit/test_strategies_combo_rust.py:" \
             "brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:" \

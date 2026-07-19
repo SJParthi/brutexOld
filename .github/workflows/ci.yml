@@ -1603,9 +1603,12 @@ jobs:
           #       DEC-LAKE-RUST-RESAMPLE-001: the flag-ON seam branch is
           #       reachable only via test_tf_resampler_rust_seam.py (the
           #       stem-matched seam-wiring pins — the feed_replay_rust_seam
-          #       precedent). All the files are required for 100%.
+          #       precedent). DEC-LAKE-RUST-RESAMPLE-DAILY-001: the batch-face
+          #       flag-ON branch of resample_all_21_tfs is reachable only via
+          #       test_tf_resampler_batch_seam.py. All the files are required
+          #       for 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_registry_parity.py tests/unit/test_tf_resampler_rust_seam.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_registry_parity.py tests/unit/test_tf_resampler_rust_seam.py tests/unit/test_tf_resampler_batch_seam.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
@@ -1613,10 +1616,12 @@ jobs:
           #       the F&O twin of resample_1m_to_daily — OHLCV aggregation +
           #       midnight-IST re-stamp + forming-session `before` guard, EXCEPT
           #       it reads the carry-last open_interest (defensive `in columns`
-          #       guard) instead of hardcoding None. 100% line+branch via
-          #       tests/unit/test_fno_daily_resample.py.
+          #       guard) instead of hardcoding None.
+          #       DEC-LAKE-RUST-RESAMPLE-DAILY-001: the flag-ON daily-seam arm
+          #       is reachable only via test_fno_daily_resample_rust_seam.py.
+          #       100% line+branch via both files together.
           if compgen -G "tests/unit/test_fno_daily_resample.py" > /dev/null; then
-            pytest --cov=brutex.data.fno_daily_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_daily_resample.py
+            pytest --cov=brutex.data.fno_daily_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_daily_resample.py tests/unit/test_fno_daily_resample_rust_seam.py
           else
             echo "(brutex.data.fno_daily_resample test file not present yet — gate inactive)"
           fi
@@ -1624,10 +1629,13 @@ jobs:
           #       the F&O twin of spot_resample.derive_intraday_tfs (OI carried)
           #       + the on-the-fly /movers resample_session_to_tf (RENAMEs the
           #       lake `timestamp -> ts_utc`, drops the trailing FORMING bucket —
-          #       no look-ahead, Property P-06). 100% line+branch via
-          #       tests/unit/test_fno_resample.py.
+          #       no look-ahead, Property P-06).
+          #       DEC-LAKE-RUST-RESAMPLE-DAILY-001: the flag-ON session-face
+          #       route of resample_session_to_tf is reachable only via
+          #       test_fno_resample_session_seam.py. 100% line+branch via
+          #       both files together.
           if compgen -G "tests/unit/test_fno_resample.py" > /dev/null; then
-            pytest --cov=brutex.data.fno_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_resample.py
+            pytest --cov=brutex.data.fno_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_resample.py tests/unit/test_fno_resample_session_seam.py
           else
             echo "(brutex.data.fno_resample test file not present yet — gate inactive)"
           fi
@@ -4245,6 +4253,13 @@ jobs:
           severity: 'CRITICAL,HIGH'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          # DEC-CI-TRIVY-SEVERITY-LIMIT-001: in `format: sarif` mode
+          # trivy-action DROPS the declared `severity` filter unless this flag
+          # is set ("Building SARIF report with all severities" in the job
+          # log), so the exit-code gate re-fires on ANY-severity finding. This
+          # restores the intended CRITICAL/HIGH-only gate lost when the #1651
+          # CI-sharding merge took main's ci.yml wholesale and dropped it.
+          limit-severities-for-sarif: 'true'
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
