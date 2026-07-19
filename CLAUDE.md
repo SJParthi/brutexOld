@@ -18,9 +18,10 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #1960 —
-renumbered #1957 → #1960 at the merge-reconcile, main took #1957 for
-DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001 —
+_Last updated: 2026-07-19 (DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #2115 —
+renumbered #1957 → #1960 → #2115 (coordinator census pre-assign 2026-07-19 —
+#1960 had seven claimants; #1957 taken on main by
+DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001) —
 branch `claude/crossverify-rust-core` — the cross-verify Rust core, first
 cut: the TWO pure-law surfaces — the pinned CSV byte assembly
 (`csv_render.render_day_csv`) + the canonical identity mapper / S3-key law
@@ -44,7 +45,7 @@ uniformity, not speed; ships INERT — a default flip needs its own DEC.
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change; new env var BRUTEX_CROSSVERIFY_RUST. This header carries the
 pointer, never the story — the full record lives in the §1 Active-branch
-blurb + MIGRATION.md #1960.)
+blurb + MIGRATION.md #2115.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3659,8 +3660,9 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/crossverify-rust-core`
-  (**DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #1960** — renumbered
-  #1957 → #1960 at the 2026-07-19 merge-reconcile (main took #1957 for
+  (**DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #2115** — renumbered
+  #1957 → #1960 → #2115 (coordinator census pre-assign 2026-07-19 — #1960
+  had seven claimants; #1957 taken on main by
   DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001; DEC-IDs are the stable handles
   per DEC-LEDGER-RENUMBER-001) — the cross-verify
   Rust core, first cut: the two pure-law surfaces (the pinned CSV byte
@@ -3696,7 +3698,7 @@ hostile-review pass._
   oracle deletion is a later lane. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes; new env var
-  `BRUTEX_CROSSVERIFY_RUST`. The full record lives in MIGRATION.md #1960 —
+  `BRUTEX_CROSSVERIFY_RUST`. The full record lives in MIGRATION.md #2115 —
   this blurb is the pointer.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
@@ -11093,8 +11095,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/crossverify-rust-core`
-  (DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #1960 — renumbered
-  #1957 → #1960 at the merge-reconcile, main took #1957 — the cross-verify Rust
+  (DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #2115 — renumbered
+  #1957 → #1960 → #2115 (coordinator census pre-assign 2026-07-19 — #1960 had
+  seven claimants; #1957 taken on main) — the cross-verify Rust
   core, first cut: the pinned CSV byte assembly + the canonical
   identity/S3-key law re-hosted on the NEW standalone `rust/brutex-ops`
   crate behind the NEW default-OFF `BRUTEX_CROSSVERIFY_RUST` flag via the
@@ -11109,7 +11112,7 @@ hostile-review pass._
   (SHIP — 2 MINOR + 2 NIT); flag OFF byte-identical (bomb-spy-pinned);
   payoff ≈ 0 — uniformity, not speed; ships INERT; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1960 for the full blurb)
+  MIGRATION.md #2115 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
