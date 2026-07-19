@@ -1,9 +1,17 @@
-# BruteX — Dependency CVE audit (every push + PR)
+# BruteX — Dependency CVE audit (manifest-touching PRs + every push to main)
 #
 # Complements security-audit.yml (weekly, main-only, fno-math-only rust job):
-# this workflow runs pip-audit + cargo-audit on EVERY push/PR so a dependency
-# CVE is caught at review time, and it audits BOTH Rust crates
+# this workflow runs pip-audit + cargo-audit so a dependency CVE is caught at
+# review time, and it audits BOTH Rust crates
 # (rust/fno-math AND rust/trading-core — the weekly job covers only fno-math).
+#
+# DEC-CI-SCANNER-DEDUPE-001: the pull_request trigger is `paths:`-filtered to
+# the dependency manifests (+ this workflow file) — a docs/engine-only PR no
+# longer queues a pip-audit run whose result cannot change. Plain `paths:` is
+# safe here precisely because NO job of this workflow is a branch-protection
+# required context (see branch-protection-drift.yml `expected_required_checks`)
+# — a skipped run never wedges a merge. Every push to main still audits
+# unconditionally, so nothing merged escapes the net for long.
 #
 # Ignore-list policy (documented, auditable — Golden Rule #10):
 # every `--ignore-vuln` below MUST carry an inline comment naming the
@@ -16,6 +24,17 @@ on:
     branches:
       - main
   pull_request:
+    # Dependency manifests only (DEC-CI-SCANNER-DEDUPE-001) — the audited
+    # surface. pyproject.toml governs the pip-install resolution the
+    # python-pip-audit job scans; uv.lock is the committed Python lock;
+    # the Cargo manifests/locks govern the cargo-audit jobs; and the
+    # workflow file itself so edits here always run once at review time.
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - rust/**/Cargo.toml
+      - rust/**/Cargo.lock
+      - .github/workflows/dep-audit.yml
   workflow_dispatch:
 
 permissions:

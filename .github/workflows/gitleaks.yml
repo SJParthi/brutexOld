@@ -1,10 +1,11 @@
-# BruteX — gitleaks secrets scan
+# BruteX — gitleaks secrets scan (scheduled deep scan only)
 #
-# Two modes:
-# - pull_request / push to main: diff-bounded scan of just the new commits
-#   (fast gate on every change);
-# - weekly schedule + manual dispatch: FULL-history scan across all branches
-#   (--all --full-history), catching anything the diff gates ever missed.
+# ONE mode (DEC-CI-SCANNER-DEDUPE-001): weekly schedule + manual dispatch —
+# a FULL-history scan across all branches (--all --full-history), catching
+# anything the diff gates ever missed. The per-PR / per-push diff-bounded
+# secret scan is NOT run here any more: it was an exact double of ci.yml's
+# REQUIRED `secrets` job ("Secret scan (gitleaks)"), which remains the
+# per-change gate on every PR / push / merge_group.
 #
 # Install path: `go install` from the Go module proxy, which checksum-verifies
 # the source against the public Go checksum database (sum.golang.org) — no
@@ -18,10 +19,6 @@
 name: Gitleaks secrets scan
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   schedule:
     - cron: "15 5 * * 1" # Monday 05:15 UTC — alongside security-audit.yml (05:00)
   workflow_dispatch:
@@ -55,29 +52,14 @@ jobs:
         run: go install "github.com/zricethezav/gitleaks/v8@${GITLEAKS_VERSION}"
 
       - name: Scan
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
           GITLEAKS="$(go env GOPATH)/bin/gitleaks"
 
-          # Default: full history, every branch (schedule / workflow_dispatch).
+          # Full history, every branch — the only mode this workflow runs
+          # (schedule / workflow_dispatch; per-change diff scanning lives in
+          # ci.yml's required `secrets` job — DEC-CI-SCANNER-DEDUPE-001).
           LOG_OPTS="--all --full-history"
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            # Diff-bounded: only the PR's own commits.
-            LOG_OPTS="--no-merges origin/${BASE_REF}..HEAD"
-          elif [ "$EVENT_NAME" = "push" ]; then
-            # Diff-bounded: only the pushed commits. A new branch / forced
-            # push reports an all-zero or unknown 'before' — fall back to
-            # scanning the full history of the pushed ref.
-            if [ -n "$BEFORE_SHA" ] \
-              && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
-              && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-              LOG_OPTS="${BEFORE_SHA}..${GITHUB_SHA}"
-            fi
-          fi
 
           echo "gitleaks git . --log-opts=\"${LOG_OPTS}\""
           "$GITLEAKS" git . \
