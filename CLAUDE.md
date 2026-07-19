@@ -95,7 +95,7 @@ lake/schema/scope/vocab/rate change. This header carries the pointer,
 never the story — the full record lives in the §1 Active-branch blurb +
 MIGRATION.md #1952.)
 Earlier: 2026-07-16 (DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001,
-MIGRATION.md #1895, branch `claude/crossverify-owed-sentinel` — the owed-day
+MIGRATION.md #1968, branch `claude/crossverify-owed-sentinel` — the owed-day
 sentinel HARDENING follow-up to the landed #1810 (the base change rode the
 club-T train, PR #1558; this delta is the round-1 hostile-review fold —
 SHIP ×2, zero BLOCKER/MAJOR): `mark_owed_for_pull` gains publish-gate PARITY
@@ -113,7 +113,7 @@ now propagates loudly), and the scan-window floor boundary is exactly
 pinned. Sidecar-gate + scan-law + comments + tests only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; zero new routes/env. This header
 carries the pointer, never the story — the full record lives in the §1
-Active-branch blurb + MIGRATION.md #1895; main's landed #1810 entry is
+Active-branch blurb + MIGRATION.md #1968; main's landed #1810 entry is
 byte-untouched.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940,
 branch `claude/rust-slice-t10-data-purelaw` — ADR-0020 slice T10 PR-1: the
@@ -537,7 +537,7 @@ production caller binds the new seams — the binders are WS-C/WS-D. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the per-item record
 lives in the §1 Active-branch blurb + MIGRATION.md #1900.)
-Earlier: 2026-07-16 (DEC-DUAL-VENDOR-PIPELINE-001, MIGRATION.md #2011 —
+Earlier: 2026-07-16 (DEC-DUAL-VENDOR-PIPELINE-001, MIGRATION.md #1964 —
 the ADR-0021 governance paperwork: the dual-vendor pull-orchestration design
 ADR (`docs/adr/0021-dual-vendor-pull-orchestration.md`, landed to main via
 PR #1555) flips Status PROPOSED → ACCEPTED on the operator's direct 2026-07-16
@@ -550,7 +550,7 @@ VendorPullProfile registry · options prebuild retired
 feed-vendor auto-arm · the ratified per-domain restore-ordering law. Docs
 ONLY — zero code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; the per-item record lives in the §1
-Active-branch blurb + MIGRATION.md #2011 — this header carries the pointer,
+Active-branch blurb + MIGRATION.md #1964 — this header carries the pointer,
 never the story.)
 Earlier: 2026-07-16 (DEC-LAKE-READ-INODE-GUARD-001 +
 DEC-LAKE-READ-INODE-GUARD-002, MIGRATION.md #1896 + #1898, branch
@@ -4000,7 +4000,7 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the per-item record lives in
   the §1 blurb + MIGRATION.md #1952 — this header carries the pointer, never the story.)
   Earlier: `claude/crossverify-owed-sentinel`
-  (**DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1895** — the
+  (**DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1968** — the
   owed-day sentinel HARDENING follow-up to the landed
   DEC-CROSSVERIFY-OWED-SENTINEL-001 (#1810; the base change landed on main
   via the club-T train, PR #1558, folding the closed draft PR #1537 — this
@@ -5514,7 +5514,7 @@ hostile-review pass._
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `claude/dual-vendor-paperwork` (**DEC-DUAL-VENDOR-PIPELINE-001,
-  MIGRATION.md #2011** — the ADR-0021 governance paperwork:
+  MIGRATION.md #1964** — the ADR-0021 governance paperwork:
   `docs/adr/0021-dual-vendor-pull-orchestration.md` flips Status PROPOSED →
   ACCEPTED (the operator landed the ADR on main via PR #1555 and gave direct
   approval in the orchestration session, 2026-07-16) + the umbrella design
@@ -5526,7 +5526,7 @@ hostile-review pass._
   auto-arm · the ratified per-domain restore-ordering law). Docs ONLY — ZERO
   code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; the per-item record lives in
-  MIGRATION.md #2011 — this header carries the pointer, never the story.)
+  MIGRATION.md #1964 — this header carries the pointer, never the story.)
   Earlier: `claude/lake-read-inode-guard`
   (**DEC-LAKE-READ-INODE-GUARD-001 + DEC-LAKE-READ-INODE-GUARD-002,
   MIGRATION.md #1896 + #1898** — ONE stacked landing vehicle: the DEC-002
@@ -11699,7 +11699,7 @@ hostile-review pass._
   speed; ships INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
   §1's Active branch line — see §1 + MIGRATION.md #1952 for the full blurb)
   Earlier: `claude/crossverify-owed-sentinel`
-  (DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1895 — the
+  (DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1968 — the
   owed-day sentinel HARDENING follow-up to the landed #1810: publish-gate
   parity on `mark_owed_for_pull` (staged-only launches no longer write
   markers the D3 catchup can never auto-clear; mark-side pin test), the
@@ -11711,7 +11711,7 @@ hostile-review pass._
   scan-window floor-boundary pin; sidecar-gate + scan-law + comments +
   tests only;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
-  line — see §1 + MIGRATION.md #1895 for the full blurb)
+  line — see §1 + MIGRATION.md #1968 for the full blurb)
   Earlier: `claude/rust-slice-t10-data-purelaw`
   (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940 — ADR-0020 slice T10 PR-1:
   the NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
@@ -12167,10 +12167,10 @@ hostile-review pass._
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
   line — see §1 + MIGRATION.md #1900 for the full blurb)
   Earlier: `claude/dual-vendor-paperwork`
-  (DEC-DUAL-VENDOR-PIPELINE-001, MIGRATION.md #2011 — the ADR-0021 governance
+  (DEC-DUAL-VENDOR-PIPELINE-001, MIGRATION.md #1964 — the ADR-0021 governance
   paperwork — Status ACCEPTED + the umbrella design ledger entry; docs ONLY,
   zero code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record
-  lives in MIGRATION.md #2011 — this header carries the pointer, never the
+  lives in MIGRATION.md #1964 — this header carries the pointer, never the
   story; matches §1's Active branch line)
   Earlier: `claude/lake-read-inode-guard`
   (DEC-LAKE-READ-INODE-GUARD-001 + DEC-LAKE-READ-INODE-GUARD-002,
