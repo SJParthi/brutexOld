@@ -37,11 +37,9 @@ fn settle_goldens_byte_parity() {
         .get("cases")
         .and_then(Value::as_array)
         .expect("cases array");
-    assert!(
-        cases.len() >= 145,
-        "battery unexpectedly small: {}",
-        cases.len()
-    );
+    // Exact-current count (T18 audit note): any corpus regen that changes the
+    // case set must consciously re-pin this — drift is loud, never silent.
+    assert_eq!(cases.len(), 155, "settle corpus count drifted");
     for case in cases {
         let name = str_of(case, "name");
         let payload_json = str_of(case, "payload_json");
@@ -84,11 +82,7 @@ fn iso_goldens_verdict_parity() {
         .get("cases")
         .and_then(Value::as_array)
         .expect("cases array");
-    assert!(
-        cases.len() >= 100,
-        "battery unexpectedly small: {}",
-        cases.len()
-    );
+    assert_eq!(cases.len(), 123, "iso corpus count drifted");
     for case in cases {
         let s = str_of(case, "s");
         let want = str_of(case, "verdict");
@@ -116,11 +110,7 @@ fn observed_goldens_decision_parity() {
         .get("cases")
         .and_then(Value::as_array)
         .expect("cases array");
-    assert!(
-        cases.len() >= 25,
-        "battery unexpectedly small: {}",
-        cases.len()
-    );
+    assert_eq!(cases.len(), 31, "observed corpus count drifted");
     for case in cases {
         let name = str_of(case, "name");
         let payload_json = str_of(case, "payload_json");
@@ -148,11 +138,7 @@ fn classify_goldens_verdict_parity() {
         .get("cases")
         .and_then(Value::as_array)
         .expect("cases array");
-    assert!(
-        cases.len() >= 15,
-        "battery unexpectedly small: {}",
-        cases.len()
-    );
+    assert_eq!(cases.len(), 18, "classify corpus count drifted");
     for case in cases {
         let name = str_of(case, "name");
         let evidence: Vec<(String, bool, i64, i64, i64)> = case

@@ -32,8 +32,12 @@ core (`cargo test` links no libpython), the binding behind the optional
 running the REAL Python laws on the CPython 3.12 baseline (settle refusal
 messages, `fromisoformat` verdicts + offset renderings, overlay loader
 decisions, classify matrices); `tests/golden_parity.rs` replays every case
-through the Rust port. Regenerate the goldens (and review the diff) in the
-SAME commit as any Python-law change.
+through the Rust port (exact-count pinned). Regenerate the goldens (and
+review the diff) in the SAME commit as any Python-law change — the
+staleness law is MECHANICAL: `tests/law_digest_pin.rs` pins the two Python
+law files' FRAMING v1 digests (the `rust/source_digest_core.rs` scheme), so
+a law edit that ships without a corpus regen + re-pin fails `cargo test`
+loudly (out-of-repo crates-only builds skip the pin with a loud eprintln).
 
 ## Build
 

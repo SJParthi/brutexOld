@@ -311,6 +311,63 @@ s_add(
     _perday("2026-07-11", {"15:45": {"records": False, "all_pass": True, "failed_checks": []}}),
 )
 
+# ── T18 audit-note top-up (append-only — every case above stays byte-
+# identical): the ACCEPT-side corpus deepened (~10 more accepts — the
+# pre-top-up accept set was 17 of 145, refusal-heavy by design). Covers:
+# mid-grid earliest/margin pairs, the 15:35 exact-floor accept via DIFFERENT
+# arithmetic than floor_1535_valid's 15:20+15, large-margin + late-evening
+# adopted values, per_day with >5 days and extra (non-earliest / failing)
+# slots per day, every informational optional field present-and-valid in one
+# payload, and generated_at_utc quirky-but-valid forms not yet in the accept
+# set (space separator · fractional microseconds · no-seconds + compact
+# offset).
+
+_FIVE_DAYS = ["2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10"]
+
+
+def _grid(earliest: str, margin: int, adopted: str) -> dict:
+    """A fully-valid payload at an arbitrary legal (earliest, margin) cell."""
+    return _mut(
+        earliest_all_pass_ist=earliest,
+        margin_minutes=margin,
+        adopted_settle_ist=adopted,
+        per_day={d: {earliest: dict(CELL)} for d in _FIVE_DAYS},
+    )
+
+
+s_add("accept_margin_60_mid", _grid("15:00", 60, "16:00"))
+s_add("accept_margin_120_mid", _grid("16:30", 120, "18:30"))
+s_add("accept_floor_1535_alt_arith", _grid("15:25", 10, "15:35"))
+s_add("accept_large_margin_evening", _grid("19:00", 240, "23:00"))
+s_add("accept_late_evening_2359", _grid("22:29", 90, "23:59"))
+s_add(
+    "accept_six_days_extra_slots",
+    _mut(
+        distinct_trading_days=6,
+        per_day={
+            d: {
+                "15:35": {"records": 2, "all_pass": False, "failed_checks": ["count_short"]},
+                "15:45": dict(CELL),
+                "16:30": dict(CELL),
+            }
+            for d in [*_FIVE_DAYS, "2026-07-13"]
+        },
+    ),
+)
+s_add(
+    "accept_informational_full",
+    _mut(
+        checks=["count", "close_edge", "fut_oi"],
+        slots_observed=["15:35", "15:45", "16:00", "16:30", "17:30"],
+        transcripts=["postclose_settle_probe_20260706.jsonl"],
+        excluded_days={"2026-07-04": "weekend", "2026-07-05": "weekend"},
+        ignored_records=7,
+    ),
+)
+s_add("accept_gen_space_sep", _mut(generated_at_utc="2026-07-11 05:00:00+00:00"))
+s_add("accept_gen_frac_us", _mut(generated_at_utc="2026-07-11T05:00:00.123456+00:00"))
+s_add("accept_gen_no_seconds_compact_offset", _mut(generated_at_utc="2026-07-11T05:00+0000"))
+
 settle_out = []
 for name, payload_json in settle_cases:
     payload = json.loads(payload_json)

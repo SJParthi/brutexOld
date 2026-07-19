@@ -29,9 +29,10 @@ refusal message BYTE-IDENTICAL incl. the ported C-accelerated
 `fromisoformat` quirks; parse-engine ABSTAIN → None on NaN/Infinity/
 lone-surrogate/>128-nesting so Python keeps its oracle) and
 `parse_observed_sidecar` (whole-overlay rejection, the version ==-punning,
-the canonical round-trip entry law) — pinned by 299 Python-generated
-goldens + a ~10,100-trial live differential vs the Python laws
-(0 mismatches). Ships INERT: consumed by NOTHING — zero brutex/ Python,
+the canonical round-trip entry law) — pinned by 327 Python-generated
+goldens (155 settle · 123 iso · 31 observed · 18 classify; a mechanical
+law-digest staleness pin ties the corpus to the two Python law files) + a
+~10,100-trial live differential vs the Python laws (0 mismatches). Ships INERT: consumed by NOTHING — zero brutex/ Python,
 ci.yml or Makefile edits; the Python modules stay the production
 implementation; the facade flip + oracle deletion + CI wheel wiring are
 LATER PRs, and PR-2 (market_hours + auto_pull_gate) stacks on this crate
@@ -3578,9 +3579,9 @@ hostile-review pass._
   (JSON true/1.0 match 1), entry dates via the canonical round-trip
   equivalence (strict shape + real proleptic date — PROVEN ≡ `fromisoformat`
   + `raw == day.isoformat()`); a serde parse failure raises ValueError (the
-  LOUD abstain). EVIDENCE: 299 fixtures generated FROM the live Python laws
-  (127 settle messages byte-exact · 123 fromisoformat verdicts · 31
-  observed · 18 classify; generator committed at
+  LOUD abstain). EVIDENCE: 327 fixtures generated FROM the live Python laws
+  (155 settle cases — messages byte-exact, 27 accepts · 123 fromisoformat
+  verdicts · 31 observed · 18 classify; generator committed at
   `rust/brutex-calendar/tests/goldens/generate_goldens.py`) + a
   ~10,100-trial random live differential vs the Python validators — 0
   mismatches. HONEST ENVELOPE: ships INERT — consumed by NOTHING; zero
@@ -3598,9 +3599,20 @@ hostile-review pass._
   CPython-3.12/Unicode-15.0 printability table replaces unicode-properties
   + exact half-even shortest-float repr replaces `{:e}`; re-verified at
   ≥100k-trial scale with ZERO mismatches, settle goldens 127 → 145 —
-  per-item record in MIGRATION.md #1957). GATES: 41 cargo tests green;
-  cargo fmt --check / clippy --all-targets -D warnings / test --release
-  green; wheel rebuilt (cp312-abi3) + the refuter harness rerun clean;
+  per-item record in MIGRATION.md #1957). T18 INDEPENDENT AUDIT folded
+  (verdict CLEAN — detached-worktree byte-identical regen + 4,400 fresh
+  hostile cases 0 mismatches; four non-blocking notes folded: the
+  law-digest STALENESS pin tests/law_digest_pin.rs — the two Python law
+  files hashed under the shared FRAMING v1 source-digest scheme, a law
+  edit without a corpus regen + re-pin fails cargo test loudly, out-of-repo
+  builds skip loudly; the accept-side golden top-up settle 145 → 155 /
+  fixtures 317 → 327, append-only byte-prefix-proven, the installed wheel
+  replayed through all 327; exact-count assert_eq! floors on all four
+  parity suites; the stale-count doc sweep). GATES: 43 cargo tests green;
+  cargo fmt --check / clippy --all-targets --locked -D warnings /
+  test --release --locked green; wheel rebuilt (cp312-abi3) + the refuter
+  harness rerun clean (the T18 fold touched no src/ — no further rebuild
+  needed, replay-verified on the installed wheel);
   zero Python-side gate exposure (no Python files
   touched). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes,
@@ -10862,7 +10874,8 @@ hostile-review pass._
   the ported C-accelerated `fromisoformat` quirks; parse-engine ABSTAIN →
   None so Python keeps its oracle) and `parse_observed_sidecar`
   (whole-overlay rejection, version ==-punning, the canonical round-trip
-  entry law) — pinned by 299 Python-generated goldens + a ~10,100-trial
+  entry law) — pinned by 327 Python-generated goldens (law-digest
+  staleness-pinned to the two Python law files) + a ~10,100-trial
   live differential (0 mismatches); ships INERT — consumed by NOTHING,
   zero brutex/ Python / ci.yml / Makefile edits; the facade flip + oracle
   deletion + CI wiring are LATER PRs; PR-2 (market_hours + auto_pull_gate)
