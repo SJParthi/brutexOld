@@ -458,6 +458,21 @@ production caller binds the new seams — the binders are WS-C/WS-D. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the per-item record
 lives in the §1 Active-branch blurb + MIGRATION.md #1900.)
+Earlier: 2026-07-16 (DEC-DUAL-VENDOR-PIPELINE-001, MIGRATION.md #1830 —
+the ADR-0021 governance paperwork: the dual-vendor pull-orchestration design
+ADR (`docs/adr/0021-dual-vendor-pull-orchestration.md`, landed to main via
+PR #1555) flips Status PROPOSED → ACCEPTED on the operator's direct 2026-07-16
+approval, and the umbrella design DEC is LEDGERED — capability-driven
+per-vendor stage graphs · ONE lake root with per-vendor write domains (engine
+reads primary only, Golden Rule #4) · ONE additively-generalized sequencer
+(all-None = byte-identical legacy, pinned) · the StageOutcome protocol + the
+VendorPullProfile registry · options prebuild retired
+(DEC-OPTIONS-PREBUILD-RETIRE-001, MIGRATION.md #1831) · incrementality-gated
+feed-vendor auto-arm · the ratified per-domain restore-ordering law. Docs
+ONLY — zero code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1830 — this header carries the pointer,
+never the story.)
 Earlier: 2026-07-10 (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 —
 a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP +
 EMA20/EMA200 over {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis;
@@ -5107,6 +5122,20 @@ hostile-review pass._
   --strict brutex` clean (461 files); pyright 0 errors on touched files.
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
+  Earlier: `claude/dual-vendor-paperwork` (**DEC-DUAL-VENDOR-PIPELINE-001,
+  MIGRATION.md #1830** — the ADR-0021 governance paperwork:
+  `docs/adr/0021-dual-vendor-pull-orchestration.md` flips Status PROPOSED →
+  ACCEPTED (the operator landed the ADR on main via PR #1555 and gave direct
+  approval in the orchestration session, 2026-07-16) + the umbrella design
+  ledger entry over the eight ADR decisions (capability-driven per-vendor
+  stage graphs · per-vendor lake write domains, engine reads primary only ·
+  ONE additively-generalized sequencer · the StageOutcome protocol + the
+  VendorPullProfile registry · options prebuild retired,
+  DEC-OPTIONS-PREBUILD-RETIRE-001 #1831 · incrementality-gated feed-vendor
+  auto-arm · the ratified per-domain restore-ordering law). Docs ONLY — ZERO
+  code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; the per-item record lives in
+  MIGRATION.md #1830 — this header carries the pointer, never the story.)
   Earlier: `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
   a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3} (hl2/ohlc4 EXCLUDED — HLC3-clones + the /2,/4 half-paisa tie; high/low DEFERRED
@@ -11492,6 +11521,12 @@ hostile-review pass._
   origin/main A/B); NO production caller binds the new seams — WS-C/WS-D;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
   line — see §1 + MIGRATION.md #1900 for the full blurb)
+  Earlier: `claude/dual-vendor-paperwork`
+  (DEC-DUAL-VENDOR-PIPELINE-001, MIGRATION.md #1830 — the ADR-0021 governance
+  paperwork — Status ACCEPTED + the umbrella design ledger entry; docs ONLY,
+  zero code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record
+  lives in MIGRATION.md #1830 — this header carries the pointer, never the
+  story; matches §1's Active branch line)
   Earlier: `claude/vwap-ema-price-source-axis`
   (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
   cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
