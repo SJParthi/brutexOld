@@ -350,3 +350,68 @@ class TestTripwiresEntry:
         assert [e.detail for e in events] == [
             "throughput 1.000/s below floor 2.000/s (peak 10.000/s × 0.2) for 3 consecutive samples"
         ]
+
+    def test_memory_budget_trip_served_by_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(run_tripwires, "_memory_budget_decide_python", _oracle_bomb)
+        config = run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            throughput_floor_fraction=0.0,
+            rss_budget_fraction=0.5,
+            memory_slope_bytes_per_tuple=0,
+        )
+        events: list[run_tripwires.TripwireEvent] = []
+        monitor = run_tripwires.TripwireMonitor(
+            config=config,
+            enumerated_total=100,
+            clock=itertools.count(1).__next__,
+            on_trip=events.append,
+            ram_total_bytes=1000,
+            rss_probe=lambda: 501,
+        )
+        monitor.on_progress(_snapshot(evaluated=1))
+        assert [e.detail for e in events] == ["RSS 501 bytes exceeds budget 500 bytes (0.5 × 1000)"]
+
+    def test_memory_slope_fire_served_by_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(run_tripwires, "_memory_slope_decide_python", _oracle_bomb)
+        config = run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            throughput_floor_fraction=0.0,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=100,
+            memory_dwell=2,
+        )
+        events: list[run_tripwires.TripwireEvent] = []
+        readings = iter([1000, 1200, 1400])
+        monitor = run_tripwires.TripwireMonitor(
+            config=config,
+            enumerated_total=100,
+            clock=itertools.count(1).__next__,
+            on_trip=events.append,
+            ram_total_bytes=10**12,
+            rss_probe=lambda: next(readings),
+        )
+        monitor.on_progress(_snapshot(evaluated=1))
+        monitor.on_progress(_snapshot(evaluated=2))
+        monitor.on_progress(_snapshot(evaluated=3))
+        assert [e.detail for e in events] == [
+            "RSS growing 200 bytes/tuple > 100 bytes/tuple for 2 consecutive samples"
+        ]
+
+    def test_summary_screens_served_by_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(run_tripwires, "_summary_classify_python", _oracle_bomb)
+        config = run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=0,
+        )
+        monitor, events = self._monitor(config)
+        monitor.on_tuple_summary({"sharpe": float("nan"), "net_pnl_paisa": 2e15})
+        assert [e.name for e in events] == ["absurd_value", "nan_metric"]
+        assert events[1].detail == "non-finite metric-summary value: sharpe=nan"
+
+    def test_ru_maxrss_served_by_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(run_tripwires, "_ru_maxrss_python", _oracle_bomb)
+        assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=1000, platform="linux") == (
+            1_024_000
+        )
+        assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=7, platform="darwin") == 7

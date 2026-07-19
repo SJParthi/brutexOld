@@ -52,7 +52,6 @@ from brutex.observability.loop_watchdog import (
     _check_once_python,
     check_once,
 )
-from brutex.observability.run_tripwires import normalized_ru_maxrss_bytes
 from brutex.observability.sla import (
     SLADetector,
     SLAEvent,
@@ -333,9 +332,11 @@ def _tw_stage_law(required_sorted: list[str], present: list[str]) -> list[bool]:
 
 
 def _tw_rss_law(ru_maxrss: int, platform: str) -> int:
-    # The REAL production law (protected file, imported not edited) — the
-    # exact oracle the S3 seam will route through this signature.
-    return normalized_ru_maxrss_bytes(ru_maxrss=ru_maxrss, platform=platform)
+    # The REAL production ORACLE (the S3 seam's extracted `_ru_maxrss_python`
+    # — the pure law body; the public `normalized_ru_maxrss_bytes` is now
+    # the branch-free ROUTER over it, so delegating to the router here
+    # would recurse through the facade).
+    return run_tripwires._ru_maxrss_python(ru_maxrss, platform)
 
 
 def _call_tw_reconcile(python_law: Any = _tw_reconcile_law) -> int:
@@ -1084,8 +1085,10 @@ def _tw_monitor(
     *,
     config: run_tripwires.TripwireConfig | None = None,
     total: int = 100,
+    ram: int = 2**30,
+    probe: Callable[[], int] | None = None,
 ) -> tuple[run_tripwires.TripwireMonitor, list[run_tripwires.TripwireEvent]]:
-    """A REAL every-tick-samples monitor with the memory watches disabled."""
+    """A REAL every-tick-samples monitor (memory watches disabled by default)."""
     events: list[run_tripwires.TripwireEvent] = []
     counter = itertools.count(1)
     monitor = run_tripwires.TripwireMonitor(
@@ -1099,14 +1102,22 @@ def _tw_monitor(
         enumerated_total=total,
         clock=lambda: float(next(counter)),
         on_trip=events.append,
-        ram_total_bytes=2**30,
-        rss_probe=lambda: 1,
+        ram_total_bytes=ram,
+        rss_probe=(lambda: 1) if probe is None else probe,
     )
     return monitor, events
 
 
 #: The exact pre-seam T2 overflow detail — the byte pin for the moved template.
 _TW_RECONCILE_DETAIL: Final[str] = "evaluated 90 + in_flight 11 > enumerated 100"
+
+#: The exact pre-seam T4a budget detail (rss 501 · RAM 1000 · fraction 0.5).
+_TW_BUDGET_DETAIL: Final[str] = "RSS 501 bytes exceeds budget 500 bytes (0.5 × 1000)"
+
+#: The exact pre-seam T4b slope detail (+200 B/tuple > 100 · dwell 2).
+_TW_SLOPE_DETAIL: Final[str] = (
+    "RSS growing 200 bytes/tuple > 100 bytes/tuple for 2 consecutive samples"
+)
 
 #: The exact pre-seam T3 fire detail (rate 1.0 · peak 10.0 · fraction 0.2 · dwell 3).
 _TW_THROUGHPUT_DETAIL: Final[str] = (
@@ -1244,6 +1255,140 @@ class TestTripwireSeamEntryPoints:
         monitor, _events = _tw_monitor()
         with pytest.raises(KeyboardInterrupt):
             monitor.on_progress(_tw_snapshot(evaluated=90), in_flight=11)
+
+    # ── S3 — the T4a/T4b/T5/T9 seams ──────────────────────────────────────
+
+    @staticmethod
+    def _budget_config() -> run_tripwires.TripwireConfig:
+        return run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            throughput_floor_fraction=0.0,
+            rss_budget_fraction=0.5,
+            memory_slope_bytes_per_tuple=0,
+        )
+
+    @staticmethod
+    def _slope_config() -> run_tripwires.TripwireConfig:
+        return run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            throughput_floor_fraction=0.0,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=100,
+            memory_dwell=2,
+        )
+
+    def test_off_memory_budget_trip_never_imports_crate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        monitor, events = _tw_monitor(config=self._budget_config(), ram=1000, probe=lambda: 501)
+        monitor.on_progress(_tw_snapshot(evaluated=1))
+        assert [e.detail for e in events] == [_TW_BUDGET_DETAIL]
+        assert events[0].values == {"rss_bytes": 501.0, "budget_bytes": 500.0}
+
+    def test_on_memory_budget_served_by_fake_crate_oracle_bombed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monkeypatch.setattr(run_tripwires, "_memory_budget_decide_python", _oracle_bomb)
+        monitor, events = _tw_monitor(config=self._budget_config(), ram=1000, probe=lambda: 501)
+        monitor.on_progress(_tw_snapshot(evaluated=1))
+        assert [e.detail for e in events] == [_TW_BUDGET_DETAIL]
+
+    def test_on_memory_slope_served_by_fake_crate_oracle_bombed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monkeypatch.setattr(run_tripwires, "_memory_slope_decide_python", _oracle_bomb)
+        readings = iter([1000, 1200, 1400])
+        monitor, events = _tw_monitor(
+            config=self._slope_config(), ram=10**12, probe=lambda: next(readings)
+        )
+        monitor.on_progress(_tw_snapshot(evaluated=1))  # first sample: no prev
+        monitor.on_progress(_tw_snapshot(evaluated=2))  # over #1
+        monitor.on_progress(_tw_snapshot(evaluated=3))  # over #2 → the dwell edge
+        assert [e.detail for e in events] == [_TW_SLOPE_DETAIL]
+        assert events[0].values == {"slope_bytes_per_tuple": 200.0, "rss_bytes": 1400.0}
+
+    def test_off_slope_recovery_rearms_and_refires(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Fire → recover (the TW_CLEAR apply arm re-arms the key) → a fresh
+        # over-slope sample fires AGAIN. memory_dwell=1 keeps NONE samples
+        # out of the sequence, so ONLY the CLEAR arm can re-arm — killing
+        # the slope `TW_CLEAR → TW_NONE` apply-compare mutant class the
+        # protected 81-test file leaves unpinned.
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        config = run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            throughput_floor_fraction=0.0,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=100,
+            memory_dwell=1,
+        )
+        readings = iter([1000, 1200, 1200, 1400])
+        monitor, events = _tw_monitor(config=config, ram=10**12, probe=lambda: next(readings))
+        monitor.on_progress(_tw_snapshot(evaluated=1))  # first sample: no prev
+        monitor.on_progress(_tw_snapshot(evaluated=2))  # +200/t → fire #1
+        monitor.on_progress(_tw_snapshot(evaluated=3))  # flat → recovery re-arms
+        monitor.on_progress(_tw_snapshot(evaluated=4))  # +200/t → fire #2
+        assert [e.name for e in events] == ["memory_slope", "memory_slope"]
+
+    def test_off_summary_nan_trip_never_imports_crate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        monitor, events = _tw_monitor()
+        monitor.on_tuple_summary({"sharpe": math.nan})
+        assert [e.detail for e in events] == ["non-finite metric-summary value: sharpe=nan"]
+        assert monitor.suspect is True
+
+    def test_on_summary_served_by_fake_crate_oracle_bombed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monkeypatch.setattr(run_tripwires, "_summary_classify_python", _oracle_bomb)
+        monitor, events = _tw_monitor()
+        monitor.on_tuple_summary({"sharpe": math.nan, "net_pnl_paisa": 2e15})
+        # Sorted iteration: net_pnl_paisa (absurd) precedes sharpe (NaN).
+        assert [e.name for e in events] == ["absurd_value", "nan_metric"]
+        assert events[0].detail == (
+            "absurd metric-summary magnitude: net_pnl_paisa=2000000000000000.0 "
+            "(|value| > 1000000000000000 paisa)"
+        )
+        assert events[1].detail == "non-finite metric-summary value: sharpe=nan"
+
+    def test_off_ru_maxrss_never_imports_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=1000, platform="linux") == (
+            1_024_000
+        )
+        assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=1000, platform="darwin") == 1000
+
+    def test_on_ru_maxrss_served_by_fake_crate_oracle_bombed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        # A LITERAL crate fn (the default delegate calls the very oracle we
+        # bomb below).
+        _install(
+            monkeypatch,
+            _fake_crate(
+                tripwire_ru_maxrss_bytes=lambda ru, plat: (
+                    int(ru) if plat == "darwin" else int(ru) * 1024
+                )
+            ),
+        )
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monkeypatch.setattr(run_tripwires, "_ru_maxrss_python", _oracle_bomb)
+        assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=1000, platform="linux") == (
+            1_024_000
+        )
+        assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=7, platform="darwin") == 7
 
 
 class TestInputGates:

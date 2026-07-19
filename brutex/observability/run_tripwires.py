@@ -56,7 +56,9 @@ mapping) — bench-pinned flat vs ``enumerated_total`` by
 
 ## Rust-routed decision laws (DEC-RUST-OBSERVABILITY-TRIPWIRES-002)
 
-The count-reconciliation and throughput-floor/dwell DECISION laws route
+The count-reconciliation, throughput-floor/dwell, memory-budget,
+memory-slope, NaN/absurd summary-screen and ``ru_maxrss``-normalization
+DECISION laws route
 through the default-OFF :mod:`brutex.observability.observability_rust`
 facade (``BRUTEX_OBSERVABILITY_RUST``), with the module-level ``_*_python``
 oracles below as the LIVE flag-OFF implementations — flag OFF (the
@@ -334,10 +336,15 @@ def normalized_ru_maxrss_bytes(*, ru_maxrss: int, platform: str) -> int:
     -------
     int
         The reading in bytes.
+
+    The decision routes through the default-OFF observability_rust facade
+    with :func:`_ru_maxrss_python` as the live oracle
+    (DEC-RUST-OBSERVABILITY-TRIPWIRES-002; branch-free here — all
+    flag/guard/burn-in branching lives facade-side).
     """
-    if platform == "darwin":
-        return int(ru_maxrss)
-    return int(ru_maxrss) * 1024
+    return observability_rust.routed_ru_maxrss_bytes(
+        ru_maxrss, platform, python_law=_ru_maxrss_python
+    )
 
 
 def _default_rss_probe() -> int:
@@ -461,6 +468,91 @@ def _throughput_decide_python(
             return (new_peak, new_below, floor, observability_rust.TW_FIRE)
         return (new_peak, new_below, floor, observability_rust.TW_NONE)
     return (new_peak, 0, floor, observability_rust.TW_CLEAR)
+
+
+def _memory_budget_decide_python(rss: int, ram_total: int, fraction: float) -> tuple[float, int]:
+    """The T4a RSS-budget decision — ``(budget, code)``.
+
+    Called only when the budget watch is enabled, RAM is known and the
+    Python-side RSS probe succeeded (the consumer's gates). Always a
+    fire-or-clear decision — strictly-over-budget trips, exactly-AT is
+    legal.
+    """
+    budget = fraction * float(ram_total)
+    if float(rss) > budget:
+        return (budget, observability_rust.TW_FIRE)
+    return (budget, observability_rust.TW_CLEAR)
+
+
+def _memory_slope_decide_python(
+    rss: int,
+    evaluated: int,
+    prev_rss: int,
+    prev_evaluated: int,
+    slope_threshold: float,
+    slope_high: int,
+    dwell: int,
+) -> tuple[float, int, int]:
+    """The T4b RSS-slope decision — ``(slope, new_high, code)``.
+
+    Called only when the slope watch is enabled, the probe succeeded and
+    ``prev is not None and evaluated > prev_evaluated`` (the consumer's
+    state-existence + progress gates — the divisor is strictly positive by
+    construction). The over-slope arm NEVER clears (the pre-seam
+    ``_slope_breach`` law); the fire code lands on the dwell EDGE (``==``);
+    recovery resets the dwell counter AND clears.
+    """
+    slope = (rss - prev_rss) / (evaluated - prev_evaluated)
+    if slope > slope_threshold:
+        new_high = slope_high + 1
+        if new_high == dwell:
+            return (slope, new_high, observability_rust.TW_FIRE)
+        return (slope, new_high, observability_rust.TW_NONE)
+    return (slope, 0, observability_rust.TW_CLEAR)
+
+
+def _summary_classify_python(
+    values: list[float], screened: list[bool], absurd_threshold: float
+) -> tuple[list[int], list[int]]:
+    """The T5 NaN/absurd per-element classification — ``(nan_codes, absurd_codes)``.
+
+    The consumer owns the ``sorted(tallies)`` iteration, the ``float()``
+    coercion (whose raise IS the I-3 fail-soft input), the screened-name
+    membership, the breach-key strings and the detail templates; the code
+    arrays drive its fire/clear walk in input order. A non-finite value
+    fires the NaN key and leaves the absurd key UNTOUCHED (the pre-seam
+    ``continue``); a finite screened value trips strictly-over-threshold
+    (exactly-AT is sane); an unscreened finite value decides nothing on the
+    absurd key.
+    """
+    nan_codes: list[int] = []
+    absurd_codes: list[int] = []
+    for value, is_screened in zip(values, screened, strict=True):
+        if not math.isfinite(value):
+            nan_codes.append(observability_rust.TW_FIRE)
+            absurd_codes.append(observability_rust.TW_NONE)
+            continue
+        nan_codes.append(observability_rust.TW_CLEAR)
+        if is_screened:
+            if abs(value) > absurd_threshold:
+                absurd_codes.append(observability_rust.TW_FIRE)
+            else:
+                absurd_codes.append(observability_rust.TW_CLEAR)
+        else:
+            absurd_codes.append(observability_rust.TW_NONE)
+    return (nan_codes, absurd_codes)
+
+
+def _ru_maxrss_python(ru_maxrss: int, platform: str) -> int:
+    """The T9 ``ru_maxrss`` platform unit law — the verbatim pre-seam body.
+
+    ``darwin`` reports BYTES verbatim; anything else reports KiB × 1024.
+    The LIVE parity oracle behind :func:`normalized_ru_maxrss_bytes` (the
+    public router keeps its signature, docstring and ``__all__`` entry).
+    """
+    if platform == "darwin":
+        return int(ru_maxrss)
+    return int(ru_maxrss) * 1024
 
 
 class TripwireMonitor:
@@ -601,9 +693,26 @@ class TripwireMonitor:
         """
         try:
             with self._lock:
-                for name in sorted(tallies):
-                    value = float(tallies[name])
-                    if not math.isfinite(value):
+                # The per-element CLASSIFICATION routes through the
+                # default-OFF observability_rust facade with
+                # `_summary_classify_python` as the live oracle
+                # (DEC-RUST-OBSERVABILITY-TRIPWIRES-002). The sorted
+                # iteration + the float() coercion (whose raise IS the I-3
+                # fail-soft input) + the key strings + the detail templates
+                # stay Python, driven by the returned code arrays.
+                names = sorted(tallies)
+                values = [float(tallies[name]) for name in names]
+                screened = [name in self._config.absurd_value_names for name in names]
+                nan_codes, absurd_codes = observability_rust.routed_tripwire_summary(
+                    values,
+                    screened,
+                    float(self._config.absurd_pnl_paisa),
+                    python_law=_summary_classify_python,
+                )
+                for name, value, nan_code, absurd_code in zip(
+                    names, values, nan_codes, absurd_codes, strict=True
+                ):
+                    if nan_code == observability_rust.TW_FIRE:
                         self._edge_fire(
                             f"nan_metric:{name}",
                             TripwireKind.NAN_METRIC,
@@ -613,18 +722,17 @@ class TripwireMonitor:
                         )
                         continue
                     self._clear(f"nan_metric:{name}")
-                    if name in self._config.absurd_value_names:
-                        if abs(value) > float(self._config.absurd_pnl_paisa):
-                            self._edge_fire(
-                                f"absurd_value:{name}",
-                                TripwireKind.ABSURD_VALUE,
-                                SEVERITY_CRITICAL,
-                                f"absurd metric-summary magnitude: {name}={value!r} "
-                                f"(|value| > {self._config.absurd_pnl_paisa} paisa)",
-                                {name: value},
-                            )
-                        else:
-                            self._clear(f"absurd_value:{name}")
+                    if absurd_code == observability_rust.TW_FIRE:
+                        self._edge_fire(
+                            f"absurd_value:{name}",
+                            TripwireKind.ABSURD_VALUE,
+                            SEVERITY_CRITICAL,
+                            f"absurd metric-summary magnitude: {name}={value!r} "
+                            f"(|value| > {self._config.absurd_pnl_paisa} paisa)",
+                            {name: value},
+                        )
+                    elif absurd_code == observability_rust.TW_CLEAR:
+                        self._clear(f"absurd_value:{name}")
         except Exception as exc:  # fail-soft law (I-3)
             self._observe_failed("on_tuple_summary", exc)
 
@@ -766,6 +874,12 @@ class TripwireMonitor:
                 detail="memory tripwires disabled for this run",
             )
             return
+        # The budget + slope DECISIONS route through the default-OFF
+        # observability_rust facade with `_memory_budget_decide_python` /
+        # `_memory_slope_decide_python` as the live oracles
+        # (DEC-RUST-OBSERVABILITY-TRIPWIRES-002). The enable gates, the
+        # probe + stand-down, the ram-unknown warn-once, the prev/progress
+        # gates and the `_prev_mem` stamp stay Python.
         if budget_enabled:
             if self._ram_total <= 0:
                 if not self._ram_unknown_warned:
@@ -775,8 +889,13 @@ class TripwireMonitor:
                         detail="total RAM undetected — RSS-budget tripwire stands down",
                     )
             else:
-                budget = self._config.rss_budget_fraction * float(self._ram_total)
-                if float(rss) > budget:
+                budget, budget_code = observability_rust.routed_tripwire_memory_budget(
+                    rss,
+                    self._ram_total,
+                    self._config.rss_budget_fraction,
+                    python_law=_memory_budget_decide_python,
+                )
+                if budget_code == observability_rust.TW_FIRE:
                     self._edge_fire(
                         "memory_budget",
                         TripwireKind.MEMORY_BUDGET,
@@ -790,27 +909,30 @@ class TripwireMonitor:
         if slope_enabled:
             prev = self._prev_mem
             if prev is not None and snapshot.evaluated > prev[1]:
-                slope = (rss - prev[0]) / (snapshot.evaluated - prev[1])
-                if slope > float(self._config.memory_slope_bytes_per_tuple):
-                    self._slope_breach(slope, rss)
-                else:
-                    self._slope_high = 0
+                slope, new_high, slope_code = observability_rust.routed_tripwire_memory_slope(
+                    rss,
+                    snapshot.evaluated,
+                    prev[0],
+                    prev[1],
+                    float(self._config.memory_slope_bytes_per_tuple),
+                    self._slope_high,
+                    self._config.memory_dwell,
+                    python_law=_memory_slope_decide_python,
+                )
+                self._slope_high = new_high
+                if slope_code == observability_rust.TW_FIRE:
+                    self._edge_fire(
+                        "memory_slope",
+                        TripwireKind.MEMORY_SLOPE,
+                        SEVERITY_WARNING,
+                        f"RSS growing {slope:.0f} bytes/tuple > "
+                        f"{self._config.memory_slope_bytes_per_tuple} bytes/tuple for "
+                        f"{self._slope_high} consecutive samples",
+                        {"slope_bytes_per_tuple": slope, "rss_bytes": float(rss)},
+                    )
+                elif slope_code == observability_rust.TW_CLEAR:
                     self._clear("memory_slope")
             self._prev_mem = (rss, snapshot.evaluated)
-
-    def _slope_breach(self, slope: float, rss: int) -> None:
-        """Count one over-slope sample; fire at the dwell edge."""
-        self._slope_high += 1
-        if self._slope_high == self._config.memory_dwell:
-            self._edge_fire(
-                "memory_slope",
-                TripwireKind.MEMORY_SLOPE,
-                SEVERITY_WARNING,
-                f"RSS growing {slope:.0f} bytes/tuple > "
-                f"{self._config.memory_slope_bytes_per_tuple} bytes/tuple for "
-                f"{self._slope_high} consecutive samples",
-                {"slope_bytes_per_tuple": slope, "rss_bytes": float(rss)},
-            )
 
     def _edge_fire(
         self,
