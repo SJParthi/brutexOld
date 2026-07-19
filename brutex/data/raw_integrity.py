@@ -55,6 +55,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from brutex.data.detectors_rust import raw_integrity_rust_enabled, routed_hash_payload_hex
+
 #: The integrity-hash algorithm identifier stamped on every record so a future
 #: migration (e.g. to a native ``blake3`` once the wheel is guaranteed) can
 #: distinguish hash families without re-hashing — the record self-describes its
@@ -128,14 +130,39 @@ def canonicalize_payload(payload: Mapping[str, object]) -> bytes:
     return text.encode("utf-8")
 
 
+def _hash_canonical_python(canonical: bytes) -> str:
+    """The verbatim digest law over already-canonical bytes — the LIVE parity oracle.
+
+    Extracted token-for-token from :func:`hash_payload` for the
+    DEC-DATA-RUST-INTEGRITY-DETECTORS-001 routing (SLICE T24 PR-1); flag OFF
+    (the default) runs exactly this expression, byte-identical to the
+    pre-facade law.
+    """
+    return hashlib.blake2b(canonical, digest_size=_DIGEST_SIZE).hexdigest()
+
+
 def hash_payload(payload: Mapping[str, object]) -> str:
     """Return the :data:`HASH_ALGORITHM` hex digest of *payload*'s canonical bytes.
 
     Determinism (CLAUDE.md §2 Rule 7): the SAME candle series always yields the
     SAME digest; a one-byte change anywhere in any candle row yields a DIFFERENT
     digest (tamper detection). O(payload) — one canonicalise + one hash pass.
+
+    Routing (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, SLICE T24 PR-1): the
+    DIGEST leg is served by :func:`_hash_canonical_python` — the verbatim
+    ``hashlib.blake2b`` expression, the LIVE parity oracle — via the
+    default-OFF ``BRUTEX_LAKE_RUST_RAW_INTEGRITY`` facade
+    (:mod:`brutex.data.detectors_rust`, an in-crate RFC 7693 blake2b). The
+    CANONICALISATION stays Python on BOTH arms (``json.dumps`` is CPython's
+    ``float.__repr__`` byte law — raw vendor candles carry float prices;
+    never re-derived in Rust, the stats-shard ruling). Flag OFF (the
+    default) returns the oracle's digest directly — the crate is never
+    imported, byte-identical to the pre-facade law.
     """
-    return hashlib.blake2b(canonicalize_payload(payload), digest_size=_DIGEST_SIZE).hexdigest()
+    canonical = canonicalize_payload(payload)
+    if not raw_integrity_rust_enabled():
+        return _hash_canonical_python(canonical)
+    return routed_hash_payload_hex(canonical, python_law=lambda: _hash_canonical_python(canonical))
 
 
 def _row_count(payload: Mapping[str, object]) -> int:

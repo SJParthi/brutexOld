@@ -1,0 +1,96 @@
+# brutex-strategies — combo.py's two pure byte laws in Rust (default-OFF).
+#
+# DEC-STRATEGIES-RUST-COMBO-001 (T16 PR-1): re-hosts EXACTLY two pure laws of
+# `brutex/strategies/combo.py` —
+#   * the `\x1f` first-offender scan of `reject_unit_separator` (values only;
+#     Python owns the field-name lookup, the error-message bytes and the
+#     injected exception class), and
+#   * the canonical-JSON RENDER of `canonicalise_params` (the ONE
+#     `json.dumps(..., sort_keys=True, separators=(",", ":"),
+#     ensure_ascii=True)` site) over the ALREADY-lowered tree.
+# Canonicalisation (`_canonicalise_value`) stays Python: the crossing tree is
+# dict / list / str / int / bool / None — float-free and Decimal-free BY LAW
+# (floats/Decimals arrive as already-rendered strings), so this crate NEVER
+# reproduces `float.__repr__` / `Decimal.__str__` (the #1914
+# ints+strings-only-FFI precedent applied to a tree; a standing crate
+# invariant — any sibling port that reintroduces bare floats owns those
+# repr-twin laws in ITS OWN PR, never folded in here silently).
+#
+# Pure-Rust-first (rlib, dependency-free core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature (turned
+# on by maturin for the wheel build) — the brutex-feed / trading-core shape.
+
+[package]
+name = "brutex-strategies"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Combo run-identity byte-law kernels (canonical JSON + unit-separator scan) for BruteX"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it
+# from the SPDX license check (mirrors brutex-feed / fno-math / trading-core).
+publish = false
+
+[lib]
+name = "brutex_strategies"
+path = "src/lib.rs"
+# cdylib so `import brutex_strategies` finds the maturin-built extension;
+# rlib so `cargo test` links the pure-Rust core.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust cores (`canon::render`, `scan_sep::first_unit_separator`)
+# need NO Python. The PyO3 module is opt-in: `cargo test` (default features)
+# builds + links zero Python symbols. maturin turns `python` on for the
+# wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into
+# the artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` /
+# `__source_digest__`. Build-script-only: it does NOT enter the shipped
+# rlib's dependency tree.
+blake3 = "1.5"
+
+[dev-dependencies]
+# Property-based testing — determinism + order-insensitivity invariants over
+# the pure render core. Test-only; same major as the sibling crates.
+proptest = "1.6.0"
+# DEC-RUST-SOURCE-DIGEST-TWIN-001: tests/source_digest_parity.rs re-includes
+# the shared framing core to pin the golden parity vector. Test-only.
+blake3 = "1.5"
+
+# Release profile: the brutex-feed template MINUS `panic = "abort"` — a
+# DELIBERATE, documented divergence (design §2.5):
+#   * NO `panic = "abort"` — the `canonical_json` pyfunction catches render
+#     panics with `catch_unwind` at the FFI boundary (the brutex-lake
+#     stats_shard shape), which REQUIRES unwinding: a render panic must
+#     surface across the FFI as a catchable Python `RuntimeError` so the
+#     facade degrades to the Python oracle — never a process abort mid-sweep
+#     (rust/brutex-lake/Cargo.toml's profile comment is the in-repo
+#     authority for exactly this reasoning).
+#   * KEEP `overflow-checks = true` (the feed stance; brutex-lake dropped it
+#     only for polars-lockstep fidelity, which does not apply here — this
+#     crate links no third-party encoder and its only arithmetic is the
+#     UTF-16 surrogate-pair math, where a panic-on-overflow is exactly right
+#     and is caught at the boundary anyway).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+overflow-checks = true # Finance code — an overflow must never be silent.
+
+[profile.bench]
+inherits = "release"
+debug = true

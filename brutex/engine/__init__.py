@@ -89,27 +89,19 @@ from brutex.engine.stage1a import (
     build_bar_bits,
 )
 from brutex.engine.trade_sim import (
-    DEFAULT_FILL_POLICY,
-    FillPolicy,
-    LevelFill,
-    SameBarTie,
     TradeSimWalker,
     simulate_trades,
 )
 
 __all__ = [
     "ANCHOR_DEPENDENT_MASK",
-    "DEFAULT_FILL_POLICY",
     "MAX_VOCAB_BITS",
     "VIX_LAKE_SYMBOL",
     "VOCAB_BITS",
-    "FillPolicy",
     "FlushResult",
-    "LevelFill",
     "ResultRow",
     "ResultsStore",
     "ResultsStoreError",
-    "SameBarTie",
     "Stage1AMatrixBuilder",
     "TradeSimWalker",
     "aggregate_trade_vix",

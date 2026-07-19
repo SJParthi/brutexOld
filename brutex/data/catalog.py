@@ -544,6 +544,8 @@ class Catalog:
                 "'pip install -e .[data]' to enable the P2 data lake"
             ) from exc
 
+        from brutex.data.guarded_read import read_parquet_regular
+
         entries = self.list_partitions(
             exchange=exchange,
             segment=segment,
@@ -571,7 +573,15 @@ class Catalog:
                     f"catalog references missing partition file {path} "
                     f"— run 'brutex data verify' to re-sync the catalog"
                 )
-            frames.append(pl.read_parquet(str(path)))
+            # Guarded literal read: the catalog resolves ONE concrete
+            # partition file — the ENGINE's feed mouth must never
+            # glob-interpret a `[`-carrying symbol dir into its siblings' bars
+            # (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15
+            # metachar law — held BY CONSTRUCTION inside read_parquet_regular:
+            # a validated open HANDLE is read literally) and never hang on a
+            # planted non-regular inode (DEC-LAKE-READ-INODE-GUARD-001 —
+            # NotRegularFileError is a parquet_read_skip_errors() member).
+            frames.append(read_parquet_regular(path))
 
         combined = pl.concat(frames, how="vertical_relaxed")
         # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): a partition poisoned

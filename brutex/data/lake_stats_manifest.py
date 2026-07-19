@@ -169,6 +169,11 @@ import structlog
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.lake_manifest import manifest_dir
+from brutex.data.lake_rust_stats import (
+    ShardRenderPayload,
+    lake_rust_stats_enabled,
+    render_shard_json,
+)
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.stat_deadline import StatSweepGate, StatSweepTimeout
 
@@ -812,6 +817,13 @@ def render_shard(stats: DatasetStats) -> str:
     Deterministic byte-for-byte for identical inputs — the golden schema-freeze
     pin (``tests/golden/test_lake_stats_manifest_golden.py``) compares this
     literal.
+
+    DEC-LAKE-RUST-STATS-MANIFEST-001 (MIGRATION.md #1914): when
+    ``BRUTEX_LAKE_RUST_STATS_MANIFEST`` is ON the assembly routes through the
+    burn-in-checked, fail-closed :mod:`brutex.data.lake_rust_stats` seam
+    (Python pre-formats every ``isoformat()`` string — ints + strings only
+    cross the FFI); the flag-OFF default is the verbatim stdlib
+    ``json.dumps`` below — byte-identical AND crate-untouched (spy-pinned).
     """
     payload = {
         "version": STATS_MANIFEST_VERSION,
@@ -835,7 +847,42 @@ def render_shard(stats: DatasetStats) -> str:
         ],
         "updated_utc": stats.updated_utc,
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def _python_render() -> str:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    if not lake_rust_stats_enabled():
+        return _python_render()
+
+    def _rust_payload() -> ShardRenderPayload:
+        # The SAME DatasetStats, pre-formatted to the ints+strings-only FFI
+        # shape — every timestamp through the identical CPython
+        # ``isoformat()`` the payload dict above uses (both arms consume
+        # one formatter; parity-pinned).
+        return ShardRenderPayload(
+            version=STATS_MANIFEST_VERSION,
+            kind=stats.kind,
+            key=tuple(stats.key.items()),
+            identity_key=tuple(stats.identity_key),
+            row_count=stats.row_count,
+            min_ts_iso=stats.min_ts.isoformat(),
+            max_ts_iso=stats.max_ts.isoformat(),
+            files=tuple(
+                (
+                    row.rel,
+                    row.rows,
+                    row.min_ts.isoformat(),
+                    row.max_ts.isoformat(),
+                    row.mtime_ns,
+                    row.size,
+                    row.raw_hash,
+                )
+                for row in stats.files
+            ),
+            updated_utc=stats.updated_utc,
+        )
+
+    return render_shard_json(payload_factory=_rust_payload, python_render=_python_render)
 
 
 def _row_from_json(obj: object) -> StatsFileRow:

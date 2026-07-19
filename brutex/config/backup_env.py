@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.config.backup_env_rust import backupenv_rust_enabled, route_verify_subset
 from brutex.config.paths import brutex_home
 
 if TYPE_CHECKING:
@@ -198,6 +199,27 @@ def _valid_verify_subset(value: str) -> bool:
     indistinguishable in rc from genuine corruption — so an invalid
     passthrough must never reach the nightly verify (round-7 MINOR; the
     F3-not-F11 honesty law of the ``binary_missing`` arm, one arm over).
+
+    Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 —
+    milestone 3): when — and ONLY when — ``BRUTEX_CORE_RUST_BACKUPENV``
+    is set truthy, the shape law routes through the default-OFF,
+    burn-in-checked, fail-closed :mod:`brutex.config.backup_env_rust`
+    facade to the ``rust/brutex-core`` crate; flag-OFF is the verbatim
+    ``_valid_verify_subset_python`` oracle — behavior-identical AND
+    crate-untouched (bomb-crate spy-pinned). Honesty banner (ADR-0020,
+    mandatory verbatim): expected payoff ≈ 0 — conversion is for
+    uniformity, not speed.
+    """
+    if not backupenv_rust_enabled():
+        return _valid_verify_subset_python(value)
+    return route_verify_subset(value, _valid_verify_subset_python)
+
+
+def _valid_verify_subset_python(value: str) -> bool:
+    """The verbatim :func:`_valid_verify_subset` body — the LIVE oracle.
+
+    Token-for-token the pre-seam body (DEC-CONFIG-RUST-LEAVES-001); every
+    flag-OFF / ineligible / degraded / burn-in call serves this.
     """
     nt = _SUBSET_NT_RE.match(value)
     if nt is not None:

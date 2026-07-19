@@ -58,6 +58,7 @@ from brutex.backup.restic_runner import (
 )
 from brutex.backup.state import canary_dir, drill_tmp_dir, load_state, state_path
 from brutex.config.paths import brutex_home, resolve_lake_root
+from brutex.data.guarded_read import open_regular_binary, read_regular_bytes
 from brutex.notifications.sweep_alerts import SweepAlerter
 
 if TYPE_CHECKING:
@@ -92,7 +93,7 @@ def canary_bytes() -> bytes:
 def _file_sha256(path: Path) -> str:
     """Stream-sha256 of *path* (bounded memory)."""
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with open_regular_binary(path) as handle:
         while True:
             chunk = handle.read(_READ_CHUNK)
             if not chunk:
@@ -103,7 +104,7 @@ def _file_sha256(path: Path) -> str:
 
 def _is_prefix_of(restored: Path, live: Path) -> bool:
     """True iff *restored*'s bytes are a byte-PREFIX of *live*'s (audit law)."""
-    with restored.open("rb") as r_handle, live.open("rb") as l_handle:
+    with open_regular_binary(restored) as r_handle, open_regular_binary(live) as l_handle:
         while True:
             r_chunk = r_handle.read(_READ_CHUNK)
             if not r_chunk:
@@ -265,7 +266,7 @@ def _run_canary(cfg: BackupEnvConfig, runner: ResticRunner, target_root: Path) -
         return EXIT_RESTIC
     restored = next((target_root / "canary").rglob("canary.bin"), None)
     verdict: int | None = None
-    if restored is None or restored.read_bytes() != expected:
+    if restored is None or read_regular_bytes(restored) != expected:
         _LOG.error(
             "backup.drill.mismatch",
             path=str(canary_path),

@@ -66,6 +66,7 @@ from brutex.data.derive_lock import derive_in_progress
 from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.session import SESSION_CLOSE, SESSION_OPEN
 from brutex.data.spot_features import pct_change
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 from brutex.money import format_inr, round_money, rupees_to_paisa
@@ -85,6 +86,7 @@ __all__ = [
     "compute_snapshot",
     "compute_spot_candidates",
     "filter_to_ist_minute",
+    "filter_to_ist_second",
     "info_prev_baseline_muhurat",
     "interval_minutes",
     "is_intraday_interval",
@@ -127,8 +129,9 @@ _INTERVAL_MINUTES: Final[dict[str, int]] = {
 
 #: NSE/BSE regular session bounds as minutes-from-midnight IST: 09:15 inclusive
 #: → 15:30 exclusive (CLAUDE.md §7 — `brutex.data.session` enforces the same).
-_SESSION_OPEN_MIN: Final[int] = 9 * 60 + 15
-_SESSION_CLOSE_MIN: Final[int] = 15 * 60 + 30
+#: DERIVED from the ONE COMMON session constants (db_view precedent; DEC-TF-REGISTRY-DYNAMIC-001 timestamp fold — values 555/930 byte-identical).
+_SESSION_OPEN_MIN: Final[int] = SESSION_OPEN.hour * 60 + SESSION_OPEN.minute
+_SESSION_CLOSE_MIN: Final[int] = SESSION_CLOSE.hour * 60 + SESSION_CLOSE.minute
 
 #: A timeframe whose bar length spans the whole session (1day = 375 min) has no
 #: intraday time-of-day choice — the bar IS the day.
@@ -388,7 +391,16 @@ def compute_snapshot(
         else session_traded_value_paisa((bar.high, bar.low, bar.close, bar.volume) for bar in bars)
     )
     snapped_prev = round_money(prev_close) if prev_close is not None else None
-    change = (ltp - snapped_prev) if snapped_prev is not None else None
+    # DEC-MOVERS-DAILY-FRESHNESS-001 (folded MINOR): the docstring contract says
+    # `change` is None when prev_close is None OR ZERO — a zero baseline has no
+    # meaningful "change vs yesterday" (`pct_change` already returns None on a
+    # zero base), yet the pre-fix subtraction served `change == ltp` beside a
+    # None pct_change (an out-of-band hand-planted 0-close prior bar; production
+    # writers never emit one — CandleBar + the ingest boundary refuse
+    # non-positive prices). One guard makes the row honor its own contract.
+    # The futures/options rows carry NO `change` field (pct_change only, whose
+    # zero-base None is already total) — nothing to fold there.
+    change = (ltp - snapped_prev) if snapped_prev is not None and snapped_prev != 0 else None
     pct = pct_change(ltp, snapped_prev) if snapped_prev is not None else None
     return MoverSnapshot(
         instrument=instrument,
@@ -703,18 +715,40 @@ def parse_snapshot_date(date_str: str | None) -> date_cls:
         raise ValueError(f"malformed date {date_str!r} — expected ISO YYYY-MM-DD") from exc
 
 
-def _cutoff_minute(time_str: str | None) -> int | None:
-    """Parse an ``HH:MM`` IST time to a minute-of-day cutoff, or ``None`` for whole-day.
+def _cutoff_second(time_str: str | None) -> int | None:
+    """Parse an ``HH:MM`` or ``HH:MM:SS`` IST time to a second-of-day cutoff, or ``None`` for whole-day.
 
-    Raises :class:`ValueError` on a malformed time (the route maps it to a 400).
+    The seconds-capable single-copy parser (DEC-TF-REGISTRY-DYNAMIC-001):
+    ``HH:MM`` means ``HH:MM:00``. Raises :class:`ValueError` on a malformed
+    time (the route maps it to a 400).
     """
     if not time_str:
         return None
     try:
-        hh, mm = time_str.split(":")  # wrong arity → ValueError (unpack), as does a bad int.
-        return int(hh) * 60 + int(mm)
+        # A bad int → ValueError, as does a wrong arity below (structural match —
+        # no magic arity literals, the PLR2004 discipline).
+        match time_str.split(":"):
+            case [hh, mm]:
+                ss = "0"
+            case [hh, mm, ss]:
+                pass
+            case parts:
+                raise ValueError(f"expected 2 or 3 colon-separated fields, got {len(parts)}")
+        return int(hh) * 3600 + int(mm) * 60 + int(ss)
     except ValueError as exc:
-        raise ValueError(f"malformed time {time_str!r} — expected HH:MM") from exc
+        raise ValueError(f"malformed time {time_str!r} — expected HH:MM or HH:MM:SS") from exc
+
+
+def _cutoff_minute(time_str: str | None) -> int | None:
+    """Parse an IST time to a minute-of-day cutoff, or ``None`` for whole-day.
+
+    Delegates to :func:`_cutoff_second` (DEC-TF-REGISTRY-DYNAMIC-001), so an
+    ``HH:MM:SS`` pick parses too and floors to its minute; the minute-of-day
+    contract for every ``HH:MM`` input is byte-identical. The malformed-time
+    error wording widened accordingly (sanctioned).
+    """
+    sec = _cutoff_second(time_str)
+    return None if sec is None else sec // 60
 
 
 def resolve_asof_cutoff(interval: str, time: str | None) -> int | None:
@@ -754,13 +788,26 @@ def resolve_asof_cutoff(interval: str, time: str | None) -> int | None:
 
     Raises :class:`ValueError` on a malformed *time* (propagated from
     :func:`_cutoff_minute`; the route maps it to a 400).
+
+    An ``HH:MM:SS`` pick with a NON-ZERO seconds component is always an
+    as-of INSTANT floored to its minute — never the bucket-anchor forward
+    resolution (resolving a mid-bucket seconds pick forward past the pick
+    would admit bars from AFTER the as-of instant — look-ahead;
+    DEC-TF-REGISTRY-DYNAMIC-001). ``HH:MM:00`` behaves exactly like ``HH:MM``.
     """
     minutes = interval_minutes(interval)
     if minutes is None or minutes >= _DAILY_MIN_FLOOR:
         return None
-    raw = _cutoff_minute(time)
-    if raw is None:
+    raw_s = _cutoff_second(time)
+    if raw_s is None:
         return None
+    raw = raw_s // 60
+    if raw_s % 60 != 0:
+        # A genuine seconds instant (DEC-TF-REGISTRY-DYNAMIC-001): NEVER the
+        # bucket-anchor forward resolution — resolving a mid-bucket seconds
+        # pick forward past the pick would admit bars from AFTER the as-of
+        # instant (look-ahead). As-of-instant law: floor to the minute.
+        return raw
     if _SESSION_OPEN_MIN <= raw < _SESSION_CLOSE_MIN and (raw - _SESSION_OPEN_MIN) % minutes == 0:
         return min(raw + minutes - 1, _SESSION_CLOSE_MIN - 1)
     return raw
@@ -849,6 +896,34 @@ def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -
         The timestamp column name to convert + compare on.
     """
     return frame.filter(_ist_minute_of_day_expr(ts_col) <= cutoff_min)
+
+
+def _ist_second_of_day_expr(ts_col: str) -> pl.Expr:
+    """IST second-of-day expression for *ts_col* — the seconds twin of
+    :func:`_ist_minute_of_day_expr` (the single copy; DEC-TF-REGISTRY-DYNAMIC-001).
+
+    Int32 casts for the same narrow-int-overflow reason as the minute twin.
+    """
+    import polars as pl
+
+    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
+    return (
+        ist.dt.hour().cast(pl.Int32) * 3600
+        + ist.dt.minute().cast(pl.Int32) * 60
+        + ist.dt.second().cast(pl.Int32)
+    )
+
+
+def filter_to_ist_second(frame: pl.DataFrame, cutoff_s: int, *, ts_col: str) -> pl.DataFrame:
+    """Keep only *frame*'s rows whose IST second-of-day is ``<= cutoff_s``.
+
+    The seconds-granular twin of :func:`filter_to_ist_minute` — the framework
+    seam for sub-minute-stamped bars (DEC-TF-REGISTRY-DYNAMIC-001). HONEST:
+    no production feed emits sub-minute bars today (Groww is 1-minute-only);
+    production consumers stay on the minute filter until a sub-minute feed +
+    its own DEC land.
+    """
+    return frame.filter(_ist_second_of_day_expr(ts_col) <= cutoff_s)
 
 
 def _read_cut_1m_frame(
@@ -1387,8 +1462,7 @@ def _read_daily_partition(
     COMMON). ``None`` when the directory is missing or holds no parquet (a
     never-pulled symbol), so every caller degrades honestly (Golden Rule #1).
     """
-    import polars as pl
-
+    from brutex.data.guarded_read import read_parquet_glob_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
@@ -1397,50 +1471,164 @@ def _read_daily_partition(
     # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): a poisoned-era duplicated
     # 1-day partition would otherwise double-serve a day — warned, never silent.
     frame, _dropped = dedup_bars_frame(
-        pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+        read_parquet_glob_regular(base.as_posix() + "/**/*.parquet"),
         source=f"movers_daily:{exchange}/{segment}/{symbol}",
     )
     return frame
 
 
 def _read_daily_bars(
-    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
-) -> list[CandleBar]:
-    """Read *day*'s stored ``1day`` bar(s) directly — NO 1-minute resample here.
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    day: date_cls,
+    stale_warn_state: _StoredStaleWarnState | None = None,
+) -> tuple[list[CandleBar], bool]:
+    """FRESHNESS-GUARDED daily day read → ``(bars, from_stored)``.
 
     1-minute is the ONLY fetched granularity and the ``1day`` partition is DERIVED
     from it (``DEC-1MINUTE-ONLY-DERIVE-1DAY-001``), so the daily movers timeframe
-    reads the already-derived ``1day`` bars straight off disk (the same partitions
-    :func:`_prev_day_close` reads) instead of re-resampling the ``1minute`` series
-    here. For a daily timeframe "the bar IS the day": there is no intraday
-    cutoff. Returns the (≤1) bar whose IST trading date equals *day*, or ``[]``
-    when the symbol has no 1-day bar on *day* (the caller reports it skipped,
-    never fabricated — Golden Rule #1).
+    reads the already-derived ``1day`` bars off disk (the same partitions
+    :func:`_prev_day_close` reads). For a daily timeframe "the bar IS the day":
+    there is no intraday cutoff.
+
+    **The daily freshness guard (DEC-MOVERS-DAILY-FRESHNESS-001 — the named
+    follow-up of DEC-MOVERS-STORED-FRESHNESS-001, which guarded only the
+    INTRADAY stored-TF path):** a stored derived ``1day`` row is rewritten only
+    by the pipeline's final prebuild, so a 1-minute append WITHOUT a re-prebuild
+    (a CLI-only pull, a crashed/partial prebuild, the #1031 hole re-pull) left
+    the daily tab serving a STALE LTP/volume beside fresh intraday tabs
+    (executed repro: 1day served ₹100.00 while 1minute served ₹200.00). The
+    stored day bar(s) now serve ONLY when they VERIFY-EQUAL the in-memory
+    derivation of the UNCUT 1-minute base for *day* via the SAME production
+    derivation the prebuild runs —
+    :func:`~brutex.data.spot_daily_resample.resample_1m_to_daily` (imported,
+    never re-minted; one implementation ⇒ a genuinely fresh partition is
+    byte-equal by the DEC-PIPELINE-AUTOPREBUILD-001 contract, proven by the
+    fresh-parity pin). The daily derivation emits :class:`CandleBar`\\ s (not a
+    frame), so the #1795a equality law (value-exact, column name+order-exact,
+    dtype-INSENSITIVE) is realised in the BAR MODEL over the same field set the
+    intraday guard's ``REQUIRED_COLUMNS`` compare covers (ts/open/high/low/
+    close/volume; spot daily OI is ``None`` on BOTH sides — the
+    ``resample_1m_to_daily`` contract and :func:`_row_to_bar`'s): both sides
+    normalise through the canonical converters, so a dtype pun that preserves
+    values still compares equal (``Decimal`` equality is numeric) and ANY value/
+    instant divergence — a stale close, a missing day row, a truncated volume,
+    a non-midnight-IST stamp — reads STALE.
+
+    Arms (the exact :func:`_read_intraday_bars` shape):
+
+    * **fresh** (stored day bars == the derivation, including both-empty) ⇒
+      serve the stored bars, ``from_stored=True`` (byte-identical to the
+      pre-guard read on a correctly-prebuilt lake — pinned);
+    * **base-1m absent for *day*** (or ``day == date.max`` — no strictly-later
+      derive cutoff exists, the #1795a ``date.min`` boundary lesson in the
+      other direction) ⇒ FAIL-OPEN serve-stored (the #1795a precedent: falling
+      back would return ``[]`` and DROP the row — strictly worse on a
+      1day-only/legacy lake; the ONE remaining unverified serve, disclosed);
+    * **stale** (any divergence — including a MISSING stored day row beside a
+      non-empty derivation, the stale-prebuild "new day appended" shape) ⇒
+      serve the 1m-derived daily bars just computed (never re-read; the movers
+      screen is an AS-OF read-time view — a still-forming session's derived
+      bar is the day's honest running OHLC, exactly what the intraday tabs
+      already serve; nothing is ever WRITTEN — the ``daily_derive_cutoff``
+      write law is untouched), ``from_stored=False``, with ONE capped
+      ``movers.stored_stale_fallback`` WARNING per (exchange, symbol, 1day)
+      per build via *stale_warn_state* (``None`` — direct/test callers — falls
+      back silently; the state is SHARED with the intraday guard so one cap
+      bounds the whole build).
+
+    Guard cost per daily candidate (honest, Golden Rule #10): ONE month-bounded
+    uncut 1-minute day read (:func:`_read_cut_1m_frame`) + one in-memory
+    ≤session-size daily derivation + a ≤1-bar compare — the daily twin of the
+    intraday guard's disclosed cost. Returns ``([], True)`` when neither the
+    stored partition nor the 1-minute base has bars for *day* (the caller
+    reports it skipped, never fabricated — Golden Rule #1).
+
+    HONEST residual (named follow-up DEC-MOVERS-BASELINE-FRESHNESS-001): the
+    prior-day ``prev_close``/OI BASELINE reads (:func:`resolve_prev_close` →
+    :func:`_read_daily_partition` prior-``tail`` + the 1-minute walk-back) are
+    a DIFFERENT seam — a stale PRIOR day's stored 1day row still baselines the
+    %-change unguarded. Deliberately not expanded here (scope-locked); the
+    contiguity stamps + this guard's fresh LTP bound the blast radius.
     """
     import polars as pl
 
+    from brutex.data.spot_daily_resample import resample_1m_to_daily
+
     df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
     if df is None:
-        return []
-    sel = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() == day).sort(
-        "timestamp"
+        sel = None
+    else:
+        day_rows = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() == day).sort(
+            "timestamp"
+        )
+        sel = None if day_rows.is_empty() else day_rows
+    stored_frame: pl.DataFrame | None = None
+    stored_bars: list[CandleBar] = []
+    if sel is not None:
+        # The 1-day partition stores the lake instant in `timestamp`; the shared
+        # `_row_to_bar` reads `ts_utc` — rename so the one converter serves both
+        # the daily and the resampled-intraday readers (CLAUDE.md §11 COMMON).
+        # Screen the stored 1day bar(s) (DEC-DASHBOARD-READ-SCREEN-001) BEFORE
+        # the freshness compare: each daily bar is its own session
+        # (first-of-session exempt), so only the insane (positivity/ordering)
+        # arm can fire — a corrupt derived 1day bar is dropped, never served
+        # raw AND never fed to `_row_to_bar` (whose CandleBar ValueError is
+        # deliberately NOT a movers skip error — the #1811 escape-class
+        # lesson); the guard then judges exactly what WOULD be served. Clean
+        # partitions return the SAME object (O(rows) pass per read).
+        stored_frame = screen_frame(
+            sel.rename({"timestamp": "ts_utc"}),
+            ts_col="ts_utc",
+            source=f"{exchange}/{segment}/{symbol}/1day",
+        )
+        stored_bars = [_row_to_bar(row) for row in stored_frame.iter_rows(named=True)]
+    if day >= date_cls.max:
+        # No strictly-later derive cutoff exists for date.max (`day + 1 day`
+        # would raise OverflowError — the #1795a R3-N1 boundary class, gated
+        # explicitly rather than caught blanketly); definitionally fail-open.
+        return stored_bars, True
+    base_day = _read_cut_1m_frame(
+        lake_root,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        day=day,
+        cutoff_min=None,
     )
-    if sel.is_empty():
-        return []
-    # The 1-day partition stores the lake instant in `timestamp`; the shared
-    # `_row_to_bar` reads `ts_utc` — rename so the one converter serves both
-    # the daily and the resampled-intraday readers (CLAUDE.md §11 COMMON).
-    # Screen the stored 1day bar(s) (DEC-DASHBOARD-READ-SCREEN-001): each daily
-    # bar is its own session (first-of-session exempt), so only the insane
-    # (positivity/ordering) arm can fire here — a corrupt derived 1day bar is
-    # dropped, never served raw. Clean partitions return the SAME object; the
-    # screen is an O(rows) Python pass per read (honest cost, not free).
-    screened = screen_frame(
-        sel.rename({"timestamp": "ts_utc"}),
-        ts_col="ts_utc",
-        source=f"{exchange}/{segment}/{symbol}/1day",
-    )
-    return [_row_to_bar(row) for row in screened.iter_rows(named=True)]
+    if base_day is None:
+        # No 1-minute evidence for the day — the fail-open serve-stored arm
+        # (a 1day-only / legacy lake keeps its row; empty stays empty).
+        return stored_bars, True
+    # The PRODUCTION daily derivation (the same function the prebuild binds via
+    # `daily_resample_fn_for(SPOT)`): `before = day + 1` includes *day* whether
+    # complete or still forming — the as-of READ-time cutoff, never a write.
+    derived = resample_1m_to_daily(base_day, before=day + timedelta(days=1))
+    if stored_bars == derived:
+        return stored_bars, True
+    if stale_warn_state is not None:
+        warn_stored_stale_fallback(
+            stale_warn_state,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval="1day",
+            snapshot_day=day,
+            # Forensic context only (the verdict is the bar-equality compare):
+            # a stored daily bar is midnight-IST-stamped ("00:00"); an ABSENT
+            # (or wholly screened-out) stored day row reads "absent" — the
+            # missing-day-row / corrupt-row shapes.
+            stored_max_ist=(
+                minute_to_hhmm(_max_ist_minute(stored_frame))
+                if stored_frame is not None and not stored_frame.is_empty()
+                else "absent"
+            ),
+            base_max_ist=minute_to_hhmm(_max_ist_minute(base_day)),
+        )
+    return derived, False
 
 
 #: Max calendar days to walk back searching for the prior trading day's last
@@ -1827,9 +2015,10 @@ class SpotCandidates:
         Read-path provenance (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2 — honesty
         visible in the payload): of the instruments that CONTRIBUTED a snapshot,
         how many were served from a STORED interval partition (the pipeline
-        prebuild's output; the daily path always reads the stored ``1day``, so
-        it counts here too) vs the on-the-fly 1-minute RESAMPLE fallback (a
-        never-prebuilt lake). A skipped instrument counts in neither.
+        prebuild's output; a freshness-VERIFIED — or fail-open — daily ``1day``
+        read counts here too, DEC-MOVERS-DAILY-FRESHNESS-001) vs the on-the-fly
+        1-minute RESAMPLE/derive fallback (a never-prebuilt lake, or a
+        stale/missing stored day row). A skipped instrument counts in neither.
     """
 
     snapshots: tuple[MoverSnapshot, ...]
@@ -1883,10 +2072,15 @@ def compute_spot_candidates(
     The discovery + read path depends on the timeframe (so the page works for
     EITHER timeframe — ``DEC-1MINUTE-ONLY-DERIVE-1DAY-001``):
 
-    * **Daily** (``1day``, the page default) → discover + read the stored
-      ``1day`` partitions DIRECTLY (:func:`_read_daily_bars`). The ``1day`` series
-      is DERIVED from the fetched 1-minute, so a daily snapshot reads the derived
-      bars off disk and never re-resamples here.
+    * **Daily** (``1day``, the page default) → discover the stored ``1day``
+      partitions, then read each symbol's day bar FRESHNESS-GUARDED
+      (:func:`_read_daily_bars`, DEC-MOVERS-DAILY-FRESHNESS-001): the stored
+      derived bar serves only when it VERIFY-EQUALS the in-memory
+      :func:`~brutex.data.spot_daily_resample.resample_1m_to_daily` of the
+      day's UNCUT 1-minute base (the SAME production derivation the prebuild
+      ran — one implementation); a stale/missing stored day row serves those
+      derived values instead + ONE capped ``movers.stored_stale_fallback``
+      WARN, and a day with no 1-minute evidence fail-opens to the stored bar.
     * **Intraday** (``1minute`` … ``4hour``) → discover the ``1minute``
       partitions, then read each symbol's day STORED-FIRST
       (:func:`_read_intraday_bars`, DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): the
@@ -1916,11 +2110,12 @@ def compute_spot_candidates(
         resample instead of the stored-first path
         (DEC-MOVERS-GATE-PREBUILD-SCOPE-001 — the ``/movers`` route passes it
         while a dashboard pull runs, because mid-fetch the stored TF partitions
-        predate the freshly-landing 1-minute bars; the DAILY path still reads
-        the derived ``1day`` partitions directly — 1-minute is the only fetched
-        granularity and ``1day`` is rewritten only by the prebuild, so its
-        mid-pull staleness is bounded to the pull window and stated, not
-        resampled away). Default ``False`` is byte-identical.
+        predate the freshly-landing 1-minute bars; the DAILY path deliberately
+        takes no ``prefer_resample`` — its freshness GUARD
+        (DEC-MOVERS-DAILY-FRESHNESS-001) already judges the stored ``1day``
+        against the live 1-minute base per read, so a mid-pull stale daily row
+        self-heals to the derived values instead of being bypassed wholesale).
+        Default ``False`` is byte-identical.
 
     Returns
     -------
@@ -1978,15 +2173,19 @@ def compute_spot_candidates(
     for dataset in spot_datasets:
         try:
             if is_daily:
-                # The daily path reads the stored (derived) `1day` partition by
-                # construction — it counts as a stored read below.
-                from_stored = True
-                bars = _read_daily_bars(
+                # The daily path reads the stored (derived) `1day` partition
+                # FRESHNESS-GUARDED (DEC-MOVERS-DAILY-FRESHNESS-001): a
+                # verify-equal stored day bar serves (from_stored=True — the
+                # pre-guard behaviour on a correctly-prebuilt lake); a stale/
+                # missing one serves the 1m-derived daily values instead
+                # (from_stored=False + ONE capped WARN via the SHARED state).
+                bars, from_stored = _read_daily_bars(
                     lake_root,
                     exchange=dataset["exchange"],
                     segment=dataset["segment"],
                     symbol=dataset["symbol"],
                     day=day,
+                    stale_warn_state=stale_warn_state,
                 )
             else:
                 bars, from_stored = _read_intraday_bars(

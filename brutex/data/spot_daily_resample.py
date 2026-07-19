@@ -76,17 +76,34 @@ provenance — a resample made zero vendor calls). The raw lake builders
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
-from brutex.calendars.nse import SESSION_OPEN_IST, has_muhurat_session
+from brutex.calendars.nse import (
+    IST_FIXED_OFFSET,
+    SESSION_OPEN_IST,
+    has_muhurat_session,
+    is_known_irregular_session,
+    known_irregular_reason,
+)
 from brutex.data.fetch_coverage import WindowKey
+
+# `frame_to_candle_bars` MOVED to the dedicated import-graph leaf
+# `brutex.data.frame_bars` (DEC-PREBUILD-FRAME-WRITE-001 review fold — the
+# frame-write lane's sink/parquet_writer degrade paths consume it, and
+# importing it from HERE re-formed a CodeQL `py/cyclic-import` cycle with
+# this module's own lazy sink/writer imports). Re-exported byte-compatibly
+# for the original call sites/tests (the house alias pattern; stays in
+# `__all__`).
+from brutex.data.frame_bars import frame_to_candle_bars
 from brutex.data.partition import MONTHS_PER_YEAR
+from brutex.data.session import ist_offset_duration
 from brutex.data.timeframes import DAILY_TF_MINUTES
 from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger, WindowLedgerRecord
 
@@ -102,14 +119,22 @@ if TYPE_CHECKING:
 #: localize a vendor ``00:00:00 IST`` daily timestamp, so the re-stamped UTC instant
 #: of a resampled daily bar is byte-identical to a vendor-fetched one (the dedup
 #: identity). India has no DST, so a fixed offset is exact for the 2020+ scope.
-_IST = timezone(timedelta(hours=5, minutes=30))
+#: The ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST = IST_FIXED_OFFSET
 
 #: Structured logger — every degrade (no 1-minute to fill from / a quarantined
 #: window) is logged, so a resample-fill pass is visible in /logs (Golden Rule #10).
 _LOG = structlog.get_logger("brutex.data.spot_daily_resample")
 
 __all__ = [
+    "DAILY_RANGE_ERROR_EVENT",
+    "DAILY_RANGE_EVENT",
+    "DAILY_RANGE_KNOWN_EVENT",
+    "DAILY_RANGE_SUPPRESSED_EVENT",
+    "DAILY_RANGE_WARN_RATIO",
     "MAX_OPEN_SUBSTITUTION_WARNS",
+    "MAX_RANGE_WARNS",
     "DailyDeriveReport",
     "DailyDeriveTarget",
     "DailyFillResult",
@@ -117,10 +142,13 @@ __all__ = [
     "DailyOpenVerdict",
     "DailyReconcileReport",
     "DailyResampleWindow",
+    "ExtremeRangeDay",
     "classify_daily_open",
     "derive_daily_for_targets",
     "detect_daily_open_substitutions",
+    "detect_extreme_daily_ranges",
     "emit_daily_open_substitutions",
+    "emit_extreme_daily_ranges",
     "fill_daily_from_minute",
     "frame_to_candle_bars",
     "ist_span_partition_files",
@@ -128,6 +156,7 @@ __all__ = [
     "make_lake_read_1m_window",
     "make_lake_write_1day",
     "observe_daily_open_substitutions",
+    "observe_extreme_daily_ranges",
     "plan_daily_resample_windows",
     "reconcile_daily_from_minute",
     "resample_1m_to_daily",
@@ -295,7 +324,7 @@ def detect_daily_open_substitutions(
 
     if df_1m.is_empty():
         return DailyOpenSubstitutionScan(substituted=(), sessions=0, muhurat_abstained=0)
-    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    ist = pl.col("ts_utc") + ist_offset_duration()
     firsts = (
         df_1m.select(ist.alias("_ist"))
         .with_columns(pl.col("_ist").dt.date().alias("_ist_date"))
@@ -395,6 +424,226 @@ def observe_daily_open_substitutions(
         )
         return 0
     return scan.count
+
+
+#: Per-session intraday range ratio at/above which a session is flagged for
+#: review — ``(max(high) - min(low)) / min(low) >= 0.09``. The 9% margin is the
+#: doc-mandated review threshold sitting just UNDER the first market-wide
+#: circuit-breaker band (the SEBI 10/15/20% framework — SEBI Circular
+#: SMDRPD/Policy/Cir-37/2001 dated 2001-06-28 as modified by
+#: CIR/MRD/DP/25/2013 dated 2013-09-03; canonical exchange page
+#: nseindia.com/products-services/equity-market-circuit-breakers; verified
+#: 2026-07-11). Env-tunable via ``BRUTEX_DAILY_RANGE_WARN_RATIO`` (fail-soft:
+#: a missing / malformed / non-finite / non-positive value falls back to this
+#: default — the diagnostic never crashes a prebuild over a bad env var).
+DAILY_RANGE_WARN_RATIO: Final[float] = 0.09
+
+#: Cap on per-(symbol, date) ``prebuild.daily_range_extreme`` WARN lines per
+#: scan (the house cap-20 discipline); the suppressed summary ALWAYS carries
+#: the TRUE count (Golden Rule #1).
+MAX_RANGE_WARNS: Final[int] = 20
+
+#: One WARN per UN-annotated extreme-range session (capped) — manual review.
+DAILY_RANGE_EVENT: Final[str] = "prebuild.daily_range_extreme"
+#: One INFO per KNOWN annotated halt/extended session — expected, no action.
+DAILY_RANGE_KNOWN_EVENT: Final[str] = "prebuild.daily_range_known_halt"
+#: One summary when the WARN lines were capped (true count carried).
+DAILY_RANGE_SUPPRESSED_EVENT: Final[str] = "prebuild.daily_range_extreme_suppressed"
+#: Emitted if the observe-only scan itself raises — never breaks the prebuild.
+DAILY_RANGE_ERROR_EVENT: Final[str] = "prebuild.daily_range_log_error"
+
+
+def _tunable_ratio(env_var: str, default: float) -> float:
+    """Read a positive finite float ratio from *env_var*, else *default*.
+
+    Fail-soft (the ``interior_gap_detect._tunable_sessions`` law): a missing,
+    empty, non-float, non-finite, or non-positive value falls back to
+    *default* — the diagnostic must NEVER crash a prebuild over a malformed
+    env var. Pure modulo the one ``os.environ`` read.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(value) or value <= 0.0:
+        return default
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ExtremeRangeDay:
+    """One session whose intraday range crossed the review threshold — pure data.
+
+    Attributes
+    ----------
+    session_date
+        The IST session date.
+    range_ratio
+        ``(max(high) - min(low)) / min(low)`` over the session's 1-minute bars.
+    known_halt
+        ``True`` iff the date is annotated known-irregular
+        (:func:`~brutex.calendars.nse.is_known_irregular_session` — the 2020
+        circuit-halt days / the 2021-02-24 extended outage day) → the INFO
+        arm, never a WARN.
+    reason
+        :func:`~brutex.calendars.nse.known_irregular_reason`'s machine token
+        for a known day, else ``None``.
+    """
+
+    session_date: date
+    range_ratio: float
+    known_halt: bool
+    reason: str | None
+
+
+def detect_extreme_daily_ranges(
+    df_1m: pl.DataFrame, *, before: date, threshold: float | None = None
+) -> tuple[ExtremeRangeDay, ...]:
+    """Scan a 1-minute frame for sessions whose intraday range is extreme — pure.
+
+    DEC-HALT-DAY-TREATMENT-001 — the self-maintaining halt-day DISCOVERY
+    instrument: any COMPLETE session (``ist_date < before`` — the same
+    forming-session cutoff the daily derive uses) whose
+    ``(max(high) - min(low)) / min(low) >= threshold`` (default
+    :data:`DAILY_RANGE_WARN_RATIO`, 9% — just under the first SEBI 10%
+    market-wide circuit band) is returned for review. A KNOWN annotated date
+    (2020-03-13 / 2020-03-23 halts, the 2021-02-24 extended day) is returned
+    with ``known_halt=True`` so the emitter files it INFO ("expected — no
+    action"), while an UN-annotated hit is the manual-review WARN whose
+    remediation is "add the date to ``calendars/nse.CIRCUIT_HALT_SESSIONS``
+    with its NSE/SEBI citation" — the annotation list maintains itself going
+    forward instead of relying on asserted future halt dates.
+
+    One O(1m-rows) polars group-by folded to O(sessions) aggregates over the
+    frame ALREADY in memory (the :func:`detect_daily_open_substitutions`
+    template; only the flag loop is O(sessions)) — zero extra lake I/O,
+    frame never mutated, derived bytes byte-unchanged (pinned). A defensive
+    non-positive session low SKIPS that session (never a division by zero —
+    price sanity makes it unreachable on a real lake). HONEST limits (Golden
+    Rule #10): a pure intraday RANGE ratio — a gap-open-then-day-long-halt
+    shape (tiny intraday range, huge move vs the prior close) is the
+    session-density census's net (:mod:`brutex.data.session_density`), not
+    this ratio's; and the scan runs at the pipeline prebuild only, so a
+    CLI-fetch-only lake is scanned on the next dashboard pipeline run (the
+    DEC-PIPELINE-AUTOPREBUILD-001 #1145 asymmetry).
+    """
+    import polars as pl
+
+    resolved = (
+        threshold
+        if threshold is not None
+        else _tunable_ratio("BRUTEX_DAILY_RANGE_WARN_RATIO", DAILY_RANGE_WARN_RATIO)
+    )
+    if df_1m.is_empty():
+        return ()
+    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    per_day = (
+        df_1m.select(
+            ist.dt.date().alias("_ist_date"),
+            pl.col("high").alias("_high"),
+            pl.col("low").alias("_low"),
+        )
+        .filter(pl.col("_ist_date") < before)
+        .group_by("_ist_date")
+        .agg(pl.col("_high").max().alias("_day_high"), pl.col("_low").min().alias("_day_low"))
+        .sort("_ist_date")
+    )
+    flagged: list[ExtremeRangeDay] = []
+    for row in per_day.iter_rows(named=True):
+        session_date: date = row["_ist_date"]
+        day_high = float(row["_day_high"])
+        day_low = float(row["_day_low"])
+        if day_low <= 0.0:
+            # Defensive: a non-positive low cannot be ratioed (and cannot enter
+            # a price-sane lake) — skip, never divide by zero / fabricate.
+            continue
+        ratio = (day_high - day_low) / day_low
+        if ratio < resolved:
+            continue
+        flagged.append(
+            ExtremeRangeDay(
+                session_date=session_date,
+                range_ratio=ratio,
+                known_halt=is_known_irregular_session(session_date),
+                reason=known_irregular_reason(session_date),
+            )
+        )
+    return tuple(flagged)
+
+
+def emit_extreme_daily_ranges(days: Sequence[ExtremeRangeDay], *, symbol: str) -> None:
+    """Emit the observe-only extreme-range log events for one symbol's scan.
+
+    * :data:`DAILY_RANGE_KNOWN_EVENT` — ONE INFO per KNOWN annotated day,
+      naming its :func:`~brutex.calendars.nse.known_irregular_reason` —
+      "annotated (DEC-HALT-DAY-TREATMENT-001) — no action needed".
+    * :data:`DAILY_RANGE_EVENT` — WARN per UN-annotated day, capped at
+      :data:`MAX_RANGE_WARNS`, remediation naming the add-with-citation path.
+    * :data:`DAILY_RANGE_SUPPRESSED_EVENT` — ONE summary iff the WARNs capped,
+      always carrying the TRUE count.
+
+    A zero-hit scan emits NOTHING (a healthy lake's log surface is
+    byte-identical to before this detector existed). Pure emitter — production
+    wires it through the guarded :func:`observe_extreme_daily_ranges`.
+    """
+    unknown = [d for d in days if not d.known_halt]
+    for day in days:
+        if day.known_halt:
+            _LOG.info(
+                DAILY_RANGE_KNOWN_EVENT,
+                symbol=symbol,
+                session_date=day.session_date.isoformat(),
+                range_ratio=day.range_ratio,
+                reason=day.reason,
+                remediation="annotated (DEC-HALT-DAY-TREATMENT-001) — no action needed",
+            )
+    for day in unknown[:MAX_RANGE_WARNS]:
+        _LOG.warning(
+            DAILY_RANGE_EVENT,
+            symbol=symbol,
+            session_date=day.session_date.isoformat(),
+            range_ratio=day.range_ratio,
+            remediation=(
+                "manual review — possible un-cataloged market-wide halt; if "
+                "confirmed by an NSE/SEBI circular, add the date to "
+                "calendars/nse.CIRCUIT_HALT_SESSIONS with its citation "
+                "(DEC-HALT-DAY-TREATMENT-001)"
+            ),
+        )
+    if len(unknown) > MAX_RANGE_WARNS:
+        _LOG.warning(
+            DAILY_RANGE_SUPPRESSED_EVENT,
+            symbol=symbol,
+            cap=MAX_RANGE_WARNS,
+            total=len(unknown),
+        )
+
+
+def observe_extreme_daily_ranges(df_1m: pl.DataFrame, *, before: date, symbol: str) -> int:
+    """Detect + emit extreme daily ranges in ONE guarded call — the entry point.
+
+    OBSERVE-ONLY by construction (the
+    :func:`observe_daily_open_substitutions` guard discipline): the whole
+    detect+emit pass runs inside one ``try/except``, so an unexpected error
+    logs :data:`DAILY_RANGE_ERROR_EVENT` and returns ``0`` (an honest "not
+    observed", never a fabricated count) — a detector bug can NEVER fail the
+    prebuild that hosts it, and the derived/stored bytes are untouched either
+    way (read-only scan, pinned). Returns the flagged-session count.
+    """
+    try:
+        days = detect_extreme_daily_ranges(df_1m, before=before)
+        emit_extreme_daily_ranges(days, symbol=symbol)
+    except Exception as exc:  # pylint: disable=broad-except - observe-only, must never break the prebuild
+        _LOG.warning(
+            DAILY_RANGE_ERROR_EVENT,
+            symbol=symbol,
+            error=repr(exc),
+        )
+        return 0
+    return len(days)
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,123 +838,6 @@ def derive_daily_for_targets(
                 end=target.end.isoformat(),
             )
     return DailyDeriveReport(derived=derived, no_minute=no_minute, errored=errored, bars=bars)
-
-
-def frame_to_candle_bars(
-    frame: pl.DataFrame,
-    *,
-    absent_open_interest: int | None = 0,
-) -> list[CandleBar]:
-    """Batched resampled-frame → :class:`~brutex.data.models.CandleBar` conversion.
-
-    The COMMON (CLAUDE.md §11) replacement for the per-row
-    ``frame.iter_rows(named=True)`` → ``CandleBar(Decimal(str(...)) × 4)`` loops
-    the derived-TF writer and the spot daily resampler each carried
-    (DEC-PREBUILD-GIL-VECTORIZE-001). Why: the pipeline prebuild runs INSIDE
-    the dashboard server process, and that per-row conversion was the largest
-    GIL-held pure-Python section of the prebuild (stack-sampled during the
-    blank-``GET /`` starvation diagnosis at the two former loop sites —
-    ``timeframe_materialize.py:516-527`` and ``spot_daily_resample.py:359-370``
-    pre-fix), stealing event-loop time from uvicorn while polars saturated the
-    cores. This batched form extracts each column ONCE (columnar, C-level)
-    instead of building a Python dict per row, renders the four price columns
-    to their shortest-round-trip decimal strings INSIDE polars
-    (``cast(String)`` — GIL released; numerically ``Decimal``-equal to Python's
-    ``str(float)`` per the DEC-LAKE-WRITE-VECTORIZE-001 byte-contract analysis
-    in :mod:`brutex.data.parquet_writer`, which pinned the same seed for the
-    write-side snap), and memoises the ``str → Decimal`` parse (2dp-snapped
-    lake prices repeat heavily across resample buckets; ``Decimal`` is
-    immutable, so sharing instances is value-safe).
-
-    Lives HERE — the import-graph LEAF of the pair (:mod:`~brutex.data.
-    timeframe_materialize` already imports this module for the daily-derive
-    seam) — and is re-exported from :mod:`brutex.data.timeframe_materialize`
-    for its original callers; it was moved from that module to break the
-    ``spot_daily_resample ↔ timeframe_materialize`` import cycle the shared
-    helper introduced (CodeQL ``py/cyclic-import``,
-    DEC-PREBUILD-GIL-VECTORIZE-001 follow-through).
-
-    BYTE-IDENTICAL lake output (Golden Rule #7): every constructed bar compares
-    equal to the legacy per-row form — same instants, ``Decimal`` values
-    numerically equal to ``Decimal(str(x))`` (polars may emit a different digit
-    STRING for the same value, e.g. ``0.00001`` vs ``1e-05`` — numerically
-    equal, and the sink's ``round_money`` 2dp snap keys off the numeric value
-    only) — pinned by the golden byte-equality regression over seeded lakes.
-    HONEST envelope (Golden Rule #10): this is a BATCHED construction, not a
-    bar-object elimination — the irreducible per-bar ``CandleBar`` (validated,
-    frozen) + Python ``datetime`` objects remain, so the measured win is the
-    dict/str/Decimal overhead (~25-30 % of the conversion), NOT an
-    order-of-magnitude cut; the sink write path is byte-unchanged. This
-    decision ships ONLY the vectorization — the diagnosis's other lever, a
-    ``POLARS_MAX_THREADS`` cap at the dashboard/pull entrypoints (set before
-    the first polars import, never on the engine/sweep path, which pins its
-    OWN per-worker cap in :mod:`brutex.engine.sweep_parallel`), is NOT
-    implemented anywhere: ``brutex/cli.py`` is fenced by open PRs, so the cap
-    is a REPORTED follow-up and polars core saturation during a prebuild
-    remains (starvation REDUCED, not eliminated).
-
-    Parameters
-    ----------
-    frame
-        A resampled frame with columns ``ts_utc, open, high, low, close,
-        volume`` and optionally ``open_interest``.
-    absent_open_interest
-        The ``open_interest`` used when the frame has NO OI column, and for a
-        present-but-null OI value. ``0`` is the derived-intraday-TF/spot lake
-        convention (the legacy ``_oi`` helper's contract); the spot daily
-        resampler passes ``None`` (spot/index daily bars carry no OI).
-    """
-    # Local imports keep the module import graph free of polars + the bar model
-    # for callers that only need the dataclasses (module discipline, §11).
-    from decimal import Decimal
-
-    import polars as pl
-
-    from brutex.data.models import CandleBar
-
-    if frame.height == 0:
-        return []
-
-    timestamps = frame.get_column("ts_utc").to_list()
-    opens, highs, lows, closes = (
-        frame.get_column(column).cast(pl.String).to_list()
-        for column in ("open", "high", "low", "close")
-    )
-    volumes = frame.get_column("volume").to_list()
-    open_interests: list[int | None]
-    if "open_interest" in frame.columns:
-        # Present-but-null OI maps to *absent_open_interest* (the legacy `_oi`
-        # contract: the lake stored 0 for spot, so 0 is the consistent absent
-        # value on the intraday path).
-        open_interests = [
-            absent_open_interest if value is None else int(value)
-            for value in frame.get_column("open_interest").to_list()
-        ]
-    else:
-        open_interests = [absent_open_interest] * frame.height
-
-    decimal_memo: dict[str, Decimal] = {}
-
-    def to_decimal(text: str) -> Decimal:
-        value = decimal_memo.get(text)
-        if value is None:
-            value = decimal_memo[text] = Decimal(text)
-        return value
-
-    return [
-        CandleBar(
-            timestamp=ts,
-            open=to_decimal(open_text),
-            high=to_decimal(high_text),
-            low=to_decimal(low_text),
-            close=to_decimal(close_text),
-            volume=int(volume),
-            open_interest=open_interest,
-        )
-        for ts, open_text, high_text, low_text, close_text, volume, open_interest in zip(
-            timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
-        )
-    ]
 
 
 def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar]:
@@ -1091,9 +1223,43 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     ``open_interest`` column is read — both the ``.select(...)`` and the empty-schema
     fallback frame gain it (``pl.Int64``) — and the OI-aware resampler carries
     last-of-day OI into the derived ``1day`` partition.
+
+    Price-sanity gate (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): the returned
+    window-cut frame is validated by the SAME COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` gate
+    (finiteness + positivity + OHLC ordering, one vectorized pass) that
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` runs —
+    pre-fix this window twin ran NO screen at all, so a corrupt 1m bar
+    yielded a CLEAN derived ``1day`` via the full prebuild but a POISONED
+    ``1day`` via the heal-recall / post-pull / crossverify window path. The
+    gate runs on the WINDOW-CUT frame only (validate-what-you-return, the
+    DEC-READ-GUARD-PARITY-001 law), so a corrupt row strictly OUTSIDE
+    ``[start, end)`` never blanks this read. The raised
+    :class:`~brutex.data.errors.ResampleInputError` rides the per-target
+    ``except Exception`` quarantine of
+    :func:`derive_daily_for_targets` / :func:`reconcile_daily_from_minute`
+    (the target is counted ``errored`` + WARNed, never a pass abort). The
+    bad-tick screen is deliberately NOT wired here (a larger scope change —
+    the named follow-up DEC-DAILY-WINDOW-BADTICK-001 recorded in
+    MIGRATION.md's DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 entry).
+
+    Timestamp-range gate (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): the SAME
+    window-cut frame is ALSO validated by
+    :func:`~brutex.data.price_sanity.validate_frame_ts_datetime_range` BEFORE
+    the price gate — an out-of-``datetime``-range stored timestamp panics the
+    Rust→Python conversion downstream as a BaseException. The IST-date window
+    cut structurally excludes such a row today (its IST date can never fall in
+    a real ``[start, end)``), so this gate is the defense-in-depth belt behind
+    that filter; the month-file read itself is ``glob=False`` (a literal file
+    list — the #1594 round-15 metachar law).
     Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
     """
     import polars as pl
+
+    from brutex.data.price_sanity import (
+        validate_frame_price_sanity,
+        validate_frame_ts_datetime_range,
+    )
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -1135,18 +1301,43 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # schema anchors; a missing column null-fills, an extra one is ignored —
         # the `.select(*columns)` below needs only the base OHLCV(+OI) columns,
         # which every shape carries, so the output is byte-identical for a
-        # uniform tree.
-        df = pl.scan_parquet(files, missing_columns="insert", extra_columns="ignore").collect()
+        # uniform tree. Lazily scanned through the EAGER per-file fd probe
+        # (DEC-LAKE-READ-INODE-GUARD-002): a planted FIFO among the month files
+        # raises NotRegularFileError at scan-build instead of hanging the
+        # collect in C-level fifo_open; regular files byte-identical. The
+        # helper's explicit-list arm scans LITERALLY (glob=False inside —
+        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15 metachar
+        # law on the bars tree, re-derived at the lap-8 fold: a `[`-carrying
+        # symbol dir must never glob-read its SIBLINGS' bars into this
+        # symbol's derived 1day).
+        from brutex.data.guarded_read import scan_parquet_regular
+
+        df = scan_parquet_regular(files, missing_columns="insert", extra_columns="ignore").collect()
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
-        ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
-        return (
+        ist_date = (pl.col("ts_utc") + ist_offset_duration()).dt.date()
+        frame = (
             df.rename({"timestamp": "ts_utc"})
             .with_columns(ist_date.alias("_ist_date"))
             .filter((pl.col("_ist_date") >= start) & (pl.col("_ist_date") < end))
             .select(*columns)
             .sort("ts_utc")
         )
+        context = f"{exchange}/{segment}/{symbol}/1minute"
+        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001: refuse an out-of-datetime-
+        # range stored timestamp FIRST — the window twin of make_lake_read_1m's
+        # gate, on the WINDOW-CUT frame (validate-what-you-return; the IST-date
+        # window cut structurally excludes an out-of-range row today, so this
+        # is the defense-in-depth belt behind that filter). Raises the
+        # quarantining ResampleInputError.
+        validate_frame_ts_datetime_range(frame, ts_column="ts_utc", context=context)
+        # DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001: refuse to feed a price-insane
+        # (non-finite / non-positive / mis-ordered) window slice to the daily
+        # resampler — the window twin of make_lake_read_1m's gate, run on the
+        # WINDOW-CUT frame only (a corrupt row outside [start, end) never
+        # blanks this read). Raises the quarantining ResampleInputError.
+        validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
+        return frame
 
     return _read
 

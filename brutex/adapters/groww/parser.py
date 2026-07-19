@@ -22,12 +22,13 @@ from __future__ import annotations
 import math
 import threading
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Final
 
 import structlog
 
 from brutex.adapters.groww.epoch_verdict import classify_epoch_timestamps
+from brutex.calendars.nse import IST_FIXED_OFFSET
 from brutex.data.candle_fields import (
     CandleParseError,
     EmptyCandleRow,
@@ -41,7 +42,9 @@ from brutex.observability.correlation import current_pull_id
 _LOG = structlog.get_logger("brutex.adapters.groww.parser")
 
 #: India Standard Time — a FIXED +05:30 offset (no DST), so no tzdata needed.
-_IST = timezone(timedelta(hours=5, minutes=30))
+#: The ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST = IST_FIXED_OFFSET
 
 #: Guards the once-per-pull epoch-timestamp WARNING dedup set below. The parser
 #: is called from PARALLEL window workers (both ingest spines fan out), so the
@@ -234,6 +237,19 @@ def parse_candle_rows(
         nonlocal clamped_bars
         clamped_bars += 1
 
+    # Negative-count-clamp counter (DEC-AUDIT-ALERT-CLAMP-OBS-001, sibling of
+    # the OHLC-clamp counter above): a vendor-emitted NEGATIVE volume /
+    # open_interest is clamped to 0 (DEC-VENDOR-VOLUME-NORMALIZE-001) — which
+    # used to fire with NO counter and NO log, unlike the OHLC clamp.
+    # OBSERVE-ONLY: parsed bars are byte-identical (the clamped value stays 0);
+    # ONE ``groww.parse.negative_volume_clamped`` WARNING per parsed window
+    # payload carries the count.
+    negative_count_clamped_bars = 0
+
+    def _count_negative_count_clamp() -> None:
+        nonlocal negative_count_clamped_bars
+        negative_count_clamped_bars += 1
+
     # Epoch-verdict samples (DEC-GROWW-EPOCH-VERDICT-001): raw NUMERIC row
     # timestamps, collected at ROW level (before ``assemble_candle``, so even
     # an all-no-trade epoch payload still yields evidence). Production string
@@ -270,6 +286,7 @@ def parse_candle_rows(
                 volume=None if drop_volume else volume,
                 open_interest=open_interest,
                 on_clamp=_count_clamp,
+                on_negative_count_clamp=_count_negative_count_clamp,
             )
         except EmptyCandleRow:
             continue  # graceful skip — no-trade minute
@@ -278,6 +295,18 @@ def parse_candle_rows(
         _LOG.warning(
             "groww.parse.ohlc_clamped",
             clamped_bars=clamped_bars,
+            total_rows=len(candles),
+            pull_id=current_pull_id(),
+        )
+    if negative_count_clamped_bars:
+        # ONE WARNING per window payload (mirrors ``ohlc_clamped``): the vendor
+        # emitted a NEGATIVE volume / open_interest on this many bars, each
+        # clamped to 0. OBSERVE-ONLY (DEC-AUDIT-ALERT-CLAMP-OBS-001) — the
+        # stored counts are byte-identical; the WARNING just makes the
+        # previously-silent clamp visible.
+        _LOG.warning(
+            "groww.parse.negative_volume_clamped",
+            negative_count_clamped_bars=negative_count_clamped_bars,
             total_rows=len(candles),
             pull_id=current_pull_id(),
         )

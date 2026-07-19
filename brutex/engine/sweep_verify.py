@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.data.guarded_read import read_parquet_schema_regular, read_regular_bytes
 from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -78,6 +79,7 @@ from brutex.engine.tuple_complete import (
     completion_sentinel_path,
     read_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
 from brutex.strategies.types import PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams, has_conflict
@@ -494,13 +496,54 @@ def _schedules_from_entries(
     return schedules
 
 
+def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path) -> None:
+    """Refuse a scoped generation whose recorded fill mode is not worst-case.
+
+    DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is the
+    ONLY fill model and every post-DEC ``SWEEP_START``/``SWEEP_LAUNCH`` line's
+    ``params`` carries the UNCONDITIONAL ``"fill_mode": "worst_case"`` key
+    (``canonical_trade_params`` emits it always). A context entry with NO key
+    is a precise-era line (the retired elide law recorded PRECISE by key
+    absence), and a literal ``"precise"`` token is the retired mode spelled
+    out — either way the generation's stores hold fills the deleted mode
+    produced, and verifying them as worst-case would launder precise-priced
+    results. Refuse LOUDLY; the remediation is a fresh worst-case sweep.
+
+    GENERATION-SCOPED: *entries* are the ONE generation's context entries
+    :func:`recorded_audit_facts` already selects — never the whole audit file.
+
+    Raises
+    ------
+    SweepVerifyError
+        If any scoped entry lacks the key or records anything other than
+        ``"worst_case"`` (a junk token refuses identically — tampered or
+        legacy, the tree is not verifiable under the one fill law).
+    """
+    expected = FillMode.WORST_CASE.value
+    for entry in entries:
+        params = entry.payload.get("params")
+        raw = params.get("fill_mode") if isinstance(params, dict) else None
+        if raw is None or str(raw) != expected:
+            raise SweepVerifyError(
+                f"precise-era sweep tree refused (DEC-FILL-WORST-CASE-ONLY-001): "
+                f"{audit_path} (seq {entry.seq}) records fill_mode={raw!r} — "
+                f"worst_case is the only fill model; this generation's stores "
+                f"were priced under the deleted mode machinery and cannot be "
+                f"verified. Re-run the sweep to produce a worst-case tree"
+            )
+
+
 def recorded_audit_facts(
     audit_path: Path,
     *,
     snapshot: str | None = None,
     indicator_version: str | None = None,
     code_commit_sha: str | None = None,
-) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]], tuple[str, ...]]:
+) -> tuple[
+    RecordedContext | None,
+    dict[str, tuple[int, ...]],
+    tuple[str, ...],
+]:
     """Read the audit ONCE and derive ONE generation's context + schedules.
 
     The ``cmd_sweep_verify`` seam (review round-4 finding 5 — ONE shared parse
@@ -534,16 +577,24 @@ def recorded_audit_facts(
     schedules disagreeing is real corruption (the resume gate refuses a
     schedule-only drift at launch), not any sanctioned cadence.
 
+    The scoped generation is additionally REQUIRED to record the one fill
+    law (DEC-FILL-WORST-CASE-ONLY-001): every context entry's ``params`` must
+    carry ``"fill_mode": "worst_case"`` — a precise-era generation (absent
+    key, the retired elide law, or a literal ``"precise"`` token) REFUSES
+    loudly via :func:`_require_worst_case_entries` before any tier runs.
+
     Returns ``(None, {}, ())`` when the audit file is absent, and
     ``(None, {}, other_generations)`` when the explicit flags match no
-    recorded entry (the explicit-flags path — the caller supplies the full
-    context).
+    recorded entry (the explicit-flags path — the caller supplies the
+    context strings via flags).
 
     Raises
     ------
     SweepVerifyError
         If the audit log is unreadable/corrupt, a context-bearing payload is
-        malformed, or the SCOPED generation's schedules disagree.
+        malformed, the SCOPED generation's schedules disagree, or the scoped
+        generation is a refused precise-era tree
+        (DEC-FILL-WORST-CASE-ONLY-001).
     """
     if not audit_path.exists():
         return None, {}, ()
@@ -568,6 +619,7 @@ def recorded_audit_facts(
     target = candidates[-1]
     matching = [entry for entry, ctx in pairs if ctx == target]
     others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs if ctx != target))
+    _require_worst_case_entries(matching, audit_path)
     return (
         _context_from_entries(matching, audit_path),
         _schedules_from_entries(matching, audit_path),
@@ -993,7 +1045,7 @@ def verify_structural(root: Path) -> TreeVerifyReport:
                 "filename carries no 16-hex tuple digest — pairing unverifiable",
             )
             continue
-        actual_hash = hashlib.sha256(store_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(read_regular_bytes(store_path)).hexdigest()
 
         sidecar_path = trial_stats_sidecar_path(store_path)
         sidecar_ok = False
@@ -1321,7 +1373,6 @@ def verify_identity(
         params — :func:`recorded_roll_schedules_from_audit` — never the
         operator's memory). ``None`` (the default / every spot tree) is the
         byte-identical pre-launch derivation.
-
     Raises
     ------
     SweepVerifyError
@@ -1330,7 +1381,9 @@ def verify_identity(
     if not root.is_dir():
         raise SweepVerifyError(f"results root not found or not a directory: {root}")
     findings: list[VerifyFinding] = []
-    plan = plan_expected_stores(root, grid, stage3=stage3)
+    plan: dict[Path, tuple[SweepTuple, SweepGridConfig, bool]] = dict(
+        plan_expected_stores(root, grid, stage3=stage3)
+    )
     found = _outside_quarantine(root, sorted(root.glob("**/*.parquet")))
 
     if plan and found and not any(path in plan for path in found):
@@ -1605,8 +1658,14 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     import polars as pl  # deferred exactly like ResultsStore.load (the data extra)
 
     try:
-        original_schema = list(pl.read_parquet_schema(original).items())
-        scratch_schema = list(pl.read_parquet_schema(scratch).items())
+        # GUARDED footer probes (DEC-LAKE-READ-INODE-GUARD-001 fix round — the
+        # diagnostic-arm class sweep): both stores' BYTE reads above ride the
+        # guarded read_regular_bytes, so this attribution probe re-opening the
+        # SAME paths must not be the one raw-path open that wedges on a
+        # post-read inode swap. NotRegularFileError is an OSError → the
+        # existing abstain arm below absorbs it (never VIX-attributable).
+        original_schema = list(read_parquet_schema_regular(original).items())
+        scratch_schema = list(read_parquet_schema_regular(scratch).items())
     except (pl.exceptions.PolarsError, OSError):
         return False  # an unreadable footer is never VIX-attributable
     original_names = {name for name, _ in original_schema}
@@ -1838,8 +1897,8 @@ def compare_recount(
             nonlocal store_digest_memo
             if store_digest_memo is None:
                 store_digest_memo = (
-                    hashlib.sha256(store_path.read_bytes()).hexdigest(),
-                    hashlib.sha256(scratch_store.read_bytes()).hexdigest(),
+                    hashlib.sha256(read_regular_bytes(store_path)).hexdigest(),
+                    hashlib.sha256(read_regular_bytes(scratch_store)).hexdigest(),
                 )
             return store_digest_memo
 
@@ -1902,7 +1961,7 @@ def compare_recount(
                     )
                 )
                 continue
-            if original.read_bytes() == scratch.read_bytes():
+            if read_regular_bytes(original) == read_regular_bytes(scratch):
                 continue  # byte-identical — verified (silence is the verdict)
             # VIX-only divergence (see the docstring's VIX RESIDUAL). All
             # THREE artifacts necessarily ride a VIX-only lake movement: the

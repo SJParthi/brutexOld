@@ -292,7 +292,9 @@ def metrics_for_mask(
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) — a pure fast-path hint, results
     byte-identical with or without it — and so are the walker's exit-reason
     counters (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), which feed the
-    metrics' ``sl_hit_rate``. ``trailing_anchor``
+    metrics' ``sl_hit_rate``. Every fill follows the ONE hardcoded
+    worst-case adverse-max law (DEC-FILL-WORST-CASE-ONLY-001) — the retired
+    ``FillPolicy`` threading is deleted with its modes. ``trailing_anchor``
     (DEC-METRICS-TRAILING-WINDOW-001) passes through to
     :func:`metrics_from_trades` — the GLOBAL recency anchor; ``None`` (the
     default) leaves every recency field the honest ``None``.

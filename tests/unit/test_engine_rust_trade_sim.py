@@ -4,10 +4,11 @@ DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). Exercises
 :class:`brutex.engine.rust_trade_sim.ResidentTradeSim` to 100% line + branch:
 construction validation, the ``n_bars`` view, the ``HOLD``/empty guards, both the
 Rust path (the default when the ``fno_math`` wheel is built — CI) AND the
-pure-Python fallback (forced by clearing ``_rust`` / shadowing the import), every
-``FillPolicy`` → kernel-flag mapping, and BUY/SELL. The parity assertions pin the
-seam's contract: its output equals the
-:func:`brutex.engine.trade_sim.simulate_trades` oracle field-for-field.
+pure-Python fallback (forced by clearing ``_rust`` / shadowing the import), and
+BUY/SELL — all under the ONE hardcoded worst-case fill law
+(DEC-FILL-WORST-CASE-ONLY-001; the retired ``FillPolicy`` → kernel-flag mapping
+is deleted). The parity assertions pin the seam's contract: its output equals
+the :func:`brutex.engine.trade_sim.simulate_trades` oracle field-for-field.
 """
 
 from __future__ import annotations
@@ -38,9 +39,6 @@ from brutex.engine.rust_trade_sim import (
 )
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.trade_sim import (
-    FillPolicy,
-    LevelFill,
-    SameBarTie,
     simulate_trades,
     simulate_trades_with_exit_counts,
 )
@@ -98,7 +96,6 @@ def _oracle(
     tf_minutes: int,
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
-    policy: FillPolicy,
 ) -> list:
     """The pure-Python oracle trades for one mask (what the seam must match)."""
     return simulate_trades(
@@ -108,7 +105,6 @@ def _oracle(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
-        policy=policy,
     )
 
 
@@ -207,7 +203,6 @@ class TestConstruction:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -231,22 +226,8 @@ class TestGuards:
 # ── parity: seam == oracle (Rust path AND forced fallback) ───────────────────
 
 
-_POLICIES = [
-    FillPolicy(),  # AT_LEVEL / AT_LEVEL / SL_FIRST (default)
-    FillPolicy(stop_loss=LevelFill.NEXT_OPEN),
-    FillPolicy(take_profit=LevelFill.NEXT_OPEN),
-    FillPolicy(same_bar=SameBarTie.TP_FIRST),
-    FillPolicy(
-        stop_loss=LevelFill.NEXT_OPEN,
-        take_profit=LevelFill.NEXT_OPEN,
-        same_bar=SameBarTie.TP_FIRST,
-    ),
-]
-
-
 class TestParity:
     @pytest.mark.parametrize("direction", [Side.BUY, Side.SELL])
-    @pytest.mark.parametrize("policy", _POLICIES)
     @pytest.mark.parametrize(
         ("sl", "tp"),
         [(None, None), (300, None), (None, 400), (300, 400)],
@@ -254,7 +235,6 @@ class TestParity:
     def test_seam_matches_oracle_rust_path(
         self,
         direction: Side,
-        policy: FillPolicy,
         sl: int | None,
         tp: int | None,
     ) -> None:
@@ -267,7 +247,6 @@ class TestParity:
             direction=direction,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
-            policy=policy,
         )
         expected = [
             _oracle(
@@ -278,7 +257,6 @@ class TestParity:
                 tf_minutes=1,
                 stop_loss_paisa=sl,
                 take_profit_paisa=tp,
-                policy=policy,
             )
             for m in masks
         ]
@@ -308,7 +286,6 @@ class TestParity:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=400,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -394,7 +371,6 @@ class TestSessionAwareForcedExitParity:
                 tf_minutes=1,
                 stop_loss_paisa=100_000,
                 take_profit_paisa=100_000,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -405,7 +381,7 @@ class TestSessionAwareForcedExitParity:
         fire_trades = got[0]
         assert len(fire_trades) == 1
         assert fire_trades[0].exit_ts == _muhurat_ts(14, 35)
-        assert fire_trades[0].pnl_paisa == 20  # forced at OPEN 100.20, not 200
+        assert fire_trades[0].pnl_paisa == 0  # forced at the bar LOW 100.00, not 200
 
     def test_rust_and_fallback_agree_on_muhurat(self) -> None:
         # The Rust path and the forced pure-Python fallback agree on a Muhurat
@@ -454,11 +430,108 @@ class TestSessionAwareForcedExitParity:
                 tf_minutes=1,
                 stop_loss_paisa=100_000,
                 take_profit_paisa=100_000,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
         assert got == expected
+
+    def test_rust_kernel_extended_outage_day_matches_oracle_at_1650(self) -> None:
+        # DEC-EXTENDED-SESSION-OUTAGE-001 (fails-before pin, Rust ≡ Python):
+        # on the 2021-02-24 extended day (close 17:00 IST at NSE + BSE + MSEI,
+        # SEBI press releases verified 2026-07-11) the kernel's forced flags
+        # resolve the 16:50 boundary — a 15:25 bar is NOT forced (the pre-fix
+        # resolver forced every bar >= 15:20), and both paths agree
+        # field-for-field.
+        outage = date(2021, 2, 24)
+
+        def _outage_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
+            ts = datetime(outage.year, outage.month, outage.day, hh, mm, tzinfo=IST).astimezone(UTC)
+            return CandleBar(
+                timestamp=ts,
+                open=Decimal(o),
+                high=Decimal(h),
+                low=Decimal(lo),
+                close=Decimal(c),
+                volume=0,
+                open_interest=None,
+            )
+
+        bars = [
+            _outage_bar(15, 18, "100", "100", "100", "100"),
+            _outage_bar(15, 25, "100", "100", "100", "100"),  # NOT forced (pre-fix: forced)
+            _outage_bar(16, 49, "100", "100", "100", "100"),  # NOT forced
+            _outage_bar(16, 50, "100.60", "101", "100", "100.80"),  # forced @ 16:50
+            _outage_bar(16, 51, "200", "200", "200", "200"),  # never reached
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1, 1 << 63]
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        got = sim.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        expected = [
+            _oracle(
+                bars,
+                bar_bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=100_000,
+                take_profit_paisa=100_000,
+            )
+            for m in masks
+        ]
+        assert got == expected
+        # Anti-vacuity: the fire-every-bar mask opens AND force-exits at the
+        # 16:50 extended boundary (NOT 15:20, NOT the 200-print next bar).
+        # Worst-case fill hand-derivation (DEC-FILL-WORST-CASE-ONLY-001 — the
+        # member authored this pin pre-#1825's open-anchored law): BUY entry
+        # fills at bar[1]'s adverse HIGH 100.00; the forced exit fills at the
+        # decided bar[3]'s adverse LOW 100.00 → pnl 0. The 16:50 bar's prices
+        # still provably fold: mfe 60 paisa = its 100.60 open over the 100.00
+        # entry. A 15:20-forced exit or a bar[4] leak (200-print → pnl
+        # 10_000 paisa) would fail BOTH the exit_ts and the pnl pins.
+        fire_trades = got[0]
+        assert len(fire_trades) == 1
+        assert fire_trades[0].exit_ts == bars[3].timestamp
+        assert fire_trades[0].pnl_paisa == 0  # adverse LOW 100.00, never 200
+        assert fire_trades[0].mfe_paisa == 60  # the 100.60 open registered
+
+    def test_rust_and_fallback_agree_on_extended_outage_day(self) -> None:
+        # The Rust path and the forced pure-Python fallback agree on the
+        # extended day too (the whole contract on the new session tier).
+        outage = date(2021, 2, 24)
+        bars = [
+            CandleBar(
+                timestamp=datetime(
+                    outage.year, outage.month, outage.day, hh, mm, tzinfo=IST
+                ).astimezone(UTC),
+                open=Decimal(o),
+                high=Decimal(h),
+                low=Decimal(lo),
+                close=Decimal(c),
+                volume=0,
+                open_interest=None,
+            )
+            for hh, mm, o, h, lo, c in [
+                (16, 40, "100", "100", "100", "100"),
+                (16, 49, "100", "100", "100", "100"),
+                (16, 50, "100.50", "101", "100", "100.90"),
+                (16, 51, "100", "100", "100", "100"),
+            ]
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1, 2, 3]
+        rust = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        rust_out = rust.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        fallback = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        fallback._rust = None
+        fb_out = fallback.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        assert rust_out == fb_out
 
 
 # ── cross-session pending-entry drop parity (R2-OC-2) ─────────────────────────
@@ -515,7 +588,6 @@ class TestCrossSessionPendingEntryParity:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
         assert got == expected
@@ -555,7 +627,6 @@ class TestCrossSessionPendingEntryParity:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
         assert got == expected
@@ -633,7 +704,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -662,7 +732,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -699,7 +768,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -743,7 +811,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -787,7 +854,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -821,7 +887,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -927,7 +992,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -968,7 +1032,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -1003,7 +1066,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
         assert first == expected  # the fallback STILL served both calls,
@@ -1053,7 +1115,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=distance if leg == "stop_loss_paisa" else None,
                 take_profit_paisa=distance if leg == "take_profit_paisa" else None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1079,7 +1140,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=_MAX_KERNEL_PRICE_PAISA,
                 take_profit_paisa=_MAX_KERNEL_PRICE_PAISA,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1142,7 +1202,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -1200,7 +1259,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in mixed
         ]
@@ -1229,7 +1287,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1274,7 +1331,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -1316,7 +1372,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in wide
         ]
@@ -1351,7 +1406,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1873,7 +1927,6 @@ class TestKernelInputsMemo:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 

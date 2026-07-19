@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from brutex.data.atomic_io import atomic_write_simple, lake_write_guard
+from brutex.data.sidecar_read import read_regular_bytes
 
 __all__ = [
     "RATE_BRIDGE_FILENAME",
@@ -310,9 +311,19 @@ def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
     """
     path = rate_bridge_path(lake_root)
     try:
-        raw = path.read_bytes()
+        # fd-gated regular-file read (DEC-LAKE-READ-INODE-GUARD-002): the plain
+        # ``path.read_bytes()`` blocked FOREVER on a FIFO planted at the bridge
+        # path — the caller (RateBridgeCache._refresh_body) runs on the deadline
+        # daemon so the ROUTE stayed bounded, but the wedged daemon never
+        # returned, the cache's single-flight ``_inflight`` never cleared, and
+        # the bridge read was permanently stuck on last-known until restart.
+        # The gate makes the FIFO raise ``NotRegularFileError`` (an ``OSError``
+        # — the arm below) instantly: honest ``None``, no zombie, the
+        # single-flight self-heals. Regular files read byte-identical bytes.
+        raw = read_regular_bytes(path)
     except OSError:
-        # Absent (FileNotFoundError) or unreadable (permission/IO) — no live CLI bridge.
+        # Absent (FileNotFoundError), unreadable (permission/IO) or a planted
+        # non-regular inode (NotRegularFileError) — no live CLI bridge.
         return None
     try:
         data = json.loads(raw)

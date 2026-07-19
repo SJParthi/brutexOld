@@ -117,7 +117,7 @@ open_interest  INT64                   NULL      -- always NULL for spot indexes
 - **O(1) lookup:** catalog routes to one partition; polars binary-search inside
 - **Hash:** `raw_hash = sha256(parquet_bytes)`
 - **Idempotence:** atomic tempfile + rename; same bytes = no-op; different bytes = `WriterError`
-- **Code:** `brutex/data/parquet_writer.py:280-300`, `brutex/data/models.py:31-88`
+- **Code:** `brutex/data/parquet_writer.py:296-320`, `brutex/data/models.py:31-88`
 
 ### 3.2 DuckDB `partitions` (catalog)
 
@@ -255,7 +255,7 @@ combo_hash = sha256(
 )
 ```
 
-✅ **RESOLVED** by DEC-P0-060 (MIGRATION.md entry #197) + DEC-COMBO-HASH-UNIQUENESS-001: `brutex/strategies/combo.py:172-194` now hashes the full 9-field identity (`strategy_id` ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical params ‖ `data_snapshot_hash` ‖ `indicator_version` ‖ `code_commit_sha`). The fenced `sha256(...)` block above is the HISTORICAL spec §14 form preserved for the audit trail — the live digest is **blake3** per C-05 (DEC-CALIBRATE-001; CLAUDE.md Golden Rule #4).
+✅ **RESOLVED** by DEC-P0-060 (MIGRATION.md entry #197) + DEC-COMBO-HASH-UNIQUENESS-001: `brutex/strategies/combo.py:209-326` now hashes the full 9-field identity (`strategy_id` ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical params ‖ `data_snapshot_hash` ‖ `indicator_version` ‖ `code_commit_sha`). The fenced `sha256(...)` block above is the HISTORICAL spec §14 form preserved for the audit trail — the live digest is **blake3** per C-05 (DEC-CALIBRATE-001; CLAUDE.md Golden Rule #4).
 
 ---
 

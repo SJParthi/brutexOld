@@ -207,10 +207,18 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # + tests/unit/test_ranking_streaks.py joining the pair (the #1750
     # pledge extension) cites THAT decision's entry, not this one.
     ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797, 1975}),
-    "brutex/data/lake_stats_manifest.py": frozenset({867}),
+    # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16): render_shard's
+    # docstring cites THAT decision's entry for its Rust-seam routing note,
+    # not this one.
+    "brutex/data/lake_stats_manifest.py": frozenset({867, 1914}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),
-    "tests/unit/test_lake_stats_manifest.py": frozenset({1597}),
+    # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16, club RL-B fold
+    # lap): the TestRenderShardRustSeamRouting class docstring cites THAT
+    # decision's entry for the render_shard Rust-seam routing pins, not this
+    # one (the member branch extended the SOURCE module's allowlist but
+    # missed this TEST file's — caught by this pin on the folded tree).
+    "tests/unit/test_lake_stats_manifest.py": frozenset({1597, 1914}),
 }
 
 

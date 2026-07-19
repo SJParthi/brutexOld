@@ -149,6 +149,30 @@ def test_compute_snapshot_empty_bars_is_none() -> None:
     assert compute_snapshot(_NIFTY, [], prev_close=Decimal("100")) is None
 
 
+def test_compute_snapshot_zero_prev_close_leaves_change_none() -> None:
+    """DEC-MOVERS-DAILY-FRESHNESS-001 folded MINOR (fails-before): the
+    ``MoverSnapshot.change`` docstring contract is None when ``prev_close`` is
+    None / ZERO, but the pre-fix subtraction served ``change == ltp`` beside a
+    None ``pct_change`` for a zero baseline (an out-of-band hand-planted
+    0-close prior bar — production writers never emit one)."""
+    bars = [_bar(minute=15, close="105.25", volume=10)]
+    snap = compute_snapshot(_NIFTY, bars, prev_close=Decimal("0"))
+    assert snap is not None
+    assert snap.prev_close == Decimal("0.00")  # the served baseline is untouched
+    assert snap.change is None  # the docstring contract — never `change == ltp`
+    assert snap.pct_change is None  # pct_change was already zero-base-total
+    assert snap.ltp == Decimal("105.25")
+
+
+def test_compute_snapshot_nonzero_prev_close_change_unchanged() -> None:
+    # The guard is zero-only: a real baseline keeps the byte-identical change.
+    bars = [_bar(minute=15, close="105.25", volume=10)]
+    snap = compute_snapshot(_NIFTY, bars, prev_close=Decimal("100"))
+    assert snap is not None
+    assert snap.change == Decimal("5.25")
+    assert snap.pct_change == Decimal("5.25")
+
+
 def test_value_crore_rendering() -> None:
     # 5,000,000,000 paisa = ₹50,000,000 = 5 crore → "5.00".
     snap = MoverSnapshot(

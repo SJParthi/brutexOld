@@ -21,6 +21,7 @@ from collections.abc import Sequence
 
 __all__ = [
     "ResidentBars",
+    "ResidentBarsU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -29,11 +30,14 @@ __all__ = [
     "bitcount_u64s",
     "blake3_hash",
     "count_supermask_u64s",
+    "count_supermask_u128s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "count_supermasks_u128s",
     "metrics_fold_recency",
     "metrics_fold_trades",
     "popcount_bytes",
+    "stats_cpcv_pass_count",
 ]
 
 __version__: str
@@ -95,6 +99,27 @@ def count_supermasks_u64s(bar_bits: list[int], masks: list[int]) -> list[int]:
     """
     ...
 
+def count_supermask_u128s(bar_bits: list[int], mask: int) -> int:
+    """Single-mask SUPERSET count over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `count_supermask_u64s`: counts `bar` in `bar_bits` with
+    `(bar & mask) == mask` over native u128 words. A value outside
+    `[0, 2**128)` raises `OverflowError` at the PyO3 extraction edge.
+    """
+    ...
+
+def count_supermasks_u128s(bar_bits: list[int], masks: list[int]) -> list[int]:
+    """Batched per-mask SUPERSET count over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `count_supermasks_u64s` — same contract with `bar_bits`
+    / `masks` widened to u128 (positional alignment; empty `masks` → `[]`;
+    empty `bar_bits` → `0` per mask; `mask == 0` matches every bar). Routes
+    through the SAME width-generic dispatch as the u64 kernel, so the counts
+    cannot drift between widths. A value outside `[0, 2**128)` raises
+    `OverflowError` at the PyO3 extraction edge.
+    """
+    ...
+
 def count_supermasks_u64s_nthreads(
     bar_bits: list[int], masks: list[int], n_threads: int
 ) -> list[int]:
@@ -112,6 +137,27 @@ def count_supermasks_u64s_nthreads(
 
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
+    ...
+
+def stats_cpcv_pass_count(
+    counts: list[int],
+    means: list[float],
+    m2s: list[float],
+    n_test_groups: int,
+    min_sharpe: float,
+) -> int:
+    """CPCV fold pass-count over per-group moment triples (DEC-METRICS-RUST-STATS-001).
+
+    `counts`/`means`/`m2s` are the per-group `(n, mean, M2)` triples from
+    `brutex.metrics.cpcv._group_moments`. Returns how many of the
+    `C(len(counts), n_test_groups)` folds have a defined Chan/Pébay-merged
+    Sharpe STRICTLY greater than `min_sharpe` — the exact
+    `brutex.metrics.cpcv._combine_moments` fold, operation-for-operation
+    (claim class STRUCTURAL). Raises `ValueError` on a structurally invalid
+    input (length mismatch, `n_groups < 2`, `n_test_groups` out of
+    `[1, n_groups - 1]`, any `count < 1`, total count beyond i64); the
+    `brutex.metrics.rust_stats` seam routes any error to the Python oracle.
+    """
     ...
 
 def sweep_drawdown_stats(
@@ -203,6 +249,22 @@ class ResidentBars:
     def count_supermasks(self, masks: list[int]) -> list[int]: ...
     def count_supermask(self, mask: int) -> int: ...
 
+class ResidentBarsU128:
+    """Resident bar buffer over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `ResidentBars`: holds u128 `bar_bits` Rust-side across
+    batch calls (the `O(N_bars)` copy paid ONCE in `__init__`; subsequent
+    `count_supermasks` calls marshal only `masks`). Frozen + immutable; only
+    `n_bars` is exposed. A `bar_bits` / mask value outside `[0, 2**128)`
+    raises `OverflowError` at the PyO3 extraction edge.
+    """
+
+    def __init__(self, bar_bits: list[int]) -> None: ...
+    @property
+    def n_bars(self) -> int: ...
+    def count_supermasks(self, masks: list[int]) -> list[int]: ...
+    def count_supermask(self, mask: int) -> int: ...
+
 class ResidentSweepSim:
     """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + sessions + bar_bits.
 
@@ -240,9 +302,6 @@ class ResidentSweepSim:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[list[tuple[int, int, int, int, int, int]]]:
         """Simulate a batch of masks → per-mask round-trip trade tuples.
 
@@ -258,9 +317,6 @@ class ResidentSweepSim:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[int]:
         """Per-mask round-trip trade COUNT only (the throughput-bench fast path).
 
@@ -275,9 +331,6 @@ class ResidentSweepSim:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[
         tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]
     ]:
@@ -324,9 +377,6 @@ class ResidentSweepSimU128:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[list[tuple[int, int, int, int, int, int]]]:
         """Simulate a batch of u128 masks → per-mask round-trip trade tuples.
 
@@ -342,9 +392,6 @@ class ResidentSweepSimU128:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[int]:
         """Per-mask round-trip trade COUNT only (no per-trade allocation).
 
@@ -358,9 +405,6 @@ class ResidentSweepSimU128:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[
         tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]
     ]:

@@ -74,13 +74,26 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
-def _trending_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos win often via the TP leg."""
+def _trending_bars(n_days: int = 45, per_day: int = 120) -> list[CandleBar]:
+    """A mostly-up drift with every-5th-day DOWN sessions (the sweep_run twin).
+
+    Under the ONE worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001) the
+    grid's ranked fixtures ride EOD-only exits (``stop_losses=[None]`` /
+    ``take_profits=[None]`` — the ``_grid`` default): tight SL/TP over these
+    wide-range synthetic bars always fills at the adverse extreme and
+    gate-rejects every combo; the DOWN days keep ``profit_factor`` finite so
+    :func:`brutex.ranking.passes_gates` can pass, and 45 days clears
+    MIN_TRADES=30 at ~one session-gap trade per day per mask.
+    """
     bars: list[CandleBar] = []
     for d in range(n_days):
         price = 100.0
+        down_day = d % 5 == 4
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
             bars.append(_bar(d, m, price, close))
             price = close
     return bars
@@ -93,8 +106,10 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "directions": [Side.BUY],
         "k_values": [1],
         "condition_bits": [0, 1, 2, 3, 4],
-        "stop_losses": [80],
-        "take_profits": [50],
+        # EOD-only exits — the ranked-fixture default under the one worst-case
+        # law (see _trending_bars); knob-specific tests override explicitly.
+        "stop_losses": [None],
+        "take_profits": [None],
         "proximities": [None],
         "mode": "A",
         "data_snapshot_hash": "snap0001",
@@ -232,6 +247,15 @@ class TestSweepGridConfig:
     def test_hold_direction_rejected(self) -> None:
         with pytest.raises(ValueError, match="must not contain Side.HOLD"):
             _grid(directions=[Side.BUY, Side.HOLD])
+
+    def test_fill_mode_field_deleted(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 killed-token pin: SweepGridConfig has
+        # NO fill-mode axis — worst-case is the law, never a grid knob.
+        import dataclasses
+
+        assert "fill_mode" not in {f.name for f in dataclasses.fields(SweepGridConfig)}
+        with pytest.raises(TypeError):
+            _grid(fill_mode="worst_case")
 
     # ── Layer-1 engine-scope hard invariant (DEC-ENGINE-SCOPE-GUARD-001) ──
 
@@ -408,13 +432,14 @@ class TestSweepGridConfig:
             _grid(stage3_enable=True, stop_losses=[7])
 
     def test_stage3_enable_rejects_none_take_profit(self) -> None:
+        # stop_losses on-grid so the TP arm is the one that trips.
         with pytest.raises(ValueError, match="take_profits value\\s+to be a Mode-A grid"):
-            _grid(stage3_enable=True, take_profits=[None])
+            _grid(stage3_enable=True, stop_losses=[80], take_profits=[None])
 
     def test_stage3_enable_rejects_off_grid_take_profit(self) -> None:
         # 505 exceeds the TP axis hi bound of 500.
         with pytest.raises(ValueError, match="take_profits value\\s+on the Mode-A grid"):
-            _grid(stage3_enable=True, take_profits=[505])
+            _grid(stage3_enable=True, stop_losses=[80], take_profits=[505])
 
     def test_stage3_enable_accepts_on_grid_axes(self) -> None:
         grid = _grid(stage3_enable=True, stop_losses=[80, 100], take_profits=[50, 120])
@@ -603,20 +628,29 @@ class TestTupleDigestGateSelectionIdentity:
     C1 (overfit) / C2 (top_k/min_hits/max_combos) / stage3 re-key the store
     Parquet + completion-sentinel address, while a DEFAULT (ungated,
     default-selection) sweep stays BYTE-STABLE — no existing on-disk store
-    re-keys. The pre-fix default digest is the empirically-captured constant.
+    re-keys WITHIN the one-law era. The default digest is the
+    empirically-captured constant, DELIBERATELY re-locked once by
+    DEC-FILL-WORST-CASE-ONLY-001: the descriptor now folds the permanent
+    ``fill_mode: worst_case`` token unconditionally, so every post-DEC store
+    address is distinct from every precise-era address by construction (the
+    anti-aliasing pin below keeps the retired digest dead).
     """
 
-    # The pre-fix default digest captured on 0f411437 (16-char _PATH_DIGEST_LEN).
-    _PRE_FIX_DEFAULT_DIGEST = "5b020e892247deac"
+    # The one-law default digest (16-char _PATH_DIGEST_LEN) captured after
+    # DEC-FILL-WORST-CASE-ONLY-001 folded the unconditional fill_mode token.
+    _DEFAULT_DIGEST = "7a0120c1123b44c6"
+    #: The FROZEN precise-era default digest (captured on 0f411437) — a
+    #: retired address no one-law sweep may ever mint again.
+    _PRECISE_ERA_DIGEST = "5b020e892247deac"
 
     def test_default_digest_byte_stable(self) -> None:
         from brutex.engine.sweep_orchestrator import _tuple_digest
 
-        assert _tuple_digest(_tuple(), _grid()) == self._PRE_FIX_DEFAULT_DIGEST
+        assert _tuple_digest(_tuple(), _grid()) == self._DEFAULT_DIGEST
 
-    def test_default_store_path_filename_unchanged(self, tmp_path: Path) -> None:
+    def test_default_store_path_filename_stable(self, tmp_path: Path) -> None:
         name = tuple_store_path(tmp_path, _tuple(), _grid()).name
-        assert name == f"BUY_k1_{self._PRE_FIX_DEFAULT_DIGEST}.parquet"
+        assert name == f"BUY_k1_{self._DEFAULT_DIGEST}.parquet"
 
     def test_selection_defaults_elide_byte_stable(self) -> None:
         from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
@@ -638,11 +672,23 @@ class TestTupleDigestGateSelectionIdentity:
         assert d90 != d0
         assert d90 != d80  # a distinct KNOB value re-keys again, not just presence
 
+    def test_one_law_digest_never_aliases_the_precise_era(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 anti-aliasing pin: the unconditional
+        # fill_mode token moves the default store address off the frozen
+        # precise-era digest, so a one-law sweep can never adopt (or
+        # overwrite) a precise-era Parquet at the same path.
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        assert d0 == self._DEFAULT_DIGEST
+        assert d0 != self._PRECISE_ERA_DIGEST
+
     def test_stage3_rekeys_but_disabled_knobs_inert(self) -> None:
         from brutex.engine.sweep_orchestrator import _tuple_digest
 
         d0 = _tuple_digest(_tuple(), _grid())
-        assert _tuple_digest(_tuple(), _grid(stage3_enable=True)) != d0
+        stage3 = _grid(stage3_enable=True, stop_losses=[80], take_profits=[50])
+        assert _tuple_digest(_tuple(), stage3) != d0
         # A disabled Stage-3 pass leaves its knobs INERT → no re-key.
         assert _tuple_digest(_tuple(), _grid(stage3_top_k=999)) == d0
 
@@ -1232,7 +1278,10 @@ class TestRunSweepGridRollSchedule:
 
     def test_futures_grid_threads_the_schedule_and_runs(self, tmp_path: Path) -> None:
         pytest.importorskip("polars")
-        bars = _trending_bars(n_days=4)
+        # The full 45-day fixture: EOD-only exits yield ~1 trade/day, so the
+        # MIN_TRADES=30 rank gate needs the whole span (the one-law economics
+        # — see _trending_bars).
+        bars = _trending_bars()
         # DEC-ENGINE-SPOT-ONLY-001: below-the-gate futures machinery test —
         # the research escape flag is the sanctioned construction path.
         grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)

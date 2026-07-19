@@ -84,6 +84,7 @@ from typing import Any, Final
 
 import fno_math
 
+from brutex.strategies import combo_rust
 from brutex.strategies.errors import StrategyError
 
 #: Maximum nesting depth accepted by :func:`_canonicalise_value`. Far above any
@@ -136,12 +137,30 @@ def reject_unit_separator(
     Exception
         The injected *error* class, naming the offending field.
     """
+    offender = combo_rust.routed_first_offending_field(fields, python_law=_first_offending_field)
+    if offender is not None:
+        raise error(
+            f"{context}: {offender} must not contain the \\x1f "
+            "unit-separator byte (it is the field join delimiter)"
+        )
+
+
+def _first_offending_field(fields: Iterable[tuple[str, str]]) -> str | None:
+    """The verbatim scan LAW — the first ``\\x1f``-carrying field's NAME, or ``None``.
+
+    Extracted token-for-token from :func:`reject_unit_separator`'s former
+    loop (DEC-STRATEGIES-RUST-COMBO-001, the Slice-0 verbatim-extraction
+    idiom) so it can serve as the LIVE parity oracle the
+    :mod:`brutex.strategies.combo_rust` facade injects (``python_law=``).
+    Lazy single-pass: a generator is consumed only to the first offender —
+    the flag-OFF behaviour is byte- and laziness-identical to the historical
+    inline loop. The message bytes + the injected error class stay in
+    :func:`reject_unit_separator` (Python owns the error taxonomy).
+    """
     for field_name, field_value in fields:
         if UNIT_SEPARATOR in field_value:
-            raise error(
-                f"{context}: {field_name} must not contain the \\x1f "
-                "unit-separator byte (it is the field join delimiter)"
-            )
+            return field_name
+    return None
 
 
 def canonicalise_params(params: Mapping[str, Any]) -> str:
@@ -162,8 +181,25 @@ def canonicalise_params(params: Mapping[str, Any]) -> str:
         raise StrategyError(
             f"canonicalise_params: top-level params must be a Mapping, got {type(params).__name__}"
         )
-    return json.dumps(
+    return combo_rust.routed_canonical_json(
         _canonicalise_value(params),
+        python_law=_stdlib_canonical_json,
+    )
+
+
+def _stdlib_canonical_json(lowered: Mapping[str, Any]) -> str:
+    """The verbatim canonical-JSON RENDER law — the historical ``json.dumps`` call.
+
+    Extracted token-for-token from :func:`canonicalise_params`
+    (DEC-STRATEGIES-RUST-COMBO-001, the Slice-0 verbatim-extraction idiom)
+    so it can serve as the LIVE parity oracle the
+    :mod:`brutex.strategies.combo_rust` facade injects (``python_law=``).
+    *lowered* is :func:`_canonicalise_value`'s output — plain data, float-
+    and Decimal-free by law (both are already-rendered strings), so this is
+    a pure stdlib byte law with no repr surface.
+    """
+    return json.dumps(
+        lowered,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,

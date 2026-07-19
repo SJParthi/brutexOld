@@ -105,22 +105,28 @@ Per industry-published broker examples + Section 170 CGST + Rule 11 STT Rules:
 
 ## 5. Worked examples (enforced calculator oracles)
 
-> **REGENERATED 2026-07-03 (R2-OC-9)** from the ACTUAL output of the shipped
-> calculator (`brutex.costs.calculator.compute_trade_cost`). The previous
-> hand-derived tables had drifted from the code: they rounded CGST/SGST
-> **separately** (the exact pre-DEC-COST-001 +₹1 overcharge this doc's §4
-> claims to have fixed — Example 3 said ₹52.19 where the calculator produces
-> **₹51.18**), mis-rounded a sub-paise SEBI fee to ₹0.01, and ignored that the
-> calculator bakes the **flat 1-tick adverse slippage per side** (§19
-> resolution 2 / TRACK2_OPTIONS_SPEC §9) into the fills, which changes each
-> notional and hence every rate-based charge.
+> **REGENERATED 2026-07-15 (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md
+> #1825)** from the ACTUAL output of the shipped calculator
+> (`brutex.costs.calculator.compute_trade_cost`) under the ONE worst-case
+> fill law: each leg's flat 1-tick adverse slippage now anchors on the fill
+> bar's ADVERSE EXTREME (long: entry HIGH + tick / exit LOW − tick), and the
+> adverse (ceiling) LEVY-rounding law is PERMANENT — every rate-scaled levy
+> CEILs (paisa for exchange/SEBI/IPFT per leg; whole-rupee for
+> STT/stamp/GST) so the backtest charge can only be ≥ the statutorily
+> half-up-rounded real charge (the backtest can only UNDERSTATE net P&L).
+> The prior regeneration (2026-07-03, R2-OC-9) had fixed the CGST/SGST
+> round-twice drift; those nearest-rounded figures are superseded by the
+> ceiled stack below.
 >
 > Fixture parameters common to Examples 1-4: trade date **2026-05-15** (IST;
 > post-1-Apr-2026 STT regime 0.15%; lot sizes per
 > `brutex/options/lot_size_history.py`: NIFTY 65 / BANKNIFTY 30 / SENSEX 20),
-> long_call, Groww, intra-state GST. Fills = buy at open + ₹0.05, sell at
-> open − ₹0.05. Examples 1-4 are **byte-exact enforced oracles** — the golden
-> test `tests/golden/test_costs_verified_examples.py` recomputes each scenario
+> long_call, Groww, intra-state GST, **FLAT fill bars** (high == low == open —
+> so the worst-case anchor coincides with the bar open and the fills read
+> buy = open + ₹0.05 / sell = open − ₹0.05; a RANGED bar anchors the
+> extremes instead — see the golden's Example W). Examples 1-4 are
+> **byte-exact enforced oracles** — the golden test
+> `tests/golden/test_costs_verified_examples.py` recomputes each scenario
 > through the real calculator and asserts every figure below, so this section
 > can no longer drift silently. Example 5 (Muhurat) is **SPEC-ONLY** — see its
 > banner.
@@ -135,15 +141,15 @@ Per industry-published broker examples + Section 170 CGST + Rule 11 STT Rules:
 | Component | Total | Rule applied |
 |---|---|---|
 | Brokerage | -40.00 | ₹20 flat per order × 2 legs |
-| STT (0.15% × ₹7,796.75 = ₹11.695) | **-12.00** | round to nearest ₹ (statutory) |
-| NSE exchange (0.03503% × both notionals) | -5.01 | paise |
-| SEBI (0.0001% × both notionals) | -0.02 | paise (per-side rounded) |
-| IPFT NSE (0.0005% × both notionals) | -0.07 | paise |
-| Stamp duty (0.003% × ₹6,503.25 = ₹0.195) | **-0.00** | round to rupee (0.195 < 0.50 → 0) |
-| GST base = 40.00 + 5.01 + 0.02 + 0.07 = ₹45.10 | | |
-| GST 18% × 45.10 = ₹8.118 → **rounded ONCE** | **-8.00** | DEC-COST-001 (total, NOT CGST/SGST each) |
-| **TOTAL CHARGES** | **-65.10** | |
-| **NET PnL** | **+1,228.40** | gross 1,293.50 − 65.10 |
+| STT (0.15% × ₹7,796.75 = ₹11.695) | **-12.00** | CEIL to rupee (adverse-levy law) |
+| NSE exchange (0.03503% per leg: ⌈227.81⌉+⌈273.12⌉ paise) | **-5.02** | per-leg CEIL paise (nearest gave 5.01) |
+| SEBI (0.0001% per leg: ⌈0.65⌉+⌈0.78⌉ paise) | -0.02 | per-leg CEIL paise |
+| IPFT NSE (0.0005% per leg: ⌈3.25⌉+⌈3.90⌉ paise) | **-0.08** | per-leg CEIL paise (nearest gave 0.07) |
+| Stamp duty (0.003% × ₹6,503.25 = ₹0.195) | **-1.00** | CEIL to rupee (nearest gave 0) |
+| GST base = 40.00 + 5.02 + 0.02 + 0.08 = ₹45.12 | | |
+| GST 18% × 45.12 = ₹8.1216 → **rounded ONCE**, CEIL | **-9.00** | DEC-COST-001 (total, NOT CGST/SGST each) |
+| **TOTAL CHARGES** | **-67.12** | |
+| **NET PnL** | **+1,226.38** | gross 1,293.50 − 67.12 |
 
 ### Example 2: NIFTY ATM call, 5 lots (multi-lot scenario)
 
@@ -154,17 +160,17 @@ Same premiums, 5 lots → n_shares = 325:
 | Component | Value | Rule |
 |---|---|---|
 | Brokerage | **-40.00** | ₹20 flat per ORDER (regardless of lot count!) |
-| STT 0.15% × ₹38,983.75 = ₹58.4756 | **-58.00** | round to rupee (the old -59 used the no-slippage ₹39,000) |
-| NSE exch 0.03503% × both notionals | -25.05 | paise |
-| SEBI 0.0001% × both notionals | -0.07 | paise (per-side rounded) |
-| IPFT 0.0005% × both notionals | -0.35 | paise (the old -0.36 used no-slippage notionals) |
-| Stamp 0.003% × ₹32,516.25 = ₹0.9755 | **-1.00** | round to rupee (≥ 0.50 → 1) |
-| GST base = 40.00 + 25.05 + 0.07 + 0.35 = ₹65.47 | | |
-| GST 18% × 65.47 = ₹11.7846 → rounded ONCE | **-12.00** | DEC-COST-001 |
-| **TOTAL CHARGES** | **-136.47** | (was ₹137.48 pre-regeneration) |
-| **NET PnL** | **+6,331.03** | gross 6,467.50 − 136.47 |
+| STT 0.15% × ₹38,983.75 = ₹58.4756 | **-59.00** | CEIL to rupee (nearest gave 58) |
+| NSE exch 0.03503% per leg: ⌈1,139.04⌉+⌈1,365.60⌉ paise | **-25.06** | per-leg CEIL paise |
+| SEBI 0.0001% per leg: ⌈3.25⌉+⌈3.90⌉ paise | **-0.08** | per-leg CEIL paise |
+| IPFT 0.0005% per leg: ⌈16.26⌉+⌈19.49⌉ paise | **-0.37** | per-leg CEIL paise |
+| Stamp 0.003% × ₹32,516.25 = ₹0.9755 | **-1.00** | CEIL to rupee |
+| GST base = 40.00 + 25.06 + 0.08 + 0.37 = ₹65.51 | | |
+| GST 18% × 65.51 = ₹11.7918 → rounded ONCE, CEIL | **-12.00** | DEC-COST-001 |
+| **TOTAL CHARGES** | **-137.51** | |
+| **NET PnL** | **+6,329.99** | gross 6,467.50 − 137.51 |
 
-**Per-lot cost (5 lots): ₹136.47 / 5 = ₹27.29/lot** — significantly cheaper than per-1-lot (₹65.10) due to brokerage amortization over 5 lots.
+**Per-lot cost (5 lots): ₹137.51 / 5 = ₹27.50/lot** — significantly cheaper than per-1-lot (₹67.12) due to brokerage amortization over 5 lots.
 
 ### Example 3: BANKNIFTY ATM, 1 lot, ₹50 → ₹60
 
@@ -175,17 +181,17 @@ Same premiums, 5 lots → n_shares = 325:
 | Component | Value | Rule |
 |---|---|---|
 | Brokerage | -40.00 | flat |
-| STT 0.15% × ₹1,798.50 = ₹2.6978 | **-3.00** | round to rupee |
-| NSE exch 0.03503% × both notionals | -1.16 | paise |
-| SEBI (0.0001% → ₹0.0033 unrounded) | **-0.00** | paise — rounds to ZERO (the old -0.01 was wrong) |
-| IPFT | -0.02 | paise |
-| Stamp 0.003% × ₹1,501.50 = ₹0.045 | **-0.00** | round (< 0.50) |
-| GST base = 40.00 + 1.16 + 0.00 + 0.02 = ₹41.18 | | |
-| GST 18% × 41.18 = ₹7.4124 → rounded ONCE | **-7.00** | DEC-COST-001 (NOT CGST ₹4 + SGST ₹4 = ₹8) |
-| **TOTAL CHARGES** | **-51.18** | (the old ₹52.19 was the round-twice + SEBI-₹0.01 drift) |
-| **NET PnL** | **+245.82** | gross 297.00 − 51.18 |
+| STT 0.15% × ₹1,798.50 = ₹2.6978 | **-3.00** | CEIL to rupee |
+| NSE exch 0.03503% per leg: ⌈52.60⌉+⌈63.0015⌉ paise | **-1.17** | per-leg CEIL paise (nearest gave 1.16) |
+| SEBI 0.0001% per leg: ⌈0.15⌉+⌈0.18⌉ paise | **-0.02** | per-leg CEIL paise (nearest gave 0) |
+| IPFT 0.0005% per leg: ⌈0.75⌉+⌈0.90⌉ paise | -0.02 | per-leg CEIL paise |
+| Stamp 0.003% × ₹1,501.50 = ₹0.045 | **-1.00** | CEIL to rupee (nearest gave 0) |
+| GST base = 40.00 + 1.17 + 0.02 + 0.02 = ₹41.21 | | |
+| GST 18% × 41.21 = ₹7.4178 → rounded ONCE, CEIL | **-8.00** | DEC-COST-001 (still ONE rounding — never CGST + SGST each) |
+| **TOTAL CHARGES** | **-53.21** | |
+| **NET PnL** | **+243.79** | gross 297.00 − 53.21 |
 
-Cost = 17.2% of the post-slippage gross move. **Trade barely viable** due to high cost-as-% on small premiums.
+Cost = 17.9% of the post-slippage gross move. **Trade barely viable** due to high cost-as-% on small premiums.
 
 ### Example 4: SENSEX ATM, 1 lot, ₹80 → ₹100 (BSE)
 
@@ -196,15 +202,15 @@ Cost = 17.2% of the post-slippage gross move. **Trade barely viable** due to hig
 | Component | Value | Rule |
 |---|---|---|
 | Brokerage | -40.00 | flat |
-| STT 0.15% × ₹1,999.00 = ₹2.9985 | **-3.00** | round to rupee |
-| BSE exch 0.03250% × both notionals | -1.17 | paise (BSE rate) |
-| SEBI (₹0.0036 unrounded) | **-0.00** | paise — rounds to zero (the old -0.01 was wrong) |
+| STT 0.15% × ₹1,999.00 = ₹2.9985 | **-3.00** | CEIL to rupee |
+| BSE exch 0.03250% per leg: ⌈52.03⌉+⌈64.97⌉ paise | **-1.18** | per-leg CEIL paise (nearest gave 1.17) |
+| SEBI 0.0001% per leg: ⌈0.16⌉+⌈0.20⌉ paise | **-0.02** | per-leg CEIL paise (nearest gave 0) |
 | IPFT BSE | **-0.00** | UNVERIFIED — BSE IPFT treated as 0 |
-| Stamp 0.003% × ₹1,601.00 = ₹0.048 | -0.00 | round (< 0.50) |
-| GST base = 40.00 + 1.17 + 0.00 + 0.00 = ₹41.17 | | |
-| GST 18% × 41.17 = ₹7.4106 → rounded ONCE | **-7.00** | DEC-COST-001 |
-| **TOTAL CHARGES** | **-51.17** | (was ₹52.17 pre-regeneration — same round-twice drift) |
-| **NET PnL** | **+346.83** | gross 398.00 − 51.17 |
+| Stamp 0.003% × ₹1,601.00 = ₹0.048 | **-1.00** | CEIL to rupee (nearest gave 0) |
+| GST base = 40.00 + 1.18 + 0.02 + 0.00 = ₹41.20 | | |
+| GST 18% × 41.20 = ₹7.416 → rounded ONCE, CEIL | **-8.00** | DEC-COST-001 |
+| **TOTAL CHARGES** | **-53.20** | |
+| **NET PnL** | **+344.80** | gross 398.00 − 53.20 |
 
 ### Example 5: NIFTY Muhurat session trade — SPEC-ONLY (NOT an enforced oracle)
 

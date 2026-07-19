@@ -107,7 +107,7 @@ from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timezone
 from decimal import Decimal
 from itertools import groupby
 from pathlib import Path
@@ -115,6 +115,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+from brutex.calendars.nse import IST_FIXED_OFFSET, IST_UTC_OFFSET
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
@@ -141,9 +142,11 @@ from brutex.data.greeks_provenance import (
     pack_greeks_provenance,
     unpack_greeks_provenance,
 )
+from brutex.data.guarded_read import read_parquet_regular
 from brutex.data.lake_keys import spot_recovery_candidates
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
+from brutex.data.session import ist_offset_duration
 from brutex.data.spot_daily_resample import ist_span_partition_files
 from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
@@ -255,8 +258,10 @@ SECONDS_PER_YEAR_ACT365: Final[float] = 365.0 * 86400.0
 #: value sits ~5000x above the band).
 DEGENERATE_TIME_VALUE_REL: Final[float] = 1e-9
 
-#: Fixed +05:30 IST (no DST) — the same offset the vendor parser uses.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+#: Fixed +05:30 IST (no DST) — the same offset the vendor parser uses; the ONE
+#: canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[timezone] = IST_FIXED_OFFSET
 
 #: The interval the enrichment reads + writes — the ONLY vendor-fetched
 #: granularity (DEC-1MINUTE-ONLY-DERIVE-1DAY-001). Derived-TF propagation is
@@ -771,7 +776,7 @@ def enrich_option_bars(
         # exist before the reuse decision. The explicit two-step memo replaces
         # the old ``setdefault`` form, whose default argument evaluated
         # ``rate_on`` eagerly on EVERY bar (RF-5 — the memo was dead code).
-        bar_date = (ts + timedelta(hours=5, minutes=30)).date()
+        bar_date = (ts + IST_UTC_OFFSET).date()
         if bar_date not in rate_by_date:
             rate_by_date[bar_date] = rate_source.rate_on(bar_date)
         rate = rate_by_date[bar_date]
@@ -1374,7 +1379,12 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
     base_columns = ("timestamp", "open", "high", "low", "close", "volume", "open_interest")
     frames: list[pl.DataFrame] = []
     for file in files:
-        df = pl.read_parquet(file)
+        # Guarded literal read: *file* is ONE concrete month path
+        # (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15 metachar
+        # law — held by construction inside read_parquet_regular — a
+        # `[`-carrying contract dir must never glob-read its siblings' bars;
+        # + DEC-LAKE-READ-INODE-GUARD-001 fd validation).
+        df = read_parquet_regular(file)
         missing = [name for name in GREEKS_OVERLAY_FIELDS if name not in df.columns]
         if missing:
             df = df.with_columns(
@@ -1398,7 +1408,7 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
     # poisoned-era duplicated 1-minute row would otherwise be enriched twice and
     # re-written; the first stored row wins, warned, never silent.
     merged, _dropped = dedup_bars_frame(merged, source=f"greeks_enrich:{target.symbol}")
-    ist_date = (pl.col("timestamp") + pl.duration(hours=5, minutes=30)).dt.date()
+    ist_date = (pl.col("timestamp") + ist_offset_duration()).dt.date()
     bounded = (
         merged.with_columns(ist_date.alias("_ist_date"))
         .filter((pl.col("_ist_date") >= target.start) & (pl.col("_ist_date") < target.end))

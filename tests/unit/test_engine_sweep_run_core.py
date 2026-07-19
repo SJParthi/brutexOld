@@ -113,6 +113,9 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model —
+        # SweepGridConfig carries no fill_mode field; the R45 closure runs
+        # under the one hardcoded law on both legs.
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -1284,6 +1287,59 @@ def test_on_progress_publishes_ticks_and_beats(tmp_path: Path) -> None:
     assert terminal["run_id"] == run_id
 
 
+def test_launch_baseline_is_fresh_bridge_evidence_not_stale(tmp_path: Path) -> None:
+    """The G4 launch baseline survives the bridge decay gate (scoped-review round 2).
+
+    Fails-before (the SUSTAINED MAJOR): ``_reset_progress_at_launch`` wrote
+    ``wall_time_utc`` but NO ``wall_time`` (``PROGRESS_WALL_TIME_KEY``), and
+    ``progress_bridge_stale`` treats a ``running=True`` claim with a missing
+    stamp as DEAD evidence — so for the whole first-tuple window (HOURS on a
+    heavy k=5 tuple) the dashboard read idle, the v29 Stop button never
+    showed, and the cancel route's bridge arm refused. The REAL baseline is
+    driven through the REAL reader chain here.
+    """
+    from brutex.engine.sweep_supervisor import (
+        PROGRESS_WALL_TIME_KEY,
+        progress_bridge_stale,
+        read_progress,
+    )
+
+    progress_path = tmp_path / "progress" / "sweep-progress.json"
+    with _core(tmp_path, progress_path=progress_path) as (_c, _s):
+        parsed = read_progress(progress_path)
+        assert parsed["running"] is True
+        assert isinstance(parsed[PROGRESS_WALL_TIME_KEY], float)
+        assert progress_bridge_stale(parsed) is False
+
+
+def test_launch_baseline_stamps_both_walls_from_one_tick(tmp_path: Path) -> None:
+    """Both launch wall stamps come from ONE injected-clock tick (G3 discipline).
+
+    The scoped-review round-2 fix must NOT add a wall tick: the decay stamp
+    (``PROGRESS_WALL_TIME_KEY``) and the G4 liveness ``wall_time_utc`` share
+    the single ``self._wall()`` call the pre-fix baseline already made. The
+    injected clock returns strictly-distinct values, so stamp EQUALITY proves
+    one call fed both (a second call would differ).
+    """
+    from brutex.engine.sweep_supervisor import PROGRESS_WALL_TIME_KEY, progress_bridge_stale
+
+    progress_path = tmp_path / "progress" / "sweep-progress.json"
+    ticks: list[float] = []
+
+    def _wall() -> float:
+        ticks.append(1_000_000.0 + len(ticks))  # strictly distinct per call
+        return ticks[-1]
+
+    with _core(tmp_path, progress_path=progress_path, wall=_wall) as (_c, _s):
+        raw = json.loads(progress_path.read_text())
+        stamp = raw[PROGRESS_WALL_TIME_KEY]
+        assert stamp == raw["wall_time_utc"]  # one tick, both stamps
+        assert stamp in ticks
+        # The injected-clock stamp judged against an injected `now` just after
+        # it: fresh (the default-now variant is covered by the test above).
+        assert progress_bridge_stale(raw, now=lambda: stamp + 1.0) is False
+
+
 def test_on_progress_without_progress_path_still_ticks(tmp_path: Path) -> None:
     with _core(tmp_path) as (core, _s):
         core.on_progress(_snapshot(enumerated=1, evaluated=1))
@@ -1368,6 +1424,9 @@ def test_diffcheck_disabled_is_none(tmp_path: Path) -> None:
 
 
 def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
+    # DEC-FILL-WORST-CASE-ONLY-001: the R45 parity holds under the ONE
+    # worst-case law — the production leg simulates it and the naive
+    # reference independently re-derives the SAME law.
     from brutex.engine.stage1a import build_bar_bits
 
     grid = _grid()
@@ -1385,6 +1444,29 @@ def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
     payload = cast("dict[str, Any]", ok_rows[0]["payload"])
     assert payload["checked"] == 2
     assert payload["mismatches"] == 0
+
+
+def test_diffcheck_enabled_under_worst_case_fill_mode(tmp_path: Path) -> None:
+    # DEC-FILL-WORST-CASE-ONLY-001 (the Stage-1 disable-bridge regression,
+    # REPURPOSED): worst-case is the ONLY law, so every grid gets a REAL
+    # diffcheck closure — no skip, no diffcheck_disabled_fill_mode WARN —
+    # and the bridge token is GONE from the run core's source.
+    import inspect
+
+    from brutex.engine import sweep_run_core as run_core_module
+    from structlog.testing import capture_logs
+
+    grid = _grid()
+    with capture_logs() as logs, _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
+        assert core.diffcheck is not None
+        assert core.suspect is False
+    assert not [
+        log for log in logs if log.get("event") == "sweep_run_core.diffcheck_disabled_fill_mode"
+    ]
+    # Source-negative pin: the Stage-1 bridge's WARN event token no longer
+    # exists as an emitted event (this test file is its ONLY remaining home).
+    source = inspect.getsource(run_core_module)
+    assert "diffcheck_disabled_fill_mode" not in source
 
 
 def test_r45_diffcheck_production_leg_carries_the_bound_run_stamper(

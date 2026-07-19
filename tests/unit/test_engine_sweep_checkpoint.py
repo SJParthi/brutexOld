@@ -195,7 +195,9 @@ def test_load_read_oserror_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     def _boom(*_a: Any, **_k: Any) -> str:
         raise OSError("eio")
 
-    monkeypatch.setattr(Path, "read_text", _boom)
+    # DEC-LAKE-READ-INODE-GUARD-001: the load path reads through the guarded
+    # deadline reader now — fault THAT seam (Path.read_text is no longer used).
+    monkeypatch.setattr(ckpt, "read_regular_text_deadline", _boom)
     with pytest.raises(SweepCheckpointError, match="Failed to read checkpoint"):
         s.load()
 
@@ -204,6 +206,31 @@ def test_load_malformed_json_raises(tmp_path: Path) -> None:
     p = tmp_path / "ckpt.json"
     p.write_text("{not json", encoding="utf-8")
     with pytest.raises(SweepCheckpointError, match="Malformed checkpoint JSON"):
+        _store(tmp_path).load()
+
+
+def test_load_invalid_utf8_raises_domain_error_not_unicodedecodeerror(tmp_path: Path) -> None:
+    """RES-4: on-disk bitrot / an external truncation (NOT a torn write from
+    this atomic tmp→fsync→os.replace writer) leaving invalid UTF-8 bytes makes
+    ``read_text`` raise ``UnicodeDecodeError`` (a ``ValueError``). That must map
+    to the typed ``SweepCheckpointError`` — like the malformed-JSON path — never
+    escape RAW past a consumer's narrow ``except SweepCheckpointError`` and fire
+    a false abort alert."""
+    p = tmp_path / "ckpt.json"
+    # A byte the utf-8 decoder rejects mid-stream (0xFF is never valid UTF-8).
+    p.write_bytes(b'{"version": 1, "sweep_id": "sweep-1"\xff}')
+    with pytest.raises(SweepCheckpointError, match="Undecodable checkpoint bytes"):
+        _store(tmp_path).load()
+
+
+def test_load_torn_leading_invalid_byte_raises_domain_error(tmp_path: Path) -> None:
+    """RES-4 (first-byte corrupt variant): a checkpoint overwritten by raw
+    invalid bytes (a UTF-16 BOM prefix / arbitrary binary — external corruption,
+    not this atomic writer) is also the typed error, not a raw
+    ``UnicodeDecodeError``."""
+    p = tmp_path / "ckpt.json"
+    p.write_bytes(b"\xff\xfe\x00 not utf8 {")
+    with pytest.raises(SweepCheckpointError, match="Undecodable checkpoint bytes"):
         _store(tmp_path).load()
 
 
