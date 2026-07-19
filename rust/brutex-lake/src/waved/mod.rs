@@ -40,6 +40,34 @@ pub mod read;
 pub mod reconcile;
 pub mod scan;
 
+/// The inode-gate refusal classes (D-31 — the typed inode contract): the
+/// `Display` renderings are byte-identical to the historical `String`
+/// messages, so every `map_err(|reason| …{reason}…)` / `.ok()?` consumer
+/// (scan / reconcile) is behavior-unchanged — only the READ seam matches
+/// on the variant to route the inode class distinctly (a real `OSError`
+/// across the FFI, the `locks.rs` errno-law sibling, so the facade can
+/// restore the typed `NotRegularFileError` contract of
+/// DEC-LAKE-READ-INODE-GUARD-001/-002).
+#[derive(Debug)]
+pub enum InodeRefusal {
+    /// The inode class proper — the path EXISTS but is not a regular file
+    /// (a planted FIFO / device / directory). Payload = the full
+    /// `not a regular file (file type …)` rendering.
+    NotRegularFile(String),
+    /// The stat itself failed (vanished / EACCES / …) — the caller's
+    /// existing io-fault classification owns it. Payload = the full
+    /// `cannot stat: …` rendering.
+    Stat(String),
+}
+
+impl std::fmt::Display for InodeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InodeRefusal::NotRegularFile(msg) | InodeRefusal::Stat(msg) => f.write_str(msg),
+        }
+    }
+}
+
 /// Refuse a NON-REGULAR inode BEFORE any `open(2)` — the crate-side
 /// DEC-LAKE-READ-INODE-GUARD-001 law (merged onto the Wave-D arm at the
 /// lap-8 lake-guards fold): opening a planted FIFO read-only blocks in
@@ -49,15 +77,16 @@ pub mod scan;
 /// symlink→FIFO resolves to the FIFO's file type and is refused too; the
 /// stat→open TOCTOU window is the same disclosed #1594-envelope residual
 /// the Python guard carried. A stat FAILURE is returned verbatim (the
-/// caller's existing io-fault classification owns it).
-pub fn ensure_regular_file(path: &std::path::Path) -> Result<(), String> {
+/// caller's existing io-fault classification owns it) as the DISTINCT
+/// [`InodeRefusal::Stat`] class — never conflated with the inode class.
+pub fn ensure_regular_file(path: &std::path::Path) -> Result<(), InodeRefusal> {
     match std::fs::metadata(path) {
         Ok(meta) if meta.file_type().is_file() => Ok(()),
-        Ok(meta) => Err(format!(
+        Ok(meta) => Err(InodeRefusal::NotRegularFile(format!(
             "not a regular file (file type {:?})",
             meta.file_type()
-        )),
-        Err(err) => Err(format!("cannot stat: {err}")),
+        ))),
+        Err(err) => Err(InodeRefusal::Stat(format!("cannot stat: {err}"))),
     }
 }
 

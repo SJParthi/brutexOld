@@ -1079,7 +1079,13 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     violation, a corrupt file, a crate panic) raises the SAME typed
     quarantining :class:`~brutex.data.errors.ResampleInputError` with the
     Rust-rendered reason (the ruled endgame semantics — message TEXT is the
-    crate's, the CLASS + isolation posture are unchanged). The months /
+    crate's, the CLASS + isolation posture are unchanged). The ONE
+    exception is the inode-guard class (D-31): a NON-REGULAR inode — a
+    planted FIFO/device/dir — in the read set keeps its pre-Wave-D typed
+    :class:`~brutex.data.sidecar_read.NotRegularFileError` (an ``OSError``
+    — DEC-LAKE-READ-INODE-GUARD-001/-002; crossed from the crate as a real
+    ``OSError``, restored facade-side), raised eagerly and folding into
+    the same ``parquet_read_skip_errors()`` quarantine arms. The months /
     whole-tree / empty-partition SOURCE DECISION — with its pinned raises —
     runs BEFORE the seam in ``_resolve_source``. An absent/stale wheel
     raises the typed

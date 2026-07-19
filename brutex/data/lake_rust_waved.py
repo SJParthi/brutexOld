@@ -36,7 +36,13 @@ structlog, injected seams and exception TYPES stay Python).
      genuine gate violation (ts-range / price-sanity), a corrupt file, a
      crate panic — raises the typed quarantining
      :class:`~brutex.data.errors.ResampleInputError` (already in the
-     prebuild's per-symbol quarantine set), message = the Rust rendering;
+     prebuild's per-symbol quarantine set), message = the Rust rendering —
+     EXCEPT the inode-gate refusal (a non-regular inode — planted
+     FIFO/device/dir — in the read set), which the crate crosses as a REAL
+     ``OSError`` (the ONE ``OSError`` the read call raises — the
+     ``locks.rs`` errno-law channel) and the facade re-raises as the typed
+     :class:`~brutex.data.sidecar_read.NotRegularFileError`, preserving
+     the DEC-LAKE-READ-INODE-GUARD-001/-002 contract (deviation D-31);
    * **heal** (:func:`heal_batch_via_rust`): the crate owns per-finding
      isolation (an out-of-envelope finding is a counted isolated error and
      the batch CONTINUES — the W-6a crate law); a crate-side disk-full
@@ -99,6 +105,7 @@ from brutex.data.errors import (
     LakeRustWavedUnavailableError,
     ResampleInputError,
 )
+from brutex.data.sidecar_read import NotRegularFileError
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable
@@ -326,10 +333,19 @@ def read_1m_via_rust(
 
     Raises
     ------
+    NotRegularFileError
+        The inode-gate refusal (DEC-LAKE-READ-INODE-GUARD-001/-002,
+        deviation D-31): a non-regular inode — a planted FIFO / device /
+        directory — in the read set crosses the FFI as a REAL ``OSError``
+        (the ONE ``OSError`` the crate's read call raises) and is
+        re-raised here as the pre-Wave-D typed class (itself an
+        ``OSError``, so every ``parquet_read_skip_errors()`` /
+        ``except OSError`` degrade arm absorbs it unchanged), message =
+        the crate rendering verbatim.
     ResampleInputError
-        ANY crate-call failure — a genuine gate violation, a corrupt or
-        vanished file, a crate panic — with the Rust-rendered reason
-        naming *context* (the ruled endgame semantics: the typed
+        ANY OTHER crate-call failure — a genuine gate violation, a
+        corrupt or vanished file, a crate panic — with the Rust-rendered
+        reason naming *context* (the ruled endgame semantics: the typed
         quarantining raise; the class is already in the prebuild's
         per-symbol quarantine set, so one poisoned symbol never aborts the
         run).
@@ -358,6 +374,18 @@ def read_1m_via_rust(
         # The escape set (the errors.py doctrine): operator interrupt /
         # interpreter shutdown / OOM stay global — never re-labelled.
         raise
+    except OSError as exc:
+        # The inode-gate refusal (D-31 — DEC-LAKE-READ-INODE-GUARD-001/
+        # -002): the ONE OSError the endgame crate's read call raises is
+        # its not-a-regular-file verdict, crossed as a REAL OSError (the
+        # locks.rs channel — a TYPE-level token, never prose-sniffed).
+        # Restore the pre-Wave-D typed contract: NotRegularFileError is
+        # itself an OSError, so the existing parquet_read_skip_errors() /
+        # `except OSError` degrade arms absorb it unchanged — never the
+        # quarantining ResampleInputError wrap the panic belt below would
+        # mint (the belt's `Exception` member covers OSError, hence this
+        # arm sits ABOVE it).
+        raise NotRegularFileError(str(exc)) from exc
     except _panic_belt_errors() as exc:
         # The ruled endgame semantics — the typed quarantining raise:
         # every crate failure class (gate refusal, corrupt file, panic)

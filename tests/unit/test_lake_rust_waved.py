@@ -7,9 +7,11 @@ degrade; there is no oracle left to serve), a SET ``$BRUTEX_LAKE_WAVED_RUST``
 (ANY value, ``1`` and ``0`` included) refuses via
 :class:`LakeRustWavedFlagRemovedError` (the ``$BRUTEX_FILL_MODE`` retirement
 precedent), and every out-of-envelope shape maps to its surface's ISOLATED
-error class (read → ``ResampleInputError``; reconcile → ``ValueError`` in
-the caller's GAP-#9 skip set; heal/scan → crate-owned isolation, so a
-facade-level raise there is refuse-poison only).
+error class (read → ``ResampleInputError``, except the inode-gate refusal,
+which crosses as a real ``OSError`` and is restored to the typed
+``NotRegularFileError`` — D-31, DEC-LAKE-READ-INODE-GUARD-001/-002;
+reconcile → ``ValueError`` in the caller's GAP-#9 skip set; heal/scan →
+crate-owned isolation, so a facade-level raise there is refuse-poison only).
 
 Every test injects a FAKE ``brutex_lake`` module straight into
 ``sys.modules`` (or a poisoned ``None`` entry for the import-guard arm), so
@@ -35,6 +37,7 @@ from brutex.data.errors import (
     LakeRustWavedUnavailableError,
     ResampleInputError,
 )
+from brutex.data.guarded_read import NotRegularFileError
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
@@ -337,6 +340,43 @@ class TestRead1mSurface:
 
         with pytest.raises(ResampleInputError, match="refused by the native lake core"):
             _read(monkeypatch, _fake_crate(read=_panic))
+
+    def test_crate_os_error_restores_the_not_regular_file_contract(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # D-31 (DEC-LAKE-READ-INODE-GUARD-001/-002): the crate's inode-gate
+        # refusal crosses the FFI as a REAL OSError — the ONE OSError the
+        # endgame read call raises — and the facade restores the typed
+        # NotRegularFileError (itself an OSError, so the existing
+        # parquet_read_skip_errors()/`except OSError` degrade arms absorb
+        # it) with the crate message VERBATIM + the cause chained; never
+        # the quarantining ResampleInputError wrap.
+        crate_msg = (
+            "cannot open /lake/bars/NSE/INDEX/NIFTY/1minute/2024/02.parquet: "
+            "not a regular file (file type FileType { is_file: false, .. })"
+        )
+
+        def _raise(*_args: object) -> tuple[bytes, str]:
+            raise OSError(crate_msg)
+
+        with pytest.raises(NotRegularFileError) as excinfo:
+            _read(monkeypatch, _fake_crate(read=_raise))
+        assert str(excinfo.value) == crate_msg
+        assert isinstance(excinfo.value.__cause__, OSError)
+        assert not isinstance(excinfo.value, ResampleInputError)
+
+    def test_non_os_crate_errors_never_take_the_inode_arm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The negative (D-31): the inode mapping is keyed on the exception
+        # TYPE channel, never the message — a ValueError CARRYING the inode
+        # wording still takes the quarantining ResampleInputError wrap.
+        def _raise(*_args: object) -> tuple[bytes, str]:
+            raise ValueError("cannot open x.parquet: not a regular file (file type ...)")
+
+        with pytest.raises(ResampleInputError) as excinfo:
+            _read(monkeypatch, _fake_crate(read=_raise))
+        assert not isinstance(excinfo.value, NotRegularFileError)
 
     @pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit, MemoryError])
     def test_escape_set_re_raises_raw(

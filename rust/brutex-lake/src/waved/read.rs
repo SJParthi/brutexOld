@@ -46,11 +46,43 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use polars::prelude::*;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use super::{BadTickEvent, bad_tick_events_json, civil_date_iso};
+use super::{BadTickEvent, InodeRefusal, bad_tick_events_json, civil_date_iso};
+
+/// The read core's error split (D-31 — the typed inode contract,
+/// DEC-LAKE-READ-INODE-GUARD-001/-002): the inode-gate refusal crosses the
+/// FFI as a REAL `OSError` (the `locks.rs` errno-law sibling — the ONE
+/// `OSError` the read pyfunction can raise), so the facade restores the
+/// typed `NotRegularFileError` the pre-Wave-D reader raised; EVERY other
+/// refusal stays the `ValueError`-bound polars class the facade wraps into
+/// the typed quarantining `ResampleInputError`.
+#[derive(Debug)]
+pub enum ReadCoreError {
+    /// A path in the read set is not a regular file (a planted FIFO /
+    /// device / directory) — payload = the full
+    /// `cannot open <path>: not a regular file (file type …)` rendering.
+    NotRegularFile(String),
+    /// Every other read/gate refusal (corrupt file, gate violation, …).
+    Polars(PolarsError),
+}
+
+impl From<PolarsError> for ReadCoreError {
+    fn from(err: PolarsError) -> Self {
+        ReadCoreError::Polars(err)
+    }
+}
+
+impl std::fmt::Display for ReadCoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadCoreError::NotRegularFile(msg) => f.write_str(msg),
+            ReadCoreError::Polars(err) => write!(f, "{err}"),
+        }
+    }
+}
 
 /// The bounded bad-tick multiple — the twin of
 /// `brutex/data/bad_tick.py::BAD_TICK_MAX_RATIO` (drift-pinned by the
@@ -363,19 +395,22 @@ fn screen_bad_ticks(df: DataFrame) -> PolarsResult<(DataFrame, Vec<BadTickEvent>
 /// (`missing_columns="insert"` / `extra_columns="ignore"` twin: absent
 /// needed columns null-filled at the first-seen dtype, extras dropped) →
 /// vstack → `timestamp`→`ts_utc` rename → select order → sort → gates →
-/// optional screen → `(ipc_bytes, events_json)`.
+/// optional screen → `(ipc_bytes, events_json)`. The inode-gate refusal is
+/// the DISTINCT [`ReadCoreError::NotRegularFile`] class (D-31); everything
+/// else is the [`ReadCoreError::Polars`] class.
 pub fn read_1m_impl(
     files: &[String],
     whole_tree_root: Option<&str>,
     with_open_interest: bool,
     screen_enabled: bool,
-) -> PolarsResult<(Vec<u8>, String)> {
+) -> Result<(Vec<u8>, String), ReadCoreError> {
     let paths: Vec<String> = match whole_tree_root {
         Some(root) => {
             if !files.is_empty() {
                 return Err(polars_err!(
                     ComputeError: "pass explicit files OR whole_tree_root, never both"
-                ));
+                )
+                .into());
             }
             collect_tree_parquet_files(Path::new(root)).map_err(
                 |err| polars_err!(ComputeError: "cannot walk 1-minute partition {}: {}", root, err),
@@ -384,7 +419,7 @@ pub fn read_1m_impl(
         None => files.to_vec(),
     };
     if paths.is_empty() {
-        return Err(polars_err!(ComputeError: "no stored 1-minute parquet files to read"));
+        return Err(polars_err!(ComputeError: "no stored 1-minute parquet files to read").into());
     }
 
     let mut stored_columns: Vec<&str> = vec!["timestamp", "open", "high", "low", "close", "volume"];
@@ -396,8 +431,20 @@ pub fn read_1m_impl(
     for path in &paths {
         // Inode gate BEFORE the open (DEC-LAKE-READ-INODE-GUARD-001 on the
         // Wave-D arm): a planted FIFO otherwise blocks forever in `open(2)`.
-        super::ensure_regular_file(std::path::Path::new(path))
-            .map_err(|reason| polars_err!(ComputeError: "cannot open {}: {}", path, reason))?;
+        // The inode class routes to the DISTINCT `NotRegularFile` variant
+        // (D-31 — it crosses the FFI as a real `OSError` so the facade can
+        // restore the typed `NotRegularFileError` contract); a stat FAILURE
+        // (vanished / EACCES) stays the generic quarantining class.
+        super::ensure_regular_file(std::path::Path::new(path)).map_err(
+            |refusal| match refusal {
+                InodeRefusal::NotRegularFile(_) => {
+                    ReadCoreError::NotRegularFile(format!("cannot open {path}: {refusal}"))
+                }
+                InodeRefusal::Stat(_) => {
+                    polars_err!(ComputeError: "cannot open {}: {}", path, refusal).into()
+                }
+            },
+        )?;
         let file = std::fs::File::open(path)
             .map_err(|err| polars_err!(ComputeError: "cannot open {}: {}", path, err))?;
         frames.push(ParquetReader::new(file).finish()?);
@@ -424,7 +471,8 @@ pub fn read_1m_impl(
                 return Err(polars_err!(
                     ColumnNotFound: "column {} missing from every stored 1-minute file",
                     stored_columns[i]
-                ));
+                )
+                .into());
             }
         }
     }
@@ -454,7 +502,7 @@ pub fn read_1m_impl(
     }
     let mut df = match acc {
         Some(df) => df,
-        None => return Err(polars_err!(ComputeError: "no frames collected")),
+        None => return Err(polars_err!(ComputeError: "no frames collected").into()),
     };
     df.rename("timestamp", "ts_utc".into())?;
     let df = df.sort(["ts_utc"], SortMultipleOptions::default())?;
@@ -476,8 +524,12 @@ pub fn read_1m_impl(
 /// as uncompressed Arrow IPC plus the per-session bad-tick warn events the
 /// shell replays.
 ///
-/// Raises `ValueError` on any read/gate refusal (the facade degrades to
-/// the Python oracle, which reproduces the exact typed error), and
+/// Raises `OSError` for the inode-gate refusal ONLY (a non-regular inode —
+/// planted FIFO / device / directory — in the read set; the `locks.rs`
+/// real-`OSError` channel, D-31: the facade maps it back to the typed
+/// `NotRegularFileError` of DEC-LAKE-READ-INODE-GUARD-001/-002),
+/// `ValueError` on every OTHER read/gate refusal (the facade wraps it into
+/// the typed quarantining `ResampleInputError` — the W-6a endgame law), and
 /// `RuntimeError` if the compute — or the result construction — panics
 /// (both caught at this boundary; a panic never crosses the FFI). Runs
 /// without the GIL (`Python::detach` — the inputs are owned values).
@@ -501,6 +553,12 @@ pub(crate) fn waved_read_1m_ipc(
     });
     let (bytes, events_json) = match result {
         Ok(Ok(payload)) => payload,
+        Ok(Err(ReadCoreError::NotRegularFile(msg))) => {
+            // D-31: the inode class crosses as a REAL `OSError` — the ONE
+            // OSError this call raises — message verbatim, no prefix (the
+            // facade re-raises it as the typed `NotRegularFileError`).
+            return Err(PyOSError::new_err(msg));
+        }
         Ok(Err(err)) => {
             return Err(PyValueError::new_err(format!(
                 "brutex-lake waved read failed: {err}"
@@ -928,6 +986,58 @@ mod tests {
         let (kept, events) = screen_bad_ticks(ok).unwrap();
         assert_eq!(kept.height(), 1);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn inode_gate_refusal_is_the_distinct_not_regular_class() {
+        // D-31 (DEC-LAKE-READ-INODE-GUARD-001/-002): a planted FIFO in the
+        // read set is the DISTINCT `NotRegularFile` class on BOTH source
+        // arms (it crosses the FFI as a real `OSError`); a VANISHED listed
+        // file stays the generic quarantining `Polars` class.
+        let dir = scratch_dir("inodegate");
+        let healthy = write_parquet(
+            &dir,
+            "2024/01.parquet",
+            &stored_frame(&[OPEN_0915_UTC_US], &[100.0], false),
+        );
+        let fifo = dir.join("2024/02.parquet");
+        let c_path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        #[allow(unsafe_code)] // SAFETY: `libc::mkfifo` on an owned NUL-terminated
+        // path in the test scratch dir — no aliasing, rc checked below.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0);
+        // Months arm (explicit list).
+        let err = read_1m_impl(
+            &[healthy, fifo.to_string_lossy().into_owned()],
+            None,
+            false,
+            true,
+        )
+        .unwrap_err();
+        match &err {
+            ReadCoreError::NotRegularFile(msg) => {
+                assert!(msg.contains("not a regular file"), "{msg}");
+                assert!(msg.contains("02.parquet"), "{msg}");
+            }
+            other => panic!("expected the NotRegularFile class, got {other:?}"),
+        }
+        // Whole-tree arm: the walk enumerates the FIFO → same class.
+        let tree_err = read_1m_impl(&[], Some(&dir.to_string_lossy()), false, true).unwrap_err();
+        assert!(
+            matches!(tree_err, ReadCoreError::NotRegularFile(_)),
+            "whole-tree arm must take the inode class too: {tree_err:?}"
+        );
+        // A VANISHED listed file is a stat FAILURE — the generic class.
+        let gone = dir.join("2024/03.parquet");
+        let gone_err =
+            read_1m_impl(&[gone.to_string_lossy().into_owned()], None, false, true).unwrap_err();
+        assert!(
+            matches!(gone_err, ReadCoreError::Polars(_)),
+            "a vanished file must stay the quarantining class: {gone_err:?}"
+        );
+        assert!(gone_err.to_string().contains("cannot stat"), "{gone_err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
