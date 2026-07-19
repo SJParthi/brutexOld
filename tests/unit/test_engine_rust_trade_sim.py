@@ -4,10 +4,11 @@ DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). Exercises
 :class:`brutex.engine.rust_trade_sim.ResidentTradeSim` to 100% line + branch:
 construction validation, the ``n_bars`` view, the ``HOLD``/empty guards, both the
 Rust path (the default when the ``fno_math`` wheel is built — CI) AND the
-pure-Python fallback (forced by clearing ``_rust`` / shadowing the import), every
-``FillPolicy`` → kernel-flag mapping, and BUY/SELL. The parity assertions pin the
-seam's contract: its output equals the
-:func:`brutex.engine.trade_sim.simulate_trades` oracle field-for-field.
+pure-Python fallback (forced by clearing ``_rust`` / shadowing the import), and
+BUY/SELL — all under the ONE hardcoded worst-case fill law
+(DEC-FILL-WORST-CASE-ONLY-001; the retired ``FillPolicy`` → kernel-flag mapping
+is deleted). The parity assertions pin the seam's contract: its output equals
+the :func:`brutex.engine.trade_sim.simulate_trades` oracle field-for-field.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
+from brutex.engine.reference_series import TradeReferenceStamper
 
 # Whitebox friend access (DEC-P0-017 per-site convention): the guard seam is
 # module-private; each COLUMN of its envelope check is pinned directly here
@@ -29,17 +31,14 @@ from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
 # OHLC invariant (see TestEnvelopeGuardSeamPerColumn).
 from brutex.engine.rust_trade_sim import (
     _MAX_KERNEL_PRICE_PAISA,  # pyright: ignore[reportPrivateUsage]
+    _TAIL_HOLE_WARN_CAP,  # pyright: ignore[reportPrivateUsage]
     _U128_MASK,  # pyright: ignore[reportPrivateUsage]
     ResidentTradeSim,
     _construction_fallback_reason,  # pyright: ignore[reportPrivateUsage]
+    _warn_session_tail_holes,  # pyright: ignore[reportPrivateUsage]
 )
 from brutex.engine.stage1a import build_bar_bits
-from brutex.engine.trade_sim import (
-    FillPolicy,
-    LevelFill,
-    SameBarTie,
-    simulate_trades,
-)
+from brutex.engine.trade_sim import simulate_trades
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 from structlog.typing import EventDict
@@ -85,7 +84,6 @@ def _oracle(
     tf_minutes: int,
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
-    policy: FillPolicy,
 ) -> list:
     """The pure-Python oracle trades for one mask (what the seam must match)."""
     return simulate_trades(
@@ -95,7 +93,6 @@ def _oracle(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
-        policy=policy,
     )
 
 
@@ -148,6 +145,33 @@ class TestConstruction:
         with pytest.raises(HolidayDataUnavailableError):
             ResidentTradeSim(bars, [0], tf_minutes=1)
 
+    def test_multi_pathology_window_raises_the_calendar_error_first(self) -> None:
+        # Refuter RF2 C-1 regression: the forced/session loop must run BEFORE
+        # the price-column derivation (main's pre-W2-rider statement order),
+        # so a window holding BOTH an out-of-coverage weekday bar AND an
+        # over-precision price — each ACCEPTED by CandleBar validation
+        # (Decimal("1E+40") is positive + ordered) — raises the class
+        # contract's HolidayDataUnavailableError, never the price snap's
+        # decimal.InvalidOperation.
+        from brutex.calendars.nse import HolidayDataUnavailableError
+
+        def _dated(day: date, price: str) -> CandleBar:
+            ts = datetime(day.year, day.month, day.day, 10, 0, tzinfo=IST).astimezone(UTC)
+            return CandleBar(
+                timestamp=ts,
+                open=Decimal(price),
+                high=Decimal(price),
+                low=Decimal(price),
+                close=Decimal(price),
+                volume=100,
+                open_interest=None,
+            )
+
+        out_of_coverage = _dated(date(2030, 1, 2), "100")  # Wednesday, > 2026 ceiling
+        over_precision = _dated(date(2026, 1, 5), "1E+40")  # validates; snap raises
+        with pytest.raises(HolidayDataUnavailableError):
+            ResidentTradeSim([out_of_coverage, over_precision], [0, 0], tf_minutes=1)
+
     def test_missing_kernel_falls_back_without_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Shadow `import fno_math` with a module lacking ResidentSweepSim so the
         # `except (ImportError, AttributeError)` branch is covered even when the
@@ -167,7 +191,6 @@ class TestConstruction:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -191,22 +214,8 @@ class TestGuards:
 # ── parity: seam == oracle (Rust path AND forced fallback) ───────────────────
 
 
-_POLICIES = [
-    FillPolicy(),  # AT_LEVEL / AT_LEVEL / SL_FIRST (default)
-    FillPolicy(stop_loss=LevelFill.NEXT_OPEN),
-    FillPolicy(take_profit=LevelFill.NEXT_OPEN),
-    FillPolicy(same_bar=SameBarTie.TP_FIRST),
-    FillPolicy(
-        stop_loss=LevelFill.NEXT_OPEN,
-        take_profit=LevelFill.NEXT_OPEN,
-        same_bar=SameBarTie.TP_FIRST,
-    ),
-]
-
-
 class TestParity:
     @pytest.mark.parametrize("direction", [Side.BUY, Side.SELL])
-    @pytest.mark.parametrize("policy", _POLICIES)
     @pytest.mark.parametrize(
         ("sl", "tp"),
         [(None, None), (300, None), (None, 400), (300, 400)],
@@ -214,7 +223,6 @@ class TestParity:
     def test_seam_matches_oracle_rust_path(
         self,
         direction: Side,
-        policy: FillPolicy,
         sl: int | None,
         tp: int | None,
     ) -> None:
@@ -227,7 +235,6 @@ class TestParity:
             direction=direction,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
-            policy=policy,
         )
         expected = [
             _oracle(
@@ -238,7 +245,6 @@ class TestParity:
                 tf_minutes=1,
                 stop_loss_paisa=sl,
                 take_profit_paisa=tp,
-                policy=policy,
             )
             for m in masks
         ]
@@ -268,7 +274,6 @@ class TestParity:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=400,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -354,7 +359,6 @@ class TestSessionAwareForcedExitParity:
                 tf_minutes=1,
                 stop_loss_paisa=100_000,
                 take_profit_paisa=100_000,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -365,7 +369,7 @@ class TestSessionAwareForcedExitParity:
         fire_trades = got[0]
         assert len(fire_trades) == 1
         assert fire_trades[0].exit_ts == _muhurat_ts(14, 35)
-        assert fire_trades[0].pnl_paisa == 20  # forced at OPEN 100.20, not 200
+        assert fire_trades[0].pnl_paisa == 0  # forced at the bar LOW 100.00, not 200
 
     def test_rust_and_fallback_agree_on_muhurat(self) -> None:
         # The Rust path and the forced pure-Python fallback agree on a Muhurat
@@ -414,7 +418,6 @@ class TestSessionAwareForcedExitParity:
                 tf_minutes=1,
                 stop_loss_paisa=100_000,
                 take_profit_paisa=100_000,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -475,7 +478,6 @@ class TestCrossSessionPendingEntryParity:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
         assert got == expected
@@ -515,7 +517,6 @@ class TestCrossSessionPendingEntryParity:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
         assert got == expected
@@ -593,7 +594,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -622,7 +622,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -659,7 +658,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -703,7 +701,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -747,7 +744,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -781,7 +777,6 @@ class TestConstructionEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -887,7 +882,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -928,7 +922,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -963,7 +956,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
         assert first == expected  # the fallback STILL served both calls,
@@ -1013,7 +1005,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=distance if leg == "stop_loss_paisa" else None,
                 take_profit_paisa=distance if leg == "take_profit_paisa" else None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1039,7 +1030,6 @@ class TestPerCallEnvelopeGuards:
                 tf_minutes=1,
                 stop_loss_paisa=_MAX_KERNEL_PRICE_PAISA,
                 take_profit_paisa=_MAX_KERNEL_PRICE_PAISA,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1102,7 +1092,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -1158,7 +1147,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in mixed
         ]
@@ -1187,7 +1175,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1232,7 +1219,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -1274,7 +1260,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=300,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
             for m in wide
         ]
@@ -1309,7 +1294,6 @@ class TestWideMaskPromotion:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1513,3 +1497,364 @@ class TestSimulateMasksWithExitIndices:
         events = [e for e in logs if e["event"] == "rust_trade_sim.exit_indices_uncertified"]
         assert len(events) == 1
         assert events[0]["reason"] == "exit_indices_not_monotonic"
+
+
+# ── reference-stamper seam (per-module 100% gate; DEC-VIX-STAMP-WIRE-001) ────
+
+
+def _vix_stamper_for(bars: list[CandleBar]) -> TradeReferenceStamper:
+    """A stamper whose VIX series covers every bar timestamp of *bars*."""
+    vix_bars = [
+        CandleBar(
+            timestamp=bar.timestamp,
+            open=Decimal("14.00"),
+            high=Decimal("15.00"),
+            low=Decimal("13.00"),
+            close=Decimal("14.00") + Decimal(i % 7) / Decimal(100),
+            volume=0,
+            open_interest=None,
+        )
+        for i, bar in enumerate(bars)
+    ]
+    return TradeReferenceStamper.from_vix_bars(vix_bars)
+
+
+class TestReferenceStamperSeam:
+    """The stamper seam's own lines, covered by THIS module's discovered suite.
+
+    The full wiring behaviour (oracle ≡ batch stamp parity, spawn-pool
+    threading, byte-identity) lives in
+    ``tests/unit/test_engine_vix_stamper_wiring.py``; these mirrors keep the
+    per-file 100% gate honest on the module's OWN covering suite
+    (``scripts/ci/coverage_gate_discovery.py`` maps ``rust_trade_sim.py`` to
+    ``test_engine_rust_trade_sim.py`` only).
+    """
+
+    def test_reference_stamper_property_default_is_none(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert sim.reference_stamper is None
+
+    def test_reference_stamper_property_returns_bound_stamper(self) -> None:
+        bars = _feed()
+        stamper = _vix_stamper_for(bars)
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, reference_stamper=stamper)
+        assert sim.reference_stamper is stamper
+
+    def test_stamped_trades_resolve_vix_at_the_conversion_seam(self) -> None:
+        bars = _feed()
+        stamper = _vix_stamper_for(bars)
+        bar_bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1, reference_stamper=stamper)
+        (trades,) = sim.simulate_masks([0], direction=Side.BUY)
+        assert trades
+        for trade in trades:
+            assert trade.vix_at_entry == stamper.vix.level_at(trade.entry_ts)
+            assert trade.vix_at_exit == stamper.vix.level_at(trade.exit_ts)
+            assert trade.vix_at_entry is not None
+            assert trade.vix_at_exit is not None
+
+
+# ────────────────────────────────────────────────────────────────────────
+# PriceColumns + derive_price_columns + the injection/memo seams
+# (DEC-STAGE1A-RUST-BATCH-001 — the W2 rider)
+# ────────────────────────────────────────────────────────────────────────
+
+from brutex.engine import rust_trade_sim as _rts_module  # noqa: E402
+from brutex.engine.rust_trade_sim import (  # noqa: E402
+    PriceColumns,
+    derive_price_columns,
+)
+
+
+class TestPriceColumns:
+    def test_derive_matches_the_historical_inline_derivation(self) -> None:
+        # The extraction golden: the module-level derive equals the old
+        # inline comprehensions (via the canonical _price_to_paisa seam) +
+        # the per-bar IST-date ordinals.
+        from brutex.engine.stage1a import (
+            _price_to_paisa,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        bars = _feed()
+        columns = derive_price_columns(bars)
+        # Immutable tuples (review LOW-2 — the columns are SHARED across sims).
+        assert columns.open_paisa == tuple(_price_to_paisa(b.open) for b in bars)
+        assert columns.high_paisa == tuple(_price_to_paisa(b.high) for b in bars)
+        assert columns.low_paisa == tuple(_price_to_paisa(b.low) for b in bars)
+        assert columns.close_paisa == tuple(_price_to_paisa(b.close) for b in bars)
+        assert columns.session_days == tuple(
+            b.timestamp.astimezone(IST).date().toordinal() for b in bars
+        )
+        assert columns.n_bars == len(bars)
+
+    @pytest.mark.parametrize("field", ["high_paisa", "low_paisa", "close_paisa", "session_days"])
+    def test_inconsistent_columns_are_refused_naming_the_field(self, field: str) -> None:
+        kwargs: dict[str, tuple[int, ...]] = {
+            "open_paisa": (1, 2),
+            "high_paisa": (1, 2),
+            "low_paisa": (1, 2),
+            "close_paisa": (1, 2),
+            "session_days": (1, 2),
+        }
+        kwargs[field] = (1,)
+        with pytest.raises(ValueError, match=field):
+            PriceColumns(**kwargs)
+
+    def test_precomputed_arm_equals_the_derive_arm_bit_for_bit(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        derived = ResidentTradeSim(bars, bits, tf_minutes=1)
+        injected = ResidentTradeSim(
+            bars, bits, tf_minutes=1, precomputed_columns=derive_price_columns(bars)
+        )
+        # The assembled kernel-input 6-tuples are bit-equal…
+        assert (
+            derived._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+            == injected._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        )
+        # …and the simulated trades identical (both kernel-served).
+        masks = [0, 1, 3]
+        assert derived.rust_active is True
+        assert injected.rust_active is True
+        assert derived.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=300
+        ) == injected.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+
+    def test_length_mismatched_precomputed_columns_are_refused_naming_both(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        short = derive_price_columns(bars[:-1])
+        with pytest.raises(ValueError, match=r"cover 4 bars != bars length 5"):
+            ResidentTradeSim(bars, bits, tf_minutes=1, precomputed_columns=short)
+
+    def test_default_none_is_the_flag_independent_byte_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The default-None arm derives locally regardless of the Stage-1A
+        # flag (the W2 rider is flag-INDEPENDENT — pinned).
+        monkeypatch.delenv("BRUTEX_SWEEP_RUST_STAGE1A", raising=False)
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        monkeypatch.setenv("BRUTEX_SWEEP_RUST_STAGE1A", "1")
+        sim_on = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert (
+            sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+            == sim_on._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        )
+
+
+class TestKernelInputsMemo:
+    def test_derive_runs_once_per_instance_including_wide_promotion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The G-4 memo: construction derives ONCE; the u128 promotion reuses
+        # the memoised 6-tuple instead of re-paying the Decimal pass.
+        calls = [0]
+        real = derive_price_columns
+
+        def _counting(bars: object) -> PriceColumns:
+            calls[0] += 1
+            return real(bars)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(_rts_module, "derive_price_columns", _counting)
+        bars = _feed()
+        bits = build_bar_bits(bars)  # u64-fit bits
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert calls[0] == 1
+        # A >64-bit mask promotes the window to the u128 sibling kernel …
+        wide_mask = 1 << 100
+        with capture_logs() as logs:
+            got = sim.simulate_masks([wide_mask], direction=Side.BUY)
+        assert [e for e in logs if e.get("event") == "rust_trade_sim.wide_kernel_promoted"]
+        # … WITHOUT a second derivation (the memo handoff).
+        assert calls[0] == 1
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                wide_mask,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+            )
+        ]
+
+    def test_injected_columns_skip_the_local_derivation_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        columns = derive_price_columns(bars)
+        monkeypatch.setattr(
+            _rts_module,
+            "derive_price_columns",
+            lambda *_a, **_k: pytest.fail("injected columns re-derived"),
+        )
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1, precomputed_columns=columns)
+        assert sim.rust_active is True
+        first = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        second = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        assert first is second  # the memo hit
+
+
+class TestSessionTailHoleWarn:
+    """The mask-independent session-tail-hole WARN (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
+
+    ``_derive_kernel_inputs`` ends with ONE capped sweep naming every
+    NON-final session whose stored bars never reach a forced-exit bar — the
+    exact shape the walker's (A2) ``session_gap`` guard fires on. Once per
+    derivation (never per mask, never inside ``_close`` — the
+    DEC-SWEEP-LOG-VOLUME-GUARD-001 posture), capped at
+    ``_TAIL_HOLE_WARN_CAP`` with ONE suppressed summary past it (the house
+    preopen capped-warn pattern).
+    """
+
+    @staticmethod
+    def _tail_hole_events(logs: list[EventDict]) -> list[EventDict]:
+        return [e for e in logs if e["event"] == "trade_sim.session_tail_hole"]
+
+    def test_construction_warns_once_for_a_non_final_forced_less_session(self) -> None:
+        # Day-1 (2024-01-02) ends at 11:12 — a session-tail hole; day-2 is the
+        # final session (exempt however it ends).
+        bars = [
+            _bar(11, 10, "100", "101", "99", "100"),
+            _bar(11, 11, "100", "101", "99", "100"),
+            _bar(11, 12, "100", "101", "99", "100"),
+            _next_day_bar(9, 15, "600", "601", "599", "600"),
+        ]
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        holes = self._tail_hole_events(logs)
+        assert len(holes) == 1
+        assert holes[0]["session"] == "2024-01-02"
+        assert holes[0]["bars"] == 3
+        assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
+    def test_silent_for_a_healthy_window_and_for_the_final_session(self) -> None:
+        # (a) day-1 REACHES its forced-exit bar (15:20) → not a hole; (b) the
+        # final session (day-2, ends 09:16) is exempt however truncated.
+        bars = [
+            _bar(15, 19, "100", "101", "99", "100"),
+            _bar(15, 20, "100", "101", "99", "100"),  # forced bar — session complete
+            _next_day_bar(9, 15, "600", "601", "599", "600"),
+            _next_day_bar(9, 16, "600", "601", "599", "600"),
+        ]
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert self._tail_hole_events(logs) == []
+
+    def test_single_session_window_never_warns(self) -> None:
+        # A one-session window IS the final session — the ordinary
+        # end-of-window shape end_of_data already names; zero WARNs.
+        bars = _feed()
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert self._tail_hole_events(logs) == []
+
+    def test_cap_20_plus_one_suppressed_summary(self) -> None:
+        # Direct-call teeth on the pure helper (the house private-import
+        # pattern): 22 hole sessions + a final session → exactly 20 WARNs +
+        # ONE suppressed summary carrying the TRUE total.
+        session_days: list[int] = []
+        forced: list[bool] = []
+        for ordinal in range(738522, 738522 + 23):  # 23 sessions, 2 bars each
+            session_days.extend([ordinal, ordinal])
+            forced.extend([False, False])
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        holes = self._tail_hole_events(logs)
+        assert len(holes) == _TAIL_HOLE_WARN_CAP == 20
+        suppressed = [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"]
+        assert len(suppressed) == 1
+        assert suppressed[0]["total"] == 22  # the final (23rd) session is exempt
+        assert suppressed[0]["shown"] == _TAIL_HOLE_WARN_CAP
+
+    def test_exactly_at_cap_20_warns_all_with_no_suppressed_summary(self) -> None:
+        # Boundary teeth on the strict `>` cap compare (refuter round 3 CM9):
+        # EXACTLY _TAIL_HOLE_WARN_CAP hole sessions (20 holes + the exempt
+        # final session) emit ALL 20 per-session WARNs and ZERO suppressed
+        # summaries — nothing was suppressed, so a summary event here would
+        # fabricate suppression. A `>` → `>=` mutant at the cap compare fires
+        # the summary at exactly-the-cap and fails this test.
+        session_days: list[int] = []
+        forced: list[bool] = []
+        for ordinal in range(738522, 738522 + 21):  # 20 holes + 1 exempt final
+            session_days.extend([ordinal, ordinal])
+            forced.extend([False, False])
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        holes = self._tail_hole_events(logs)
+        assert len(holes) == _TAIL_HOLE_WARN_CAP == 20
+        assert [e["session"] for e in holes] == [
+            date.fromordinal(o).isoformat() for o in range(738522, 738522 + 20)
+        ]
+        assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
+    def test_forced_bearing_interior_session_is_not_a_hole(self) -> None:
+        # Direct call: an interior session carrying ANY forced bar is healthy;
+        # its forced-less interior sibling still warns (the run split logic).
+        session_days = [1, 1, 2, 2, 3]
+        forced = [False, True, False, False, False]
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        holes = self._tail_hole_events(logs)
+        assert [(e["session"], e["bars"]) for e in holes] == [(date.fromordinal(2).isoformat(), 2)]
+
+    def test_single_forced_bar_interior_session_is_not_a_hole(self) -> None:
+        # Direct call (refuter round 5 MR3b, slice-START mutant killer): an
+        # interior session whose ONLY stored bar IS a forced-exit bar — e.g. a
+        # lake hole leaving just the 15:20 bar — is healthy, NOT a hole.
+        # Because forced flags are a monotone suffix within a session, the
+        # single-bar forced-only run is the ONE shape that discriminates the
+        # slice start: a `forced[run_start:i]` → `forced[run_start+1:i]`
+        # mutant scans the EMPTY slice here and fabricates a false
+        # session_tail_hole WARN (bars=1). The forced-bearing sibling test
+        # above puts its forced bar SECOND, so only this shape kills it.
+        session_days = [738522, 738523, 738523]
+        forced = [True, False, False]
+        with capture_logs() as logs:
+            _warn_session_tail_holes(forced, session_days)
+        assert self._tail_hole_events(logs) == []
+        assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
+    def test_session_days_derive_from_the_ist_session_date_not_the_utc_date(self) -> None:
+        """``session_days`` ordinals derive from the bar's IST session date,
+        never its UTC calendar date (refuter round 5 MD2, directed mutant pin
+        — the Rust-path derivation mirror of the walker's
+        ``test_entry_day_is_the_ist_session_date_not_the_utc_date``).
+
+        The ``bar.timestamp.date()`` (UTC-date) mutant at the
+        ``session_days.append`` in ``_derive_kernel_inputs`` survived the
+        suite because the mismatch is domain-bounded — no NSE session bar
+        exists before 05:30 IST post-ingest-filter, so IST and UTC dates
+        always agree on real lake bars. The derivation's DOCUMENTED semantics
+        are the IST session date ("mirrors the walker's gate bit-for-bit"),
+        so this pins that law beyond the NSE trading window
+        (defense-in-depth; the domain never produces such bars): two bars in
+        ONE IST session 2024-01-02 straddle UTC midnight (IST 01:00 = UTC
+        2024-01-01 19:30; IST 06:00 = UTC 2024-01-02 00:30) — under the
+        mutant the IST session SPLITS into two kernel sessions (a phantom
+        boundary the kernel's (A2) guard would session_gap-close across) and
+        a false ``trade_sim.session_tail_hole`` WARN fires naming the UTC
+        date 2024-01-01.
+        """
+        bars = [
+            _bar(1, 0, "100", "101", "99", "100"),  # IST 01:00 = UTC 2024-01-01T19:30
+            _bar(6, 0, "100", "101", "99", "100"),  # IST 06:00 = UTC 2024-01-02T00:30
+        ]
+        # The fixture genuinely straddles UTC midnight within one IST session.
+        assert [b.timestamp.astimezone(UTC).date().isoformat() for b in bars] == [
+            "2024-01-01",
+            "2024-01-02",
+        ]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, [0, 0], tf_minutes=1)
+            derived = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        session_days = derived[5]
+        # Container glue only (the W2 memo stores immutable tuples — review
+        # LOW-2): the behavioral assertion — the VALUES — is main's, unchanged.
+        assert list(session_days) == [_DAY.toordinal()] * 2  # ONE IST session (2024-01-02)
+        assert self._tail_hole_events(logs) == []

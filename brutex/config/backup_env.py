@@ -19,7 +19,10 @@ Resolution law (fail-safe, never fail-crash):
   fail-safe idiom, never a silent misconfig; Golden Rule #1). "Malformed"
   INCLUDES a non-finite float (``nan``/``inf`` — which would silently mute the
   dead-man: ``elapsed > nan`` is always False) and, for the hour/deadline
-  knobs, a non-positive one (round-8 MINOR).
+  knobs, a non-positive one (round-8 MINOR). A ``< 1`` retention keep count
+  likewise falls back LOUDLY (round-10 MINOR — restic treats ``--keep-* 0``
+  as no-keep, silently disabling that retention tier on the one
+  data-destroying verb, ``forget --prune``).
 * BOTH password sources set is ambiguous (F6): both fields resolve to ``None``
   plus ONE ``backup.config.ambiguous_password_source`` WARN, so run/drill then
   refuse with ``EXIT_CONFIG``.
@@ -35,6 +38,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.config.backup_env_rust import backupenv_rust_enabled, route_verify_subset
 from brutex.config.paths import brutex_home
 
 if TYPE_CHECKING:
@@ -81,13 +85,16 @@ BACKUP_MAX_RUNTIME_HOURS_ENV: Final[str] = "BRUTEX_BACKUP_MAX_RUNTIME_HOURS"
 #: ``max_runtime_hours × 3600`` (one knob, two guards — F17a belt to F17b braces).
 BACKUP_TIMEOUT_S_ENV: Final[str] = "BRUTEX_BACKUP_TIMEOUT_S"
 
-#: Retention: ``restic forget --keep-daily`` (default 14).
+#: Retention: ``restic forget --keep-daily`` (default 14; ``< 1`` → default +
+#: WARN — restic treats 0 as no-keep, round-10 MINOR).
 BACKUP_KEEP_DAILY_ENV: Final[str] = "BRUTEX_BACKUP_KEEP_DAILY"
 
-#: Retention: ``restic forget --keep-weekly`` (default 8).
+#: Retention: ``restic forget --keep-weekly`` (default 8; ``< 1`` → default +
+#: WARN).
 BACKUP_KEEP_WEEKLY_ENV: Final[str] = "BRUTEX_BACKUP_KEEP_WEEKLY"
 
-#: Retention: ``restic forget --keep-monthly`` (default 12).
+#: Retention: ``restic forget --keep-monthly`` (default 12; ``< 1`` → default
+#: + WARN).
 BACKUP_KEEP_MONTHLY_ENV: Final[str] = "BRUTEX_BACKUP_KEEP_MONTHLY"
 
 #: Python ``weekday()`` (0=Mon..6=Sun, judged in IST — the box TZ law) on which
@@ -192,6 +199,27 @@ def _valid_verify_subset(value: str) -> bool:
     indistinguishable in rc from genuine corruption — so an invalid
     passthrough must never reach the nightly verify (round-7 MINOR; the
     F3-not-F11 honesty law of the ``binary_missing`` arm, one arm over).
+
+    Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 —
+    milestone 3): when — and ONLY when — ``BRUTEX_CORE_RUST_BACKUPENV``
+    is set truthy, the shape law routes through the default-OFF,
+    burn-in-checked, fail-closed :mod:`brutex.config.backup_env_rust`
+    facade to the ``rust/brutex-core`` crate; flag-OFF is the verbatim
+    ``_valid_verify_subset_python`` oracle — behavior-identical AND
+    crate-untouched (bomb-crate spy-pinned). Honesty banner (ADR-0020,
+    mandatory verbatim): expected payoff ≈ 0 — conversion is for
+    uniformity, not speed.
+    """
+    if not backupenv_rust_enabled():
+        return _valid_verify_subset_python(value)
+    return route_verify_subset(value, _valid_verify_subset_python)
+
+
+def _valid_verify_subset_python(value: str) -> bool:
+    """The verbatim :func:`_valid_verify_subset` body — the LIVE oracle.
+
+    Token-for-token the pre-seam body (DEC-CONFIG-RUST-LEAVES-001); every
+    flag-OFF / ineligible / degraded / burn-in call serves this.
     """
     nt = _SUBSET_NT_RE.match(value)
     if nt is not None:
@@ -237,7 +265,9 @@ class BackupEnvConfig:
         Resolved subprocess deadline (env override or derived
         ``max_runtime_hours × 3600``).
     keep_daily, keep_weekly, keep_monthly
-        ``restic forget`` retention counts.
+        ``restic forget`` retention counts; a ``< 1`` env value falls back to
+        the default + WARN (restic treats ``--keep-* 0`` as no-keep — a
+        silent retention disable, round-10 MINOR).
     prune_weekday
         Python ``weekday()`` (0=Mon..6=Sun) on which ``forget`` prunes;
         an out-of-range env value falls back to the default 6 + WARN.
@@ -322,6 +352,32 @@ def _int_env(env: Mapping[str, str], name: str, default: int) -> int:
     except ValueError:
         _LOG.warning("backup.config.malformed_numeric", env_var=name, value=raw, default=default)
         return default
+
+
+def _keep_env(env: Mapping[str, str], name: str, default: int, *, knob: str) -> int:
+    """Read a ``restic forget --keep-*`` retention count; ``< 1`` → *default* + WARN.
+
+    Round-10 MINOR: a 0/negative keep count parses as a VALID int — the
+    malformed-numeric loud-fallback never fires — yet it flows verbatim into
+    ``restic forget --keep-daily/--keep-weekly/--keep-monthly``
+    (:meth:`brutex.backup.restic_runner.ResticRunner.forget`) where restic
+    treats ``0`` as "keep NONE for this bucket", silently DISABLING that
+    retention tier with rc=0 and no warning — on the ONE verb
+    (``forget --prune``) that can destroy repository data. Same law as the
+    prune_weekday / drill_sample guards: a nonsensical value falls back to
+    its default LOUDLY (``backup.config.<knob>_out_of_range`` naming the env
+    var), never a quiet no-keep policy.
+    """
+    value = _int_env(env, name, default)
+    if value < 1:
+        _LOG.warning(
+            f"backup.config.{knob}_out_of_range",
+            env_var=name,
+            value=value,
+            default=default,
+        )
+        return default
+    return value
 
 
 def _split_excludes(raw: str) -> tuple[str, ...]:
@@ -472,9 +528,13 @@ brutex_home`.
         ),
         max_runtime_hours=max_runtime_hours,
         timeout_s=timeout_s,
-        keep_daily=_int_env(env, BACKUP_KEEP_DAILY_ENV, _DEFAULT_KEEP_DAILY),
-        keep_weekly=_int_env(env, BACKUP_KEEP_WEEKLY_ENV, _DEFAULT_KEEP_WEEKLY),
-        keep_monthly=_int_env(env, BACKUP_KEEP_MONTHLY_ENV, _DEFAULT_KEEP_MONTHLY),
+        keep_daily=_keep_env(env, BACKUP_KEEP_DAILY_ENV, _DEFAULT_KEEP_DAILY, knob="keep_daily"),
+        keep_weekly=_keep_env(
+            env, BACKUP_KEEP_WEEKLY_ENV, _DEFAULT_KEEP_WEEKLY, knob="keep_weekly"
+        ),
+        keep_monthly=_keep_env(
+            env, BACKUP_KEEP_MONTHLY_ENV, _DEFAULT_KEEP_MONTHLY, knob="keep_monthly"
+        ),
         prune_weekday=prune_weekday,
         verify_subset=verify_subset,
         healthcheck_url=_optional(env, BACKUP_HEALTHCHECK_URL_ENV),

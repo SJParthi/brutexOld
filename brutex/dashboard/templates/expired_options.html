@@ -125,6 +125,10 @@
      authority). -->
 <link rel="stylesheet" href="/static/bx-design.css">
 <script defer src="/static/bx-ui.js"></script>
+<!-- The ONE shared poll-discipline core (DEC-FRONTEND-LATENCY-HARDENING-001,
+     MIGRATION.md #1720): hidden guard, one-in-flight chain, 10 s fetch abort,
+     capped 3 s→30 s backoff, visibilitychange catch-up. -->
+<script defer src="/static/bx-poll.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
@@ -144,9 +148,15 @@
       <span class="sep">·</span>
       <a href="/coverage" aria-current="page">Coverage</a>
       <span class="sep">·</span>
+      <a href="/completeness">Completeness</a>
+      <span class="sep">·</span>
       <a href="/movers">Movers</a>
       <span class="sep">·</span>
       <a href="/results">Results</a>
+      <span class="sep">·</span>
+      <a href="/screener">Screener</a>
+      <span class="sep">·</span>
+      <a href="/strategy">Strategy</a>
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
@@ -174,7 +184,7 @@
     <div id="panel" aria-busy="true">
       <!-- Skeleton shimmer, NOT a "loading…" literal: poll() ALWAYS resolves
            this to data / an honest empty state / an honest error state
-           (fetchWithTimeout bounds a hung request at 12 s). -->
+           (fetchTextBounded bounds a hung request through the body read). -->
       <div class="skelwrap" aria-hidden="true">
         <span class="bx-skel bx-skel-row" style="width:38%"></span>
         <span class="bx-skel bx-skel-row"></span>
@@ -197,8 +207,9 @@
    DEC-DASHBOARD-UX-ANIMATE-001 layer (state honesty + polish only — every
    rendered VALUE string is byte-identical): the initial paint is a skeleton
    shimmer that ALWAYS resolves — "loading…" is banned as a terminal state;
-   fetches ride BXUI.fetchWithTimeout (12 s deadline, plain-fetch fallback
-   only until the deferred bx-ui.js executes) so a hung endpoint mid-pull
+   fetches ride the shared BXUI.fetchTextBounded (abort armed THROUGH the
+   body read — DEC-O1-GUARANTEE-HARDEN-001; 12 s default bound) so a hung
+   endpoint mid-pull — headers-then-stalled-body included —
    rejects into the catch instead of pending forever; an error BEFORE any
    data renders an honest .bx-state error card with Retry, an error AFTER
    data keeps the last real table (the header verdict carries the failure);
@@ -231,11 +242,14 @@ function setDot(state) {
   if (state) liveDot.classList.add("live-" + state);
 }
 
-/* Deadline-guarded fetch: a dead/hung endpoint rejects into the caller's
-   catch. bx-ui.js is deferred, so only the very first tick can fall back to
-   bare fetch — every later 4 s tick is guarded. */
-function doFetch(url) {
-  return window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url);
+/* Minimal guard onto the ONE shared BXUI.fetchTextBounded (§11 COMMON — the body-armed-abort rationale lives ON the helper in bx-ui.js; review round 1 shrank the 3 copy-pasted shims). No-BXUI arm = the legacy unbounded-body shape, never fetchless. */
+function fetchTextBounded(url, timeoutMs) {
+  if (window.BXUI && BXUI.fetchTextBounded) {
+    return BXUI.fetchTextBounded(url, timeoutMs);
+  }
+  return fetch(url).then(function (r) {
+    return r.text().then(function (txt) { return { ok: r.ok, status: r.status, text: txt }; });
+  });
 }
 
 /* KPI writes ride the shared change-only count-up when available (final
@@ -308,7 +322,7 @@ function showFetchError(status, offline) {
   if (hasResolved) return;
   panel.setAttribute("aria-busy", "false");
   if (window.BXUI) {
-    BXUI.errorCard(panel, { status: status || undefined, offline: offline, retry: poll });
+    BXUI.errorCard(panel, { status: status || undefined, offline: offline, retry: repoll });
   } else {
     /* pre-BXUI very first tick: still an honest terminal state (the 4 s
        interval keeps retrying), built via textContent. */
@@ -344,20 +358,16 @@ let lastCoverageTxt = null;
 let lastHeadline = {};
 let lastRowCount = 0;
 
-async function poll() {
-  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires
-     ZERO fetches; the interval keeps ticking (hidden ticks are free) and the
-     visibilitychange listener below re-polls immediately on return. */
-  if (document.hidden) return;
+async function poll(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/coverage/options");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/options", timeoutMs);
+    if (!res.ok) {
       lastCoverageTxt = null;
-      liveTxt.textContent = "error " + r.status;
-      showFetchError(r.status, false);
-      return;
+      liveTxt.textContent = "error " + res.status;
+      showFetchError(res.status, false);
+      return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastCoverageTxt) {
       lastCoverageTxt = txt;
       const body = JSON.parse(txt);
@@ -375,26 +385,65 @@ async function poll() {
     let running = false;
     let prOk = false;
     try {
-      const pr = await doFetch('/api/v1/universe/pull-progress');
-      if (pr.ok) { prOk = true; running = ((await pr.json()).state || "") === "running"; }
+      /* Best-effort second read, same bounded-body helper — a malformed body
+         throws into THIS inner catch (running=false), never backs the tick off. */
+      const pr = await fetchTextBounded('/api/v1/universe/pull-progress', timeoutMs);
+      if (pr.ok) { prOk = true; running = (JSON.parse(pr.text).state || "") === "running"; }
     } catch (e) { running = false; }
     liveTxt.textContent = running
       ? "pulling · " + num(h.series) + " series · " + num(h.total_bars) + " bars"
       : "live · " + lastRowCount + " underlyings";
     setPullState(running, prOk ? "ok" : "");
+    return true;
   } catch (e) {
     lastCoverageTxt = null;
     liveTxt.textContent = "offline";
     showFetchError(0, true);
+    return false;
   }
 }
 
-poll();
-setInterval(poll, 4000);
-/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001). */
-document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) poll();
-});
+/* Self-recovering scheduler (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md
+   #1720): the tick above rides the ONE shared BXPoll discipline core
+   (bx-poll.js — hidden-tab guard BEFORE any fetch, one-in-flight
+   self-scheduling chain, capped 3 s→30 s failure backoff when the coverage
+   read fails, visibilitychange catch-up) instead of a bare fixed setInterval;
+   the visible-tab cadence is unchanged (pollMs: 4000) and every
+   render/degrade above is byte-identical (the best-effort pull-progress
+   second read keeps its own inner try — its failure never backs the tick
+   off). The poller starts at DOMContentLoaded, by which every deferred
+   script has executed; a missing bx-poll.js degrades to the legacy guarded
+   interval — the page never goes pollerless. */
+let poller = null;
+function repoll() { if (poller) { poller.pollNow(); } else { void poll(); } }
+function startPolling() {
+  if (window.BXPoll) {
+    poller = window.BXPoll.createPoller({
+      url: "/api/v1/coverage/options", // informational — the tick owns its own fetches
+      pollMs: 4000,
+      fetchJson: function (_url, timeoutMs) {
+        return poll(timeoutMs).then(function (ok) {
+          if (!ok) { throw new Error("coverage/options poll tick failed"); }
+          return { ok: true };
+        });
+      },
+      onData: function () { /* the tick already rendered */ }
+    });
+    poller.start();
+  } else {
+    const legacyTick = function () { if (!document.hidden) void poll(); };
+    legacyTick();
+    setInterval(legacyTick, 4000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) void poll();
+    });
+  }
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startPolling);
+} else {
+  startPolling();
+}
 </script>
 </body>
 </html>

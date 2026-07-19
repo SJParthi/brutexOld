@@ -21,7 +21,9 @@ expiry; the underlying is everything BETWEEN the exchange and the expiry (joined
 through any interior hyphens).
 
 This module is **pure** (stdlib only — no I/O, no clock, no Parquet / DuckDB
-imports) so it is trivially unit-testable and importable from the data layer without
+imports — plus the default-OFF Rust seam facade :mod:`brutex.data.fno_symbol_rust`,
+which adds ``structlog`` transitively) so it is trivially unit-testable and
+importable from the data layer without
 the P2 data-lake extras. It NEVER raises on a malformed / non-derivative symbol —
 :func:`parse_fno_symbol` returns ``None`` so a caller iterating lake directories
 simply skips a foreign / half-written name (Golden Rule #1: never fabricate, never
@@ -34,6 +36,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final
+
+from brutex.data import fno_symbol_rust
 
 #: The trailing instrument-type token of a future contract symbol.
 FUTURE_TYPE: Final[str] = "FUT"
@@ -110,10 +114,12 @@ class FnoSymbolParts:
 def expiry_year_in_window(year: int) -> bool:
     """Return ``True`` iff *year* is a sane F&O expiry calendar year.
 
-    The ONE window predicate (CLAUDE.md §11 COMMON) shared by
-    :func:`parse_expiry_token` and the shape-stricter futures-movers twin
-    (:mod:`brutex.dashboard.movers_futures`), so the two parsers can never again
-    diverge on which resolved years are junk (DEC-FNO-EXPIRY-YEAR-PIVOT-001).
+    The ONE window predicate (CLAUDE.md §11 COMMON) applied by
+    :func:`parse_expiry_token` — since DEC-MOVERS-FUTURES-HYPHEN-PARSE-001
+    (MIGRATION.md #1646) the futures movers' formerly shape-stricter local twin
+    is DELETED and :mod:`brutex.dashboard.movers_futures` delegates to this
+    module's canonical grammar, so there is exactly ONE parser and ONE junk-year
+    window (DEC-FNO-EXPIRY-YEAR-PIVOT-001).
 
     Parameters
     ----------
@@ -169,27 +175,12 @@ def parse_strike_token(token: str) -> Decimal | None:
     return value
 
 
-def parse_fno_symbol(symbol: str) -> FnoSymbolParts | None:
-    """Decode a lake F&O contract ``groww_symbol``, or ``None`` for a non-F&O / junk symbol.
+def _parse_fno_symbol_python(symbol: str) -> FnoSymbolParts | None:
+    """The verbatim Python parse law — the LIVE parity oracle of the Rust seam.
 
-    Right-anchored (see the module docstring): the LAST hyphen token is the instrument
-    type; for an option the second-to-last is the strike and the third-to-last is the
-    ``DDMmmYY`` expiry; for a future the second-to-last is the expiry. The underlying is
-    every token between the exchange (token ``0``) and the expiry, joined through any
-    interior hyphens so a hyphenated underlying (``BAJAJ-AUTO``) is preserved intact.
-
-    Parameters
-    ----------
-    symbol
-        A candidate contract ``groww_symbol`` (typically a lake ``FNO`` directory name).
-
-    Returns
-    -------
-    FnoSymbolParts | None
-        The decoded coordinates when *symbol* is a well-formed FUT / CE / PE contract,
-        else ``None`` (a spot symbol, a future missing its expiry, an option missing
-        its strike, an unparseable expiry / strike, or any junk) — never raising, so a
-        directory walk skips the entry.
+    The pre-seam :func:`parse_fno_symbol` body, moved token-for-token
+    (DEC-DATA-RUST-PURELAW-001; the #1913 ``tf_resampler`` extraction shape).
+    Every flag-OFF / degraded / non-ASCII call runs exactly this function.
     """
     parts = symbol.split("-")
     instrument_type = parts[-1]
@@ -222,6 +213,42 @@ def parse_fno_symbol(symbol: str) -> FnoSymbolParts | None:
         instrument_type=instrument_type,
         strike=strike,
         option_type=option_type,
+    )
+
+
+def parse_fno_symbol(symbol: str) -> FnoSymbolParts | None:
+    """Decode a lake F&O contract ``groww_symbol``, or ``None`` for a non-F&O / junk symbol.
+
+    Right-anchored (see the module docstring): the LAST hyphen token is the instrument
+    type; for an option the second-to-last is the strike and the third-to-last is the
+    ``DDMmmYY`` expiry; for a future the second-to-last is the expiry. The underlying is
+    every token between the exchange (token ``0``) and the expiry, joined through any
+    interior hyphens so a hyphenated underlying (``BAJAJ-AUTO``) is preserved intact.
+
+    Routed through the default-OFF ``BRUTEX_DATA_RUST`` seam
+    (:func:`brutex.data.fno_symbol_rust.routed_parse_fno_symbol`,
+    DEC-DATA-RUST-PURELAW-001) with :func:`_parse_fno_symbol_python` — the
+    verbatim pre-seam body — as the LIVE parity oracle; flag unset/falsy is
+    byte-identical to the pre-seam behaviour.
+
+    Parameters
+    ----------
+    symbol
+        A candidate contract ``groww_symbol`` (typically a lake ``FNO`` directory name).
+
+    Returns
+    -------
+    FnoSymbolParts | None
+        The decoded coordinates when *symbol* is a well-formed FUT / CE / PE contract,
+        else ``None`` (a spot symbol, a future missing its expiry, an option missing
+        its strike, an unparseable expiry / strike, or any junk) — never raising, so a
+        directory walk skips the entry.
+    """
+    return fno_symbol_rust.routed_parse_fno_symbol(
+        symbol,
+        python_law=_parse_fno_symbol_python,
+        strike_law=parse_strike_token,
+        build_parts=FnoSymbolParts,
     )
 
 

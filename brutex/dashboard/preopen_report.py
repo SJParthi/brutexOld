@@ -43,23 +43,21 @@ import bisect
 import io
 import re
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import groupby
 from pathlib import Path
+from types import EllipsisType
 from typing import Any, Final, Literal
 
 import duckdb
 import structlog
 
-from brutex.calendars.nse import HolidayDataUnavailableError
-from brutex.calendars.observed_sessions import (
-    is_trading_day_checked_observed,
-    load_observed_holidays,
-)
+from brutex.calendars.nse import has_muhurat_session, previous_trading_session
+from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _INTRADAY_BASE_INTERVAL,
@@ -67,11 +65,12 @@ from brutex.dashboard.db_view import (
     _daily_open_by_date,
     _intraday_last_close_by_date,
     _intraday_open_by_date,
-    _prev_trading_close,
     list_candle_datasets,
 )
+from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.session import IST
+from brutex.data.spot_daily_resample import make_lake_read_1m_window, resample_1m_to_daily
 
 #: Module logger — surfaces a per-symbol skip (DEC-PREOPEN-SPACE-SYMBOL-001) so a
 #: degraded export is visible in ``/logs``, never silent.
@@ -170,6 +169,247 @@ REPORT_BASES: Final[tuple[ReportBasis, ...]] = ("day", "minute")
 #: share (CLAUDE.md §11 COMMON).
 REPORT_EXCLUDED_SEGMENTS: Final[frozenset[str]] = frozenset({FNO_CANDLE_LAKE_SEGMENT})
 
+#: Cap on ``preopen.prev_close_noncontiguous`` WARNs emitted per report build
+#: (DEC-PREOPEN-PREVDAY-COMMON-002) — deduped per ``(exchange, segment,
+#: symbol)`` dataset triple (a bare-symbol key would silence a dual-listed
+#: symbol's second exchange — the hostile-review fold); everything past the
+#: cap rolls into ONE ``preopen.prev_close_noncontiguous_suppressed`` summary
+#: (mirrors the /movers #1535 capped-warn precedent, state kept function-local).
+_HOLE_WARN_CAP: Final[int] = 20
+
+#: The reproduced shapes a VERIFIED prev-close hole takes — the machine
+#: ``hole_shape`` field on the ``preopen.prev_close_noncontiguous`` WARN
+#: (DEC-PREOPEN-PREVDAY-COMMON-002 hostile-review fold: the original one-line
+#: detail unconditionally advised a re-pull, which is WRONG remediation for
+#: most of the shapes; DEC-PREVSESSION-MUHURAT-COHERENCE-001 split the
+#: calendar-confirmed Muhurat boundary — a HEALTHY lake — out of the
+#: suspicious ``extra_nonsession_bar`` catch-all). See :func:`_hole_shape`.
+_HoleShape = Literal[
+    "muhurat_session_bar", "extra_nonsession_bar", "prebuild_lag", "missing_session"
+]
+
+#: Cap on ``preopen.stale_daily_recomputed`` WARNs emitted per report build
+#: (DEC-PREOPEN-DAY-FRESHNESS-001) — deduped per ``(exchange, segment,
+#: symbol)`` dataset triple exactly like :data:`_HOLE_WARN_CAP` (the
+#: #1539/#1649a capped-WARN idiom); everything past the cap rolls into ONE
+#: ``preopen.stale_daily_recomputed_suppressed`` summary.
+_STALE_WARN_CAP: Final[int] = 20
+
+
+def _fresh_daily_maps(
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    days: AbstractSet[date],
+    on_error: Callable[[BaseException], None] | None = None,
+) -> tuple[dict[date, Decimal], dict[date, Decimal]]:
+    """Fresh per-session ``(open, close)`` maps resampled from the stored 1-minute base.
+
+    The evidence source of the day-basis derived-1day FRESHNESS guard
+    (DEC-PREOPEN-DAY-FRESHNESS-001, the pre-open mirror of the /movers
+    #1795a verify-equality law): since DEC-1MINUTE-ONLY-DERIVE-1DAY-001 the
+    ``1day`` partition is BY DEFINITION the resample of the stored 1-minute —
+    so the resample of the CURRENT 1-minute is the day basis' ground truth,
+    and a stored value that diverges from it is a STALE write-time cache
+    (a 1-minute write after the last prebuild). Reads the 1-minute base
+    month-BOUNDED to the ``[min(days), max(days)]`` span via the ONE COMMON
+    window reader (:func:`~brutex.data.spot_daily_resample.
+    make_lake_read_1m_window` — the SAME reader the prebuild's daily derive
+    uses, price-sanity gate included) and resamples it through the ONE COMMON
+    daily resampler (:func:`~brutex.data.spot_daily_resample.
+    resample_1m_to_daily` — never a second math copy, CLAUDE.md §11 COMMON),
+    keying each derived bar by its IST session date.
+
+    FAIL-OPEN, never fail-closed (the movers base-absent mirror): an empty
+    *days* set, a symbol with NO stored 1-minute for the span, or a
+    verification-read failure (an unreadable/corrupt month file, a
+    price-insane row refused by the reader's sanity gate, a resampler input
+    violation) returns EMPTY maps — the caller then serves the stored values
+    exactly as before this guard existed (disclosed limit; the failure arm
+    additionally surfaces ONE ``preopen.freshness_check_failed`` WARN naming
+    the error, so a degraded verification is visible, never silent —
+    *on_error* is the build-side seam that routes it through the SAME
+    capped/deduped per-build WARN idiom as the guard's other events
+    (hostile-review NIT fold); ``None`` — a direct call — logs directly).
+    The caught
+    set is the KNOWN data-shape classes only — the COMMON unreadable-file set
+    (:func:`~brutex.dashboard.movers_resilient.movers_read_skip_errors`,
+    which already carries the reader's typed
+    :class:`~brutex.data.errors.ResampleInputError` refusals — incl. the
+    price-sanity gate's) plus ``ValueError``/``ArithmeticError`` (the
+    DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 re-wrap law's classes, covering a
+    hostile Decimal parse); deliberately NOT the whole ``DataLakeError``
+    family (``LakeWriteHalt`` must never be swallowed — the movers set's own
+    narrowness law), and a genuine code bug (``TypeError`` from an
+    out-of-band null column included — the sibling boundary's disclosed
+    limit) still propagates.
+
+    HONEST O-cost (Golden Rule #10): one month-bounded 1-minute read + one
+    in-memory O(span-bars) resample PER day-basis symbol PER cold build —
+    NOT free (the price of never serving a stale derived value); the
+    ``/reports`` memo (DEC-DB-LATENCY-HARDENING-001) still makes every warm
+    click zero-read. A ``days`` upper bound at ``date.max`` saturates the
+    half-open read end (that degenerate day fails open — unreachable from
+    real NSE sessions).
+    """
+    if not days:
+        return {}, {}
+    lo, hi = min(days), max(days)
+    end = hi + timedelta(days=1) if hi < date.max else hi
+    read_errors: tuple[type[BaseException], ...] = (
+        *movers_read_skip_errors(),
+        ValueError,
+        ArithmeticError,
+    )
+    try:
+        frame = make_lake_read_1m_window(
+            lake_root=lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            start=lo,
+            end=end,
+        )()
+        if frame.is_empty():
+            return {}, {}
+        bars = resample_1m_to_daily(frame, before=end)
+    except read_errors as exc:
+        if on_error is not None:
+            on_error(exc)
+        else:
+            _LOG.warning(
+                "preopen.freshness_check_failed",
+                symbol=symbol,
+                exchange=exchange,
+                segment=segment,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        return {}, {}
+    fresh_open: dict[date, Decimal] = {}
+    fresh_close: dict[date, Decimal] = {}
+    for bar in bars:
+        session = bar.timestamp.astimezone(IST).date()
+        fresh_open[session] = bar.open
+        fresh_close[session] = bar.close
+    return fresh_open, fresh_close
+
+
+def _stale_day_row(
+    iep: Decimal,
+    anchor: Decimal,
+    *,
+    day: date,
+    expected: date | None,
+    fresh_open: Mapping[date, Decimal],
+    fresh_close: Mapping[date, Decimal],
+) -> tuple[date, Decimal, Decimal] | None:
+    """The fresh ``(expected, iep, prev_close)`` triple when the stored row is STALE.
+
+    The per-ROW verdict of the day-basis freshness guard
+    (DEC-PREOPEN-DAY-FRESHNESS-001), scoped to EXACTLY the two stored 1-day
+    values the report consumes — the day's OPEN (IEP) and the prior session's
+    CLOSE (PREV. CLOSE); high/low/volume are never read by the report, so
+    they are deliberately not verified (a narrower guard than the movers
+    whole-frame ``.equals``, disclosed in the ledger entry).
+
+    ROW-ATOMIC by design — the load-bearing law: a row is served either
+    fully-STORED or fully-FRESH, NEVER a mix, because the two sources can sit
+    on different price scales when the stored 1-day series is a hand-built /
+    pre-#853 vendor artifact (the TMPV demerger shape the locked
+    DEC-PREOPEN-REPORT-1DAY-001 exists for — recomputing only the IEP there
+    would re-create the exact +69.88%-vs-+2.84% cross-basis explosion that
+    decision killed). So:
+
+    * *expected* ``None`` — defensively total (an emitted row always resolved
+      a prior session, so this arm is production-unreachable via the caller;
+      kept for the pure helper's totality, the :func:`_hole_shape`
+      ``prebuild_lag`` precedent, and directly unit-tested) → ``None``.
+    * either session ABSENT from the fresh maps (no 1-minute base for it) →
+      ``None`` — the row is NOT fully recomputable on the 1-minute scale, so
+      it fails open to the stored pair verbatim (the TMPV shape lands here:
+      its 1-minute series covers the report day but not the prior session);
+      when the AVAILABLE evidence proves a divergence the fail-open is
+      observed by the sibling :func:`_stale_day_row_unrecomputable` WARN
+      (the hostile-review fold — serve behavior unchanged).
+    * both fresh values present and EQUAL to the stored pair (full-precision
+      ``Decimal`` numeric equality — the write-time stored ≡ resample law
+      held, a FRESH lake) → ``None`` — serve stored, byte-identical.
+    * both present and EITHER differs → the fresh triple — the stored row is
+      stale; the caller serves BOTH fresh values (one consistent scale) and
+      WARNs once per dataset triple.
+
+    Fresh values are positive by construction (the window reader's
+    price-sanity gate refuses non-positive/non-finite rows), so a served
+    fresh ``prev_close`` can never re-open the ``/0`` %CHNG the caller's
+    zero-anchor skip guards.
+    """
+    if expected is None:
+        return None
+    f_open = fresh_open.get(day)
+    f_close = fresh_close.get(expected)
+    if f_open is None or f_close is None:
+        return None
+    if f_open == iep and f_close == anchor:
+        return None
+    return (expected, f_open, f_close)
+
+
+def _stale_day_row_unrecomputable(
+    iep: Decimal,
+    anchor: Decimal,
+    *,
+    day: date,
+    expected: date | None,
+    fresh_open: Mapping[date, Decimal],
+    fresh_close: Mapping[date, Decimal],
+) -> tuple[date, Decimal | None, Decimal | None] | None:
+    """The ``(expected, fresh_iep?, fresh_prev_close?)`` evidence when a row is
+    STALE-but-UNRECOMPUTABLE — the fail-open lane's observability twin.
+
+    The hostile-review MINOR fold on DEC-PREOPEN-DAY-FRESHNESS-001: the
+    row-atomic fail-open (:func:`_stale_day_row` returning ``None`` because
+    ONE of the two sessions has no 1-minute base) previously served the
+    stored pair SILENTLY even when the AVAILABLE fresh evidence proved a
+    divergence. This helper detects exactly that shape — the row is NOT
+    fully recomputable (so the serve stays the stored pair, unchanged — the
+    row-atomic law is untouched) but at least one available fresh value
+    DIFFERS from its stored counterpart — so the caller can emit ONE capped
+    ``preopen.stale_daily_unrecomputable`` WARN. OBSERVE-ONLY: no served
+    value changes in any arm. Honest limit (disclosed in the ledger entry):
+    the evidence cannot distinguish genuine staleness from a legitimately
+    ADJUSTED hand-built/vendor-era series on a different price scale (the
+    TMPV demerger shape) — such a lake now reads this observe-only WARN
+    where it was silent (the WARN's detail says "possibly a legitimately
+    adjusted series", never a false certainty).
+
+    Arms (each returns ``None`` = nothing to observe):
+
+    * *expected* ``None`` — total (production-unreachable via the caller; an
+      emitted row always resolved a prior session — the
+      :func:`_stale_day_row` precedent, directly unit-tested).
+    * BOTH sessions present in the fresh maps — the row is fully
+      recomputable, so the recompute lane (:func:`_stale_day_row`) owns the
+      verdict (a fresh equal pair correctly observes nothing here).
+    * no available fresh value differs — no divergence evidence (the
+      fail-open stays honestly silent: there is nothing to report).
+    * else → the evidence triple (the missing side reads ``None``).
+    """
+    if expected is None:
+        return None
+    f_open = fresh_open.get(day)
+    f_close = fresh_close.get(expected)
+    if f_open is not None and f_close is not None:
+        return None
+    divergent = (f_open is not None and f_open != iep) or (
+        f_close is not None and f_close != anchor
+    )
+    if not divergent:
+        return None
+    return (expected, f_open, f_close)
+
 
 def resolve_report_datasets(
     lake_root: Path,
@@ -231,56 +471,33 @@ def resolve_report_datasets(
 def _previous_trading_day(day: date, *, observed: AbstractSet[date] = frozenset()) -> date | None:
     """The NSE trading session immediately before *day* (per the shared calendar).
 
-    Walks back one calendar day at a time from ``day - 1`` until the STRICT
-    :func:`brutex.calendars.observed_sessions.is_trading_day_checked_observed`
-    is satisfied — the checked calendar AND NOT an *observed* overlay day
-    (DEC-CALENDAR-OBSERVED-SESSIONS-001 — an observably-untraded day is NOT a
-    session, so the anchor steps over it exactly like a holiday; remove-only,
-    default empty = byte-identical back-compat) — so weekends and listed
-    NSE/BSE holidays are stepped over (they are NOT trading sessions) and a
-    special weekend session (e.g. a Budget-Day Saturday) IS honoured. The walk
-    always terminates: any covered weekday outside the holiday list is a
-    trading day and the DETECTOR-written overlay is capped at 8 days/year
-    (write-time — ``classify_month_drift``; a hand-edited sidecar still loads a
-    FINITE set), so the immediately-preceding session is at most a handful of
-    days back (bounded constant work, not unbounded).
+    DEC-PREOPEN-PREVDAY-COMMON-002: a THIN delegator over the ONE COMMON
+    :func:`brutex.calendars.nse.previous_trading_session` primitive (CLAUDE.md
+    §11 COMMON — the #1535/#1539-named follow-up, now CLOSED; the private walk
+    this module used to carry is DELETED). Name + signature are KEPT so every
+    existing caller/test survives verbatim. *observed* is the REMOVE-ONLY
+    observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): an
+    observably-untraded day is stepped over exactly like a holiday; the default
+    empty set is byte-identical back-compat (delegation-equivalence pinned
+    against a verbatim copy of the old walk over the full covered span).
 
-    LOUD out-of-coverage handling (DEC-CALENDAR-EXCHANGE-SPLIT-001 pack): when
-    the walk reaches a weekday OUTSIDE the published holiday span (e.g. a report
-    for the 2020-01-01 pull floor walking into 2019, or a post-coverage 2027+
-    date), the checked calendar raises rather than silently guessing "trading
-    day" — this helper catches that, emits ONE ``calendar.coverage_exhausted``
-    structlog warning, and returns ``None``. The caller
-    (:func:`_daily_prev_close_contiguous`) treats ``None`` as prev-close-ABSENT,
-    so the row is honestly SKIPPED (the locked "correct-or-absent, never wrong"
-    contract) instead of anchoring on an unverified session — never a silent
+    ABSTAIN, never guess: when the back-walk crosses the published-holiday
+    coverage floor the primitive emits ONE
+    ``calendar.previous_session_coverage_exhausted`` warning (the COMMON event
+    — the legacy ``calendar.coverage_exhausted`` twin this module emitted is
+    RETIRED, a sanctioned observability rename) and returns ``None``; the
+    callers treat ``None`` as prev-close-ABSENT so the row is honestly SKIPPED
+    (the locked "correct-or-absent, never wrong" contract) — never a silent
     guess, never a crash/500.
 
-    Honest limit (Golden Rule #10): a Diwali **Muhurat** date is classified as a
-    holiday by the calendar, so it is treated as a NON-session here.
-    A symbol whose 1-day lake happens to carry a Muhurat daily bar may therefore
-    have the day-after-Diwali row conservatively SKIPPED by
-    :func:`_daily_prev_close_contiguous` (the "correct-or-absent, never wrong"
-    rule) — recorded in the decision ledger, not a silent wrong number.
+    Honest limit (Golden Rule #10): a Diwali **Muhurat** date is classified as
+    a holiday by the calendar, so it is a NON-session here. A symbol whose lake
+    carries a Muhurat bar may therefore have the day-after-Diwali row
+    conservatively SKIPPED by BOTH contiguity guards (the "correct-or-absent,
+    never wrong" rule) — recorded in the decision ledger, not a silent wrong
+    number.
     """
-    probe = day - timedelta(days=1)
-    while True:
-        try:
-            if is_trading_day_checked_observed(probe, observed=observed):
-                return probe
-        except HolidayDataUnavailableError:
-            _LOG.warning(
-                "calendar.coverage_exhausted",
-                report_day=day.isoformat(),
-                probe_day=probe.isoformat(),
-                detail=(
-                    "holiday list exhausted while walking back to the prior trading "
-                    "session; PREV. CLOSE will be reported ABSENT for this day "
-                    "(correct-or-absent, never a guess)"
-                ),
-            )
-            return None
-        probe -= timedelta(days=1)
+    return previous_trading_session(day, observed=observed)
 
 
 def _daily_prev_close_contiguous(
@@ -289,6 +506,8 @@ def _daily_prev_close_contiguous(
     day: date,
     *,
     observed: AbstractSet[date] = frozenset(),
+    expected_session: date | None | EllipsisType = ...,
+    on_hole: Callable[[date, date], None] | None = None,
 ) -> Decimal | None:
     """Daily-basis PREV. CLOSE that REFUSES to anchor across a MISSING daily bar.
 
@@ -321,15 +540,43 @@ def _daily_prev_close_contiguous(
     calendar walk is a bounded constant); a safety net, never a data fix — the
     1-day series is filled by re-pulling (DEC-DHAN-429-RETRY-001 #466) + the
     windows table (#465) + the auto-retry layer (DEC-INGEST-AUTO-RETRY-001).
+
+    Seams (DEC-PREOPEN-PREVDAY-COMMON-002, shared with the minute mirror):
+    *expected_session* is the Ellipsis-sentinel prior-session seam — the
+    default ``...`` computes :func:`_previous_trading_day(day, observed=…)`
+    internally (the historical behaviour), while a caller holding a memoised
+    walk result passes it directly (``build_preopen_rows``'s per-report
+    O(unique days) memo). *on_hole* is the observability seam: invoked as
+    ``on_hole(expected, nearest_lake_session)`` EXACTLY when the anchor is
+    refused because the nearest earlier daily bar is NOT the calendar's prior
+    session (a lake hole) — never on the first-session, coverage-abstain, or
+    zero-close refusals, and never when ``None``. The mismatch takes the three
+    reproduced shapes :func:`_hole_shape` classifies for the WARN — an EXTRA
+    calendar-non-session bar AFTER the prior session (``found > expected``, the
+    Muhurat shape), a 1-day series LAGGING the minute series (prebuild lag), or
+    a genuinely MISSING session — but on the daily basis the caller holds no
+    minute evidence (this basis never reads the 1-minute series,
+    DEC-PREOPEN-REPORT-1DAY-001), so its diagnostic is honestly TWO-WAY
+    (extra-non-session-bar vs missing-session). The refusal VALUE contract
+    is unchanged (payload byte-identical; its refusals already skip).
     """
     idx = bisect.bisect_left(daily_dates, day)
     if idx == 0:
         return None
-    expected = _previous_trading_day(day, observed=observed)
+    expected = (
+        _previous_trading_day(day, observed=observed)
+        if expected_session is ...
+        else expected_session
+    )
     # ``None`` = the calendar's coverage ran out while walking back (already
-    # WARNed loudly by the helper): the prior session cannot be verified, so
-    # the anchor is honestly ABSENT and the row is skipped — never a guess.
-    if expected is None or daily_dates[idx - 1] != expected:
+    # WARNed loudly by the COMMON primitive): the prior session cannot be
+    # verified, so the anchor is honestly ABSENT and the row is skipped —
+    # never a guess, and never an ``on_hole`` (there is no verified hole).
+    if expected is None:
+        return None
+    if daily_dates[idx - 1] != expected:
+        if on_hole is not None:
+            on_hole(expected, daily_dates[idx - 1])
         return None
     close = daily[expected]
     if close == 0:
@@ -338,40 +585,164 @@ def _daily_prev_close_contiguous(
 
 
 def _minute_prev_close_contiguous(
-    minute_last: dict[date, Decimal], trading_dates: list[date], day: date
+    minute_last: dict[date, Decimal],
+    day: date,
+    *,
+    observed: AbstractSet[date] = frozenset(),
+    expected_session: date | None | EllipsisType = ...,
 ) -> Decimal | None:
-    """Minute-basis PREV. CLOSE that REFUSES to anchor across a data hole.
+    """Minute-basis PREV. CLOSE anchored on the checked NSE calendar ALONE.
 
     The "previous close" for *day* is the **immediately preceding trading
-    session's** last 1-minute close. The authoritative trading-session list is
-    the symbol's own **1-day** series (*trading_dates*, sorted) — one bar per
-    session, far more robust than the minute feed and able to tell a genuine
-    holiday gap (absent from BOTH series) apart from a *missing 1-minute window*
-    (present in the 1-day series, absent from the minute feed). The expected
-    prior session is the latest 1-day date strictly before *day*; the anchor is
-    valid ONLY when that exact session also has 1-minute data in *minute_last*.
+    session's** last 1-minute close. The authoritative prior session is derived
+    from the shared **NSE trading calendar** (:func:`_previous_trading_day`) —
+    the SAME resolver the daily basis uses (:func:`_daily_prev_close_contiguous`)
+    — and the anchor is served iff that EXACT session has 1-minute data in
+    *minute_last*. The symbol's 1-day series is NOT consulted
+    (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1660 — supersedes-in-part the
+    #1620/#1621 shape AND the minute-basis arm of the richer
+    DEC-PREOPEN-PREVDAY-COMMON-002 #1649a confirmation guard folded at the
+    2026-07-10 merge-reconcile, both of which required the possibly-stale 1-day
+    series to CONFIRM the calendar's session): with the checked-calendar walk
+    threaded, the 1-day intermediary could only ADD over-refusals (a 1-day-holed
+    but 1-minute-complete lake skipped a row whose correct anchor existed in
+    ``minute_last[expected]``) and could not catch anything the
+    calendar + minute check misses. The previous-AVAILABLE fallback for a
+    symbol with no 1-day partition is likewise REMOVED — that arm bridged a
+    genuine 1-minute session hole onto a stale earlier close with NO calendar
+    check (the captured 23.81%-where-truth-is-4.00% mis-anchor class), and a
+    CLI-pulled / never-prebuilt lake put EVERY symbol on it. Because no 1-day
+    comparison remains, the #1649a ``on_hole`` seam does not exist on THIS
+    guard (the hole-WARN channel stays live on the daily mirror, which keeps
+    its 1-day evidence); the #1649a *expected_session* memo seam IS kept —
+    ``...`` computes the walk internally, a memo-holding caller passes it, so
+    the calendar back-walk runs once per unique report day.
 
-    When the prior session's minute window is MISSING from the lake this returns
-    ``None`` so the caller SKIPS the row rather than silently anchoring on a
-    stale far-earlier close — the fake-mover bug where a missing prior-day
-    window produced a wildly wrong %CHNG (e.g. a −7.88% on JUBLINGREA whose
-    prior 1-minute window had not been fetched), exactly the rows the Top-mover
-    category then surfaced (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001). Also ``None``
-    on the first known session (no prior 1-day date) or a zero prior close.
-    O(log N) via :func:`bisect.bisect_left` over the pre-sorted *trading_dates*.
+    Refusal ladder (each returns ``None`` so the caller SKIPS the row — the
+    locked "correct-or-absent, never wrong" contract):
 
-    Used ONLY when a 1-day series exists for the symbol; a pure-minute symbol
-    with no 1-day partition keeps the DEC-PREOPEN-MINUTE-BASIS-001 fallback (the
-    previous AVAILABLE minute session) since there is no calendar to verify
-    against — the honest limit is recorded in the decision ledger.
+    * the calendar's prior session is unverifiable past the coverage floor
+      (:func:`_previous_trading_day` LOUD-abstains → ``None``);
+    * the prior session's 1-minute window is MISSING (``minute_last`` has no
+      entry for it — the fake-mover bug where an un-fetched prior-day window
+      produced a wildly wrong %CHNG, e.g. −7.88% on JUBLINGREA;
+      DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001), OR its close is zero.
+
+    A genuine weekend/holiday gap is NOT a hole: the calendar steps over it, so
+    a contiguous series across a holiday still resolves to the real prior
+    session. The calendar walk is a bounded constant per row; the map lookup is
+    O(1). Honest limit (Golden Rule #10): a PARTIAL prior-session 1-minute
+    window (truncated intra-day) still serves its mid-session last close — real
+    data at a real checked-calendar session, but not necessarily the 15:29
+    close; intra-session completeness is not checked here (recorded in the
+    ledger entry, note-only follow-up).
     """
-    idx = bisect.bisect_left(trading_dates, day)
-    if idx == 0:
+    expected = (
+        _previous_trading_day(day, observed=observed)
+        if expected_session is ...
+        else expected_session
+    )
+    # ``None`` = the calendar's coverage ran out while walking back (already
+    # WARNed loudly by the helper): the prior session cannot be verified, so the
+    # anchor is honestly ABSENT and the row is skipped — never a guess.
+    if expected is None:
         return None
-    close = minute_last.get(trading_dates[idx - 1])
+    close = minute_last.get(expected)
     if close is None or close == 0:
         return None
     return close
+
+
+def _hole_shape(
+    expected: date, found: date, minute_evidence: Mapping[date, Decimal] | None
+) -> _HoleShape:
+    """Classify a VERIFIED prev-close hole into its reproduced remediation shape.
+
+    DIAGNOSTIC ONLY (the hostile-review fold on DEC-PREOPEN-PREVDAY-COMMON-002):
+    the refusal itself stands in EVERY shape — the correct-or-absent contract is
+    untouched, and in particular the guard is never re-anchored on
+    ``minute_evidence[expected]``: 1-minute PRESENCE for the expected session
+    does NOT prove session COMPLETENESS (a partially-pulled day's last minute
+    close would be a fabricated PREV. CLOSE). The shape only aims the
+    remediation text in the WARN's ``detail``:
+
+    * ``found > expected`` AND :func:`brutex.calendars.nse.has_muhurat_session`
+      confirms *found* → ``"muhurat_session_bar"`` — the annual day-after-
+      Diwali boundary (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the ingest
+      legitimately keeps Muhurat bars (DEC-INGEST-BOUNDARY-INTEGRITY-001) and
+      the prebuild derives their 1-day bar, so the lake is HEALTHY and no
+      action is needed. The pre-open report is an ANCHOR-law surface, so the
+      row still stays conservatively skipped — it mirrors the engine's
+      ``stage1a.muhurat_prev_day_anchor_skip`` (#1616), while ``/movers``
+      serves the Muhurat close under the DISPLAY baseline law (stamped
+      ``prev_close_muhurat``) — the recorded two-law design.
+    * ``found > expected`` on a NON-Muhurat date → ``"extra_nonsession_bar"``
+      — an UNEXPECTED calendar-non-session 1-day bar sits AFTER the
+      calendar's prior session: honestly SUSPICIOUS (a stray write, a corrupt
+      partition, or a calendar gap) — inspect the unexpected bar; a re-pull
+      alone cannot explain it away.
+    * ``found < expected`` AND the expected session IS present in the symbol's
+      minute series → ``"prebuild_lag"`` — the 1-day series LAGS the 1-minute
+      series (e.g. a CLI-pulled lake awaiting the pipeline prebuild,
+      DEC-PIPELINE-AUTOPREBUILD-001). Remediation: run the pipeline prebuild,
+      not a re-pull.
+    * ``found < expected`` AND the expected session is absent from the minute
+      evidence too → ``"missing_session"`` — the genuine hole; remediation is
+      re-pulling the missing session.
+
+    *minute_evidence* is ``None`` on the DAILY basis (the day basis never reads
+    the 1-minute series, DEC-PREOPEN-REPORT-1DAY-001), so the daily
+    ``found < expected`` diagnostic is honestly reduced to
+    ``missing_session`` — a daily-basis prebuild lag reads ``missing_session``
+    (an accepted, documented limit; the minute basis, which holds the
+    evidence, names it). The ``found > expected`` split needs no minute
+    evidence, so both bases classify it identically.
+    """
+    if found > expected:
+        if has_muhurat_session(found):
+            return "muhurat_session_bar"
+        return "extra_nonsession_bar"
+    if minute_evidence is not None and expected in minute_evidence:
+        return "prebuild_lag"
+    return "missing_session"
+
+
+def _hole_detail(shape: _HoleShape, expected: date, found: date) -> str:
+    """The honest, shape-matched remediation text for the non-contiguity WARN.
+
+    One sentence per :func:`_hole_shape` verdict — the ``missing_session`` text
+    is the original (pre-fold) detail verbatim; the other shapes name the
+    evidence and deliberately do NOT advise a re-pull (a re-pull cannot fix
+    any of them). No served value changes in any shape — the row stays
+    skipped. DEC-PREVSESSION-MUHURAT-COHERENCE-001 split the calendar-
+    confirmed Muhurat boundary (healthy — "no action needed") out of
+    ``extra_nonsession_bar``, whose text no longer GUESSES Muhurat and is now
+    honestly suspicious ("inspect") instead of falsely reassuring.
+    """
+    if shape == "muhurat_session_bar":
+        return (
+            f"row conservatively skipped — the prior real session was the "
+            f"{found.isoformat()} Diwali Muhurat session (calendar-confirmed); the "
+            f"calendar's prior REGULAR session is {expected.isoformat()}; the lake is "
+            "HEALTHY, no action needed — the pre-open anchor law refuses a Muhurat "
+            "anchor (mirrors stage1a.muhurat_prev_day_anchor_skip; /movers serves the "
+            "Muhurat close under the display law, stamped prev_close_muhurat)"
+        )
+    if shape == "extra_nonsession_bar":
+        return (
+            f"row conservatively skipped — an UNEXPECTED calendar-non-session 1-day bar "
+            f"({found.isoformat()}, not a known Muhurat session) sits after the prior "
+            f"NSE session {expected.isoformat()}; inspect the unexpected bar (a stray "
+            "write / a corrupt partition / a calendar gap) — the day-after row stays "
+            "absent by the correct-or-absent rule"
+        )
+    if shape == "prebuild_lag":
+        return (
+            f"row skipped — the 1-day series lags the minute series (the prior NSE session "
+            f"{expected.isoformat()} has 1-minute bars but no 1-day bar); run the pipeline "
+            "prebuild to derive the 1-day partition"
+        )
+    return "row skipped — prior NSE session missing from the lake; re-pull the missing session"
 
 
 def build_preopen_rows(
@@ -395,23 +766,251 @@ def build_preopen_rows(
       the row instead of jumping onto a stale far-earlier close).
     * ``"minute"`` (DEC-PREOPEN-MINUTE-BASIS-001) — IEP = the **09:15:00 1-minute
       session-open OPEN** (:func:`_intraday_open_by_date`); PREV. CLOSE = the
-      **prior trading day's last 1-minute close** (:func:`_prev_trading_close`
-      over :func:`_intraday_last_close_by_date`), matching the engine's own
-      prev-close (DEC-SPOT-PREVCLOSE-1MIN-001).
+      **prior NSE-trading-session's last 1-minute close**
+      (:func:`_minute_prev_close_contiguous` over
+      :func:`_intraday_last_close_by_date` — the checked-calendar anchor,
+      DEC-STALENESS-CACHE-TRUTH-001; a missing prior-session 1-minute window
+      SKIPS the row, never a bridged stale close), matching the engine's own
+      prev-close convention (DEC-SPOT-PREVCLOSE-1MIN-001).
 
     Both columns ALWAYS come from the same basis (never mixed), so an
     adjustment-mismatched symbol (e.g. TMPV) stays precise. A day is emitted only
     when its open exists, a non-zero prior close exists, and the day is in range.
     Per-symbol reads are wrapped so one un-queryable symbol can NEVER 500 the
     export (DEC-PREOPEN-SPACE-SYMBOL-001). Rows sorted by ``(day, symbol)``.
+
+    DEC-PREOPEN-PREVDAY-COMMON-002: BOTH calendar-verified bases (the daily
+    guard AND the minute guard — the minute basis was calendar-blind before)
+    share ONE function-local prior-session memo, so the calendar back-walk runs
+    O(unique report days) per build (never O(rows); no globals — NOT an
+    O(1)-total claim). A verified hole refusal rides the existing skip
+    ``continue`` — the row is honestly ABSENT, never a fabricated %CHNG, never
+    a raise/500 — and, on the DAILY basis, is surfaced as ONE
+    ``preopen.prev_close_noncontiguous`` WARN per ``(exchange, segment,
+    symbol)`` dataset triple (capped at :data:`_HOLE_WARN_CAP` per build, with
+    one ``preopen.prev_close_noncontiguous_suppressed`` summary past the cap).
+    DEC-STALENESS-CACHE-TRUTH-001 merge-reconcile (2026-07-10): the MINUTE
+    basis anchors on the checked calendar ALONE — it no longer reads the 1-day
+    series at all, so there is no 1-day-vs-calendar comparison to classify and
+    the hole-WARN channel fires on the daily basis only (a minute-basis
+    missing prior-session window stays the byte-preserved silent skip).
+    The WARN carries a machine ``hole_shape`` + a shape-matched ``detail``
+    (:func:`_hole_shape` / :func:`_hole_detail` — the hostile-review fold +
+    the DEC-PREVSESSION-MUHURAT-COHERENCE-001 split): ``muhurat_session_bar``
+    (the calendar-confirmed day-after-Diwali boundary — a HEALTHY lake, no
+    action needed; the anchor-law row still stays absent, mirroring the
+    engine's #1616 Muhurat skip while /movers serves the close under the
+    display law), ``extra_nonsession_bar`` (an UNEXPECTED non-Muhurat
+    non-session 1-day bar after the prior session — honestly suspicious,
+    inspect it), ``prebuild_lag`` (the 1-day series lags the minute series;
+    remediation is the pipeline prebuild — the minute basis passes its
+    ``minute_last`` as DIAGNOSTIC evidence only, the anchor is never taken
+    from it — production-UNREACHABLE via this caller under the merged
+    calendar-alone minute rule, kept for the pure classifier's totality and
+    directly unit-tested), or ``missing_session`` (the genuine hole;
+    remediation stays "re-pull the missing session"). The daily basis passes
+    no minute evidence (it never reads the 1-minute series), so its
+    ``found < expected`` diagnostic reads ``missing_session``.
+
+    DEC-PREOPEN-DAY-FRESHNESS-001 (the /movers #1795a verify-equality mirror,
+    F-D1): the DAY basis additionally runs a stored-vs-resample VALUE
+    freshness guard over the two 1-day values each row consumes — stored ≡
+    resample is a WRITE-TIME guarantee, not an invariant, so a 1-minute write
+    AFTER the last prebuild left the derived ``1day`` stale and this basis
+    served a wrong %CHNG with ZERO warnings (the executed refuter repro:
+    +3.49% where the 1-minute truth was −47.55%; the #1649a contiguity guards
+    catch missing SESSIONS, never stale VALUES). Each emitted row's stored
+    ``(IEP, PREV. CLOSE)`` pair is served only when it EQUALS the fresh
+    resample of the stored 1-minute base (:func:`_fresh_daily_maps` over the
+    ONE COMMON daily resampler); a diverging row is served RECOMPUTED from
+    the 1-minute truth — row-atomically, never a mixed-scale pair
+    (:func:`_stale_day_row`) — plus ONE capped
+    ``preopen.stale_daily_recomputed`` WARN per ``(exchange, segment,
+    symbol)`` triple per build (cap :data:`_STALE_WARN_CAP`, one
+    ``preopen.stale_daily_recomputed_suppressed`` summary past it). The
+    guard NEVER adds or removes rows (the contiguity/session laws are
+    untouched — values only); a symbol/session with no 1-minute base fails
+    OPEN to the stored values exactly as before (disclosed limit) —
+    since the hostile-review fold that fail-open is LOUD when the available
+    fresh evidence proves a divergence (ONE capped
+    ``preopen.stale_daily_unrecomputable`` WARN via
+    :func:`_stale_day_row_unrecomputable`; serve behavior unchanged) and the
+    verification-read failure WARN (``preopen.freshness_check_failed``)
+    rides the SAME cap/dedupe idiom. The
+    MINUTE basis needs no guard — it already reads the 1-minute truth.
     """
     rows: list[PreOpenRow] = []
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
-    # report and threaded into the daily-basis prior-session walk, so an observably
+    # report and threaded into BOTH bases' prior-session walk, so an observably
     # untraded day (an overlay entry) is stepped over like a holiday instead of the
-    # row being skipped for a "missing" daily bar. Remove-only; the loader never
+    # row being skipped for a "missing" bar. Remove-only; the loader never
     # raises (missing/corrupt sidecar -> empty overlay = the pre-change behaviour).
     observed = load_observed_holidays(lake_root)
+    # Prior-session memo: ONE calendar back-walk per unique report day, shared
+    # by BOTH bases across every symbol (function-local, never a global).
+    expected_by_day: dict[date, date | None] = {}
+
+    def _expected_session(day: date) -> date | None:
+        if day not in expected_by_day:
+            expected_by_day[day] = _previous_trading_day(day, observed=observed)
+        return expected_by_day[day]
+
+    # Non-contiguity WARN state: dedupe per (exchange, segment, symbol) dataset
+    # triple (a bare-symbol key would silence a dual-listed symbol's second
+    # exchange), cap the emitted warns per build, and roll everything past the
+    # cap into ONE summary event.
+    hole_keys: set[tuple[str, str, str]] = set()
+    holes_suppressed = 0
+
+    # Stale-derived-1day WARN state (DEC-PREOPEN-DAY-FRESHNESS-001): the exact
+    # _warn_hole idiom — dedupe per (exchange, segment, symbol) triple, cap
+    # per build, one suppressed summary past the cap. THREE sibling families
+    # under the ONE cap constant: recomputed (the guard fired), unrecomputable
+    # (divergence evidence but the row is not fully recomputable — the
+    # hostile-review MINOR fold; serve behavior unchanged) and check-failed
+    # (the verification read itself failed — the NIT fold bringing it under
+    # the same cap). Separate states so no family starves another.
+    stale_keys: set[tuple[str, str, str]] = set()
+    stale_suppressed = 0
+    unrec_keys: set[tuple[str, str, str]] = set()
+    unrec_suppressed = 0
+    check_failed_keys: set[tuple[str, str, str]] = set()
+    check_failed_suppressed = 0
+
+    def _warn_unrecomputable(
+        symbol: str,
+        exchange: str,
+        segment: str,
+        day: date,
+        expected: date,
+        stored_iep: Decimal,
+        stored_prev_close: Decimal,
+        fresh_iep: Decimal | None,
+        fresh_prev_close: Decimal | None,
+    ) -> None:
+        nonlocal unrec_suppressed
+        key = (exchange, segment, symbol)
+        if key in unrec_keys:
+            return
+        unrec_keys.add(key)
+        if len(unrec_keys) > _STALE_WARN_CAP:
+            unrec_suppressed += 1
+            return
+        _LOG.warning(
+            "preopen.stale_daily_unrecomputable",
+            basis=basis,
+            symbol=symbol,
+            exchange=exchange,
+            segment=segment,
+            day=day.isoformat(),
+            expected_session=expected.isoformat(),
+            stored_iep=str(stored_iep),
+            stored_prev_close=str(stored_prev_close),
+            fresh_iep=None if fresh_iep is None else str(fresh_iep),
+            fresh_prev_close=None if fresh_prev_close is None else str(fresh_prev_close),
+            detail=(
+                "a stored derived-1day value diverges from the available 1-minute "
+                "evidence but the row is NOT fully recomputable (the other session "
+                "has no 1-minute base) — the STORED pair is served verbatim (the "
+                "row-atomic law; possibly a legitimately adjusted series); re-pull "
+                "the missing session's 1-minute or run the pipeline prebuild"
+            ),
+        )
+
+    def _warn_check_failed(
+        symbol: str,
+        exchange: str,
+        segment: str,
+        exc: BaseException,
+    ) -> None:
+        nonlocal check_failed_suppressed
+        key = (exchange, segment, symbol)
+        if key in check_failed_keys:
+            return
+        check_failed_keys.add(key)
+        if len(check_failed_keys) > _STALE_WARN_CAP:
+            check_failed_suppressed += 1
+            return
+        _LOG.warning(
+            "preopen.freshness_check_failed",
+            basis=basis,
+            symbol=symbol,
+            exchange=exchange,
+            segment=segment,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+    def _warn_stale(
+        symbol: str,
+        exchange: str,
+        segment: str,
+        day: date,
+        expected: date,
+        stored_iep: Decimal,
+        stored_prev_close: Decimal,
+        fresh_iep: Decimal,
+        fresh_prev_close: Decimal,
+    ) -> None:
+        nonlocal stale_suppressed
+        key = (exchange, segment, symbol)
+        if key in stale_keys:
+            return
+        stale_keys.add(key)
+        if len(stale_keys) > _STALE_WARN_CAP:
+            stale_suppressed += 1
+            return
+        _LOG.warning(
+            "preopen.stale_daily_recomputed",
+            basis=basis,
+            symbol=symbol,
+            exchange=exchange,
+            segment=segment,
+            day=day.isoformat(),
+            expected_session=expected.isoformat(),
+            stored_iep=str(stored_iep),
+            stored_prev_close=str(stored_prev_close),
+            fresh_iep=str(fresh_iep),
+            fresh_prev_close=str(fresh_prev_close),
+            detail=(
+                "stored derived-1day values diverge from the fresh resample of the "
+                "stored 1-minute base (a 1-minute write landed after the last "
+                "prebuild) — the row is served RECOMPUTED from the 1-minute truth; "
+                "run the pipeline prebuild to refresh the stored 1day partition"
+            ),
+        )
+
+    def _warn_hole(
+        symbol: str,
+        exchange: str,
+        segment: str,
+        day: date,
+        expected: date,
+        found: date,
+        minute_evidence: Mapping[date, Decimal] | None,
+    ) -> None:
+        nonlocal holes_suppressed
+        key = (exchange, segment, symbol)
+        if key in hole_keys:
+            return
+        hole_keys.add(key)
+        if len(hole_keys) > _HOLE_WARN_CAP:
+            holes_suppressed += 1
+            return
+        shape = _hole_shape(expected, found, minute_evidence)
+        _LOG.warning(
+            "preopen.prev_close_noncontiguous",
+            basis=basis,
+            symbol=symbol,
+            exchange=exchange,
+            segment=segment,
+            day=day.isoformat(),
+            expected_session=expected.isoformat(),
+            nearest_lake_session=found.isoformat(),
+            hole_shape=shape,
+            detail=_hole_detail(shape, expected, found),
+        )
+
     for exchange, segment, symbol in datasets:
         # Resilience (DEC-PREOPEN-SPACE-SYMBOL-001): one un-queryable symbol must
         # NEVER 500 the whole multi-symbol export — a ``ValueError`` (the candle-
@@ -421,29 +1020,44 @@ def build_preopen_rows(
             daily: dict[date, Decimal] = {}
             daily_dates: list[date] = []
             minute_last: dict[date, Decimal] = {}
-            prev_by_day: dict[date, Decimal] = {}
+            # The IEP (open) reads are SPAN-BOUNDED (DEC-DB-LATENCY-HARDENING-001):
+            # only in-range days of `opens` are ever consumed (the loop below
+            # `continue`s past out-of-range days), so binding only the report
+            # span's month files is byte-identical — the profiling evidence
+            # measured the unbounded minute basis binding EVERY 1-minute month
+            # file of every symbol (616 files/click at 103 symbols). The CLOSE
+            # maps deliberately stay whole-partition: the contiguity guards'
+            # `found = nearest_lake_session` hole diagnostics + the calendar
+            # back-walk depth need the unbounded view (a bounded close map could
+            # silently change a WARN's evidence or an anchor refusal).
             if basis == "minute":
                 opens = _intraday_open_by_date(
-                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                    conn,
+                    lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    span=(start, end),
                 )
                 minute_last = _intraday_last_close_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
                 )
-                # The 1-day series is the trading-session CALENDAR used to detect a
-                # missing prior-day 1-minute window so PREV. CLOSE never anchors
-                # across a data hole (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001). When a
-                # symbol has NO 1-day partition there is no calendar to verify
-                # against, so we keep the DEC-PREOPEN-MINUTE-BASIS-001 fallback (the
-                # previous AVAILABLE minute session).
-                daily = _daily_close_by_date(
-                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-                )
-                daily_dates = sorted(daily)
-                if not daily_dates:
-                    prev_by_day = _prev_trading_close(minute_last)
+                # The minute anchor is verified by the checked NSE calendar ALONE
+                # (DEC-STALENESS-CACHE-TRUTH-001): the 1-day series is NOT read on
+                # this basis any more — as a proxy calendar it only ever ADDED
+                # over-refusals (a 1-day hole skipped a row whose correct anchor
+                # existed in the 1-minute data), and its absence put every symbol
+                # on the calendar-blind previous-AVAILABLE fallback (the bridged
+                # stale-close mis-anchor class) — both closed by the one rule in
+                # _minute_prev_close_contiguous.
             else:
                 opens = _daily_open_by_date(
-                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                    conn,
+                    lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    span=(start, end),
                 )
                 daily = _daily_close_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
@@ -460,18 +1074,134 @@ def build_preopen_rows(
                 error=str(exc),
             )
             continue
+        # DIAGNOSTIC evidence for the hole-shape classification (never the
+        # anchor). Under the merged DEC-STALENESS-CACHE-TRUTH-001 rule only the
+        # DAILY guard takes the on_hole seam (the minute guard has no 1-day
+        # comparison), and the daily basis passes None (it never reads the
+        # 1-minute series) — so the fired diagnostic is honestly two-way here
+        # (see _hole_shape; the prebuild_lag arm is direct-unit-tested).
+        minute_evidence: dict[date, Decimal] | None = minute_last if basis == "minute" else None
+        # Day-basis derived-1day FRESHNESS evidence (DEC-PREOPEN-DAY-FRESHNESS-001):
+        # ONE month-bounded 1-minute read + resample per symbol covering exactly
+        # the sessions this build can consume — the in-span report days plus
+        # their prior sessions (the PREV. CLOSE anchors). Empty maps = fail-open
+        # (no 1-minute base / a verification-read failure) — every row then
+        # serves the stored values exactly as before this guard existed.
+        fresh_open: dict[date, Decimal] = {}
+        fresh_close: dict[date, Decimal] = {}
+        if basis != "minute":
+            needed = {d for d in opens if start <= d <= end}
+            for span_day in tuple(needed):
+                prior = _expected_session(span_day)
+                if prior is not None:
+                    needed.add(prior)
+            if needed:
+
+                def _on_check_failed(
+                    exc: BaseException,
+                    *,
+                    _symbol: str = symbol,
+                    _exchange: str = exchange,
+                    _segment: str = segment,
+                ) -> None:
+                    _warn_check_failed(_symbol, _exchange, _segment, exc)
+
+                fresh_open, fresh_close = _fresh_daily_maps(
+                    lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    days=needed,
+                    on_error=_on_check_failed,
+                )
         for day in sorted(opens):
             if day < start or day > end:
                 continue
+
+            def _on_hole(
+                expected: date,
+                found: date,
+                *,
+                _symbol: str = symbol,
+                _exchange: str = exchange,
+                _segment: str = segment,
+                _day: date = day,
+                _minute: dict[date, Decimal] | None = minute_evidence,
+            ) -> None:
+                _warn_hole(_symbol, _exchange, _segment, _day, expected, found, _minute)
+
             if basis != "minute":
-                anchor = _daily_prev_close_contiguous(daily, daily_dates, day, observed=observed)
-            elif daily_dates:
-                anchor = _minute_prev_close_contiguous(minute_last, daily_dates, day)
+                anchor = _daily_prev_close_contiguous(
+                    daily,
+                    daily_dates,
+                    day,
+                    expected_session=_expected_session(day),
+                    on_hole=_on_hole,
+                )
             else:
-                anchor = prev_by_day.get(day)
+                anchor = _minute_prev_close_contiguous(
+                    minute_last, day, expected_session=_expected_session(day)
+                )
             if anchor is None or anchor == 0:
                 continue
             iep = opens[day]
+            if basis != "minute":
+                # The stored-vs-resample VALUE freshness verdict for THIS row
+                # (DEC-PREOPEN-DAY-FRESHNESS-001) — row-atomic: on a stale
+                # verdict BOTH consumed values are served from the fresh
+                # 1-minute resample (one consistent price scale), never a mix;
+                # a not-fully-recomputable row fails open to the stored pair.
+                # Runs AFTER the anchor/session guards, so the emitted ROW SET
+                # is byte-identical to the unguarded build — values only.
+                stale = _stale_day_row(
+                    iep,
+                    anchor,
+                    day=day,
+                    expected=_expected_session(day),
+                    fresh_open=fresh_open,
+                    fresh_close=fresh_close,
+                )
+                if stale is not None:
+                    stale_expected, fresh_iep, fresh_prev_close = stale
+                    _warn_stale(
+                        symbol,
+                        exchange,
+                        segment,
+                        day,
+                        stale_expected,
+                        iep,
+                        anchor,
+                        fresh_iep,
+                        fresh_prev_close,
+                    )
+                    iep, anchor = fresh_iep, fresh_prev_close
+                else:
+                    # The fail-open lane's observability twin (the
+                    # hostile-review MINOR fold): divergence evidence on a
+                    # not-fully-recomputable row is WARNED, never silently
+                    # swallowed — the SERVE stays the stored pair verbatim
+                    # (observe-only; the row-atomic law untouched).
+                    unrec = _stale_day_row_unrecomputable(
+                        iep,
+                        anchor,
+                        day=day,
+                        expected=_expected_session(day),
+                        fresh_open=fresh_open,
+                        fresh_close=fresh_close,
+                    )
+                    if unrec is not None:
+                        unrec_expected, unrec_open, unrec_close = unrec
+                        _warn_unrecomputable(
+                            symbol,
+                            exchange,
+                            segment,
+                            day,
+                            unrec_expected,
+                            iep,
+                            anchor,
+                            unrec_open,
+                            unrec_close,
+                        )
             chng = iep - anchor
             rows.append(
                 PreOpenRow(
@@ -483,6 +1213,34 @@ def build_preopen_rows(
                     pct_chng=chng / anchor * Decimal(100),
                 )
             )
+    if holes_suppressed:
+        _LOG.warning(
+            "preopen.prev_close_noncontiguous_suppressed",
+            basis=basis,
+            suppressed_symbols=holes_suppressed,
+            cap=_HOLE_WARN_CAP,
+        )
+    if stale_suppressed:
+        _LOG.warning(
+            "preopen.stale_daily_recomputed_suppressed",
+            basis=basis,
+            suppressed_symbols=stale_suppressed,
+            cap=_STALE_WARN_CAP,
+        )
+    if unrec_suppressed:
+        _LOG.warning(
+            "preopen.stale_daily_unrecomputable_suppressed",
+            basis=basis,
+            suppressed_symbols=unrec_suppressed,
+            cap=_STALE_WARN_CAP,
+        )
+    if check_failed_suppressed:
+        _LOG.warning(
+            "preopen.freshness_check_failed_suppressed",
+            basis=basis,
+            suppressed_symbols=check_failed_suppressed,
+            cap=_STALE_WARN_CAP,
+        )
     rows.sort(key=lambda r: (r.day, r.symbol))
     return rows
 

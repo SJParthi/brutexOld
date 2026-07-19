@@ -207,6 +207,31 @@ def test_load_malformed_json_raises(tmp_path: Path) -> None:
         _store(tmp_path).load()
 
 
+def test_load_invalid_utf8_raises_domain_error_not_unicodedecodeerror(tmp_path: Path) -> None:
+    """RES-4: on-disk bitrot / an external truncation (NOT a torn write from
+    this atomic tmp→fsync→os.replace writer) leaving invalid UTF-8 bytes makes
+    ``read_text`` raise ``UnicodeDecodeError`` (a ``ValueError``). That must map
+    to the typed ``SweepCheckpointError`` — like the malformed-JSON path — never
+    escape RAW past a consumer's narrow ``except SweepCheckpointError`` and fire
+    a false abort alert."""
+    p = tmp_path / "ckpt.json"
+    # A byte the utf-8 decoder rejects mid-stream (0xFF is never valid UTF-8).
+    p.write_bytes(b'{"version": 1, "sweep_id": "sweep-1"\xff}')
+    with pytest.raises(SweepCheckpointError, match="Undecodable checkpoint bytes"):
+        _store(tmp_path).load()
+
+
+def test_load_torn_leading_invalid_byte_raises_domain_error(tmp_path: Path) -> None:
+    """RES-4 (first-byte corrupt variant): a checkpoint overwritten by raw
+    invalid bytes (a UTF-16 BOM prefix / arbitrary binary — external corruption,
+    not this atomic writer) is also the typed error, not a raw
+    ``UnicodeDecodeError``."""
+    p = tmp_path / "ckpt.json"
+    p.write_bytes(b"\xff\xfe\x00 not utf8 {")
+    with pytest.raises(SweepCheckpointError, match="Undecodable checkpoint bytes"):
+        _store(tmp_path).load()
+
+
 @pytest.mark.parametrize("payload", ["[]", "null", '"hello"', "42", "true"])
 def test_load_non_object_json_raises_domain_error(tmp_path: Path, payload: str) -> None:
     """load() on valid-JSON-non-object corruption raises SweepCheckpointError, never

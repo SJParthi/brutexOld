@@ -23,6 +23,7 @@ from brutex.notifications.sweep_alerts import (
     CRASH_LOOP_RELAUNCH_THRESHOLD,
     SweepAlerter,
     emit_lake_heal_alert,
+    emit_lake_heal_still_refused_alert,
     emit_pull_halt_alert,
     escape_markdown_v2,
 )
@@ -34,6 +35,7 @@ from brutex.notifications.telegram import (
 )
 from hypothesis import given
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
 
 # ────────────────────────────────────────────────────────────────────────
 # Fakes
@@ -235,6 +237,29 @@ class TestAlerts:
         # The body is MarkdownV2-escaped (underscore → `\_`), so assert the escaped forms.
         assert escape_markdown_v2("disk_full") in ev.message
         assert escape_markdown_v2("Pull HALTED") in ev.message
+
+    def test_loop_stalled(self) -> None:
+        """loop_stalled (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 G5): the
+        pull_halted twin — PHASE_BLOCKED CRITICAL, observe-only wording, fired
+        by the LoopWatchdog's CRITICAL edge (its state machine owns the real
+        coalescing; the dedupe_key is identification only at the 0.0-window
+        kind)."""
+        fake = FakeNotifier()
+        assert SweepAlerter(notifier=fake).loop_stalled(stalled_s=36.4, threshold_s=30.0)
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "loop-stalled"
+        assert escape_markdown_v2("event loop STALLED") in ev.message
+        assert escape_markdown_v2("36.4") in ev.message
+        assert "30" in ev.message
+        assert escape_markdown_v2("observes only") in ev.message
+
+    def test_loop_stalled_disabled_notifier_is_silent_noop(self) -> None:
+        """Telegram disabled (no notifier resolves) → False, never a raise —
+        the best-effort law the watchdog's alert lane depends on."""
+        alerter = SweepAlerter(resolver=lambda: None)
+        assert alerter.loop_stalled(stalled_s=31.0, threshold_s=30.0) is False
 
     def test_vendor_down(self) -> None:
         """vendor_down (DEC-VENDOR-DOWN-BREAKER-001): CRITICAL, WAIT-worded, deduped."""
@@ -727,6 +752,101 @@ class TestEmitLakeHealAlert:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# lake_heal_still_refused + emit_lake_heal_still_refused_alert
+# (DEC-LAKE-INVARIANTS-PREINDEX-001 review fold — the standing mass-heal-
+# refusal RE-alert a deterministic boot skip fires from PERSISTED values)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestLakeHealStillRefused:
+    _ATTEMPT_UTC = "2026-07-10T02:00:00+00:00"
+
+    def test_still_refused_is_critical_phase_blocked(self) -> None:
+        """The re-alert names the PRIOR sweep's persisted tallies + wall time
+        — explicitly a re-alert, never a fresh heal report — on the CRITICAL
+        operator-must-act ``PHASE_BLOCKED`` house pattern."""
+        fake = FakeNotifier()
+        ok = SweepAlerter(notifier=fake).lake_heal_still_refused(
+            findings=7,
+            files_scanned=10,
+            attempt_utc=self._ATTEMPT_UTC,
+            scope="startup-sweep",
+        )
+        assert ok is True
+        (event,) = fake.published
+        assert event.kind == TelegramEventKind.PHASE_BLOCKED
+        assert event.severity == TelegramSeverity.CRITICAL
+        assert event.dedupe_key == f"lake-heal-still-refused:startup-sweep:{self._ATTEMPT_UTC}"
+        assert "STILL REFUSED" in event.message
+        assert escape_markdown_v2("re-alert of a prior sweep") in event.message
+        assert escape_markdown_v2(f"still refused since {self._ATTEMPT_UTC}") in event.message
+        assert escape_markdown_v2("7 finding(s)") in event.message
+        assert escape_markdown_v2("10 scanned file(s)") in event.message
+        assert "NOTHING was fixed" in event.message
+
+    def test_distinct_attempts_never_coalesce_on_the_dedupe_key(self) -> None:
+        """A NEW refusal (fresh attempt timestamp) carries a NEW dedupe key —
+        only re-alerts of the SAME standing attempt coalesce."""
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        alerter.lake_heal_still_refused(
+            findings=1, files_scanned=2, attempt_utc="2026-07-10T02:00:00+00:00", scope="s"
+        )
+        alerter.lake_heal_still_refused(
+            findings=1, files_scanned=2, attempt_utc="2026-07-11T02:00:00+00:00", scope="s"
+        )
+        first, second = fake.published
+        assert first.dedupe_key != second.dedupe_key
+
+    def test_disabled_notifier_returns_false(self) -> None:
+        ok = SweepAlerter(resolver=lambda: None).lake_heal_still_refused(
+            findings=1, files_scanned=2, attempt_utc=self._ATTEMPT_UTC, scope="startup-sweep"
+        )
+        assert ok is False
+
+
+class TestEmitLakeHealStillRefusedAlert:
+    def test_routes_the_persisted_values_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[dict[str, object]] = []
+
+        class _FakeAlerter:
+            def lake_heal_still_refused(self, **kwargs: object) -> bool:
+                calls.append(kwargs)
+                return True
+
+        from brutex.notifications import sweep_alerts as mod
+
+        monkeypatch.setattr(mod, "SweepAlerter", _FakeAlerter)
+        emit_lake_heal_still_refused_alert(
+            findings=3,
+            files_scanned=4,
+            attempt_utc="2026-07-10T02:00:00+00:00",
+            scope="startup-sweep",
+        )
+        (kwargs,) = calls
+        assert kwargs == {
+            "findings": 3,
+            "files_scanned": 4,
+            "attempt_utc": "2026-07-10T02:00:00+00:00",
+            "scope": "startup-sweep",
+        }
+
+    def test_swallows_its_own_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The blanket guard: an alert failure can never fail the boot."""
+
+        class _RaisingAlerter:
+            def lake_heal_still_refused(self, **_kwargs: object) -> bool:
+                raise RuntimeError("simulated alert failure")
+
+        from brutex.notifications import sweep_alerts as mod
+
+        monkeypatch.setattr(mod, "SweepAlerter", _RaisingAlerter)
+        emit_lake_heal_still_refused_alert(
+            findings=1, files_scanned=2, attempt_utc="t", scope="startup-sweep"
+        )  # must not raise
+
+
+# ────────────────────────────────────────────────────────────────────────
 # child_relaunched (DEC-SUPERVISOR-CRASHLOOP-ALERT-001)
 # ────────────────────────────────────────────────────────────────────────
 
@@ -887,3 +1007,133 @@ class TestSupervisorGaveUp:
         assert not SweepAlerter(notifier=fake).supervisor_gave_up(
             child="c", exit_code=1, signal=None, restarts=1, max_restarts=1
         )
+
+
+class TestMassAllFiltered:
+    """mass_all_filtered (DEC-ALLFILTERED-MASS-BREAKER-001): CRITICAL, count-naming,
+    pull-scoped dedupe_key — the mass-event alarm body. HONEST (review round 1):
+    the once-per-pass guarantee is the breaker latch, NOT notifier dedupe —
+    PHASE_BLOCKED's dedupe window is 0.0 s (never coalesced), so the key asserted
+    below is defence-in-depth only."""
+
+    def test_body_carries_every_count_and_the_remediation(self) -> None:
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).mass_all_filtered(
+            trip_rule="fraction",
+            all_filtered_windows=21,
+            observed_windows=40,
+            distinct_series=7,
+            series_sample=("A:1minute", "B:1minute"),
+            window_samples=("A:1minute 2026-01-01→2026-02-01",),
+            rescinded_settles=2,
+            pull_id="abc123",
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "allfiltered-trip:abc123"  # pull-scoped key (defence-in-depth)
+        assert escape_markdown_v2("Mass ALL-FILTERED event (fraction rule)") in ev.message
+        assert "21" in ev.message and "40" in ev.message and "7" in ev.message
+        assert escape_markdown_v2("2 same-pull SKIPPED settle(s) auto-rescinded") in ev.message
+        assert escape_markdown_v2("A:1minute 2026-01-01→2026-02-01") in ev.message
+        assert escape_markdown_v2("brutex reopen-skipped") in ev.message
+        assert escape_markdown_v2("BRUTEX_ALLFILTERED_BREAKER=off") in ev.message
+
+    def test_blank_pull_id_keys_on_the_rule(self) -> None:
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).mass_all_filtered(
+            trip_rule="spread",
+            all_filtered_windows=10,
+            observed_windows=100,
+            distinct_series=10,
+            series_sample=(),
+            window_samples=(),
+            rescinded_settles=0,
+            pull_id="",
+        )
+        assert fake.published[0].dedupe_key == "allfiltered-trip:spread"
+
+
+class TestEmitMassAllFilteredAlert:
+    """The COMMON emit both spine tails call at trip time — one structlog ERROR +
+    one best-effort push; None-trip no-op; a raising notifier is swallowed."""
+
+    @staticmethod
+    def _trip() -> object:
+        from brutex.adapters.all_filtered_breaker import AllFilteredTrip
+
+        return AllFilteredTrip(
+            trip_rule="fraction",
+            all_filtered_windows=3,
+            observed_windows=3,
+            distinct_series=3,
+            series_sample=("A:1m", "B:1m", "C:1m"),
+            window_samples=("A:1m s→e",),
+        )
+
+    def test_emits_one_error_log_and_one_push(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
+
+        pushes: list[dict] = []
+
+        class _FakeAlerter:
+            def mass_all_filtered(self, **kw: object) -> bool:
+                pushes.append(dict(kw))
+                return True
+
+        monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
+        with capture_logs() as logs:
+            emit_mass_all_filtered_alert(self._trip(), rescinded=1, pull_id="p1")  # type: ignore[arg-type]
+        errors = [e for e in logs if e["event"] == "allfiltered_breaker.tripped"]
+        assert len(errors) == 1
+        assert errors[0]["log_level"] == "error"
+        assert errors[0]["all_filtered_windows"] == 3
+        assert errors[0]["rescinded_settles"] == 1
+        assert pushes == [
+            {
+                "trip_rule": "fraction",
+                "all_filtered_windows": 3,
+                "observed_windows": 3,
+                "distinct_series": 3,
+                "series_sample": ("A:1m", "B:1m", "C:1m"),
+                "window_samples": ("A:1m s→e",),
+                "rescinded_settles": 1,
+                "pull_id": "p1",
+            }
+        ]
+
+    def test_none_trip_is_a_defensive_noop(self) -> None:
+        from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
+
+        with capture_logs() as logs:
+            emit_mass_all_filtered_alert(None, rescinded=0, pull_id="p1")
+        assert logs == []
+
+    def test_raising_notifier_is_swallowed_after_the_log(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
+
+        class _BoomAlerter:
+            def __init__(self) -> None:
+                raise RuntimeError("notifier construction blew up")
+
+        monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _BoomAlerter)
+        with capture_logs() as logs:
+            emit_mass_all_filtered_alert(self._trip(), rescinded=0, pull_id="p1")  # type: ignore[arg-type]
+        events = [e["event"] for e in logs]
+        assert "allfiltered_breaker.tripped" in events  # the load-bearing ERROR fired
+        assert "mass_all_filtered_alert_failed" in events  # the failure swallowed + logged
+
+    def test_disabled_notifier_is_a_silent_push_noop(self) -> None:
+        # The default resolver with Telegram disabled → _publish returns False;
+        # the structlog ERROR still fires (the alarm is never fully silent).
+        from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
+
+        with capture_logs() as logs:
+            emit_mass_all_filtered_alert(self._trip(), rescinded=0, pull_id="p1")  # type: ignore[arg-type]
+        events = [e["event"] for e in logs]
+        # The load-bearing ERROR fires; the push path neither raised nor logged a
+        # failure (the resolver's own import-time INFO noise is not ours to pin).
+        assert events.count("allfiltered_breaker.tripped") == 1
+        assert "mass_all_filtered_alert_failed" not in events

@@ -67,6 +67,7 @@ from time import sleep as _time_sleep
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
 from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
 from brutex.adapters.error_storm_breaker import (
     ErrorStormBreaker,
@@ -94,8 +95,10 @@ from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
     GROWW_COVERAGE_MARKET,
     OLD_GAP_HORIZON_DAYS,
+    CancelCheck,
     clamp_window_end,
     drop_bars_after,
+    raise_if_cancelled,
     summarize_conflicts,
     tile_windows,
 )
@@ -103,7 +106,7 @@ from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
 )
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.errors import PartitionLockTimeout, WriteDeadlineExceeded
+from brutex.data.errors import MarketHoursHalt, PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP, observe_interior_gap
 from brutex.data.models import CandleBar
@@ -116,6 +119,11 @@ from brutex.data.session import (
     observe_all_filtered,
 )
 from brutex.data.sink import BarSink
+from brutex.data.today_completeness import (
+    TODAY_INCOMPLETE,
+    InstrumentClass,
+    observe_today_completeness,
+)
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.write_breaker import WriteHealthBreaker, partition_health_key
 from brutex.models import Instrument
@@ -303,6 +311,15 @@ class _RawWindow:
     #: (the structural floor of a first-try win) so the field rides the frozen
     #: payload additively; the producer always passes the real count.
     empty_fetches: int = 0
+    #: The IST date of the SAME clock instant the producer passed to
+    #: ``clamp_window_end`` (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — the tail's
+    #: covers-today predicate (``window_end == clamp_today + 1 day``) is judged
+    #: against the date that MINTED the clamped end, so clamp and gate stay
+    #: coherent across a midnight-crossing async drain (the tail NEVER reads a
+    #: clock for the gate). ``None`` (a legacy/un-threaded constructor) keeps
+    #: the gate INERT for the window — fail-open to pre-gate behavior. Appended
+    #: LAST + defaulted (the ``empty_fetches`` additive-field precedent).
+    clamp_today: date | None = None
 
 
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
@@ -341,13 +358,27 @@ def ingest_spot(
     on_window: WindowTick | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    should_stop: CancelCheck | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe, checked as the FIRST statement of every window fetch — BEFORE
+    any vendor call, so a flagged window makes ZERO vendor calls and its ledger
+    row stays PLANNED/unsettled (idempotently re-pulled next time). It raises
+    :class:`~brutex.adapters.ingest_common.PullCancelled`, a pull-wide graceful
+    stop. The never-interrupt zone (``_process_window_tail`` — sink append +
+    ledger record) deliberately carries NO check: a window that started its
+    fetch always completes its durable write chain. ``None`` (every legacy
+    caller) is byte-identical.
 
     The series' fetch WINDOWS are mapped through *run_parallel* so a SINGLE
     symbol's windows are in flight at once and the pull saturates UP TO the rate
@@ -419,6 +450,21 @@ def ingest_spot(
         global stop — the pull halts loudly instead of settling poisoned windows), and a
         tripped breaker suppresses every remaining EMPTY settle at ledger-record time.
         ``None`` (unit-test / legacy callers) observes nothing — byte-identical behaviour.
+    all_filtered_breaker
+        Optional per-pull :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker`
+        (DEC-ALLFILTERED-MASS-BREAKER-001) — the mass ALL-FILTERED counter shared by
+        every window worker of EVERY pass of the pull (the pull entrypoints resolve
+        ONE instance threaded through each retry pass — review round 4; the
+        run-ingest layer's ``None`` fallback serves direct callers).
+        Each ELIGIBLE window's boundary verdict is observed at the consumer tail; a
+        mass event (SPREAD/FRACTION rules) latches ONCE, auto-rescinds the same-pull
+        pre-trip ``ALL_FILTERED`` settles, emits ONE count-naming alarm, and
+        suppresses further ``ALL_FILTERED`` SKIPPED-settles for the pull via the
+        record-time ``record(allow_degraded_settle=…)`` re-check (the breaker's
+        ``allow_settle``, evaluated UNDER the ledger lock — review round 1 TOCTOU
+        closure; windows stay FAILED + re-pullable; deliberately NOT a pull
+        stop). ``None`` (unit-test / legacy callers) observes nothing —
+        byte-identical behaviour.
     storm_breaker
         Optional per-pull :class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`
         (DEC-VENDOR-DOWN-BREAKER-001) — the vendor-down error-storm breaker + the
@@ -443,6 +489,20 @@ def ingest_spot(
         dry-run / synthetic / unit-test callers) never probes; ONLY the
         real-vendor production sites arm it (the ``storm_breaker`` gating
         pattern). Best-effort: a learner failure can never crash the pull.
+    today_completeness_gate
+        The pre-settle TODAY minute-completeness gate
+        (DEC-PULL-TODAY-COMPLETENESS-GATE-001,
+        :mod:`brutex.data.today_completeness`): when ``True``, a ``1minute``
+        window covering TODAY's IST session whose fetched bars fail the
+        per-class completeness criteria has today's bars WITHHELD from the sink
+        (keep-first would freeze the still-settling rows forever) and is demoted
+        to a re-pullable ``FAILED`` under the streak-EXEMPT
+        ``TODAY_INCOMPLETE`` reason. Default ``False`` (library-inert — the
+        dry-run synthetic adapter anchors bars on the window-START day, so an
+        armed dry-run today-window would false-red, the #1031 lesson); the
+        production sites pass ``(not dry_run) and
+        resolve_today_completeness_enabled()`` (env kill switch
+        ``BRUTEX_TODAY_COMPLETENESS_GATE``, resolved ONCE per pull).
 
     Returns
     -------
@@ -466,6 +526,11 @@ def ingest_spot(
     # injected clock the current-day clamp uses, so a test's injected ``now_ist`` makes the
     # decision deterministic. Passed down to ``_ingest_one_window``.
     old_cutoff = now_for_clamp.date() - timedelta(days=OLD_GAP_HORIZON_DAYS)
+    # TODAY-gate clamp date (DEC-PULL-TODAY-COMPLETENESS-GATE-001): the SAME clock
+    # instant the clamp used, stamped on every _RawWindow so the tail's
+    # covers-today predicate is judged against the date that MINTED the clamped
+    # end (a midnight-crossing drain stays coherent; the tail never reads a clock).
+    clamp_today_date = now_for_clamp.date()
     if clamped_end != end:
         _LOG.info(
             "ingest.window.clamped",
@@ -515,6 +580,10 @@ def ingest_spot(
         captured by *run_parallel*, and re-raised on the caller thread below.
         """
         with pull_id_scope(pull_id):
+            # COOPERATIVE cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the ONE safe
+            # boundary — BEFORE the window's vendor fetch. A flagged window makes
+            # ZERO vendor calls; its ledger row stays unsettled → re-pulled.
+            raise_if_cancelled(should_stop)
             return _ingest_one_window(
                 adapter,
                 sink,
@@ -531,13 +600,17 @@ def ingest_spot(
                 empty_retry_attempts=empty_retry_attempts,
                 empty_retry_backoff=empty_backoff,
                 old_cutoff=old_cutoff,
+                clamp_today=clamp_today_date,
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
+                today_completeness_gate=today_completeness_gate,
                 observed_holidays=observed_holidays,
                 empty_breaker=empty_breaker,
+                all_filtered_breaker=all_filtered_breaker,
                 storm_breaker=storm_breaker,
                 write_breaker=write_breaker,
                 floor_learner=floor_learner,
+                market_closed=market_closed,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -679,13 +752,17 @@ def _ingest_one_window(
     empty_retry_attempts: int = _DEFAULT_EMPTY_RETRY_ATTEMPTS,
     empty_retry_backoff: Callable[[int], None] = _noop_empty_backoff,
     old_cutoff: date | None = None,
+    clamp_today: date | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -710,7 +787,15 @@ def _ingest_one_window(
     (DEC-EMPTY-INPULL-RETRY-001) — see :func:`_fetch_window_raw`. *old_cutoff*
     (DEC-OLD-GAP-FAST-SETTLE-001) drives the OLD-gap fast-settle — see
     :func:`_process_window_tail`.
+
+    Market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001): consulted FIRST — before
+    the vendor fetch, the ledger-skip probe, or any I/O — so a pull that crossed into
+    the NSE trading window ``[08:45, 15:35)`` IST halts on THIS window instead of
+    issuing a vendor call. ``MarketHoursHalt`` is a ``_GLOBAL_STOP_ERRORS`` member, so
+    it propagates past the per-symbol quarantine and stops the whole pull gracefully.
     """
+    if market_closed is not None and market_closed():
+        raise MarketHoursHalt()
     outcome, raw = _fetch_window_raw(
         adapter,
         instrument=instrument,
@@ -725,6 +810,7 @@ def _ingest_one_window(
         empty_retry_attempts=empty_retry_attempts,
         empty_retry_backoff=empty_retry_backoff,
         old_cutoff=old_cutoff,
+        clamp_today=clamp_today,
         empty_breaker=empty_breaker,
         storm_breaker=storm_breaker,
         floor_learner=floor_learner,
@@ -742,8 +828,10 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
             detect_completeness_gaps=detect_completeness_gaps,
+            today_completeness_gate=today_completeness_gate,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            all_filtered_breaker=all_filtered_breaker,
             write_breaker=write_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
@@ -768,8 +856,10 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
             detect_completeness_gaps=detect_completeness_gaps,
+            today_completeness_gate=today_completeness_gate,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            all_filtered_breaker=all_filtered_breaker,
             write_breaker=write_breaker,
         )
         if result_outcome.transient:
@@ -835,6 +925,7 @@ def _fetch_window_raw(
     empty_retry_attempts: int,
     empty_retry_backoff: Callable[[int], None],
     old_cutoff: date | None,
+    clamp_today: date | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
@@ -953,6 +1044,7 @@ def _fetch_window_raw(
                         bars_net_new=0,  # the failed fetch stored nothing (a known 0)
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
+                        pull_id=pull_id,
                         # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): every prior
                         # ladder fetch was a clean empty (the loop re-iterates
                         # only on one) and THIS fetch is the one transient — the
@@ -1082,6 +1174,7 @@ def _fetch_window_raw(
             fetch_count=fetch_count,
             settle_empty=settle_empty,
             empty_fetches=empty_fetches,
+            clamp_today=clamp_today,
         ),
     )
 
@@ -1095,8 +1188,10 @@ def _process_window_tail(
     pull_id: str,
     series_fields: dict[str, str],
     detect_completeness_gaps: bool = False,
+    today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
 ) -> _WindowOutcome:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
@@ -1168,7 +1263,56 @@ def _process_window_tail(
     # PHANTOM FUTURE partition. The window is already clamped (no current-day request), so
     # this only ever removes an out-of-window / clock-skew phantom — a bar ON the boundary
     # is KEPT, so the existing behaviour is byte-unchanged for every legitimate in-range bar.
-    bars = drop_bars_after(bars, window_end)
+    bars, future_dropped = drop_bars_after(bars, window_end)
+    if future_dropped:
+        # EXACTLY ONE aggregated WARNING per window (never per bar), mirroring the
+        # session-filter WARNING above (DEC-AUDIT-ALERT-CLAMP-OBS-001): a
+        # future-phantom bar mixed with good bars used to vanish silently here.
+        _LOG.warning(
+            "ingest.future_bar_dropped",
+            pull_id=pull_id,
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+            dropped=future_dropped,
+            **series_fields,
+        )
+    # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-GATE-001):
+    # a covers-today window (``window_end == clamp_today + 1 day`` — mintable only at/after
+    # 15:30 IST via clamp_window_end) whose fetched TODAY bars fail the per-class criteria
+    # must NOT store today's bars (the keep-first merge law would freeze the still-settling
+    # #837 forming-shape rows FOREVER) nor settle SUCCESS. The guarded wrapper returns
+    # ``None`` (⇒ append the ORIGINAL bars, never demote) for every inert/abstain shape —
+    # a legacy payload (clamp_today None), a non-1minute interval, a non-today window
+    # (classifier not consulted — byte-identity pinned), a raw-EMPTY fetch (the EMPTY
+    # machinery owns it), out-of-coverage/non-trading dates, or an internal error
+    # (fail-open). On a FAIL only the bars strictly BEFORE clamp_today are appended (the
+    # window's settled history still lands; today + any boundary today+1 leak are withheld)
+    # and the record below is demoted under the streak-EXEMPT ``TODAY_INCOMPLETE`` reason.
+    # Session-exempt symbols (their grid is not the NSE session) are not judged.
+    today_incomplete = False
+    append_bars = bars
+    if today_completeness_gate and not is_session_exempt(instrument.symbol_name):
+        gate_result = observe_today_completeness(
+            _LOG,
+            bars=bars,
+            clamp_today=raw.clamp_today,
+            window_end=window_end,
+            instrument_class=(
+                InstrumentClass.INDEX_SPOT if instrument.is_index else InstrumentClass.CASH_SPOT
+            ),
+            symbol=instrument.symbol_name,
+            interval=interval,
+            pull_id=pull_id,
+            raw_count=len(raw_bars),
+            fields={
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                **series_fields,
+            },
+        )
+        if gate_result is not None and gate_result[1].incomplete:
+            today_incomplete = True
+            append_bars = gate_result[0].prior
     # ALL-FILTERED at the WHOLE boundary (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
     # widening DEC-INGEST-BOUNDARY-INTEGRITY-001's session-filter-only check): the
     # kept count is read AFTER the session filter AND the future-bar drop, so a
@@ -1213,7 +1357,10 @@ def _process_window_tail(
             segment=instrument.segment.value,
             symbol=instrument.symbol_name,
             interval=interval,
-            bars=bars,
+            # The TODAY-gate write guard: on a today-incomplete verdict only the
+            # settled pre-today history is appended (``append_bars``); every
+            # other path appends the ORIGINAL ``bars`` object — byte-identical.
+            bars=append_bars,
         )
     except (PartitionLockTimeout, WriteDeadlineExceeded) as exc:
         # DEFER this window to the next pull, exactly like a 429 / timeout transient — record
@@ -1245,6 +1392,7 @@ def _process_window_tail(
                 bars_net_new=0,  # the deferred write stored nothing (a known 0)
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
+                pull_id=pull_id,
                 # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): the fetch ladder's own
                 # facts — the defer is a WRITE-side stall, not a vendor transient,
                 # so the transient half is the payload's structural 0 (see
@@ -1391,15 +1539,78 @@ def _process_window_tail(
     # dedup: a re-pull whose bars all dedup to zero NET-NEW still passes bars
     # THROUGH the boundary (``bars`` non-empty), so it stays SUCCESS.
     all_filtered = detect_completeness_gaps and interval != _DAILY and all_boundary_filtered
-    degraded = all_filtered or (demotable and (truncated or interior_gap))
-    if all_filtered:
-        degraded_reason: str | None = ALL_FILTERED
+    # Demotion priority (DEC-PULL-TODAY-COMPLETENESS-GATE-001 Ruling G-5): the TODAY gate's
+    # verdict WINS when it fired — TODAY_INCOMPLETE is the streak-EXEMPT reason, so if the
+    # streak-BUMPING ALL_FILTERED won on a covers-today window, three same-evening rounds
+    # could still walk it to SKIPPED. Overlap is narrow anyway (an all-filtered covers-today
+    # INDEX window has zero today bars, so the count check fails it first).
+    degraded = today_incomplete or all_filtered or (demotable and (truncated or interior_gap))
+    if today_incomplete:
+        degraded_reason: str | None = TODAY_INCOMPLETE
+    elif all_filtered:
+        degraded_reason = ALL_FILTERED
     elif demotable and interior_gap:
         degraded_reason = INTERIOR_GAP
     elif demotable and truncated:
         degraded_reason = SUSPECTED_PARTIAL
     else:
         degraded_reason = None
+    # Mass ALL-FILTERED breaker feed (DEC-ALLFILTERED-MASS-BREAKER-001): observe every
+    # ELIGIBLE window's boundary verdict — the eligibility mirrors the demotion's own
+    # ``detect_completeness_gaps`` + ``interval != _DAILY`` gate (a dry-run/synthetic
+    # pull never feeds the breaker; a derived-1day window is never boundary-judged)
+    # plus the session-exempt + raw-bars>0 conjuncts, so a genuine EMPTY window never
+    # inflates the denominator and an exempt symbol (GIFTNIFTY) joins NEITHER the
+    # numerator NOR the denominator. The breaker's DEFAULT dedupe key
+    # ("<series>|<start>|<end>", review round 6) IS this spine's window ledger
+    # identity — series = "<symbol>:<interval>" — so a retry pass re-attempting
+    # the same still-FAILED window updates its verdict in place instead of
+    # re-counting it. Observe BEFORE the record below — the
+    # trip-crossing window suppresses ITSELF through the record-time
+    # ``allow_degraded_settle`` re-check (evaluated inside ``record()`` UNDER the
+    # ledger lock, serialized with the trip's rescind — review round 1 TOCTOU
+    # closure: a settle in flight at the trip instant is either suppressed or
+    # captured in ``_af_settled_keys`` and rescinded, never leaked).
+    af_eligible = (
+        detect_completeness_gaps
+        and interval != _DAILY
+        and not is_session_exempt(instrument.symbol_name)
+        and len(raw_bars) > 0
+    )
+    if all_filtered_breaker is not None and af_eligible:
+        af_series = f"{instrument.symbol_name}:{interval}"
+        if all_filtered_breaker.observe(
+            af_series,
+            all_filtered=all_boundary_filtered,
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+        ):
+            # The trip TRANSITION (returned True exactly once per pull): auto-rescind
+            # the same-pull pre-trip ALL_FILTERED settles, then emit the ONE loud
+            # count-naming alarm (structlog ERROR + CRITICAL Telegram) from the COMMON
+            # helper both spines share. Deliberately NOT a pull stop — a filter-side
+            # event poisons SETTLING only, never fetching/storage. Lazy import: the
+            # notifications module is pulled in at most once per pull, at trip time.
+            from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
+
+            rescinded = ledger.rescind_all_filtered_settles() if ledger is not None else 0
+            emit_mass_all_filtered_alert(
+                all_filtered_breaker.trip_snapshot(), rescinded=rescinded, pull_id=pull_id
+            )
+    # Mass ALL-FILTERED suppression seam (DEC-ALLFILTERED-MASS-BREAKER-001): the
+    # breaker is handed to ``record()`` as its ``allow_degraded_settle`` callable
+    # and consulted INSIDE the ledger lock — NEVER pre-computed in this tail (the
+    # review-round-1 TOCTOU fix: a tail-time boolean raced the sibling trip's
+    # one-shot rescind, so a settle in flight at the trip instant escaped BOTH
+    # suppression and rescind). The conjunct with ``all_filtered`` is deliberate:
+    # the spot-only INTERIOR_GAP / SUSPECTED_PARTIAL demotions are ORTHOGONAL
+    # evidence channels and stay byte-unchanged even while the all-filtered
+    # breaker is tripped.
+    af_allow_settle: Callable[[], bool] | None = (
+        all_filtered_breaker.allow_settle
+        if all_filtered and all_filtered_breaker is not None
+        else None
+    )
     # Record the window's outcome in the unified ledger: SUCCESS when the vendor returned
     # COMPLETE bars, EMPTY on a clean 0-bar response, or a DEMOTED re-pullable FAILED when the
     # bars are incomplete (interior gap / truncation). ``raw_bars`` (NOT
@@ -1426,6 +1637,8 @@ def _process_window_tail(
             degraded=degraded,
             degraded_reason=degraded_reason,
             suppress_settle=suppress_settle,
+            allow_degraded_settle=af_allow_settle,
+            pull_id=pull_id,
         )
     if on_success is not None:
         on_success()

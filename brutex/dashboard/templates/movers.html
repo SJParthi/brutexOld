@@ -72,6 +72,9 @@
   td.pos { color:var(--green); } td.neg { color:var(--red); }
   td.muted { color:var(--muted); }
   tbody tr:hover { background:var(--surface-2); }
+  /* Row drill-down affordance (DEC-MOVERS-DRILL-DOWN-001): only rows stamped with a
+     real payload symbol are links; SAMPLE/empty rows carry no data-symbol → default cursor. */
+  tbody tr[data-symbol] { cursor:pointer; }
   .controls-row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
   #asof { margin-left:auto; font-size:12px; color:var(--muted); align-self:center; }
   .note { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; } .note b { color:var(--text); }
@@ -103,8 +106,11 @@
       <a href="/universe">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers" aria-current="page">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
   </header>
@@ -122,6 +128,10 @@
         <span id="pills"></span>
         <span class="spacer"></span>
         <select id="exchange" title="Exchange"><option>NSE</option><option>BSE</option></select>
+        <!-- Underlying-class filter (DEC-MOVERS-UNDERLYING-CLASS-001): All | Indices | Stocks
+             on all three tabs. Default "All" is NOT sent, so the payload stays byte-identical;
+             Indices/Stocks filter the SAME cached candidate set server-side at rank time. -->
+        <select id="uclass" title="Underlying class"><option>All</option><option>Indices</option><option>Stocks</option></select>
         <select id="track" title="Expiry cadence (Options)" style="display:none;"></select>
         <select id="expiry" title="Expiry" style="display:none;"></select>
       </div>
@@ -237,7 +247,7 @@ const ASSETS = {
        session bar; DEC-GREEKS-ENGINE-PR3B-001 over the Phase-2b store) — full-precision
        floats in the payload, 4dp DISPLAY-only ("num4"); null (legacy pre-Greeks
        partition / stamped-NA bar) renders "—", never a fabricated Greek. */
-    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Value (Cr)","value_cr","num"],["Volume","volume","int"]],
   },
 };
 /* Lake interval label → bar minutes for ALL 21 Track-1 timeframes — mirrors
@@ -333,7 +343,15 @@ function fillTimes() {
    (DEC-DASHBOARD-XSS-HARDENING-001). */
 function refreshBaselineLegend(note) {
   const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
-  $("noteText").textContent = (note||"") + (staleBaseline ? " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)" : "");
+  /* Muhurat legend (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the EMIT-ON-TRUE keys
+     arrive only when the baseline is the legitimate Diwali Muhurat close — a real
+     NSE session, never a lake hole — so it gets its OWN " †" legend, distinct from
+     the " *" possible-lake-hole legend (whose wording is shape-neutral: no
+     unconditional re-pull imperative — the hole may be a stray bar instead). */
+  const muhuratBaseline = rowsData.some(r => r && (r.prev_close_muhurat === true || r.oi_baseline_muhurat === true));
+  $("noteText").textContent = (note||"")
+    + (staleBaseline ? " · * baseline is not the immediately-preceding REGULAR NSE session (nearest-prior shown — possible lake hole)" : "")
+    + (muhuratBaseline ? " · † baseline is the Diwali Muhurat session close (a real NSE session the lake legitimately carries; engine day-anchors deliberately use the prior regular session)" : "");
 }
 /* Sub-filter (pill) switch: re-render the already-fetched payload's other category
    list IN THE BROWSER — the server returned every category for this coordinate, so
@@ -463,7 +481,25 @@ function renderRows() {
   }
   const tb = $("rows");
   if (!data.length) { tb.innerHTML = `<tr><td colspan="${cols.length}" class="empty">📭 no movers in this snapshot</td></tr>`; return; }
-  tb.innerHTML = data.map(row => "<tr>" + cols.map(([,field,type],i) => {
+  tb.innerHTML = data.map(row => {
+    /* Row drill-down coordinate stamp (DEC-MOVERS-DRILL-DOWN-001): only a row
+       carrying a REAL payload `symbol` becomes a link — the offline SAMPLE
+       preview rows have NO symbol key and the empty-state row has no attrs,
+       so both stay inert. The (symbol, exchange, segment) triple is the lake
+       dataset coordinate verbatim (spot) / the contract groww_symbol (F&O) —
+       self-describing via data-segment, never state.asset. esc()'d inside
+       double-quoted attributes: the SAME sanctioned innerHTML+esc path every
+       cell already rides (DEC-DASHBOARD-XSS-HARDENING-001). A11y (review
+       MINOR-1 fold): deliberately NO link-role override — the tr keeps its
+       NATIVE `row` role so table semantics survive for screen readers;
+       keyboard reachability rides tabindex=0 + the Enter twin, and the
+       esc()'d aria-label names the destination. */
+    const link = row.symbol
+      ? ' data-symbol="' + esc(row.symbol) + '" data-exchange="' + esc(row.exchange || "") + '"'
+        + ' data-segment="' + esc(row.segment || "") + '" tabindex="0"'
+        + ' aria-label="open ' + esc(row.symbol) + ' in the database candle viewer"'
+      : "";
+    return "<tr" + link + ">" + cols.map(([,field,type],i) => {
     let v = row[field]; if (v===undefined||v===null) v = "—";
     let cls = i===0 ? "name" : "";
     /* Numeric cells get display formatting: money → ₹ + Indian grouping @ 2dp,
@@ -503,8 +539,14 @@ function renderRows() {
        esc(v) return — the marker rides the same escape as the value. */
     if ((field==="change"||field==="pct_change") && row.prev_close_contiguous === false && v!=="—" && v!=="?") v += " *";
     if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_contiguous === false && v!=="—" && v!=="?") v += " *";
+    /* " †" Muhurat marker (DEC-PREVSESSION-MUHURAT-COHERENCE-001): STRICT === true
+       on the EMIT-ON-TRUE keys — a legitimate Diwali Muhurat baseline is flagged
+       distinctly from the " *" possible-lake-hole marker; pre-esc like " *". */
+    if ((field==="change"||field==="pct_change") && row.prev_close_muhurat === true && v!=="—" && v!=="?") v += " †";
+    if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_muhurat === true && v!=="—" && v!=="?") v += " †";
     return `<td class="${cls}">${esc(v)}</td>`;
-  }).join("") + "</tr>").join("");
+  }).join("") + "</tr>";
+  }).join("");
 }
 function syncControls() {
   ["date","interval","time","exchange"].forEach(id => {
@@ -543,6 +585,9 @@ async function load() {
   /* OPT-IN Top Volume floor (DEC-MOVERS-MIN-VOLUME-001): only send a POSITIVE value, so
      blank / 0 stays byte-identical to the no-floor default (the route default is 0). */
   if (parseInt($("minvol").value, 10) > 0) p.set("min_volume", $("minvol").value);
+  /* Underlying-class filter (DEC-MOVERS-UNDERLYING-CLASS-001): only send a non-"All"
+     value, so "All" (the default) stays byte-identical to today (the route default). */
+  if ($("uclass").value && $("uclass").value !== "All") p.set("underlying_class", $("uclass").value);
   if (state.asset!=="spot") p.set("expiry", $("expiry").value||"Near");
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
@@ -714,6 +759,47 @@ function onHeadClick(e) {
   updateHeadSort(); renderRows();
 }
 $("head").addEventListener("click", onHeadClick);
+/* ── Row drill-down → /db candle viewer (DEC-MOVERS-DRILL-DOWN-001) ──
+   Delegated click + Enter — ONE listener pair on #rows, attached once; it
+   survives renderRows' innerHTML swaps by construction (the onPillsClick /
+   onHeadClick pattern) and touches NOTHING the sort/pill/tab listeners own.
+   SAMPLE/empty rows carry no data-symbol → inert. DISCLOSED fidelity limits:
+   the as-of TIME is NOT carried (/db date filtering is day-granular — the
+   whole day is shown, so a mid-session as-of snapshot and the /db page are
+   not value-reconcilable — a navigation aid, never a reconciliation
+   surface), and an interval /db has not STORED falls back to its 1-minute
+   preference on the /db side (only stored intervals are offerable). */
+function moversDbUrl(tr) {
+  const seg = tr.dataset.segment || "";
+  const p = new URLSearchParams();
+  p.set("candles", seg === "FNO" ? "fno" : "spot");
+  p.set("symbol", tr.dataset.symbol);
+  if (seg !== "FNO") { p.set("exchange", tr.dataset.exchange || ""); p.set("segment", seg); }
+  p.set("interval", $("interval").value);
+  /* The RESOLVED snapshot day from the payload echo — the as-of line already
+     trusts j.date — so a blank date input ("latest day") still deep-links to
+     the actual day shown, the honest choice (falls back to the raw input
+     only when no payload is cached). */
+  const d = (lastPayload && lastPayload.date) || $("date").value;
+  if (d) p.set("date", d);
+  return "/db?" + p.toString();
+}
+function onRowClick(e) {
+  /* Text-selection guard (review MINOR-2 fold): a click that ENDS a text
+     selection (select/copy a cell value) must not be swallowed into a
+     navigation — a live selection anywhere on the page means the operator
+     was selecting, not clicking through. */
+  if (!window.getSelection().isCollapsed) return;
+  const tr = e.target.closest("tr[data-symbol]");
+  if (!tr) return;
+  window.location.href = moversDbUrl(tr);
+}
+$("rows").addEventListener("click", onRowClick);
+$("rows").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  const tr = e.target.closest("tr[data-symbol]");
+  if (tr) window.location.href = moversDbUrl(tr);
+});
 $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
   $("tabs").querySelectorAll(".tab").forEach(x=>x.classList.remove("on")); t.classList.add("on");
   state.asset = t.dataset.asset; state.category = ASSETS[state.asset].cats[0][0]; state.sort = {idx:null,dir:1};
@@ -728,7 +814,7 @@ $("time").onchange = () => { state.time = $("time").value; load(); };
 const DEBOUNCE_MS = 200;
 let debounceTimer = null;
 function debouncedLoad() { clearTimeout(debounceTimer); debounceTimer = setTimeout(load, DEBOUNCE_MS); }
-["exchange","expiry","track","date"].forEach(id => $(id).onchange = load);
+["exchange","uclass","expiry","track","date"].forEach(id => $(id).onchange = load);
 ["topn","minvol"].forEach(id => $(id).onchange = debouncedLoad);
 $("refresh").onclick = load;
 fillTimes(); renderPills(); load();

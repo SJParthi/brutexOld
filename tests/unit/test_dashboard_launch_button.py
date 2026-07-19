@@ -12,7 +12,8 @@ real sweep. Skipped cleanly when the ``[ui]`` extra (FastAPI) is absent.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import shutil
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +25,26 @@ pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 from brutex.dashboard import launch_button as lb
 from brutex.dashboard.app import DashboardState, build_app
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def hermetic_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the disk probe deterministic (DEC-LAUNCH-DISK-GATE-HERMETIC-001).
+
+    The POST gate re-checks ``disk_free >= DEFAULT_MIN_DISK_FREE_BYTES``
+    (20 GiB) against the REAL runner disk; on a CI runner with < 20 GiB free
+    that 412'd 7 tests in this file and dragged ``launch_button.py`` below
+    the 100% gate. Every test here rides a deterministic plenty-free probe
+    via the ``_default_disk_usage`` module seam; the disk-refusal arm
+    (``test_low_disk_412_nothing_spawned``) re-pins the seam to a LOW value
+    explicitly — the gate itself stays byte-identical in production.
+    """
+    plenty = 4 * lb.DEFAULT_MIN_DISK_FREE_BYTES
+
+    def _plenty_free(path: str) -> Any:
+        return SimpleNamespace(total=plenty * 2, used=plenty, free=plenty)
+
+    monkeypatch.setattr(lb, "_default_disk_usage", _plenty_free)
 
 
 @pytest.fixture
@@ -102,14 +123,46 @@ class TestLaunchStateRoute:
         names = {c["name"] for c in payload["preconditions"]}
         assert "nifty_interval_partitions" in names
         assert "no_active_launch" in names
+        # hermetic disk seam: the pinned plenty-free probe reads GREEN
+        # deterministically — never the real runner disk.
+        verdicts = {c["name"]: c["ok"] for c in payload["preconditions"]}
+        assert verdicts["disk_free"] is True
         assert payload["cards"]["spot"]["enabled"] is True
         # coordinator delta: base command display carries NO ack flag
         assert lb.SLA_ACK_FLAG not in payload["cards"]["spot"]["command_display"]
         assert payload["cards"]["spot"]["sla_ack_flag"] == lb.SLA_ACK_FLAG
-        # On main the futures alias layer (PR #1264) is absent — honest verdict.
+        # DEC-ENGINE-SPOT-ONLY-001: the request-time probe (the REAL scope
+        # classifier; zero code change in launch_button, exactly as its
+        # docstring promises) honestly reads UNAVAILABLE — the futures track
+        # is retired from engine scope, so the card is disabled with the
+        # DEC-citing reason (the pre-flip PR-#1264-merged available arm is
+        # pinned via the monkeypatched probe tests).
         assert payload["futures"]["available"] is False
         assert payload["cards"]["futures"]["enabled"] is False
-        assert "PR #1264" in payload["cards"]["futures"]["reason"]
+        assert "DEC-ENGINE-SPOT-ONLY-001" in payload["cards"]["futures"]["reason"]
+
+    def test_futures_card_disabled_when_alias_unavailable(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The UNAVAILABLE futures CARD arm: disabled + the probe's reason.
+
+        Covers ``_card_payload``'s ``reason = futures.reason`` branch (the
+        #1311-fold flip of ``test_state_payload`` to available=True left it
+        unexercised) via a monkeypatched probe, mirroring the 400-arm test.
+        """
+        monkeypatch.setattr(
+            lb,
+            "probe_futures_alias",
+            lambda: lb.FuturesAvailability(available=False, reason=lb.FUTURES_DEPENDENCY_NOTE),
+        )
+        payload = client.get("/api/v1/launch/state").json()
+        assert payload["futures"]["available"] is False
+        card = payload["cards"]["futures"]
+        assert card["enabled"] is False
+        assert card["reason"] == lb.FUTURES_DEPENDENCY_NOTE
+        assert "DEC-ENGINE-SPOT-ONLY-001" in card["reason"]
+        # The spot card is untouched by the futures probe.
+        assert payload["cards"]["spot"]["enabled"] is True
 
     def test_state_without_store_is_honest(self, bare_client: TestClient) -> None:
         payload = bare_client.get("/api/v1/launch/state").json()
@@ -138,10 +191,31 @@ class TestLaunchSweepRoute:
         resp = bare_client.post("/api/v1/launch/sweep?card=spot")
         assert resp.status_code == 503
 
-    def test_futures_unavailable_400_on_main(self, client: TestClient) -> None:
+    def test_futures_unavailable_400_when_alias_absent(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The honest-refusal arm, pinned via a monkeypatched probe (the REAL
+        # probe also refuses under DEC-ENGINE-SPOT-ONLY-001 — see the
+        # real-probe 400 test below).
+        monkeypatch.setattr(
+            lb,
+            "probe_futures_alias",
+            lambda: lb.FuturesAvailability(available=False, reason=lb.FUTURES_DEPENDENCY_NOTE),
+        )
         resp = client.post("/api/v1/launch/sweep?card=futures")
         assert resp.status_code == 400
-        assert "PR #1264" in resp.json()["detail"]
+        assert "DEC-ENGINE-SPOT-ONLY-001" in resp.json()["detail"]
+
+    def test_futures_card_400_under_the_real_spot_only_probe(self, client: TestClient) -> None:
+        """DEC-ENGINE-SPOT-ONLY-001: the REAL probe refuses a futures launch.
+
+        No monkeypatch — the request-time probe consults the real scope
+        classifier, so a POST on the futures card is a loud 400 citing the
+        DEC, never a spawned NSE-NIFTY-FUT sweep.
+        """
+        resp = client.post("/api/v1/launch/sweep?card=futures")
+        assert resp.status_code == 400
+        assert "DEC-ENGINE-SPOT-ONLY-001" in resp.json()["detail"]
 
     def test_missing_partitions_412_nothing_spawned(
         self, tmp_path: Path, fake_spawner: dict[str, Any]
@@ -154,6 +228,29 @@ class TestLaunchSweepRoute:
             resp = c.post("/api/v1/launch/sweep?card=spot")
         assert resp.status_code == 412
         assert "nifty_interval_partitions" in resp.json()["detail"]
+        assert "argv" not in fake_spawner
+
+    def test_low_disk_412_nothing_spawned(
+        self, lake: Path, fake_spawner: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The disk-refusal arm, HERMETIC: an injected low probe still 412s.
+
+        DEC-LAUNCH-DISK-GATE-HERMETIC-001 teeth — the seam refactor must not
+        weaken the gate: a probe under the 20 GiB floor refuses the POST with
+        412 naming ``disk_free`` and spawns nothing, regardless of the real
+        runner disk.
+        """
+        low = lb.DEFAULT_MIN_DISK_FREE_BYTES - 1
+
+        def _low_free(path: str) -> Any:
+            return SimpleNamespace(total=low * 2, used=low, free=low)
+
+        monkeypatch.setattr(lb, "_default_disk_usage", _low_free)
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
+            resp = c.post("/api/v1/launch/sweep?card=spot")
+        assert resp.status_code == 412
+        assert "disk_free" in resp.json()["detail"]
         assert "argv" not in fake_spawner
 
     def test_failed_launch_500_with_detail(
@@ -300,3 +397,76 @@ class TestRealPidLifecycle:
         assert second.status_code == 200
         second_pid = second.json()["active"]["pid"]
         assert second_pid != pid or not os.path.exists(f"/proc/{pid}")
+
+
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the run_lake= injection seam (#1757) ──
+
+
+def _recording_run_lake(calls: list[str]) -> Callable[..., Awaitable[Any]]:
+    """A run_lake fake with the LakeOffload/run_in_threadpool call contract."""
+
+    async def run_lake(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        calls.append(getattr(func, "__name__", repr(func)))
+        return func(*args, **kwargs)
+
+    return run_lake
+
+
+class TestLaunchOffloadDispatch:
+    """DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the ``run_lake=`` injection seam.
+
+    Every /api/v1/launch/* closure stats/reads/writes under the lake root, so
+    ``build_app`` passes its 32-token ``_run_lake`` — these pins prove all
+    THREE offload sites dispatch through the seam (order-exact), and that a
+    direct caller WITHOUT the kwarg keeps today's default-pool behavior
+    byte-identically (the None-arm back-compat branch).
+    """
+
+    def _register(self, lake: Path, calls: list[str] | None) -> TestClient:
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        if calls is None:
+            lb.register_launch_routes(app, lake_root_resolver=lambda: lake)
+        else:
+            lb.register_launch_routes(
+                app,
+                lake_root_resolver=lambda: lake,
+                run_lake=_recording_run_lake(calls),
+            )
+        return TestClient(app)
+
+    def test_state_route_dispatches_build_launch_state_through_run_lake(self, lake: Path) -> None:
+        calls: list[str] = []
+        client = self._register(lake, calls)
+        assert client.get("/api/v1/launch/state").status_code == 200
+        assert calls == ["build_launch_state"]
+
+    def test_sweep_route_dispatches_both_call_sites_through_run_lake(
+        self, lake: Path, fake_spawner: dict[str, Any]
+    ) -> None:
+        """Order-exact list: converting only ONE of the two _offload call
+        sites (the run_preconditions one or the launch_sweep one) FAILS."""
+        calls: list[str] = []
+        client = self._register(lake, calls)
+        resp = client.post("/api/v1/launch/sweep?card=spot")
+        assert resp.status_code == 200
+        assert calls == ["run_preconditions", "launch_sweep"]
+
+    def test_sweep_refusal_arm_dispatches_only_preconditions_through_run_lake(
+        self, lake: Path
+    ) -> None:
+        calls: list[str] = []
+        shutil.rmtree(lake / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute")
+        client = self._register(lake, calls)
+        assert client.post("/api/v1/launch/sweep?card=spot").status_code == 412
+        assert calls == ["run_preconditions"]
+
+    def test_register_without_run_lake_defaults_to_the_default_pool(self, lake: Path) -> None:
+        """The None-arm back-compat branch (discovery-gate coverage): behavior
+        byte-identical for direct callers — passes on the reverted tree too,
+        by design; the teeth live in the realserver + dispatch pins."""
+        client = self._register(lake, None)
+        resp = client.get("/api/v1/launch/state")
+        assert resp.status_code == 200
+        assert "cards" in resp.json()  # today's payload shape, unchanged

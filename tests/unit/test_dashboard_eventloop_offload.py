@@ -48,9 +48,10 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 
@@ -58,9 +59,12 @@ pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
 from brutex.dashboard.app import DashboardState, build_app
+from brutex.dashboard.lake_offload import LakeOffload
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.lake_invariants import LakeScanReport
 from fastapi.testclient import TestClient
+
+_T = TypeVar("_T")
 
 #: How long the stubbed walk blocks (upper bound; released early on pass).
 _WALK_HOLD_S: float = 5.0
@@ -237,33 +241,79 @@ def _empty_scan_report() -> LakeScanReport:
     )
 
 
-def test_lake_uniqueness_scan_runs_off_the_event_loop(
+def test_lake_uniqueness_scan_runs_on_the_dedicated_census_daemon_thread(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The lake-uniqueness census must not wedge the loop (DEC-LAKE-UNIQUENESS-OFFLOAD-001).
+    """The census runs on the DEDICATED daemon thread — never the loop, never the pool.
 
-    ``GET /api/v1/universe/lake-uniqueness`` offloads its ``scan_lake_invariants``
-    whole-lake walk (measured 30-46 s on a ~40k-contract lake) to the threadpool.
-    This pins that offload: while the scan blocks a worker, a concurrent
-    ``/api/v1/state`` must still complete within budget (a free loop). If a future
-    refactor inlined the scan onto the ``async def`` body, the loop would wedge for
-    the whole hold and this fails — exactly the #1143 preopen regression class.
+    SUPERSESSION (DEC-LAKE-CENSUS-NONBLOCKING-001): this test previously pinned
+    the DEC-LAKE-UNIQUENESS-OFFLOAD-001 ``run_in_threadpool`` offload of the
+    census scan. That offload was REAL (#1302/#1316 — the loop never wedged),
+    but it consumed shared AnyIO threadpool tokens, and ``SummaryCache``'s cold
+    single-flight parked every stacked 15 s poller in an unbounded wait ON a
+    worker — the reproduced 26-minute dashboard-wide freeze. The route now uses
+    NO threadpool at all: it returns the ``LakeCensusHolder``'s O(1) snapshot
+    immediately, and the scan runs on the named ``brutex-lake-census`` daemon
+    thread (asserted below — an AnyIO worker carries a different name; the
+    route completing while the scan is STILL HELD proves the request awaits
+    neither the loop nor a worker running the scan).
     """
-    stub = _BlockingStub(result=_empty_scan_report())
-    monkeypatch.setattr("brutex.dashboard.app.scan_lake_invariants", stub)
+    thread_names: list[str] = []
+    entered = threading.Event()
+    release = threading.Event()
 
-    status, payload = _assert_loop_free_while_blocked(
-        client, stub, "/api/v1/universe/lake-uniqueness"
-    )
-    # The offloaded request still returns the real census payload once released:
-    # the REAL build_lake_census + census_to_dict ran on the worker over the
-    # (stubbed-empty) scan, so a resolvable lake root reads present=True with a
-    # zero-finding verdict — never the {"present": False} no-lake gate.
-    assert status == 200
-    assert isinstance(payload, dict)
+    def _held_scan(*args: object, **kwargs: object) -> object:
+        thread_names.append(threading.current_thread().name)
+        entered.set()
+        release.wait(timeout=_WALK_HOLD_S)
+        return _empty_scan_report()
+
+    monkeypatch.setattr("brutex.dashboard.app.scan_lake_invariants", _held_scan)
+    try:
+        # The arming poll returns IMMEDIATELY (an O(1) snapshot) — the pre-fix
+        # route blocked here for the whole scan on a threadpool worker.
+        t0 = time.perf_counter()
+        first = client.get("/api/v1/universe/lake-uniqueness")
+        first_elapsed = time.perf_counter() - t0
+        assert first.status_code == 200
+        assert first_elapsed < _READ_BUDGET_S, (
+            f"the arming census poll took {first_elapsed * 1000:.1f}ms — the route "
+            "must snapshot, never wait for the scan."
+        )
+        assert entered.wait(timeout=5.0), "the census scan was never entered"
+
+        # While the scan is held: the loop is free AND the snapshot is honest.
+        t0 = time.perf_counter()
+        state = client.get("/api/v1/state")
+        elapsed = time.perf_counter() - t0
+        assert state.status_code == 200
+        assert elapsed < _READ_BUDGET_S, (
+            f"/api/v1/state took {elapsed * 1000:.1f}ms while the census scan was "
+            "held — the scan is running ON the event loop (regression)."
+        )
+        held = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert held["present"] is True
+        assert held["scan_in_progress"] is True
+        assert "findings_total" not in held  # no verdict fabricated mid-first-scan
+    finally:
+        release.set()
+
+    # The scan ran on the DEDICATED census daemon thread — zero AnyIO tokens.
+    assert thread_names == ["brutex-lake-census"]
+
+    # Once the scan lands, the verdict serves (the REAL build_lake_census +
+    # census_to_dict ran on the daemon thread over the stubbed-empty report).
+    deadline = time.time() + 10.0
+    payload: dict[str, object] = {}
+    while time.time() < deadline:
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        if "findings_total" in payload:
+            break
+        time.sleep(0.05)
     assert payload["present"] is True
     assert payload["findings_total"] == 0
     assert payload["files_scanned"] == 0
+    assert payload["scan_in_progress"] is False
 
 
 # ── DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the /universe backend + generation probe ──
@@ -285,7 +335,13 @@ def test_universe_summary_read_runs_off_the_event_loop(
 
     status, payload = _assert_loop_free_while_blocked(client, stub, "/api/v1/universe/summary")
     assert status == 200
-    assert payload == {"index_count": 0, "stock_count": 0, "total": 0}
+    assert payload == {
+        "index_count": 0,
+        "stock_count": 0,
+        "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
 
 
 def test_universe_index_constituents_reads_run_off_the_event_loop(
@@ -370,3 +426,67 @@ def test_oneclick_routes_run_off_the_event_loop(
     assert status == 200
     assert isinstance(payload, dict)
     assert payload["fixture_root_active"] is False
+
+
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — pool-choice dispatch pins (#1757) ──
+
+
+class _CountingLakeOffload(LakeOffload):
+    """A LakeOffload that records every dispatched callable's qualname."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dispatched: list[str] = []
+
+    async def __call__(  # signature mirrors the parent exactly (pyright on tests)
+        self, func: Callable[..., _T], /, *args: object, **kwargs: object
+    ) -> _T:
+        self.dispatched.append(getattr(func, "__qualname__", repr(func)))
+        return await super().__call__(func, *args, **kwargs)
+
+
+class TestLakeLimiterRouteDispatch:
+    """Pool-choice pins via the ``build_app(lake_offload=)`` seam (#1757).
+
+    The wedged-lake realserver regression proves the LIMITER binds; these
+    pins prove WHICH pool each route's dispatch rides — the class the equity
+    route's bare ``run_in_threadpool`` regression (the #1665 merge-seam
+    straggler) was invisible to.
+    """
+
+    @pytest.fixture
+    def counting_client(
+        self, store: InstrumentStore
+    ) -> Generator[tuple[TestClient, _CountingLakeOffload]]:
+        counting = _CountingLakeOffload()
+        app = build_app(DashboardState(), instrument_store=store, lake_offload=counting)
+        with TestClient(app) as c:
+            yield c, counting
+
+    def test_oneclick_equity_dispatches_through_the_lake_limiter(
+        self, counting_client: tuple[TestClient, _CountingLakeOffload]
+    ) -> None:
+        """FAILS pre-fix: the equity dispatch was bare run_in_threadpool."""
+        client, counting = counting_client
+        resp = client.get("/api/v1/oneclick/equity?run_id=r-x&rank=1")
+        assert resp.status_code == 200  # empty-lake awaiting — the route executed
+        assert any("api_oneclick_equity.<locals>._resolve" in q for q in counting.dispatched), (
+            f"equity _resolve not on the lake limiter; saw {counting.dispatched}"
+        )
+
+    def test_pull_rate_stays_on_the_default_pool(
+        self, counting_client: tuple[TestClient, _CountingLakeOffload]
+    ) -> None:
+        """The deliberate-keep NEGATIVE twin (#1642 doctrine): the deadline-
+        guarded liveness memo must NOT consume a lake token — a lake outage
+        must never starve the route that reports on the lake outage."""
+        client, counting = counting_client
+        before = len(counting.dispatched)
+        assert client.get("/api/v1/pull/rate").status_code == 200
+        newly_dispatched = counting.dispatched[before:]
+        assert not any("api_pull_rate" in q or "RateBridgeCache" in q for q in newly_dispatched), (
+            f"/api/v1/pull/rate dispatched through the LAKE limiter "
+            f"({newly_dispatched}) — the deadline-guarded liveness memo must "
+            "stay on the default pool (DEC-DASHBOARD-LAKE-IO-LIMITER-001 "
+            "deliberate-keep set)"
+        )

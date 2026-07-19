@@ -17,7 +17,11 @@
  *     ("live run r-…" / "completed run r-… · manifest") is textContent-set;
  *   - the timeline is a RING BUFFER capped at 5,000 records (F-B2), loudly
  *     labeled; the search input filters the RING only (honest O(ring)
- *     client cost — window-scoped, NOT O(1)-total);
+ *     client cost — window-scoped, NOT O(1)-total) and is 200 ms debounced;
+ *     the DOM render is additionally capped at the newest 500 rows with the
+ *     truncation NAMED on a visible count line, and an unchanged
+ *     (ring, filter) window skips the rebuild entirely
+ *     (DEC-O1-GUARANTEE-HARDEN-001);
  *   - one-shot fetches route failure through BXUI.errorCard with a Retry
  *     button — fetch rejection AND non-ok AND malformed body all land there,
  *     never a false-empty grid; "Loading…" is never a terminal state (F-M4);
@@ -45,21 +49,62 @@ var BX_TIMELINE_RING_LABEL =
 
 /**
  * Append records to the ring, trimming the OLDEST from the front past cap
- * (pure — mutates and returns `ring`).
+ * (pure — mutates and returns `ring`). When the optional `seen` dedup map
+ * is given, each trimmed-out record's canonical-line key is EVICTED from it
+ * (the ONE trim site — Breaker B #5 memory-leak fix: pre-fix, keys were
+ * inserted before the trim and never evicted, a 153.6 B/event GC-immune
+ * growth on a long-lived operator tab).
  *
  * @param {object[]} ring - the ring array (oldest first).
  * @param {object[]} records - new records to append.
  * @param {number} cap - the capacity (BX_TIMELINE_RING_CAP).
+ * @param {Object<string, boolean>} [seen] - optional dedup map keyed on
+ *   bxEventLineText; trimmed records' keys are deleted from it.
  * @returns {object[]} the same ring, trimmed to cap.
  */
-function bxRingPush(ring, records, cap) {
+function bxRingPush(ring, records, cap, seen) {
   for (var i = 0; i < records.length; i++) {
     ring.push(records[i]);
   }
   if (ring.length > cap) {
-    ring.splice(0, ring.length - cap);
+    var dropped = ring.splice(0, ring.length - cap);
+    if (seen) {
+      for (var j = 0; j < dropped.length; j++) {
+        delete seen[bxEventLineText(dropped[j])];
+      }
+    }
   }
   return ring;
+}
+
+/**
+ * Dedup-gate `records` against `seen` then push the fresh ones onto the
+ * ring, evicting trimmed-out keys (pure — mutates `ring` + `seen`).
+ *
+ * WINDOW-SCOPED DEDUP SEMANTIC: the capped ring IS the dedup window —
+ * `seen` holds exactly the keys of the records currently inside the ring
+ * (bounded at `cap` keys, never whole-history), so an event whose key has
+ * LEFT the window MAY legitimately be re-admitted if the server re-sends
+ * it. That matches the honest "showing last 5,000 events" label; dedup
+ * stays exact for everything inside the window.
+ *
+ * @param {object[]} ring - the ring array (oldest first).
+ * @param {Object<string, boolean>} seen - key → true for in-ring records.
+ * @param {object[]} records - candidate records (keyed on bxEventLineText).
+ * @param {number} cap - the capacity (BX_TIMELINE_RING_CAP).
+ * @returns {number} how many records were actually admitted.
+ */
+function bxRingAdd(ring, seen, records, cap) {
+  var fresh = [];
+  for (var i = 0; i < records.length; i++) {
+    var key = bxEventLineText(records[i]);
+    if (!seen[key]) {
+      seen[key] = true;
+      fresh.push(records[i]);
+    }
+  }
+  bxRingPush(ring, fresh, cap, seen);
+  return fresh.length;
 }
 
 /**
@@ -99,6 +144,253 @@ function bxEventLineText(rec) {
   return String(rec.ts_utc) + "  " + String(rec.kind) + "  " + JSON.stringify(rec.payload);
 }
 
+/** The honest null-VIX copy (ONE constant — the [W3-R4] house awaiting style). */
+var BX_VIX_BAND_NOT_STAMPED = "VIX band not stamped for this run";
+
+/**
+ * The story-card VIX band sentence ([W3-R4] DEC-ONECLICK-TOP100-OBJECT-
+ * ROOT-001 wave-3 fold; pure — textContent-rendered on the operator rank-1
+ * card AND the /strategy story card).
+ *
+ * The REAL writer emits ``vix_band`` as an OBJECT whose ``lo``/``hi`` are
+ * null for a null-VIX run (engine ``_vix_band_payload``) — the old
+ * undefined-only gate rendered "works when VIX between null–null". A
+ * null/missing bound now reads the honest not-stamped copy; a PARTIAL band
+ * (one real bound) states the bound it has and names the missing one —
+ * never a fabricated range, never "null" as prose.
+ *
+ * @param {*} band - the row's vix_band value (object | null | undefined).
+ * @returns {string} the sentence.
+ */
+function bxVixBandText(band) {
+  if (!band || typeof band !== "object") {
+    return BX_VIX_BAND_NOT_STAMPED;
+  }
+  var loNum = typeof band.lo === "number" && isFinite(band.lo);
+  var hiNum = typeof band.hi === "number" && isFinite(band.hi);
+  if (loNum && hiNum) {
+    return "works when VIX between " + String(band.lo) + "–" + String(band.hi);
+  }
+  if (loNum) {
+    return "works when VIX ≥ " + String(band.lo) + " (upper bound not stamped)";
+  }
+  if (hiNum) {
+    return "works when VIX ≤ " + String(band.hi) + " (lower bound not stamped)";
+  }
+  return BX_VIX_BAND_NOT_STAMPED;
+}
+
+/**
+ * The compact /screener band-column cell for the SAME verdicts (pure; the
+ * cell previously rendered "null–null" for a null-lo/hi writer band).
+ *
+ * @param {*} band - the row's vix_band value (object | null | undefined).
+ * @returns {string} the cell text ("12.5–18.2" · "≥ 12.5 (upper not
+ *   stamped)" · "≤ 18.2 (lower not stamped)" · "not stamped").
+ */
+function bxVixBandCellText(band) {
+  if (!band || typeof band !== "object") {
+    return "not stamped";
+  }
+  var loNum = typeof band.lo === "number" && isFinite(band.lo);
+  var hiNum = typeof band.hi === "number" && isFinite(band.hi);
+  if (loNum && hiNum) {
+    return String(band.lo) + "–" + String(band.hi);
+  }
+  if (loNum) {
+    return "≥ " + String(band.lo) + " (upper not stamped)";
+  }
+  if (hiNum) {
+    return "≤ " + String(band.hi) + " (lower not stamped)";
+  }
+  return "not stamped";
+}
+
+/**
+ * The instrument display cell/label (DEC-ONECLICK-INSTRUMENT-DISPLAY-001,
+ * pure — textContent-rendered on the operator rank-1 card, the combos
+ * table's Inst column and the /strategy identity strip).
+ *
+ * The engine writer always emits the additive per-entry ``instrument``
+ * (``top100_artifact._entry_payload`` — the winner's own market, e.g.
+ * "NSE-NIFTY"); a pre-instrument artifact / null / non-string value reads
+ * the honest "—" — never "undefined"/"null" as prose, never an invented
+ * market (the operator must be able to tell WHICH index the best strategy
+ * trades, or see that the artifact does not say).
+ *
+ * @param {*} value - the row's instrument value (string | null | undefined).
+ * @returns {string} the instrument string or the honest "—".
+ */
+function bxInstrumentText(value) {
+  if (typeof value === "string" && value !== "") {
+    return value;
+  }
+  return "—";
+}
+
+/* ── Winner-detail builders (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001, pure —
+      the /strategy story card renders the SHIPPED results-depth aggregates
+      the writer already persists; every builder reads the writer's exact
+      keys, formats money through an injected house formatter, and degrades
+      to the honest "—" — never an invented number, never "null" prose). ── */
+
+/**
+ * The exit-reason mix line from the writer's ``metrics.exits`` object
+ * (``{stop_loss, take_profit, signal, forced_1520, end_of_data,
+ * session_gap}`` — ``top100_artifact._metrics_payload``; ``session_gap``
+ * appended last, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — an OLD artifact
+ * missing the key reads the honest "?", never an invented 0).
+ *
+ * @param {*} exits - the metrics.exits value.
+ * @returns {string} "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0 · gap 0" or
+ *   "—"; a non-numeric count reads "?" (counted-but-unreadable, never
+ *   invented).
+ */
+function bxExitMixText(exits) {
+  if (!exits || typeof exits !== "object" || Array.isArray(exits)) {
+    return "—";
+  }
+  var parts = [
+    ["SL", exits.stop_loss],
+    ["TP", exits.take_profit],
+    ["signal", exits.signal],
+    ["15:20", exits.forced_1520],
+    ["EOD", exits.end_of_data],
+    ["gap", exits.session_gap]
+  ];
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var n = parts[i][1];
+    out.push(parts[i][0] + " " + (typeof n === "number" && isFinite(n) ? String(n) : "?"));
+  }
+  return out.join(" · ");
+}
+
+/**
+ * The worst-5-days line from the writer's ``metrics.worst5_days``
+ * (``[[iso_date, pnl_paisa], …]`` ≤ 5 — NOTE: a METRICS key, not a regime
+ * key; verified against ``_metrics_payload``).
+ *
+ * @param {*} worst5 - the metrics.worst5_days value.
+ * @param {function(*): string} fmt - the house paisa→₹ formatter.
+ * @returns {string} "2024-01-02 −₹5.00 · …", "none stored" for a valid
+ *   empty list, "—" for absent/malformed.
+ */
+function bxWorst5DaysText(worst5, fmt) {
+  if (!Array.isArray(worst5)) {
+    return "—";
+  }
+  if (worst5.length === 0) {
+    return "none stored";
+  }
+  var out = [];
+  for (var i = 0; i < worst5.length; i++) {
+    var entry = worst5[i];
+    if (!Array.isArray(entry) || entry.length < 2) {
+      return "—"; // one malformed entry ⇒ the whole line abstains, never a partial fabrication
+    }
+    out.push(String(entry[0]) + " " + fmt(entry[1]));
+  }
+  return out.join(" · ");
+}
+
+/**
+ * The trend-regime P&L split from the writer's ``regime.by_trend`` object
+ * (``_regime_payload`` — trend label → pnl paisa), keys sorted for a
+ * deterministic line.
+ *
+ * @param {*} byTrend - the regime.by_trend value.
+ * @param {function(*): string} fmt - the house paisa→₹ formatter.
+ * @returns {string} "sideways +₹… · trending +₹…" or "—".
+ */
+function bxTrendSplitText(byTrend, fmt) {
+  if (!byTrend || typeof byTrend !== "object" || Array.isArray(byTrend)) {
+    return "—";
+  }
+  var keys = Object.keys(byTrend).sort();
+  if (keys.length === 0) {
+    return "—";
+  }
+  var out = [];
+  for (var i = 0; i < keys.length; i++) {
+    var v = byTrend[keys[i]];
+    out.push(keys[i] + " " + (typeof v === "number" && isFinite(v) ? fmt(v) : "?"));
+  }
+  return out.join(" · ");
+}
+
+/**
+ * The one-regime-wonder verdict sentence from the writer's
+ * ``regime.one_regime_wonder`` + ``regime.regime_wonder_axis``.
+ *
+ * @param {*} wonder - the boolean flag (writer truth).
+ * @param {*} axis - the concentrating axis name (string | null).
+ * @returns {string} the loud wonder warning / the spread verdict / "—".
+ */
+function bxRegimeWonderText(wonder, axis) {
+  if (wonder === true) {
+    var ax = typeof axis === "string" && axis !== "" ? axis : "regime";
+    return "ONE-REGIME WONDER — profits concentrate in a single " + ax;
+  }
+  if (wonder === false) {
+    return "profits spread across regimes";
+  }
+  return "—";
+}
+
+/**
+ * An "avg X · <label> Y" pair cell (MAE avg·worst / MFE avg·best) — each
+ * leg renders only when it is a finite number; both absent reads "—".
+ *
+ * @param {*} avg - the average paisa value.
+ * @param {*} extreme - the worst/best paisa value.
+ * @param {string} extremeLabel - "worst" | "best".
+ * @param {function(*): string} fmt - the house paisa→₹ formatter.
+ * @returns {string} the pair text or "—".
+ */
+function bxAvgExtremeText(avg, extreme, extremeLabel, fmt) {
+  var avgOk = typeof avg === "number" && isFinite(avg);
+  var extOk = typeof extreme === "number" && isFinite(extreme);
+  if (!avgOk && !extOk) {
+    return "—";
+  }
+  var parts = [];
+  if (avgOk) {
+    parts.push("avg " + fmt(avg));
+  }
+  if (extOk) {
+    parts.push(extremeLabel + " " + fmt(extreme));
+  }
+  return parts.join(" · ");
+}
+
+/**
+ * The minute-path max-drawdown cell (``max_dd_minute_path_paisa`` +
+ * ``max_dd_minute_path_pct`` — the R22 minute-granular equity path).
+ *
+ * SCALE LAW (hostile-round MAJOR-1): the wire's ``max_dd_minute_path_pct``
+ * is a 0-1 RATIO (``minute_path.py`` ``drop / peak``, served verbatim by
+ * ``top100_artifact.py``) — unlike the sibling ``max_drawdown_pct``, which
+ * the writer percent-scales (``compute.py`` ``* 100.0``). The builder
+ * scales ×100 HERE (bounded to 2dp) so an equal-magnitude event reads
+ * "30%" on BOTH cells of the same card — never a 100×-understated "0.3%".
+ *
+ * @param {*} paisa - the minute-path DD paisa value.
+ * @param {*} pct - the minute-path DD as a 0-1 RATIO (writer scale).
+ * @param {function(*): string} fmt - the house paisa→₹ formatter.
+ * @returns {string} "−₹… (1.5%)" / "−₹…" / "—".
+ */
+function bxMinutePathDdText(paisa, pct, fmt) {
+  if (!(typeof paisa === "number") || !isFinite(paisa)) {
+    return "—";
+  }
+  var out = fmt(paisa);
+  if (typeof pct === "number" && isFinite(pct)) {
+    out += " (" + String(Math.round(pct * 10000) / 100) + "%)";
+  }
+  return out;
+}
+
 /**
  * Funnel write-precedence law (C-M2, pure): the live source may always
  * write; the manifest fill applies ONLY while NO sweep is running.
@@ -112,6 +404,145 @@ function bxFunnelWriteAllowed(source, sweepRunning) {
     return true;
   }
   return !sweepRunning; // manifest fills only when idle (C-M2)
+}
+
+/** Timeline DOM render cap (DEC-O1-GUARANTEE-HARDEN-001 — bounded per-tick
+ *  DOM work: the ring may hold 5,000 records but a render never rebuilds
+ *  more than the NEWEST 500 rows; the truncation is NAMED on a visible
+ *  count line — the anti-illusion law, the BXScreener
+ *  bxRenderCount/bxCapNote idiom). */
+var BX_TIMELINE_RENDER_CAP = 500;
+
+/**
+ * Clamp a timeline render offset (the viewport's distance from the ring
+ * TAIL, in filtered rows) into the renderable range `[0, max(0, total -
+ * cap)]` (pure — junk/negative/fractional folds to a safe integer).
+ *
+ * @param {number} total - rows surviving the ring filter.
+ * @param {number} cap - the render cap (BX_TIMELINE_RENDER_CAP).
+ * @param {number} offset - the requested distance from the tail.
+ * @returns {number} the effective (renderable) offset.
+ */
+function bxTimelineClampOffset(total, cap, offset) {
+  var n = typeof offset === "number" && isFinite(offset) ? Math.floor(offset) : 0;
+  if (n < 0) {
+    n = 0;
+  }
+  var max = total > cap ? total - cap : 0;
+  return n > max ? max : n;
+}
+
+/**
+ * The viewport offset that anchors the render window on the OLDEST rows
+ * after a "load earlier" click (pure — review round 1 MAJOR-A): everything
+ * newer than the oldest cap-window is skipped, so the earlier records the
+ * click just fetched are actually RENDERED instead of hidden behind the
+ * newest-500 slice.
+ *
+ * @param {number} total - rows surviving the ring filter.
+ * @param {number} cap - the render cap (BX_TIMELINE_RENDER_CAP).
+ * @returns {number} the front-anchored offset.
+ */
+function bxTimelineEarlierOffset(total, cap) {
+  return total > cap ? total - cap : 0;
+}
+
+/**
+ * Advance a viewport offset across an events tick that ADMITTED `admitted`
+ * new records at the ring tail (pure — review round 1 MAJOR-A): a parked
+ * viewport (offset > 0 — the reader is browsing earlier events) grows its
+ * tail distance by the admissions so the SAME rows stay on screen — a live
+ * tick can never yank the reader back toward the newest window; a
+ * tail-anchored viewport (offset 0) stays live on the newest rows.
+ *
+ * @param {number} offset - the current viewport offset.
+ * @param {number} admitted - records the tick admitted at the tail.
+ * @returns {number} the content-anchored offset.
+ */
+function bxTimelineTickOffset(offset, admitted) {
+  var off = typeof offset === "number" && offset > 0 ? Math.floor(offset) : 0;
+  if (off <= 0) {
+    return 0;
+  }
+  var n = typeof admitted === "number" && admitted > 0 ? Math.floor(admitted) : 0;
+  return off + n;
+}
+
+/**
+ * The rendered cap-window of the filtered timeline rows (pure — rows are
+ * oldest first). With offset 0 (the default) the slice keeps the TAIL —
+ * the truncation drops the OLDEST rows, never the live tail; a positive
+ * offset slides the viewport toward OLDER rows ("load earlier", review
+ * round 1 MAJOR-A) — offset = distance from the tail, clamped renderable.
+ *
+ * @param {object[]} rows - the filtered ring rows (oldest first).
+ * @param {number} cap - the render cap (BX_TIMELINE_RENDER_CAP).
+ * @param {number} [offset] - viewport distance from the tail (default 0).
+ * @returns {object[]} the rows to render (same array when within cap).
+ */
+function bxTimelineRenderRows(rows, cap, offset) {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  if (rows.length <= cap) {
+    return rows;
+  }
+  var off = bxTimelineClampOffset(rows.length, cap, offset);
+  return rows.slice(rows.length - cap - off, rows.length - off);
+}
+
+/**
+ * The visible count line naming a render-cap truncation (pure; "" when
+ * nothing was cut — every cap is NAMED, never a silent shrink). A parked
+ * viewport (offset > 0) names the exact window it shows — "showing events
+ * X–Y of N (render cap S)" — so the reader always knows WHERE in the
+ * history they are (review round 1 MAJOR-A honesty half).
+ *
+ * @param {number} shown - rows actually rendered.
+ * @param {number} total - rows surviving the ring filter.
+ * @param {number} [offset] - the effective (clamped) viewport offset.
+ * @returns {string} the honest note or "".
+ */
+function bxTimelineCapNote(shown, total, offset) {
+  if (shown >= total) {
+    return "";
+  }
+  var off = typeof offset === "number" && offset > 0 ? Math.floor(offset) : 0;
+  if (off <= 0) {
+    return "showing newest " + shown + " of " + total + " events (render cap)";
+  }
+  var end = total - off;
+  var start = end - shown + 1;
+  return (
+    "showing events " + start + "–" + end + " of " + total +
+    " (render cap " + shown + ")"
+  );
+}
+
+/**
+ * Cheap skip-render token for the timeline (pure): the DOM needs a rebuild
+ * ONLY when the ring content changed (the mutation counter moved), the
+ * filter text changed, or the viewport offset moved — an unchanged triple
+ * means the rendered rows are already exact, so renderTimeline can skip the O(rows)
+ * teardown+rebuild (pre-fix, a live sweep's events tick rebuilt up to
+ * 5,000 text nodes every ~3 s even when every record was a window dup).
+ * Folding the viewport OFFSET into the token (review round 1 MAJOR-A)
+ * means a "load earlier" viewport move genuinely re-renders while a
+ * no-change tick still skips — the triple is (mutations, filter, offset).
+ *
+ * @param {number} mutations - the monotonic ring-mutation counter.
+ * @param {string} filterText - the search box value ("" when absent).
+ * @param {number} [offset] - the viewport offset (default 0).
+ * @returns {string} the compare token.
+ */
+function bxTimelineRenderToken(mutations, filterText, offset) {
+  return (
+    String(mutations) +
+    "\u001f" +
+    String(filterText == null ? "" : filterText) +
+    "\u001f" +
+    String(offset == null ? 0 : offset)
+  );
 }
 
 /**
@@ -150,13 +581,129 @@ function bxFunnelProvenance(source, runId) {
   var EVENTS_PAGE_LIMIT = 200;
   var TRADES_PAGE_LIMIT = 100;
 
+  /* ── one fetch, N consumers (DEC-OPERATOR-PAGE-CONSOLIDATE-001) ──
+     A page-lifetime PROMISE MEMO keyed on runId: the operator card, the
+     combos table, the winners section and the strategy drawer all consume
+     ONE /api/v1/oneclick/top100 network fetch per run selection.
+     Invalidated on run switch (selectRun + the runs poller's first
+     programmatic auto-selection). HONEST: a memo within one page lifetime,
+     NOT a TTL cache — server freshness rides the run-switch invalidation. */
+  var top100Memo = { runId: null, promise: null };
+  function getTop100(runId) {
+    if (top100Memo.runId === runId && top100Memo.promise) {
+      return top100Memo.promise;
+    }
+    var promise = window.BXPoll.fetchJson(
+      TOP100_URL + "?run_id=" + encodeURIComponent(runId),
+      12000
+    );
+    top100Memo = { runId: runId, promise: promise };
+    // a REJECTED promise self-evicts so Retry genuinely refetches:
+    promise.catch(function () {
+      if (top100Memo.promise === promise) {
+        top100Memo = { runId: null, promise: null };
+      }
+    });
+    return promise;
+  }
+
+  /* Run-change observer registry: the ONLY correct hook for a run switch —
+     the runs poller's programmatic auto-selection sets select.value WITHOUT
+     firing a DOM 'change' event, so a listener on the select would miss it. */
+  var runChangeSubs = [];
+  function notifyRunChange(runId) {
+    for (var s = 0; s < runChangeSubs.length; s++) {
+      try {
+        runChangeSubs[s](runId);
+      } catch (subErr) {
+        void subErr; // one bad subscriber never breaks the rest
+      }
+    }
+  }
+
+  /**
+   * Fan a poll result out to page-registered subscribers
+   * (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): template
+   * inline scripts push callbacks onto `window.<listName>` (an array they
+   * lazily create BEFORE this deferred file executes), so ONE BXPoll
+   * consumer per endpoint feeds every render target on the page — v29's
+   * former second/third `setInterval` pollers on /api/v1/sweep-progress
+   * are replaced by subscriptions to THIS file's progressPoller. Read at
+   * call time (never captured) so load order cannot drop a subscriber; a
+   * throwing subscriber is isolated so it can never break the poll chain
+   * or a sibling subscriber.
+   */
+  function notifyPageSubs(listName, arg) {
+    var subs = window[listName];
+    if (!subs || !subs.length) {
+      return;
+    }
+    for (var i = 0; i < subs.length; i++) {
+      try {
+        subs[i](arg);
+      } catch (e) {
+        /* subscriber isolation — one bad subscriber never breaks the rest */
+      }
+    }
+  }
+
+  /* The last manifest payload the poller rendered (the strategy panel's
+     zero-fetch symbol source when it is for the SAME run). */
+  var lastManifestPayload = null;
+
+  /* ~one-shot /runs read for cold-start deep links (portal use). */
+  function latestRun() {
+    return window.BXPoll.fetchJson(RUNS_URL, 12000);
+  }
+
+  /* In-flight /manifest dedupe (adversarial-review fold, P-M1): a cold
+     deep-link drawer open (the strategy panel's manifest one-shot) and the
+     manifest poller can request the SAME run's manifest concurrently — the
+     second caller rides the FIRST in-flight promise instead of paying a
+     duplicate network fetch. HONEST: an IN-FLIGHT dedupe ONLY, never a
+     payload cache — the memo self-evicts on settle (resolve AND reject) so
+     the poller always refetches fresh on its next tick. */
+  var manifestInflight = { runId: null, promise: null };
+  function getManifestOnce(runId, timeoutMs) {
+    if (manifestInflight.runId === runId && manifestInflight.promise) {
+      return manifestInflight.promise;
+    }
+    var promise = window.BXPoll.fetchJson(
+      MANIFEST_URL + "?run_id=" + encodeURIComponent(runId),
+      timeoutMs === undefined ? 12000 : timeoutMs
+    );
+    manifestInflight = { runId: runId, promise: promise };
+    var evict = function () {
+      if (manifestInflight.promise === promise) {
+        manifestInflight = { runId: null, promise: null };
+      }
+    };
+    promise.then(evict, evict); // settle-evict — an in-flight dedupe only
+    return promise;
+  }
+
   var state = {
     selectedRunId: null,
     sweepRunning: false,
     ring: [],
-    ringSeen: {}, // canonical-line dedupe for the load-earlier pager
+    // Canonical-line dedupe, WINDOW-scoped: holds exactly the keys inside
+    // the ring (bxRingAdd evicts trimmed keys), so it is bounded at
+    // BX_TIMELINE_RING_CAP — never whole-history (Breaker B #5).
+    ringSeen: {},
     eventsCursor: -1, // -1 = tail-anchored first page
-    earlierCursor: 0 // forward cursor for the "load earlier" pager
+    earlierCursor: 0, // forward cursor for the "load earlier" pager
+    // Monotonic ring-content counter + the last-rendered token: together
+    // they let renderTimeline skip the O(rows) DOM rebuild when the
+    // (ring, filter) window is unchanged (DEC-O1-GUARANTEE-HARDEN-001).
+    ringMutations: 0,
+    lastTimelineToken: null,
+    // Viewport offset (distance from the ring TAIL, in filtered rows —
+    // review round 1 MAJOR-A): 0 = live newest window; a "load earlier"
+    // click parks it on the oldest window; a live tick grows it by the
+    // admissions so parked content never yanks back toward newest; a
+    // run/filter change resets it to 0.
+    renderOffset: 0,
+    lastFilterText: ""
   };
 
   function byId(id) {
@@ -177,6 +724,15 @@ function bxFunnelProvenance(source, runId) {
     var nodes = document.querySelectorAll('[data-oc="' + key.replace(/[^a-z0-9_-]/gi, "") + '"]');
     for (var i = 0; i < nodes.length; i++) {
       nodes[i].textContent = text;
+    }
+  }
+
+  /* Toggle one CSS class on every [data-oc=key] node (the r1_cascade
+     red-badge tooth — DEC-RESULTS-CASCADE-VERDICT-JOIN-001). */
+  function setOcClass(key, cls, on) {
+    var nodes = document.querySelectorAll('[data-oc="' + key.replace(/[^a-z0-9_-]/gi, "") + '"]');
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].classList.toggle(cls, !!on);
     }
   }
 
@@ -203,11 +759,25 @@ function bxFunnelProvenance(source, runId) {
     return String(value);
   }
 
+  /* [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+     the one-click Top-100 order is the artifact's R30 preset (default
+     min_dd_first — smallest max-drawdown first), which deliberately DIFFERS
+     from /results (Rank-by metric, descending). Label only — neither sort
+     is changed; a missing preset falls back honestly to the default name. */
+  function sortBasisText(preset) {
+    var name =
+      typeof preset === "string" && preset ? preset : "min_dd_first (default)";
+    return (
+      "sort basis: artifact preset " +
+      name +
+      " — differs from /results (Rank-by metric, descending)"
+    );
+  }
+
+  /* [W3-R4]: delegate to the ONE pure builder above — a null-lo/hi writer
+     band reads the honest not-stamped copy, never "between null–null". */
   function vixBandText(band) {
-    if (!band || typeof band !== "object" || band.lo === undefined || band.hi === undefined) {
-      return "no VIX band";
-    }
-    return "works when VIX between " + String(band.lo) + "–" + String(band.hi);
+    return bxVixBandText(band);
   }
 
   /* One-shot fetch failure law (F-M4): rejection AND non-ok AND malformed
@@ -251,6 +821,7 @@ function bxFunnelProvenance(source, runId) {
   /* ── Awaiting banner + run pill (manifest poller) ── */
 
   function renderManifest(payload) {
+    lastManifestPayload = payload; // the BXOneclick.lastManifest() source
     var awaiting = byId("ocAwaiting");
     if (awaiting) {
       if (payload.status === "awaiting") {
@@ -431,6 +1002,9 @@ function bxFunnelProvenance(source, runId) {
     var m = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
     setOc("r1_rank", "#" + String(row.rank));
     setOc("r1_name", conditionsText(row));
+    // The winner's OWN market (additive writer key) — honest "—" when the
+    // artifact predates the instrument field (never invented).
+    setOc("r1_instrument", bxInstrumentText(row.instrument));
     setOc("r1_tf", String(row.tf));
     setOc("r1_direction", String(row.direction));
     setOc("r1_arm", String(row.arm));
@@ -441,8 +1015,24 @@ function bxFunnelProvenance(source, runId) {
     setOc("r1_sharpe", metricText(m.sharpe));
     setOc("r1_dsr", metricText(m.dsr));
     setOc("r1_cpcv", metricText(m.cpcv_pass_pct));
+    /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
+       status_text is SERVER-built (oneclick_view.cascade_status_text via the
+       artifact bridge; no verdict prose is ever composed here — a missing/
+       pre-change artifact reads the honest "—"), and a FAIL paints the red
+       .oc-cascade-fail badge so a cascade-FAILED rank-1 is never silently
+       green (flagged, never re-ranked/hidden). */
+    var casc = row.cascade && typeof row.cascade === "object" ? row.cascade : null;
+    setOc("r1_cascade", casc && casc.status_text ? String(casc.status_text) : "—");
+    setOcClass("r1_cascade", "oc-cascade-fail", !!(casc && casc.status === "fail"));
     setOc("r1_trades", metricText(m.trades));
     setOc("r1_vix_band", vixBandText(row.vix_band));
+    /* Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown +
+       worst-5-days on the OPERATOR card too — one_regime_wonder/by_trend
+       from entry.regime; worst5_days is a METRICS key (writer truth). */
+    var reg = row.regime && typeof row.regime === "object" ? row.regime : {};
+    setOc("r1_trend_split", bxTrendSplitText(reg.by_trend, paisaText));
+    setOc("r1_regime_wonder", bxRegimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis));
+    setOc("r1_worst5", bxWorst5DaysText(m.worst5_days, paisaText));
   }
 
   /* Build the #combosBody rows from the top-100 artifact. Cells carry the
@@ -477,7 +1067,9 @@ function bxFunnelProvenance(source, runId) {
       tr.appendChild(td("#" + String(row.rank), null, row.rank));
       tr.appendChild(td(String(row.mask_hex), null, undefined));
       tr.appendChild(td(conditionsText(row), null, undefined));
-      tr.appendChild(td("—", null, undefined)); // Inst — instrument is not a top100 row field
+      // Inst — the entry's additive `instrument` key (the writer always
+      // emits it; a pre-instrument artifact reads the honest "—").
+      tr.appendChild(td(bxInstrumentText(row.instrument), null, undefined));
       tr.appendChild(td(String(row.tf), null, undefined));
       tr.appendChild(td(String(row.direction), null, undefined));
       tr.appendChild(td(metricText(m.trades), null, m.trades === undefined ? 0 : m.trades));
@@ -515,8 +1107,9 @@ function bxFunnelProvenance(source, runId) {
     if (!state.selectedRunId) {
       return;
     }
-    var url = TOP100_URL + "?run_id=" + encodeURIComponent(state.selectedRunId);
-    window.BXPoll.fetchJson(url, 12000)
+    // Fetch plumbing only: the memo'd getTop100 promise (one network fetch
+    // per run selection, shared with the winners section + the drawer).
+    getTop100(state.selectedRunId)
       .then(function (payload) {
         if (!payload || typeof payload !== "object") {
           return;
@@ -534,6 +1127,7 @@ function bxFunnelProvenance(source, runId) {
           }
         }
         if (payload.status === "ok" || payload.status === "partial") {
+          setOc("top100_sort_basis", sortBasisText(payload.preset));
           fillRankOneCard(payload.rows || []);
           renderCombosRows(payload);
           if (payload.rows && payload.rows.length && payload.row_count !== undefined) {
@@ -613,6 +1207,14 @@ function bxFunnelProvenance(source, runId) {
     }
     if (series.invalid_rows) {
       noteBits.push(String(series.invalid_rows) + " invalid row(s) skipped");
+    }
+    /* [W2-4] Ruling-18 null costs: counted at Rs 0 — the curve is honestly
+       labeled gross of those unverified costs, never an empty chart. */
+    if (series.null_cost_rows) {
+      noteBits.push(
+        String(series.null_cost_rows) +
+          " row(s) carry null costs (by design until P5) — curve is gross of those costs"
+      );
     }
     noteBits.push("net " + paisaText(series.final_paisa));
     host.appendChild(window.BXUI.el("div", "oc-sub", noteBits.join(" · ")));
@@ -745,15 +1347,16 @@ function bxFunnelProvenance(source, runId) {
   /* ── Timeline: capped ring + window-scoped search + load-earlier pager ── */
 
   function ringAdd(records) {
-    var fresh = [];
-    for (var i = 0; i < records.length; i++) {
-      var key = bxEventLineText(records[i]);
-      if (!state.ringSeen[key]) {
-        state.ringSeen[key] = true;
-        fresh.push(records[i]);
-      }
-    }
-    bxRingPush(state.ring, fresh, BX_TIMELINE_RING_CAP);
+    // Window-scoped dedup + bounded seen set — the ONE pure core
+    // (bxRingAdd) owns the gate + the trimmed-key eviction. Only ADMITTED
+    // records move the mutation counter: a dup-only page leaves the window
+    // unchanged, so the next renderTimeline skips the DOM rebuild.
+    var admitted = bxRingAdd(state.ring, state.ringSeen, records, BX_TIMELINE_RING_CAP);
+    state.ringMutations += admitted;
+    // A parked viewport keeps its CONTENT anchored across the live tick
+    // (review round 1 MAJOR-A): the tail distance grows by the admissions,
+    // so new events can never yank a "load earlier" reader back to newest.
+    state.renderOffset = bxTimelineTickOffset(state.renderOffset, admitted);
     if (state.ring.length >= BX_TIMELINE_RING_CAP) {
       setText("ocTimelineLabel", BX_TIMELINE_RING_LABEL); // loud, honest cap label
     }
@@ -766,11 +1369,36 @@ function bxFunnelProvenance(source, runId) {
     }
     var search = byId("ocTimelineSearch");
     var q = search ? search.value : "";
+    if (q !== state.lastFilterText) {
+      state.lastFilterText = q;
+      state.renderOffset = 0; // a filter change re-anchors on the newest window
+    }
+    // Skip-render token (DEC-O1-GUARANTEE-HARDEN-001): an unchanged
+    // (ring-mutations, filter, viewport-offset) triple means the rendered
+    // DOM is already exact — no teardown+rebuild of up to 5,000 nodes per
+    // events tick (review round 1 MAJOR-A folds the offset in).
+    var token = bxTimelineRenderToken(state.ringMutations, q, state.renderOffset);
+    if (token === state.lastTimelineToken) {
+      return;
+    }
     var rows = bxRingFilter(state.ring, q, "");
+    // Clamp to the renderable range, then store the token folding the
+    // EFFECTIVE offset — the value the DOM actually reflects.
+    state.renderOffset = bxTimelineClampOffset(rows.length, BX_TIMELINE_RENDER_CAP, state.renderOffset);
+    state.lastTimelineToken = bxTimelineRenderToken(state.ringMutations, q, state.renderOffset);
+    var visible = bxTimelineRenderRows(rows, BX_TIMELINE_RENDER_CAP, state.renderOffset);
     window.BXUI.clear(host);
+    var capNote = bxTimelineCapNote(visible.length, rows.length, state.renderOffset);
+    if (capNote) {
+      // The NAMED truncation line sits at the top of the list; a parked
+      // viewport names the exact window ("showing events X–Y of N") so the
+      // reader always knows WHERE in the history they are (anti-illusion
+      // law — every cap is named; ONE text node, textContent only).
+      host.appendChild(window.BXUI.el("div", "oc-event-cap", capNote));
+    }
     // Newest last (log order); each record is ONE text node (F-M2).
-    for (var i = 0; i < rows.length; i++) {
-      host.appendChild(window.BXUI.el("div", "oc-event-line", bxEventLineText(rows[i])));
+    for (var i = 0; i < visible.length; i++) {
+      host.appendChild(window.BXUI.el("div", "oc-event-line", bxEventLineText(visible[i])));
     }
   }
 
@@ -830,6 +1458,7 @@ function bxFunnelProvenance(source, runId) {
         }
         if (take.length) {
           state.ring = take.concat(state.ring);
+          state.ringMutations += take.length; // content changed — next render is real
         }
         if (typeof page.next_offset === "number") {
           state.earlierCursor = page.next_offset;
@@ -837,6 +1466,17 @@ function bxFunnelProvenance(source, runId) {
         if (state.ring.length >= BX_TIMELINE_RING_CAP) {
           setText("ocTimelineLabel", BX_TIMELINE_RING_LABEL);
         }
+        // Slide the viewport onto the OLDEST window so the earlier records
+        // this click fetched are actually RENDERED (review round 1 MAJOR-A:
+        // the newest-500 slice otherwise silently hid every prepended
+        // record whenever the filtered rows already exceeded the cap — a
+        // wired-but-useless pager).
+        var search = byId("ocTimelineSearch");
+        var q = search ? search.value : "";
+        state.renderOffset = bxTimelineEarlierOffset(
+          bxRingFilter(state.ring, q, "").length,
+          BX_TIMELINE_RENDER_CAP
+        );
         renderTimeline();
       })
       .catch(function () {
@@ -899,7 +1539,14 @@ function bxFunnelProvenance(source, runId) {
     }
     var searchBox = byId("ocTimelineSearch");
     if (searchBox) {
-      searchBox.addEventListener("input", renderTimeline); // ring-scoped filter only
+      // ring-scoped filter only, ~200 ms trailing-edge debounced (the #1720
+      // screener/results house idiom): a typing burst coalesces into ONE
+      // filter+render instead of a full O(rows) rebuild per keystroke.
+      var searchDebounceTimer = null;
+      searchBox.addEventListener("input", function () {
+        clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = setTimeout(renderTimeline, 200);
+      });
     }
     var runSelect = byId("ocRunSelect");
     if (runSelect) {
@@ -931,8 +1578,21 @@ function bxFunnelProvenance(source, runId) {
         lastProgress = data;
         state.sweepRunning = !!(data && data.running);
         renderTicker(lastProgress, lastRuns);
+        // ONE poller per endpoint per page (DEC-FRONTEND-LATENCY-HARDENING-001):
+        // the v29 [data-sweep] panel + heartbeat sweep slot + run-controls
+        // renderer all subscribe here instead of owning their own timers.
+        notifyPageSubs("__bxSweepProgressSubs", data);
+      },
+      onFail: function (failures) {
+        notifyPageSubs("__bxSweepProgressFailSubs", failures);
       }
     });
+    // Immediate-refresh hook for the page (e.g. right after a Run click):
+    // pollNow() bumps the poller's own seq — a superseded in-flight response
+    // never renders, and no second poll chain is ever created.
+    window.__bxSweepProgressPollNow = function () {
+      progressPoller.pollNow();
+    };
 
     // Runs poller: run discovery + the ticker strip's run half + the run
     // selector options (textContent-built <option> nodes).
@@ -942,7 +1602,12 @@ function bxFunnelProvenance(source, runId) {
         lastRuns = data;
         if (!state.selectedRunId && data.latest_run_id) {
           state.selectedRunId = data.latest_run_id;
+          top100Memo = { runId: null, promise: null }; // fresh run, fresh memo
           loadRunScoped(); // first selection: fetch the run-scoped one-shots
+          // The programmatic FIRST auto-selection notifies observers too —
+          // a portal mounted before the poller landed would otherwise show
+          // stale/awaiting winners for the auto-selected run.
+          notifyRunChange(state.selectedRunId);
         }
         var select = byId("ocRunSelect");
         if (select && data.runs) {
@@ -978,10 +1643,10 @@ function bxFunnelProvenance(source, runId) {
         if (!state.selectedRunId) {
           return Promise.resolve({ status: "awaiting", detail: "no run selected" });
         }
-        return window.BXPoll.fetchJson(
-          MANIFEST_URL + "?run_id=" + encodeURIComponent(state.selectedRunId),
-          timeoutMs
-        );
+        // Rides the in-flight dedupe: a concurrent cold drawer open shares
+        // this tick's fetch (the memo self-evicts on settle, so the NEXT
+        // poll tick always refetches fresh).
+        return getManifestOnce(state.selectedRunId, timeoutMs);
       },
       onData: function (data) {
         renderManifest(data);
@@ -1011,21 +1676,52 @@ function bxFunnelProvenance(source, runId) {
   window.BXOneclick = {
     TIMELINE_RING_CAP: BX_TIMELINE_RING_CAP,
     TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
+    TIMELINE_RENDER_CAP: BX_TIMELINE_RENDER_CAP,
+    VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     ringPush: bxRingPush,
+    ringAdd: bxRingAdd,
     ringFilter: bxRingFilter,
+    timelineRenderRows: bxTimelineRenderRows,
+    timelineCapNote: bxTimelineCapNote,
+    timelineRenderToken: bxTimelineRenderToken,
+    timelineClampOffset: bxTimelineClampOffset,
+    timelineEarlierOffset: bxTimelineEarlierOffset,
+    timelineTickOffset: bxTimelineTickOffset,
     eventLineText: bxEventLineText,
     funnelWriteAllowed: bxFunnelWriteAllowed,
     funnelProvenance: bxFunnelProvenance,
+    vixBandText: bxVixBandText,
+    vixBandCellText: bxVixBandCellText,
+    instrumentText: bxInstrumentText,
+    exitMixText: bxExitMixText,
+    worst5DaysText: bxWorst5DaysText,
+    trendSplitText: bxTrendSplitText,
+    regimeWonderText: bxRegimeWonderText,
+    avgExtremeText: bxAvgExtremeText,
+    minutePathDdText: bxMinutePathDdText,
     oneshotFetch: bxOneshotFetch,
     renderChainMap: renderChainMap,
+    getTop100: getTop100,
+    onRunChange: function (cb) {
+      runChangeSubs.push(cb);
+    },
+    lastManifest: function () {
+      return lastManifestPayload;
+    },
+    getManifestOnce: getManifestOnce,
+    latestRun: latestRun,
     selectRun: function (runId) {
+      top100Memo = { runId: null, promise: null }; // run switch invalidates
       state.selectedRunId = runId;
       state.ring = [];
       state.ringSeen = {};
       state.eventsCursor = -1;
       state.earlierCursor = 0;
+      state.renderOffset = 0; // a run change re-anchors on the newest window
+      state.lastTimelineToken = null; // ring content reset — force the next render
       renderTimeline();
       loadRunScoped();
+      notifyRunChange(runId);
     }
   };
 
@@ -1042,10 +1738,28 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     BX_TIMELINE_RING_CAP: BX_TIMELINE_RING_CAP,
     BX_TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
+    BX_TIMELINE_RENDER_CAP: BX_TIMELINE_RENDER_CAP,
+    BX_VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     bxRingPush: bxRingPush,
+    bxRingAdd: bxRingAdd,
     bxRingFilter: bxRingFilter,
+    bxTimelineRenderRows: bxTimelineRenderRows,
+    bxTimelineCapNote: bxTimelineCapNote,
+    bxTimelineRenderToken: bxTimelineRenderToken,
+    bxTimelineClampOffset: bxTimelineClampOffset,
+    bxTimelineEarlierOffset: bxTimelineEarlierOffset,
+    bxTimelineTickOffset: bxTimelineTickOffset,
     bxEventLineText: bxEventLineText,
     bxFunnelWriteAllowed: bxFunnelWriteAllowed,
-    bxFunnelProvenance: bxFunnelProvenance
+    bxFunnelProvenance: bxFunnelProvenance,
+    bxVixBandText: bxVixBandText,
+    bxVixBandCellText: bxVixBandCellText,
+    bxInstrumentText: bxInstrumentText,
+    bxExitMixText: bxExitMixText,
+    bxWorst5DaysText: bxWorst5DaysText,
+    bxTrendSplitText: bxTrendSplitText,
+    bxRegimeWonderText: bxRegimeWonderText,
+    bxAvgExtremeText: bxAvgExtremeText,
+    bxMinutePathDdText: bxMinutePathDdText
   };
 }

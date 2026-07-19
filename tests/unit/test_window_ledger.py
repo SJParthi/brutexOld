@@ -10,10 +10,12 @@ thread-safety under a concurrent fan-out.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
+    ALL_FILTERED_MASS_RESCINDED,
     DEMOTED_SETTLE_REASONS,
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
@@ -22,12 +24,20 @@ from brutex.data.window_ledger import (
     REOPENED_MARKER,
     SETTLED_STATUSES,
     SKIPPED,
+    STREAK_CLEAN_CHANNEL,
+    STREAK_PROVENANCE_MAX_ENTRIES,
+    STREAK_PROVENANCE_TRUNC,
     SUCCESS,
     LedgerProgress,
     WindowLedger,
     expired_window_settle_reason,
     is_expired_window_settle_reason,
+    streak_provenance_append,
+    streak_provenance_counts,
+    streak_provenance_entries,
 )
+from hypothesis import given
+from hypothesis import strategies as st
 
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
 _LATER = datetime(2026, 6, 9, 12, 0, tzinfo=UTC)
@@ -660,6 +670,7 @@ class TestPruneSuperseded:
                     _NOW.isoformat(),
                     0,
                     0,
+                    None,
                     None,
                     None,
                     None,
@@ -1985,13 +1996,20 @@ class TestDemotedSettleReasons:
         from brutex.data.interior_gap_detect import INTERIOR_GAP
         from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
         from brutex.data.session import ALL_FILTERED
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
 
-        # The three detector tags PLUS "DEGRADED" — record()'s defensive
+        # The four detector tags PLUS "DEGRADED" — record()'s defensive
         # fallback for a degraded=True call with no reason (latent: both
         # production spines always pass a concrete tag). Enumerated so a
         # reason-less demotion settle can never fall through to the
         # "vendor confirmed no trades" label (wiring-review fold, PR #1158).
-        expected = frozenset({ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"})
+        # TODAY_INCOMPLETE (DEC-PULL-TODAY-COMPLETENESS-GATE-001) is a member
+        # DEFENSIVELY: its demotion is streak-EXEMPT, so a SKIPPED settle
+        # carrying it is structurally unreachable — but were it ever stamped,
+        # the label must never read "vendor confirmed no trades".
+        expected = frozenset(
+            {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, TODAY_INCOMPLETE, "DEGRADED"}
+        )
         assert expected == DEMOTED_SETTLE_REASONS
 
     def test_reasonless_degraded_record_stamps_a_demoted_reason(self) -> None:
@@ -2042,10 +2060,17 @@ class TestDegradedOldWindowInteraction:
         assert s2 == SKIPPED
         rec = ledger.records()[0]
         assert is_expired_window_settle_reason(rec.last_error)
-        # HONEST-envelope pin (documented in record()): the stamp's clean-attempt
-        # COUNT is streak-derived, so the prior DEGRADED bump inflates it to 2
-        # even though only ONE genuine clean EMPTY landed — accepted + pinned.
-        assert rec.last_error == expired_window_settle_reason(2)
+        # PROVENANCE-honest stamp (DEC-STREAK-PROVENANCE-001 — the sanctioned pin
+        # FLIP of the #1294 accepted defect): the clean-attempt COUNT now reads
+        # the provenance-KNOWN clean entries, so the prior DEGRADED bump no
+        # longer inflates it — exactly ONE genuine clean EMPTY landed.
+        assert rec.last_error == expired_window_settle_reason(1)
+        # The provenance names both channels; the forced streak keeps its shape.
+        assert rec.streak_provenance is not None
+        assert [c for c, _p in streak_provenance_entries(rec.streak_provenance)] == [
+            "ALL_FILTERED",
+            "EMPTY",
+        ]
 
     def test_all_filtered_demotion_alone_never_settles_old_window(self) -> None:
         # A degraded (all-filtered) outcome NEVER rides the old-empty settle arm —
@@ -2089,14 +2114,834 @@ class TestLedgerRecordRow:
         records = ledger.records()
         assert ledger.to_rows() == [ledger_record_row(r) for r in records]
         row = ledger_record_row(records[0])
-        assert len(row) == 16
+        assert len(row) == 17
         assert row[0] == records[0].market
-        assert row[13] == 3  # bars_net_new (back-compat append order)
-        # empty_retries / transient_retries are the LAST two fields
-        # (DEC-RETRY-COUNTER-SPLIT-001 append-LAST back-compat order); this
-        # caller did not observe the fetch ladder, so both read honest None.
+        assert row[13] == 3  # bars_net_new stays at index 13 (append order preserved)
+        # empty_retries / transient_retries follow (DEC-RETRY-COUNTER-SPLIT-001
+        # append-LAST back-compat order); this caller did not observe the fetch
+        # ladder, so both read honest None.
         assert row[14] is None
         assert row[15] is None
+        # streak_provenance is the LAST field (DEC-STREAK-PROVENANCE-001
+        # back-compat append order): a SUCCESS resets it to the KNOWN-zero "".
+        assert row[16] == ""
+
+
+def _legacy_row(
+    *,
+    status: str = FAILED,
+    empty_streak: int = 0,
+    last_error: str | None = None,
+    streak_provenance: str | None = None,
+) -> tuple[
+    str,
+    str,
+    str,
+    str,
+    str,
+    str,
+    int,
+    int,
+    str | None,
+    str,
+    str | None,
+    int,
+    int,
+    int | None,
+    int | None,
+    int | None,
+    str | None,
+]:
+    """One 17-field row for `from_rows` — the store's coerced legacy-load shape."""
+    return (
+        "dhan",
+        "NIFTY",
+        "1minute",
+        "2021-01-01",
+        "2021-04-01",
+        status,
+        0,
+        1,
+        last_error,
+        _NOW.isoformat(),
+        _NOW.isoformat(),
+        empty_streak,
+        1,
+        None,
+        None,
+        None,
+        streak_provenance,
+    )
+
+
+class TestStreakProvenance:
+    """DEC-STREAK-PROVENANCE-001 — the pure helpers + the full record() transition table."""
+
+    # ---- pure helpers -------------------------------------------------------
+
+    def test_append_builds_channel_at_pull_entries(self) -> None:
+        prov = streak_provenance_append("", "EMPTY", "a1b2c3")
+        prov = streak_provenance_append(prov, "ALL_FILTERED", "d4e5f6")
+        assert prov == "EMPTY@a1b2c3|ALL_FILTERED@d4e5f6"
+        assert streak_provenance_entries(prov) == (
+            ("EMPTY", "a1b2c3"),
+            ("ALL_FILTERED", "d4e5f6"),
+        )
+
+    def test_append_sanitizes_pull_id_separators(self) -> None:
+        prov = streak_provenance_append("", "EMPTY", "a|b@c")
+        assert prov == "EMPTY@a_b_c"
+        assert streak_provenance_entries(prov) == (("EMPTY", "a_b_c"),)
+
+    def test_append_blank_pull_id_reads_dash(self) -> None:
+        assert streak_provenance_append("", "EMPTY", "") == "EMPTY@-"
+
+    def test_append_overflow_drops_oldest_and_prepends_marker(self) -> None:
+        prov = ""
+        for i in range(STREAK_PROVENANCE_MAX_ENTRIES + 1):  # 17 entries
+            prov = streak_provenance_append(prov, "EMPTY", f"p{i:02d}")
+        assert prov.startswith(f"{STREAK_PROVENANCE_TRUNC}|")
+        entries = streak_provenance_entries(prov)
+        assert len(entries) == STREAK_PROVENANCE_MAX_ENTRIES  # newest 16 survive
+        assert entries[0] == ("EMPTY", "p01")  # p00 (the oldest) was dropped
+        assert entries[-1] == ("EMPTY", "p16")
+        # Counts parse the SURVIVORS only — the honest under-report.
+        assert streak_provenance_counts(prov) == (STREAK_PROVENANCE_MAX_ENTRIES, 0)
+        # A further append keeps the cap + the marker (drop-oldest again).
+        prov = streak_provenance_append(prov, "ALL_FILTERED", "p17")
+        entries = streak_provenance_entries(prov)
+        assert len(entries) == STREAK_PROVENANCE_MAX_ENTRIES
+        assert prov.startswith(f"{STREAK_PROVENANCE_TRUNC}|")
+        assert entries[-1] == ("ALL_FILTERED", "p17")
+
+    def test_entries_none_and_empty_read_empty(self) -> None:
+        assert streak_provenance_entries(None) == ()
+        assert streak_provenance_entries("") == ()
+
+    def test_entries_skip_malformed_tokens_never_raise(self) -> None:
+        # No '@' / empty channel / the bare marker are skipped defensively.
+        assert streak_provenance_entries("EMPTY|@p1|…|EMPTY@p2") == (("EMPTY", "p2"),)
+
+    def test_counts_tri_state(self) -> None:
+        assert streak_provenance_counts(None) is None  # unknown lineage
+        assert streak_provenance_counts("") == (0, 0)  # KNOWN zero
+        assert streak_provenance_counts("EMPTY@a|ALL_FILTERED@b|EMPTY@c") == (2, 1)
+        assert STREAK_CLEAN_CHANNEL == EMPTY
+
+    # ---- record() transitions ----------------------------------------------
+
+    def test_empty_bump_appends_clean_channel_with_explicit_pull_id(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="pull1"
+        )
+        rec = ledger.records()[0]
+        assert rec.empty_streak == 1
+        assert rec.streak_provenance == "EMPTY@pull1"
+
+    def test_degraded_bump_appends_reason_channel(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            pull_id="pull1",
+        )
+        rec = ledger.records()[0]
+        assert rec.streak_provenance == "ALL_FILTERED@pull1"
+
+    def test_degraded_bump_without_reason_uses_degraded_channel(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            pull_id="pull1",
+        )
+        assert ledger.records()[0].streak_provenance == "DEGRADED@pull1"
+
+    def test_failed_preserves_provenance(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="p1")
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type="GrowwRateLimitError",
+            bars_appended=0,
+            now=_LATER,
+            pull_id="p2",
+        )
+        rec = ledger.records()[0]
+        assert rec.empty_streak == 1
+        assert rec.streak_provenance == "EMPTY@p1"  # no bump — lineage untouched
+
+    def test_success_resets_to_known_zero(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="p1")
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_LATER)
+        rec = ledger.records()[0]
+        assert rec.empty_streak == 0
+        assert rec.streak_provenance == ""  # KNOWN zero — never None
+
+    def test_suppressed_empty_appends_nothing(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="p1")
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            suppress_settle=True,
+            pull_id="p2",
+        )
+        rec = ledger.records()[0]
+        assert rec.empty_streak == 1
+        assert rec.streak_provenance == "EMPTY@p1"
+
+    def test_plan_and_seed_stamp_known_zero(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        assert ledger.records()[0].streak_provenance == ""
+        ledger2 = WindowLedger()
+        assert ledger2.seed_lake_success(_key(), bars=10, now=_NOW)
+        assert ledger2.records()[0].streak_provenance == ""
+
+    def test_settle_known_gap_preserves_prior_lineage(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="p1")
+        ledger.settle_known_gap(_key(), now=_LATER, reason="DH-905")
+        assert ledger.records()[0].streak_provenance == "EMPTY@p1"
+
+    def test_settle_known_gap_absent_prior_reads_unknown(self) -> None:
+        # The bars_net_new pattern verbatim: no prior row → honest None.
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        assert ledger.records()[0].streak_provenance is None
+
+    def test_reopen_resets_to_known_zero(self) -> None:
+        ledger = WindowLedger()
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(
+                _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="p1"
+            )
+        assert ledger.records()[0].status == SKIPPED
+        assert ledger.reopen_skipped() == 1
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.empty_streak == 0
+        assert rec.streak_provenance == ""  # a fresh, fully-attributed budget
+
+    # ---- legacy-None propagation (the honesty core) --------------------------
+
+    def test_legacy_unknown_prior_propagates_none_on_a_bump(self) -> None:
+        # A legacy row (provenance None, streak > 0) NEVER gains a partial history.
+        ledger = WindowLedger.from_rows(
+            [_legacy_row(status=EMPTY, empty_streak=2, streak_provenance=None)]
+        )
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_LATER, pull_id="p9"
+        )
+        rec = ledger.records()[0]
+        # threshold crossed (2 + 1 = 3) — the settle still fires off the streak…
+        assert rec.status == SKIPPED
+        assert rec.empty_streak == 3
+        # …but the lineage stays honestly UNKNOWN (no fabricated partial history).
+        assert rec.streak_provenance is None
+
+    def test_legacy_degraded_bump_also_propagates_none(self) -> None:
+        ledger = WindowLedger.from_rows(
+            [_legacy_row(status=FAILED, empty_streak=1, streak_provenance=None)]
+        )
+        ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            pull_id="p9",
+        )
+        assert ledger.records()[0].streak_provenance is None
+
+    def test_legacy_zero_streak_prior_starts_a_fresh_lineage(self) -> None:
+        # provenance None with streak == 0: "zero bumps" is KNOWN from the streak,
+        # so a new bump starts an exact 1-entry history (the crisp rule boundary).
+        ledger = WindowLedger.from_rows(
+            [_legacy_row(status=FAILED, empty_streak=0, streak_provenance=None)]
+        )
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_LATER, pull_id="p9"
+        )
+        rec = ledger.records()[0]
+        assert rec.empty_streak == 1
+        assert rec.streak_provenance == "EMPTY@p9"
+
+    def test_legacy_none_resets_via_success_then_tracks(self) -> None:
+        ledger = WindowLedger.from_rows(
+            [_legacy_row(status=EMPTY, empty_streak=1, streak_provenance=None)]
+        )
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_LATER)
+        assert ledger.records()[0].streak_provenance == ""  # the honest reset
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_LATER, pull_id="p2"
+        )
+        assert ledger.records()[0].streak_provenance == "EMPTY@p2"
+
+    # ---- expired-stamp arithmetic --------------------------------------------
+
+    def test_expired_stamp_legacy_prior_keeps_streak_derived_count(self) -> None:
+        # LEGACY byte-identity pin: a None-provenance prior keeps the exact
+        # pre-column ``prior_streak + 1`` fallback arithmetic.
+        ledger = WindowLedger.from_rows(
+            [_legacy_row(status=EMPTY, empty_streak=1, streak_provenance=None)]
+        )
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            old_window=True,
+        )
+        assert status == SKIPPED
+        rec = ledger.records()[0]
+        assert rec.last_error == expired_window_settle_reason(2)  # 1 + 1, verbatim
+        assert rec.streak_provenance is None
+
+    def test_forced_settle_keeps_true_entry_count(self) -> None:
+        # An old-window settle FORCES the streak to the threshold; the provenance
+        # keeps the TRUE single entry — never padded to match the forced streak.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            old_window=True,
+            pull_id="p1",
+        )
+        rec = ledger.records()[0]
+        assert rec.status == SKIPPED
+        assert rec.empty_streak == EMPTY_TERMINAL_THRESHOLD  # forced shape
+        assert rec.streak_provenance == "EMPTY@p1"  # ONE true entry
+        assert rec.last_error == expired_window_settle_reason(1)
+
+    # ---- pull-id resolution ---------------------------------------------------
+
+    def test_pull_id_contextvar_fallback(self) -> None:
+        from brutex.observability.correlation import pull_id_scope
+
+        ledger = WindowLedger()
+        with pull_id_scope("ctx42"):
+            ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.records()[0].streak_provenance == "EMPTY@ctx42"
+
+    def test_pull_id_explicit_wins_over_contextvar(self) -> None:
+        from brutex.observability.correlation import pull_id_scope
+
+        ledger = WindowLedger()
+        with pull_id_scope("ctx42"):
+            ledger.record(
+                _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="exp7"
+            )
+        assert ledger.records()[0].streak_provenance == "EMPTY@exp7"
+
+    def test_pull_id_dash_last_resort(self) -> None:
+        # Outside any scope current_pull_id() is "" — the entry reads the honest "-".
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.records()[0].streak_provenance == "EMPTY@-"
+
+    # ---- round-trip + invariant ----------------------------------------------
+
+    def test_to_rows_from_rows_provenance_identity(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key("A"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="p1"
+        )
+        ledger.record(_key("B"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        ledger.plan(_key("C"), now=_NOW)
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.to_rows() == ledger.to_rows()
+        by_sym = {r.security_id: r for r in restored.records()}
+        assert by_sym["A"].streak_provenance == "EMPTY@p1"
+        assert by_sym["B"].streak_provenance == ""
+
+    @given(
+        outcomes=st.lists(st.sampled_from(["empty", "degraded", "failed", "success"]), max_size=12)
+    )
+    def test_property_clean_plus_flagged_equals_streak_on_natural_paths(
+        self, outcomes: list[str]
+    ) -> None:
+        ledger = WindowLedger(_threshold=99)  # keep every path un-settled
+        for i, outcome in enumerate(outcomes):
+            if outcome == "empty":
+                ledger.record(
+                    _key(),
+                    raw_bars=0,
+                    error_type=None,
+                    bars_appended=0,
+                    now=_NOW,
+                    pull_id=f"p{i}",
+                )
+            elif outcome == "degraded":
+                ledger.record(
+                    _key(),
+                    raw_bars=2,
+                    error_type=None,
+                    bars_appended=0,
+                    now=_NOW,
+                    degraded=True,
+                    degraded_reason="ALL_FILTERED",
+                    pull_id=f"p{i}",
+                )
+            elif outcome == "failed":
+                ledger.record(
+                    _key(),
+                    raw_bars=0,
+                    error_type="Timeout",
+                    bars_appended=0,
+                    now=_NOW,
+                    pull_id=f"p{i}",
+                )
+            else:
+                ledger.record(
+                    _key(),
+                    raw_bars=3,
+                    error_type=None,
+                    bars_appended=3,
+                    now=_NOW,
+                    pull_id=f"p{i}",
+                )
+            rec = ledger.records()[0]
+            counts = streak_provenance_counts(rec.streak_provenance)
+            assert counts is not None  # a fresh ledger is never legacy
+            assert counts[0] + counts[1] == rec.empty_streak
+
+
+class TestSuppressDegradedSettle:
+    """`record(suppress_degraded_settle=True)` — the degraded-arm suppress twin
+    (DEC-ALLFILTERED-MASS-BREAKER-001, the gate `suppress_settle` never reached)."""
+
+    def test_suppressed_degraded_preserves_streak_and_provenance(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            pull_id="p1",
+        )
+        status = ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            suppress_degraded_settle=True,
+            pull_id="p2",
+        )
+        assert status == FAILED  # honest + retryable, reason stamped
+        rec = ledger.records()[0]
+        assert rec.last_error == "ALL_FILTERED"
+        assert rec.empty_streak == 1  # NOT bumped
+        assert rec.streak_provenance == "ALL_FILTERED@p1"  # nothing appended
+
+    def test_settle_arm_is_gated_off_while_suppressed(self) -> None:
+        # A prior streak ALREADY at the threshold: without the gate the third
+        # record would settle SKIPPED off the preserved streak — the explicit
+        # conjunct keeps it FAILED (fails-before / passes-after).
+        ledger = WindowLedger.from_rows(
+            [
+                _legacy_row(
+                    status=FAILED,
+                    empty_streak=EMPTY_TERMINAL_THRESHOLD,
+                    last_error="ALL_FILTERED",
+                    streak_provenance="ALL_FILTERED@a|ALL_FILTERED@b|ALL_FILTERED@c",
+                )
+            ]
+        )
+        status = ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            suppress_degraded_settle=True,
+            pull_id="p9",
+        )
+        assert status == FAILED
+        assert not ledger.is_skippable(_key())
+        assert ledger.newly_settled_skipped == 0
+
+    def test_default_false_settles_exactly_as_before(self) -> None:
+        ledger = WindowLedger()
+        status = ""
+        for i in range(EMPTY_TERMINAL_THRESHOLD):
+            status = ledger.record(
+                _key(),
+                raw_bars=3,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="ALL_FILTERED",
+                pull_id=f"p{i}",
+            )
+        assert status == SKIPPED  # the byte-identical bounded-terminal path
+
+    def test_ignored_for_empty_success_and_plain_failed(self) -> None:
+        # EMPTY: the flag appears only in the degraded arms — a genuine clean
+        # EMPTY still bumps + settles normally even while "suppressed".
+        ledger = WindowLedger()
+        status = ""
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            status = ledger.record(
+                _key(),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                suppress_degraded_settle=True,
+            )
+        assert status == SKIPPED
+        # SUCCESS resets; a plain FAILED preserves — both untouched by the flag.
+        ledger2 = WindowLedger()
+        assert (
+            ledger2.record(
+                _key(),
+                raw_bars=5,
+                error_type=None,
+                bars_appended=5,
+                now=_NOW,
+                suppress_degraded_settle=True,
+            )
+            == SUCCESS
+        )
+        assert (
+            ledger2.record(
+                _key(),
+                raw_bars=0,
+                error_type="Timeout",
+                bars_appended=0,
+                now=_NOW,
+                suppress_degraded_settle=True,
+            )
+            == FAILED
+        )
+
+    def test_both_flags_on_one_record_disjoint_arms(self) -> None:
+        # A record can carry BOTH suppress flags: a degraded outcome rides the
+        # degraded arm (suppress_degraded_settle governs), an EMPTY outcome the
+        # EMPTY arm (suppress_settle governs) — no interference.
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            suppress_settle=True,
+            suppress_degraded_settle=True,
+        )
+        assert status == FAILED
+        assert ledger.records()[0].empty_streak == 0
+
+    def test_suppressed_degraded_still_tombstones(self) -> None:
+        # The :800 tombstone fires unchanged — a suppressed degraded record is
+        # still `degraded_success and status == FAILED` (merge-on-save must not
+        # resurrect a disk SUCCESS over it).
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            suppress_degraded_settle=True,
+        )
+        assert ledger.degraded_keys() == frozenset(
+            {("dhan", "NIFTY", "1minute", "2021-01-01", "2021-04-01")}
+        )
+
+    def test_fno_degraded_old_window_while_suppressed_stays_failed(self) -> None:
+        # The F&O same-call shape (degraded + old_window) while suppressed: the
+        # classification is FAILED, so the old-empty single-confirm arm (which
+        # requires EMPTY) is structurally inert — no settle leak.
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            old_window=True,
+            suppress_degraded_settle=True,
+        )
+        assert status == FAILED
+        assert not ledger.is_skippable(_key())
+
+
+class TestAllowDegradedSettleRecheck:
+    """`record(allow_degraded_settle=...)` — the RECORD-TIME suppression re-check
+    (DEC-ALLFILTERED-MASS-BREAKER-001 review round 1): evaluated UNDER the ledger
+    lock, serialized with `rescind_all_filtered_settles`, closing the trip/settle
+    TOCTOU the old tail-computed bool leaked (a settle in flight at the trip
+    instant escaped BOTH the suppression and the one-shot rescind)."""
+
+    @staticmethod
+    def _degraded(
+        ledger: WindowLedger,
+        *,
+        allow: Callable[[], bool] | None = None,
+        suppress: bool = False,
+        pull_id: str = "p",
+    ) -> str:
+        return ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            suppress_degraded_settle=suppress,
+            allow_degraded_settle=allow,
+            pull_id=pull_id,
+        )
+
+    def test_post_trip_record_is_suppressed(self) -> None:
+        # The F4/F8 interleave, deterministically: the window sits at
+        # threshold-1; a sibling tail trips the breaker AND runs the one-shot
+        # rescind while OUR tail is between its observe() and its record().
+        # Pre-fix the tail's stale bool settled this window SKIPPED — appended
+        # to the already-drained `_af_settled_keys`, never rescinded; the
+        # record-time re-check now suppresses it.
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        ledger = WindowLedger()
+        for i in range(EMPTY_TERMINAL_THRESHOLD - 1):
+            self._degraded(ledger, pull_id=f"p{i}")
+        breaker = AllFilteredBreaker(spread_series_limit=2)
+        for series in ("X:1minute", "Y:1minute"):
+            breaker.observe(series, all_filtered=True)
+        assert breaker.tripped
+        assert ledger.rescind_all_filtered_settles() == 0  # the sibling's one-shot fired
+        status = self._degraded(ledger, allow=breaker.allow_settle, pull_id="race")
+        assert status == FAILED  # suppressed — NOT a leaked SKIPPED settle
+        rec = ledger.records()[0]
+        assert rec.last_error == "ALL_FILTERED"
+        assert rec.empty_streak == EMPTY_TERMINAL_THRESHOLD - 1  # preserved
+        assert ledger.newly_settled_skipped == 0
+
+    def test_pre_rescind_record_is_captured_and_reversed(self) -> None:
+        # The other lock ordering: the record lands BEFORE the sibling's rescind
+        # (the callable still allows at record time) — the settle is tracked in
+        # `_af_settled_keys` and the rescind reverses it. Together with the
+        # post-trip test above, both serializations of record vs rescind are
+        # pinned: no interleaving leaks an un-rescinded settle.
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        ledger = WindowLedger()
+        breaker = AllFilteredBreaker(spread_series_limit=2)
+        status = ""
+        for i in range(EMPTY_TERMINAL_THRESHOLD):
+            status = self._degraded(ledger, allow=breaker.allow_settle, pull_id=f"p{i}")
+        assert status == SKIPPED  # an allowing breaker is byte-identical
+        assert ledger.rescind_all_filtered_settles() == 1
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == ALL_FILTERED_MASS_RESCINDED
+
+    def test_allowing_callable_is_byte_identical(self) -> None:
+        # `lambda: True` over the full threshold == no callable at all.
+        plain = WindowLedger()
+        with_cb = WindowLedger()
+        for i in range(EMPTY_TERMINAL_THRESHOLD):
+            self._degraded(plain, pull_id=f"p{i}")
+            self._degraded(with_cb, allow=lambda: True, pull_id=f"p{i}")
+        assert plain.to_rows() == with_cb.to_rows()
+
+    def test_never_consulted_for_non_degraded_records(self) -> None:
+        # The `degraded_success` conjunct: EMPTY / SUCCESS / plain-FAILED
+        # records never invoke the callable — the suppression is
+        # degraded-channel-only (a dropped conjunct would silently consult the
+        # breaker for every record; the call count is the mutation kill).
+        calls: list[int] = []
+
+        def _allow() -> bool:
+            calls.append(1)
+            return False
+
+        ledger = WindowLedger()
+        empty = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            allow_degraded_settle=_allow,
+        )
+        success = ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            allow_degraded_settle=_allow,
+        )
+        failed = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type="Timeout",
+            bars_appended=0,
+            now=_NOW,
+            allow_degraded_settle=_allow,
+        )
+        assert (empty, success, failed) == (EMPTY, SUCCESS, FAILED)
+        assert calls == []
+
+    def test_explicit_suppress_bool_wins_without_a_call(self) -> None:
+        # `suppress_degraded_settle=True` short-circuits: the callable is NOT
+        # consulted — a `True` return could otherwise CLEAR the explicit bool
+        # (the drop-the-`not suppress_degraded_settle`-conjunct mutant).
+        calls: list[int] = []
+
+        def _allow() -> bool:
+            calls.append(1)
+            return True
+
+        ledger = WindowLedger()
+        status = self._degraded(ledger, allow=_allow, suppress=True)
+        assert status == FAILED
+        assert calls == []
+        assert ledger.records()[0].empty_streak == 0  # suppressed — no bump
+
+
+class TestRescindAllFilteredSettles:
+    """`rescind_all_filtered_settles` — the same-pull auto-reversal
+    (DEC-ALLFILTERED-MASS-BREAKER-001, delegating to the reopen primitive)."""
+
+    def _settle_all_filtered(self, ledger: WindowLedger, key: WindowKey) -> None:
+        for i in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(
+                key,
+                raw_bars=3,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="ALL_FILTERED",
+                pull_id=f"p{i}",
+            )
+
+    def test_rescinds_same_pull_all_filtered_settles(self) -> None:
+        ledger = WindowLedger()
+        self._settle_all_filtered(ledger, _key())
+        assert ledger.records()[0].status == SKIPPED
+        assert ledger.newly_settled_skipped == 1
+        assert ledger.rescind_all_filtered_settles() == 1
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == ALL_FILTERED_MASS_RESCINDED
+        assert rec.empty_streak == 0
+        assert rec.streak_provenance == ""  # full fresh, fully-attributed budget
+        wk = ("dhan", "NIFTY", "1minute", "2021-01-01", "2021-04-01")
+        # BOTH tombstone sets — the mid-pull-flushed SKIPPED can never resurrect.
+        assert wk in ledger.reopened_keys()
+        assert wk in ledger.degraded_keys()
+        assert wk in ledger.dirty_keys()
+        # The settled-skipped verdict counter never reports a rescinded settle.
+        assert ledger.newly_settled_skipped == 0
+
+    def test_rescinded_row_reads_retryable_on_the_label(self) -> None:
+        from brutex.dashboard.db_view import window_status_label
+
+        ledger = WindowLedger()
+        self._settle_all_filtered(ledger, _key())
+        ledger.rescind_all_filtered_settles()
+        rec = ledger.records()[0]
+        assert window_status_label(rec.status, rec.empty_streak, rec.last_error) == (
+            "FAILED (will re-pull)"
+        )
+
+    def test_non_all_filtered_settles_are_not_tracked(self) -> None:
+        ledger = WindowLedger()
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(
+                _key(),
+                raw_bars=3,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="INTERIOR_GAP",
+            )
+        assert ledger.records()[0].status == SKIPPED
+        assert ledger.rescind_all_filtered_settles() == 0
+        assert ledger.records()[0].status == SKIPPED  # untouched
+
+    def test_row_re_recorded_success_is_skipped_by_the_rescind(self) -> None:
+        ledger = WindowLedger()
+        self._settle_all_filtered(ledger, _key())
+        # A later COMPLETE re-record supersedes the settle — nothing to rescind.
+        ledger.record(_key(), raw_bars=9, error_type=None, bars_appended=9, now=_LATER)
+        assert ledger.rescind_all_filtered_settles() == 0
+        assert ledger.records()[0].status == SUCCESS
+
+    def test_empty_tracked_list_is_a_noop(self) -> None:
+        ledger = WindowLedger()
+        assert ledger.rescind_all_filtered_settles() == 0
+
+    def test_duplicate_tracked_keys_dedupe(self) -> None:
+        ledger = WindowLedger()
+        self._settle_all_filtered(ledger, _key())
+        # A further degraded record on the already-SKIPPED row re-fires the settle
+        # arm (streak above threshold) → the key is tracked TWICE; the rescind
+        # dedupes so the verdict counter is decremented exactly once.
+        ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            pull_id="p9",
+        )
+        assert ledger.newly_settled_skipped == 1
+        assert ledger.rescind_all_filtered_settles() == 1
+        assert ledger.newly_settled_skipped == 0
+
+    def test_tracked_list_clears_after_rescind(self) -> None:
+        ledger = WindowLedger()
+        self._settle_all_filtered(ledger, _key())
+        assert ledger.rescind_all_filtered_settles() == 1
+        # Idempotent: a second call has nothing tracked (and the row is FAILED).
+        assert ledger.rescind_all_filtered_settles() == 0
 
 
 class TestRetryCounterSplit:
@@ -2226,3 +3071,179 @@ class TestRetryCounterSplit:
         assert by_symbol["NIFTY"].transient_retries == 1
         assert by_symbol["SENSEX"].empty_retries is None
         assert by_symbol["SENSEX"].transient_retries is None
+
+
+class TestStreakExemptDemotion:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001: a TODAY_INCOMPLETE demotion is TIME-transient
+    evidence — it preserves the empty_streak (like FAILED) and can NEVER settle SKIPPED,
+    unlike the STRUCTURAL demotions (ALL_FILTERED/INTERIOR_GAP/SUSPECTED_PARTIAL) whose
+    bounded accept-gap settle is byte-unchanged."""
+
+    def test_today_incomplete_preserves_streak_never_skips(self) -> None:
+        # Five consecutive same-evening vendor-lag demotions: status FAILED every
+        # time, the streak NEVER moves, never SKIPPED — kills the streak arm's
+        # ``in`` → ``not in`` membership mutant (a bumping mutant reads streak 5
+        # and, pre-belt, would settle at 3).
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        ledger = WindowLedger(_threshold=3)
+        for _ in range(5):
+            status = ledger.record(
+                _key(),
+                raw_bars=374,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason=TODAY_INCOMPLETE,
+            )
+            assert status == FAILED
+            rec = ledger.records()[0]
+            assert rec.status == FAILED
+            assert rec.last_error == TODAY_INCOMPLETE
+            assert rec.empty_streak == 0  # preserved — never a step toward SKIPPED
+            assert not ledger.is_skippable(_key())
+
+    def test_structural_reasons_unchanged(self) -> None:
+        # ALL_FILTERED (a STRUCTURAL demotion) still bumps + settles SKIPPED at
+        # the threshold — byte-identity of the existing bounded channel.
+        ledger = WindowLedger(_threshold=3)
+        statuses = [
+            ledger.record(
+                _key(),
+                raw_bars=5,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="ALL_FILTERED",
+            )
+            for _ in range(3)
+        ]
+        assert statuses == [FAILED, FAILED, SKIPPED]
+        assert ledger.records()[0].empty_streak == 3
+
+    def test_mixed_history_belt(self) -> None:
+        # A prior clean-EMPTY streak of 2 + a TODAY_INCOMPLETE demotion: no
+        # settle, streak stays 2 (the demotion neither bumps nor consumes the
+        # EMPTY evidence).
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        ledger = WindowLedger(_threshold=3)
+        for _ in range(2):
+            ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.records()[0].empty_streak == 2
+        status = ledger.record(
+            _key(),
+            raw_bars=374,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason=TODAY_INCOMPLETE,
+        )
+        assert status == FAILED
+        rec = ledger.records()[0]
+        assert rec.empty_streak == 2
+        assert rec.status == FAILED
+
+    def test_settle_belt_over_forged_high_streak(self) -> None:
+        # The settle arm's ``not in STREAK_EXEMPT_DEGRADED_REASONS`` BELT: a row
+        # with a (normally unreachable) streak >= threshold restored from disk
+        # must STILL never settle SKIPPED on a TODAY_INCOMPLETE record — kills
+        # the settle arm's ``not in`` → ``in`` membership mutant, which is
+        # invisible through record() alone (the streak arm never lets the
+        # streak reach the threshold).
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        k = _key()
+        ledger = WindowLedger.from_rows(
+            [
+                (
+                    k.market,
+                    k.security_id,
+                    k.interval,
+                    k.start.isoformat(),
+                    k.end.isoformat(),
+                    FAILED,
+                    0,
+                    1,
+                    "GrowwTimeoutError",
+                    _NOW.isoformat(),
+                    _NOW.isoformat(),
+                    5,  # forged: at/over the threshold
+                    1,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            ],
+            threshold=3,
+        )
+        status = ledger.record(
+            k,
+            raw_bars=374,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason=TODAY_INCOMPLETE,
+        )
+        assert status == FAILED  # never the accept-gap SKIPPED
+        assert ledger.records()[0].empty_streak == 5  # preserved verbatim
+
+    def test_tombstone_set_and_discarded_on_success(self) -> None:
+        # The degraded tombstone semantics are INHERITED (free protection): a
+        # TODAY_INCOMPLETE FAILED is tombstoned so merge-on-save cannot
+        # resurrect a concurrent disk SUCCESS over it; the overnight SUCCESS
+        # discards it.
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=374,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason=TODAY_INCOMPLETE,
+        )
+        assert ledger.degraded_keys()  # tombstoned
+        ledger.record(_key(), raw_bars=375, error_type=None, bars_appended=375, now=_LATER)
+        assert ledger.records()[0].status == SUCCESS
+        assert not ledger.degraded_keys()  # discarded on the settled re-record
+
+    def test_today_incomplete_in_demoted_settle_reasons(self) -> None:
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+        from brutex.data.window_ledger import STREAK_EXEMPT_DEGRADED_REASONS
+
+        assert TODAY_INCOMPLETE in DEMOTED_SETTLE_REASONS
+        assert frozenset({TODAY_INCOMPLETE}) == STREAK_EXEMPT_DEGRADED_REASONS
+
+
+class TestG8KeyDelegationPin:
+    """DEC-LAKE-RUST-WINDOW-LEDGER-001 — ``WindowLedger._key`` delegates to the ONE law."""
+
+    def test_key_matches_window_key_python(self) -> None:
+        from datetime import date
+
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_status import window_key_python
+
+        key = WindowKey(
+            market="groww-option",
+            security_id="NSE-NIFTY-30Sep25-24000-CE",
+            interval="1minute",
+            start=date(2025, 8, 31),
+            end=date(2025, 9, 30),
+        )
+        assert WindowLedger._key(key) == window_key_python(key)
+        assert WindowLedger._key(key) == (
+            "groww-option",
+            "NSE-NIFTY-30Sep25-24000-CE",
+            "1minute",
+            "2025-08-31",
+            "2025-09-30",
+        )

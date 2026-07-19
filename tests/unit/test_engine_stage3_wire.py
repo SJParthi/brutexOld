@@ -29,12 +29,13 @@ import hashlib
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.cascade_wire import Stage3ManifestRecord
+from brutex.engine.reference_series import ReferenceSeries, TradeReferenceStamper
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.stage3_wire import (
@@ -68,8 +69,15 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluation
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import (
+    DEFAULT_PRICE_SOURCE_CELL,
+    FibAnchorKind,
+    PriceSource,
+    PriceSourceCell,
+    Side,
+)
 from brutex.vocabulary import ProximityParams
+from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
     from brutex.metrics.compute import ResultMetrics
@@ -85,8 +93,24 @@ _CTX: dict[str, str] = {
     "indicator_version": "ind-v1",
     "code_commit_sha": "deadbeef",
 }
+
+
 #: The bars-context scope the pass hashes its train slices with.
-_SCOPE: dict[str, str] = {
+class _ScopeKwargs(TypedDict):
+    """The data-scope labels, TYPED so ``**_SCOPE`` splats stay key-exact.
+
+    A plain ``dict[str, str]`` splat would let pyright match the string values
+    against ``run_stage3_pass``'s optional ``stamper_for`` callable parameter
+    (DEC-VIX-STAMP-WIRE-001) — a TypedDict pins the exact four keys.
+    """
+
+    exchange: str
+    segment: str
+    start: str
+    end: str
+
+
+_SCOPE: _ScopeKwargs = {
     "exchange": "NSE",
     "segment": "INDEX",
     "start": "2026-01-01",
@@ -112,15 +136,56 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
+def _bar_ohlc(day: int, minute: int, o: float, h: float, lo: float, c: float) -> CandleBar:
+    """Build one IST-session minute bar with EXPLICIT extremes (worst-case fixture)."""
+    ts = (
+        datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
+    ).astimezone(UTC)
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(str(round(o, 2))),
+        high=Decimal(str(round(h, 2))),
+        low=Decimal(str(round(lo, 2))),
+        close=Decimal(str(round(c, 2))),
+        volume=100,
+        open_interest=None,
+    )
+
+
 def _trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos win often via the TP leg."""
+    """A gap-up drift both masks RANK on under the ONE worst-case fill law.
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (a worst-case entry fills at
+    the bar HIGH, so the old wide-range drift SL'd every entry on its own
+    bar): 7-bar cycles of NARROW gap-up bars (open = prior close + 3.00,
+    range 0.50 < the SL 0.80 — no same-bar stop-out; the NEXT gap-up's low
+    clears the TP level so the win banks exactly +50), a shallow BEARISH
+    signal bar at cycle position 3 (feeds the k=1 bit-1 mask), and — every
+    4th cycle — a DEEP bearish bar at position 4 (range 0.85 > the SL) whose
+    stop-out keeps profit_factor FINITE for BOTH masks (losses −85 entering
+    the deep bar itself / −115 stopped from the prior bar's fill). Measured
+    on this tree at sl=80/tp=50: FULL mask-0 PF 3.72 · mask-2 PF 3.77; TRAIN
+    slice 72 / 30 trades — every hard rank gate passes on both masks.
+    """
     bars: list[CandleBar] = []
+    cycle = 0
     for d in range(n_days):
         price = 100.0
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
-            bars.append(_bar(d, m, price, close))
-            price = close
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish SIGNAL bar (bit 1 fires)
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+            bars.append(_bar_ohlc(d, m, o, h, lo, c))
+            price = c
     return bars
 
 
@@ -156,7 +221,13 @@ def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
 
 
-def _run_full(out_root: Path, bars: list[CandleBar], grid: SweepGridConfig) -> Stage3PassReport:
+def _run_full(
+    out_root: Path,
+    bars: list[CandleBar],
+    grid: SweepGridConfig,
+    *,
+    stamper: TradeReferenceStamper | None = None,
+) -> Stage3PassReport:
     """One full enabled run: grid sweep → Stage-3 pass, one audit chain."""
 
     def bars_for(_instrument: str, _tf_label: str) -> list[CandleBar]:
@@ -180,6 +251,7 @@ def _run_full(out_root: Path, bars: list[CandleBar], grid: SweepGridConfig) -> S
             segment=_SCOPE["segment"],
             start=_SCOPE["start"],
             end=_SCOPE["end"],
+            stamper_for=(lambda: stamper) if stamper is not None else None,
         )
 
 
@@ -372,6 +444,7 @@ def _run_id_for(
     tp: int | None,
     mask: int = 0,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    price_source: PriceSourceCell = DEFAULT_PRICE_SOURCE_CELL,
 ) -> str:
     return mask_run_id(
         mask=mask,
@@ -386,6 +459,8 @@ def _run_id_for(
             proximity=None,
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
+            vwap_source=price_source.vwap_source,
+            ema_source=price_source.ema_source,
         ),
         data_snapshot_hash=grid.data_snapshot_hash,
         indicator_version=grid.indicator_version,
@@ -397,13 +472,15 @@ class TestRecoverSurvivorCell:
     def test_recovers_a_non_first_cell_by_identity_match(self) -> None:
         grid = _grid(stop_losses=[80, 100], take_profits=[50, 120])
         run_id = _run_id_for(grid, sl=100, tp=120)
-        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001);
-        # the default prev-day grid recovers PREV_DAY.
+        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001)
+        # AND the price-source cell (DEC-NIFTY-PRICE-SOURCE-AXIS-001); the default
+        # prev-day / (HLC3, CLOSE) grid recovers PREV_DAY + the baseline cell.
         assert recover_survivor_cell(_row_for(run_id), grid) == (
             100,
             120,
             None,
             FibAnchorKind.PREV_DAY,
+            DEFAULT_PRICE_SOURCE_CELL,
         )
 
     def test_recovers_a_non_prev_day_anchor_cell(self) -> None:
@@ -416,10 +493,29 @@ class TestRecoverSurvivorCell:
             50,
             None,
             FibAnchorKind.ROLLING_WEEKLY,
+            DEFAULT_PRICE_SOURCE_CELL,
+        )
+
+    def test_recovers_a_non_default_price_source_cell(self) -> None:
+        # A survivor swept under a NON-default price-source cell recovers THAT cell —
+        # proving the source is part of the identity re-derivation (Golden Rule #4);
+        # the row's run_id ONLY reproduces at its ORIGINATING (vwap, ema) source.
+        non_default = PriceSourceCell(vwap_source=PriceSource.OPEN, ema_source=PriceSource.CLOSE)
+        grid = _grid(price_source_cells=[DEFAULT_PRICE_SOURCE_CELL, non_default])
+        run_id = _run_id_for(grid, sl=80, tp=50, price_source=non_default)
+        assert recover_survivor_cell(_row_for(run_id), grid) == (
+            80,
+            50,
+            None,
+            FibAnchorKind.PREV_DAY,
+            non_default,
         )
 
     def test_unmatchable_row_raises(self) -> None:
-        with pytest.raises(Stage3WireError, match="no \\(sl × tp × proximity × fib_anchor\\) cell"):
+        with pytest.raises(
+            Stage3WireError,
+            match="no \\(sl × tp × proximity × fib_anchor × price_source\\) cell",
+        ):
             recover_survivor_cell(_row_for("ab" * 32), _grid())
 
     def test_matched_cell_with_disabled_sl_leg_raises(self) -> None:
@@ -663,6 +759,290 @@ class TestRunStage3PassFull:
         assert actions.index(STAGE3_ACTION_PASS_START) > actions.index("GRID_SWEEP_COMPLETE")
 
 
+# ────── non-default price-source cell threading (DEC-NIFTY-PRICE-SOURCE-AXIS-001) ──────
+
+
+class TestStage3NonDefaultPriceSource:
+    """MAJOR-1 regression: a non-default price-source cell + Stage-3 COMPLETES.
+
+    Before the fix, ``recover_survivor_cell`` iterated ``sl × tp × proximity ×
+    fib_anchor`` only and always hashed the DEFAULT ``(HLC3, CLOSE)`` source, so a
+    survivor swept under e.g. ``open:close`` never matched its own ``run_id`` and
+    the whole staged use case aborted with ``Stage3WireError``. These tests pin
+    that the pass now completes AND refines against the ORIGINATING source bits.
+    """
+
+    _CELL = PriceSourceCell(vwap_source=PriceSource.OPEN, ema_source=PriceSource.CLOSE)
+
+    def test_full_pass_completes_and_refines_against_the_swept_source(self, tmp_path: Path) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        # Would raise Stage3WireError pre-fix; now the pass runs end-to-end.
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        assert report.enabled is True
+        assert report.masks_refined >= 1
+        assert report.cells
+        # Every refined cell carries the ORIGINATING non-default source (never a
+        # silent (HLC3, CLOSE) fallback).
+        for cell in report.cells:
+            assert cell.tuple_.price_source == self._CELL
+
+    def test_refined_row_identity_re_derives_with_the_non_default_source(
+        self, tmp_path: Path
+    ) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        assert report.train_snapshot_hash is not None
+        cell = report.cells[0]
+        row = ResultsStore.load(cell.path).rows()[0]
+        # The stored run_id ONLY reproduces when canonical_trade_params is fed the
+        # cell's OWN (vwap, ema) source — the correctness teeth for the thread.
+        expected = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=canonical_trade_params(
+                sl_paisa=cell.tuple_.sl_paisa,
+                tp_paisa=cell.tuple_.tp_paisa,
+                prior_n=grid.prior_n,
+                proximity=cell.tuple_.proximity,
+                start_equity_paisa=grid.start_equity_paisa,
+                vwap_source=self._CELL.vwap_source,
+                ema_source=self._CELL.ema_source,
+            ),
+            data_snapshot_hash=report.train_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        assert row.run_id == expected
+        # And it does NOT reproduce at the default source (the false-green a
+        # missing thread would have produced).
+        wrong = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=canonical_trade_params(
+                sl_paisa=cell.tuple_.sl_paisa,
+                tp_paisa=cell.tuple_.tp_paisa,
+                prior_n=grid.prior_n,
+                proximity=cell.tuple_.proximity,
+                start_equity_paisa=grid.start_equity_paisa,
+            ),
+            data_snapshot_hash=report.train_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        assert row.run_id != wrong
+
+    def test_manifest_record_and_cascade_specs_carry_the_source(self, tmp_path: Path) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        record = stage3_manifest_record(report)
+        assert record.refined_cells
+        for rec in record.refined_cells:
+            assert rec.vwap_source is self._CELL.vwap_source
+            assert rec.ema_source is self._CELL.ema_source
+        specs = cascade_specs_for_refined_cells(report.cells, grid=grid)
+        assert specs
+        for spec in specs:
+            assert spec.vwap_source is self._CELL.vwap_source
+            assert spec.ema_source is self._CELL.ema_source
+
+    def test_ema_varying_cell_moves_refined_bar_bits_0_to_5(self, tmp_path: Path) -> None:
+        """GAP-2: an EMA-source-varying cell demonstrably changes REFINED bits 0-5.
+
+        The sibling acceptance test above sweeps ``(OPEN vwap, CLOSE ema)`` — on
+        this volume-flat spot fixture the swept VWAP source is INERT (bits 52-53
+        need traded volume to separate) and the only swept condition is bit 1 (an
+        EMA bit), so ``(OPEN, CLOSE)`` refines against bar_bits that differ from
+        the default at ZERO positions: it proved the identity-hash thread but NOT
+        that the source moves any refined bit. Here the cell varies ``ema_source``
+        (``hlc3:open``), which flips bits 0-5, and we assert the refined bar_bits
+        the pass built for the cell genuinely differ from the ``(HLC3, CLOSE)``
+        default on the SAME train slice + params — and that the change is CONFINED
+        to the EMA group 0-5 (the ``build_bar_bits`` source-locality contract).
+        """
+        ema_cell = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.OPEN)
+        # Drift zig-zag + EOD-only exits: the gap-up _trending_bars ranks under
+        # the one law but its OPEN series is a level-shifted CLOSE copy, so an
+        # EMA-source change moves NO bit on it (see _drift_trending_bars).
+        # Axis-MAX legal levels the micro fixture can never trigger (see
+        # _drift_trending_bars) — every trade session-gap-closes at EOD.
+        grid = _grid(
+            price_source_cells=[ema_cell],
+            stop_losses=[200],
+            take_profits=[500],
+        )
+        bars = _drift_trending_bars(_N_DAYS)
+        report = _run_full(tmp_path, bars, grid)
+        assert report.enabled is True
+        assert report.masks_refined >= 1
+        assert report.cells
+        for cell in report.cells:
+            assert cell.tuple_.price_source == ema_cell
+
+        # Reconstruct the exact train-slice bar_bits the pass used for this cell
+        # vs the (HLC3, CLOSE) default, same proximity=None / prior_n / anchor.
+        train = train_slice_bars(bars)
+        default_bits = build_bar_bits(train, prior_n=grid.prior_n)
+        ema_bits = build_bar_bits(train, prior_n=grid.prior_n, ema_source=PriceSource.OPEN)
+        moved = {
+            bit
+            for base, ema in zip(default_bits, ema_bits, strict=True)
+            for bit in range(128)
+            if ((base ^ ema) >> bit) & 1
+        }
+        # The refined bits genuinely MOVE (unlike the (OPEN, CLOSE) sibling) …
+        assert moved, "ema_source=open must flip at least one EMA bit vs the default"
+        # … and the movement is confined to the EMA group 0-5 (source locality).
+        assert moved <= set(range(6))
+        assert moved & set(range(6))
+
+
+# ────── the bar_bits memo MUST be price-source-keyed (GAP-1) ──────
+
+
+def _drift_trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
+    """MICRO-scale drift zig-zag — rankable under the ONE worst-case fill law
+    at STAGE-3-LEGAL integer levels, and EMA-source-sensitive.
+
+    Two constraints meet here (DEC-FILL-WORST-CASE-ONLY-001 ×
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001): (a) Stage-3 grids REQUIRE integer sl/tp
+    on the locked Mode-A axes (SL ∈ [5,200] / TP ∈ [10,500] paisa — ADR-0007
+    condition 3), and under the one law a level a fixture's bars can REACH
+    always fills at the adverse extreme; so the bars are scaled to ±6/3-paisa
+    zig moves with 5-paisa pads (bar range ≈ 16 paisa, daily excursion ≈ ±90
+    paisa) and the consuming tests pass the axis-MAX ``sl=[200], tp=[500]`` —
+    legal ints the fixture can never trigger, so every trade rides to the
+    #1743 session-gap EOD close (up days win, the every-5th DOWN day keeps
+    ``profit_factor`` finite for the rank gates; measured: masks_refined=2 on
+    the k∈{0,1} bit-1 grid). (b) The EMA-source bit-flip demonstrations need
+    a source series whose SHAPE differs from CLOSE — a pure LEVEL shift
+    cancels in the source-vs-its-own-EMA comparison (the gap-up
+    :func:`_trending_bars`' OPEN series is exactly such a shift, measured
+    ZERO flips), while this zig-zag's one-bar open/close PHASE shift moves
+    the EMA crossings (measured: ``ema_source=open`` flips bits {0,1,2,3},
+    ``ema_source=hlc3`` flips bits {0,1} on the train slice).
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        down_day = d % 5 == 4
+        for m in range(per_day):
+            if down_day:
+                close = price - 0.06 if m % 3 else price + 0.03
+            else:
+                close = price + 0.06 if m % 3 else price - 0.03
+            open_ = price
+            hi = max(open_, close) + 0.05
+            lo = min(open_, close) - 0.05
+            bars.append(_bar_ohlc(d, m, open_, hi, lo, close))
+            price = close
+    return bars
+
+
+class TestStage3MemoIsPriceSourceKeyed:
+    """GAP-1 kill: the Stage-3 ``bits_memo`` key MUST include ``price_source``.
+
+    Dropping ``price_source`` from the memo key (``stage3_wire.py`` — the
+    ``memo_key = (instrument, tf, proximity, fib_anchor, price_source)`` line)
+    survived the whole prior suite: every earlier fixture's surviving masks were
+    source-INDEPENDENT (a k=0 enter-every-bar mask, or a bit the swept source
+    never moved), so the second-processed cell being served the first cell's bits
+    produced no observable difference.
+
+    Here TWO cells differ ONLY in ``ema_source`` and BOTH produce a surviving k=1
+    bit-1 (``close_below_ema20``) mask whose train-slice bar_bits genuinely differ
+    (measured 196 vs 83 fires). If the memo key drops the source, whichever cell
+    is processed SECOND is served the first cell's bar_bits and refines WRONG.
+
+    The order-independent oracle: each cell's refined rows in the 2-cell pass must
+    byte-match that SAME cell's refined rows in a SINGLE-cell pass (where no memo
+    collision is possible). Under the mutation the second-processed cell diverges
+    from its single-cell baseline (verified: applying the mutation flips one of
+    the two equalities to False), so asserting BOTH catches it regardless of the
+    intra-leaderboard processing order.
+    """
+
+    _A = DEFAULT_PRICE_SOURCE_CELL  # (HLC3, CLOSE)
+    _B = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.HLC3)
+
+    @staticmethod
+    def _rows_by_source(
+        report: Stage3PassReport,
+    ) -> dict[PriceSourceCell, list[tuple[object, ...]]]:
+        """Aggregate every refined-cell row, grouped by the recovered source cell."""
+        out: dict[PriceSourceCell, list[tuple[object, ...]]] = {}
+        for cell in report.cells:
+            rows = ResultsStore.load(cell.path).rows()
+            out.setdefault(cell.tuple_.price_source, []).extend(
+                (r.mask_bits, r.run_id, r.net_pnl_paisa, r.total_trades) for r in rows
+            )
+        return {src: sorted(v) for src, v in out.items()}
+
+    def test_each_cell_refines_against_its_own_source_bits(self, tmp_path: Path) -> None:
+        bars = _drift_trending_bars(_N_DAYS)
+        # top_k / stage3_top_k widened so the merged (instrument, tf, mode)
+        # leaderboard keeps BOTH cells' masks (2 masks × 2 cells) — otherwise the
+        # bounding could drop a cell and mask the collision.
+        single_a = self._rows_by_source(
+            _run_full(
+                tmp_path / "a",
+                bars,
+                _grid(
+                    price_source_cells=[self._A],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
+            )
+        )[self._A]
+        single_b = self._rows_by_source(
+            _run_full(
+                tmp_path / "b",
+                bars,
+                _grid(
+                    price_source_cells=[self._B],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
+            )
+        )[self._B]
+        both = self._rows_by_source(
+            _run_full(
+                tmp_path / "ab",
+                bars,
+                _grid(
+                    price_source_cells=[self._A, self._B],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
+            )
+        )
+
+        # Precondition (guards against a coinciding fixture silently tautologising
+        # the test): the two cells genuinely refine to DIFFERENT rows, and BOTH
+        # produced the ema-sensitive k=1 bit-1 (mask == 0b10) survivor.
+        assert single_a != single_b
+        assert any(mask == 0b10 for mask, *_ in single_a)
+        assert any(mask == 0b10 for mask, *_ in single_b)
+
+        # The kill: in the 2-cell pass each cell reproduces its OWN single-cell
+        # refinement (its own source bits), never the sibling's. Under the
+        # dropped-source memo mutation the second-processed cell diverges from its
+        # single-cell baseline, flipping one of these equalities to False.
+        assert both[self._A] == single_a
+        assert both[self._B] == single_b
+
+
 # ────── the A/B determinism oracle (review F11) + idempotent re-run ──────
 
 
@@ -689,6 +1069,98 @@ class TestDeterminismOracle:
         assert report_b2.rows_appended == 0
         assert report_b2.evals_total == report_b.evals_total
         assert _tree_hashes(out_root_b) == tree_b
+
+
+def _const_stamper(bars: list[CandleBar], level: str) -> TradeReferenceStamper:
+    """A stamper serving one CONSTANT level at every fixture-bar instant."""
+    return TradeReferenceStamper(
+        vix=ReferenceSeries(
+            name="india_vix",
+            close_by_ts={bar.timestamp: Decimal(level) for bar in bars},
+        )
+    )
+
+
+class TestVixConflictCellSkip:
+    """A VIX-lake-moved re-launch SKIPS conflicted cells — never aborts the pass.
+
+    DEC-VIX-STAMP-WIRE-001 round-3 panel MAJOR: the round-2 tuple-skip fix
+    covered only the grid drivers, but ``run_stage3_pass`` re-appends into
+    PRE-EXISTING cell stores on every resume (the grid tuples sentinel-skip,
+    so this is the DOMINANT redo path for the reference-only conflict) — a
+    :class:`~brutex.engine.results_store.VixTrioConflictError` escaped the
+    pass and aborted the whole sweep-all launch with a false CRITICAL alert.
+    """
+
+    def test_vix_moved_relaunch_skips_conflicted_cells_never_aborts(self, tmp_path: Path) -> None:
+        bars = _trending_bars(_N_DAYS)
+        report_1 = _run_full(tmp_path, bars, _grid(), stamper=_const_stamper(bars, "14.5"))
+        assert report_1.cells_conflicted == 0
+        assert report_1.rows_appended > 0
+        tree_before = _tree_hashes(tmp_path)
+
+        # The sanctioned lake movement: the India-VIX series re-pulled at NEW
+        # levels between the two launches (VIX is outside the run identity, so
+        # the redo re-derives byte-identical non-VIX columns + a NEW trio).
+        with capture_logs() as logs:
+            report_2 = _run_full(tmp_path, bars, _grid(), stamper=_const_stamper(bars, "19.5"))
+
+        # Every stamped cell conflicts → skipped + counted, never a raise.
+        assert report_2.cells_conflicted > 0
+        assert len(report_2.cells) == len(report_1.cells) - report_2.cells_conflicted
+        assert report_2.rows_appended == 0
+        # The on-disk tree is untouched — a conflicted cell's store + sidecar
+        # keep their launch-1 bytes (the redo contract: quarantine to re-persist).
+        assert _tree_hashes(tmp_path) == tree_before
+        warns = [e for e in logs if e["event"] == "stage3_wire.cell_vix_conflict"]
+        assert len(warns) == report_2.cells_conflicted
+        assert "quarantine" in warns[0]["remediation"]
+        assert "REFERENCE-ONLY VIX trio conflict" in warns[0]["error"]
+
+    def test_same_lake_relaunch_has_zero_conflicts(self, tmp_path: Path) -> None:
+        """The no-move control: an unchanged VIX lake re-launches conflict-free."""
+        bars = _trending_bars(_N_DAYS)
+        stamper = _const_stamper(bars, "14.5")
+        report_1 = _run_full(tmp_path, bars, _grid(), stamper=stamper)
+        report_2 = _run_full(tmp_path, bars, _grid(), stamper=stamper)
+        assert report_1.cells_conflicted == 0
+        assert report_2.cells_conflicted == 0
+        assert report_2.rows_appended == 0
+        assert report_2.cells == report_1.cells
+
+    def test_load_time_trio_conflict_in_a_cell_store_skips_that_cell(self, tmp_path: Path) -> None:
+        """Round-4 panel: a LOAD-time ``VixTrioConflictError`` cell-skips too.
+
+        ``ResultsStore.load`` re-appends each stored record, so a cell parquet
+        holding TWO physical rows with the SAME run_id differing in non-None
+        VIX values raises at LOAD time — tamper-grade only (the dict-keyed
+        flush writes one row per run_id, so no legitimate writer produces
+        this), but the grid drivers tuple-skip the very same file, and before
+        this fix the pass's load sat OUTSIDE the per-cell try and the one
+        tampered file aborted the WHOLE launch.
+        """
+        import polars as pl
+
+        bars = _trending_bars(_N_DAYS)
+        stamper = _const_stamper(bars, "14.5")
+        report_1 = _run_full(tmp_path, bars, _grid(), stamper=stamper)
+        assert report_1.rows_appended > 0
+        victim = report_1.cells[0].path
+        # The tamper: duplicate the first physical row with a CONFLICTING
+        # non-None vix_max (a foreign write — never a flush product).
+        frame = pl.read_parquet(victim)
+        dup = frame.head(1).with_columns(pl.lit(99.0).alias("vix_max"))
+        pl.concat([frame, dup]).write_parquet(victim)
+
+        with capture_logs() as logs:
+            report_2 = _run_full(tmp_path, bars, _grid(), stamper=stamper)
+
+        # The tampered cell is skipped + counted; the pass completes.
+        assert report_2.cells_conflicted == 1
+        assert victim not in {cell.path for cell in report_2.cells}
+        warns = [e for e in logs if e["event"] == "stage3_wire.cell_vix_conflict"]
+        assert len(warns) == 1
+        assert warns[0]["cell_path"] == str(victim)
 
 
 # ────── cascade_specs_for_refined_cells (reviews F3 + F8) ──────
@@ -996,3 +1468,43 @@ class TestManifestRecordRelPath:
         (tmp_path / "root").mkdir()
         with pytest.raises(Stage3WireError, match="not under"):
             stage3_manifest_record(self._report_with_cell(outside), results_root=tmp_path / "root")
+
+
+# ────── The WORST_CASE evaluator threading pin (fix round 2) ──────
+
+
+class TestEvaluatorOneLawWorstCase:
+    """DEC-FILL-WORST-CASE-ONLY-001: stage3_wire's ``_make_evaluator`` runs the
+    ONE hardcoded worst-case law — the fill_mode/policy seam is DELETED.
+
+    Hand-derived pins on ``_trending_bars(3)`` (the worst-case-rankable
+    gap-up fixture) at ``evaluate(80, 50)``: 27 trades — 24 TP wins of
+    exactly +50 (entry at the narrow gap-up bar's HIGH; the next gap-up's
+    low clears the TP level so the fill is AT level) and 3 deep-bar
+    stop-outs (−115 each: entry fill o+0.40, stop floor o−0.40, deep low
+    o−0.75 → adverse fill min(level, low) = o−0.75) → gross_profit
+    24 × 50 = 1_200, gross_loss 3 × 115 = 345, net +855.
+    """
+
+    def test_one_law_evaluation_reproduces_the_worst_case_pins(self) -> None:
+        import inspect
+
+        from brutex.engine import stage3_wire as stage3_mod
+
+        assert "fill_mode" not in inspect.signature(stage3_mod._make_evaluator).parameters
+        bars = _trending_bars(3)
+        bar_bits = build_bar_bits(bars)
+        evaluate = stage3_mod._make_evaluator(
+            bars=bars,
+            bar_bits=bar_bits,
+            mask=0,
+            side=Side.BUY,
+            tf_minutes=1,
+            start_equity_paisa=10_000_000,
+            reference_stamper=None,
+        )
+        worst = evaluate(80, 50)
+        assert worst.total_trades == 27
+        assert worst.net_pnl_paisa == 855
+        assert worst.gross_profit_paisa == 1_200
+        assert worst.gross_loss_paisa == 345

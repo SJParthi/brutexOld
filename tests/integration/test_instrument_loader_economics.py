@@ -288,6 +288,10 @@ class _InterleaveProbeStore:
     def list_index_equity_instruments(self) -> list[Any]:
         return []
 
+    def reference_only_security_ids(self) -> frozenset[int]:
+        """The summary's reference-id read (DEC-LABEL-TRUTH-001) — empty here."""
+        return frozenset()
+
 
 def test_serialised_under_concurrency() -> None:
     """The module lock serialises concurrent loads — they never overlap."""

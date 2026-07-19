@@ -1,0 +1,54 @@
+SLUG: getproducts-2
+LINK: https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getproducts-2/
+TITLE: GetProducts
+MODIFIED: 2024-07-10T12:39:13
+-----DECODED-----
+<h3>GetProducts : Returns list of Products (e.g. NIFTY, BANKNIFTY, GAIL, etc.)</h3>
+<div><b><span style="color: #dd3333;">Supported parameters</span></b></div>
+<table>
+<tbody>
+<tr>
+<td><b>Exchange</b></td>
+<td><i>String value like MCX</i></td>
+<td>Name of supported exchange. How to get list of supported exchanges you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/function-getexchanges-2/">here</a></td>
+</tr>
+<tr>
+<td><b>InstrumentType</b></td>
+<td><i>String value like FUTIDX</i></td>
+<td>Optional parameter. Name of supported Instrument Type. How to get list of supported values you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getinstrumenttypes-2/">here</a></td>
+</tr>
+</tbody>
+</table>
+<p> </p>
+<div><b><span style="color: #dd3333;">What is returned ?</span></b></div>
+<table>
+<tbody>
+<tr>
+<td><strong>Products</strong></td>
+</tr>
+</tbody>
+</table>
+<p> </p>
+<div><b><span style="color: #dd3333;">Sample request(JavaScript)</span></b></div>
+<pre lang="javascript">
+{
+MessageType: "GetProducts",
+Exchange: "NFO",
+};
+var message = JSON.stringify(request);
+websocket.send(message);
+</pre>
+<div><b><span style="color: #dd3333;">Example of returned data in JSON format</span></b></div>
+<pre lang="javascript">
+{
+"Request":{
+"Exchange":"NFO",
+"MessageType":"GetProducts"
+},
+"Result":[
+{"Value":"NIFTY"},
+{"Value":"GAIL"}
+],
+"MessageType":"ProductsResult"
+}
+</pre>

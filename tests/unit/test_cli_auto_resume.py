@@ -1,164 +1,47 @@
 # pyright: reportPrivateUsage=none
-"""Unit tests for the CLI boot-time auto-resume argv builder + validator.
+"""Unit tests for the CLI boot-time auto-resume decision layer.
 
-DEC-AUTO-RESUME-ON-BOOT-001 (the decision layer) + DEC-AUTO-RESUME-ARGV-FIX-001
-(the dead-resume fix): the spawned child used to run the RETIRED
-``brutex fetch --universe --until-clean``, which :func:`brutex.cli.cmd_fetch`
-refuses with ``EXIT_USER_ERROR`` before any pull work — so the crash/redeploy
-recovery feature never resumed anything while the boot log read
-``verdict=resumed``. These tests pin, through the REAL CLI parser + ``main``
-dispatch, that the generated argv reaches the genuine pull entry, and that the
-new pre-spawn validator (:func:`brutex.cli._validate_auto_resume_argv`) turns
-any argv drift into the honest ``error`` verdict instead of a false
-``resumed`` (the ``maybe_resume_on_boot`` never-raises contract).
+DEC-AUTO-RESUME-ON-BOOT-001 (the gated decision) + DEC-PULL-INTENT-RESUME-001
+(the ONE decision point with the intent resume) + DEC-AUTO-RESUME-INPROCESS-001
+(the in-process legacy resume): the legacy boot resume used to SPAWN
+``python -m brutex fetch --until-clean --lake-root <root>`` — a child that was
+DOA on every opted-in boot, because BOTH DuckDB files its ``cmd_fetch`` must
+open are exclusively locked against it: ``<lake>/catalog.duckdb`` FIRST
+(``Catalog.open`` before ``_resolve_brute_force_instruments``; held by the
+dashboard's boot-window L3 lake-heal sweeper — the 2026-07-09T02:47:24Z
+production traceback's actual first-raising site, ``catalog.py``
+``duckdb.connect``), and one step later ``<lake>/instruments.duckdb``, which
+the dashboard holds READ-WRITE for its LIFETIME (uncaught ``CatalogError`` →
+exit 1 in ~0.3 s either way, stderr inherited and never captured). The child
+machinery (``_spawn_auto_resume_pull`` / ``_auto_resume_child_argv`` /
+``_validate_auto_resume_argv``) is DELETED; the legacy arm now fires the
+injected IN-PROCESS ``resume_legacy`` seam
+(``app.state.brutex_resume_legacy`` →
+:func:`brutex.dashboard.pull_intent.run_legacy_resume`), which opens no second
+catalog/store handle — so the whole lock class is structurally gone.
 
-The dashboard boot wiring (:func:`brutex.cli._start_auto_resume_on_boot` /
-:func:`brutex.cli._spawn_auto_resume_pull`) is live daemon-thread + subprocess +
-server glue, excluded at the SAME live-side-effect boundary the supervisor's
-daemon loop is (``# pragma: no cover``); the resume DECISION is 100%-tested in
-:mod:`brutex.orchestrator.auto_resume`. The PURE seams in the CLI — the argv
-builder + the argv validator — are un-pragma'd and pinned here (mirrors
-``test_cli_supervisor`` for ``_supervisor_child_argv``).
+These tests pin, through the REAL ``_start_auto_resume_on_boot`` daemon-thread
+seam: (a) the incident class itself (a REAL rw-held ``catalog.duckdb`` AND a
+REAL rw-held ``instruments.duckdb`` each make a child-process open exit
+non-zero — BOTH documented DOA arms); (b) the fix (the in-process resume fires
+with ZERO ``subprocess.Popen`` calls, even while the store is held); (c) the
+honest ``error`` verdict when the in-process seam is unwired (never a false
+``resumed``, never a DOA child); and (d) the intent-exclusivity decision
+point, unchanged.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
 from brutex import cli
-from brutex.orchestrator.auto_resume import ResumeVerdict, maybe_resume_on_boot
-
-
-def test_auto_resume_child_argv_is_until_clean_pull() -> None:
-    """The resume child re-runs the CURRENT supported until-clean pull (no retired flag)."""
-    argv = cli._auto_resume_child_argv(Path("/data/lake"))
-    assert argv == [
-        sys.executable,
-        "-m",
-        "brutex",
-        "fetch",
-        "--until-clean",
-        "--lake-root",
-        "/data/lake",
-    ]
-
-
-def test_auto_resume_child_argv_carries_resolved_lake_root() -> None:
-    """The child argv carries the SAME lake root the ledger was read from (MAJOR fix).
-
-    Without the explicit ``--lake-root`` a dashboard started with
-    ``--lake-root /data/lake`` (``$BRUTEX_LAKE_ROOT`` unset) would spawn a child
-    that falls back to ``~/.brutex/lake`` — re-pulling the WRONG lake AND missing
-    the lake-root-keyed single-flight lock (the double-pull this feature prevents).
-    """
-    argv = cli._auto_resume_child_argv(Path("/mnt/ssd/brutex-lake"))
-    assert "--lake-root" in argv
-    # The resolved root is the LAST token, directly after the ``--lake-root`` flag.
-    assert argv[argv.index("--lake-root") + 1] == "/mnt/ssd/brutex-lake"
-
-
-class TestArgvReachesRealPullEntry:
-    """DEC-AUTO-RESUME-ARGV-FIX-001 regression — the argv must reach cmd_fetch's pull path.
-
-    FAILS-BEFORE / PASSES-AFTER: the pre-fix argv carried the RETIRED
-    ``--universe`` flag, so the REAL ``main`` dispatch forwarded
-    ``universe=True`` into ``cmd_fetch`` — which returns ``EXIT_USER_ERROR``
-    (the retirement notice) before any pull work. The fixed argv dispatches
-    with ``universe=False`` + ``until_clean=True`` — the genuine pull entry.
-    """
-
-    def test_generated_argv_dispatches_to_cmd_fetch_pull_entry(self) -> None:
-        """Parse + dispatch the generated argv through the REAL CLI parser/main."""
-        argv = cli._auto_resume_child_argv(Path("/data/lake"))
-        tokens = argv[3:]  # strip [sys.executable, "-m", "brutex"]
-        with mock.patch.object(cli, "cmd_fetch", return_value=cli.EXIT_OK) as fetch:
-            rc = cli.main(tokens)
-
-        assert rc == cli.EXIT_OK
-        _, kwargs = fetch.call_args
-        # The retired flag would make cmd_fetch return EXIT_USER_ERROR before pulling.
-        assert kwargs["universe"] is False
-        assert kwargs["until_clean"] is True
-        assert kwargs["lake_root"] == Path("/data/lake")
-
-    def test_retired_universe_flag_is_refused_by_cmd_fetch(self, tmp_path: Path) -> None:
-        """Pin the pre-fix failure path: ``universe=True`` exits with EXIT_USER_ERROR.
-
-        This is the exact dead-end the OLD child argv landed on — proving the
-        bug class stays observable (the retirement refusal), not silently gone.
-        """
-        rc = cli.cmd_fetch(
-            tmp_path,
-            None,
-            None,
-            "all",
-            window_days=None,
-            dry_run=False,
-            inspect=False,
-            rows_per_chunk=5,
-            universe=True,
-        )
-        assert rc == cli.EXIT_USER_ERROR
-
-
-class TestValidateAutoResumeArgv:
-    """The pre-spawn validator — every drift raises, the generated argv passes."""
-
-    def test_generated_argv_is_accepted(self) -> None:
-        """The builder's own argv validates cleanly (the wired production pair)."""
-        cli._validate_auto_resume_argv(cli._auto_resume_child_argv(Path("/data/lake")))
-
-    def test_rejects_non_module_prefix(self) -> None:
-        """An argv not running ``python -m brutex`` is refused."""
-        with pytest.raises(ValueError, match="python -m brutex"):
-            cli._validate_auto_resume_argv(["brutex", "fetch", "--until-clean"])
-
-    def test_rejects_empty_subcommand_tokens(self) -> None:
-        """A bare ``python -m brutex`` (no subcommand) is refused."""
-        with pytest.raises(ValueError, match="no CLI subcommand tokens"):
-            cli._validate_auto_resume_argv([sys.executable, "-m", "brutex"])
-
-    def test_rejects_parser_unknown_flag(self) -> None:
-        """A flag the REAL parser refuses (SystemExit) surfaces as ValueError."""
-        argv = [sys.executable, "-m", "brutex", "fetch", "--no-such-flag"]
-        with pytest.raises(ValueError, match="rejected by the CLI parser"):
-            cli._validate_auto_resume_argv(argv)
-
-    def test_rejects_non_fetch_command(self) -> None:
-        """A well-formed argv for a DIFFERENT subcommand is refused."""
-        argv = [sys.executable, "-m", "brutex", "version"]
-        with pytest.raises(ValueError, match="must dispatch to `fetch`"):
-            cli._validate_auto_resume_argv(argv)
-
-    def test_rejects_retired_universe_flag(self) -> None:
-        """The exact pre-fix argv (RETIRED ``--universe``) is refused pre-spawn."""
-        argv = [
-            sys.executable,
-            "-m",
-            "brutex",
-            "fetch",
-            "--universe",
-            "--until-clean",
-            "--lake-root",
-            "/data/lake",
-        ]
-        with pytest.raises(ValueError, match="RETIRED `--universe`"):
-            cli._validate_auto_resume_argv(argv)
-
-    def test_rejects_instruments_only_mode(self) -> None:
-        """``--instruments`` loads the master and exits — no pull, so refused."""
-        argv = [sys.executable, "-m", "brutex", "fetch", "--instruments", "--until-clean"]
-        with pytest.raises(ValueError, match="--instruments"):
-            cli._validate_auto_resume_argv(argv)
-
-    def test_rejects_missing_until_clean(self) -> None:
-        """A fetch without ``--until-clean`` breaks the bounded-resume contract."""
-        argv = [sys.executable, "-m", "brutex", "fetch", "--lake-root", "/data/lake"]
-        with pytest.raises(ValueError, match="--until-clean"):
-            cli._validate_auto_resume_argv(argv)
 
 
 class _OutstandingLedger:
@@ -174,97 +57,577 @@ class _OutstandingLedger:
         return self._Counts()
 
 
-class TestBootNeverRaisesContract:
-    """maybe_resume_on_boot stays never-raises AND never reports a false ``resumed``."""
+def _wire_legacy_wants_to_fire(monkeypatch: pytest.MonkeyPatch) -> list[list[Any]]:
+    """Make the LEGACY arm eager (gates ON + outstanding ledger) + spy every Popen.
 
-    def test_invalid_argv_yields_error_verdict_not_resumed(self) -> None:
-        """A resume action tripping the validator returns ERROR — never RESUMED."""
-        bad_argv = [sys.executable, "-m", "brutex", "fetch", "--universe", "--until-clean"]
-        verdict = maybe_resume_on_boot(
-            load_ledger=_OutstandingLedger,
-            resume=lambda incomplete: cli._validate_auto_resume_argv(bad_argv),
-            enabled=True,
-        )
-        assert verdict is ResumeVerdict.ERROR
-        assert verdict is not ResumeVerdict.RESUMED
+    ``BRUTEX_AUTO_RESUME=1`` opts INTO the master kill switch
+    (DEC-AUTO-RESUME-DEFAULT-OFF-001, default OFF); without it neither arm
+    fires regardless of the legacy sub-gate — that default-OFF neutralisation
+    is pinned separately in :class:`TestMasterGateDefaultOff`.
 
-    def test_valid_generated_argv_yields_resumed_verdict(self) -> None:
-        """The production builder+validator pair keeps the RESUMED happy path."""
-        verdict = maybe_resume_on_boot(
-            load_ledger=_OutstandingLedger,
-            resume=lambda incomplete: cli._validate_auto_resume_argv(
-                cli._auto_resume_child_argv(Path("/data/lake"))
-            ),
-            enabled=True,
+    Returns the recorded ``subprocess.Popen`` argv list — the behavioural pin
+    that the auto-resume path never spawns a child again
+    (DEC-AUTO-RESUME-INPROCESS-001). Patching the stdlib ``subprocess.Popen``
+    covers both a module-level and a function-local ``import subprocess``.
+    """
+    import brutex.data.window_ledger_store as ledger_store
+
+    monkeypatch.setenv("BRUTEX_AUTO_RESUME", "1")
+    monkeypatch.setenv("BRUTEX_AUTO_RESUME_ON_BOOT", "1")
+    monkeypatch.setattr(ledger_store, "load_window_ledger", lambda _root: _OutstandingLedger())
+    popen_calls: list[list[Any]] = []
+
+    def _spy_popen(*args: Any, **kwargs: Any) -> Any:
+        popen_calls.append(list(args))
+        raise AssertionError("auto-resume must never spawn a subprocess (in-process by design)")
+
+    monkeypatch.setattr(subprocess, "Popen", _spy_popen)
+    return popen_calls
+
+
+def _wait_for_verdict(log: mock.Mock, *, timeout: float = 10.0) -> str:
+    """Block until the daemon thread logs ``auto_resume.verdict``; return it."""
+    deadline = threading.Event()
+    for _ in range(int(timeout / 0.01)):
+        for call in log.info.call_args_list:
+            if call.args and call.args[0] == "auto_resume.verdict":
+                verdict = call.kwargs["verdict"]
+                assert isinstance(verdict, str)
+                return verdict
+        deadline.wait(0.01)
+    raise AssertionError("the auto-resume daemon thread never logged its verdict")
+
+
+class TestInProcessLegacyResume:
+    """DEC-AUTO-RESUME-INPROCESS-001 — the legacy arm fires IN-PROCESS, never a child.
+
+    FAILS-BEFORE / PASSES-AFTER: the pre-fix ``_start_auto_resume_on_boot`` had
+    no ``resume_legacy`` parameter (calling it below raises ``TypeError``) and
+    its legacy arm called ``_spawn_auto_resume_pull`` — a ``subprocess.Popen``
+    the spy here turns into a loud failure.
+    """
+
+    def test_legacy_arm_fires_injected_inprocess_resume_no_subprocess(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        popen_calls = _wire_legacy_wants_to_fire(monkeypatch)
+        fired = threading.Event()
+        log = mock.Mock()
+        cli._start_auto_resume_on_boot(
+            tmp_path,
+            log,
+            intent_store=None,
+            resume_pipeline=None,
+            resume_legacy=fired.set,
         )
-        assert verdict is ResumeVerdict.RESUMED
+        assert fired.wait(timeout=10.0), "the in-process legacy resume must fire"
+        assert _wait_for_verdict(log) == "resumed"
+        assert popen_calls == [], "auto-resume must never spawn a subprocess"
+        # The in-process arm logs its own honest launch event with the counts.
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "auto_resume.inprocess" in events
+
+    def test_unwired_seam_reads_error_verdict_never_false_resumed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """resume_legacy=None (intent-store build failed) ⇒ honest ``error`` verdict.
+
+        The legacy arm raises into ``maybe_resume_on_boot``'s guard, which logs
+        ``auto_resume.error`` naming why — never a false ``resumed`` and never
+        a DOA subprocess child.
+        """
+        popen_calls = _wire_legacy_wants_to_fire(monkeypatch)
+        log = mock.Mock()
+        cli._start_auto_resume_on_boot(
+            tmp_path,
+            log,
+            intent_store=None,
+            resume_pipeline=None,
+            resume_legacy=None,
+        )
+        assert _wait_for_verdict(log) == "error"
+        assert popen_calls == [], "an unwired seam must not fall back to a subprocess"
+
+
+class TestIncidentClassRegression:
+    """The 2026-07-09 incident shape: dashboard-held DuckDB locks vs the resume.
+
+    (a)+(b) document the DELETED child's death class on BOTH files its
+    ``cmd_fetch`` had to open — ``catalog.duckdb`` (opened FIRST; the incident
+    traceback's actual first-raising site, held by the dashboard's boot-window
+    L3 lake-heal sweeper) and ``instruments.duckdb`` (opened one step later;
+    held by the dashboard READ-WRITE for its lifetime) — a SECOND process
+    opening either while a dashboard-shaped parent holds it exits non-zero on
+    the DuckDB exclusive lock; (c) proves the NEW in-process path fires under
+    the SAME held lock with zero subprocess spawns.
+    """
+
+    @staticmethod
+    def _run_child(child_code: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-c", child_code],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+    def test_child_process_catalog_open_is_doa_while_dashboard_sweeps(self, tmp_path: Path) -> None:
+        """The incident's FIRST-raising arm: ``Catalog.open(<lake>/catalog.duckdb)``.
+
+        ``cmd_fetch`` opens the catalog BEFORE ``_resolve_brute_force_instruments``;
+        the dashboard's boot-window L3 lake-heal sweeper holds the same file —
+        the production traceback died here (``catalog.py`` ``duckdb.connect``).
+        """
+        pytest.importorskip("duckdb", reason="the incident class needs the real DuckDB lock")
+        from brutex.data.catalog import Catalog
+
+        db = tmp_path / "catalog.duckdb"
+        # The L3 sweeper's boot-window handle — HELD across the child spawn.
+        with Catalog.open(db):
+            proc = self._run_child(
+                "from pathlib import Path\n"
+                "from brutex.data.catalog import Catalog\n"
+                f"Catalog.open(Path({str(db)!r}))\n"
+            )
+        assert proc.returncode != 0, "the child MUST die on the exclusive DuckDB lock"
+        assert "CatalogError" in proc.stderr or "lock" in proc.stderr.lower()
+
+    def test_child_process_store_open_is_doa_while_dashboard_holds_store(
+        self, tmp_path: Path
+    ) -> None:
+        """The DETERMINISTIC arm: the dashboard's LIFETIME-held ``instruments.duckdb``.
+
+        Even when the catalog is momentarily free, the child dies one step
+        later here — the store handle is held for the whole dashboard process.
+        """
+        pytest.importorskip("duckdb", reason="the incident class needs the real DuckDB lock")
+        from brutex.data.instrument_store import InstrumentStore
+
+        db = tmp_path / "instruments.duckdb"
+        # The dashboard's lifetime rw handle — HELD across the child spawn.
+        with InstrumentStore.open(db):
+            proc = self._run_child(
+                "from pathlib import Path\n"
+                "from brutex.data.instrument_store import InstrumentStore\n"
+                f"InstrumentStore.open(Path({str(db)!r}))\n"
+            )
+        assert proc.returncode != 0, "the child MUST die on the exclusive DuckDB lock"
+        # The uncaught CatalogError names the lock conflict — the exact stderr the
+        # old fire-and-forget child threw away (inherited, never captured).
+        assert "CatalogError" in proc.stderr or "lock" in proc.stderr.lower()
+
+    def test_inprocess_resume_fires_while_dashboard_holds_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("duckdb", reason="the incident class needs the real DuckDB lock")
+        from brutex.data.instrument_store import InstrumentStore
+
+        popen_calls = _wire_legacy_wants_to_fire(monkeypatch)
+        # The dashboard's own rw handle — HELD while the in-process resume fires.
+        with InstrumentStore.open(tmp_path / "instruments.duckdb"):
+            fired = threading.Event()
+            log = mock.Mock()
+            cli._start_auto_resume_on_boot(
+                tmp_path,
+                log,
+                resume_legacy=fired.set,
+            )
+            assert fired.wait(timeout=10.0), (
+                "the in-process resume must fire even while the dashboard's own "
+                "rw store handle is held — no second store open, no DuckDB lock"
+            )
+            assert _wait_for_verdict(log) == "resumed"
+        assert popen_calls == [], "zero subprocess spawns while the store is held"
+
+
+def _call_gate_tracking_threads(
+    lake_root: Path,
+    log: object,
+    *,
+    intent_store: object = None,
+    resume_pipeline: Callable[[], None] | None = None,
+    resume_legacy: Callable[[], object] | None = None,
+) -> list[object]:
+    """Call the boot launcher and return any NEW threads it spawned (join-bounded).
+
+    The DETERMINISTIC no-fire oracle for the disabled-gate tests
+    (DEC-AUTO-RESUME-DEFAULT-OFF-001 review round 1, minor 7): a disabled master
+    gate must return SYNCHRONOUSLY — before any daemon-thread spawn — so the
+    oracle is "zero new threads". Any thread that IS spawned (e.g. under an
+    either-gate-enables mutant) is joined with a bounded timeout FIRST, so the
+    caller's decide/resume-spy assertions can never race a live daemon body.
+    Mirrors the REAL launcher signature (incl. the in-process *resume_legacy*
+    seam — DEC-AUTO-RESUME-INPROCESS-001). No sleeps.
+    """
+    before = set(threading.enumerate())
+    cli._start_auto_resume_on_boot(
+        lake_root,
+        log,
+        intent_store=intent_store,
+        resume_pipeline=resume_pipeline,
+        resume_legacy=resume_legacy,
+    )
+    spawned_threads = [t for t in threading.enumerate() if t not in before]
+    for thread in spawned_threads:
+        thread.join(timeout=10.0)
+    return list(spawned_threads)
 
 
 class TestIntentDecisionPointAtBootSeam:
     """DEC-PULL-INTENT-RESUME-001 — the extended ``_start_auto_resume_on_boot``:
     ONE decision point, driven end-to-end through the REAL daemon-thread seam
     with a REAL ``PullIntentStore`` in a tmp lake root. Intent present ⇒ the
-    pipeline resume fires and the legacy CLI child is NEVER spawned; no intent
-    ⇒ the legacy spawn path is byte-identical."""
+    pipeline resume fires and the legacy in-process resume NEVER fires; no
+    intent ⇒ the legacy in-process arm runs as before."""
 
-    @staticmethod
-    def _wire_legacy_wants_to_fire(monkeypatch: pytest.MonkeyPatch) -> list[object]:
-        """Make the LEGACY path eager: env ON + an outstanding ledger + a spawn spy."""
-        import brutex.data.window_ledger_store as ledger_store
-
-        spawned: list[object] = []
-        monkeypatch.setenv("BRUTEX_AUTO_RESUME_ON_BOOT", "1")
-        monkeypatch.setattr(ledger_store, "load_window_ledger", lambda _root: _OutstandingLedger())
-        monkeypatch.setattr(
-            cli,
-            "_spawn_auto_resume_pull",
-            lambda incomplete, lake_root, log: spawned.append(incomplete),
-        )
-        return spawned
-
-    def test_intent_present_fires_pipeline_and_never_spawns_cli_child(
+    def test_intent_present_fires_pipeline_and_never_fires_legacy(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import threading
-
         from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
 
-        spawned = self._wire_legacy_wants_to_fire(monkeypatch)
+        popen_calls = _wire_legacy_wants_to_fire(monkeypatch)
         store = PullIntentStore(tmp_path)
         persist_intent_for_launch(
             store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
         )
         fired = threading.Event()
+        legacy_fired: list[object] = []
         log = mock.Mock()
-        cli._start_auto_resume_on_boot(tmp_path, log, intent_store=store, resume_pipeline=fired.set)
-        assert fired.wait(timeout=10.0), "the pipeline resume must fire on an intent boot"
-        # The daemon thread logs the verdict AFTER the resume — wait for it so the
-        # legacy-spawn assertion cannot race the thread body.
-        deadline = threading.Event()
-        for _ in range(1000):
-            if log.info.call_args_list:
-                break
-            deadline.wait(0.01)
-        assert spawned == [], "the legacy CLI child must NOT spawn on an intent boot"
-
-    def test_no_intent_keeps_legacy_spawn_byte_identical(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import threading
-
-        from brutex.dashboard.pull_intent import PullIntentStore
-
-        spawned = self._wire_legacy_wants_to_fire(monkeypatch)
-        fired = threading.Event()
         cli._start_auto_resume_on_boot(
             tmp_path,
-            mock.Mock(),
-            intent_store=PullIntentStore(tmp_path),  # no intent file on disk
+            log,
+            intent_store=store,
             resume_pipeline=fired.set,
+            resume_legacy=lambda: legacy_fired.append(True),
         )
-        for _ in range(1000):
-            if spawned:
-                break
-            threading.Event().wait(0.01)
-        assert len(spawned) == 1, "no intent ⇒ the legacy resume spawn runs as before"
-        assert not fired.is_set(), "the pipeline resume must not fire without an intent"
+        assert fired.wait(timeout=10.0), "the pipeline resume must fire on an intent boot"
+        assert _wait_for_verdict(log) == "intent_resumed"
+        assert legacy_fired == [], "the legacy resume must NOT fire on an intent boot"
+        assert popen_calls == []
+
+    def test_no_intent_keeps_legacy_inprocess_arm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard.pull_intent import PullIntentStore
+
+        popen_calls = _wire_legacy_wants_to_fire(monkeypatch)
+        pipeline_fired = threading.Event()
+        legacy_fired = threading.Event()
+        log = mock.Mock()
+        cli._start_auto_resume_on_boot(
+            tmp_path,
+            log,
+            intent_store=PullIntentStore(tmp_path),  # no intent file on disk
+            resume_pipeline=pipeline_fired.set,
+            resume_legacy=legacy_fired.set,
+        )
+        assert legacy_fired.wait(timeout=10.0), "no intent ⇒ the legacy in-process resume fires"
+        assert _wait_for_verdict(log) == "resumed"
+        assert not pipeline_fired.is_set(), "the pipeline resume must not fire without an intent"
+        assert popen_calls == []
+
+
+class TestMasterGateDefaultOff:
+    """DEC-AUTO-RESUME-DEFAULT-OFF-001 — the ``BRUTEX_AUTO_RESUME`` master kill switch.
+
+    The operator's #1 pain: a leftover ``<lake>/.pull_intent.json`` silently
+    auto-launched a full-universe pull on boot with ZERO clicks. The master gate
+    (default OFF) neutralises BOTH resume arms at the earliest boot chokepoint —
+    checked BEFORE the intent wiring / any intent-file read / the daemon-thread
+    spawn — so the intent file can no longer trigger a pull unless the operator
+    explicitly opts in with ``BRUTEX_AUTO_RESUME=1``. FAILS-BEFORE / PASSES-AFTER:
+    without the gate the intent boot fires the pipeline resume (pinned by
+    :class:`TestIntentDecisionPointAtBootSeam`); with the gate default-OFF the
+    SAME boot fires nothing. Every disabled-path test rides the deterministic
+    :func:`_call_gate_tracking_threads` oracle (zero new threads + bounded
+    join — review round 1, minor 7; no sleeps).
+    """
+
+    @staticmethod
+    def _clear_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Start from a hermetic env — neither the master gate nor the sub-gate set."""
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME_ON_BOOT", raising=False)
+
+    def test_default_unset_does_not_start_resume_even_with_intent_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE operator scenario: a leftover intent file + default env ⇒ NO launch.
+
+        With the master gate unset (the default), a durable ``.pull_intent.json``
+        on disk must NOT trigger a resume: ``maybe_resume_on_boot`` is never
+        invoked, no pull launches (neither the pipeline seam nor the legacy
+        in-process resume fires), and EXACTLY ONE
+        ``auto_resume.disabled_by_default`` line is logged. The gate returns
+        SYNCHRONOUSLY (zero new threads — deterministic).
+        """
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        self._clear_gates(monkeypatch)
+        # A REAL leftover intent — exactly the state a died-mid-pull boot leaves.
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        # Spy the DECISION entry point — the gate must short-circuit before it.
+        decide = mock.Mock()
+        monkeypatch.setattr("brutex.orchestrator.auto_resume.maybe_resume_on_boot", decide)
+        resume_pipeline = mock.Mock()
+        resume_legacy = mock.Mock()
+        log = mock.Mock()
+
+        new_threads = _call_gate_tracking_threads(
+            tmp_path,
+            log,
+            intent_store=store,
+            resume_pipeline=resume_pipeline,
+            resume_legacy=resume_legacy,
+        )
+
+        assert new_threads == [], "the disabled gate must return before any thread spawn"
+        decide.assert_not_called()  # the resume decision never even ran
+        resume_pipeline.assert_not_called()  # the pipeline arm did not fire
+        resume_legacy.assert_not_called()  # the legacy in-process arm did not fire
+        logged = [c.args[0] for c in log.info.call_args_list]
+        assert logged.count("auto_resume.disabled_by_default") == 1
+        assert "auto_resume.verdict" not in logged  # the daemon-thread body never ran
+
+    def test_master_unset_with_legacy_subgate_armed_never_spawns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EXACT up.sh-provisioned env (sub-gate armed, master unset) fires NOTHING.
+
+        up.sh pre-arms ``BRUTEX_AUTO_RESUME_ON_BOOT=1`` (so ONE master flip
+        restores the prior behaviour) — this pins that the pre-armed sub-gate
+        alone, even over an OUTSTANDING ledger, fires no legacy IN-PROCESS
+        resume (DEC-AUTO-RESUME-INPROCESS-001 — the seam a spawned daemon
+        would invoke) and never reaches the resume decision. KILLS the
+        either-gate-enables mutant (a gate passing when the master OR the
+        legacy sub-gate is truthy): under that mutant the daemon thread spawns
+        and — after the helper's bounded join — the decide spy has fired, so
+        this test fails deterministically on the zero-new-threads oracle and
+        the spies. No sleeps.
+        """
+        import brutex.data.window_ledger_store as ledger_store
+
+        self._clear_gates(monkeypatch)
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME_ON_BOOT", "1")  # exactly what up.sh persists
+        monkeypatch.setattr(ledger_store, "load_window_ledger", lambda _root: _OutstandingLedger())
+        decide = mock.Mock()
+        monkeypatch.setattr("brutex.orchestrator.auto_resume.maybe_resume_on_boot", decide)
+        resume_legacy = mock.Mock()
+        log = mock.Mock()
+
+        new_threads = _call_gate_tracking_threads(tmp_path, log, resume_legacy=resume_legacy)
+
+        assert new_threads == [], "the disabled gate must return before any thread spawn"
+        decide.assert_not_called()  # the ledger decision never ran
+        resume_legacy.assert_not_called()  # the legacy in-process resume did not fire
+        logged = [c.args[0] for c in log.info.call_args_list]
+        assert logged.count("auto_resume.disabled_by_default") == 1
+
+    def test_master_enabled_runs_existing_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``BRUTEX_AUTO_RESUME=1`` opts in ⇒ the existing intent arm fires (green passthrough).
+
+        The master gate ON alone is sufficient for the intent arm (default-ON via
+        its own ``BRUTEX_PULL_INTENT_RESUME`` sub-gate) — the boot-resume path is
+        byte-identical to before the master gate existed.
+        """
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        self._clear_gates(monkeypatch)
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME", "1")
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        fired = threading.Event()
+        cli._start_auto_resume_on_boot(
+            tmp_path, mock.Mock(), intent_store=store, resume_pipeline=fired.set
+        )
+        assert fired.wait(timeout=10.0), "master gate ON ⇒ the intent resume must fire"
+
+    def test_master_explicit_zero_disables_with_honest_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit ``BRUTEX_AUTO_RESUME=0`` disables and logs the DELIBERATE state.
+
+        Review round 1 (minor 6): an explicit falsy value is a deliberate
+        operator choice — it logs ``auto_resume.disabled`` carrying the raw
+        ``env_value``, NOT the unset-default ``auto_resume.disabled_by_default``.
+        """
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        self._clear_gates(monkeypatch)
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME", "0")
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        resume_pipeline = mock.Mock()
+        log = mock.Mock()
+
+        new_threads = _call_gate_tracking_threads(
+            tmp_path, log, intent_store=store, resume_pipeline=resume_pipeline
+        )
+
+        assert new_threads == []
+        resume_pipeline.assert_not_called()
+        disabled = [c for c in log.info.call_args_list if c.args[0] == "auto_resume.disabled"]
+        assert len(disabled) == 1
+        assert disabled[0].kwargs["env_value"] == "0"
+        info_events = [c.args[0] for c in log.info.call_args_list]
+        assert "auto_resume.disabled_by_default" not in info_events
+
+    def test_master_junk_value_disables_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A junk master value still disables (fail-safe) but is LOUD, never silent.
+
+        Review round 1 (minor 6): an unrecognised token is a probable typo — it
+        logs ONE WARNING ``auto_resume.junk_value_disabled`` carrying the raw
+        value, so the operator who wrote ``BRUTEX_AUTO_RESUME=maybe`` learns why
+        auto-resume never armed instead of reading the misleading
+        ``disabled_by_default`` line.
+        """
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        self._clear_gates(monkeypatch)
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME", "maybe")
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        resume_pipeline = mock.Mock()
+        log = mock.Mock()
+
+        new_threads = _call_gate_tracking_threads(
+            tmp_path, log, intent_store=store, resume_pipeline=resume_pipeline
+        )
+
+        assert new_threads == []
+        resume_pipeline.assert_not_called()
+        junk = [
+            c for c in log.warning.call_args_list if c.args[0] == "auto_resume.junk_value_disabled"
+        ]
+        assert len(junk) == 1
+        assert junk[0].kwargs["env_value"] == "maybe"
+        info_events = [c.args[0] for c in log.info.call_args_list]
+        assert "auto_resume.disabled_by_default" not in info_events
+
+
+class TestDisabledPendingIntentVisibility:
+    """DEC-AUTO-RESUME-DEFAULT-OFF-001 review round 1 (MAJOR 2) — no silent rot.
+
+    With the master gate at its default OFF, a leftover ``.pull_intent.json``
+    must SURFACE — one ``auto_resume.disabled_with_pending_intent`` WARNING plus
+    the critical :class:`~brutex.dashboard.pull_intent.ResumeBanner` payload
+    with the three remediations — instead of sitting invisible until someone
+    flips the gate months later. Best-effort by contract: a probe/banner error
+    logs ``auto_resume.intent_probe_failed`` and boot continues.
+    """
+
+    def test_pending_intent_warns_and_sets_critical_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Intent present + gate disabled ⇒ ONE WARNING + the critical banner payload."""
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        log = mock.Mock()
+
+        new_threads = _call_gate_tracking_threads(
+            tmp_path, log, intent_store=store, resume_pipeline=mock.Mock()
+        )
+
+        assert new_threads == []
+        warned = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "auto_resume.disabled_with_pending_intent"
+        ]
+        assert len(warned) == 1
+        assert warned[0].kwargs["path"] == str(store.path)
+        payload = store.banner.snapshot()
+        assert payload is not None, "the pending-intent banner must be set"
+        assert payload["level"] == "critical"
+        # The honest, actionable remediations — all three named.
+        assert "BRUTEX_AUTO_RESUME=1" in payload["message"]
+        assert "delete the intent file" in payload["message"]
+        assert "manually" in payload["message"]
+        assert "interrupted" in payload["message"]
+
+    def test_no_intent_stays_quiet_and_sets_no_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No intent on disk ⇒ the existing quiet disabled log only — no WARN, no banner."""
+        from brutex.dashboard.pull_intent import PullIntentStore
+
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        store = PullIntentStore(tmp_path)  # nothing persisted
+        log = mock.Mock()
+
+        _call_gate_tracking_threads(tmp_path, log, intent_store=store, resume_pipeline=mock.Mock())
+
+        assert log.warning.call_args_list == []
+        assert store.banner.snapshot() is None
+        logged = [c.args[0] for c in log.info.call_args_list]
+        assert logged.count("auto_resume.disabled_by_default") == 1
+
+    def test_no_store_probes_lake_root_and_warns_without_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With NO intent store (its boot construction failed) the path probe still warns.
+
+        The probe derives ``<lake>/.pull_intent.json`` from the lake root
+        directly; there is no banner surface without a store, so the WARNING is
+        the honest maximum — never a crash, never silence.
+        """
+        from brutex.dashboard.pull_intent import PULL_INTENT_FILENAME
+
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        (tmp_path / PULL_INTENT_FILENAME).write_text("{}", encoding="utf-8")
+        log = mock.Mock()
+
+        _call_gate_tracking_threads(tmp_path, log, intent_store=None, resume_pipeline=None)
+
+        warned = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "auto_resume.disabled_with_pending_intent"
+        ]
+        assert len(warned) == 1
+        assert warned[0].kwargs["path"] == str(tmp_path / PULL_INTENT_FILENAME)
+
+    def test_probe_error_never_breaks_boot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising probe (exploding store) logs ``intent_probe_failed`` — boot continues."""
+
+        class _ExplodingStore:
+            @property
+            def path(self) -> Path:
+                raise RuntimeError("boom-intent-path")
+
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        log = mock.Mock()
+
+        # Must NOT raise — the guard converts the failure into one warning line.
+        _call_gate_tracking_threads(
+            tmp_path, log, intent_store=_ExplodingStore(), resume_pipeline=None
+        )
+
+        failed = [
+            c for c in log.warning.call_args_list if c.args[0] == "auto_resume.intent_probe_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0].kwargs["error_type"] == "RuntimeError"
+        logged = [c.args[0] for c in log.info.call_args_list]
+        assert logged.count("auto_resume.disabled_by_default") == 1

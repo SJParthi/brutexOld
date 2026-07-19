@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -39,6 +40,7 @@ from brutex.adapters.groww.pull_singleflight import (
     pull_lease_guard,
     pull_singleflight_lock,
 )
+from brutex.calendars.market_hours import guard_active_default
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S, PullWatchdog
@@ -219,7 +221,14 @@ def _finish_detail(result: object) -> str:
 def is_pull_halt(exc: BaseException) -> bool:
     """True iff *exc* is a pull-wide global-stop (halts every window), not a per-symbol failure.
 
-    Mirrors the ingest spines' ``_GLOBAL_STOP_ERRORS`` set (DEC-LAKE-WRITE-HALT-001 /
+    Matches the ingest spines' ``_GLOBAL_STOP_ERRORS`` set MINUS one DELIBERATE
+    carve-out: :class:`~brutex.adapters.ingest_common.PullCancelled`
+    (DEC-JOB-COOPERATIVE-CANCEL-001) IS a spine global-stop (it halts every
+    remaining window) but is NOT a pull halt here — an operator's cooperative
+    cancel must never fire the CRITICAL Telegram pull-halt alert nor read as an
+    ``error`` terminal (the exclusion is regression-pinned; a future "restore
+    the mirror" refactor fails that test loudly). The matched set
+    (DEC-LAKE-WRITE-HALT-001 /
     quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 / the TERMINAL Groww auth failure — a
     dead credential / an exhausted re-mint budget, DEC-GROWW-AUTH-HALT-001, consulted
     via :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` so the RETRYABLE
@@ -244,13 +253,18 @@ def is_pull_halt(exc: BaseException) -> bool:
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import VendorDownError
     from brutex.adapters.groww.errors import is_terminal_auth_failure
-    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt, MarketHoursHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
     return isinstance(
         exc,
         (
             LakeWriteHalt,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: a pull crossed into the NSE
+            # market-hours window and halted to free the shared Groww account for
+            # TickVault's live feed — a pull-wide graceful stop, alerted like a
+            # LakeWriteHalt if it escapes to the job layer.
+            MarketHoursHalt,
             # The two quota classes are DORMANT under Groww (no daily quota, no
             # tracker constructed anywhere — DEC-QUOTA-VERDICT-MOOT-001) but
             # deliberately KEPT: they are the raise-path phone-alert net that
@@ -283,6 +297,23 @@ class _Invalidatable(Protocol):
 def _daemon_spawn(fn: Callable[[], None]) -> None:  # pragma: no cover — real-thread default
     """Run *fn* in a fire-and-forget daemon thread (the live default)."""
     threading.Thread(target=fn, daemon=True).start()
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedPullState:
+    """The last PULL-kind run's snapshot + its run correlation id (immutable).
+
+    DEC-OPERATOR-HEALTH-TRUTH-001 (hostile-review M2 fix): the shared job slot
+    also runs the SWEEP, whose ``PullProgress.start`` RESETS the shared tracker
+    — so the last pull's terminal state must be retained SEPARATELY or a halted
+    pull's red outcome is wiped by the next sweep. ``pull_id`` is the run's
+    correlation id (``""`` for a run-less deferral/refusal record), letting the
+    outcome probe correlate the un-timestamped verdict holder with the EXACT
+    run this snapshot describes — never a stale verdict over a different run.
+    """
+
+    snapshot: ProgressSnapshot
+    pull_id: str
 
 
 class BackgroundPullJob:
@@ -416,6 +447,7 @@ class BackgroundPullJob:
         on_run_end: FinallyHook | None = None,
         journal_heartbeat_interval_s: float = ALIVE_LOG_MIN_INTERVAL_S,
         journal_clock: Callable[[], float] = time.monotonic,
+        market_hours_guard: Callable[[], bool] = guard_active_default,
     ) -> None:
         self._progress = progress if progress is not None else PullProgress()
         self._spawn = spawn
@@ -464,6 +496,14 @@ class BackgroundPullJob:
         #: and before the single-flight release, in its OWN try/except. Production wiring:
         #: ``SessionRateController.clear_meter`` (the C0 cross-pull meter-leak fix).
         self._on_run_end = on_run_end
+        #: Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): a zero-arg
+        #: ``() -> bool`` predicate returning ``True`` when a vendor pull must be
+        #: DEFERRED because the clock is inside the NSE market-hours window
+        #: ``[08:45, 15:35)`` IST on a trading day AND the guard is enabled. The
+        #: default resolves the live clock + env kill switch; tests inject a lambda.
+        #: Consulted ONLY for :data:`JOB_KIND_PULL` starts (the Greeks-backfill /
+        #: sweep kinds make no vendor calls and stay exempt).
+        self._market_hours_guard = market_hours_guard
         self._lock = threading.Lock()
         self._running = False
         #: The CURRENT run's job kind (DEC-RATE-METER-LIFECYCLE-001) — :data:`JOB_KIND_PULL`
@@ -472,6 +512,15 @@ class BackgroundPullJob:
         #: AttributeError; stamped in :meth:`start` under the claim lock, strictly AFTER
         #: the single-flight refusal (a refused start never overwrites the running kind).
         self._job_kind: str = JOB_KIND_PULL
+        #: The last PULL-kind run's RETAINED terminal snapshot + run id
+        #: (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2/m5): survives the
+        #: shared tracker being reset by a later SWEEP start, so a halted
+        #: pull's red outcome is never wiped into a masked green. Stamped in
+        #: :meth:`_run`'s identity-gated ``finally`` (real runs) and via
+        #: :meth:`_retain_pull_terminal` (the run-less deferral/refusal
+        #: records); read by :meth:`last_pull_state`. ``None`` until the first
+        #: PULL-kind start/deferral.
+        self._last_pull_terminal: RetainedPullState | None = None
         #: The CURRENT run's account-wide single-flight lock context manager (entered in
         #: :meth:`start`, exited in :meth:`_run`'s ``finally``). ``None`` between runs and
         #: when the guard is disabled (no resolvable lake root). Held for the WHOLE pull so
@@ -517,6 +566,24 @@ class BackgroundPullJob:
         #: DEC-PULL-BEAT-PERRUN-001 fix round). Reset on every :meth:`start`; guarded by
         #: :attr:`_lock`.
         self._foreign_beat_warned = False
+        #: Per-RUN cooperative-cancel token (DEC-JOB-COOPERATIVE-CANCEL-001): a
+        #: FRESH ``threading.Event`` is minted by every :meth:`start` under the
+        #: claim lock — the fresh-per-run object IS the identity gate (the
+        #: ``self._watchdog is watchdog`` law's twin), so a cancel requested
+        #: against run A can never leak into a later run B. The pull work
+        #: closures capture :meth:`cancel_requested` as their ``should_stop``
+        #: window-boundary probe. Initialised here so a pre-first-start read is
+        #: an honest ``False``, never an AttributeError.
+        self._cancel_event = threading.Event()
+        #: Whether the CURRENT run's work observes the cancel token at all
+        #: (DEC-JOB-COOPERATIVE-CANCEL-001 review fold): a surface whose spine has
+        #: NO ``should_stop`` seam (the standalone metadata pull —
+        #: ``pull_expiries_contracts`` threads no cancel probe) starts with
+        #: ``cancellable=False`` so :meth:`request_cancel` refuses HONESTLY instead
+        #: of setting a token the run can never observe (a fabricated
+        #: ``{"cancelling": true}``). Defaults ``True`` — every seam-carrying
+        #: surface is unchanged.
+        self._cancellable: bool = True
         #: Count of EMPTY-ambient direct-hook beats ACCEPTED while the run is LIVE —
         #: the documented, reviewer-sanctioned legacy envelope of :meth:`_beat`
         #: (unscoped threads / tests / unrebound hooks). OBSERVABILITY ONLY (review
@@ -539,6 +606,8 @@ class BackgroundPullJob:
         on_finally: FinallyHook | None = None,
         job_kind: str = JOB_KIND_PULL,
         pull_id: str | None = None,
+        cancellable: bool = True,
+        market_hours_exempt: bool = False,
     ) -> bool:
         """Launch *work* in the background over *total* units; return whether it started.
 
@@ -548,19 +617,37 @@ class BackgroundPullJob:
         empty id must never key the legacy back-compat channel); callers pass an
         explicit id only to correlate with an external job id / a deterministic test.
 
+        *cancellable* (DEC-JOB-COOPERATIVE-CANCEL-001 review fold) declares whether
+        this run's work observes the per-run cancel token — ``False`` for a surface
+        whose spine has NO ``should_stop`` seam (the standalone metadata pull), so
+        :meth:`request_cancel` refuses HONESTLY instead of fabricating a
+        ``cancelling: true`` the run can never observe. Default ``True`` keeps every
+        seam-carrying caller byte-identical.
+
         Single-flight: returns ``True`` and starts the job when idle; returns
         ``False`` (a no-op) when a pull is already running. O(1).
 
         When *cross_process_lock* is ``False`` the cross-process guards (layer 2
-        below) are SKIPPED for this run — the sanctioned use is a ZERO-WRITE run
-        (the dashboard's dry-run Greeks-backfill scan,
+        below) are SKIPPED for this run — the sanctioned uses are (a) a
+        ZERO-WRITE run (the dashboard's dry-run Greeks-backfill scan,
         DEC-GREEKS-BULK-REENRICH-001 fix round 2): a read-only report has no
         writes to protect and no vendor calls to rate-guard, so it must never
         exclude a REAL pull on the same lake for its whole O(files) scan (the
         CLI ``--dry-run`` lock-free posture, kept behaviourally equal across the
-        two surfaces). The IN-process single-flight (layer 1) still applies — a
-        second click on the same job is refused either way. Default ``True``
-        keeps every existing caller byte-identical.
+        two surfaces); and (b) a run whose CALLEE owns its own cross-process
+        lock discipline on the SAME flock file(s) — the crossverify route (the
+        runner's ``default_seams`` takes the account→lake→lease trio itself,
+        DEC-CROSSVERIFY-PRODUCER-001) and the SWEEP route (``cmd_sweep_all``
+        takes the G10 lake read-guard ``LOCK_SH`` across the bar PRELOAD only +
+        the G6 sweep single-flight — DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): a
+        job-level second acquire of the same file would SELF-CONFLICT (flock is
+        per open file description), and a whole-run EX hold would lock the
+        daily pull/crossverify out for the callee's wall time. The IN-process
+        single-flight (layer 1) still applies — a second click on the same job
+        is refused either way. Default ``True`` keeps every existing
+        ``JOB_KIND_PULL`` caller byte-identical; for a NON-pull *job_kind* the
+        cross-process pull-writer guards are never taken regardless of this
+        flag (DEC-SWEEP-JOB-LOCK-POSTURE-001 — see *job_kind* below).
 
         Two single-flight layers (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001):
 
@@ -607,9 +694,58 @@ class BackgroundPullJob:
         dry-run included) or :data:`JOB_KIND_SWEEP` (the zero-vendor-call brute-force
         sweep route). Read via :attr:`running_job_kind` by the ``/api/v1/pull/rate``
         probe so a 2-4-day sweep reads an honest "idle", never a site-wide red
-        "stalled" (the #1593 C5 fix). It changes NOTHING else — ``running``, the
-        progress feed and the single-flight are byte-identical for either kind.
+        "stalled" (the #1593 C5 fix). Since DEC-SWEEP-JOB-LOCK-POSTURE-001
+        (MIGRATION.md #1770) it ALSO governs the cross-process lock posture: the
+        pull-WRITER guards (lake EX flock + account lock + cross-host lease) are
+        taken for :data:`JOB_KIND_PULL` starts only — a sweep-kind job is a lake
+        READER whose exclusion is ``cmd_sweep_all``'s own G10 shared read-guard
+        + G6 results-root single-flight; the job wrapper holding the pull EX
+        flock made the sweep's G10 ``LOCK_SH`` acquire fail against its OWN
+        job's EX (``LakeBusyError`` — every real one-click sweep died at
+        launch). Everything else — ``running``, the progress feed, the
+        IN-process single-flight — stays byte-identical for either kind.
+
+        *market_hours_exempt* (DEC-GROWW-MARKET-HOURS-GUARD-001) exempts THIS start
+        from the market-hours START gate below — set ``True`` by callers that make
+        ZERO Groww API calls and are therefore safe to run inside the NSE trading
+        window: the dashboard Greeks-backfill start (a stamp-driven re-enrich over
+        ALREADY-STORED bars) and every ``--dry-run`` pull start (a synthetic adapter,
+        no vendor call). Default ``False`` gates a REAL ``JOB_KIND_PULL`` vendor pull.
+        Orthogonal to *job_kind*: a sweep is already exempt by kind; this flag covers
+        the vendor-free operations that still run under ``JOB_KIND_PULL``.
         """
+        # Market-hours START gate (DEC-GROWW-MARKET-HOURS-GUARD-001): refuse to BEGIN a
+        # VENDOR pull inside the NSE market-hours window ``[08:45, 15:35)`` IST on a
+        # trading day, so a manual/auto-resume click during the session never competes
+        # with TickVault's live feed for the shared Groww account. THREE exemptions —
+        # each makes ZERO Groww API calls, so each is safe in market hours:
+        #   (a) the sweep route (``job_kind != JOB_KIND_PULL`` — a brute-force sweep
+        #       reads the lake, never the vendor);
+        #   (b) any caller that sets ``market_hours_exempt=True`` — the dashboard's
+        #       Greeks-backfill start (a stamp-driven re-enrich over stored bars) AND
+        #       every ``--dry-run`` pull start (a synthetic adapter, no vendor call).
+        # Only a REAL (``JOB_KIND_PULL``, non-exempt) vendor pull is deferred here.
+        # Returns ``False`` with a distinct "deferred" detail + log, exactly like a
+        # refused single-flight (no watchdog built, no lock taken, no worker spawned →
+        # a clean no-op). The pull resumes on the next out-of-hours run.
+        if job_kind == JOB_KIND_PULL and not market_hours_exempt and self._market_hours_guard():
+            self._progress.fail(
+                "deferred — inside NSE market-hours window (08:45-15:35 IST); "
+                "pulls run outside market hours only"
+            )
+            # Retain the deferral as the last PULL terminal (DEC-OPERATOR-HEALTH-TRUTH-001,
+            # hostile-review m5): the gate fires BEFORE ``_job_kind`` is stamped, so
+            # without this a deferral following a SWEEP run was invisible to the
+            # outcome probe (the shared tracker's record was gated out as the
+            # sweep's). Passed the ATTEMPTED kind explicitly; no run id exists.
+            self._retain_pull_terminal(job_kind=job_kind)
+            _LOG.warning(
+                "pull.deferred.market_hours",
+                job_kind=job_kind,
+                detail=detail,
+                reason="inside NSE market-hours window (08:45-15:35 IST)",
+            )
+            return False
         # Build the per-run stall watchdog BEFORE the lock (DEC-PULL-STALL-DETECTION-001):
         # the worker beats it on real progress (per window / per post-fetch unit via the
         # emit_progress_beat seams), and its daemon timer declares the worker HUNG if no
@@ -639,6 +775,8 @@ class BackgroundPullJob:
             prior_pull_id = self._pull_id
             prior_foreign_beat_warned = self._foreign_beat_warned
             prior_empty_ambient_beats = self._empty_ambient_beats
+            prior_cancel_event = self._cancel_event
+            prior_cancellable = self._cancellable
             # Publish the run-identity token ATOMICALLY with the single-flight flag, under
             # the SAME lock the gates read it under. Otherwise a stale worker A's finally
             # could acquire the lock in the gap between ``_running = True`` and a later
@@ -657,6 +795,15 @@ class BackgroundPullJob:
             self._pull_id = run_pull_id
             self._foreign_beat_warned = False
             self._empty_ambient_beats = 0
+            # Fresh per-run cancel token (DEC-JOB-COOPERATIVE-CANCEL-001): the
+            # IDENTITY gate — a cancel set against a PRIOR run can never hit
+            # this run (a stale request dies with its own Event object). The
+            # per-run cancellable flag rides the SAME claim lock (a
+            # no-cancel-seam surface — cancellable=False — makes
+            # request_cancel refuse honestly instead of setting a token the
+            # run can never observe).
+            self._cancel_event = threading.Event()
+            self._cancellable = cancellable
         # Cross-process account-wide single-flight gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001).
         # Taken AFTER the in-process flag (so a same-process double-click is filtered by the
         # cheap flag first) but BEFORE any work is spawned. On contention a peer process is
@@ -665,7 +812,18 @@ class BackgroundPullJob:
         # A resolver returning None DISABLES the guard (dry-run / test). Done outside
         # ``self._lock`` — it does (fast, non-blocking) filesystem I/O, and the flag is
         # already claimed so no other start can race in.
-        if cross_process_lock:
+        # DEC-SWEEP-JOB-LOCK-POSTURE-001 (MIGRATION.md #1770): the guards below are the
+        # lake PULL-WRITER's exclusion (the lake-root EX flock + the account lock + the
+        # cross-host lease), so they are taken for ``JOB_KIND_PULL`` ONLY. A sweep-kind
+        # job is a lake READER making ZERO vendor calls; holding the pull EX flock for
+        # its whole run made ``cmd_sweep_all``'s own G10 ``lake_read_guard``
+        # (``LOCK_SH | LOCK_NB`` on the SAME lock file, from a second fd) fail against
+        # the job's OWN held EX — every real one-click dashboard sweep died at launch
+        # with ``LakeBusyError`` ("a pull/heal is running against this lake"). The
+        # sweep's correct cross-process exclusion lives INSIDE ``cmd_sweep_all``: the
+        # G10 SH read-guard vs a real pull/heal's EX (held across the bar preload) plus
+        # the G6 results-root sweep single-flight — both untouched here.
+        if cross_process_lock and job_kind == JOB_KIND_PULL:
             if not self._acquire_singleflight():
                 with self._lock:
                     # Roll back the in-process flag we just claimed. No identity gate is needed
@@ -686,15 +844,25 @@ class BackgroundPullJob:
                     self._pull_id = prior_pull_id
                     self._foreign_beat_warned = prior_foreign_beat_warned
                     self._empty_ambient_beats = prior_empty_ambient_beats
+                    self._cancel_event = prior_cancel_event
+                    self._cancellable = prior_cancellable
+                # Retain the refusal record as the last PULL terminal
+                # (DEC-OPERATOR-HEALTH-TRUTH-001): the outcome probe then reads
+                # the honest ``refused_busy`` even after a later sweep reuses
+                # the shared tracker. ATTEMPTED kind — a refused sweep start
+                # never masquerades as a pull outcome; no run id was minted.
+                self._retain_pull_terminal(job_kind=job_kind)
                 return False
         else:
-            # ZERO-WRITE run (see the docstring): neither cross-process lock is
-            # taken, so a concurrent REAL pull on the same lake is unaffected.
-            # Both guard slots are pinned to None so _run's finally release is a
-            # no-op for this run (they are already None between runs; this makes
-            # the skip explicit rather than incidental).
+            # ZERO-WRITE run (``cross_process_lock=False`` — see the docstring) or a
+            # NON-PULL job kind (a lake READER — DEC-SWEEP-JOB-LOCK-POSTURE-001):
+            # no cross-process pull-writer guard is taken, so a concurrent REAL pull
+            # on the same lake is unaffected. The guard slots are pinned to None so
+            # _run's finally release is a no-op for this run (they are already None
+            # between runs; this makes the skip explicit rather than incidental).
             self._singleflight = None
             self._account_singleflight = None
+            self._lease = None
         self._ledger_synced = ledger_synced
         self._pair_progress = False  # per-run reset; a phase opts in via set_phase
         self._progress.start(total=total, detail=detail)
@@ -883,10 +1051,20 @@ class BackgroundPullJob:
         ``finally`` when the thread actually exits; a wedge that never exits keeps the
         flag held (honest — the zombie still owns the lake; a process restart releases the
         ``flock`` on fd close, and the CRITICAL alert + marker make the wedge LOUD, never
-        silent). The timer keeps polling so a later heartbeat (the greeks/prebuild/movers
-        seams now beat — the false-positive class is closed) fires the recovery edge and
-        :meth:`_on_recovered` clears the marker. Identity-gated: a late edge for a
-        superseded run never marks a newer run.
+        silent). The timer keeps polling so a later heartbeat fires the recovery edge and
+        :meth:`_on_recovered` clears the marker. HONESTY RECONCILE
+        (DEC-HEAL-SCAN-LIVENESS-BEATS-001): the earlier "the greeks/prebuild/movers seams
+        now beat — the false-positive class is closed" claim here was FALSIFIED by
+        production forensics — the L2 post-pull HEAL SCAN (O(files), 36 min over 101,682
+        files) and the synchronous drain-time window-ledger FULL SAVE (a 12.96 s
+        ``save_slow`` over 68,234 rows) emitted ZERO beats, so this edge falsely fired
+        ``stalled_suspect`` for ~27 min on a provably-healthy run. Those two surfaces now
+        beat too (per-target + per-file inside ``lake_heal.heal_after_pull``'s scan +
+        per healed finding; entry/completion beats around
+        ``window_ledger_store.save_window_ledger``). The class is NARROWED, not closed:
+        any FUTURE >timeout silent stage on the worker re-opens it — the safe failure
+        direction stays a loud false SUSPECT, never a masked true stall.
+        Identity-gated: a late edge for a superseded run never marks a newer run.
 
         The whole body is wrapped in its own ``try/except`` (best-effort): an alert or
         progress call that raises is logged + swallowed so it can never kill the daemon
@@ -1153,6 +1331,19 @@ class BackgroundPullJob:
                     # let a stale worker clobber a newer run.
                     if self._watchdog is watchdog:
                         self._running = False
+                        # Retain THIS run's terminal snapshot when it was a PULL
+                        # (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2): the
+                        # shared tracker is reset by the NEXT start (a sweep
+                        # included), so the honest last-pull outcome — a halted
+                        # pull's red included — must survive here, keyed with the
+                        # run id so the outcome probe can correlate the verdict
+                        # holder with EXACTLY this run. Inline (self._lock is held
+                        # and non-reentrant — _retain_pull_terminal would deadlock);
+                        # lock order job → progress, a pinned-safe leaf read.
+                        if self._job_kind == JOB_KIND_PULL:
+                            self._last_pull_terminal = RetainedPullState(
+                                self._progress.snapshot(), run_pull_id
+                            )
                         # Collect the run's ACCEPTED empty-ambient direct-beat tally for
                         # the observability-only debug flush below (review fold MINOR —
                         # logged OUTSIDE the lock, mirroring
@@ -1436,6 +1627,136 @@ class BackgroundPullJob:
         with self._lock:
             return self._job_kind if self._running else None
 
+    def request_cancel(self, *, expected_kind: str | None = None) -> bool:
+        """Request a COOPERATIVE cancel of the RUNNING job — O(1), thread-safe.
+
+        The bool-only convenience wrapper over :meth:`request_cancel_verdict`
+        (every pre-existing caller/test keeps its exact contract); see that
+        method for the full semantics + the refusal-reason vocabulary.
+        """
+        cancelling, _reason = self.request_cancel_verdict(expected_kind=expected_kind)
+        return cancelling
+
+    def request_cancel_verdict(
+        self, *, expected_kind: str | None = None
+    ) -> tuple[bool, str | None]:
+        """Request a COOPERATIVE cancel; return ``(cancelling, refusal_reason)``.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001. Sets the CURRENT run's per-run cancel
+        token so the work's ``should_stop`` probe (:meth:`cancel_requested`,
+        captured by the route work closures and threaded to the pull spines'
+        WINDOW boundary) reads ``True`` from the next boundary on. Returns
+        ``(True, None)`` iff a run was live to cancel; an idle job is a
+        ``(False, "idle")`` no-op — a between-runs request can never pre-poison
+        a future run (the fresh-Event-per-start identity gate).
+
+        The REASON (fix round 4 — the wire previously conflated "idle" with
+        "running-but-uncancellable", so the UI rendered "No running pull to
+        cancel" directly above a visibly-running metadata pull) is a stable
+        refusal vocabulary: ``"idle"`` (no run in flight), ``"wrong_kind"``
+        (a run of another kind holds the single-flight job), and
+        ``"uncancellable"`` (the RUNNING surface has no cancel seam — the
+        standalone metadata pull); ``None`` on success. Server-side behaviour
+        is byte-identical — this only NAMES the already-distinguished branch.
+
+        *expected_kind* (review fold — the ``clear_meter(expected=)``
+        DEC-RATE-METER-LIFECYCLE-001 precedent) makes the kind gate a
+        COMPARE-AND-SET under the ONE lock hold: a non-``None`` value refuses
+        (``"wrong_kind"``) unless the RUNNING job's kind matches, so a route
+        can never land its cancel on a job that transitioned kinds between a
+        separate kind read and the cancel (the check-then-act race the old
+        two-lock route sequence carried). A run started ``cancellable=False``
+        (a no-cancel-seam surface — the standalone metadata pull) is ALSO
+        refused honestly: its work never observes the token, so setting it
+        would fabricate a ``cancelling: true``. HONEST latency (Golden Rule
+        #10): cooperative — the current window's fetch + durable write always
+        complete first; a wedged worker ignores it (the WEDGED escalation
+        stays that class's honest terminal).
+        """
+        with self._lock:
+            if not self._running:
+                return (False, "idle")
+            if expected_kind is not None and self._job_kind != expected_kind:
+                return (False, "wrong_kind")
+            run_pull_id = self._pull_id
+            job_kind = self._job_kind
+            if not self._cancellable:
+                refused = True
+            else:
+                refused = False
+                self._cancel_event.set()
+        if refused:
+            _LOG.warning(
+                "pull_job.cancel_refused_uncancellable",
+                pull_id=run_pull_id,
+                job_kind=job_kind,
+                note="the running surface has no cancel seam — refused honestly",
+            )
+            return (False, "uncancellable")
+        _LOG.warning(
+            "pull_job.cancel_requested",
+            pull_id=run_pull_id,
+            job_kind=job_kind,
+            note="cooperative — the job stops at its next safe boundary",
+        )
+        return (True, None)
+
+    def cancel_requested(self) -> bool:
+        """``True`` iff a run is LIVE and the CURRENT run's cancel token is set — O(1).
+
+        The ``should_stop`` probe the work closures capture
+        (DEC-JOB-COOPERATIVE-CANCEL-001). Reads ``_running`` AND the current
+        Event under ONE lock hold so a stale run's token (already replaced by
+        a newer :meth:`start`) is never consulted AND an idle job never
+        reports ``cancelling: true`` after a cancelled run settles (review
+        fold — the work closures only probe while ``_running`` is ``True``,
+        so the window-boundary semantics are unchanged).
+        """
+        with self._lock:
+            return self._running and self._cancel_event.is_set()
+
+    def last_pull_state(self) -> RetainedPullState | None:
+        """The last PULL-kind run's snapshot + run id — O(1), sweep-proof.
+
+        DEC-OPERATOR-HEALTH-TRUTH-001 (hostile-review M2/m5 fix): the honest
+        last-pull-outcome projection must survive the shared job slot being
+        REUSED by the zero-vendor-call SWEEP — ``PullProgress.start`` resets the
+        shared tracker, so a halted pull's ``error`` snapshot would otherwise be
+        WIPED by the next sweep and the classifier could fall back to a
+        possibly-stale verdict (the masked-green class). This returns:
+
+        * the LIVE snapshot + run id while a PULL-kind run is in flight;
+        * otherwise the RETAINED terminal snapshot of the last PULL-kind run
+          (stamped in :meth:`_run`'s identity-gated ``finally``), which also
+          covers the market-hours START deferral and the single-flight
+          refusals (each stamps via :meth:`_retain_pull_terminal` with an
+          EMPTY run id — no run ever existed);
+        * ``None`` when no pull has ever run/deferred on this slot.
+
+        The carried ``pull_id`` lets the outcome probe consult the
+        (un-timestamped) last-pull-verdict holder ONLY when the verdict was
+        stamped by the SAME run the snapshot describes — a stale verdict can
+        never colour a different run's outcome.
+        """
+        with self._lock:
+            if self._running and self._job_kind == JOB_KIND_PULL:
+                return RetainedPullState(self._progress.snapshot(), self._pull_id)
+            return self._last_pull_terminal
+
+    def _retain_pull_terminal(self, *, job_kind: str, pull_id: str = "") -> None:
+        """Retain the just-recorded snapshot as the last PULL terminal (O(1)).
+
+        DEC-OPERATOR-HEALTH-TRUTH-001: called at the run-less refusal sites —
+        the market-hours START deferral and the cross-process single-flight
+        refusal — with the ATTEMPTED *job_kind* (a refused SWEEP start must
+        never masquerade as a pull outcome). *pull_id* stays ``""`` there: no
+        run was minted, so no verdict can ever correlate with it.
+        """
+        if job_kind != JOB_KIND_PULL:
+            return
+        with self._lock:
+            self._last_pull_terminal = RetainedPullState(self._progress.snapshot(), pull_id)
+
     @property
     def counters(self) -> CoverageCounters:
         """The incremental coverage counters fed by the write funnel — O(1)."""
@@ -1506,6 +1827,7 @@ __all__ = [
     "LakeRootResolver",
     "ProgressHook",
     "PullWork",
+    "RetainedPullState",
     "SingleflightFactory",
     "Spawner",
     "SuccessHook",

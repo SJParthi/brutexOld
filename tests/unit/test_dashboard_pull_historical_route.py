@@ -146,6 +146,10 @@ def _patch_historical(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any])
         # route now threads the DURABLE form-winner map too — captured for
         # assertion (fail-loud key access: dropping the wiring fails every test).
         captured["form_preference"] = kwargs["form_preference"]
+        # DEC-JOB-COOPERATIVE-CANCEL-001 (review fold): the direct-selection route
+        # threads the job's cancel probe — captured for assertion (fail-loud key
+        # access: dropping the wiring fails every test in this file).
+        captured["should_stop"] = kwargs["should_stop"]
         return HistoricalPullReport(
             dry_run=kwargs["dry_run"],
             intervals=tuple(kwargs["intervals"]),
@@ -465,6 +469,35 @@ def test_no_selection_is_honest_400(
     assert "no cached contracts matched" in resp.json()["detail"]
 
 
+def test_concurrent_registry_open_race_is_503_not_500(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A racing ``RegistryStore.open`` surfaces as a retryable 503, never a 500.
+
+    DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 review fold: offloading the
+    direct-arm resolution WIDENED the concurrency window on
+    ``RegistryStore.open`` (write-on-open — schema DDL + a ``schema_meta``
+    stamp), so two simultaneous launch clicks can now race a DuckDB
+    Transaction/Constraint exception → ``RegistryError``, which pre-guard
+    escaped ``run_in_threadpool`` uncaught → HTTP 500. The route maps it to an
+    honest 503 "registry busy — retry" (nothing launched, nothing corrupted;
+    fails-before verified by removing the guard: this reads 500).
+    """
+    from brutex.data.registry_store import RegistryError
+
+    _pin_creds_present(monkeypatch)
+
+    def _racing_open(*_a: object, **_k: object) -> object:
+        raise RegistryError("TransactionException: write-write conflict on schema_meta")
+
+    monkeypatch.setattr(app_module.RegistryStore, "open", _racing_open)
+    resp = client.post(
+        "/api/v1/universe/pull-historical", params={"contract": "NSE-NIFTY-01Jan20-100-CE"}
+    )
+    assert resp.status_code == 503
+    assert "registry busy" in resp.json()["detail"]
+
+
 # ── 400 arms (bad interval / expiry) ──────────────────────────────────────────
 
 
@@ -502,16 +535,18 @@ def test_universe_page_pull_historical_button_removed(client: TestClient) -> Non
     fill is the pipeline's gated final fetch stage (DEC-UNIVERSE-PULL-CONSOLIDATE-001).
 
     The route ``/api/v1/universe/pull-historical`` itself still exists (covered by
-    this file's route tests); it is no longer surfaced as its own button. The ONE
-    ``pullPipelineBtn`` runs the gated chain that includes the historical pull.
+    this file's route tests); it is no longer surfaced as its own button. Since
+    the round-6 two-button split (DEC-PULL-SCOPED-ALL-ONECLICK-001) the
+    selection-aware ``pullFnoBtn`` runs the gated chain that includes the
+    historical pull.
     """
     resp = client.get("/universe")
     assert resp.status_code == 200
     # the redundant per-stage historical button is gone (no null .onclick at load)
     assert 'id="pullHistBtn"' not in resp.text
     assert 'getElementById("pullHistBtn")' not in resp.text
-    # the ONE pull button drives the gated pipeline (which includes the historical stage)
-    assert 'id="pullPipelineBtn"' in resp.text
+    # the ▶ Pull F&O button drives the gated pipeline (which includes the historical stage)
+    assert 'id="pullFnoBtn"' in resp.text
     assert "/api/v1/universe/pull-pipeline" in resp.text
 
 
@@ -782,6 +817,10 @@ def _patch_composite(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) 
         # the DURABLE form-winner map — captured for assertion (fail-loud key
         # access: dropping the wiring fails every composite-route test).
         captured["form_preference"] = kwargs["form_preference"]
+        # DEC-JOB-COOPERATIVE-CANCEL-001 (review fold): the composite route threads
+        # the job's cancel probe — captured for assertion (fail-loud key access:
+        # dropping the wiring fails every composite-route test).
+        captured["should_stop"] = kwargs["should_stop"]
         return _composite_report(names=names, skipped=skipped, dry_run=kwargs["dry_run"])
 
     monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake)
@@ -912,3 +951,45 @@ def test_universe_page_no_longer_sends_standalone_historical_query(client: TestC
     assert "pull-historical?enumerate=true&symbols=" not in resp.text
     # the single pipeline button posts the consolidated route instead
     assert "/api/v1/universe/pull-pipeline" in resp.text
+
+
+def test_direct_selection_receives_the_cancel_probe(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct-selection grammars thread should_stop into pull_contract_candles.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001 review fold (fails-before): this surface was
+    un-wired, so POST /api/v1/pull/cancel returned {"cancelling": true} while the
+    contract pull ran to completion — a fabricated success.
+    """
+    _pin_creds_present(monkeypatch)
+    captured = _captured()
+    _patch_historical(monkeypatch, captured)
+    _seed_registry(_lake_root(store))
+    resp = client.post("/api/v1/universe/pull-historical", params={"underlying": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    probe = captured["should_stop"]
+    assert callable(probe)
+    assert getattr(probe, "__name__", "") == "cancel_requested"
+    assert probe() is False  # idle after settle — the running gate reads honest False
+
+
+def test_composite_receives_the_cancel_probe(
+    ref_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ?symbols= composite threads should_stop into pull_historical_for_underlyings.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001 review fold (fails-before): this surface was
+    un-wired — the fabricated-cancel class's composite arm.
+    """
+    _pin_creds_present(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_composite(monkeypatch, captured)
+    resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(ref_client)["state"] == "done"
+    probe = captured["should_stop"]
+    assert callable(probe)
+    assert getattr(probe, "__name__", "") == "cancel_requested"
+    assert probe() is False  # idle after settle — the running gate reads honest False

@@ -109,9 +109,31 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "writes (aggs join + twin entry-ts sets) — engine artifacts, not "
         "lake bars (DEC-SWEEP-RESULTS-DEPTH-001)"
     ),
+    "brutex/dashboard/oneclick_artifacts.py": (
+        "display-zone read of the results-depth EQUITY sidecar "
+        "(<stem>.equity.parquet under sweep_runs/, run_id-keyed — the "
+        "trade_store writer/reader pair's stored series) for "
+        "/api/v1/oneclick/equity — engine artifacts, not lake bars; dedup "
+        "identity does not apply (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001)"
+    ),
+    "brutex/dashboard/composite_join.py": (
+        "display-zone read of the results-depth AGGS sidecars under "
+        "sweep_runs/ ((run_id, composite_score) columns only — the "
+        "trade_store writer/reader pair's artifacts) for the /results "
+        "?preset=composite join — engine artifacts, not lake bars; the "
+        "lake_read dedup chokepoint governs lake bar reads only "
+        "(DEC-RESULTS-CASCADE-VERDICT-JOIN-001)"
+    ),
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
         "bar/options lake — dedup identity does not apply"
+    ),
+    "brutex/data/lake_rust_ledger_render.py": (
+        "burn-in ROW-EQUIVALENCE readback — pq.read_table over the IN-MEMORY "
+        "just-rendered WINDOW-LEDGER parquet bytes (the rust arm vs the pyarrow "
+        "oracle, io.BytesIO — never a lake file, never bar/options rows); the "
+        "window_ledger_store sidecar class one seam over "
+        "(DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001)"
     ),
     "brutex/cli.py": (
         "wired: _LakeOptionBarSource._row_at keep-first + WARN via log_read_duplicates"

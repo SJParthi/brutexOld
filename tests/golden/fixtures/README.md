@@ -118,13 +118,47 @@ XSS (`r-hostile01`) twins.
 * Regenerate: `python tests/golden/generate_oneclick_fixture.py` then update
   the `_EXPECTED_SHA256` manifest in the test.
 
+### Results-store optional-column back-compat corpora (DEC-VIX-STAMP-WIRE-001)
+
+`results_store_pre_vix_columns.parquet` + `results_store_pre_deflated_sharpe.parquet`
+— the only *committed Parquet* fixtures (a `.gitignore` exception admits exactly
+`tests/golden/fixtures/*.parquet`). They freeze the two HISTORICAL
+`brutex/engine/results_store.py` on-disk layouts so the optional-column reader
+law is pinned against genuine legacy bytes:
+
+* **`results_store_pre_vix_columns.parquet`** — the exact pre-Stage-C layout
+  (ends `… deflated_sharpe, avg_entry_price, avg_exit_price`; NO
+  `vix_mean`/`vix_min`/`vix_max`). Byte-fidelity was PROVEN at generation time
+  by rendering the same rows through the actual pre-change
+  `ResultsStore._render_bytes` (git HEAD before Stage C) — identical SHA-256.
+  Loads with the VIX trio `None` (honest unknown — never a fabricated `0.0`)
+  while `deflated_sharpe` round-trips (one real value `0.25`, one null).
+* **`results_store_pre_deflated_sharpe.parquet`** — one optional-column
+  generation older (additionally lacks `deflated_sharpe`; every column the
+  current reader REQUIRES is present). Loads with `deflated_sharpe` AND the
+  trio `None`.
+
+* Generator: `../generate_results_store_backcompat_fixtures.py`
+  (deterministic; real `ResultRow` values + the store's exact determinism
+  knobs; the legacy column lists are deliberately FROZEN local copies — a
+  committed legacy file never tracks the live schema).
+* Golden gate: `../test_results_store_backcompat_golden.py` — SHA-256
+  manifest + generator-reproduces-committed-bytes + the loads-as-`None` law +
+  the lossless re-flush-to-current-schema migration.
+* Regenerate: `.venv/bin/python
+  tests/golden/generate_results_store_backcompat_fixtures.py` then update the
+  `_EXPECTED_SHA256` manifest in the gate (byte pins are polars/zstd-build
+  sensitive, same stance as `test_engine_sweep_run_golden.py`).
+
 ## Status
 
 ✅ All Phase 2 corpora (#1–5, #7, #8, #9) are landed.
+✅ Results-store back-compat corpora (DEC-VIX-STAMP-WIRE-001) are landed.
 
 ## Decision
 
 DEC-PHASE1-SMOKE-AND-SKELETONS-001 (MIGRATION entry #251);
 DEC-PHASE2-TRUTH-TABLE-001 (MIGRATION entry #538);
 DEC-ENGINE-PAISA-ACCOUNTING-GOLDEN-001 (MIGRATION entry #544);
-DEC-PHASE2-CORPORA-001 (MIGRATION entry #548).
+DEC-PHASE2-CORPORA-001 (MIGRATION entry #548);
+DEC-VIX-STAMP-WIRE-001 (results-store optional-column back-compat corpora).

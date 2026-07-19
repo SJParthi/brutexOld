@@ -23,6 +23,12 @@ Currently exposes:
 - ``results_store`` — the deterministic sweep→Parquet results sink keyed by
   the BLAKE3 run-identity: idempotent, byte-reproducible writes with an O(1)
   read-back lookup + top-K leaderboard (DEC-RESULT-STORE-001).
+- ``lake_slice`` — the ONE COMMON lake-slice read (catalog-reconcile → L1
+  heal → window-bounded feed → keep-FIRST dedup) shared by the cascade
+  replay and the reference-stamp wiring (DEC-VIX-STAMP-WIRE-001).
+- ``reference_wire`` — the India-VIX stamper provider (lazy, once per run,
+  honest ``None`` degrade) + the pure per-combo ``aggregate_trade_vix``
+  mean/min/max fold. India VIX stays REFERENCE ONLY (CLAUDE.md §2 Rule 3).
 - ``trade_sim`` — the Stage-2 spot trade-simulation walker: consumes a
   ``bool``-per-bar entry-signal stream + a ``CandleBar`` feed and emits
   int64-paisa :class:`~brutex.metrics.types.ClosedTrade` round-trips
@@ -43,7 +49,15 @@ Re-exports the combo-mask primitives + the Stage-1A matrix builder. As
 subsequent modules land, their public symbols will be re-exported here.
 """
 
-from brutex.engine import combo_mask, results_report, results_store, stage1a, trade_sim
+from brutex.engine import (
+    combo_mask,
+    lake_slice,
+    reference_wire,
+    results_report,
+    results_store,
+    stage1a,
+    trade_sim,
+)
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
     VOCAB_BITS,
@@ -54,6 +68,13 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_n,
     mask_to_bits,
     popcount,
+)
+from brutex.engine.lake_slice import load_lake_slice
+from brutex.engine.reference_wire import (
+    VIX_LAKE_SYMBOL,
+    aggregate_trade_vix,
+    vix_stamper_provider,
+    warn_stale_vix_derived,
 )
 from brutex.engine.results_report import results_show_report
 from brutex.engine.results_store import (
@@ -68,28 +89,22 @@ from brutex.engine.stage1a import (
     build_bar_bits,
 )
 from brutex.engine.trade_sim import (
-    DEFAULT_FILL_POLICY,
-    FillPolicy,
-    LevelFill,
-    SameBarTie,
     TradeSimWalker,
     simulate_trades,
 )
 
 __all__ = [
     "ANCHOR_DEPENDENT_MASK",
-    "DEFAULT_FILL_POLICY",
     "MAX_VOCAB_BITS",
+    "VIX_LAKE_SYMBOL",
     "VOCAB_BITS",
-    "FillPolicy",
     "FlushResult",
-    "LevelFill",
     "ResultRow",
     "ResultsStore",
     "ResultsStoreError",
-    "SameBarTie",
     "Stage1AMatrixBuilder",
     "TradeSimWalker",
+    "aggregate_trade_vix",
     "bits_to_mask",
     "build_bar_bits",
     "combo_mask",
@@ -97,12 +112,17 @@ __all__ = [
     "evaluate_mask",
     "iter_masks_k_of_bits",
     "iter_masks_k_of_n",
+    "lake_slice",
+    "load_lake_slice",
     "mask_to_bits",
     "popcount",
+    "reference_wire",
     "results_report",
     "results_show_report",
     "results_store",
     "simulate_trades",
     "stage1a",
     "trade_sim",
+    "vix_stamper_provider",
+    "warn_stale_vix_derived",
 ]

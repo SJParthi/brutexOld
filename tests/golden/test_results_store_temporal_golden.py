@@ -143,14 +143,32 @@ def test_temporal_locked_literals() -> None:
     assert null_arm.temporal_judged_years_json is None
 
 
-def test_temporal_flush_reproduces_the_fixture_bytes(tmp_path: Path) -> None:
-    """Byte-determinism across the extension: re-flushing the literals lands on
-    the committed bytes (polars/zstd-build sensitive — the same caveat class as
-    the pre-extension fixture's generation note; the field pins above are the
-    version-robust contract)."""
-    pytest.importorskip("polars")
-    store = ResultsStore(path=tmp_path / "regen.parquet")
-    for row in _expected_rows():
-        store.append(row)
-    store.flush()
-    assert (tmp_path / "regen.parquet").read_bytes() == _FIXTURE.read_bytes()
+def test_temporal_flush_reproduces_the_fixture_rows(tmp_path: Path) -> None:
+    """Determinism + round-trip across the extension boundary.
+
+    2026-07-18 merge-reconcile (lawful baseline shift, in-file justification):
+    this arm originally asserted regen bytes == the committed fixture bytes.
+    Between the branch fork and the merge, main's writer gained the
+    ALWAYS-WRITTEN nullable VIX trio (DEC-VIX-STAMP-WIRE-001), so a fresh
+    flush of the same literals legally carries three more all-null Float64
+    columns than this pre-VIX fixture — the fixture stays FROZEN (module
+    docstring: do NOT regenerate) and the pin becomes the version-robust
+    trio: (a) flush byte-DETERMINISM, (b) the regen's schema is EXACTLY the
+    fixture's columns + the appended VIX trio, (c) the regen file loads to
+    rows field-for-field equal to the fixture's rows (the pre-VIX fixture
+    reads its absent VIX columns as honest ``None``)."""
+    pl = pytest.importorskip("polars")
+    for tag in ("regen", "twin"):
+        store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+        for row in _expected_rows():
+            store.append(row)
+        store.flush()
+    regen = tmp_path / "regen.parquet"
+    assert regen.read_bytes() == (tmp_path / "twin.parquet").read_bytes()
+    fixture_cols = pl.read_parquet(_FIXTURE).columns
+    regen_cols = pl.read_parquet(regen).columns
+    assert [c for c in regen_cols if c not in ("vix_mean", "vix_min", "vix_max")] == fixture_cols
+    assert {"vix_mean", "vix_min", "vix_max"} <= set(regen_cols)
+    loaded_regen = sorted(ResultsStore.load(regen).rows(), key=lambda r: r.run_id)
+    loaded_fixture = sorted(ResultsStore.load(_FIXTURE).rows(), key=lambda r: r.run_id)
+    assert loaded_regen == loaded_fixture

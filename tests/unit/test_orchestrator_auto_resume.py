@@ -23,12 +23,15 @@ from dataclasses import dataclass
 
 import pytest
 from brutex.orchestrator.auto_resume import (
+    AUTO_RESUME_MASTER_ENV,
     AUTO_RESUME_ON_BOOT_ENV,
     IncompletePull,
     LedgerLike,
     ResumeVerdict,
+    classify_auto_resume_master,
     detect_incomplete_pull,
     maybe_resume_on_boot,
+    resolve_auto_resume_master,
     resolve_auto_resume_on_boot,
 )
 
@@ -88,6 +91,107 @@ def test_resolve_flag_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatc
     assert resolve_auto_resume_on_boot() is True
     monkeypatch.delenv(AUTO_RESUME_ON_BOOT_ENV, raising=False)
     assert resolve_auto_resume_on_boot() is False
+
+
+# ── resolve_auto_resume_master (the MASTER kill switch, default OFF) ─────────
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "on", " on ", "ON"])
+def test_resolve_master_truthy_values_enable(value: str) -> None:
+    """Every explicit truthy value (case / whitespace-insensitive) enables the master gate."""
+    assert resolve_auto_resume_master({AUTO_RESUME_MASTER_ENV: value}) is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "  ", "maybe", "2"])
+def test_resolve_master_falsy_or_unrecognised_disable(value: str) -> None:
+    """A falsy / blank / unrecognised (junk) value keeps the safe default-OFF.
+
+    Junk still DISABLES (fail-safe, never raises — a gate can never be enabled
+    by accident) but is no longer silent: the boot gate classifies it via
+    :func:`classify_auto_resume_master` and logs a WARNING
+    (``auto_resume.junk_value_disabled`` — DEC-AUTO-RESUME-DEFAULT-OFF-001
+    review round 1, minor 6). The boolean surface stays disabled either way.
+    """
+    assert resolve_auto_resume_master({AUTO_RESUME_MASTER_ENV: value}) is False
+
+
+def test_resolve_master_unset_disables() -> None:
+    """An env WITHOUT the key returns False — the default-OFF the whole fix delivers."""
+    assert resolve_auto_resume_master({}) is False
+
+
+def test_resolve_master_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no env injected, the master resolver reads the real ``os.environ``."""
+    monkeypatch.setenv(AUTO_RESUME_MASTER_ENV, "yes")
+    assert resolve_auto_resume_master() is True
+    monkeypatch.delenv(AUTO_RESUME_MASTER_ENV, raising=False)
+    assert resolve_auto_resume_master() is False
+
+
+def test_resolve_master_is_independent_of_the_legacy_sub_gate() -> None:
+    """The master gate reads ONLY ``BRUTEX_AUTO_RESUME`` — the legacy sub-gate cannot enable it.
+
+    A boot with the legacy ``BRUTEX_AUTO_RESUME_ON_BOOT=1`` set but the master
+    gate unset stays DISABLED (the master sits ABOVE the sub-gates).
+    """
+    assert resolve_auto_resume_master({AUTO_RESUME_ON_BOOT_ENV: "1"}) is False
+
+
+# ── classify_auto_resume_master (the honest gate verdict) ───────────────────
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "on", " on ", "ON"])
+def test_classify_master_truthy_is_enabled(value: str) -> None:
+    """A truthy token classifies ``enabled`` with the raw value echoed."""
+    verdict = classify_auto_resume_master({AUTO_RESUME_MASTER_ENV: value})
+    assert verdict.enabled is True
+    assert verdict.state == "enabled"
+    assert verdict.raw == value
+
+
+def test_classify_master_unset_is_default_off() -> None:
+    """An unset key reads ``default_off`` with ``raw=None`` (nothing was chosen)."""
+    verdict = classify_auto_resume_master({})
+    assert verdict == classify_auto_resume_master({})  # value-equal dataclass
+    assert (verdict.enabled, verdict.state, verdict.raw) == (False, "default_off", None)
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_classify_master_blank_is_default_off(value: str) -> None:
+    """A blank value classifies like unset (``default_off``) but echoes the raw string."""
+    verdict = classify_auto_resume_master({AUTO_RESUME_MASTER_ENV: value})
+    assert (verdict.enabled, verdict.state, verdict.raw) == (False, "default_off", value)
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF", " No "])
+def test_classify_master_explicit_falsy_is_explicit_off(value: str) -> None:
+    """An explicit falsy token classifies ``explicit_off`` (a deliberate choice)."""
+    verdict = classify_auto_resume_master({AUTO_RESUME_MASTER_ENV: value})
+    assert (verdict.enabled, verdict.state, verdict.raw) == (False, "explicit_off", value)
+
+
+@pytest.mark.parametrize("value", ["maybe", "2", "yess", "enable"])
+def test_classify_master_junk_is_junk_off(value: str) -> None:
+    """An unrecognised token classifies ``junk_off`` — disabled, but loud at the gate."""
+    verdict = classify_auto_resume_master({AUTO_RESUME_MASTER_ENV: value})
+    assert (verdict.enabled, verdict.state, verdict.raw) == (False, "junk_off", value)
+
+
+@pytest.mark.parametrize(
+    "value", ["1", "true", "TRUE", "Yes", "on", "0", "false", "no", "off", "", "  ", "maybe", "2"]
+)
+def test_classify_and_resolve_master_can_never_drift(value: str) -> None:
+    """``resolve_auto_resume_master`` IS the classifier's boolean (one reader, no drift)."""
+    env = {AUTO_RESUME_MASTER_ENV: value}
+    assert resolve_auto_resume_master(env) is classify_auto_resume_master(env).enabled
+
+
+def test_classify_master_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no env injected, the classifier reads the real ``os.environ``."""
+    monkeypatch.setenv(AUTO_RESUME_MASTER_ENV, "junk-token")
+    assert classify_auto_resume_master().state == "junk_off"
+    monkeypatch.delenv(AUTO_RESUME_MASTER_ENV, raising=False)
+    assert classify_auto_resume_master().state == "default_off"
 
 
 # ── detect_incomplete_pull ──────────────────────────────────────────────────

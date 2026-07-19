@@ -137,12 +137,24 @@ class _FakeVerdict:
 
 
 class _FakeReport:
-    """Stub pull report — only ``.verdict`` is read on the job thread."""
+    """Stub pull report — ``.verdict`` + ``.to_dict()`` are read on the job thread.
+
+    Mirrors the ``BulkSpotReport`` surface the pull-all ``_work`` closure
+    consumes (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3): the closure
+    stamps ``report.verdict.to_dict()`` then returns ``report.to_dict()`` — a
+    Mapping — so ``pull_jobs._finish_detail`` can surface an emit-on-cancel
+    ``"note"``. This UNCANCELLED stub payload carries NO ``note`` key, so the
+    job headline stays the back-compat ``"done"``.
+    """
 
     @property
     def verdict(self) -> _FakeVerdict:
         """The stub verdict."""
         return _FakeVerdict()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Minimal uncancelled payload Mapping (no ``note`` → headline "done")."""
+        return {"dry_run": True}
 
 
 def _fake_pull_all_spot(instruments: list[Instrument], **kwargs: Any) -> _FakeReport:
@@ -293,10 +305,20 @@ def test_coverage_options_empty_when_no_lake_root(nolake_client: TestClient) -> 
 
 
 def test_preopen_symbols_empty_when_no_lake_root(nolake_client: TestClient) -> None:
-    """/api/v1/reports/preopen/symbols returns no symbols when no lake root is wired."""
+    """/api/v1/reports/preopen/symbols returns no symbols when no lake root is wired.
+
+    The payload keeps the SAME additive freshness-key shape as the real path
+    (DEC-STALENESS-CACHE-TRUTH-001 — a store without a filesystem lake has
+    trivially never observed a prebuild).
+    """
     resp = nolake_client.get("/api/v1/reports/preopen/symbols")
     assert resp.status_code == 200
-    assert resp.json() == {"symbols": []}
+    assert resp.json() == {
+        "symbols": [],
+        "basis": "day",
+        "basis_derived": True,
+        "derived_last_built": None,
+    }
 
 
 def test_db_candles_400_when_no_lake_root(nolake_client: TestClient) -> None:
@@ -359,7 +381,13 @@ def test_universe_summary_counts_wired_store(client: TestClient) -> None:
     """/api/v1/universe/summary tallies the wired store's single admitted index."""
     resp = client.get("/api/v1/universe/summary")
     assert resp.status_code == 200
-    assert resp.json() == {"index_count": 1, "stock_count": 0, "total": 1}
+    assert resp.json() == {
+        "index_count": 1,
+        "stock_count": 0,
+        "total": 1,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
 
 
 def test_universe_instruments_invalid_kind_400(client: TestClient) -> None:

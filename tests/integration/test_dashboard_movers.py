@@ -28,6 +28,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -42,6 +43,7 @@ from brutex.dashboard.movers_snapshot import (
     _read_daily_bars,
     _read_session_bars,
     filter_to_ist_minute,
+    resolve_prev_close,
     run_movers_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -335,16 +337,18 @@ class TestFilterToIstMinute:
 
 
 class TestReadDailyBars:
-    """The derived-1-day DIRECT reader (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — no 1-minute resample."""
+    """The derived-1-day reader (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), now
+    freshness-GUARDED (DEC-MOVERS-DAILY-FRESHNESS-001 — the ``(bars,
+    from_stored)`` tuple mirrors ``_read_intraday_bars``; these seeds carry NO
+    1-minute base, so every stored read here is the documented FAIL-OPEN
+    serve-stored arm)."""
 
     def test_missing_1day_dir_returns_empty(self, tmp_path: Path) -> None:
-        # No 1-day partition at all → _read_daily_partition is None → [].
-        assert (
-            _read_daily_bars(
-                tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="GHOST", day=_DAY
-            )
-            == []
-        )
+        # No 1-day partition at all → _read_daily_partition is None → [] (and
+        # no 1-minute base either → the fail-open arm reports from_stored=True).
+        assert _read_daily_bars(
+            tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="GHOST", day=_DAY
+        ) == ([], True)
 
     def test_selected_day_bar_read_directly(self, tmp_path: Path) -> None:
         _write(
@@ -356,28 +360,27 @@ class TestReadDailyBars:
                 _day_bar(day=_DAY, open_="111", close="222", volume=7),
             ],
         )
-        bars = _read_daily_bars(
+        bars, from_stored = _read_daily_bars(
             tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
         )
+        assert from_stored is True  # no 1-minute base → fail-open serve-stored
         assert len(bars) == 1
         assert bars[0].close == Decimal("222")
         assert bars[0].volume == 7
         assert bars[0].timestamp.tzinfo is not None  # stored UTC instant preserved
 
     def test_no_bar_on_selected_day_returns_empty(self, tmp_path: Path) -> None:
-        # 1-day data exists, but only for a DIFFERENT day → sel.is_empty → [].
+        # 1-day data exists, but only for a DIFFERENT day → sel.is_empty → []
+        # (no 1-minute base → nothing to derive either — honest skip).
         _write(
             tmp_path,
             "NIFTY",
             "1day",
             [_day_bar(day=date(2024, 6, 12), open_="1", close="2", volume=1)],
         )
-        assert (
-            _read_daily_bars(
-                tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
-            )
-            == []
-        )
+        assert _read_daily_bars(
+            tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
+        ) == ([], True)
 
 
 # ── _prev_day_close (direct, every branch) ────────────────────────────────
@@ -416,6 +419,139 @@ class TestPrevDayClose:
             )
             is None
         )
+
+
+# ── resolve_prev_close: the CE/PE 1-minute-native gate ────────────────────
+# DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of 2026-07-15 as
+# relayed via the coordinator — ADR-0021 RULING B, draft PR #1555): option
+# contracts never receive derived-timeframe prebuild any more, so a STORED
+# option ``1day`` partition is frozen at retirement eve. Reading it FIRST
+# would serve a stale prev-close (and a wrong %CHNG) forever — the resolver
+# must skip the 1day read entirely for CE/PE and go straight to the bounded
+# 1-minute prior-session walk-back. SPOT + FUT stay byte-identical
+# (1day-first), pinned below.
+
+
+_CE_SYMBOL = "NSE-NIFTY-27Jun24-20000-CE"
+_FUT_SYMBOL = "NSE-NIFTY-27Jun24-FUT"
+
+
+def _write_fno(tmp_path: Path, symbol: str, interval: str, bars: list[CandleBar]) -> None:
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange=_EXCHANGE, segment="FNO", symbol=symbol, interval=interval, bars=bars
+    )
+
+
+class TestOptionPrevCloseOneMinuteNative:
+    def _seed_stale_1day_fresh_minute(self, tmp_path: Path, symbol: str) -> None:
+        """A FROZEN (stale) stored ``1day`` beside a FRESH 1-minute prior session.
+
+        The retirement-eve shape: the stored 1day's 2024-06-12 close (100 —
+        derived before later 06-12 minutes were pulled) diverges from the TRUE
+        06-12 last 1-minute close (123.45).
+        """
+        _write_fno(
+            tmp_path,
+            symbol,
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="99", close="100", volume=10)],
+        )
+        _write_fno(
+            tmp_path,
+            symbol,
+            "1minute",
+            [
+                _min_bar(hour=9, minute=15, close="120", volume=5, day=date(2024, 6, 12)),
+                _min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12)),
+            ],
+        )
+
+    def test_option_prev_close_serves_true_minute_prior_session_not_frozen_1day(
+        self, tmp_path: Path
+    ) -> None:
+        """FAILS-BEFORE: pre-retirement the resolver read the frozen option
+        1day FIRST and served the stale close 100; the gate must serve the
+        TRUE 1-minute prior-session close 123.45."""
+        self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert got.found_date == date(2024, 6, 12)
+
+    def test_option_prev_close_never_opens_the_1day_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read spy: the CE baseline resolve performs ZERO 1day-partition reads."""
+        from brutex.dashboard import movers_snapshot as ms
+
+        self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
+        calls: list[str] = []
+        real = ms._read_daily_partition
+
+        def _spy(lake_root: Path, **kwargs: Any) -> Any:
+            calls.append(str(kwargs.get("symbol")))
+            return real(lake_root, **kwargs)
+
+        monkeypatch.setattr(ms, "_read_daily_partition", _spy)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert calls == []  # the option 1day is never opened
+
+    def test_fut_prev_close_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """FUT byte-identity pin: futures keep their daily prebuild under the
+        ruling, so the FUT baseline still reads the stored 1day FIRST even
+        when a diverging 1-minute prior session exists."""
+        self._seed_stale_1day_fresh_minute(tmp_path, _FUT_SYMBOL)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_FUT_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("100")  # the stored 1day close — 1day-first
+        assert got.found_date == date(2024, 6, 12)
+
+    def test_spot_prev_close_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """SPOT byte-identity pin: the gate is CE/PE-only — a spot symbol with a
+        diverging 1-minute prior session still serves the stored 1day close."""
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="99", close="100", volume=10)],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1minute",
+            [_min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12))],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
+        )
+        assert got.value == Decimal("100")
+
+    def test_option_prev_close_equal_when_both_sources_fresh(self, tmp_path: Path) -> None:
+        """Equivalence pin: when the stored option 1day IS fresh (its close ==
+        the session's last 1-minute close, the derive law) the gate changes
+        nothing — the walk-back recovers the byte-equal value."""
+        _write_fno(
+            tmp_path,
+            _CE_SYMBOL,
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="120", close="123.45", volume=10)],
+        )
+        _write_fno(
+            tmp_path,
+            _CE_SYMBOL,
+            "1minute",
+            [_min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12))],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert got.found_date == date(2024, 6, 12)
 
 
 # ── run_movers_snapshot (direct, every branch) ────────────────────────────
@@ -593,6 +729,30 @@ class TestMoversApi:
         assert resp.status_code == 400
         assert "malformed time" in resp.json()["detail"]
 
+    def test_date_min_derived_tf_serves_200_not_500(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # REFUTER ROUND 3 defect R3-N1 (r3_attack_overflow.py port): ?date=0001-01-01
+        # is WELL-FORMED per parse_snapshot_date (only malformed dates 400), yet the
+        # round-2 month-edge probe's `day - timedelta(days=1)` raised OverflowError
+        # for date.min — neither a PolarsError nor an OSError, so it escaped the
+        # per-symbol movers_read_skip_errors() isolation and 500'd the route on any
+        # DERIVED TF (pre-probe code served the honest empty 200). The `day >
+        # date.min` probe gate restores the 200: date.min has no prior day at all,
+        # hence no prior-month file to probe. Fails pre-fix (HTTP 500) with the
+        # gate reverted.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store),
+            raise_server_exceptions=False,
+        )
+        resp = client.get("/api/v1/movers", params={"interval": "5minute", "date": "0001-01-01"})
+        assert resp.status_code == 200
+        body = resp.json()
+        # Honest empty ranking — no bars exist on a year-1 date; never a 500.
+        assert body["price_gainers"] == []
+        assert body["price_losers"] == []
+
     def test_unknown_asset_is_pending_not_500(self, store: InstrumentStore) -> None:
         # Spot / Futures / Options are all wired now; an UNKNOWN asset still gets
         # an honest "ships after Spot" pending payload (never a 500). The wired
@@ -601,6 +761,44 @@ class TestMoversApi:
         body = client.get("/api/v1/movers", params={"asset": "commodities"}).json()
         assert body["instrument_count"] == 0
         assert "Spot" in body["note"]
+
+    def test_daily_interval_nulls_echoed_asof_time(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-MOVERS-DAILY-ASOF-ECHO-HONEST-001 (Defect 3c): a 1day request with an
+        # explicit ?time= must NOT echo an as-of the served whole-day close never
+        # honours. The route nulls `time` for a non-intraday interval, so
+        # payload["time"] is None and the note reads "(daily)", NOT "11:00" — while
+        # the ranked whole-day values are byte-identical to a no-time request.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"interval": "1day", "date": "2024-06-13", "time": "11:00"},
+        ).json()
+        assert body["time"] is None
+        assert "(daily)" in body["note"]
+        assert "11:00" not in body["note"]
+        # value unchanged: the whole-day close is served regardless of the time echo.
+        assert [r["symbol"] for r in body["price_gainers"]] == ["NIFTY"]
+        no_time = client.get(
+            "/api/v1/movers", params={"interval": "1day", "date": "2024-06-13"}
+        ).json()
+        assert body["price_gainers"] == no_time["price_gainers"]
+
+    def test_intraday_interval_keeps_echoed_asof_time(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Guard: a genuine intraday interval STILL echoes its explicit as-of time
+        # (is_intraday_interval True → `time` untouched) — byte-identical to before.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"interval": "5minute", "date": "2024-06-13", "time": "11:00"},
+        ).json()
+        assert body["time"] == "11:00"
+        assert "11:00" in body["note"]
 
     def test_reflected_asset_note_carries_no_unescaped_tag(self, store: InstrumentStore) -> None:
         # DEC-DASHBOARD-XSS-HARDENING-001 (GAP B, server defense-in-depth): the
@@ -651,8 +849,16 @@ class TestMoversApi:
         partition was served (``stored_reads == 1``) even when it predated the
         fresh 1-minute data, so this test's pull-active arm FAILED. Now the
         route passes ``prefer_resample=_pull_live()``: pull running → the
-        1-minute resample serves (fresh, ``resampled_reads == 1``); idle →
-        stored-first byte-identical."""
+        1-minute resample serves (fresh, ``resampled_reads == 1``) WITHOUT ever
+        opening the stored partition (zero stale warns — the threading proof).
+
+        IDLE arm FLIPPED (DEC-MOVERS-STORED-FRESHNESS-001, REFUTER ROUND 1): the
+        idle read still goes stored-FIRST (it opens the stored partition — hence
+        the ONE stale WARN, which the pull-active arm never emits), but the
+        VERIFY-EQUALITY freshness guard refuses the value-poisoned partition and
+        serves the fresh resample. Pre-guard this arm pinned the stale ₹99,999
+        close being served ("mid-pull is the only switch window" — no longer
+        true: the freshness guard is the second switch)."""
         # Fresh 1-minute session 09:15–09:19 + a STALE stored 5minute partition
         # whose poisoned close the resample can never produce.
         writer = ParquetWriter(lake_root=tmp_path)
@@ -679,22 +885,28 @@ class TestMoversApi:
             "date": "2024-06-13",
             "time": "09:19",
         }
-        # A pull IS running (injected probe) → the always-fresh resample serves.
+        # A pull IS running (injected probe) → the always-fresh resample serves,
+        # and the stored partition is never even opened (no stale warn).
         pulling = TestClient(
             build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: True)
         )
-        body = pulling.get("/api/v1/movers", params=params).json()
+        with capture_logs() as pull_logs:
+            body = pulling.get("/api/v1/movers", params=params).json()
         assert (body["stored_reads"], body["resampled_reads"]) == (0, 1)
         # No prior-day 1day baseline → the row ranks under volume (no % change).
         assert body["volume"][0]["ltp"] == "₹22,040.00"  # the FRESH close
-        # No pull → the stored-first read is byte-identical to before (the
-        # stale stored close is served — mid-pull is the only switch window).
+        assert [e for e in pull_logs if e["event"] == "movers.stored_stale_fallback"] == []
+        # No pull → the read goes stored-FIRST, opens the stale partition, and
+        # the freshness guard refuses it: fresh values + ONE stale WARN
+        # (REFUTER ROUND 1 flip — this arm previously served ₹99,999.00).
         idle = TestClient(
             build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: False)
         )
-        body2 = idle.get("/api/v1/movers", params=params).json()
-        assert (body2["stored_reads"], body2["resampled_reads"]) == (1, 0)
-        assert body2["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+        with capture_logs() as idle_logs:
+            body2 = idle.get("/api/v1/movers", params=params).json()
+        assert (body2["stored_reads"], body2["resampled_reads"]) == (0, 1)
+        assert body2["volume"][0]["ltp"] == "₹22,040.00"  # never the stale bar
+        assert len([e for e in idle_logs if e["event"] == "movers.stored_stale_fallback"]) == 1
 
     def test_raising_pull_probe_is_swallowed_to_idle_read(
         self, store: InstrumentStore, tmp_path: Path
@@ -703,10 +915,16 @@ class TestMoversApi:
         an injected pull-active probe that RAISES is swallowed to ``False``
         (the documented "a raising probe is swallowed" except-arm), so the
         movers read serves the byte-identical IDLE stored-first path — a 200
-        with ``stored_reads == 1``, never a 500, never a resample switch."""
-        # Same lake shape as the pin above: fresh 1-minute session + a stale
-        # aligned stored 5minute partition whose poisoned close identifies
-        # which read path served the row.
+        with ``stored_reads == 1``, never a 500, never a resample switch.
+
+        Reworked for DEC-MOVERS-STORED-FRESHNESS-001 (REFUTER ROUND 1): the
+        stored 5minute partition is now a REAL prebuild (fresh — the freshness
+        guard verifies it against the base and serves it), because the previous
+        hand-poisoned stale partition is refused by the guard on EVERY idle read
+        and could no longer discriminate the swallowed-probe path. A True probe
+        would flip the provenance to ``resampled_reads == 1``, so ``(1, 0)``
+        still proves the raise was swallowed to ``False``."""
+        # Fresh 1-minute session + the REAL prebuilt (fresh) 5minute partition.
         writer = ParquetWriter(lake_root=tmp_path)
         writer.write(
             exchange=_EXCHANGE,
@@ -718,13 +936,20 @@ class TestMoversApi:
                 for i in range(5)
             ],
         )
-        writer.write(
+        from brutex.data.timeframe_materialize import (
+            PrebuildKind,
+            materialize_lake_timeframes,
+        )
+
+        result = materialize_lake_timeframes(
+            lake_root=tmp_path,
             exchange=_EXCHANGE,
             segment=_SEGMENT,
             symbol="NIFTY",
-            interval="5minute",
-            bars=[_min_bar(hour=9, minute=15, close="99999", volume=1)],
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
         )
+        assert result.total_bars > 0
 
         def _wedged_probe() -> bool:
             raise RuntimeError("pull-job probe wedged")
@@ -743,10 +968,10 @@ class TestMoversApi:
         )
         assert resp.status_code == 200  # the probe error never breaks the read
         body = resp.json()
-        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves,
-        # byte-identical to the idle arm of the pin above.
+        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves the
+        # verified-fresh prebuilt partition (a True probe would read (0, 1)).
         assert (body["stored_reads"], body["resampled_reads"]) == (1, 0)
-        assert body["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+        assert body["volume"][0]["ltp"] == "₹22,040.00"  # the prebuilt bucket close
 
     def test_no_date_defaults_to_latest_available_day(
         self, store: InstrumentStore, tmp_path: Path
@@ -877,30 +1102,68 @@ class TestMoversAsofLatestDefault:
     def test_teeth_old_per_tf_default_slot_would_differ(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
-        # The bug reproduction: the OLD per-TF default pinned 3minute to its last
-        # grid slot 15:27 → the 15:27 partial-bucket close 21800, DIFFERENT from
-        # the new default's 15:29 latest close 22000. Explicit times still cut honestly.
+        # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 UPDATE: an explicit bucket-anchor pick
+        # now resolves FORWARD to the COMPLETED bucket, so 3minute @ 15:27 reads the
+        # completed 15:27–15:29 bucket close (22000 — the broker's), NOT the old
+        # partial 15:27 close (21800). That partial close is still observable on
+        # 1minute @ 15:27 (identity). DEC-MOVERS-ASOF-LATEST-DEFAULT-001's invariant
+        # (the no-time DEFAULT reaches the latest minute 22000 on every TF) holds.
         _seed_finalized_day_lake(tmp_path)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
-        at_1527 = client.get(
+        at_1527_3m = client.get(
             "/api/v1/movers",
             params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "15:27"},
         ).json()
-        at_0915 = client.get(
+        at_1527_1m = client.get(
             "/api/v1/movers",
-            params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "09:15"},
+            params={"asset": "spot", "interval": "1minute", "date": "2024-06-13", "time": "15:27"},
         ).json()
-        # Read the LTP from the volume category (always includes the row — at 09:15
-        # the pct change is 0% so it is not a gainer/loser).
-        assert at_1527["volume"][0]["ltp"] == "₹21,800.00"
-        assert at_0915["volume"][0]["ltp"] == "₹20,000.00"
-        # The per-TF slots DIFFER from each other AND from the new default's 22000 —
-        # exactly the operator-reported divergence the default fix removes.
-        assert at_1527["volume"][0]["ltp"] != at_0915["volume"][0]["ltp"]
+        # Read the LTP from the volume category (always includes the row).
+        # 3minute @ 15:27 = the completed bucket close 22000; 1minute @ 15:27 = the
+        # partial 15:27 close 21800 (the value the OLD 3minute default wrongly froze).
+        assert at_1527_3m["volume"][0]["ltp"] == "₹22,000.00"
+        assert at_1527_1m["volume"][0]["ltp"] == "₹21,800.00"
+        assert at_1527_3m["volume"][0]["ltp"] != at_1527_1m["volume"][0]["ltp"]
+        # Provenance is honest: the 3minute pick echoes its resolved bucket end.
+        assert at_1527_3m["asof_through"] == "15:29"
+        assert "15:27 bucket · through 15:29" in at_1527_3m["note"]
+        # The no-time DEFAULT reaches the latest minute (22000) — the completed bucket.
         default = client.get(
             "/api/v1/movers", params={"asset": "spot", "interval": "3minute"}
         ).json()
         assert default["price_gainers"][0]["ltp"] == "₹22,000.00"
+        assert default["asof_through"] is None  # no explicit pick → no bucket provenance
+
+    def test_default_latest_close_identical_with_stale_stored_tf(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """DEC-MOVERS-STORED-FRESHNESS-001: the invariant holds on a STALE-stored lake.
+
+        The DEC-MOVERS-ASOF-LATEST-DEFAULT-001 pin above runs on a lake with no
+        stored TF partitions, so it could never see the stale-stored divergence: a
+        stale prebuilt 3minute partition (one 09:15 bucket, close 21111 — a crashed
+        / partial prebuild) previously SERVED that stale close on the whole-day
+        default while 1minute read 22000. The freshness guard falls back to the
+        1-minute resample, so the no-time default reads the IDENTICAL latest close
+        across every timeframe again. Fail-before: pre-guard, 3minute reads
+        ₹21,111.00.
+        """
+        _seed_finalized_day_lake(tmp_path)
+        # A STALE stored 3minute partition: one bucket-open 09:15 bar (555);
+        # 555 + 3 = 558 ≤ 929 (the base's 15:29) → stale by the day-scoped guard.
+        _write(
+            tmp_path,
+            "NIFTY",
+            "3minute",
+            [_min_bar(hour=9, minute=15, close="21111", volume=50)],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        ltps: set[str] = set()
+        for tf in ("1minute", "3minute", "5minute"):
+            body = client.get("/api/v1/movers", params={"asset": "spot", "interval": tf}).json()
+            assert body["date"] == "2024-06-13"
+            ltps.add(body["price_gainers"][0]["ltp"])
+        assert ltps == {"₹22,000.00"}, ltps  # ONE value — the stale partition never serves
 
     def test_default_intraday_echoes_latest_time_and_null_time(
         self, store: InstrumentStore, tmp_path: Path
@@ -1033,14 +1296,18 @@ class TestMoversPage:
 
 from structlog.testing import capture_logs  # noqa: E402
 
-#: The FROZEN additive-key vocabulary this decision may ever add to a movers
-#: row — a new key needs a conscious edit here (the key-NAME set pin).
+#: The FROZEN additive-key vocabulary this decision family may ever add to a
+#: movers row — a new key needs a conscious edit here (the key-NAME set pin).
+#: DELIBERATE widening 2026-07-09 (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the
+#: two EMIT-ON-TRUE-ONLY Muhurat keys join the #1539 EMIT-ON-FALSE pair.
 _CONTIGUITY_KEYS = frozenset(
     {
         "prev_close_session",
         "prev_close_contiguous",
         "oi_baseline_session",
         "oi_baseline_contiguous",
+        "prev_close_muhurat",
+        "oi_baseline_muhurat",
     }
 )
 
@@ -1194,3 +1461,475 @@ class TestPrevCloseContiguityGoldens:
         )
         assert set(row) & _CONTIGUITY_KEYS == set()
         assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+
+# ── Muhurat-boundary display-baseline coherence (DEC-PREVSESSION-MUHURAT-COHERENCE-001) ──
+#
+# The CONFIRMED W2-3 repro, promoted to a committed fixture: a HEALTHY lake
+# legitimately carrying the 2024-11-01 Diwali Muhurat session (the ingest keeps
+# Muhurat bars, DEC-INGEST-BOUNDARY-INTEGRITY-001; the prebuild derives their
+# 1-day bar). PRE-FIX WIRE (captured 2026-07-09 on the pre-fix code): the
+# day-after row (Mon 2024-11-04) served change=₹-2.00 / pct −1.9047…% but
+# stamped {"prev_close_session": "2024-11-01", "prev_close_contiguous": false}
+# + the " *" marker + ONE movers.prev_baseline_noncontiguous WARN — a FALSE
+# "lake hole" on a healthy lake, annually, across up to 21 events/build × the
+# 39 warm-grid keys. POST-FIX (the SANCTIONED wire delta): the SAME served
+# values, the false pair DROPPED, {"prev_close_muhurat": true} GAINED, zero
+# WARNs, exactly ONE movers.prev_baseline_muhurat INFO per build.
+
+
+_IST_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _day_bar_mid_ist(*, day: date, open_: str, close: str, volume: int) -> CandleBar:
+    """A 1-day bar stamped at MIDNIGHT IST (18:30 UTC prior day) — the
+    production derived-1day convention (``spot_daily_resample``)."""
+    o = Decimal(open_)
+    c = Decimal(close)
+    return CandleBar(
+        timestamp=datetime(day.year, day.month, day.day, 0, 0, tzinfo=_IST_TZ).astimezone(UTC),
+        open=o,
+        high=max(o, c),
+        low=min(o, c),
+        close=c,
+        volume=volume,
+        open_interest=None,
+    )
+
+
+def _seed_muhurat_boundary_lake(tmp_path: Path) -> None:
+    """The W2-3 fixture: Thu 2024-10-31 regular (close 101.00) → Fri 2024-11-01
+    Muhurat evening (1m 18:00/18:59, DISTINCT 1-day close 105.00) → Mon
+    2024-11-04 regular (open 102.00, close 103.00). Real ``ParquetWriter``;
+    1-day bars midnight-IST stamped (both Oct/Nov UTC partitions exercised)."""
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1minute",
+        [
+            _min_bar(hour=9, minute=15, close="100.00", volume=100, day=date(2024, 10, 31)),
+            _min_bar(hour=15, minute=29, close="101.00", volume=100, day=date(2024, 10, 31)),
+        ],
+    )
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1minute",
+        [
+            # The Muhurat EVENING session (18:00-19:00 IST) — kept by the
+            # calendar-aware ingest filter; a real session's real bars.
+            _min_bar(hour=18, minute=0, close="104.00", volume=50, day=date(2024, 11, 1)),
+            _min_bar(hour=18, minute=59, close="105.00", volume=50, day=date(2024, 11, 1)),
+            _min_bar(hour=9, minute=15, close="102.00", volume=200, day=date(2024, 11, 4)),
+            _min_bar(hour=15, minute=29, close="103.00", volume=300, day=date(2024, 11, 4)),
+        ],
+    )
+    # Midnight-IST 1-day stamps: 10-31 + 11-01 land in the OCTOBER UTC month
+    # partition (18:30Z on the prior calendar day), 11-04 in NOVEMBER.
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1day",
+        [
+            _day_bar_mid_ist(day=date(2024, 10, 31), open_="100.00", close="101.00", volume=200),
+            _day_bar_mid_ist(day=date(2024, 11, 1), open_="103.50", close="105.00", volume=100),
+        ],
+    )
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1day",
+        [_day_bar_mid_ist(day=date(2024, 11, 4), open_="102.00", close="103.00", volume=500)],
+    )
+
+
+class TestMuhuratBaselineCoherence:
+    def test_day_after_diwali_1day_served_flagged_muhurat_no_warn(self, tmp_path: Path) -> None:
+        """FIX-REVERSION TEETH: with the muhurat arm reverted this test FAILS
+        (the row regains the false contiguous:false pair + a WARN and loses
+        prev_close_muhurat). Values are byte-identical to the pre-fix wire."""
+        _seed_muhurat_boundary_lake(tmp_path)
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-04", time=None, top_n=5
+            )
+        (row,) = payload["price_losers"]
+        # VALUE-EQUALITY: the served numbers are UNCHANGED by the fix — the
+        # display law serves the real Muhurat close (105.00) either way.
+        assert row["ltp"] == "₹103.00"
+        assert row["change"] == "₹-2.00"
+        assert row["pct_change"] == str(
+            (Decimal("103.00") - Decimal("105.00")) / Decimal("105.00") * 100
+        )
+        assert row["pct_change"].startswith("-1.9047619047")
+        # The SANCTIONED wire delta: the false EMIT-ON-FALSE pair is GONE,
+        # exactly the ONE EMIT-ON-TRUE muhurat key is added.
+        assert "prev_close_session" not in row
+        assert "prev_close_contiguous" not in row
+        assert row["prev_close_muhurat"] is True
+        assert set(row) - _SPOT_ROW_KEYS == {"prev_close_muhurat"}
+        # ZERO noncontiguous WARNs; exactly ONE per-build muhurat INFO.
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        infos = [e for e in logs if e["event"] == "movers.prev_baseline_muhurat"]
+        assert len(infos) == 1
+        assert infos[0]["kind"] == "prev_close"
+        assert infos[0]["symbol"] == "NIFTY"
+        assert infos[0]["found_session"] == "2024-11-01"
+        assert infos[0]["snapshot_day"] == "2024-11-04"
+
+    def test_day_after_diwali_1minute_basis_identical_values_and_flag(self, tmp_path: Path) -> None:
+        # The intraday (1minute) basis reads the SAME 1-day baseline — values
+        # byte-identical to the daily basis, same muhurat flag, zero WARNs.
+        _seed_muhurat_boundary_lake(tmp_path)
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1minute", date="2024-11-04", time=None, top_n=5
+            )
+        (row,) = payload["price_losers"]
+        assert row["change"] == "₹-2.00"
+        assert row["pct_change"] == str(
+            (Decimal("103.00") - Decimal("105.00")) / Decimal("105.00") * 100
+        )
+        assert row["prev_close_muhurat"] is True
+        assert "prev_close_contiguous" not in row
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        assert len([e for e in logs if e["event"] == "movers.prev_baseline_muhurat"]) == 1
+
+    def test_missing_muhurat_bar_lake_reads_plain_contiguous_no_flag(self, tmp_path: Path) -> None:
+        # The ASYMMETRY pin: a lake WITHOUT the Muhurat bar (10-31 + 11-04
+        # only) baselines 11-04 on 10-31 — the calendar's prior REGULAR
+        # session — so the row is plain contiguous: NO muhurat key, no WARN
+        # (the Muhurat date is a calendar NON-session for the daily walk).
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar_mid_ist(day=date(2024, 10, 31), open_="100.00", close="101.00", volume=200)],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar_mid_ist(day=date(2024, 11, 4), open_="102.00", close="103.00", volume=500)],
+        )
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-04", time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        assert row["change"] == "₹2.00"  # vs the 10-31 close 101.00
+        assert set(row) & _CONTIGUITY_KEYS == set()
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+    def test_muhurat_days_own_row_is_plain_contiguous(self, tmp_path: Path) -> None:
+        # The Muhurat day's OWN row (snapshot 2024-11-01, baseline the 10-31
+        # regular close) is an ORDINARY contiguous row — no flag, no WARN.
+        _seed_muhurat_boundary_lake(tmp_path)
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-01", time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        assert row["change"] == "₹4.00"  # 105.00 vs the 10-31 close 101.00
+        assert set(row) & _CONTIGUITY_KEYS == set()
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+    def test_hole_before_muhurat_flags_its_own_rows_not_the_day_after(self, tmp_path: Path) -> None:
+        # The MASKING-concern pin (ledgered honest limit): a lake missing
+        # 10-31 but holding the 11-01 Muhurat bar. The 11-04 row is genuinely
+        # muhurat-served (11-01 IS its nearest real prior session — nothing is
+        # masked for it), while the 10-31 hole flags on ITS OWN affected row:
+        # the 11-01 snapshot's baseline (found 10-30 ≠ expected 10-31) reads
+        # strictly False + one WARN.
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [
+                _day_bar_mid_ist(day=date(2024, 10, 30), open_="99.00", close="99.50", volume=100),
+                # 2024-10-31 DELIBERATELY absent (the genuine hole).
+                _day_bar_mid_ist(day=date(2024, 11, 1), open_="103.50", close="105.00", volume=100),
+            ],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar_mid_ist(day=date(2024, 11, 4), open_="102.00", close="103.00", volume=500)],
+        )
+        with capture_logs() as logs_after:
+            payload_after = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-04", time=None, top_n=5
+            )
+        (row_after,) = payload_after["price_losers"]
+        assert row_after["prev_close_muhurat"] is True
+        assert "prev_close_contiguous" not in row_after
+        noncontig = [e for e in logs_after if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert noncontig == []
+        with capture_logs() as logs_on:
+            payload_on = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-01", time=None, top_n=5
+            )
+        (row_on,) = payload_on["price_gainers"]
+        assert row_on["prev_close_session"] == "2024-10-30"
+        assert row_on["prev_close_contiguous"] is False
+        assert "prev_close_muhurat" not in row_on
+        warns = [e for e in logs_on if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert len(warns) == 1
+        assert warns[0]["expected_session"] == "2024-10-31"
+
+    def test_warm_grid_over_muhurat_lake_emits_zero_noncontiguous_warns(
+        self, tmp_path: Path
+    ) -> None:
+        # The FLOOD pin: the FULL 39-key post-pull warm grid (3 spot + 9
+        # futures + 27 options coordinates, DEC-MOVERS-WARM-GRID-001) over the
+        # healthy Muhurat-boundary lake fires ZERO noncontiguous WARNs — the
+        # pre-fix behaviour re-warned every warm key, annually.
+        from brutex.dashboard.movers_futures import compute_futures_candidates
+        from brutex.dashboard.movers_options import compute_options_candidates
+        from brutex.dashboard.movers_snapshot import compute_spot_candidates
+        from brutex.dashboard.movers_warm import (
+            futures_warm_grid,
+            options_warm_grid,
+            spot_warm_grid,
+        )
+
+        _seed_muhurat_boundary_lake(tmp_path)
+        keys = 0
+        with capture_logs() as logs:
+            for coord in spot_warm_grid():
+                compute_spot_candidates(
+                    lake_root=tmp_path,
+                    interval="1day",
+                    date="2024-11-04",
+                    time=None,
+                    exchange=coord["exchange"],
+                )
+                keys += 1
+            for coord in futures_warm_grid():
+                compute_futures_candidates(
+                    lake_root=tmp_path,
+                    interval="1day",
+                    date="2024-11-04",
+                    time=None,
+                    exchange=coord["exchange"],
+                    expiry_tier=coord["expiry_tier"] or "near",
+                )
+                keys += 1
+            for coord in options_warm_grid():
+                compute_options_candidates(
+                    lake_root=tmp_path,
+                    interval="1day",
+                    date="2024-11-04",
+                    time=None,
+                    exchange=coord["exchange"],
+                    expiry_tier=coord["expiry_tier"] or "near",
+                    expiry_track=coord["expiry_track"] or "all",
+                )
+                keys += 1
+        assert keys == 39  # the full DEC-MOVERS-WARM-GRID-001 grid
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        assert [
+            e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous_suppressed"
+        ] == []
+
+
+# ── DEC-MOVERS-DAILY-FRESHNESS-001: the route-level regressions ───────────
+
+
+def _seed_stale_daily_prebuild(lake: Path) -> None:
+    """The executed crosscut probe's producer chain, PRODUCTION writers only:
+    old 1-minute (close 100) → the REAL prebuild derives the stored 1day →
+    newer 1-minute appended to close 200 with NO re-prebuild."""
+    from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_timeframes
+
+    writer = ParquetWriter(lake_root=lake)
+    writer.write(
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[
+            _min_bar(hour=9, minute=15 + i, close=str(98 + i * 0.5), volume=10) for i in range(5)
+        ],
+    )
+    result = materialize_lake_timeframes(
+        lake_root=lake,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol="NIFTY",
+        kind=PrebuildKind.SPOT,
+        tfs=("5minute",),
+        include_daily=True,
+        daily_before=date(2024, 6, 14),
+    )
+    assert result.written.get("1day", 0) > 0
+    writer.write(
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[
+            _min_bar(hour=15, minute=25 + i, close=str(180 + i * 5), volume=10) for i in range(5)
+        ],
+    )
+
+
+class TestDailyFreshnessRoute:
+    def test_1day_serves_fresh_ltp_after_1m_append_without_reprebuild(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """FAILS-BEFORE (the executed crosscut probe): GET ?interval=1day served
+        the STALE stored 1day close (₹100.00) while ?interval=1minute served the
+        fresh ₹200.00 — a cross-TF inconsistency on the SAME coordinate. The
+        daily verify-equality guard now serves the 1m-derived truth on all TFs."""
+        _seed_stale_daily_prebuild(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+        def ltp(interval: str) -> str:
+            body = client.get(
+                "/api/v1/movers", params={"interval": interval, "date": _DAY.isoformat()}
+            ).json()
+            rows = [
+                row
+                for cat in ("price_gainers", "price_losers", "volume", "value")
+                for row in body[cat]
+                if row["symbol"] == "NIFTY"
+            ]
+            assert rows, f"NIFTY must rank on interval={interval}"
+            ltp_value = rows[0]["ltp"]
+            assert isinstance(ltp_value, str)
+            return ltp_value
+
+        assert ltp("1day") == "₹200.00"  # pre-fix: the STALE "₹100.00"
+        assert ltp("1minute") == "₹200.00"
+        assert ltp("5minute") == "₹200.00"  # the #1795a intraday guard, unchanged
+
+
+class TestZeroPrevCloseRoute:
+    def test_zero_prev_close_serves_change_none(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """FAILS-BEFORE (folded MINOR-1, the executed spot repro): a hand-planted
+        0-close prior 1day bar (out-of-band — production writers refuse
+        non-positive prices) served `change == full LTP` beside a None
+        pct_change, violating the MoverSnapshot docstring contract. Both now
+        read None; the LTP itself is untouched."""
+        import polars as pl
+
+        # The 0-close prior bar is only plantable RAW (CandleBar refuses it).
+        planted = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1day" / "2024" / "06.parquet"
+        planted.parent.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "timestamp": [
+                    datetime(2024, 6, 12, 3, 45, tzinfo=UTC),
+                    datetime(2024, 6, 13, 3, 45, tzinfo=UTC),
+                ],
+                "open": [0.0, 105.0],
+                "high": [0.0, 106.0],
+                "low": [0.0, 104.0],
+                "close": [0.0, 105.25],
+                "volume": [10, 20],
+                "open_interest": [None, None],
+            },
+            schema_overrides={"open_interest": pl.Int64},
+        ).write_parquet(planted)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers", params={"interval": "1day", "date": _DAY.isoformat()}
+        ).json()
+        rows = [row for cat in ("volume", "value") for row in body[cat] if row["symbol"] == "NIFTY"]
+        assert rows, "the day bar must still rank on volume/value"
+        row = rows[0]
+        assert row["ltp"] == "₹105.25"
+        assert row["change"] is None  # pre-fix: the full "₹105.25"
+        assert row["pct_change"] is None
+
+
+class TestMoversIntervalValidation:
+    """DEC-MOVERS-DAILY-FRESHNESS-001 folded MINOR-2: an unknown ?interval= is a
+    clean 400 naming the parameter, BEFORE any lake read, on all three tabs —
+    pre-fix it flowed into the compute and minted the FALSE "No futures in the
+    lake yet" / "No spot data" note on a POPULATED lake (the executed futures
+    probe). The PURE compute_*_candidates unknown-interval degrade contracts
+    are unchanged (their pins above/in the sibling suites stand)."""
+
+    @pytest.mark.parametrize("asset", ["spot", "futures", "options"])
+    def test_unknown_interval_is_400_on_every_tab(self, store: InstrumentStore, asset: str) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/movers", params={"asset": asset, "interval": "banana"})
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "interval" in detail
+        assert "'banana'" in detail  # the offender named, repr()'d (#907)
+        assert "1day" in detail  # the allowed vocabulary listed
+
+    def test_unknown_interval_never_reads_the_lake(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # BEFORE any lake read: even the prebuild-gate flock probe is skipped.
+        from brutex.dashboard import app as app_module
+
+        calls: list[str] = []
+        real = app_module.compute_spot_candidates
+
+        def _spy(**kwargs: Any) -> Any:
+            calls.append("compute")
+            return real(**kwargs)
+
+        monkeypatch.setattr(app_module, "compute_spot_candidates", _spy)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        assert client.get("/api/v1/movers", params={"interval": "banana"}).status_code == 400
+        assert calls == []
+
+    def test_populated_futures_lake_no_false_empty_note(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The executed futures probe: interval=banana on a POPULATED futures
+        lake served 200 + "No futures in the lake yet — pull the F&O futures
+        first" with instrument_count:0 — a FALSE note. Now a 400; the control
+        (a valid interval) still serves the future."""
+        cd = Decimal("100")
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange=_EXCHANGE,
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-FUT",
+            interval="1minute",
+            bars=[
+                CandleBar(
+                    timestamp=datetime(2024, 6, 13, 3, 45, tzinfo=UTC),
+                    open=cd,
+                    high=cd,
+                    low=cd,
+                    close=cd,
+                    volume=10,
+                    open_interest=1,
+                )
+            ],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        control = client.get(
+            "/api/v1/movers",
+            params={"asset": "futures", "interval": "1day", "date": "2024-06-13"},
+        )
+        assert control.status_code == 200
+        assert control.json()["instrument_count"] == 1
+        resp = client.get(
+            "/api/v1/movers",
+            params={"asset": "futures", "interval": "banana", "date": "2024-06-13"},
+        )
+        assert resp.status_code == 400
+        assert "No futures in the lake yet" not in resp.text
+
+    def test_every_lake_interval_label_still_accepted(self, store: InstrumentStore) -> None:
+        # The canonical vocabulary (LAKE_INTERVAL_LABELS — the ONE source of
+        # truth the validation inverts) stays fully accepted, 21 labels.
+        from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        for label in LAKE_INTERVAL_LABELS.values():
+            resp = client.get(
+                "/api/v1/movers", params={"interval": label, "date": _DAY.isoformat()}
+            )
+            assert resp.status_code == 200, label

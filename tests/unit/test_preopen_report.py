@@ -10,20 +10,25 @@ column-letter helper). Verified against the operator's COALINDIA pre-open CSV
 
 from __future__ import annotations
 
+import inspect
 import io
 import zipfile
 from collections.abc import Collection
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import duckdb
 import pytest
+from brutex.calendars.nse import HolidayDataUnavailableError, trading_days_between
+from brutex.calendars.observed_sessions import is_trading_day_checked_observed
 from brutex.dashboard import db_view, preopen_report
 from brutex.dashboard.db_view import list_candle_datasets
 from brutex.dashboard.preopen_report import (
     _BASIS_INTERVAL,
     _COL_WIDTHS,
+    _HOLE_WARN_CAP,
+    _STALE_WARN_CAP,
     _STYLE_GREEN,
     _STYLE_GREEN_BOLD,
     _STYLE_RED,
@@ -36,11 +41,15 @@ from brutex.dashboard.preopen_report import (
     _daily_close_by_date,
     _daily_open_by_date,
     _daily_prev_close_contiguous,
+    _fresh_daily_maps,
     _group_by_month,
+    _hole_detail,
+    _hole_shape,
     _minute_prev_close_contiguous,
     _month_label,
     _previous_trading_day,
     _row_fill_styles,
+    _stale_day_row,
     build_preopen_rows,
     render_month_workbook,
     render_report_zip,
@@ -53,6 +62,13 @@ from brutex.dashboard.preopen_report import (
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.spot_daily_resample import (
+    fill_daily_from_minute,
+    make_lake_read_1m_window,
+    make_lake_write_1day,
+)
+from hypothesis import assume, given, settings
+from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
 
@@ -72,9 +88,11 @@ def _bar(ts: datetime, *, open_: str, close: str) -> CandleBar:
     )
 
 
-def _write(lake: Path, symbol: str, interval: str, bars: list[CandleBar]) -> None:
+def _write(
+    lake: Path, symbol: str, interval: str, bars: list[CandleBar], *, exchange: str = "NSE"
+) -> None:
     ParquetWriter(lake_root=lake).write(
-        exchange="NSE", segment="CASH", symbol=symbol, interval=interval, bars=bars
+        exchange=exchange, segment="CASH", symbol=symbol, interval=interval, bars=bars
     )
 
 
@@ -755,19 +773,21 @@ def test_build_minute_basis_no_minute_partition_is_empty(tmp_path: Path) -> None
 
 
 def test_minute_prev_close_contiguous_branches() -> None:
-    # The pure guard: PREV. CLOSE is the IMMEDIATELY-preceding 1-day session's
-    # last 1-minute close, valid ONLY when that session has minute data.
+    # The pure guard (DEC-STALENESS-CACHE-TRUTH-001 shape — checked calendar
+    # ALONE, no 1-day intermediary): PREV. CLOSE is the calendar's
+    # IMMEDIATELY-preceding NSE session's last 1-minute close, served ONLY when
+    # that exact session has minute data.
     d1, d2, d3 = date(2026, 6, 3), date(2026, 6, 4), date(2026, 6, 5)
-    trading_dates = [d1, d2, d3]
     minute_last = {d1: Decimal("630")}
-    # valid — the prior session (d1) has minute data → its last close.
-    assert _minute_prev_close_contiguous(minute_last, trading_dates, d2) == Decimal("630")
+    # valid — the calendar's prior session (d1) has minute data → its last close.
+    assert _minute_prev_close_contiguous(minute_last, d2) == Decimal("630")
     # missing — the prior session (d2) has NO minute data → None (skip, no fake anchor).
-    assert _minute_prev_close_contiguous(minute_last, trading_dates, d3) is None
-    # first session — no prior 1-day date (idx == 0) → None.
-    assert _minute_prev_close_contiguous(minute_last, trading_dates, d1) is None
+    assert _minute_prev_close_contiguous(minute_last, d3) is None
+    # first known session — the calendar's prior session (2026-06-02) has no
+    # minute data either → None (the old idx==0 refusal, now data-driven).
+    assert _minute_prev_close_contiguous(minute_last, d1) is None
     # zero prior close → None (never a /0 %CHNG).
-    assert _minute_prev_close_contiguous({d2: Decimal("0")}, [d2, d3], d3) is None
+    assert _minute_prev_close_contiguous({d2: Decimal("0")}, d3) is None
 
 
 def test_build_minute_basis_skips_row_when_prior_window_missing(tmp_path: Path) -> None:
@@ -857,6 +877,255 @@ def test_build_minute_basis_contiguous_uses_prior_session(tmp_path: Path) -> Non
     assert rows[0].chng == Decimal("1.05")
 
 
+# ── DEC-PREOPEN-PREVDAY-COMMON-002 — minute basis cross-checks the NSE calendar ──
+# The minute basis used the symbol's OWN 1-day series as its calendar, so a real
+# NSE session absent from BOTH the 1-day AND 1-minute series (a genuine lake hole,
+# not a holiday) was silently BRIDGED onto a stale earlier session → a fake %CHNG.
+# It now mirrors the daily basis: the latest available prior 1-day date must EQUAL
+# the NSE calendar's true prior session (`_previous_trading_day`), else the row is
+# skipped (correct-or-absent). These tests fail against the OLD self-referential
+# calendar and pass against the calendar cross-check.
+
+
+def test_minute_prev_close_contiguous_bridges_hole_before_fix_after_skips() -> None:
+    # Real NSE sessions Wed/Thu/Fri (2024-07-03/04/05) are all trading days. The
+    # symbol's 1-minute series is missing Thu 07-04 (a lake hole), so for Fri
+    # 07-05 the calendar names Thu as the true prior session and `minute_last`
+    # has no entry for it → None (skip). The PRE-#1620 code anchored on Wed's
+    # stale close (a fake %CHNG bridging the missing Thu); the intent is
+    # preserved under the DEC-STALENESS-CACHE-TRUTH-001 calendar-alone rule.
+    wed, fri = date(2024, 7, 3), date(2024, 7, 5)
+    minute_last = {wed: Decimal("630")}
+    assert _minute_prev_close_contiguous(minute_last, fri) is None
+
+
+def test_minute_prev_close_contiguous_holiday_gap_still_resolves() -> None:
+    # Guard against OVER-refusal: 2024-08-15 is a REAL NSE holiday (Independence
+    # Day), so the calendar steps over it — the prior session of Fri 08-16 IS
+    # Wed 08-14. A series holding Wed 08-14 + Fri 08-16 is CONTIGUOUS (the holiday
+    # is not a hole), so the Fri row must resolve on Wed's close, not be skipped.
+    wed, fri = date(2024, 8, 14), date(2024, 8, 16)
+    minute_last = {wed: Decimal("500.25")}
+    assert _minute_prev_close_contiguous(minute_last, fri) == Decimal("500.25")
+
+
+def test_minute_prev_close_contiguous_serves_when_1day_series_disagrees() -> None:
+    # The over-refusal upgrade (DEC-STALENESS-CACHE-TRUTH-001, the investigator's
+    # captured outcome-(b)): the 1-day series is NO LONGER consulted — a
+    # possibly-stale/holey 1-day series cannot veto an anchor whose correct value
+    # exists in the 1-minute data at the checked calendar's exact prior session.
+    # (Under the #1620 shape a trading_dates list missing 2024-01-11 refused this
+    # anchor even though minute_last[2024-01-11] existed.)
+    thu, fri = date(2024, 1, 11), date(2024, 1, 12)
+    minute_last = {thu: Decimal("125")}
+    assert _minute_prev_close_contiguous(minute_last, fri) == Decimal("125")
+
+
+def test_minute_prev_close_contiguous_coverage_floor_abstains() -> None:
+    # Past the published-holiday coverage floor the calendar back-walk raises →
+    # `_previous_trading_day` LOUD-abstains (None), so the anchor is honestly
+    # ABSENT (never a guessed session). 2020-01-01 walks into out-of-coverage 2019.
+    floor_edge, prior = date(2020, 1, 1), date(2019, 12, 31)
+    minute_last = {prior: Decimal("100")}
+    with capture_logs() as logs:
+        assert _minute_prev_close_contiguous(minute_last, floor_edge) is None
+    # DEC-PREOPEN-PREVDAY-COMMON-002 merge-reconcile: the module-local
+    # ``calendar.coverage_exhausted`` event was RETIRED for the ONE COMMON
+    # ``calendar.previous_session_coverage_exhausted`` (the sanctioned rename in
+    # MIGRATION.md #1649a); this pin now asserts the COMMON event (the guard
+    # itself is the DEC-STALENESS-CACHE-TRUTH-001 calendar-alone signature).
+    assert any(e["event"] == "calendar.previous_session_coverage_exhausted" for e in logs)
+
+
+def test_build_minute_basis_skips_row_on_session_hole_in_both_series(tmp_path: Path) -> None:
+    # END-TO-END minute-basis defect: SESAHOLE has 1-day + 1-minute bars for
+    # Mon 07-01, Tue 07-02 and Thu 07-04, but Wed 07-03 — a REAL NSE trading
+    # session — is missing from BOTH series (a genuine lake hole). Requesting
+    # basis="minute" for Thu 07-04, the OLD code anchored PREV. CLOSE on Tue
+    # 07-02's last 1-minute close (bridging the missing Wed) → a fake %CHNG row.
+    # The calendar cross-check names Wed 07-03 as the true prior session, so the
+    # latest available prior date (Tue) != Wed → the Thu row is SKIPPED.
+    _write(
+        tmp_path,
+        "SESAHOLE",
+        "1day",
+        [
+            _bar(datetime(2024, 7, 1, 3, 45, tzinfo=UTC), open_="100", close="101"),
+            _bar(datetime(2024, 7, 2, 3, 45, tzinfo=UTC), open_="101", close="102"),
+            _bar(datetime(2024, 7, 4, 3, 45, tzinfo=UTC), open_="110", close="111"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "SESAHOLE",
+        "1minute",
+        [
+            _bar(datetime(2024, 7, 1, 3, 45, tzinfo=UTC), open_="100", close="100.5"),
+            _bar(datetime(2024, 7, 1, 9, 44, tzinfo=UTC), open_="100.5", close="101"),
+            _bar(datetime(2024, 7, 2, 3, 45, tzinfo=UTC), open_="101", close="101.5"),
+            _bar(datetime(2024, 7, 2, 9, 44, tzinfo=UTC), open_="101.5", close="102"),  # Tue last
+            _bar(datetime(2024, 7, 4, 3, 45, tzinfo=UTC), open_="110", close="110.5"),  # Thu 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "SESAHOLE")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        basis="minute",
+    )
+    # Mon → skipped (first session); Tue → prior Mon present + calendar-adjacent →
+    # emitted; Thu → SKIPPED (Wed hole; no stale Tue-anchored fake %CHNG).
+    assert [r.day for r in rows] == [date(2024, 7, 2)]
+    assert rows[0].prev_close == Decimal("101")  # Mon's last 1-minute close, not bridged
+
+
+def test_build_minute_basis_holiday_gap_emits_row(tmp_path: Path) -> None:
+    # Guard end-to-end: Wed 08-14 + Fri 08-16 flank the REAL NSE holiday Thu
+    # 08-15. The series is contiguous across the holiday, so the Fri row resolves
+    # on Wed's last 1-minute close (the holiday is not a hole) — never over-refused.
+    _write(
+        tmp_path,
+        "SESAHOL2",
+        "1day",
+        [
+            _bar(datetime(2024, 8, 14, 3, 45, tzinfo=UTC), open_="200", close="201"),
+            _bar(datetime(2024, 8, 16, 3, 45, tzinfo=UTC), open_="210", close="211"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "SESAHOL2",
+        "1minute",
+        [
+            _bar(datetime(2024, 8, 14, 3, 45, tzinfo=UTC), open_="200", close="200.5"),
+            _bar(datetime(2024, 8, 14, 9, 44, tzinfo=UTC), open_="200.5", close="201"),  # Wed last
+            _bar(datetime(2024, 8, 16, 3, 45, tzinfo=UTC), open_="210", close="210.5"),  # Fri 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "SESAHOL2")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        basis="minute",
+    )
+    assert [r.day for r in rows] == [date(2024, 8, 16)]
+    assert rows[0].prev_close == Decimal("201")  # Wed's last 1-minute close, holiday stepped over
+    assert rows[0].iep == Decimal("210")
+
+
+# ── DEC-STALENESS-CACHE-TRUTH-001 — minute basis anchored on the checked calendar
+# ALONE (the 1-day intermediary + the previous-AVAILABLE fallback are REMOVED).
+# Fixture values = the investigator's executed repro (real NSE sessions
+# 2024-01-08…12; stale close 105 @ Wed 01-10, true prior close 125 @ Thu 01-11,
+# IEP 130 @ Fri 01-12 — the 23.81%-vs-4.00% pair).
+
+
+def test_build_minute_basis_serves_true_prior_close_despite_1day_hole(tmp_path: Path) -> None:
+    # The finder's shape (fails BEFORE this change): the 1-day series is missing
+    # the true prior session Thu 2024-01-11, but the 1-minute data for it is
+    # PRESENT. The #1620 shape required the 1-day series to CONFIRM the
+    # calendar's session, so it SKIPPED the Fri row even though the correct
+    # anchor (125) existed — an over-refusal. Now the checked calendar + the
+    # 1-minute data alone decide: the row SERVES the TRUE prior close 125 →
+    # %CHNG = (130 − 125) / 125 × 100 = 4.00 (never the stale-105-anchored
+    # 23.81%). Real data on the real calendar date — strictly better than
+    # absence, and never a fabricated value (Golden Rule #1).
+    _write(
+        tmp_path,
+        "FINDER",
+        "1day",
+        [
+            _bar(datetime(2024, 1, 10, 3, 45, tzinfo=UTC), open_="104", close="105"),
+            # Thu 2024-01-11 daily bar MISSING (the 1-day hole).
+            _bar(datetime(2024, 1, 12, 3, 45, tzinfo=UTC), open_="130", close="131"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "FINDER",
+        "1minute",
+        [
+            _bar(datetime(2024, 1, 10, 3, 45, tzinfo=UTC), open_="104", close="105"),  # Wed last
+            _bar(datetime(2024, 1, 11, 3, 45, tzinfo=UTC), open_="120", close="125"),  # Thu last
+            _bar(datetime(2024, 1, 12, 3, 45, tzinfo=UTC), open_="130", close="130.5"),  # Fri 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "FINDER")],
+        start=date(2024, 1, 12),
+        end=date(2024, 1, 12),
+        basis="minute",
+    )
+    assert [r.day for r in rows] == [date(2024, 1, 12)]
+    assert rows[0].prev_close == Decimal("125")  # the TRUE prior-session close
+    assert rows[0].iep == Decimal("130")
+    assert rows[0].pct_chng == Decimal("4")  # the finder's 4.00% — never 23.81%
+
+
+def test_build_minute_basis_cli_lake_hole_never_mis_anchors(tmp_path: Path) -> None:
+    # The captured 23.81% mis-anchor class (fails BEFORE this change — this is
+    # the SANCTIONED honesty behavior change of DEC-STALENESS-CACHE-TRUTH-001):
+    # a CLI-pulled / never-prebuilt lake has NO 1day partition at all, which put
+    # EVERY symbol on the calendar-blind previous-AVAILABLE fallback
+    # (`_prev_trading_close`). With a genuine 1-minute session hole at the true
+    # prior session (Thu 2024-01-11), that fallback bridged Fri's anchor onto
+    # Wed's stale close 105 → a served %CHNG of 23.81% where the truth is 4.00%.
+    # Now the row is SKIPPED (correct-or-absent) — never the bridged number.
+    _write(
+        tmp_path,
+        "CLILAKE",
+        "1minute",
+        [
+            _bar(datetime(2024, 1, 10, 3, 45, tzinfo=UTC), open_="104", close="105"),  # Wed last
+            # Thu 2024-01-11 1-minute session MISSING (the lake hole).
+            _bar(datetime(2024, 1, 12, 3, 45, tzinfo=UTC), open_="130", close="130.5"),  # Fri 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "CLILAKE")],
+        start=date(2024, 1, 12),
+        end=date(2024, 1, 12),
+        basis="minute",
+    )
+    # No 23.81% row — the hole is refused, never bridged (correct-or-absent).
+    assert rows == []
+
+
+def test_build_minute_basis_cli_lake_contiguous_serves(tmp_path: Path) -> None:
+    # The healthy CLI-lake twin: NO 1day partition, but the 1-minute series is
+    # contiguous (Thu present) → the Fri row serves the true prior close via the
+    # checked calendar — a pure-minute lake still reports, only the bridged-hole
+    # rows disappear (scopes the sanctioned change to exactly the wrong rows).
+    _write(
+        tmp_path,
+        "CLILAKE2",
+        "1minute",
+        [
+            _bar(datetime(2024, 1, 11, 3, 45, tzinfo=UTC), open_="120", close="125"),  # Thu last
+            _bar(datetime(2024, 1, 12, 3, 45, tzinfo=UTC), open_="130", close="130.5"),  # Fri 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "CLILAKE2")],
+        start=date(2024, 1, 12),
+        end=date(2024, 1, 12),
+        basis="minute",
+    )
+    assert [r.day for r in rows] == [date(2024, 1, 12)]
+    assert rows[0].prev_close == Decimal("125")
+    assert rows[0].pct_chng == Decimal("4")
+
+
 # ── DEC-PREOPEN-PREVCLOSE-CONTIGUITY-DAILY-001 — daily basis: no jump over a hole ─
 
 
@@ -897,15 +1166,19 @@ def test_previous_trading_day_coverage_exhausted_warns_and_returns_none() -> Non
     # Calendar-correctness pack: the OLD silent behaviour is GONE — walking back
     # from the 2020-01-01 pull floor reaches 2019-12-31 (a Tuesday OUTSIDE the
     # published holiday span), which the unguarded calendar silently read as a
-    # trading day. The walk now uses the STRICT is_trading_day_checked, emits
-    # ONE calendar.coverage_exhausted warning, and returns None (prev-close
-    # honestly ABSENT — never a guessed session, never a crash).
+    # trading day. The walk uses the STRICT is_trading_day_checked, emits ONE
+    # warning, and returns None (prev-close honestly ABSENT — never a guessed
+    # session, never a crash). DEC-PREOPEN-PREVDAY-COMMON-002 reconcile: the
+    # delegator now rides the COMMON nse.previous_trading_session primitive, so
+    # the warning is the COMMON calendar.previous_session_coverage_exhausted
+    # event (the legacy module-local calendar.coverage_exhausted is RETIRED —
+    # a sanctioned observability rename, grep-verified consumer-free).
     with capture_logs() as logs:
         assert _previous_trading_day(date(2020, 1, 1)) is None
-    events = [log for log in logs if log["event"] == "calendar.coverage_exhausted"]
+    events = [log for log in logs if log["event"] == "calendar.previous_session_coverage_exhausted"]
     assert len(events) == 1
-    assert events[0]["probe_day"] == "2019-12-31"
-    assert events[0]["report_day"] == "2020-01-01"
+    assert events[0]["probe_date"] == "2019-12-31"
+    assert events[0]["requested_date"] == "2020-01-01"
 
 
 def test_daily_prev_close_contiguous_absent_when_coverage_exhausted() -> None:
@@ -1427,3 +1700,1674 @@ def test_build_daily_basis_overlay_recovers_row(tmp_path: Path) -> None:
     with_overlay = build_preopen_rows(_conn(), tmp_path, datasets=datasets, start=start, end=end)
     assert [r.day for r in with_overlay] == [date(2026, 5, 13)]
     assert with_overlay[0].prev_close == Decimal("110")
+
+
+# ── DEC-PREOPEN-PREVDAY-COMMON-002 — minute basis checked against the REAL calendar ─
+#
+# The confirmed defect (independently reproduced on origin/main 63ab35f): the
+# minute-basis guard anchored on trading_dates[idx-1] — the symbol's OWN 1-day
+# series — with ZERO real-NSE-calendar check, so a real session missing from
+# BOTH series (2024-01-03, a plain trading Wednesday) read as "a genuine
+# holiday" and 2024-01-04 fabricated prev_close=100.0 → +10.0% across the hole
+# (select_top_movers would have crowned it). The day basis on the IDENTICAL
+# lake skipped. The fix mirrors the daily guard: the checked calendar
+# (_previous_trading_day) is the prior-session authority for BOTH bases.
+
+
+def _hole_lake(lake: Path, *, jan3_minute_close: str | None = None) -> None:
+    """The repro lake: 2024-01-02 + 2024-01-04 in BOTH series; 01-03 daily ABSENT.
+
+    2024-01-02 (Tue) / 01-03 (Wed) / 01-04 (Thu) are ALL real NSE sessions.
+    ``jan3_minute_close`` optionally plants a 01-03 MINUTE bar (daily still
+    absent) — the mutation-teeth shape: the stale nearest date (01-02, close
+    100.00) carries a DIFFERENT close than the true prior session, so an
+    ``!=`` → ``==`` mutant on the expected check emits a row and dies.
+    """
+    _write(
+        lake,
+        "HOLETEST",
+        "1day",
+        [
+            _bar(datetime(2024, 1, 2, 3, 45, tzinfo=UTC), open_="99.00", close="100.00"),
+            _bar(datetime(2024, 1, 4, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+        ],
+    )
+    minute_bars = [
+        _bar(datetime(2024, 1, 2, 3, 45, tzinfo=UTC), open_="99.50", close="99.80"),
+        _bar(datetime(2024, 1, 2, 9, 59, tzinfo=UTC), open_="99.90", close="100.00"),
+        _bar(datetime(2024, 1, 4, 3, 45, tzinfo=UTC), open_="110.00", close="110.50"),
+    ]
+    if jan3_minute_close is not None:
+        minute_bars.insert(
+            2,
+            _bar(datetime(2024, 1, 3, 3, 45, tzinfo=UTC), open_="105.00", close=jan3_minute_close),
+        )
+    _write(lake, "HOLETEST", "1minute", minute_bars)
+
+
+def test_minute_basis_refuses_real_session_hole_regression(tmp_path: Path) -> None:
+    # THE regression (the finder's repro, ported): the pre-fix code emitted
+    # day=2024-01-04 prev_close=100.0 pct_chng=+10.0 across the 01-03 hole.
+    # Now: NO row (honest absence) and the Top-mover selector has nothing to
+    # crown that day. Under the merged DEC-STALENESS-CACHE-TRUTH-001 rule the
+    # minute-basis refusal is SILENT (the hole-WARN channel is daily-only —
+    # the day-basis control test pins the WARN on this exact lake).
+    _hole_lake(tmp_path)
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "HOLETEST")],
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+            basis="minute",
+        )
+    assert rows == []  # the fabricated +10.0% row is GONE
+    assert select_top_movers(rows, min_pct=Decimal("0")) == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert events == []  # the minute basis has no 1-day comparison to warn on
+    suppressed = [
+        log for log in logs if log["event"] == "preopen.prev_close_noncontiguous_suppressed"
+    ]
+    assert suppressed == []
+
+
+def test_day_basis_control_on_the_hole_lake_unchanged(tmp_path: Path) -> None:
+    # The day-basis CONTROL on the identical lake: it already skipped (its
+    # guard was calendar-checked before this fix) — the payload is unchanged;
+    # it now ALSO surfaces the named WARN (observability symmetry).
+    _hole_lake(tmp_path)
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "HOLETEST")],
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == 1
+    assert events[0]["basis"] == "day"
+    # The daily basis reads no minute series, so its diagnostic is two-way:
+    # this genuine hole reads missing_session with the re-pull remediation.
+    assert events[0]["hole_shape"] == "missing_session"
+    assert "re-pull" in str(events[0]["detail"])
+
+
+def test_minute_basis_hole_mutation_teeth(tmp_path: Path) -> None:
+    # Mutation teeth under the merged DEC-STALENESS-CACHE-TRUTH-001 rule:
+    # 01-03 has a MINUTE bar (close 106.00 ≠ the stale 01-02 close 100.00)
+    # while its DAILY bar is absent — the 1-day series is NOT consulted, so
+    # the row SERVES the true prior session's close (the outcome-(b)
+    # over-refusal upgrade: real data at the real checked-calendar session).
+    # The distinct closes are the teeth: a mutant anchoring on the previous
+    # AVAILABLE minute session (100.00) — or on any other date — emits a
+    # DIFFERENT prev_close and dies here.
+    _hole_lake(tmp_path, jan3_minute_close="106.00")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "HOLETEST")],
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+            basis="minute",
+        )
+    assert [(r.day, r.prev_close) for r in rows] == [(date(2024, 1, 4), Decimal("106.00"))]
+    # A served row has no hole to warn about (and the minute basis is silent
+    # by design — the WARN channel is the daily basis's).
+    assert [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"] == []
+
+
+# ── the pure guards: branch-complete over the new seams ─────────────────────
+
+
+def test_minute_guard_has_no_1day_or_on_hole_seams_and_serves_from_minute_data() -> None:
+    # DEC-STALENESS-CACHE-TRUTH-001 merge-reconcile drift pin: the minute
+    # guard anchors on the checked calendar ALONE — no 1-day comparison
+    # remains, so the #1649a trading_dates evidence + on_hole seam
+    # deliberately do NOT exist on THIS guard (the daily mirror keeps both).
+    # Re-adding either is a conscious decision, never a refactor accident.
+    params = inspect.signature(_minute_prev_close_contiguous).parameters
+    assert "on_hole" not in params
+    assert "trading_dates" not in params
+    # And the over-refusal upgrade the removal buys: minute data AT the
+    # expected session SERVES even where a 1-day series would disagree.
+    jan3, jan4 = date(2024, 1, 3), date(2024, 1, 4)
+    got = _minute_prev_close_contiguous({jan3: Decimal("106")}, jan4, expected_session=jan3)
+    assert got == Decimal("106")
+
+
+def test_minute_guard_missing_prior_session_window_is_silent_skip() -> None:
+    jan2, jan4 = date(2024, 1, 2), date(2024, 1, 4)
+    # The default Ellipsis seam (the walk computes 2024-01-03 internally): the
+    # prior session's 1-minute window is MISSING → None, silently — the
+    # refusal VALUE is the whole contract (no minute-basis WARN channel).
+    with capture_logs() as logs:
+        assert _minute_prev_close_contiguous({jan2: Decimal("100")}, jan4) is None
+    assert [e for e in logs if e["event"] == "preopen.prev_close_noncontiguous"] == []
+
+
+def test_minute_guard_coverage_abstain_returns_none() -> None:
+    # The walk from 2020-01-01 exhausts coverage → the COMMON primitive WARNs
+    # once and abstains; the guard returns None (never a guessed session).
+    prior, day = date(2019, 12, 31), date(2020, 1, 1)
+    with capture_logs() as logs:
+        got = _minute_prev_close_contiguous({prior: Decimal("100")}, day)
+    assert got is None
+    events = [log for log in logs if log["event"] == "calendar.previous_session_coverage_exhausted"]
+    assert len(events) == 1
+
+
+def test_minute_guard_explicit_none_expected_session_abstains() -> None:
+    # A caller-supplied None (the memoised abstain) short-circuits identically.
+    jan2, jan4 = date(2024, 1, 2), date(2024, 1, 4)
+    got = _minute_prev_close_contiguous({jan2: Decimal("100")}, jan4, expected_session=None)
+    assert got is None
+
+
+def test_minute_guard_ellipsis_seam_parity() -> None:
+    # The Ellipsis default computes the SAME walk a caller would memoise:
+    # helper(...) == helper(expected_session=_previous_trading_day(day)).
+    d1, d2 = date(2026, 6, 3), date(2026, 6, 4)
+    minute_last = {d1: Decimal("630")}
+    for day in (d1, d2):
+        assert _minute_prev_close_contiguous(minute_last, day) == _minute_prev_close_contiguous(
+            minute_last, day, expected_session=_previous_trading_day(day)
+        )
+
+
+def test_minute_guard_observed_overlay_steps_over_flagged_day() -> None:
+    # The dedicated SPURIOUS-SKIP pin: 2026-05-12 (a derived trading Tuesday)
+    # is overlay-flagged as observably untraded. WITHOUT the overlay the
+    # 05-13 anchor reads 05-12 → its minute window is missing → silent skip.
+    # WITH it the walk steps over 05-12 to 05-11, whose data is present → the
+    # anchor RESOLVES (the overlay prevents a spurious skip; remove-only).
+    may11, may12, may13 = date(2026, 5, 11), date(2026, 5, 12), date(2026, 5, 13)
+    minute_last = {may11: Decimal("110")}
+    assert _minute_prev_close_contiguous(minute_last, may13) is None
+    with_overlay = _minute_prev_close_contiguous(minute_last, may13, observed=frozenset({may12}))
+    assert with_overlay == Decimal("110")
+
+
+def test_daily_guard_mismatch_invokes_on_hole_with_exact_args() -> None:
+    jan2, jan3, jan4 = date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)
+    calls: list[tuple[date, date]] = []
+    got = _daily_prev_close_contiguous(
+        {jan2: Decimal("100"), jan4: Decimal("110")},
+        [jan2, jan4],
+        jan4,
+        expected_session=jan3,
+        on_hole=lambda expected, found: calls.append((expected, found)),
+    )
+    assert got is None
+    assert calls == [(jan3, jan2)]
+
+
+def test_daily_guard_coverage_abstain_returns_none_without_on_hole() -> None:
+    prior, day = date(2019, 12, 31), date(2020, 1, 1)
+    calls: list[tuple[date, date]] = []
+    with capture_logs():
+        got = _daily_prev_close_contiguous(
+            {prior: Decimal("630"), day: Decimal("640")},
+            [prior, day],
+            day,
+            on_hole=lambda expected, found: calls.append((expected, found)),
+        )
+    assert got is None
+    assert calls == []
+
+
+def test_daily_guard_ellipsis_seam_parity() -> None:
+    d1, d2 = date(2026, 6, 3), date(2026, 6, 4)
+    daily = {d1: Decimal("630"), d2: Decimal("632")}
+    for day in (d1, d2):
+        assert _daily_prev_close_contiguous(daily, [d1, d2], day) == _daily_prev_close_contiguous(
+            daily, [d1, d2], day, expected_session=_previous_trading_day(day)
+        )
+
+
+def test_daily_guard_observed_kwarg_still_steps_over_flagged_day() -> None:
+    # The pre-existing observed kwarg survives the seam refactor unchanged.
+    may11, may12, may13 = date(2026, 5, 11), date(2026, 5, 12), date(2026, 5, 13)
+    daily = {may11: Decimal("110"), may13: Decimal("125")}
+    assert _daily_prev_close_contiguous(daily, [may11, may13], may13) is None
+    assert _daily_prev_close_contiguous(
+        daily, [may11, may13], may13, observed=frozenset({may12})
+    ) == Decimal("110")
+
+
+# ── contiguous-arm parity: the new anchor == the old rule where the old was right ─
+
+
+def test_minute_guard_contiguous_run_matches_old_rule() -> None:
+    # For EVERY day of a fully-contiguous session run the calendar-verified
+    # anchor equals the OLD trading_dates[idx-1] rule (the fix only ever
+    # REMOVES wrong rows, never changes a right one). 2024 H1 spans weekends,
+    # Republic Day, the Holi cluster and Good Friday.
+    sessions = trading_days_between(date(2024, 1, 1), date(2024, 6, 30))
+    minute_last = {d: Decimal(100) + Decimal(i) for i, d in enumerate(sessions)}
+    for i, day in enumerate(sessions):
+        old = minute_last.get(sessions[i - 1]) if i > 0 else None
+        assert _minute_prev_close_contiguous(minute_last, day) == old
+
+
+@settings(max_examples=25, deadline=None)
+@given(
+    start=st.dates(min_value=date(2020, 2, 1), max_value=date(2026, 10, 1)),
+    length=st.integers(min_value=2, max_value=30),
+)
+def test_minute_guard_contiguous_property_new_equals_old(start: date, length: int) -> None:
+    # Hypothesis twin of the deterministic run: any calendar-generated
+    # contiguous window anywhere in coverage → new == old for every day.
+    # A degenerate draw is REJECTED via assume (never a silent vacuous pass —
+    # the hostile-review fold on the earlier bare `return`).
+    sessions = trading_days_between(start, start + timedelta(days=length * 3))[:length]
+    assume(len(sessions) >= 2)
+    minute_last = {d: Decimal(100) + Decimal(i) for i, d in enumerate(sessions)}
+    for i, day in enumerate(sessions[1:], start=1):
+        assert _minute_prev_close_contiguous(minute_last, day) == minute_last[sessions[i - 1]]
+
+
+# ── the delegator: equivalence with a verbatim copy of the OLD private walk ──
+
+
+def _old_previous_trading_day(day: date, *, observed: frozenset[date] = frozenset()) -> date | None:
+    # VERBATIM copy of the pre-DEC-PREOPEN-PREVDAY-COMMON-002 private walk
+    # (origin/main 63ab35f preopen_report.py::_previous_trading_day), with the
+    # abstain-path structlog warning elided — the equivalence pin is the VALUE.
+    probe = day - timedelta(days=1)
+    while True:
+        try:
+            if is_trading_day_checked_observed(probe, observed=observed):
+                return probe
+        except HolidayDataUnavailableError:
+            return None
+        probe -= timedelta(days=1)
+
+
+def test_previous_trading_day_delegation_equivalence_full_span() -> None:
+    # The thin delegator over nse.previous_trading_session is VALUE-identical
+    # to the deleted private walk for EVERY day of the covered span
+    # (2020-01-02 → 2026-12-31), with and without an overlay.
+    observed_sets = (
+        frozenset[date](),
+        frozenset({date(2024, 1, 3), date(2025, 9, 26), date(2026, 5, 12)}),
+    )
+    with capture_logs():
+        day = date(2020, 1, 2)
+        while day <= date(2026, 12, 31):
+            for observed in observed_sets:
+                assert _previous_trading_day(day, observed=observed) == (
+                    _old_previous_trading_day(day, observed=observed)
+                ), day
+            day += timedelta(days=1)
+
+
+@settings(max_examples=100, deadline=None)
+@given(
+    day=st.dates(min_value=date(2020, 1, 2), max_value=date(2026, 12, 31)),
+    observed=st.frozensets(
+        st.dates(min_value=date(2020, 1, 1), max_value=date(2026, 12, 31)), max_size=8
+    ),
+)
+def test_previous_trading_day_delegation_equivalence_property(
+    day: date, observed: frozenset[date]
+) -> None:
+    with capture_logs():
+        assert _previous_trading_day(day, observed=observed) == _old_previous_trading_day(
+            day, observed=observed
+        )
+
+
+# ── build-level calendar shapes (Budget Saturday / Holi / Muhurat / overlay) ─
+
+
+def _both_series(lake: Path, symbol: str, days: list[tuple[date, str, str]]) -> None:
+    """Write 1day + 1minute bars for each (day, open, close), split by month."""
+    by_month: dict[tuple[int, int], list[tuple[date, str, str]]] = {}
+    for d, o, c in days:
+        by_month.setdefault((d.year, d.month), []).append((d, o, c))
+    for chunk in by_month.values():
+        _write(
+            lake,
+            symbol,
+            "1day",
+            [
+                _bar(datetime(d.year, d.month, d.day, 3, 45, tzinfo=UTC), open_=o, close=c)
+                for d, o, c in chunk
+            ],
+        )
+        _write(
+            lake,
+            symbol,
+            "1minute",
+            [
+                _bar(datetime(d.year, d.month, d.day, 3, 45, tzinfo=UTC), open_=o, close=c)
+                for d, o, c in chunk
+            ],
+        )
+
+
+@pytest.mark.parametrize("basis", ["day", "minute"])
+def test_build_budget_saturday_is_a_session_both_bases(tmp_path: Path, basis: str) -> None:
+    # Sat 2025-02-01 is a SPECIAL_WEEKEND_TRADING_SESSIONS Budget session:
+    # with all three sessions present, the SATURDAY row anchors on Friday and
+    # Monday 02-03 anchors on the SATURDAY (never on Friday) — zero warns.
+    _both_series(
+        tmp_path,
+        "BUDGET",
+        [
+            (date(2025, 1, 31), "500.00", "505.00"),
+            (date(2025, 2, 1), "503.00", "504.00"),
+            (date(2025, 2, 3), "503.50", "507.50"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "BUDGET")],
+            start=date(2025, 1, 1),
+            end=date(2025, 12, 31),
+            basis=basis,  # type: ignore[arg-type]
+        )
+    assert [(r.day, r.prev_close) for r in rows] == [
+        (date(2025, 2, 1), Decimal("505.00")),  # Saturday ← Friday's close
+        (date(2025, 2, 3), Decimal("504.00")),  # Monday ← the SATURDAY's close
+    ]
+    assert [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"] == []
+
+
+@pytest.mark.parametrize("basis", ["day", "minute"])
+def test_build_missing_budget_saturday_is_a_hole_both_bases(tmp_path: Path, basis: str) -> None:
+    # The Saturday session MISSING from the lake: Monday 02-03 must NOT
+    # baseline on Friday across the missing special session — skip, plus the
+    # daily-basis WARN (pre-fix the minute basis fabricated exactly this row;
+    # under the merged DEC-STALENESS-CACHE-TRUTH-001 rule the minute basis
+    # skips SILENTLY — no 1-day comparison to classify).
+    _both_series(
+        tmp_path,
+        "BUDGET",
+        [
+            (date(2025, 1, 31), "500.00", "505.00"),
+            (date(2025, 2, 3), "503.50", "507.50"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "BUDGET")],
+            start=date(2025, 1, 1),
+            end=date(2025, 12, 31),
+            basis=basis,  # type: ignore[arg-type]
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    if basis == "day":
+        assert len(events) == 1
+        assert events[0]["expected_session"] == "2025-02-01"
+        assert events[0]["nearest_lake_session"] == "2025-01-31"
+        # The Saturday session is absent from BOTH series → the genuine hole
+        # shape with the re-pull remediation.
+        assert events[0]["hole_shape"] == "missing_session"
+    else:
+        assert events == []  # the minute-basis refusal is the silent skip
+
+
+def test_build_minute_basis_holi_cluster_gap_is_not_a_hole(tmp_path: Path) -> None:
+    # Holi 2024: Mon 03-25 is a listed holiday, so Fri 03-22 → Tue 03-26 is
+    # CONTIGUOUS across holiday + weekend — the row is emitted, zero warns
+    # (a calendar gap is never a data hole).
+    _both_series(
+        tmp_path,
+        "HOLI",
+        [
+            (date(2024, 3, 22), "101.50", "102.00"),
+            (date(2024, 3, 26), "103.00", "104.50"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "HOLI")],
+            start=date(2024, 3, 23),
+            end=date(2024, 3, 31),
+            basis="minute",
+        )
+    assert [(r.day, r.prev_close) for r in rows] == [(date(2024, 3, 26), Decimal("102.00"))]
+    assert [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"] == []
+
+
+def test_build_minute_basis_muhurat_boundary_serves_prior_regular_close(tmp_path: Path) -> None:
+    # The MERGED Muhurat stance on the minute basis (the DEC-STALENESS-CACHE-
+    # TRUTH-001 #1660 enumerated sanctioned flip): the 2024-11-01 Diwali
+    # Muhurat day is a calendar NON-session for the prior-session walk, so
+    # the day-after row (Mon 11-04) anchors on the prior REGULAR session Thu
+    # 2024-10-31 — whose 1-minute data is present — and SERVES the
+    # calendar-consistent pre-Diwali close, consistent with the daily basis's
+    # own calendar treatment. The DAILY basis stays conservatively skipped
+    # with the definitive muhurat_session_bar WARN (the day-basis mirror
+    # test, DEC-PREVSESSION-MUHURAT-COHERENCE-001).
+    _both_series(
+        tmp_path,
+        "MUHURAT",
+        [
+            (date(2024, 10, 31), "98.00", "99.00"),
+            (date(2024, 11, 1), "100.00", "101.00"),
+            (date(2024, 11, 4), "102.00", "103.00"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "MUHURAT")],
+            start=date(2024, 11, 2),
+            end=date(2024, 11, 30),
+            basis="minute",
+        )
+    assert [(r.day, r.prev_close) for r in rows] == [(date(2024, 11, 4), Decimal("99.00"))]
+    assert [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"] == []
+
+
+def test_build_day_basis_muhurat_bar_shape_mirror(tmp_path: Path) -> None:
+    # The DAILY twin of the Muhurat pin (day↔minute mirror parity): the
+    # found > expected split needs NO minute evidence, so the day basis names
+    # the SAME definitive muhurat_session_bar shape.
+    _both_series(
+        tmp_path,
+        "MUHURAT",
+        [
+            (date(2024, 11, 1), "100.00", "101.00"),
+            (date(2024, 11, 4), "102.00", "103.00"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "MUHURAT")],
+            start=date(2024, 11, 2),
+            end=date(2024, 11, 30),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == 1
+    assert events[0]["hole_shape"] == "muhurat_session_bar"
+    assert "no action needed" in str(events[0]["detail"])
+    assert "re-pull" not in str(events[0]["detail"])
+
+
+def test_build_weekend_junk_bar_daily_warns_suspicious_minute_serves(tmp_path: Path) -> None:
+    # A NON-Muhurat non-session 1-day bar (a stray Saturday 2024-01-06 write)
+    # after the prior session (Fri 2024-01-05). DAY basis: found (01-06) >
+    # expected (01-05) → the reworded extra_nonsession_bar shape — honestly
+    # SUSPICIOUS ("inspect"), never the old falsely-reassuring "no action is
+    # needed", never a Muhurat guess — killing the has_muhurat_session-dropped
+    # classifier mutant on the integration path (the mutant reads
+    # muhurat_session_bar here). MINUTE basis (the merged
+    # DEC-STALENESS-CACHE-TRUTH-001 rule): the stray bar is INVISIBLE to the
+    # calendar-alone anchor — Mon 01-08 serves Fri 01-05's close, zero warns.
+    _both_series(
+        tmp_path,
+        "JUNKBAR",
+        [
+            (date(2024, 1, 5), "100.00", "101.00"),
+            (date(2024, 1, 6), "200.00", "201.00"),  # Saturday — a stray write
+            (date(2024, 1, 8), "102.00", "103.00"),
+        ],
+    )
+    with capture_logs() as day_logs:
+        day_rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "JUNKBAR")],
+            start=date(2024, 1, 8),
+            end=date(2024, 1, 8),
+            basis="day",
+        )
+    assert day_rows == []
+    events = [log for log in day_logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == 1
+    assert events[0]["hole_shape"] == "extra_nonsession_bar"
+    detail = str(events[0]["detail"])
+    assert "inspect" in detail
+    assert "no action" not in detail
+    assert "Diwali" not in detail  # the Muhurat guess is GONE from this shape
+    assert "re-pull" not in detail
+    with capture_logs() as minute_logs:
+        minute_rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "JUNKBAR")],
+            start=date(2024, 1, 8),
+            end=date(2024, 1, 8),
+            basis="minute",
+        )
+    assert [(r.day, r.prev_close) for r in minute_rows] == [(date(2024, 1, 8), Decimal("101.00"))]
+    assert [log for log in minute_logs if log["event"] == "preopen.prev_close_noncontiguous"] == []
+
+
+def test_day_basis_prebuild_lag_lake_reads_missing_session(tmp_path: Path) -> None:
+    # The daily basis's DOCUMENTED two-way limit, pinned: on the prebuild-lag
+    # lake (01-03 has minute bars but no 1-day bar) the day basis holds no
+    # minute evidence — the shape honestly degrades to missing_session (the
+    # minute basis, which holds the evidence, names prebuild_lag instead).
+    _hole_lake(tmp_path, jan3_minute_close="106.00")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "HOLETEST")],
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == 1
+    assert events[0]["hole_shape"] == "missing_session"
+    assert "re-pull" in str(events[0]["detail"])
+
+
+def test_build_minute_basis_overlay_recovers_row(tmp_path: Path) -> None:
+    # The minute twin of the daily overlay test: bars on 2026-05-11 + 05-13,
+    # the derived-calendar prior session 05-12 observed-flagged → the walk
+    # steps over it, the anchor resolves on 05-11, and the row is emitted.
+    _both_series(
+        tmp_path,
+        "DRIFTED",
+        [
+            (date(2026, 5, 11), "100.00", "110.00"),
+            (date(2026, 5, 13), "120.00", "125.00"),
+        ],
+    )
+    datasets = [("NSE", "CASH", "DRIFTED")]
+    start, end = date(2026, 5, 1), date(2026, 5, 31)
+    without = build_preopen_rows(
+        _conn(), tmp_path, datasets=datasets, start=start, end=end, basis="minute"
+    )
+    assert [r.day for r in without] == []  # 05-12 reads as a lake hole
+    _write_overlay(tmp_path, "2026-05-12")
+    with_overlay = build_preopen_rows(
+        _conn(), tmp_path, datasets=datasets, start=start, end=end, basis="minute"
+    )
+    assert [r.day for r in with_overlay] == [date(2026, 5, 13)]
+    assert with_overlay[0].prev_close == Decimal("110.00")
+
+
+# ── the capped, per-(exchange, segment, symbol)-deduped WARN machinery ───────
+
+
+def test_hole_warn_dedupes_per_dataset_triple(tmp_path: Path) -> None:
+    # TWO holes for ONE dataset triple (01-03 and 01-05 both missing) →
+    # exactly ONE warn (per-(exchange, segment, symbol) dedup), and still
+    # zero rows fabricated.
+    _write(
+        tmp_path,
+        "TWOHOLES",
+        "1day",
+        [
+            _bar(datetime(2024, 1, 2, 3, 45, tzinfo=UTC), open_="99.00", close="100.00"),
+            _bar(datetime(2024, 1, 4, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+            _bar(datetime(2024, 1, 8, 3, 45, tzinfo=UTC), open_="112.00", close="113.00"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "TWOHOLES")],
+            start=date(2024, 1, 3),
+            end=date(2024, 1, 31),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == 1
+    assert events[0]["symbol"] == "TWOHOLES"
+
+
+def test_hole_warn_dual_exchange_symbol_warns_per_exchange(tmp_path: Path) -> None:
+    # The hostile-review regression: a DUAL-LISTED symbol with the same hole
+    # on BOTH exchanges must warn TWICE (once per (exchange, segment, symbol)
+    # triple) — the old bare-symbol dedupe key silenced (and uncounted) the
+    # second exchange entirely.
+    bars = [
+        _bar(datetime(2024, 1, 2, 3, 45, tzinfo=UTC), open_="99.00", close="100.00"),
+        _bar(datetime(2024, 1, 4, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+    ]
+    _write(tmp_path, "DUAL", "1day", bars)
+    _write(tmp_path, "DUAL", "1day", bars, exchange="BSE")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("BSE", "CASH", "DUAL"), ("NSE", "CASH", "DUAL")],
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert [(e["exchange"], e["segment"], e["symbol"]) for e in events] == [
+        ("BSE", "CASH", "DUAL"),
+        ("NSE", "CASH", "DUAL"),
+    ]
+
+
+# ── the pure hole-shape classifier + shape-matched detail ────────────────────
+
+
+def test_hole_shape_muhurat_session_bar_ignores_minute_evidence() -> None:
+    # found > expected on a calendar-confirmed Muhurat date → the DEFINITIVE
+    # muhurat_session_bar shape (DEC-PREVSESSION-MUHURAT-COHERENCE-001), with
+    # OR without minute evidence (the classification needs none) — identical
+    # on both bases.
+    expected, found = date(2024, 10, 31), date(2024, 11, 1)
+    assert _hole_shape(expected, found, None) == "muhurat_session_bar"
+    assert _hole_shape(expected, found, {found: Decimal("1")}) == "muhurat_session_bar"
+
+
+def test_hole_shape_muhurat_split_covers_every_covered_boundary() -> None:
+    # Every MUHURAT_SESSIONS entry classifies muhurat_session_bar against its
+    # own prior regular session — the split is table-driven, never hardcoded
+    # to 2024.
+    from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
+
+    for muhurat_day in sorted(MUHURAT_SESSIONS):
+        expected = previous_trading_session(muhurat_day, exchange="NSE")
+        assert expected is not None
+        assert _hole_shape(expected, muhurat_day, None) == "muhurat_session_bar", muhurat_day
+
+
+def test_hole_shape_extra_nonsession_bar_is_the_non_muhurat_arm() -> None:
+    # found > expected on a NON-Muhurat date (a stray Saturday bar) → the
+    # honestly-suspicious extra_nonsession_bar shape, with OR without minute
+    # evidence — kills the has_muhurat_session-dropped mutant (which would
+    # bless every later bar as muhurat_session_bar).
+    expected, found = date(2024, 1, 5), date(2024, 1, 6)
+    assert _hole_shape(expected, found, None) == "extra_nonsession_bar"
+    assert _hole_shape(expected, found, {found: Decimal("1")}) == "extra_nonsession_bar"
+
+
+def test_hole_shape_2026_muhurat_absent_abstains_to_extra_nonsession_bar() -> None:
+    # HONEST-LIMIT pin (documented abstain): Diwali 2026 (2026-11-08) has NO
+    # MUHURAT_SESSIONS entry (timings not notified — never fabricated), so the
+    # arm abstains to the suspicious shape. Self-limiting in production: the
+    # ingest keeps Muhurat bars via the SAME MUHURAT_SESSIONS table, so a lake
+    # cannot legitimately carry a 2026 Muhurat bar until the entry lands.
+    from brutex.calendars.nse import has_muhurat_session
+
+    assert has_muhurat_session(date(2026, 11, 8)) is False
+    assert _hole_shape(date(2026, 11, 6), date(2026, 11, 8), None) == "extra_nonsession_bar"
+
+
+def test_hole_shape_prebuild_lag_requires_minute_presence() -> None:
+    # found < expected AND the expected session IS in the minute evidence →
+    # the 1-day series lags the minute series.
+    expected, found = date(2024, 1, 3), date(2024, 1, 2)
+    assert _hole_shape(expected, found, {expected: Decimal("106")}) == "prebuild_lag"
+
+
+def test_hole_shape_missing_session_arms() -> None:
+    # found < expected with NO minute evidence (the daily basis) or with the
+    # expected session absent from it (the minute basis) → the genuine hole.
+    expected, found = date(2024, 1, 3), date(2024, 1, 2)
+    assert _hole_shape(expected, found, None) == "missing_session"
+    assert _hole_shape(expected, found, {found: Decimal("100")}) == "missing_session"
+
+
+def test_hole_detail_texts_are_shape_honest() -> None:
+    # Muhurat (DEC-PREVSESSION-MUHURAT-COHERENCE-001): definitive — names
+    # found + expected, "no action needed", cross-references the engine skip
+    # and the /movers display-law flag; no re-pull advice.
+    muhurat = _hole_detail("muhurat_session_bar", date(2024, 10, 31), date(2024, 11, 1))
+    assert "2024-11-01" in muhurat
+    assert "2024-10-31" in muhurat
+    assert "Muhurat" in muhurat
+    assert "no action needed" in muhurat
+    assert "stage1a.muhurat_prev_day_anchor_skip" in muhurat
+    assert "prev_close_muhurat" in muhurat
+    assert "re-pull" not in muhurat
+    # Non-Muhurat extra bar: honestly SUSPICIOUS ("inspect") — the old Muhurat
+    # guess + the falsely-reassuring "no action is needed" are GONE.
+    stray = _hole_detail("extra_nonsession_bar", date(2024, 1, 5), date(2024, 1, 6))
+    assert "2024-01-06" in stray
+    assert "2024-01-05" in stray
+    assert "inspect" in stray
+    # The old "e.g. a Diwali Muhurat session" GUESS is gone — the shape now
+    # affirmatively EXCLUDES Muhurat ("not a known Muhurat session").
+    assert "Diwali" not in stray
+    assert "not a known Muhurat session" in stray
+    assert "no action" not in stray
+    assert "re-pull" not in stray
+    # Prebuild lag: names the pipeline prebuild, no re-pull advice (verbatim).
+    lag = _hole_detail("prebuild_lag", date(2024, 1, 3), date(2024, 1, 2))
+    assert "2024-01-03" in lag
+    assert "prebuild" in lag
+    assert "re-pull" not in lag
+    # Genuine hole: the original detail text, verbatim.
+    assert _hole_detail("missing_session", date(2024, 1, 3), date(2024, 1, 2)) == (
+        "row skipped — prior NSE session missing from the lake; re-pull the missing session"
+    )
+
+
+def test_hole_warn_cap_emits_one_suppressed_summary(tmp_path: Path) -> None:
+    # _HOLE_WARN_CAP + 2 hole symbols in one build → exactly the cap emitted +
+    # ONE suppressed summary carrying the overflow count.
+    n = _HOLE_WARN_CAP + 2
+    for i in range(n):
+        _write(
+            tmp_path,
+            f"HOLE{i:02d}",
+            "1day",
+            [
+                _bar(datetime(2024, 1, 2, 3, 45, tzinfo=UTC), open_="99.00", close="100.00"),
+                _bar(datetime(2024, 1, 4, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+            ],
+        )
+    datasets = [("NSE", "CASH", f"HOLE{i:02d}") for i in range(n)]
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=datasets,
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == _HOLE_WARN_CAP
+    summaries = [
+        log for log in logs if log["event"] == "preopen.prev_close_noncontiguous_suppressed"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]["suppressed_symbols"] == 2
+    assert summaries[0]["cap"] == _HOLE_WARN_CAP
+
+
+def test_contiguous_build_emits_zero_hole_warns(tmp_path: Path) -> None:
+    # A fully-contiguous lake never warns on either basis.
+    _both_series(
+        tmp_path,
+        "CLEAN",
+        [
+            (date(2024, 3, 1), "100.00", "101.00"),
+            (date(2024, 3, 4), "101.50", "102.00"),
+        ],
+    )
+    for basis in REPORT_BASES:
+        with capture_logs() as logs:
+            rows = build_preopen_rows(
+                _conn(),
+                tmp_path,
+                datasets=[("NSE", "CASH", "CLEAN")],
+                start=date(2024, 1, 1),
+                end=date(2024, 12, 31),
+                basis=basis,
+            )
+        assert [r.day for r in rows] == [date(2024, 3, 4)]
+        assert [
+            log
+            for log in logs
+            if log["event"]
+            in ("preopen.prev_close_noncontiguous", "preopen.prev_close_noncontiguous_suppressed")
+        ] == []
+
+
+def test_prior_session_walk_is_memoised_per_unique_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The perf memo: THREE symbols sharing the SAME two days → the calendar
+    # back-walk runs ONCE per unique day (2), not once per (symbol, day) row
+    # (6). O(unique days) per build — deliberately NOT an O(1)-total claim.
+    for symbol in ("MEMOA", "MEMOB", "MEMOC"):
+        _both_series(
+            tmp_path,
+            symbol,
+            [
+                (date(2024, 3, 1), "100.00", "101.00"),
+                (date(2024, 3, 4), "101.50", "102.00"),
+            ],
+        )
+    real = preopen_report._previous_trading_day
+    calls: list[date] = []
+
+    def _counting(day: date, *, observed: frozenset[date] = frozenset()) -> date | None:
+        calls.append(day)
+        return real(day, observed=observed)
+
+    monkeypatch.setattr(preopen_report, "_previous_trading_day", _counting)
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", s) for s in ("MEMOA", "MEMOB", "MEMOC")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        basis="minute",
+    )
+    assert len(rows) == 3  # one 03-04 row per symbol
+    assert sorted(calls) == [date(2024, 3, 1), date(2024, 3, 4)]  # one walk per unique day
+
+
+# ── the day-basis derived-1day FRESHNESS guard (DEC-PREOPEN-DAY-FRESHNESS-001) ─
+
+
+def _prebuild_1day(lake: Path, symbol: str, *, start: date, end: date) -> None:
+    """Derive the symbol's ``1day`` partition from its stored 1-minute — the REAL
+    production prebuild builders (``make_lake_read_1m_window`` +
+    ``make_lake_write_1day`` through ``fill_daily_from_minute``), never a
+    hand-written daily bar, so the fixture's stored-vs-resample relationship is
+    exactly the production write-time law."""
+    fill_daily_from_minute(
+        read_1m=make_lake_read_1m_window(
+            lake_root=lake, exchange="NSE", segment="CASH", symbol=symbol, start=start, end=end
+        ),
+        write_1day=make_lake_write_1day(
+            lake_root=lake, exchange="NSE", segment="CASH", symbol=symbol
+        ),
+        before=end,
+    )
+
+
+def _stale_prev_close_lake(lake: Path, symbol: str = "STALE") -> None:
+    """The F-D1 executed-repro lake: prebuild from a PARTIAL session A, then a
+    later 1-minute pull lands A's true tail — the stored derived 1day close
+    (100.30) is now STALE vs the 1-minute truth (197.90)."""
+    _write(
+        lake,
+        symbol,
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+            _bar(datetime(2024, 3, 5, 4, 30, tzinfo=UTC), open_="100.10", close="100.30"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="103.90"),
+            _bar(datetime(2024, 3, 6, 9, 59, tzinfo=UTC), open_="103.90", close="104.00"),
+        ],
+    )
+    _prebuild_1day(lake, symbol, start=date(2024, 3, 5), end=date(2024, 3, 7))
+    # The LATER heal/re-pull: session A's true tail (new timestamps — the
+    # keep-first 1-minute law appends them; the derived 1day is not re-derived).
+    _write(
+        lake,
+        symbol,
+        "1minute",
+        [_bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="197.00", close="197.90")],
+    )
+
+
+def test_day_basis_recomputes_stale_prev_close_from_1m_truth(tmp_path: Path) -> None:
+    # THE F-D1 regression (DEC-PREOPEN-DAY-FRESHNESS-001, the executed refuter
+    # repro worker_d_probe2): stored-vs-resample equality is a WRITE-TIME
+    # guarantee, not an invariant — a 1-minute write AFTER the last prebuild
+    # left the derived 1day PREV. CLOSE stale, and the day basis (the DEFAULT
+    # report) served +3.49% where the 1-minute truth was −47.55%, with ZERO
+    # warnings. Now: the row is served RECOMPUTED from the 1-minute base +
+    # exactly ONE capped preopen.stale_daily_recomputed WARN.
+    _stale_prev_close_lake(tmp_path)
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "STALE")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.day == date(2024, 3, 6)
+    assert row.prev_close == Decimal("197.90")  # the 1-minute truth, NOT the stale 100.30
+    assert row.iep == Decimal("103.80")
+    assert row.display_cells()[-1] == -47.55  # was +3.49 pre-fix (fails-before)
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"]
+    assert len(events) == 1
+    assert events[0]["symbol"] == "STALE"
+    assert events[0]["day"] == "2024-03-06"
+    assert events[0]["expected_session"] == "2024-03-05"
+    assert events[0]["stored_prev_close"] == "100.3"
+    assert events[0]["fresh_prev_close"] == "197.9"
+    assert [
+        log for log in logs if log["event"] == "preopen.stale_daily_recomputed_suppressed"
+    ] == []
+
+
+def test_day_basis_recomputes_stale_iep_from_1m_truth(tmp_path: Path) -> None:
+    # The IEP twin: the initial pull MISSED session B's 09:15 open minute, the
+    # prebuild stamped the 09:20 substitute open (104.50), then a heal re-pull
+    # landed the true 09:15 bar (open 103.80) — the stored 1day OPEN is stale.
+    _write(
+        tmp_path,
+        "STALEIEP",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+            _bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="100.20", close="100.30"),
+            _bar(datetime(2024, 3, 6, 3, 50, tzinfo=UTC), open_="104.50", close="104.60"),
+            _bar(datetime(2024, 3, 6, 9, 59, tzinfo=UTC), open_="104.70", close="104.80"),
+        ],
+    )
+    _prebuild_1day(tmp_path, "STALEIEP", start=date(2024, 3, 5), end=date(2024, 3, 7))
+    _write(
+        tmp_path,
+        "STALEIEP",
+        "1minute",
+        [_bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="103.85")],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "STALEIEP")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == 1
+    assert rows[0].iep == Decimal("103.80")  # the true 09:15 open, not the stale 104.50
+    assert rows[0].prev_close == Decimal("100.30")  # equal on both sources (fresh pair served)
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"]
+    assert len(events) == 1
+    assert events[0]["stored_iep"] == "104.5"
+    assert events[0]["fresh_iep"] == "103.8"
+
+
+def test_day_basis_fresh_lake_serves_stored_silently_and_byte_identically(
+    tmp_path: Path,
+) -> None:
+    # A FRESH lake (prebuild ran, no later 1-minute write): stored ≡ resample,
+    # so the guard serves the stored values with ZERO freshness events and the
+    # rendered workbook is byte-identical to the stored-value render (the
+    # fresh-lake byte-identity pin; the frozen golden suite is the cross-file
+    # oracle for the committed fixture lake). The 03-07 session carries an
+    # AWKWARD 2dp float (78521.45 — an 11-significant-digit shortest-repr
+    # class value) so a str-vs-polars float-format divergence could never
+    # silently read false-stale (the hostile-review NIT regression net).
+    _write(
+        tmp_path,
+        "FRESH",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+            _bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="100.20", close="100.30"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="103.90"),
+            _bar(datetime(2024, 3, 6, 9, 59, tzinfo=UTC), open_="103.90", close="104.00"),
+            _bar(datetime(2024, 3, 7, 3, 45, tzinfo=UTC), open_="78521.45", close="78522.10"),
+            _bar(datetime(2024, 3, 7, 9, 59, tzinfo=UTC), open_="78522.15", close="78523.15"),
+        ],
+    )
+    _prebuild_1day(tmp_path, "FRESH", start=date(2024, 3, 5), end=date(2024, 3, 8))
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "FRESH")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 7),
+            basis="day",
+        )
+    assert [(r.day, r.prev_close, r.iep) for r in rows] == [
+        (date(2024, 3, 6), Decimal("100.30"), Decimal("103.80")),
+        (date(2024, 3, 7), Decimal("104.00"), Decimal("78521.45")),
+    ]
+    assert [log for log in logs if "stale_daily" in log["event"]] == []
+    assert [log for log in logs if log["event"] == "preopen.freshness_check_failed"] == []
+
+    def _expected_row(day: date, prev_close: str, iep: str) -> PreOpenRow:
+        chng = Decimal(iep) - Decimal(prev_close)
+        return PreOpenRow(
+            day=day,
+            symbol="FRESH",
+            prev_close=Decimal(prev_close),
+            iep=Decimal(iep),
+            chng=chng,
+            pct_chng=chng / Decimal(prev_close) * 100,
+        )
+
+    expected = render_xlsx(
+        [
+            _expected_row(date(2024, 3, 6), "100.3", "103.8"),
+            _expected_row(date(2024, 3, 7), "104.0", "78521.45"),
+        ]
+    )
+    assert render_xlsx(rows) == expected  # byte-identical wire/export on a fresh lake
+
+
+def test_day_basis_no_1m_base_fails_open_to_stored(tmp_path: Path) -> None:
+    # A 1day-only symbol (no 1-minute partition at all — e.g. a vendor-era
+    # artifact): the guard has NO base to verify against, so the row serves the
+    # STORED values exactly as before this guard existed, silently (the movers
+    # base-absent fail-open mirror; disclosed limit).
+    _write(
+        tmp_path,
+        "ONLYDAY",
+        "1day",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.30"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="104.00"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "ONLYDAY")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert [(r.prev_close, r.iep) for r in rows] == [(Decimal("100.30"), Decimal("103.80"))]
+    assert [log for log in logs if "stale_daily" in log["event"]] == []
+
+
+def test_day_basis_partial_1m_base_fails_open_never_mixes_scales(tmp_path: Path) -> None:
+    # The TMPV shape at the guard level (row-ATOMICITY): the 1-minute series
+    # covers the report day (on a DIFFERENT price scale — the demerger-raw
+    # ~191.8 vs the adjusted daily ~116) but NOT the prior session. The row is
+    # NOT fully recomputable on the 1-minute scale, so it serves the stored
+    # pair VERBATIM — recomputing only the IEP would re-create the exact
+    # cross-basis %CHNG explosion DEC-PREOPEN-REPORT-1DAY-001 killed.
+    _write(
+        tmp_path,
+        "TMPVG",
+        "1day",
+        [
+            _bar(datetime(2021, 1, 1, 3, 45, tzinfo=UTC), open_="111.96", close="112.90"),
+            _bar(datetime(2021, 1, 4, 3, 45, tzinfo=UTC), open_="116.11", close="117.00"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "TMPVG",
+        "1minute",
+        [_bar(datetime(2021, 1, 4, 3, 45, tzinfo=UTC), open_="191.80", close="191.90")],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "TMPVG")],
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 4),
+            basis="day",
+        )
+    assert [(r.prev_close, r.iep) for r in rows] == [(Decimal("112.90"), Decimal("116.11"))]
+    assert rows[0].display_cells()[-1] == 2.84  # never the 191.8-mixed +69.88 explosion
+    # NEVER recomputed — but since the hostile-review fold the divergence
+    # evidence (fresh open 191.80 vs stored 116.11) is OBSERVED, not silent:
+    # ONE stale_daily_unrecomputable WARN, serve behavior unchanged.
+    assert [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"] == []
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable"]
+    assert len(events) == 1
+    assert events[0]["symbol"] == "TMPVG"
+    assert events[0]["stored_iep"] == "116.11"
+    assert events[0]["fresh_iep"] == "191.8"
+    assert events[0]["fresh_prev_close"] is None  # the missing side reads None
+
+
+def test_day_basis_coverage_abstain_day_skips_guard_cleanly(tmp_path: Path) -> None:
+    # 2020-01-01's prior-session walk crosses the published-holiday coverage
+    # floor → expected None → the row was always skipped; the guard's
+    # needed-day fold takes the prior-is-None arm and the build stays clean.
+    _write(
+        tmp_path,
+        "FLOOR",
+        "1day",
+        [_bar(datetime(2020, 1, 1, 3, 45, tzinfo=UTC), open_="100.00", close="101.00")],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "FLOOR")],
+        start=date(2020, 1, 1),
+        end=date(2020, 1, 31),
+        basis="day",
+    )
+    assert rows == []
+
+
+def test_stale_warn_dedupes_per_dataset_triple(tmp_path: Path) -> None:
+    # TWO stale rows for ONE dataset triple → BOTH rows recomputed, exactly ONE
+    # preopen.stale_daily_recomputed WARN (per-(exchange, segment, symbol)
+    # dedupe — the _warn_hole idiom).
+    _write(
+        tmp_path,
+        "TWOSTALE",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="103.00", close="103.10"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="106.00", close="106.10"),
+        ],
+    )
+    _prebuild_1day(tmp_path, "TWOSTALE", start=date(2024, 3, 4), end=date(2024, 3, 7))
+    # Late tails for BOTH anchor sessions (03-04 and 03-05) — the 03-05 AND
+    # 03-06 rows' stored PREV. CLOSE anchors are now both stale.
+    _write(
+        tmp_path,
+        "TWOSTALE",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 4, 9, 59, tzinfo=UTC), open_="101.00", close="101.50"),
+            _bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="104.00", close="104.50"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "TWOSTALE")],
+            start=date(2024, 3, 5),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert [(r.day, r.prev_close) for r in rows] == [
+        (date(2024, 3, 5), Decimal("101.50")),  # the 1-minute truth, not the stale 100.10
+        (date(2024, 3, 6), Decimal("104.50")),  # the 1-minute truth, not the stale 103.10
+    ]
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"]
+    assert len(events) == 1  # deduped per dataset triple
+
+
+def test_stale_warn_cap_emits_one_suppressed_summary(tmp_path: Path) -> None:
+    # _STALE_WARN_CAP + 2 stale symbols in one build → exactly the cap emitted
+    # + ONE suppressed summary carrying the overflow count. The staleness is a
+    # hand-planted 1day/1m divergence (cheaper than 22 prebuilds — divergence
+    # is divergence to the guard).
+    n = _STALE_WARN_CAP + 2
+    for i in range(n):
+        symbol = f"STALE{i:02d}"
+        _write(
+            tmp_path,
+            symbol,
+            "1day",
+            [
+                _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.00"),
+                _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+            ],
+        )
+        _write(
+            tmp_path,
+            symbol,
+            "1minute",
+            [
+                # 03-05's 1-minute truth closes at 105 — the stored 100 is stale.
+                _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="105.00"),
+                _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+            ],
+        )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", f"STALE{i:02d}") for i in range(n)],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == n
+    assert all(r.prev_close == Decimal("105.00") for r in rows)  # every row recomputed
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"]
+    assert len(events) == _STALE_WARN_CAP
+    suppressed = [
+        log for log in logs if log["event"] == "preopen.stale_daily_recomputed_suppressed"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0]["suppressed_symbols"] == 2
+    assert suppressed[0]["cap"] == _STALE_WARN_CAP
+
+
+def _unrec_lake(lake: Path, symbol: str, *, divergent_close_only: bool = False) -> None:
+    """A stale-but-UNRECOMPUTABLE lake: hand-divergent 1day vs a PARTIAL 1m base.
+
+    Default shape (``UNRECA``): 1day for Mar 1/4/5/6; 1m ONLY for Mar 4 + Mar 6
+    with divergent values — every in-span row has divergence EVIDENCE but is
+    never fully recomputable (each day's counterpart session lacks a 1m base).
+    ``divergent_close_only``: 1day for Mar 1/4/5; 1m ONLY for Mar 4 whose OPEN
+    EQUALS the stored open but whose close diverges — the Mar 5 row's evidence
+    is then the prior-session CLOSE alone (the fresh_iep-None WARN shape).
+    """
+    if divergent_close_only:
+        days_1day = [("2024-03-01", "99.00", "100.00"), ("2024-03-04", "103.00", "104.00")]
+        days_1day.append(("2024-03-05", "106.00", "107.00"))
+        minute = [_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="103.00", close="304.50")]
+    else:
+        days_1day = [
+            ("2024-03-01", "99.00", "100.00"),
+            ("2024-03-04", "103.00", "104.00"),
+            ("2024-03-05", "106.00", "107.00"),
+            ("2024-03-06", "109.00", "110.00"),
+        ]
+        minute = [
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="203.00", close="204.50"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="209.00", close="210.00"),
+        ]
+    _write(
+        lake,
+        symbol,
+        "1day",
+        [
+            _bar(datetime.fromisoformat(f"{d}T03:45:00+00:00"), open_=o, close=c)
+            for d, o, c in days_1day
+        ],
+    )
+    _write(lake, symbol, "1minute", minute)
+
+
+def test_unrecomputable_stale_warns_once_and_serves_stored(tmp_path: Path) -> None:
+    # The hostile-review MINOR fold: divergence evidence on rows that are NOT
+    # fully recomputable is OBSERVED (one capped WARN per triple), while the
+    # serve stays the STORED pair verbatim (row-atomic law unchanged). THREE
+    # in-span rows each carry evidence → THREE attempts → ONE deduped WARN.
+    _unrec_lake(tmp_path, "UNRECA")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "UNRECA")],
+            start=date(2024, 3, 4),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    # Every row serves the STORED values (never a recompute, never a mix).
+    assert [(r.day, r.prev_close, r.iep) for r in rows] == [
+        (date(2024, 3, 4), Decimal("100.00"), Decimal("103.00")),
+        (date(2024, 3, 5), Decimal("104.00"), Decimal("106.00")),
+        (date(2024, 3, 6), Decimal("107.00"), Decimal("109.00")),
+    ]
+    assert [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"] == []
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable"]
+    assert len(events) == 1  # deduped per dataset triple
+    assert events[0]["day"] == "2024-03-04"
+    assert events[0]["fresh_iep"] == "203.0"
+    assert events[0]["fresh_prev_close"] is None
+
+
+def test_unrecomputable_close_only_evidence_warns_with_null_iep(tmp_path: Path) -> None:
+    # The symmetric evidence shape: the report day has NO 1m base (fresh IEP
+    # None) but the prior session's fresh CLOSE diverges from the stored
+    # anchor — observed, served stored.
+    _unrec_lake(tmp_path, "UNRECB", divergent_close_only=True)
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "UNRECB")],
+            start=date(2024, 3, 5),
+            end=date(2024, 3, 5),
+            basis="day",
+        )
+    assert [(r.prev_close, r.iep) for r in rows] == [(Decimal("104.00"), Decimal("106.00"))]
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable"]
+    assert len(events) == 1
+    assert events[0]["fresh_iep"] is None
+    assert events[0]["fresh_prev_close"] == "304.5"
+    assert events[0]["stored_prev_close"] == "104.0"
+
+
+def test_unrecomputable_warn_cap_emits_one_suppressed_summary(tmp_path: Path) -> None:
+    # _STALE_WARN_CAP + 2 unrecomputable-stale symbols → the cap emitted + ONE
+    # suppressed summary (the sibling of the recomputed-family cap law).
+    n = _STALE_WARN_CAP + 2
+    for i in range(n):
+        symbol = f"UNREC{i:02d}"
+        _write(
+            tmp_path,
+            symbol,
+            "1day",
+            [
+                _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.00"),
+                _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+            ],
+        )
+        # 1m ONLY for the report day, with a divergent open — evidence without
+        # recomputability (the prior session has no 1m base).
+        _write(
+            tmp_path,
+            symbol,
+            "1minute",
+            [_bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="210.00", close="211.00")],
+        )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", f"UNREC{i:02d}") for i in range(n)],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == n
+    assert all(r.iep == Decimal("110.00") for r in rows)  # stored served everywhere
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable"]
+    assert len(events) == _STALE_WARN_CAP
+    suppressed = [
+        log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable_suppressed"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0]["suppressed_symbols"] == 2
+
+
+def _insane_1m_lake(lake: Path, symbol: str) -> None:
+    """A 1day pair + a price-INSANE (negative, self-consistent) 1m base — the
+    freshness verification read raises ``ResampleInputError`` (fail-open)."""
+    _write(
+        lake,
+        symbol,
+        "1day",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.00"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+        ],
+    )
+    _write(
+        lake,
+        symbol,
+        "1minute",
+        [_bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="-5.00", close="-4.00")],
+    )
+
+
+def test_check_failed_warn_dedupes_per_dataset_triple(tmp_path: Path) -> None:
+    # The freshness-check-failed WARN rides the SAME per-triple dedupe (the
+    # hostile-review NIT fold): a duplicated dataset triple pays the failing
+    # verification read twice but warns ONCE; the rows still serve stored.
+    _insane_1m_lake(tmp_path, "BADREAD")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "BADREAD"), ("NSE", "CASH", "BADREAD")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert all(r.iep == Decimal("110.00") for r in rows)  # fail-open: stored served
+    events = [log for log in logs if log["event"] == "preopen.freshness_check_failed"]
+    assert len(events) == 1
+    assert events[0]["error_type"] == "ResampleInputError"
+
+
+def test_check_failed_warn_cap_emits_one_suppressed_summary(tmp_path: Path) -> None:
+    # _STALE_WARN_CAP + 2 symbols whose verification read fails → the cap
+    # emitted + ONE suppressed summary; every row still serves stored.
+    n = _STALE_WARN_CAP + 2
+    for i in range(n):
+        _insane_1m_lake(tmp_path, f"BAD{i:02d}")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", f"BAD{i:02d}") for i in range(n)],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == n
+    events = [log for log in logs if log["event"] == "preopen.freshness_check_failed"]
+    assert len(events) == _STALE_WARN_CAP
+    suppressed = [
+        log for log in logs if log["event"] == "preopen.freshness_check_failed_suppressed"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0]["suppressed_symbols"] == 2
+
+
+class TestStaleDayRowUnrecomputable:
+    """Totality + observe-only semantics of the fail-open evidence verdict."""
+
+    _DAY = date(2024, 3, 6)
+    _EXPECTED = date(2024, 3, 5)
+
+    def _verdict(
+        self,
+        fresh_open: dict[date, Decimal],
+        fresh_close: dict[date, Decimal],
+        *,
+        expected: date | None = _EXPECTED,
+    ) -> tuple[date, Decimal | None, Decimal | None] | None:
+        from brutex.dashboard.preopen_report import _stale_day_row_unrecomputable
+
+        return _stale_day_row_unrecomputable(
+            Decimal("110"),
+            Decimal("100"),
+            day=self._DAY,
+            expected=expected,
+            fresh_open=fresh_open,
+            fresh_close=fresh_close,
+        )
+
+    def test_expected_none_is_total(self) -> None:
+        assert self._verdict({self._DAY: Decimal("210")}, {}, expected=None) is None
+
+    def test_fully_recomputable_defers_to_the_recompute_lane(self) -> None:
+        assert self._verdict({self._DAY: Decimal("210")}, {self._EXPECTED: Decimal("200")}) is None
+
+    def test_no_evidence_is_silent(self) -> None:
+        assert self._verdict({}, {}) is None
+        # Available-but-EQUAL evidence is not divergence either.
+        assert self._verdict({self._DAY: Decimal("110")}, {}) is None
+        assert self._verdict({}, {self._EXPECTED: Decimal("100")}) is None
+
+    def test_divergent_open_evidence(self) -> None:
+        assert self._verdict({self._DAY: Decimal("210")}, {}) == (
+            self._EXPECTED,
+            Decimal("210"),
+            None,
+        )
+
+    def test_divergent_close_evidence(self) -> None:
+        assert self._verdict({}, {self._EXPECTED: Decimal("200")}) == (
+            self._EXPECTED,
+            None,
+            Decimal("200"),
+        )
+
+
+def test_minute_basis_never_runs_the_freshness_guard(tmp_path: Path) -> None:
+    # The minute basis reads the 1-minute truth directly — the guard is
+    # day-basis only (its 1m read would be pure waste), pinned by a spy on the
+    # fresh-maps builder.
+    _coalindia(tmp_path)
+    calls: list[str] = []
+    real = preopen_report._fresh_daily_maps
+
+    def _spy(
+        lake_root: Path,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        days: Collection[date],
+        on_error: object = None,
+    ) -> tuple[dict[date, Decimal], dict[date, Decimal]]:
+        calls.append("called")
+        del on_error  # the spy only counts invocations
+        return real(lake_root, exchange=exchange, segment=segment, symbol=symbol, days=set(days))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(preopen_report, "_fresh_daily_maps", _spy)
+        build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "COALINDIA")],
+            start=date(2024, 1, 1),
+            end=date(2024, 12, 31),
+            basis="minute",
+        )
+    assert calls == []
+
+
+# ── _stale_day_row (the pure per-row verdict) ────────────────────────────────
+
+
+class TestStaleDayRow:
+    """Totality + row-atomicity of the pure per-row freshness verdict."""
+
+    _DAY = date(2024, 3, 6)
+    _EXPECTED = date(2024, 3, 5)
+
+    def test_expected_none_is_total_and_fails_open(self) -> None:
+        # Production-unreachable via the caller (an emitted row always resolved
+        # a prior session) — kept for totality, the _hole_shape precedent.
+        assert (
+            _stale_day_row(
+                Decimal("100"),
+                Decimal("99"),
+                day=self._DAY,
+                expected=None,
+                fresh_open={self._DAY: Decimal("100")},
+                fresh_close={},
+            )
+            is None
+        )
+
+    def test_missing_fresh_open_fails_open(self) -> None:
+        assert (
+            _stale_day_row(
+                Decimal("100"),
+                Decimal("99"),
+                day=self._DAY,
+                expected=self._EXPECTED,
+                fresh_open={},
+                fresh_close={self._EXPECTED: Decimal("99")},
+            )
+            is None
+        )
+
+    def test_missing_fresh_close_fails_open(self) -> None:
+        # The TMPV arm: the report day is recomputable but the anchor session
+        # is not → NEVER a mixed-scale pair.
+        assert (
+            _stale_day_row(
+                Decimal("100"),
+                Decimal("99"),
+                day=self._DAY,
+                expected=self._EXPECTED,
+                fresh_open={self._DAY: Decimal("191.8")},
+                fresh_close={},
+            )
+            is None
+        )
+
+    def test_equal_pair_is_fresh(self) -> None:
+        # Numeric Decimal equality — "100.30" vs "100.3" is the SAME value
+        # (stored floats and polars-rendered strings differ only in digits).
+        assert (
+            _stale_day_row(
+                Decimal("100.30"),
+                Decimal("99.00"),
+                day=self._DAY,
+                expected=self._EXPECTED,
+                fresh_open={self._DAY: Decimal("100.3")},
+                fresh_close={self._EXPECTED: Decimal("99")},
+            )
+            is None
+        )
+
+    def test_stale_open_serves_fresh_pair(self) -> None:
+        assert _stale_day_row(
+            Decimal("104.5"),
+            Decimal("100.3"),
+            day=self._DAY,
+            expected=self._EXPECTED,
+            fresh_open={self._DAY: Decimal("103.8")},
+            fresh_close={self._EXPECTED: Decimal("100.3")},
+        ) == (self._EXPECTED, Decimal("103.8"), Decimal("100.3"))
+
+    def test_stale_close_serves_fresh_pair(self) -> None:
+        assert _stale_day_row(
+            Decimal("103.8"),
+            Decimal("100.3"),
+            day=self._DAY,
+            expected=self._EXPECTED,
+            fresh_open={self._DAY: Decimal("103.8")},
+            fresh_close={self._EXPECTED: Decimal("197.9")},
+        ) == (self._EXPECTED, Decimal("103.8"), Decimal("197.9"))
+
+
+# ── _fresh_daily_maps (the 1-minute resample evidence source) ────────────────
+
+
+class TestFreshDailyMaps:
+    """The month-bounded 1-minute → daily evidence maps + every fail-open arm."""
+
+    def test_empty_days_is_a_no_read_no_op(self, tmp_path: Path) -> None:
+        assert _fresh_daily_maps(
+            tmp_path, exchange="NSE", segment="CASH", symbol="ANY", days=frozenset()
+        ) == ({}, {})
+
+    def test_no_1m_base_returns_empty_maps(self, tmp_path: Path) -> None:
+        assert _fresh_daily_maps(
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="ABSENT",
+            days={date(2024, 3, 6)},
+        ) == ({}, {})
+
+    def test_date_max_upper_bound_saturates(self, tmp_path: Path) -> None:
+        # The degenerate date.max day saturates the half-open read end instead
+        # of overflowing — fails open (empty maps), never an OverflowError.
+        assert _fresh_daily_maps(
+            tmp_path, exchange="NSE", segment="CASH", symbol="EDGE", days={date.max}
+        ) == ({}, {})
+
+    def test_happy_path_maps_per_session_open_and_close(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "MAPS",
+            "1minute",
+            [
+                _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+                _bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="100.20", close="100.30"),
+                _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="103.90"),
+            ],
+        )
+        fresh_open, fresh_close = _fresh_daily_maps(
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="MAPS",
+            days={date(2024, 3, 5), date(2024, 3, 6)},
+        )
+        assert fresh_open == {
+            date(2024, 3, 5): Decimal("100.0"),
+            date(2024, 3, 6): Decimal("103.8"),
+        }
+        assert fresh_close == {
+            date(2024, 3, 5): Decimal("100.3"),
+            date(2024, 3, 6): Decimal("103.9"),
+        }
+
+    def test_price_insane_1m_row_fails_open_with_one_warn(self, tmp_path: Path) -> None:
+        # A NEGATIVE (self-consistent) stored 1-minute bar: the window reader's
+        # price-sanity gate refuses it (ResampleInputError) — the guard fails
+        # OPEN (empty maps → the build serves stored values) + ONE
+        # preopen.freshness_check_failed WARN, never a crashed/blanked export.
+        _write(
+            tmp_path,
+            "INSANE",
+            "1minute",
+            [_bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="-5.00", close="-4.00")],
+        )
+        with capture_logs() as logs:
+            result = _fresh_daily_maps(
+                tmp_path,
+                exchange="NSE",
+                segment="CASH",
+                symbol="INSANE",
+                days={date(2024, 3, 6)},
+            )
+        assert result == ({}, {})
+        events = [log for log in logs if log["event"] == "preopen.freshness_check_failed"]
+        assert len(events) == 1
+        assert events[0]["error_type"] == "ResampleInputError"

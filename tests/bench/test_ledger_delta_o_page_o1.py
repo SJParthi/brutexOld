@@ -5,9 +5,12 @@ Honest, narrow claims (Golden Rule #10) — NONE is a literal O(1)-total claim:
 * mid-pull, the folded window-ledger source is ONE **O(total physical rows,
   incl. every delta file's Parquet footer)** columnar ``QUALIFY``
   hash-partition per FRESH stamp — NOT literal O(page); repeat polls WITHIN
-  one stamp are composite-stamp-token count-cache hits (the flatness these
-  pins gate), and the O(delta-file-count) footer-open term is MEASURED and
-  documented, with delta compaction NAMED future work;
+  one stamp are stamp-generation cache hits for the counts AND (since
+  DEC-WINDOWS-MIDPULL-FLOOR-001) the row PAGE (the flatness these pins gate),
+  leaving the honest O(pending-delta) stamp-probe directory listing per poll;
+  the O(delta-file-count) footer-open term is MEASURED and documented (B-4
+  fresh-fold growth, B-8 accumulation regime), with delta compaction NAMED
+  future work;
 * the FIRST Python ledger parse per stamp stays **O(rows)** — sub-part (b)
   bounds only the duty cycle (``min(max(2 s, the parse's own duration),
   120 s)``, the #920 law) and the concurrency (single-flight: one parse per
@@ -26,9 +29,18 @@ ratio (B-1) routes through :func:`tests.bench._o1_tiers.cache_tier_ceiling`
 (8.0 shared / strict **3.0**, NOT 1.1 — its 10× workload legitimately scans
 10× the columnar rows, so the strict 1.1 tier is physically unsatisfiable
 there, the DEC-O1-CACHE-TIER-001 discipline); the fresh-fold delta-file growth
-pin (B-4, ``< 20.0×``) and the cold-scan bound (B-6, ``< 2 s`` mean) are
-ABSOLUTE measured-slack ceilings, deliberately not tier-routed; B-2/B-5/B-7
-are deterministic spy/sentinel pins with no timing ratio at all.
+pin (B-4, ``< 20.0×``), the cold-scan bound (B-6, ``< 2 s`` mean) and the
+production-scale fresh-fold bound (B-9, ``< 8 s`` @ ≥500k base rows,
+DEC-DB-OPAGE-HONESTY-001) are ABSOLUTE measured-slack ceilings, deliberately
+not tier-routed; B-2/B-5/B-7 are deterministic spy/sentinel pins with no timing
+ratio at all.
+
+B-9 (DEC-DB-OPAGE-HONESTY-001) is the honest production-scale companion to B-1: the fresh window-ledger
+fold GROUP BY is an **O(total physical rows)** columnar QUALIFY hash-partition,
+so at ≥500k base rows (approaching the disclosed ~841k full-universe worst case,
+DEC-SUSPICION-SWEEP-FIXES-001 #1492) it is NOT flat vs a 10k base — measured
+2026-07-08 (sandbox) 11.8 ms @ 10k vs 230.1 ms @ 500k → 19.52× for 50× the
+rows — bounded but genuinely O(rows). Golden Rule #10: the fold is never O(page).
 """
 
 from __future__ import annotations
@@ -41,7 +53,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 
@@ -99,27 +111,45 @@ def _seeded_lake(root: Path, *, depth: int, deltas: int, tag: str) -> Path:
     return lake
 
 
-class _SentinelCountCache:
-    """A :class:`WindowCountsCache` that COUNTS real recomputes and, once
-    ``frozen``, RAISES if any poll tries to recompute — the deterministic
-    no-recompute teeth (the ``test_summary_cache_o1.py`` sentinel pattern)."""
+_SentinelT = TypeVar("_SentinelT")
 
-    def __init__(self) -> None:
-        self._inner = MoversSnapshotCache()
-        self.computes = 0
+
+class _SentinelCountCache:
+    """A :class:`WindowCountsCache` that COUNTS real recomputes PER KEY FAMILY
+    (``window-counts`` / ``window-counts-since`` / ``window-page`` — the
+    page-row family joined the cache in DEC-WINDOWS-MIDPULL-FLOOR-001) and,
+    once ``frozen``, RAISES if any poll tries to recompute ANY family — the
+    deterministic no-recompute teeth (the ``test_summary_cache_o1.py``
+    sentinel pattern). *inner* injects the concrete cache (default: a plain
+    un-floored :class:`MoversSnapshotCache`; B-8's floor teeth inject the
+    production-shaped floored instance)."""
+
+    def __init__(self, inner: MoversSnapshotCache | None = None) -> None:
+        self._inner = inner if inner is not None else MoversSnapshotCache()
+        self.computes_by_family: dict[str, int] = {}
         self.frozen = False
+
+    @property
+    def count_computes(self) -> int:
+        return self.computes_by_family.get("window-counts", 0)
+
+    @property
+    def page_computes(self) -> int:
+        return self.computes_by_family.get("window-page", 0)
 
     def get_or_compute(
         self,
         key: str,
         *,
         generation: int,
-        compute: Callable[[], tuple[dict[str, dict[str, int]], int]],
-    ) -> tuple[dict[str, dict[str, int]], int]:
-        def _wrapped() -> tuple[dict[str, dict[str, int]], int]:
+        compute: Callable[[], _SentinelT],
+    ) -> _SentinelT:
+        family = key.split("|", 1)[0]
+
+        def _wrapped() -> _SentinelT:
             if self.frozen:
-                raise AssertionError("stamp unchanged — the counts GROUP BY must not re-run")
-            self.computes += 1
+                raise AssertionError(f"stamp unchanged — the {family} query must not re-run")
+            self.computes_by_family[family] = self.computes_by_family.get(family, 0) + 1
             return compute()
 
         return self._inner.get_or_compute(key, generation=generation, compute=_wrapped)
@@ -131,18 +161,20 @@ def test_midpull_window_payload_flat_vs_ledger_depth(tmp_path: Path) -> None:
     With 5 pending deltas (the (a) SQL fold path genuinely exercised — gate TRUE
     via ``list_ledger_deltas``), repeat one-page (``limit=500``)
     ``build_window_payload`` polls WITHIN one stamp at 1k vs 10k base rows: the
-    counts are composite-stamp-token cache hits and only the page query re-runs.
-    HONEST envelope: the page query is an **O(total-rows) columnar** scan of the
-    QUALIFY fold (plus one footer open per delta file) per poll — NOT literal
-    O(page) (the same envelope ``query_candles`` already accepts) — so the
-    residual depth term is a bounded COLUMNAR-scan factor, never the O(matched)
-    Python projection a regression to the legacy fold would re-introduce.
-    Ceiling: :func:`cache_tier_ceiling` (8.0 shared / 3.0 strict) because the
-    10× workload legitimately scans 10× the columnar data — the decreed 1.1×
-    is physically unsatisfiable for an admitted O(total-rows) scan (the
-    DEC-O1-CACHE-TIER-001 discipline). Measured 2026-07-06 (sandbox, shared-CI
-    class): 14.18 ms/poll @ 1k vs 17.58 ms/poll @ 10k → ratio 1.24× — the poll
-    is dominated by the fixed per-query DuckDB cost, not the depth.
+    counts AND (since DEC-WINDOWS-MIDPULL-FLOOR-001) the page rows are both
+    composite-stamp cache hits, so the within-stamp poll pays only the O(pending
+    deltas) stamp-probe listings + cache handoffs. HONEST envelope: each FRESH
+    stamp still pays the **O(total-rows) columnar** scan of the QUALIFY fold
+    (plus one footer open per delta file) per cached family — NOT literal
+    O(page) (the same envelope ``query_candles`` already accepts).
+    Ceiling: :func:`cache_tier_ceiling` (8.0 shared / 3.0 strict) — the
+    pre-page-cache measurement legitimately scanned 10× the columnar data per
+    poll (the decreed 1.1× is physically unsatisfiable for an admitted
+    O(total-rows) scan — the DEC-O1-CACHE-TIER-001 discipline), and the ceiling
+    is deliberately KEPT after the page cache made the ratio flatter (a
+    regression back to per-poll scanning must still fail it). Measured
+    2026-07-06 pre-page-cache (sandbox, shared-CI class): 14.18 ms/poll @ 1k vs
+    17.58 ms/poll @ 10k → ratio 1.24×.
     """
 
     def _time(depth: int, tag: str) -> float:
@@ -152,7 +184,7 @@ def test_midpull_window_payload_flat_vs_ledger_depth(tmp_path: Path) -> None:
 
         def _poll() -> None:
             payload = build_window_payload(
-                lake, conn=conn, count_cache=cache, generation=0, limit=500
+                lake, conn=conn, count_cache=cache, page_cache=cache, generation=0, limit=500
             )
             assert payload["source"] == "ledger"
             assert payload["count"] == depth  # the fold served every distinct key
@@ -181,13 +213,16 @@ def test_midpull_window_payload_flat_vs_ledger_depth(tmp_path: Path) -> None:
 def test_midpull_counts_no_recompute_within_stamp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """B-2: ONE counts ``GROUP BY`` per ledger stamp — and ZERO Python parses.
+    """B-2: ONE counts ``GROUP BY`` + ONE page query per ledger stamp — ZERO Python parses.
 
-    The composite stamp token's teeth: 20 repeat polls at one stamp are pure
-    cache hits (the frozen sentinel RAISES on any recompute); ONE real
-    ``append_ledger_delta`` moves the token → exactly ONE recount. A spy on
-    ``window_ledger_store.load_window_ledger`` proves the fast path performs
-    ZERO Python ledger parses mid-pull (the O(records) fold it replaced).
+    The composite stamp token's teeth (stamp-DIGEST generation on stable keys
+    since DEC-WINDOWS-MIDPULL-FLOOR-001; the page-row family joined the cache
+    there too): 20 repeat polls at one stamp are pure cache hits for BOTH
+    families (the frozen sentinel RAISES on any recompute); ONE real
+    ``append_ledger_delta`` moves the token → exactly ONE recount + ONE page
+    re-query. A spy on ``window_ledger_store.load_window_ledger`` proves the
+    fast path performs ZERO Python ledger parses mid-pull (the O(records) fold
+    it replaced).
     """
     lake = _seeded_lake(tmp_path, depth=_SMALL, deltas=3, tag="lake")
     ledger = WindowLedger()  # a writer-side handle for the mid-test delta append
@@ -201,24 +236,30 @@ def test_midpull_counts_no_recompute_within_stamp(
     monkeypatch.setattr(wls, "load_window_ledger", _counting_load)
     conn = duckdb.connect()
     cache = _SentinelCountCache()
-    first = build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
+    first = build_window_payload(lake, conn=conn, count_cache=cache, page_cache=cache, generation=0)
     assert first["source"] == "ledger"
-    assert cache.computes == 1
+    assert cache.count_computes == 1
+    assert cache.page_computes == 1
     cache.frozen = True  # any further recompute now raises
     for _ in range(20):
-        assert (
-            build_window_payload(lake, conn=conn, count_cache=cache, generation=0)["counts"]
-            == first["counts"]
+        repeat = build_window_payload(
+            lake, conn=conn, count_cache=cache, page_cache=cache, generation=0
         )
-    assert cache.computes == 1  # 20 polls, zero recounts
-    # ONE real delta append → the stamp token moves → exactly ONE recount.
+        assert repeat["counts"] == first["counts"]
+        assert repeat["windows"] == first["windows"]
+    assert cache.count_computes == 1  # 20 polls, zero recounts
+    assert cache.page_computes == 1  # …and zero page re-queries
+    # ONE real delta append → the stamp token moves → exactly ONE recount + page.
     cache.frozen = False
     ledger.record(_key(0), raw_bars=99, error_type=None, bars_appended=99, now=_NOW)
     assert wls.append_ledger_delta(ledger, lake) == 1
-    build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
-    assert cache.computes == 2
+    build_window_payload(lake, conn=conn, count_cache=cache, page_cache=cache, generation=0)
+    assert cache.count_computes == 2
+    assert cache.page_computes == 2
     cache.frozen = True
-    build_window_payload(lake, conn=conn, count_cache=cache, generation=0)  # hit again
+    build_window_payload(
+        lake, conn=conn, count_cache=cache, page_cache=cache, generation=0
+    )  # hit again
     conn.close()
     assert parses["n"] == 0, "the SQL fast path must never fall back to a Python ledger parse"
 
@@ -285,14 +326,15 @@ def test_delta_fold_cost_scales_with_files_not_polls(tmp_path: Path) -> None:
     lake5 = _seeded_lake(tmp_path, depth=_SMALL, deltas=5, tag="d5")
     lake50 = _seeded_lake(tmp_path, depth=_SMALL, deltas=50, tag="d50")
     conn = duckdb.connect()
-    # (i) repeat-poll flatness: pure hits at both delta counts.
+    # (i) repeat-poll flatness: pure hits (counts AND page) at both delta counts.
     for lake in (lake5, lake50):
         cache = _SentinelCountCache()
-        build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
+        build_window_payload(lake, conn=conn, count_cache=cache, page_cache=cache, generation=0)
         cache.frozen = True
         for _ in range(10):
-            build_window_payload(lake, conn=conn, count_cache=cache, generation=0)
-        assert cache.computes == 1
+            build_window_payload(lake, conn=conn, count_cache=cache, page_cache=cache, generation=0)
+        assert cache.count_computes == 1
+        assert cache.page_computes == 1
 
     # (ii) the fresh-fold (uncached GROUP BY over the QUALIFY fold) cost per
     # delta count — measured + bounded, never hidden.
@@ -594,6 +636,145 @@ def test_results_poll_flat_during_pull(tmp_path: Path, monkeypatch: pytest.Monke
                 poll = client.get("/api/v1/sweep/leaderboard")
                 assert poll.status_code == 200
                 assert poll.json() == primed
+
+
+def test_accumulation_regime_warm_poll_bounded(tmp_path: Path) -> None:
+    """B-8 (DEC-WINDOWS-MIDPULL-FLOOR-001): the mid-pull delta-ACCUMULATION regime.
+
+    Deltas accrue ~1 file/2 s for the whole pull (pruned only by the pull-end
+    save), so a multi-hour pull reaches hundreds→thousands of pending files.
+    Pre-fix the row-PAGE query re-ran the whole O(total rows + delta footers)
+    fold on EVERY poll — measured 2026-07-09 (sandbox, shared-CI class):
+    33 ms/warm-poll @ 50 deltas → 158 ms @ 400 (the 4 s+ poll class at
+    thousands). Three teeth:
+
+    (i)  DETERMINISTIC at accumulation scale: at 400 pending deltas, warm polls
+         within one stamp recompute NOTHING — counts AND page families (frozen
+         family-aware sentinel);
+    (ii) ABSOLUTE (the discriminating bound — the B-4/B-6 "deliberately not
+         tier-routed" measured-slack discipline; a RATIO cannot discriminate
+         here because the pre-fix cost was also roughly linear in deltas):
+         mean warm poll @ 400 pending deltas < 100 ms — measured 4.2 ms
+         post-fix (~×24 slack) vs 158 ms pre-fix (fails the bound);
+    (iii) RATIO via :func:`cache_tier_ceiling` (8.0 shared): warm(400 deltas) /
+         warm(50 deltas) — the residual per-poll term is the honest O(pending
+         deltas) stamp-PROBE directory listing (how a flush is detected at
+         all), never a re-fold; measured 1.4 ms @ 50 vs 4.2 ms @ 400 → 3.0×
+         (a genuine O(deltas) probe over an 8× delta spread — the cache-tier
+         class, not an algorithmic regression; this file is not in
+         bench-m4pro.yml's strict list, and (ii) is the regression catcher).
+    """
+
+    def _warm_lake(deltas: int, tag: str) -> tuple[Path, _SentinelCountCache]:
+        lake = _seeded_lake(tmp_path, depth=_SMALL, deltas=deltas, tag=tag)
+        return lake, _SentinelCountCache()
+
+    conn = duckdb.connect()
+
+    def _time(lake: Path, cache: _SentinelCountCache) -> float:
+        def _poll() -> None:
+            payload = build_window_payload(
+                lake, conn=conn, count_cache=cache, page_cache=cache, generation=0, limit=500
+            )
+            assert payload["source"] == "ledger"
+
+        for _ in range(3):  # warm: one real GROUP BY + one real page per stamp
+            _poll()
+        iterations = 20
+        t0 = time.perf_counter_ns()
+        for _ in range(iterations):
+            _poll()
+        t1 = time.perf_counter_ns()
+        return (t1 - t0) / iterations
+
+    lake50, cache50 = _warm_lake(50, "acc50")
+    lake400, cache400 = _warm_lake(400, "acc400")
+    t50 = _time(lake50, cache50)
+    t400 = _time(lake400, cache400)
+    # (i) the accumulation-scale no-recompute teeth: everything above was ONE
+    # compute per family; freeze and poll again — any recompute raises.
+    for cache, lake in ((cache50, lake50), (cache400, lake400)):
+        assert cache.count_computes == 1
+        assert cache.page_computes == 1
+        cache.frozen = True
+        for _ in range(10):
+            build_window_payload(
+                lake, conn=conn, count_cache=cache, page_cache=cache, generation=0, limit=500
+            )
+    conn.close()
+    # (ii) the absolute accumulation bound — the pre-fix page-refold regime
+    # (158 ms measured) FAILS this; ~×24 measured slack for slower CI boxes.
+    assert t400 / 1e6 < 100.0, (
+        f"warm /coverage/windows poll at 400 pending deltas took {t400 / 1e6:.1f} ms mean "
+        f"(ceiling 100 ms; measured 4.2 ms on 2026-07-09, pre-fix 158 ms) — the page query "
+        f"may have regressed to a per-poll re-fold of the delta accumulation."
+    )
+    # (iii) the probe-term growth ratio — cache-tier-routed, honest O(deltas)
+    # listing term stated above.
+    ratio = t400 / max(t50, 1.0)
+    assert ratio < cache_tier_ceiling(8.0), (
+        f"warm-poll ratio {ratio:.2f}× (400 vs 50 pending deltas) exceeds the ceiling — "
+        f"the within-stamp poll may have regressed past the O(deltas) stamp probe. "
+        f"t_50={t50 / 1e6:.2f}ms, t_400={t400 / 1e6:.2f}ms."
+    )
+
+
+def test_fresh_fold_at_production_scale_is_bounded_and_not_flat(tmp_path: Path) -> None:
+    """B-9 (relabelled from B-8 at the club fold — main's DEC-WINDOWS-MIDPULL-FLOOR-001
+    accumulation-regime pin already holds the B-8 label): the fresh window-ledger fold
+    at ≥500k base rows is O(total rows), not O(page).
+
+    The prior B-1 flatness pin tops out at 10k base rows; the disclosed
+    full-universe worst case is ~841k ledger rows (DEC-SUSPICION-SWEEP-FIXES-001
+    #1492), so this arm exercises the fresh (uncached) fold GROUP BY at ≥500k
+    rows — two orders above B-1 — and asserts the HONEST envelope
+    (DEC-DB-OPAGE-HONESTY-001): the fold is ONE O(total physical rows) columnar
+    QUALIFY hash-partition per FRESH stamp, so (i) it stays under a generous
+    ABSOLUTE ceiling (a super-linear regression fails loudly) and (ii) it is NOT
+    flat vs a 10k base — the ``_window_counts_total`` cost genuinely grows with
+    the stored row count (a false O(page)/O(1) claim would collapse the ratio
+    toward 1×). Measured 2026-07-08 (sandbox): 11.8 ms @ 10k vs 230.1 ms @ 500k
+    → 19.52× for 50× the rows; the full first payload (fold + one 500-row page)
+    at 500k ran 562 ms. Both ≪ the 8 s ABSOLUTE ceiling.
+    """
+    small = _seeded_lake(tmp_path, depth=_LARGE, deltas=5, tag="b9_small")  # 10k rows
+    big = _seeded_lake(tmp_path, depth=500_000, deltas=5, tag="b9_big")
+    conn = duckdb.connect()
+
+    def _fresh(lake: Path) -> float:
+        source = _ledger_scan_source(wls.ledger_path(lake))
+        for _ in range(3):  # warm DuckDB + the OS page cache
+            _window_counts_total(conn, source)
+        iterations = 8
+        t0 = time.perf_counter_ns()
+        for _ in range(iterations):
+            _window_counts_total(conn, source)
+        return (time.perf_counter_ns() - t0) / iterations
+
+    # The fold really served every distinct key at production scale (not a footer
+    # illusion) — one full payload build over the 500k lake.
+    payload = build_window_payload(big, conn=conn, count_cache=MoversSnapshotCache(), generation=0)
+    assert payload["source"] == "ledger"
+    assert payload["count"] == 500_000
+
+    t_small = _fresh(small)
+    t_big = _fresh(big)
+    conn.close()
+    ratio = t_big / max(t_small, 1.0)
+
+    assert t_big < 8e9, (
+        f"fresh fold @ 500k base rows took {t_big / 1e6:.1f} ms (ceiling 8000 ms; measured "
+        f"230.1 ms on 2026-07-08) — the O(total-rows) fold may have regressed to super-linear "
+        f"work as the ledger approaches the ~841k worst case."
+    )
+    assert ratio > 1.5, (
+        f"fresh-fold latency ratio {ratio:.2f}× (500k vs 10k base rows) is unexpectedly FLAT "
+        f"— the fold is an O(total physical rows) columnar QUALIFY hash-partition, so it MUST "
+        f"scale with the stored row count (measured 19.52× on 2026-07-08). A near-1× ratio "
+        f"means the honest O(total-rows) claim silently became O(page)/O(1) (then update the "
+        f"docstrings + this pin) or the fixture failed to scale. "
+        f"t_10k={t_small / 1e6:.1f}ms, t_500k={t_big / 1e6:.1f}ms."
+    )
 
 
 def test_module_header_enumerates_the_real_ceiling_mechanisms() -> None:

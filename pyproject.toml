@@ -47,7 +47,7 @@ dependencies = [
 data = [
     "polars>=1.0,<2.0",
     "duckdb>=1.0,<2.0",
-    "pyarrow>=16,<25",   # was <19; PyPI latest 24.0.0 (DEC-P0-012)
+    "pyarrow>=16,<26",   # was <19; PyPI latest 24.0.0 (DEC-P0-012)
     "pytz>=2024.1",
 ]
 # DEC-CLONE-RUN-001 (2026-05-28): dashboard runtime deps. The dashboard
@@ -101,6 +101,19 @@ groww = [
 # `# pragma: no cover`; a pure-Python `FakeAwsClient` drives the broker to 100%
 # coverage with no install and no network.
 token-broker = [
+    "boto3>=1.34,<2.0",
+]
+# DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (MIGRATION.md #1777): the cross-verify
+# producer's S3 publisher needs boto3 for PutObject — BruteX's FIRST sanctioned
+# AWS WRITE surface (s3:PutObject on arn:aws:s3:::tv-prod-cold/crossverify/*
+# ONLY; the SSM read-only pledge of DEC-AWS-ONLY-CREDS-001 is UNCHANGED). Kept
+# a DEDICATED optional extra — exactly like `token-broker` — so local runs and
+# CI never install it (extras name their posture: read-broker vs
+# write-publisher); `bootstrap.sh` deliberately does NOT install it. The real
+# boto3 client build is `# pragma: no cover` behind the PUT-only S3PutClient
+# Protocol; a pure-Python `FakeS3Client` drives the publisher to 100% coverage
+# with no install and no network.
+crossverify = [
     "boto3>=1.34,<2.0",
 ]
 dev = [
@@ -157,7 +170,17 @@ src = ["brutex", "tests"]
 # Red-team fixtures intentionally contain planted bugs. Excluded
 # from the global ruff scan; verified individually by tests/redteam/
 # subprocess invocations.
-extend-exclude = ["tests/redteam/fixtures/*.stripped.py", "tests/redteam/fixtures/planted_*.py"]
+# The #1775 post-close settle probe lives under docs/ and is OUTSIDE every
+# lint/type/coverage gate BY DESIGN (kept py_compile-clean; its module
+# docstring records the posture) — force-excluded here so the pre-commit ruff
+# hooks (which pass --force-exclude) match the CI scope (`ruff check brutex
+# tests`); DEC-SETTLE-EVIDENCE-ADOPTION-001 made the standing posture
+# mechanical when the emitter edits first put the file in a hook-scanned diff.
+extend-exclude = [
+    "tests/redteam/fixtures/*.stripped.py",
+    "tests/redteam/fixtures/planted_*.py",
+    "docs/groww/probe/postclose_settle_probe.py",
+]
 
 [tool.ruff.lint]
 select = [
@@ -293,7 +316,7 @@ no_implicit_reexport = true
 # site (e.g. strategies/combo.py -> fno_math.blake3_hash) failed the hook with
 # `no-any-return` on files the commit never touched. mypy_path lets BOTH envs
 # resolve the same in-repo stubs (mypy has no CLI flag for this — config only).
-mypy_path = ["rust/fno-math/python", "rust/trading-core/python"]
+mypy_path = ["rust/fno-math/python", "rust/trading-core/python", "rust/brutex-feed/python"]
 # DEC-P0-004 Agent 5 HIGH fix: pyright [tool.pyright] exclude already
 # covers redteam planted-bug fixtures; mypy needs the same exclusion or
 # strict mode will trip on the intentional bugs on every PR.
@@ -341,7 +364,11 @@ ignore_missing_imports = true
 # AVAILABLE (the hook fix) while suppressing diagnostics INSIDE them in every
 # env — the same reporting behaviour they had before mypy_path existed.
 [[tool.mypy.overrides]]
-module = ["trading_core", "trading_core.*", "fno_math", "fno_math.*"]
+module = [
+    "trading_core", "trading_core.*",
+    "fno_math", "fno_math.*",
+    "brutex_feed", "brutex_feed.*",  # DEC-FEED-RUST-CORE-001: same in-repo shim promotion class
+]
 follow_imports = "silent"
 
 # Dashboard uses FastAPI decorators which are untyped — the file wraps

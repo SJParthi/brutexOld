@@ -51,14 +51,31 @@ appends only the dirtied rows to ``window_ledger/deltas/``
 deltas`` newer-file-wins and the pull-end :func:`save_window_ledger` subsumes +
 deletes the deltas. Scheduled compaction of crash-orphaned deltas (and an
 SQL-side delta fold for the /coverage DuckDB fast paths) are NAMED follow-ups.
+
+**Load-cost honesty (DEC-LEDGER-LOAD-SPACE-V1-001, measured 2026-07-09):** the
+full load materialises EVERY recorded row — measured pre-fix at **794 B/row
+logical / 1,305 B/row RSS** (~13.6 µs/row) on an 87,573-row real-writer
+fixture, ~60-100× the ~13 B/row on disk, because ``to_pylist()`` decodes a
+DISTINCT ``str`` per cell. The per-load intern memo
+(:data:`_INTERNED_COLUMNS`) cuts the low-cardinality string share (~40% of the
+logical per-row cost) and :func:`shared_pull_ledger_scope` collapses the full
+pipeline's TWO whole-ledger materialisations to ONE. Both reduce the
+PER-ROW/PER-RUN constant only — the base itself still grows without bound
+(~4.4M rows/yr at the documented accumulation rate; the only in-memory delete
+is the plan-scoped ``prune_superseded``). Bounding the growth CLASS (an
+expiry-keyed ARCHIVAL policy for terminal F&O rows) is the NAMED follow-up
+F1-FU1 — designed, deliberately NOT claimed here.
 """
 
 from __future__ import annotations
 
+import contextvars
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -70,6 +87,10 @@ from brutex.data.atomic_io import atomic_write_via
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import interior_gap_runs
+from brutex.data.lake_rust_ledger_render import (
+    lake_rust_ledger_render_enabled,
+    render_ledger_parquet_bytes,
+)
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.window_ledger import (
     EMPTY,
@@ -83,6 +104,7 @@ from brutex.data.window_ledger import (
     WindowLedger,
     WindowLedgerRecord,
 )
+from brutex.observability.progress_beat import emit_progress_beat
 
 #: Structured logger — surfaces a corrupt/absent ledger into ``/logs``.
 _LOG = structlog.get_logger("brutex.data.window_ledger_store")
@@ -155,14 +177,15 @@ _CORE_COLUMNS: tuple[str, ...] = (
 #: The full on-disk column order — fixed so the Parquet schema is stable + the row
 #: tuples round-trip :meth:`WindowLedger.to_rows` exactly. ``empty_streak`` then
 #: ``in_pull_fetches`` then ``bars_net_new`` then the ``empty_retries`` /
-#: ``transient_retries`` split were each appended LAST
-#: (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
-#: DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001), so a legacy
+#: ``transient_retries`` split then ``streak_provenance`` were each appended
+#: LAST (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
+#: DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001 /
+#: DEC-STREAK-PROVENANCE-001), so a legacy
 #: file written before any of the optional columns existed loads cleanly: the
 #: core columns are read and each optional column is filled per-row (see
 #: :func:`_rows_to_records`; an absent ``bars_net_new`` / ``empty_retries`` /
-#: ``transient_retries`` is an honest ``None``). Backward-compatible, never a
-#: re-pull.
+#: ``transient_retries`` / ``streak_provenance`` is an honest ``None``).
+#: Backward-compatible, never a re-pull.
 _COLUMNS: tuple[str, ...] = (
     *_CORE_COLUMNS,
     "empty_streak",
@@ -170,6 +193,7 @@ _COLUMNS: tuple[str, ...] = (
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "streak_provenance",
 )
 
 
@@ -267,20 +291,42 @@ def _derive_retry_count() -> int | None:
     return None
 
 
+def _derive_streak_provenance() -> str | None:
+    """Honest ``streak_provenance`` for a LEGACY row that predates the column: ``None``.
+
+    DEC-STREAK-PROVENANCE-001, the :func:`_derive_bars_net_new` twin of the
+    optional-column template: a legacy pull's contributing (channel, pull_id)
+    bumps are genuinely UNRECORDED — any reconstruction from
+    ``(status, streak, last_error)`` would be a fabrication (Golden Rule #1),
+    and ``""`` in particular would falsely claim "a KNOWN zero contributing
+    bumps" (the tri-state's honest reset value, reserved for a real
+    SUCCESS/reopen/plan reset). The absent column therefore ALWAYS loads as
+    ``None`` (unknown lineage — every provenance consumer then takes its
+    byte-identical legacy fallback); the ``str`` side of the annotation is the
+    field's domain, deliberately never produced here. The helper exists so the
+    optional-column template stays uniform and the honest-unknown rule has ONE
+    documented home for this column.
+    """
+    return None
+
+
 def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
-    """Coerce raw rows to the exact 16-field tuple :meth:`WindowLedger.from_rows` expects.
+    """Coerce raw rows to the exact 17-field tuple :meth:`WindowLedger.from_rows` expects.
 
     Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1)
     plus ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) plus ``bars_net_new``
     (DEC-INGEST-BOUNDARY-INTEGRITY-001) plus the ``empty_retries`` /
-    ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001). A ``None`` optional
+    ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) plus
+    ``streak_provenance`` (DEC-STREAK-PROVENANCE-001). A ``None`` optional
     column (a legacy file written before that column) is derived: ``empty_streak``
     from ``(status, attempts)`` via :func:`_derive_empty_streak`;
     ``in_pull_fetches`` from ``status`` via :func:`_derive_in_pull_fetches`;
     ``bars_net_new`` stays an honest ``None`` via :func:`_derive_bars_net_new`;
     ``empty_retries`` / ``transient_retries`` stay an honest ``None`` via
     :func:`_derive_retry_count` (a NULL cell in a NEW file — e.g. a lake
-    cold-start seed — reads ``None`` the same way). A wrong arity / non-coercible
+    cold-start seed — reads ``None`` the same way); ``streak_provenance``
+    stays an honest ``None`` via :func:`_derive_streak_provenance` (unknown
+    lineage, never a fabricated ``""``). A wrong arity / non-coercible
     element raises here (``ValueError`` / ``TypeError``) and is caught by the
     caller, degrading to an empty ledger.
     """
@@ -302,6 +348,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         bars_net_new,
         empty_retries,
         transient_retries,
+        streak_provenance,
     ) in rows:
         status_s = str(status)
         attempts_i = int(attempts)
@@ -316,6 +363,9 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         net_new = _derive_bars_net_new() if bars_net_new is None else int(bars_net_new)
         empties = _derive_retry_count() if empty_retries is None else int(empty_retries)
         transients = _derive_retry_count() if transient_retries is None else int(transient_retries)
+        provenance = (
+            _derive_streak_provenance() if streak_provenance is None else str(streak_provenance)
+        )
         coerced.append(
             (
                 str(market),
@@ -334,6 +384,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
                 net_new,
                 empties,
                 transients,
+                provenance,
             )
         )
     return coerced
@@ -350,27 +401,84 @@ _LEDGER_READ_ERRORS: tuple[type[BaseException], ...] = (
     ImportError,
 )
 
+#: The LOW-cardinality string columns the per-load intern memo deduplicates
+#: (DEC-LEDGER-LOAD-SPACE-V1-001): ``pyarrow``'s ``to_pylist()`` yields a
+#: DISTINCT ``str`` object per CELL — even the constant ``"1minute"`` shares
+#: nothing across rows (measured 794 B/row logical / 1,305 B/row RSS on an
+#: 87,573-row real-writer fixture; the on-disk row is ~13 B). These seven
+#: columns are the ones whose value sets are small relative to the row count
+#: (market ~3 · interval 1 · status ~5 · window dates ~hundreds · security_id
+#: ~2-3 windows per contract · last_error a small error-string set), so
+#: deduplicating equal cells onto ONE shared object cuts ~40% of the per-row
+#: decode cost. ``first_seen_at`` / ``last_attempt_at`` are DELIBERATELY
+#: excluded — µs-ISO timestamps are essentially unique, so a memo would just
+#: double-hold them (skip decided per COLUMN, never a per-value heuristic).
+_INTERNED_COLUMNS: Final[frozenset[str]] = frozenset(
+    {
+        "market",
+        "security_id",
+        "interval",
+        "window_start",
+        "window_end",
+        "status",
+        "last_error",
+    }
+)
 
-def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
-    """Read ONE ledger-shaped Parquet into the coerced 16-field row tuples.
+
+def _intern_cells(cells: list[Any], memo: dict[str, str]) -> list[Any]:
+    """Dedup equal ``str`` cells onto one shared object — values byte-identical.
+
+    DEC-LEDGER-LOAD-SPACE-V1-001. Only object IDENTITY changes (``==``-equal
+    strings collapse onto the memo's first instance); a non-``str`` cell (the
+    ``None`` of a nullable column) passes through untouched. The *memo* is
+    per-:func:`load_window_ledger`-call (shared across the base + every delta
+    file) — deliberately NOT :func:`sys.intern`, whose process-lifetime table
+    would accumulate high-cardinality ``security_id`` strings across many
+    lakes/tests forever; the per-call dict has exactly the load's lifetime.
+    O(cells) with one O(1) dict op per string cell.
+    """
+    return [memo.setdefault(v, v) if type(v) is str else v for v in cells]
+
+
+def _read_ledger_file_rows(
+    path: Path, *, memo: dict[str, str] | None = None
+) -> list[tuple[Any, ...]]:
+    """Read ONE ledger-shaped Parquet into the coerced 17-field row tuples.
 
     The single per-file read (CLAUDE.md §11 COMMON) shared by the BASE load and
     the per-DELTA fold. The core 11 columns are REQUIRED — a missing one raises
     ``KeyError`` (the wrong-shape guard the caller degrades on). ``empty_streak``
     + ``in_pull_fetches`` + ``bars_net_new`` + ``empty_retries`` +
-    ``transient_retries`` are OPTIONAL (a legacy file lacks one or more) and
-    derived per-row by :func:`_rows_to_records` (an absent ``bars_net_new`` /
-    ``empty_retries`` / ``transient_retries`` stays an honest ``None`` —
-    DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001). Raises any
+    ``transient_retries`` + ``streak_provenance`` are OPTIONAL (a legacy file
+    lacks one or more) and derived per-row by :func:`_rows_to_records` (an
+    absent ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` /
+    ``streak_provenance`` stays an honest ``None`` —
+    DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001 /
+    DEC-STREAK-PROVENANCE-001). Raises any
     of :data:`_LEDGER_READ_ERRORS` on a malformed / unreadable file — the CALLER
     decides the degrade (base → empty + ``load_failed``; delta → skip that one
     file).
+
+    *memo* is the per-load string-intern table (DEC-LEDGER-LOAD-SPACE-V1-001):
+    :func:`load_window_ledger` threads ONE dict across the base + every delta so
+    equal low-cardinality cells (:data:`_INTERNED_COLUMNS`) share one object
+    across ALL folded files; ``None`` (a direct call) interns within this one
+    file only. Values are byte-identical either way — only identity changes.
     """
     import pyarrow.parquet as pq
 
     table = pq.read_table(path)  # type: ignore[no-untyped-call, unused-ignore]
     present = set(table.schema.names)
-    columns = {name: table.column(name).to_pylist() for name in _CORE_COLUMNS}
+    intern_memo: dict[str, str] = {} if memo is None else memo
+    columns = {
+        name: (
+            _intern_cells(table.column(name).to_pylist(), intern_memo)
+            if name in _INTERNED_COLUMNS
+            else table.column(name).to_pylist()
+        )
+        for name in _CORE_COLUMNS
+    }
     n = len(columns[_CORE_COLUMNS[0]])
 
     def _optional(name: str) -> list[Any]:
@@ -382,6 +490,7 @@ def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
     net_new = _optional("bars_net_new")
     empties = _optional("empty_retries")
     transients = _optional("transient_retries")
+    provenance = _optional("streak_provenance")
     rows = zip(
         *(columns[name] for name in _CORE_COLUMNS),
         streaks,
@@ -389,6 +498,7 @@ def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
         net_new,
         empties,
         transients,
+        provenance,
         strict=True,
     )
     return _rows_to_records(rows)
@@ -418,14 +528,24 @@ def load_window_ledger(
     SKIPPED (the never-raises degrade contract) — only a failed BASE read sets
     ``load_failed=True``. A base-less lake with deltas (a first pull's mid-flight
     checkpoint) reconstructs from the deltas alone.
+
+    **Interned decode (DEC-LEDGER-LOAD-SPACE-V1-001):** ONE per-call string
+    memo is threaded through every per-file read (base + deltas), so equal
+    low-cardinality cells (:data:`_INTERNED_COLUMNS`) share one object across
+    the whole load instead of ``to_pylist()``'s one-distinct-``str``-per-cell
+    (~40% of the measured 794 B/row logical decode cost). Values byte-identical
+    — only object identity changes; the memo dies with this call.
     """
     path = ledger_path(lake_root)
     delta_files = list_ledger_deltas(lake_root)
     load_failed = False
+    # The per-LOAD intern memo — shared across the base + every delta file so a
+    # delta's re-write of a base row re-uses the base's string objects too.
+    memo: dict[str, str] = {}
     base_rows: list[tuple[Any, ...]] = []
     if path.is_file():
         try:
-            base_rows = _read_ledger_file_rows(path)
+            base_rows = _read_ledger_file_rows(path, memo=memo)
         except _LEDGER_READ_ERRORS as exc:
             _LOG.warning("window_ledger.load_failed", path=str(path), error=str(exc))
             # LOUD degrade (DEC-WINDOW-LEDGER-RESCUE-001): the file EXISTED but could
@@ -442,7 +562,7 @@ def load_window_ledger(
     }
     for delta in delta_files:
         try:
-            delta_rows = _read_ledger_file_rows(delta)
+            delta_rows = _read_ledger_file_rows(delta, memo=memo)
         except _LEDGER_READ_ERRORS as exc:
             _LOG.warning("window_ledger.delta_load_failed", path=str(delta), error=str(exc))
             continue
@@ -456,13 +576,14 @@ def load_window_ledger(
     return ledger
 
 
-#: One serialised ledger row — EXACTLY the 16-field tuple :meth:`WindowLedger.to_rows`
+#: One serialised ledger row — EXACTLY the 17-field tuple :meth:`WindowLedger.to_rows`
 #: emits (and :meth:`WindowLedger.from_rows` restores); the ONE spelling lives on the
 #: ledger module as :data:`~brutex.data.window_ledger.LedgerRowTuple` (CLAUDE.md §11
 #: COMMON) and this store-side name aliases it. The merge-on-save operates on this
 #: shape directly so the conflict rule below is pure + unit-testable. The trailing
-#: ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` are ``int | None``
-#: (``None`` = honest unknown for a legacy row).
+#: ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` (``int | None``)
+#: and ``streak_provenance`` (``str | None``) are nullable (``None`` = honest
+#: unknown for a legacy row).
 LedgerRow = LedgerRowTuple
 
 #: The window identity — the leading 5 fields of a :data:`LedgerRow` (the same 5-tuple
@@ -612,9 +733,65 @@ def _rows_to_table(rows: Sequence[LedgerRow]) -> Any:
             # unknown ``None`` (DEC-RETRY-COUNTER-SPLIT-001).
             ("empty_retries", pa.int64()),
             ("transient_retries", pa.int64()),
+            # Nullable by design: a legacy row's streak lineage is an honest
+            # unknown ``None`` (DEC-STREAK-PROVENANCE-001 — never a fabricated
+            # ``""`` known-zero).
+            ("streak_provenance", pa.string()),
         ]
     )
     return pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
+
+
+def _render_ledger_parquet_python(rows: Sequence[LedgerRowTuple]) -> bytes:
+    """The VERBATIM pyarrow ledger render — the retained live oracle.
+
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 (MIGRATION.md #1918): the exact
+    render both write sites ran inline pre-conversion —
+    :func:`_rows_to_table` then a zero-kwarg ``pq.write_table`` — extracted
+    to ONE place, rendering to BYTES (``pq.write_table`` writes identical
+    bytes to a buffer and to a path — pinned in the store suite beside the
+    byte-determinism golden probe; "byte-identical" is scoped to the BYTES —
+    the buffer hop adds a bounded one-render peak-memory delta on the default
+    path, the full parquet buffer held in RAM before the temp write, KB–MB at
+    ledger scale beside the already-materialised pyarrow table). Flag-OFF
+    production runs exactly this;
+    flag-ON it is the ROW-EQUIVALENCE burn-in oracle the facade compares
+    the crate render against (never bytes — the #1917 measured-infeasible
+    verdict; see :mod:`brutex.data.lake_rust_ledger_render`).
+    """
+    import io
+
+    import pyarrow.parquet as pq
+
+    table = _rows_to_table(rows)
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer)  # type: ignore[no-untyped-call, unused-ignore]
+    return buffer.getvalue()
+
+
+def _ledger_parquet_bytes(rows: Sequence[LedgerRowTuple]) -> bytes:
+    """The ONE shared ledger render body — base save + delta append, flag-gated.
+
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001: both write sites
+    (:func:`append_ledger_delta` + :func:`save_window_ledger`) render their
+    parquet bytes HERE, so the default-OFF ``BRUTEX_LAKE_RUST_LEDGER_RENDER``
+    seam has exactly one home. Flag OFF (the default) runs the verbatim
+    pyarrow oracle directly — the crate is never imported (bomb-spy-pinned
+    in the facade suite); flag ON routes through
+    :func:`~brutex.data.lake_rust_ledger_render.render_ledger_parquet_bytes`,
+    whose EVERY path still returns valid parquet bytes (guarded / degraded /
+    burn-in-mismatched calls serve the oracle). Callers run this INSIDE
+    :func:`~brutex.data.atomic_io.atomic_write_via`'s guarded callable, so
+    the ENOSPC/OOM → :class:`~brutex.data.errors.LakeWriteHalt` law
+    (DEC-WINDOW-LEDGER-WRITE-HALT-001) covers the render on BOTH arms,
+    byte-identical to the pre-conversion semantics.
+    """
+    if lake_rust_ledger_render_enabled():
+        return render_ledger_parquet_bytes(
+            rows=rows,
+            python_render=lambda: _render_ledger_parquet_python(rows),
+        )
+    return _render_ledger_parquet_python(rows)
 
 
 def _next_delta_path(directory: Path) -> Path:
@@ -683,11 +860,19 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
 
     Returns the number of rows appended (0 for a no-op / a skipped flush).
     """
-    import pyarrow.parquet as pq
-
     rows = ledger.dirty_rows()
     if not rows:
         return 0
+    # MID-PULL COMPACTION FOLLOW-UP (deferred by the coordinator with
+    # DEC-WINDOWS-MIDPULL-FLOOR-001, distinct from the crash-orphan compactor
+    # named above): deltas accrue HERE ~1 file per LIVE_FLUSH_MIN_INTERVAL_S
+    # (2 s) and are pruned only by the next FULL save's subsumption, so a
+    # multi-hour pull reaches thousands of pending files and every fresh-stamp
+    # reader fold pays one Parquet footer open per file (db_view's
+    # `_ledger_scan_source` envelope). The read side is floor-throttled + page-
+    # cached (MIGRATION.md #1637); bounding the FILE COUNT itself (periodic
+    # mid-pull delta consolidation under this same lock) stays the named
+    # follow-up.
     directory = deltas_dir(lake_root)
     directory.mkdir(parents=True, exist_ok=True)
     try:
@@ -697,10 +882,13 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
             # let a later-locking writer carry an earlier filename under
             # contention, inverting the newer-file-wins fold order.
             path = _next_delta_path(directory)
-            table = _rows_to_table(rows)
 
             def _write_parquet(tmp: Path) -> None:
-                pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
+                # The ONE shared render body (flag-gated Rust seam,
+                # DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001) runs INSIDE the
+                # guarded callable, so a render-time ENOSPC/OOM still maps to
+                # LakeWriteHalt exactly as the inline pq.write_table did.
+                tmp.write_bytes(_ledger_parquet_bytes(rows))
 
             atomic_write_via(path, _write_parquet)
     except PartitionLockTimeout as exc:
@@ -781,8 +969,17 @@ def save_window_ledger(
     """
     import contextlib
 
-    import pyarrow.parquet as pq
-
+    # Liveness beats around the whole synchronous save body
+    # (DEC-HEAL-SCAN-LIVENESS-BEATS-001): the drain-time full save is a single
+    # multi-second synchronous read-merge-write (a forensically-measured
+    # 12.96 s ``window_ledger.save_slow`` over 68,234 rows) running on the
+    # beat-watched pull worker AFTER the last fetched-window heartbeat — the
+    # entry beat marks the save alive and the completion beat (both arms of
+    # the try/except below) refreshes liveness before the next silent stage.
+    # HONEST envelope: no mid-save heartbeat thread — a save LONGER than the
+    # ~600 s stall timeout would still gap (the ``save_slow`` WARN makes it
+    # visible); ``emit_progress_beat`` is a cheap no-op with no watchdog.
+    emit_progress_beat()
     tick = clock if clock is not None else time.monotonic
     started = tick()
     directory = ledger_dir(lake_root)
@@ -818,10 +1015,12 @@ def save_window_ledger(
                 reopened_keys=ledger.reopened_keys(),
                 degraded_keys=ledger.degraded_keys(),
             )
-            table = _rows_to_table(rows)
 
             def _write_parquet(tmp: Path) -> None:
-                pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
+                # The ONE shared render body (flag-gated Rust seam,
+                # DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001) runs INSIDE the
+                # guarded callable — see the delta twin above.
+                tmp.write_bytes(_ledger_parquet_bytes(rows))
 
             # COMMON lake-safe atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
             # DEC-WINDOW-LEDGER-WRITE-HALT-001): the ledger is a LAKE write (it lives under
@@ -883,6 +1082,11 @@ def save_window_ledger(
             path=str(path),
             error=str(exc),
         )
+    # Completion beat (both the completed-save AND lock-timeout-skip arms; a
+    # RAISING save skips it — the pull is halting anyway): a multi-second save
+    # can no longer leave the watchdog's last heartbeat stranded at its entry
+    # (DEC-HEAL-SCAN-LIVENESS-BEATS-001).
+    emit_progress_beat()
 
 
 def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:
@@ -930,6 +1134,9 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 # retries — honest unknown (DEC-RETRY-COUNTER-SPLIT-001).
                 empty_retries=_derive_retry_count(),
                 transient_retries=_derive_retry_count(),
+                # ...nor the streak's per-bump lineage — honest unknown
+                # (DEC-STREAK-PROVENANCE-001).
+                streak_provenance=_derive_streak_provenance(),
             )
         )
 
@@ -952,6 +1159,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 r.bars_net_new,
                 r.empty_retries,
                 r.transient_retries,
+                r.streak_provenance,
             )
             for r in by_window.values()
         ),
@@ -1184,6 +1392,7 @@ def seed_enclosed_windows(
     *,
     now: datetime,
     today_ist: date | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Seed ``SUCCESS`` (only-if-absent) for each candidate window the lake ENCLOSES — the COMMON core.
 
@@ -1255,17 +1464,23 @@ def seed_enclosed_windows(
     detector; note the abstain now keys on the DATASET's first/last covered
     dates, so a span reaching past holiday coverage abstains for ALL its
     windows — conservative in the seed direction, byte-identical to the
-    span-only path); the seed calls :func:`interior_gap_runs` WITHOUT the
-    DEC-CALENDAR-OBSERVED-SESSIONS-001 ``observed=`` drift overlay the
-    fetch-time detector threads (``ingest.observe_interior_gap`` passes
-    ``observed=observed_holidays``; the reconcile chokepoints have no overlay
-    plumbed), so on a vendor-observed holiday the seed counts one more bar-less
-    "session" than the classifier would — the overlay is REMOVE-only, so the
-    omission can only EXTEND a run: at worst ONE conservative refusal → one
-    idempotent re-fetch, after which the recorded row trips ``has_window`` and
-    the gate is permanently silent (a single drift day can never mint a
-    >tolerance run alone; threading the overlay to the reconcile callers is a
-    named follow-up, NOT claimed — wiring-review fold, PR #1158);
+    span-only path); the seed threads the DEC-CALENDAR-OBSERVED-SESSIONS-001
+    *observed* drift overlay into :func:`interior_gap_runs` — CLOSED by
+    DEC-SEED-OBSERVED-OVERLAY-001 (previously the reconcile chokepoints had no
+    overlay plumbed, so on a vendor-observed holiday the seed counted one more
+    bar-less "session" than the fetch-time classifier and refused a window the
+    classifier called continuous — one redundant vendor re-fetch per cold
+    start); the caller HOISTS its ONE per-pull ``load_observed_holidays`` read
+    above the reconcile so the seed and the fetch-time detectors share ONE
+    consistent snapshot (single source of truth; the shared run-walker breaks
+    a run on every COVERED static session BEFORE consulting the overlay, so
+    threading the remove-only overlay can only SHORTEN runs — the seed
+    becomes strictly MORE permissive, never newly refusing, for EVERY overlay
+    shape: a STALE entry over a since-backfilled covered day — reachable,
+    because an entry self-heals only when ``brutex detect-session-drift``
+    next re-runs, NOT the moment bars appear — can no longer MERGE its two
+    flanking runs into a super-tolerance refusal; the property-pinned
+    monotonicity law, pinned WITHOUT a disjointness restriction);
     sub-tolerance holes still seed; and CONVERGENCE after a
     refusal is fetch-verdict-dependent — a run CONTAINED in one window is
     demoted at fetch time (``INTERIOR_GAP``, bounded → SKIPPED), while a
@@ -1343,7 +1558,12 @@ def seed_enclosed_windows(
                     continue
                 if span_key not in runs_by_span:
                     try:
-                        runs_by_span[span_key] = interior_gap_runs(covered_dates=sessions)
+                        # SAME per-pull *observed* snapshot the fetch-time detectors
+                        # read (DEC-SEED-OBSERVED-OVERLAY-001) — the memo stays valid
+                        # because *observed* is constant per call.
+                        runs_by_span[span_key] = interior_gap_runs(
+                            covered_dates=sessions, observed=observed
+                        )
                     except Exception as exc:  # fail-CLOSED — a re-pull is always data-safe
                         runs_by_span[span_key] = exc
                 runs = runs_by_span[span_key]
@@ -1394,6 +1614,7 @@ def reconcile_ledger_windows(
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
     symbol_windows: Mapping[str, tuple[date, date]] | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Seed ``SUCCESS`` for every lake-enclosed window with no ledger row — **pure** (cold-start).
 
@@ -1417,6 +1638,12 @@ def reconcile_ledger_windows(
     would land a SUCCESS row at a window boundary the bounded plan never created — an
     ORPHAN row the completeness page would miscount. ``None`` (the default) tiles the
     global range, byte-identical to the pre-feature behaviour.
+
+    *observed* (DEC-SEED-OBSERVED-OVERLAY-001): the per-pull observed-sessions
+    drift overlay (``load_observed_holidays``), threaded into the seed's
+    interior-gap continuity gate so the seed and the fetch-time detectors judge
+    the SAME calendar (see :func:`seed_enclosed_windows`). ``frozenset()`` (the
+    default) is byte-identical to the pre-threading behaviour.
     """
     # Shared vendor-neutral tiler + the (relocated-to-neutral) width policy +
     # coverage market namespace, all in ingest_common (CLAUDE.md §11 COMMON; moved
@@ -1474,7 +1701,7 @@ def reconcile_ledger_windows(
                         span_key,
                     )
 
-    return seed_enclosed_windows(ledger, span_index, _candidates(), now=stamp)
+    return seed_enclosed_windows(ledger, span_index, _candidates(), now=stamp, observed=observed)
 
 
 def reconcile_ledger_with_lake(
@@ -1489,6 +1716,7 @@ def reconcile_ledger_with_lake(
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
     symbol_windows: Mapping[str, tuple[date, date]] | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Load the lake spans + seed the ledger cold-start (the wired entry point).
 
@@ -1521,6 +1749,7 @@ def reconcile_ledger_with_lake(
         market=market,
         window_days_for=window_days_for,
         symbol_windows=symbol_windows,
+        observed=observed,
     )
 
 
@@ -1791,6 +2020,69 @@ def run_skipped_audit_guarded(
         return 0
 
 
+#: The ACTIVE shared-pull-ledger scope (DEC-LEDGER-LOAD-SPACE-V1-001): ``None``
+#: outside any scope (every :func:`begin_pull_ledger` loads fresh — the
+#: pre-existing behaviour, byte-identical); inside a
+#: :func:`shared_pull_ledger_scope` it holds one ``{str(lake_root) →
+#: WindowLedger}`` reuse map. A :class:`~contextvars.ContextVar` (the
+#: ``pull_id_scope`` correlation precedent, NOT module-global mutable state):
+#: the scope is confined to the opening thread/context, so an unrelated thread's
+#: ``begin_pull_ledger`` can never observe another pipeline's live instance.
+_SHARED_PULL_LEDGER: contextvars.ContextVar[dict[str, WindowLedger] | None] = (
+    contextvars.ContextVar("brutex_shared_pull_ledger", default=None)
+)
+
+
+@contextmanager
+def shared_pull_ledger_scope() -> Generator[None, None, None]:
+    """Reuse ONE loaded ledger per lake across this scope's :func:`begin_pull_ledger` calls.
+
+    DEC-LEDGER-LOAD-SPACE-V1-001. A full-pipeline run performs TWO whole-ledger
+    materialisations of the SAME lake — ``pull_all_spot`` and the historical
+    phase's ``_run_phase`` each ``begin_pull_ledger`` (measured 1,305 B/row RSS
+    + ~13.6 µs/row per load; ~16 s + a second full-resident copy across the
+    phase boundary at the documented ~1.2M-row scale). Inside this scope the
+    FIRST ``begin_pull_ledger`` per lake loads; every later one returns the SAME
+    instance, so one pipeline run pays ONE load and never holds two distinct
+    materialisations.
+
+    Safety (why reuse is sound where the pipeline uses it):
+
+    * the pipeline phases run **sequentially on one thread** under the
+      account-wide pull single-flight lock — SAME-HOST concurrency is excluded
+      by the flock/single-flight (``reopen_skipped`` refuses under the same
+      lock), so on this host the re-load this scope skips could only ever have
+      observed what this same process just saved (the save is a
+      read-MERGE-write whose merge partner is our own prior save — the fold is
+      idempotent). CROSS-HOST the lease is DETECTION, not mutual exclusion
+      (DEC-ACCOUNT-LEASE-CROSSHOST-001): a cross-host peer's rows are folded
+      at the save's read-MERGE-write — the in-memory instance may not see them
+      until then, the same visibility as any mid-window write, and negligible
+      in practice (foreign keys never enter group-scoped ``progress_counts``);
+    * each phase's END-OF-PHASE SAVE is UNCHANGED (durability byte-identical —
+      the mid-pull delta flush + per-phase :func:`end_pull_ledger` cadence all
+      still run); ONLY the redundant re-load is skipped;
+    * :class:`~brutex.data.window_ledger.WindowLedger` is internally locked, so
+      even a caller that DID share across threads mutates safely;
+    * a **dry-run** ``begin_pull_ledger`` still returns ``None`` and never
+      enters the map; lakes are keyed by ``str(lake_root)`` — two spellings of
+      one lake simply load twice (today's behaviour, never worse).
+
+    Disclosed edge (Golden Rule #10): a corrupt base at pipeline start now
+    carries ``load_failed=True`` into the LATER phases too (pre-scope, the
+    second load read the first phase's rescue save and reported a clean
+    reload) — the honest carry: the history genuinely was lost at pull start,
+    and the re-verify note already fired from the first phase's flag.
+
+    The scope always resets on exit (exception included). O(1) per call.
+    """
+    token = _SHARED_PULL_LEDGER.set({})
+    try:
+        yield
+    finally:
+        _SHARED_PULL_LEDGER.reset(token)
+
+
 def begin_pull_ledger(
     lake_root: Path, *, dry_run: bool, now: datetime | None = None
 ) -> WindowLedger | None:
@@ -1799,11 +2091,23 @@ def begin_pull_ledger(
     A **live** pull loads (or one-shot migrates) the persisted ledger so the table
     reflects the full cross-run history; a **dry-run** returns ``None`` (no
     recording, no disk touch) — its synthetic fetch would otherwise pollute the
-    real ledger.
+    real ledger. Under an active :func:`shared_pull_ledger_scope`
+    (DEC-LEDGER-LOAD-SPACE-V1-001) the first live call per lake loads and every
+    later one returns the SAME instance — one materialisation per pipeline run;
+    outside any scope (every other caller) the behaviour is byte-identical to
+    before.
     """
     if dry_run:
         return None
-    return load_or_migrate_window_ledger(lake_root, now=now)
+    shared = _SHARED_PULL_LEDGER.get()
+    if shared is None:
+        return load_or_migrate_window_ledger(lake_root, now=now)
+    key = str(lake_root)
+    ledger = shared.get(key)
+    if ledger is None:
+        ledger = load_or_migrate_window_ledger(lake_root, now=now)
+        shared[key] = ledger
+    return ledger
 
 
 def end_pull_ledger(ledger: WindowLedger | None, lake_root: Path, *, dry_run: bool) -> None:
@@ -1844,5 +2148,6 @@ __all__ = [
     "save_skipped_audit_cursor",
     "save_window_ledger",
     "seed_enclosed_windows",
+    "shared_pull_ledger_scope",
     "skipped_audit_cursor_path",
 ]

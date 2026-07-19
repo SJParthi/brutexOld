@@ -11,6 +11,8 @@ Mirrors the dispatch-test style of tests/unit/test_cli_backfill.py.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -66,6 +68,34 @@ def test_sweep_all_parser_help_names_the_env_fallbacks() -> None:
     assert not hasattr(daemon_args, "sweep_cache_map_mb")
 
 
+def test_price_source_cells_argparse_default_is_baseline_cardinality_one() -> None:
+    """GAP-3: the ``--price-source-cells`` argparse DEFAULT resolves to the sole
+    baseline ``(HLC3, CLOSE)`` cell — the swept axis stays default-OMITTED/dormant.
+
+    The config-layer default (``price_source_cells: str = "hlc3:close"`` on the
+    ``cmd_sweep_all`` shim) is pinned elsewhere, but the PARSER-layer default was
+    unpinned: flipping the argparse ``default=`` string to e.g. ``"open:close"``
+    would silently turn the axis default-ON (breaking Override 1's byte-identity
+    for every plain ``sweep-all`` invocation) without tripping any test. The
+    assertion rides ``build_parser()`` (NOT the ``# pragma: no cover``
+    declarative-wiring helper), so it exercises + bites the real default value.
+    """
+    from brutex.strategies.types import (
+        DEFAULT_PRICE_SOURCE_CELL,
+        PriceSourceCell,
+        parse_price_source_cells,
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["sweep-all", "--start", "2024-01-01", "--end", "2024-01-02"])
+    # The raw parser default string (the mutation target).
+    assert args.price_source_cells == "hlc3:close"
+    # …which resolves to exactly the cardinality-1 baseline cell (axis dormant).
+    resolved = parse_price_source_cells(args.price_source_cells)
+    assert resolved == [DEFAULT_PRICE_SOURCE_CELL]
+    assert tuple(resolved) == (PriceSourceCell(),)
+
+
 # ────────────────────────────────────────────────────────────────────────
 # --acknowledge-sla-overrun (DEC-SLA-LAUNCH-GUARD-001)
 # ────────────────────────────────────────────────────────────────────────
@@ -106,3 +136,52 @@ def test_sla_acknowledge_is_sweep_all_only() -> None:
         ["sweep-daemon", "--once", "--start", "2024-01-01", "--end", "2024-01-02"]
     )
     assert not hasattr(daemon_args, "acknowledge_sla_overrun")
+
+
+def _cmd_sweep_kwargs(tmp_path: Path, interval: str) -> dict[str, Any]:
+    """Minimal in-scope cmd_sweep kwargs against a missing catalog.
+
+    The 1day launch note prints BEFORE `_require_catalog_exists`, so the
+    missing catalog's CliUserError bounds the test without any lake I/O.
+    """
+    return {
+        "lake_root": tmp_path,
+        "catalog_path": tmp_path / "missing-catalog.duckdb",
+        "exchange": "NSE",
+        "segment": "INDEX",
+        "symbol": "NIFTY",
+        "interval": interval,
+        "start": "2024-01-01",
+        "end": "2024-01-02",
+        "direction": "BUY",
+        "k": 1,
+        "conditions": None,
+        "stop_loss_paisa": None,
+        "take_profit_paisa": None,
+        "top": 5,
+        "min_hits": None,
+        "sort_by": "score",
+        "validate_oos": False,
+        "oos_only": False,
+    }
+
+
+def test_cmd_sweep_1day_launch_prints_the_trade_law_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-8 finding 1: a 1day launch is loudly LABELLED, never a silent
+    empty leaderboard — `one_day_trade_law_note` prints before any lake I/O."""
+    with pytest.raises(cli.CliUserError, match="catalog not found"):
+        cli.cmd_sweep(**_cmd_sweep_kwargs(tmp_path, "1day"))
+    out = capsys.readouterr().out
+    assert "interval '1day' ranks NOTHING under the intraday-only trade law" in out
+    assert "DEC-FUTURES-LAUNCH-REVIEW-FIXES-008" in out  # the named follow-up
+
+
+def test_cmd_sweep_intraday_launch_prints_no_1day_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The intraday grid gets NO note — the label fires only for 1day."""
+    with pytest.raises(cli.CliUserError, match="catalog not found"):
+        cli.cmd_sweep(**_cmd_sweep_kwargs(tmp_path, "15minute"))
+    assert "intraday-only trade law" not in capsys.readouterr().out

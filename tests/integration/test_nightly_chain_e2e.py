@@ -93,8 +93,8 @@ class FakePipeline:
 
 
 @contextmanager
-def _noop_keep_awake(reason: str) -> Generator[None]:
-    yield
+def _noop_keep_awake(reason: str) -> Generator[bool]:
+    yield False
 
 
 def _fixture_lake(tmp_path: Path) -> tuple[Path, Path]:
@@ -151,6 +151,15 @@ def _seams(
     }
 
     def run_sweep(**_kwargs: Any) -> int:
+        # DEC-SWEEP-LOCK-PULL-CONCURRENCY-001 (fails before): during the SWEEP
+        # leg the LAKE pull lock must be FREE — a REAL EX acquire on a second
+        # open file description succeeds, proving a daily pull/crossverify
+        # would NOT defer behind the sweep's multi-day compute (pre-fix the
+        # nightly held the lake flock through this leg, so this acquire raised
+        # PullAlreadyRunningError — and the real cmd_sweep_all's G10 SH guard
+        # self-conflicted the same hold at preload).
+        with ps.pull_singleflight_lock(results.parent):
+            pass
         # Production shape: the SUPERVISOR audit chain (SweepGuards.audit →
         # audit/sweep-all-supervisor.jsonl) with the REAL engine action
         # constant — never the ingest sweep-all.jsonl (review round 1).

@@ -25,8 +25,98 @@
  * the page wiring (COLS render, th-click sort) is pinned by SOURCE-STRING
  * tests only (the tests/browser Playwright job — #1557 — does not
  * drive /screener).
+ *
+ * A-r4 defense-in-depth (DEC-ONECLICK-PERF-CLUB-001): every work surface is
+ * BOUNDED independently of payload trust — bxApplyFilters/bxSortRows process
+ * at most BX_SCREENER_INPUT_CAP rows, and the render plan (bxRenderCount /
+ * bxCapNote) caps even the "Show all" view at BX_SCREENER_SHOW_ALL_CAP with
+ * an honest "showing first N of M (render cap)" note. The server already
+ * bounds the wire at TOP100_ROW_CAP=100 (#1373), so these caps are
+ * unreachable through /api/v1/oneclick/top100 today; they exist so a FUTURE
+ * path bypassing load_top100 can never resurrect the measured 10k=4.8 s /
+ * 20k=14.1 s tab freeze. Truncation is of an out-of-contract payload and is
+ * always NAMED on the count line, never silent.
  */
 "use strict";
+
+/** Rows rendered in the default (non-Show-all) view. */
+var BX_SCREENER_RENDER_CAP = 200;
+/** Rows rendered at most even under "Show all" (A-r4 — a bounded ceiling). */
+var BX_SCREENER_SHOW_ALL_CAP = 1000;
+/** Rows bxApplyFilters/bxSortRows will process at most (input bound). */
+var BX_SCREENER_INPUT_CAP = 5000;
+
+/**
+ * Bound an untrusted rows array to BX_SCREENER_INPUT_CAP (pure).
+ *
+ * @param {*} rows - the payload rows (any shape — a non-array reads empty).
+ * @returns {{rows: object[], dropped: number}} the first-N slice + the
+ *          honest dropped count (0 when nothing was cut).
+ */
+function bxInputCapRows(rows) {
+  if (!Array.isArray(rows)) {
+    return { rows: [], dropped: 0 };
+  }
+  if (rows.length <= BX_SCREENER_INPUT_CAP) {
+    return { rows: rows, dropped: 0 };
+  }
+  return {
+    rows: rows.slice(0, BX_SCREENER_INPUT_CAP),
+    dropped: rows.length - BX_SCREENER_INPUT_CAP
+  };
+}
+
+/**
+ * How many rows the table renders for this view (pure — the ONE cap law).
+ *
+ * @param {number} sortedLength - rows surviving filter+sort.
+ * @param {boolean} showAll - the Show-all toggle.
+ * @returns {number} min(sortedLength, the view's cap).
+ */
+function bxRenderCount(sortedLength, showAll) {
+  var cap = showAll ? BX_SCREENER_SHOW_ALL_CAP : BX_SCREENER_RENDER_CAP;
+  return Math.min(sortedLength, cap);
+}
+
+/**
+ * The count-line suffix naming a render-cap truncation ("" when none).
+ *
+ * @param {number} shown - rows actually rendered.
+ * @param {number} sortedLength - rows surviving filter+sort.
+ * @param {boolean} showAll - the Show-all toggle.
+ * @returns {string} the honest note or "".
+ */
+function bxCapNote(shown, sortedLength, showAll) {
+  if (shown >= sortedLength) {
+    return "";
+  }
+  if (!showAll) {
+    return " (render cap " + BX_SCREENER_RENDER_CAP + " — use Show all)";
+  }
+  return (
+    " (showing first " + shown + " of " + sortedLength + " (render cap " +
+    BX_SCREENER_SHOW_ALL_CAP + "))"
+  );
+}
+
+/**
+ * The count-line suffix naming an INPUT-cap truncation ("" when none) — an
+ * out-of-contract payload (> BX_SCREENER_INPUT_CAP rows) is never silently
+ * shrunk.
+ *
+ * @param {number} dropped - rows cut by bxInputCapRows.
+ * @param {number} payloadLength - the payload's original row count.
+ * @returns {string} the honest note or "".
+ */
+function bxInputCapNote(dropped, payloadLength) {
+  if (!(typeof dropped === "number") || dropped <= 0) {
+    return "";
+  }
+  return (
+    " (input capped: first " + BX_SCREENER_INPUT_CAP + " of " +
+    payloadLength + " payload rows loaded)"
+  );
+}
 
 /**
  * The canonical screener column config (ONE source of truth — screener.html
@@ -41,6 +131,7 @@
 var BX_SCREENER_COLUMNS = [
   { key: "rank", label: "#", type: "num", explain: "rank" },
   { key: "conditions", label: "Strategy", type: "str", explain: "conditions" },
+  { key: "instrument", label: "Inst", type: "str", explain: "instrument" },
   { key: "tf", label: "TF", type: "str", explain: "tf" },
   { key: "direction", label: "Dir", type: "str", explain: "direction" },
   { key: "arm", label: "SL/TP arm", type: "str", explain: "arm" },
@@ -53,6 +144,11 @@ var BX_SCREENER_COLUMNS = [
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
   { key: "vix_band", label: "VIX band", type: "vix", explain: "vix_band" },
+  /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
+     cascade.status_text is SERVER-built (oneclick_view.cascade_status_text);
+     a pre-change artifact lacks the key entirely -> "—" (absent-excluded-
+     but-counted under a filter, the #1631 law — never a fabricated PASS). */
+  { key: "cascade.status_text", label: "Cascade", type: "str", explain: "cascade_status" },
   { key: "family_id", label: "Family", type: "str", explain: "family_id" },
   { key: "mask_hex", label: "Mask", type: "str", explain: "mask_hex" }
 ];
@@ -143,6 +239,10 @@ function bxCompare(field, type, dir) {
  * Sorted COPY of rows by one column (the comparator's rank tie-break makes
  * the order total, hence stable on every engine).
  *
+ * A-r4 input bound: at most BX_SCREENER_INPUT_CAP rows are sorted — rows
+ * past the cap of an out-of-contract payload are ignored (they could never
+ * render anyway; the page names the input cap via bxInputCapNote).
+ *
  * @param {object[]} rows - the top100 rows.
  * @param {string} field - dotted field path.
  * @param {string} type - "num" | "str" | "vix".
@@ -150,7 +250,7 @@ function bxCompare(field, type, dir) {
  * @returns {object[]} a new sorted array (input untouched).
  */
 function bxSortRows(rows, field, type, dir) {
-  return rows.slice().sort(bxCompare(field, type, dir));
+  return rows.slice(0, BX_SCREENER_INPUT_CAP).sort(bxCompare(field, type, dir));
 }
 
 /**
@@ -177,6 +277,8 @@ function bxVixOverlap(band, lo, hi) {
  * Non-VIX filter predicate for one row (pure).
  *
  * filters: { tf: string[]|null, direction: string|null,
+ *            instrument: string|null (exact match; an absent-instrument row
+ *            never matches an active filter),
  *            min_win_rate: number|null, min_pf: number|null,
  *            max_abs_dd_paisa: number|null (magnitude cap — max_dd_paisa is
  *            stored NEGATIVE, the cap compares |dd|) }.
@@ -194,6 +296,14 @@ function bxFilterRow(row, filters) {
     return false;
   }
   if (filters.direction && row.direction !== filters.direction) {
+    return false;
+  }
+  // Instrument is exact-match like direction (DEC-ONECLICK-INSTRUMENT-
+  // DISPLAY-001): a row WITHOUT the additive `instrument` key (a
+  // pre-instrument artifact) never matches an ACTIVE filter — but the page
+  // only offers filter options harvested from the loaded rows, so on such
+  // an artifact the dropdown stays empty and the filter is never active.
+  if (filters.instrument && row.instrument !== filters.instrument) {
     return false;
   }
   var m = row.metrics || {};
@@ -216,6 +326,10 @@ function bxFilterRow(row, filters) {
  * band filter (filters.vix_lo/vix_hi numeric) a row whose vix_band is null
  * is EXCLUDED-but-COUNTED in null_vix_excluded — never silently dropped.
  *
+ * A-r4 input bound: at most BX_SCREENER_INPUT_CAP rows are examined — rows
+ * past the cap of an out-of-contract payload are ignored (they could never
+ * render anyway; the page names the input cap via bxInputCapNote).
+ *
  * @param {object[]} rows - the top100 rows.
  * @param {object|null} filters - bxFilterRow filters + vix_lo/vix_hi.
  * @returns {{rows: object[], null_vix_excluded: number}} the kept rows +
@@ -228,7 +342,8 @@ function bxApplyFilters(rows, filters) {
     !!filters && (typeof filters.vix_lo === "number" || typeof filters.vix_hi === "number");
   var lo = vixActive && typeof filters.vix_lo === "number" ? filters.vix_lo : -Infinity;
   var hi = vixActive && typeof filters.vix_hi === "number" ? filters.vix_hi : Infinity;
-  for (var i = 0; i < rows.length; i++) {
+  var bound = Math.min(rows.length, BX_SCREENER_INPUT_CAP);
+  for (var i = 0; i < bound; i++) {
     var row = rows[i];
     if (!bxFilterRow(row, filters)) {
       continue;
@@ -270,6 +385,9 @@ function bxNullVixNote(n) {
 
 var BXScreener = {
   COLUMNS: BX_SCREENER_COLUMNS,
+  RENDER_CAP: BX_SCREENER_RENDER_CAP,
+  SHOW_ALL_CAP: BX_SCREENER_SHOW_ALL_CAP,
+  INPUT_CAP: BX_SCREENER_INPUT_CAP,
   fieldValue: bxFieldValue,
   rankTie: bxRankTie,
   compare: bxCompare,
@@ -277,7 +395,11 @@ var BXScreener = {
   vixOverlap: bxVixOverlap,
   filterRow: bxFilterRow,
   applyFilters: bxApplyFilters,
-  nullVixNote: bxNullVixNote
+  nullVixNote: bxNullVixNote,
+  inputCapRows: bxInputCapRows,
+  renderCount: bxRenderCount,
+  capNote: bxCapNote,
+  inputCapNote: bxInputCapNote
 };
 
 /* Browsers get the global; a non-browser harness (the node golden) gets the

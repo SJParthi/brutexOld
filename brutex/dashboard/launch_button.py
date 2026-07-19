@@ -121,7 +121,7 @@ from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 _LOG = structlog.get_logger(__name__)
 
@@ -191,8 +191,12 @@ LOCKED_TOP: Final[int] = 20
 #: Worker count exported to the detached CLI process (CLAUDE.md §8 envelope).
 LOCKED_SWEEP_WORKERS: Final[str] = "8"
 
-#: Rank-region byte budget exported to the child (audit delta, W07_m4_oom_table:
-#: the divisor=1 worker OOM was live-proven and the 1 GiB arm bit-identical).
+#: Rank-region byte budget exported to the child. The divisor=1 worker-OOM gap
+#: this pin originally mitigated (audit delta, W07_m4_oom_table — live-proven,
+#: 1 GiB arm bit-identical) is CLOSED by DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+#: (MIGRATION.md #1671 — the engine now divides the derived budget across
+#: workers itself); this 1 GiB export REMAINS a deliberate PER-WORKER pin,
+#: passed undivided per the #1352 env-override contract.
 #: Verified against main's real env name (`sweep_mem_budget.MEM_BUDGET_ENV`) and
 #: its fail-loud positive-int parser (`resolve_mem_budget_bytes` accepts this
 #: literal).
@@ -212,8 +216,14 @@ K6_FOLLOWON_NOTE: Final[str] = "k=6 runs as a documented follow-on delta run"
 #: implies 21 productive timeframes.
 GRID_HONESTY_NOTE: Final[str] = "20 trade-bearing TFs + 1day (no trades by design)"
 
-#: The honest futures-card dependency note shown while the alias is absent.
-FUTURES_DEPENDENCY_NOTE: Final[str] = "futures layer not merged yet — PR #1264"
+#: The honest futures-card note shown while the alias is scope-refused
+#: (DEC-ENGINE-SPOT-ONLY-001 — the pre-flip "PR #1264 not merged yet" note
+#: became FALSE the day the alias layer merged; the card is now disabled
+#: because the engine is spot-only, and the probe's dynamic reason carries
+#: the classifier's own law citation alongside this note).
+FUTURES_DEPENDENCY_NOTE: Final[str] = (
+    "futures track retired from engine scope — DEC-ENGINE-SPOT-ONLY-001 (the engine is spot-only)"
+)
 
 #: The whole-series futures symbol PR #1264's alias layer resolves.
 FUTURES_SYMBOL: Final[str] = "NSE-NIFTY-FUT"
@@ -420,10 +430,12 @@ def probe_futures_alias() -> FuturesAvailability:
 
     Calls the REAL scope classifier
     (:func:`brutex.universe.classify_engine_sweep_target`) at request time —
-    never a hardcoded assumption. On main (pre-#1264) the alias is refused;
-    the moment PR #1264's alias layer merges (+ dashboard restart) this reads
-    available with zero code change here. A missing/reshaped classifier
-    (guarded import) degrades to "unavailable", never a crash.
+    never a hardcoded assumption. Under DEC-ENGINE-SPOT-ONLY-001 the alias is
+    scope-refused (the engine is spot-only), so this reads unavailable with
+    the classifier's own law citation; were the scope law ever re-widened by
+    a future DEC, this would read available with zero code change here. A
+    missing/reshaped classifier (guarded import) degrades to "unavailable",
+    never a crash.
     """
     try:
         universe = importlib.import_module("brutex.universe")
@@ -483,11 +495,28 @@ def _wheels_check(
     )
 
 
+def _default_disk_usage(path: str) -> Any:
+    """The PRODUCTION disk probe — resolves ``shutil.disk_usage`` at CALL time.
+
+    DEC-LAUNCH-DISK-GATE-HERMETIC-001: ``run_preconditions`` previously bound
+    ``shutil.disk_usage`` as a DEF-TIME default argument, so tests could not
+    monkeypatch the probe and the ``/launch`` route suite read the REAL
+    runner disk — a CI runner with < 20 GiB free failed 7 POST tests with
+    412s (the disk gate itself was correct; the TESTS were not hermetic).
+    The default is now the ``spawner=None`` module-seam pattern:
+    ``disk_usage=None`` resolves THIS wrapper at call time, so tests pin
+    ``launch_button._default_disk_usage`` deterministically while production
+    behavior is identical — one ``shutil.disk_usage`` call per check, the
+    same floor, the same OSError arm.
+    """
+    return shutil.disk_usage(path)
+
+
 def run_preconditions(
     lake_root: Path | None,
     *,
     min_free_bytes: int = DEFAULT_MIN_DISK_FREE_BYTES,
-    disk_usage: Callable[[str], Any] = shutil.disk_usage,
+    disk_usage: Callable[[str], Any] | None = None,
 ) -> list[PreconditionCheck]:
     """Run the cheap launch preconditions (bounded — a few stats, zero scans).
 
@@ -495,7 +524,10 @@ def run_preconditions(
     free ≥ *min_free_bytes* · Rust wheels importable · sweeps root writable ·
     no launch already active. Deep lake-completeness checks are deliberately
     NOT duplicated here — the launched CLI itself refuses loudly on missing
-    slices (DEC-SWEEP-PREFLIGHT-001).
+    slices (DEC-SWEEP-PREFLIGHT-001). *disk_usage* ``None`` resolves the
+    module seam :func:`_default_disk_usage` (→ ``shutil.disk_usage``) at
+    call time (DEC-LAUNCH-DISK-GATE-HERMETIC-001 — test-injectable, never a
+    def-time binding).
     """
     checks: list[PreconditionCheck] = []
     if lake_root is None:
@@ -532,8 +564,9 @@ def run_preconditions(
         )
     )
 
+    disk_probe = disk_usage if disk_usage is not None else _default_disk_usage
     try:
-        free = int(disk_usage(str(lake_root)).free)
+        free = int(disk_probe(str(lake_root)).free)
         ok = free >= min_free_bytes
         detail = f"{free / 1024**3:.1f} GiB free (floor {min_free_bytes / 1024**3:.1f} GiB)"
     except OSError as exc:
@@ -1239,16 +1272,48 @@ def register_launch_routes(
     lake_root_resolver: Callable[[], Path | None],
     spawner: Callable[[list[str], Path], int] | None = None,
     min_free_bytes: int = DEFAULT_MIN_DISK_FREE_BYTES,
+    run_lake: Callable[..., Awaitable[Any]] | None = None,
 ) -> None:
     """Register the INTERIM launch page + API routes on *app* (additive only).
 
     FastAPI is imported lazily (the app.py doctrine — unit tests can import
     this module without the ``[ui]`` extra). *spawner* is the injectable
     detached-process seam so tests NEVER launch a real sweep.
+
+    *run_lake* is the app's lake-I/O limiter (``LakeOffload.__call__``-shaped —
+    the ``run_in_threadpool``-identical contract; DEC-DASHBOARD-LAKE-IO-LIMITER-002):
+    every /api/v1/launch/* closure stats/reads/writes under the lake root, so
+    ``build_app`` passes its own 32-token ``_run_lake``. ``None`` degrades to the
+    lazily-imported default-pool ``run_in_threadpool`` so direct callers without
+    an app limiter keep today's behavior byte-identically.
     """
     from fastapi import HTTPException, Query
     from fastapi.concurrency import run_in_threadpool
     from fastapi.responses import HTMLResponse, JSONResponse
+
+    # The lake-I/O dispatch (DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the #1642
+    # named follow-up): every /api/v1/launch/* closure stats/reads/writes
+    # under the lake root (21 partition dir stats + shutil.disk_usage +
+    # <lake>/sweeps/.launch/ pidfile + the launch.log tail; the POST adds the
+    # flock + atomic pidfile writes + the log open), so it must ride the
+    # app's 32-token lake limiter, never the DEFAULT 40-token pool a wedged
+    # volume would starve.
+    _offload: Callable[..., Awaitable[Any]] = (
+        run_lake if run_lake is not None else run_in_threadpool
+    )
+
+    # Hoist ``JSONResponse`` into module globals (the app.py `_make_ws_handler`
+    # hoist idiom — DEC-OPENAPI-ANNOTATIONS-RESOLVE-001): the two API closures'
+    # stringified ``-> JSONResponse`` return annotations
+    # (``from __future__ import annotations``) resolve against THIS module's
+    # ``endpoint.__globals__``, where the function-local import above is
+    # invisible — without the hoist ``app.openapi()`` raises
+    # ``PydanticUserError`` even after app.py's own hoist, 500ing
+    # ``/openapi.json`` for the whole dashboard. ``HTMLResponse`` is only a
+    # runtime value (``response_class=``), never an annotation, so it is
+    # deliberately NOT hoisted. The lazy-import contract stands: this module
+    # still imports without fastapi installed.
+    globals()["JSONResponse"] = JSONResponse
 
     async def launch_page() -> str:
         """GET /launch — the INTERIM Run-Sweep launch page."""
@@ -1257,9 +1322,7 @@ def register_launch_routes(
     async def api_launch_state() -> JSONResponse:
         """GET /api/v1/launch/state — preconditions + cards + active-run poll."""
         lake_root = lake_root_resolver()
-        payload = await run_in_threadpool(
-            build_launch_state, lake_root, min_free_bytes=min_free_bytes
-        )
+        payload = await _offload(build_launch_state, lake_root, min_free_bytes=min_free_bytes)
         return JSONResponse(payload)
 
     async def api_launch_sweep(
@@ -1297,16 +1360,14 @@ def register_launch_routes(
             futures = probe_futures_alias()
             if not futures.available:
                 raise HTTPException(status_code=400, detail=futures.reason)
-        checks = await run_in_threadpool(
-            run_preconditions, lake_root, min_free_bytes=min_free_bytes
-        )
+        checks = await _offload(run_preconditions, lake_root, min_free_bytes=min_free_bytes)
         failing = [c.name for c in checks if not c.ok and c.name in _POST_GATE_CHECKS]
         if failing:
             raise HTTPException(
                 status_code=412,
                 detail=f"launch preconditions failed: {', '.join(failing)} — nothing launched",
             )
-        outcome = await run_in_threadpool(
+        outcome = await _offload(
             launch_sweep,
             card,
             lake_root=lake_root,

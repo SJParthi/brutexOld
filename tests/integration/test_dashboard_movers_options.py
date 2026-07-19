@@ -123,6 +123,12 @@ def _seed_options_lake(tmp_path: Path) -> None:
     CE LTP 164 (+OI 1100) vs prior-day close 100 / prior-day OI 1000 → pct +64%,
     oi_chg +100, oi% +10%. PE LTP 80 (+OI 900) vs prior-day close 90 / prior-day
     OI 1200 → pct −11.11%, oi_chg −300, oi% −25%. Spot LTP 23622.90.
+
+    DEC-OPTIONS-PREBUILD-RETIRE-001: the option baselines are seeded as the
+    PRIOR SESSION'S last 1-minute bars (the 1-minute-native source the CE/PE
+    resolvers now read); the stored option ``1day`` rows are KEPT with the
+    SAME values as inert frozen legacy — the served numbers prove the gate
+    recovers the identical baseline from 1-minute.
     """
     _write(
         tmp_path,
@@ -130,6 +136,7 @@ def _seed_options_lake(tmp_path: Path) -> None:
         symbol=_CE,
         interval="1minute",
         bars=[
+            _min_bar(hour=15, minute=29, close="100", volume=10, oi=1000, day=date(2024, 6, 12)),
             _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050),
             _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100),
         ],
@@ -147,6 +154,7 @@ def _seed_options_lake(tmp_path: Path) -> None:
         symbol=_PE,
         interval="1minute",
         bars=[
+            _min_bar(hour=15, minute=29, close="90", volume=10, oi=1200, day=date(2024, 6, 12)),
             _min_bar(hour=9, minute=15, close="85", volume=50, oi=950),
             _min_bar(hour=9, minute=16, close="80", volume=150, oi=900),
         ],
@@ -384,14 +392,18 @@ class TestRunOptionsSnapshot:
 
     def test_intraday_cutoff_path(self, tmp_path: Path) -> None:
         _seed_options_lake(tmp_path)
-        # 5-minute interval at 09:15 → only the 09:15 CE/PE bars (CE close 150).
+        # 5-minute interval at 09:15 → the COMPLETED [09:15, 09:20) CE bucket
+        # (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001): 09:15 is a 5-minute anchor, so the
+        # effective cut resolves forward to 09:19 and the last AVAILABLE minute is
+        # 09:16 → the completed bucket CE close 164 / OI 1100 (was the partial 09:15
+        # close 150 / OI 1050 before the explicit-bucket-asof fix).
         payload = run_options_snapshot(
             lake_root=tmp_path, interval="5minute", date="2024-06-13", time="09:15", top_n=10
         )
         assert payload["instrument_count"] == 2
         ce_row = payload["highest_oi"][0]
-        assert ce_row["ltp"] == "₹150.00"
-        assert ce_row["oi"] == 1050
+        assert ce_row["ltp"] == "₹164.00"
+        assert ce_row["oi"] == 1100
 
 
 # ── run_options_snapshot WITHIN a cadence track (DEC-MOVERS-OPTIONS-TRACK-001) ──
@@ -725,6 +737,247 @@ class TestOptionsApi:
         assert "vendor calendar" in body["note"]
 
 
+# ── registry content-token cache keying (DEC-MEMORY-FOOTPRINT-HARDENING-001) ─
+
+
+def _seed_sparse_july_lake(tmp_path: Path) -> None:
+    """A sparse July-2025 lake: only the 07-Jul CE/PE contracts carry candles."""
+    for opt in ("CE", "PE"):
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=f"NSE-NIFTY-07Jul25-24000-{opt}",
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15, close="150", volume=100, oi=10, day=date(2025, 7, 7))
+            ],
+        )
+
+
+def _upsert_registry_expiries(tmp_path: Path, expiries: tuple[date, ...], *, run_id: str) -> None:
+    """A REAL RegistryStore write — the cross-process metadata-pull stand-in.
+
+    Deliberately NOT routed through any dashboard job funnel, so the write
+    bumps NEITHER the summary generation NOR the instrument-master revision —
+    exactly the nightly-headless / CLI / second-dashboard write class the
+    registry content token exists to catch.
+    """
+    import os as _os
+
+    from brutex.data.registry_store import RegistryStore
+
+    now = datetime(2025, 7, 1, tzinfo=UTC)
+    with RegistryStore.open(tmp_path / "registry.duckdb") as reg:
+        for exp in expiries:
+            reg.upsert_expiry("NSE", "NIFTY", exp, run_id=run_id, fetched_at=now)
+    # Deterministically distinct stat token (no filesystem mtime-granularity
+    # flake): the DuckDB commit moved the file already; pin a unique mtime too.
+    target = tmp_path / "registry.duckdb"
+    stamp = _os.stat(target).st_mtime_ns + 1_000_000
+    _os.utime(target, ns=(stamp, stamp))
+
+
+class TestRegistryContentTokenKeying:
+    """The options registry-derived caches re-key on a CROSS-PROCESS registry write.
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001: `_options_calendar_cache` +
+    `_options_strikes_cache` (and the options candidate key that bakes their
+    verdicts into its rows) were keyed on the write generation ONLY —
+    `lake_revision`'s composite never stats `registry.duckdb`, so a metadata
+    pull in ANOTHER process (nightly headless `run_full_pipeline`, a second
+    dashboard, a CLI registry writer) left an open dashboard serving the
+    PRE-pull expiry tiers / ATM strike steps until an unrelated ledger write
+    bumped the generation. The `registry_revision` token folded into those
+    keys (the #1660 `coverage_revision` precedent) closes it.
+    """
+
+    def test_cross_process_registry_write_rekeys_the_options_caches(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The STALE-KEY regression (fails with the key folds reverted).
+
+        1. Registry v1 holds ONLY the 07-Jul expiry → a Far-Weekly poll reads
+           the honest "no Far Weekly contracts" note (one-expiry calendar has
+           no far weekly) and CACHES calendar + candidates.
+        2. A cross-process-style registry write lands the full July weeklies
+           (14/21/28-Jul) — NO generation bump, NO master move.
+        3. The SAME coordinate polled again MUST recompute off the POST-write
+           calendar: 21-Jul is now the calendar Far weekly with no pulled
+           candles → the "vendor calendar" honest-no-data note. Pre-fix the
+           generation-only keys served step 1's payload byte-identically.
+        """
+        _seed_sparse_july_lake(tmp_path)
+        _upsert_registry_expiries(tmp_path, (date(2025, 7, 7),), run_id="r1")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        params = {
+            "asset": "options",
+            "interval": "1day",
+            "date": "2025-07-07",
+            "expiry": "Far",
+            "track": "Weekly",
+        }
+        pre = client.get("/api/v1/movers", params=params).json()
+        assert pre["instrument_count"] == 0
+        assert "vendor calendar" not in pre["note"]  # the one-expiry calendar has no far weekly
+
+        # The cross-process metadata pull: the registry moves, the generation does NOT.
+        _upsert_registry_expiries(
+            tmp_path, (date(2025, 7, 14), date(2025, 7, 21), date(2025, 7, 28)), run_id="r2"
+        )
+
+        post = client.get("/api/v1/movers", params=params).json()
+        # The registry token moved the calendar + candidate keys → a fresh
+        # compute off the POST-write calendar (21-Jul Far weekly, honest no-data).
+        assert post["instrument_count"] == 0
+        assert "vendor calendar" in post["note"]
+        assert post["note"] != pre["note"]
+
+    def test_no_registry_write_repeat_polls_hit_the_cache_byte_identical(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The no-write parity pin: repeat polls are cache HITS, payloads byte-identical.
+
+        With nothing changed between two identical polls, the folded registry
+        token is byte-stable, so the calendar read AND the candidate scan each
+        run exactly ONCE (the O(1)-on-repeat contract is not regressed by the
+        key change) and the second payload equals the first.
+        """
+        from brutex.dashboard import app as app_mod
+
+        _seed_sparse_july_lake(tmp_path)
+        _upsert_registry_expiries(
+            tmp_path,
+            (date(2025, 7, 7), date(2025, 7, 14), date(2025, 7, 21), date(2025, 7, 28)),
+            run_id="r1",
+        )
+        calendar_calls = 0
+        candidate_calls = 0
+        real_calendar = app_mod.load_registry_expiries
+        real_candidates = app_mod.compute_options_candidates
+
+        def _counting_calendar(*args: object, **kwargs: object) -> object:
+            nonlocal calendar_calls
+            calendar_calls += 1
+            return real_calendar(*args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        def _counting_candidates(*args: object, **kwargs: object) -> object:
+            nonlocal candidate_calls
+            candidate_calls += 1
+            return real_candidates(*args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(app_mod, "load_registry_expiries", _counting_calendar)
+        monkeypatch.setattr(app_mod, "compute_options_candidates", _counting_candidates)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        # Near expiry with REAL rows so the strike-chain loader (the
+        # `_RegistryKeyedCache` adapter path) is exercised through the route.
+        params = {"asset": "options", "interval": "1day", "date": "2025-07-07", "expiry": "near"}
+        first = client.get("/api/v1/movers", params=params).json()
+        second = client.get("/api/v1/movers", params=params).json()
+        assert first["instrument_count"] == 2
+        assert second == first  # byte-identical payload on the repeat poll
+        assert calendar_calls == 1  # ONE calendar read across both polls
+        assert candidate_calls == 1  # ONE candidate scan across both polls
+
+    def test_registry_key_component_folds_token_or_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_registry_key_component`: the real token, the stable sentinels, the outage arm."""
+        from brutex.dashboard import app as app_mod
+        from brutex.dashboard.db_view import registry_path_for
+        from brutex.dashboard.lake_revision import ABSENT_TOKEN, registry_revision
+
+        # Absent registry → the stable double-absent composite passes through.
+        assert app_mod._registry_key_component(tmp_path) == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        # Present registry → the exact stat token passes through — resolved off
+        # the SAME path the ONE `registry_path_for` law yields (the drift pin:
+        # `_registry_key_component`'s path expression cannot diverge from it).
+        (tmp_path / "registry.duckdb").write_bytes(b"duckdb-stand-in")
+        assert app_mod._registry_key_component(tmp_path) == registry_revision(
+            registry_path_for(tmp_path / "instruments.duckdb")
+        )
+        # Probe outage (None — "no signal") → the distinct stable "unknown"
+        # sentinel (the pre-fix generation-only envelope, never a raise).
+        monkeypatch.setattr(app_mod, "registry_revision", lambda _root: None)
+        assert app_mod._registry_key_component(tmp_path) == "unknown"
+
+    def test_registry_keyed_cache_adapter_folds_the_token_into_every_key(self) -> None:
+        """`_RegistryKeyedCache` delegates with `|r=<token>` appended, stamp untouched."""
+        from brutex.dashboard import app as app_mod
+        from brutex.dashboard.movers_cache import MoversSnapshotCache
+
+        inner = MoversSnapshotCache()
+        adapter = app_mod._RegistryKeyedCache(inner, "111:222")
+        assert (
+            adapter.get_or_compute(
+                "options_strikes||NIFTY|2025-07-07", generation=7, compute=lambda: "chain"
+            )
+            == "chain"
+        )
+        # The inner cache holds the token-folded key at the SAME generation…
+        assert (
+            inner.get_or_compute(
+                "options_strikes||NIFTY|2025-07-07|r=111:222",
+                generation=7,
+                compute=lambda: "MISS",
+            )
+            == "chain"
+        )
+        # …and a DIFFERENT token keys apart (the cross-process re-key law).
+        other = app_mod._RegistryKeyedCache(inner, "333:444")
+        assert (
+            other.get_or_compute(
+                "options_strikes||NIFTY|2025-07-07", generation=7, compute=lambda: "fresh"
+            )
+            == "fresh"
+        )
+
+    def test_held_open_connection_commit_moves_the_token_via_the_wal(self, tmp_path: Path) -> None:
+        """The m1 wal-widening REAL-DuckDB arm: a wal-ONLY write moves the token.
+
+        A commit on a HELD-OPEN connection lands in DuckDB's write-ahead log;
+        the MAIN file's ``mtime``/``size`` move only on CHECKPOINT (connection
+        close / WAL threshold) — probe-verified 2026-07-11 on this DuckDB.
+        Pre-widening, ``registry_revision`` statted the main file ONLY, so
+        this exact write class was invisible until checkpoint (fails before:
+        the pre-widening token is byte-identical across the held-open commit).
+        """
+        import os as _os
+
+        from brutex.dashboard.lake_revision import registry_revision
+        from brutex.data.registry_store import RegistryStore
+
+        now = datetime(2025, 7, 1, tzinfo=UTC)
+        target = tmp_path / "registry.duckdb"
+        # Create + checkpoint (context-manager close), so the held-open phase
+        # starts wal-less — the steady post-pull state.
+        with RegistryStore.open(target) as reg:
+            reg.upsert_expiry("NSE", "NIFTY", date(2025, 7, 7), run_id="r1", fetched_at=now)
+        before = registry_revision(target)
+        main_before = _os.stat(target)
+        cm = RegistryStore.open(target)
+        reg2 = cm.__enter__()  # the held-open connection — no checkpoint yet
+        try:
+            reg2.upsert_expiry("NSE", "NIFTY", date(2025, 7, 14), run_id="r2", fetched_at=now)
+            held = registry_revision(target)
+            main_held = _os.stat(target)
+        finally:
+            cm.__exit__(None, None, None)
+        assert held is not None
+        assert held != before  # the committed write is VISIBLE while held open…
+        # …and it is visible via the WAL component alone: the main file's stat
+        # is byte-identical across the held-open commit (the m1 evidence).
+        assert (main_before.st_mtime_ns, main_before.st_size) == (
+            main_held.st_mtime_ns,
+            main_held.st_size,
+        )
+        # The close's checkpoint removes the wal → the token moves again
+        # (correctly — a write happened) back to a `|absent`-shaped composite.
+        after_close = registry_revision(target)
+        assert after_close is not None
+        assert after_close != held
+        assert after_close.endswith("|absent")
+
+
 # ── compute_options_candidates discovery + resilience branches ────────────
 # These exercise the per-file gate branches the broad dashboard suite covered
 # but the narrowly-mapped tests did not: the _discover_options segment/interval
@@ -835,6 +1088,126 @@ class TestComputeOptionsCandidatesBranches:
         )
         # The BSE option is filtered out by the per-exchange discovery ``continue``.
         assert {m.underlying for m in nse.movers} == {"NIFTY"}
+
+
+# ── DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in: the #1482 spot-drift ──
+# recovery ladder on the options moneyness spot probe. Fails-before (executed
+# repro 2026-07-09): a spelling-drifted stock spot dir (chain underlying
+# BAJAJAUTO vs the master's on-disk BAJAJ-AUTO) read spot=None and a silent
+# '?' moneyness on the REAL compute even though the spot data existed.
+
+
+def _eq(symbol: str) -> Instrument:
+    """A minimal NSE cash-equity master row (the test_spot_drift `_eq` pattern)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+class TestStockDriftSpotRecoveryOptions:
+    def _seed_drifted_options_lake(self, tmp_path: Path) -> None:
+        """Two BAJAJAUTO CE contracts + the DRIFTED BAJAJ-AUTO spot dir + master."""
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-BAJAJAUTO-27Jun24-8000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="150", volume=30, oi=300)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-BAJAJAUTO-27Jun24-8100-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="90", volume=20, oi=200)],
+        )
+        _write(
+            tmp_path,
+            segment="CASH",
+            symbol="BAJAJ-AUTO",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="8010", volume=100, oi=None)],
+        )
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_eq("BAJAJ-AUTO")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-drift",
+                csv_source_sha256="0" * 64,
+            )
+
+    def test_drifted_stock_moneyness_recovers_one_log_across_rows(self, tmp_path: Path) -> None:
+        """The fails-before flip: both rows carry the recovered spot + a REAL
+        moneyness label (pre-fix: spot=None, moneyness_label='?'), and the
+        recovery ladder walks + logs ONCE for the whole chain (the per-compute
+        memo — never per row)."""
+        from structlog.testing import capture_logs
+
+        self._seed_drifted_options_lake(tmp_path)
+        with capture_logs() as logs:
+            got = compute_options_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                expiry_tier="near",
+                expiry_track="all",
+                exchange="NSE",
+            )
+        by_strike = {str(m.strike): m for m in got.movers}
+        assert set(by_strike) == {"8000", "8100"}
+        assert by_strike["8000"].spot == Decimal("8010.00")
+        assert by_strike["8000"].moneyness_label == "ATM"
+        assert by_strike["8100"].spot == Decimal("8010.00")
+        assert by_strike["8100"].moneyness_label == "OTM +1"
+        events = [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+        assert len(events) == 1  # memoised across the two rows of one underlying
+        assert events[0]["source"] == "options"
+        assert events[0]["underlying"] == "BAJAJAUTO"
+        assert events[0]["recovered_key"] == "BAJAJ-AUTO"
+        assert events[0]["rung"] == "stock_drift"
+
+    def test_non_drifted_lake_zero_drift_io(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exactly-keyed spot (the NIFTY INDEX dir) resolves on the exact
+        probe: the drift map is NEVER built (spy) and no recovery log fires —
+        index symbols and clean lakes are byte-untouched."""
+        import brutex.dashboard.movers_futures as mf
+        from structlog.testing import capture_logs
+
+        _seed_options_lake(tmp_path)
+
+        def _never(lake_root: Path) -> None:
+            raise AssertionError("load_stock_drift_map must not run on a resolving lake")
+
+        monkeypatch.setattr(mf, "load_stock_drift_map", _never)
+        with capture_logs() as logs:
+            got = compute_options_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                expiry_tier="near",
+                expiry_track="all",
+            )
+        assert {m.spot for m in got.movers} == {Decimal("23622.90")}
+        assert not [e for e in logs if e["event"] == "movers.spot_key_recovered"]
 
 
 # ── DEC-MOVERS-CALENDAR-TIERS-001: calendar-driven tiers over a sparse lake ──
@@ -1171,6 +1544,21 @@ class TestOptionsGreeksEndToEnd:
         assert '["Delta","delta","num4"]' in html
         assert 'type === "num4"' in html  # the 4dp display formatter exists
 
+    def test_movers_template_options_offers_value_cr_column(self) -> None:
+        """VIEW-2 (DEC-MOVERS-VWAP-VALUE-001): the options table config carries the
+        "Value (Cr)" column so the "Top Value" ranking metric is VISIBLE on-screen,
+        mirroring the spot + futures tabs — and it sits INSIDE the options ``cols``
+        (before ``Volume``, the tab's last column)."""
+        from brutex.dashboard.app import _render_movers_html
+
+        html = _render_movers_html()
+        assert '["Value (Cr)","value_cr","num"]' in html
+        # The column lands inside the options cols block (…OI Chg % → Value (Cr) → Volume).
+        assert (
+            '["OI Chg %","oi_chg_pct","num"],["Value (Cr)","value_cr","num"],'
+            '["Volume","volume","int"]'
+        ) in html
+
 
 # ── the AUTHORITATIVE registry strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001) ──
 
@@ -1411,7 +1799,7 @@ class TestRegistryStrikeStep:
     def test_movers_template_renders_the_low_confidence_marker(self) -> None:
         # The frontend honesty marker (a trailing " ~" keyed off the row field) is
         # present in the served template — display-only, string-pinned.
-        import brutex.dashboard as dashboard_pkg
+        from brutex import dashboard as dashboard_pkg
 
         template = (Path(dashboard_pkg.__file__).parent / "templates" / "movers.html").read_text(
             encoding="utf-8"
@@ -1752,14 +2140,20 @@ class TestOptionsPcr:
         # Design test #28 (warm parity, round-1 hostile-review fold): prime the
         # INJECTED movers cache exactly as the app's `_make_opt_job` warm job
         # does — an `options_warm_grid()` coordinate keyed by `candidate_key` +
-        # `compute_options_candidates` at `latest_movers_date` and the live
-        # generation — then poll the route at that coordinate: a PURE cache hit
-        # (compute never re-invoked) whose payload carries the warmed PCR rows.
+        # the instrument-master content token (`|m=<count>:<latest>` — the
+        # DEC-MOVERS-UNDERLYING-CLASS-001 fix round folded `master_revision`
+        # into the F&O candidate keys, warm/route parity kept) +
+        # `compute_options_candidates` (threading the warm job's
+        # `underlying_kinds`) at `latest_movers_date` and the live generation —
+        # then poll the route at that coordinate: a PURE cache hit (compute
+        # never re-invoked) whose payload carries the warmed PCR rows.
         from brutex.dashboard import app as app_module
         from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
         from brutex.dashboard.movers_snapshot import DEFAULT_INTERVAL
+        from brutex.dashboard.movers_underlying_class import build_underlying_kind_map
         from brutex.dashboard.movers_warm import latest_movers_date, options_warm_grid
         from brutex.dashboard.summary_cache import SummaryCache
+        from brutex.dashboard.universe_cache import master_revision
 
         _seed_pcr_lake(tmp_path)
         # A spot 1day partition so latest_movers_date resolves the seeded day —
@@ -1783,6 +2177,11 @@ class TestOptionsPcr:
         movers_cache = MoversSnapshotCache()
         summary_cache = SummaryCache()
         warm_date_str: str = warm_date
+        # The warm job's composite key: candidate_key + the master content token
+        # (the app's `_underlying_kinds_cached` law) — and the SAME kinds map
+        # threaded into the compute, so the warmed stamps match the route's.
+        count, latest = master_revision(store)
+        kinds = build_underlying_kind_map(store.list_index_equity_instruments())
         movers_cache.get_or_compute(
             candidate_key(
                 asset="options",
@@ -1792,7 +2191,11 @@ class TestOptionsPcr:
                 time=None,
                 expiry_tier=tier,
                 expiry_track=track,
-            ),
+            )
+            # …PLUS the registry.duckdb content token (the DEC-MEMORY-FOOTPRINT-
+            # HARDENING-001 fold — warm/route key parity; this lake has no
+            # registry, so the component is the stable "absent" sentinel).
+            + f"|m={count}:{latest}|r={app_module._registry_key_component(tmp_path)}",
             generation=summary_cache.generation,
             compute=lambda: compute_options_candidates(
                 lake_root=tmp_path,
@@ -1802,6 +2205,7 @@ class TestOptionsPcr:
                 expiry_tier=tier,
                 expiry_track=track,
                 exchange=exchange,
+                underlying_kinds=kinds,
             ),
         )
 
@@ -1863,6 +2267,18 @@ class TestOptionsPcr:
         from tests.fakes.movers_spies import spy_all_movers_readers
 
         _seed_pcr_lake(tmp_path)
+        # The underlying spot must resolve on the EXACT-key probe so the
+        # one-read-per-contract law below stays crisp — a spot-less lake now
+        # additionally pays ONE memoised drift-recovery walk per underlying
+        # (the DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in), which is
+        # pinned in its own suites, not here.
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="23600.00", volume=10, oi=None)],
+        )
         counts = spy_all_movers_readers(mo_module, monkeypatch)
         candidates = compute_options_candidates(
             lake_root=tmp_path, interval="1day", date="2024-06-13", time=None
@@ -1985,8 +2401,22 @@ class TestOptionsPcr:
 from brutex.data.moneyness import Moneyness  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
 
-#: The FROZEN additive-key vocabulary this decision may ever add to a row.
+#: The FROZEN additive-key vocabulary this decision family may ever add to a
+#: row. DELIBERATE widening 2026-07-09 (DEC-PREVSESSION-MUHURAT-COHERENCE-001):
+#: the two EMIT-ON-TRUE-ONLY Muhurat keys join the #1539 EMIT-ON-FALSE pairs.
 _CONTIGUITY_KEYS = frozenset(
+    {
+        "prev_close_session",
+        "prev_close_contiguous",
+        "oi_baseline_session",
+        "oi_baseline_contiguous",
+        "prev_close_muhurat",
+        "oi_baseline_muhurat",
+    }
+)
+
+#: The #1539 EMIT-ON-FALSE lake-hole pairs alone (the noncontiguous-arm wire).
+_HOLE_KEYS = frozenset(
     {
         "prev_close_session",
         "prev_close_contiguous",
@@ -2009,6 +2439,7 @@ _OPTION_ROW_KEYS = frozenset(
         "oi_chg",
         "oi_chg_pct",
         "volume",
+        "value_cr",
         "moneyness",
         "moneyness_bucket",
         "atm_offset",
@@ -2023,15 +2454,19 @@ _G_CE = "NSE-NIFTY-30Sep25-24000-CE"  # expiry 2025-09-30 ≥ snapshot → near 
 
 
 def _seed_contiguity_option(tmp_path: Path, *, prior_day: date) -> None:
-    """One CE contract: session bars on Mon 2025-09-29 + ONE prior 1-day bar on
-    *prior_day* (close 100, OI 1000). NO underlying spot (an honest None spot —
-    keeps the golden fully deterministic)."""
+    """One CE contract: session bars on Mon 2025-09-29 + the prior session's
+    last 1-MINUTE bar on *prior_day* (close 100, OI 1000 — the 1-minute-native
+    baseline source, DEC-OPTIONS-PREBUILD-RETIRE-001) + ONE stored 1-day bar
+    on the same *prior_day* with the SAME values (inert frozen legacy — the
+    gate ignores it; identical served numbers prove the recovery). NO
+    underlying spot (an honest None spot — keeps the golden deterministic)."""
     _write(
         tmp_path,
         segment="FNO",
         symbol=_G_CE,
         interval="1minute",
         bars=[
+            _min_bar(hour=15, minute=29, close="100", volume=10, oi=1000, day=prior_day),
             _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=_G_DAY),
             _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=_G_DAY),
         ],
@@ -2069,6 +2504,9 @@ class TestOptionsContiguityGoldens:
             "oi_chg": 100,
             "oi_chg_pct": str((Decimal(1100) - Decimal(1000)) / Decimal(1000) * 100),
             "volume": 500,
+            # HLC3 turnover in ₹ crore (2dp; DEC-MOVERS-VWAP-VALUE-001): bar 150×100 +
+            # 164×400 = 80,600 rupees = 0.00806 crore → 0.01 (ROUND_HALF_UP 2dp).
+            "value_cr": "0.01",
             "moneyness": "?",
             "moneyness_bucket": Moneyness.UNKNOWN.value,
             "atm_offset": None,
@@ -2101,9 +2539,60 @@ class TestOptionsContiguityGoldens:
         assert row["prev_close_contiguous"] is False
         assert row["oi_baseline_session"] == "2025-09-25"
         assert row["oi_baseline_contiguous"] is False
-        assert set(row) - _OPTION_ROW_KEYS == _CONTIGUITY_KEYS
+        assert set(row) - _OPTION_ROW_KEYS == _HOLE_KEYS
         warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
         assert sorted((e["kind"], e["symbol"]) for e in warns) == [
             ("oi", _G_CE),
             ("prev_close", _G_CE),
         ]
+
+    def test_muhurat_boundary_close_and_oi_flagged_no_warn_one_info(self, tmp_path: Path) -> None:
+        # DEC-PREVSESSION-MUHURAT-COHERENCE-001, the options OI twin: the ONLY
+        # prior 1-day bar is the 2024-11-01 Diwali Muhurat session — BOTH
+        # baselines legitimately ride it → both EMIT-ON-TRUE muhurat keys, no
+        # hole pair, ZERO noncontiguous WARNs, exactly ONE per-build INFO.
+        day = date(2024, 11, 4)
+        ce = "NSE-NIFTY-28Nov24-24000-CE"
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=ce,
+            interval="1minute",
+            bars=[
+                # The 2024-11-01 Diwali Muhurat evening session's last bar —
+                # the 1-minute-native baseline (DEC-OPTIONS-PREBUILD-RETIRE-001).
+                _min_bar(
+                    hour=18, minute=59, close="100", volume=10, oi=1000, day=date(2024, 11, 1)
+                ),
+                _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=day),
+                _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=day),
+            ],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=ce,
+            interval="1day",
+            bars=[_day_bar(day=date(2024, 11, 1), close="100", oi=1000)],
+        )
+        with capture_logs() as logs:
+            payload = run_options_snapshot(
+                lake_root=tmp_path, interval="1day", date=day.isoformat(), time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # VALUE-EQUALITY: served numbers baseline on the REAL Muhurat close/OI.
+        assert row["ltp"] == "₹164.00"
+        assert row["pct_change"] == str(
+            (Decimal("164.00") - Decimal("100.00")) / Decimal("100.00") * 100
+        )
+        assert row["oi_chg"] == 100
+        # The SANCTIONED wire delta: exactly the two muhurat keys, no hole pair.
+        assert row["prev_close_muhurat"] is True
+        assert row["oi_baseline_muhurat"] is True
+        assert set(row) & _HOLE_KEYS == set()
+        assert set(row) - _OPTION_ROW_KEYS == {"prev_close_muhurat", "oi_baseline_muhurat"}
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        infos = [e for e in logs if e["event"] == "movers.prev_baseline_muhurat"]
+        assert len(infos) == 1
+        assert infos[0]["symbol"] == ce
+        assert infos[0]["found_session"] == "2024-11-01"

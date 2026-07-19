@@ -32,6 +32,7 @@ from brutex.adapters.groww.constants import (
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.db_view import (
     KNOWN_TABLES,
+    TABLE_SUMMARY_FAULT_TYPES,
     WINDOW_PHASES,
     _build_window_payload_duckdb,
     _json_safe,
@@ -52,6 +53,7 @@ from brutex.dashboard.db_view import (
     window_status_label,
 )
 from brutex.dashboard.movers_cache import MoversSnapshotCache
+from brutex.data.errors import CatalogError
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.instrument_store import Instrument, InstrumentStore
 from brutex.data.session import IST
@@ -182,6 +184,53 @@ def test_table_summary_tolerates_missing_table(tmp_path: Path) -> None:
     assert by_name["instrument_runs"] == 0
     # the other tables still report normally
     assert by_name["schema_meta"] >= 1
+
+
+def test_table_summary_default_flag_parity_and_strict_reraises(tmp_path: Path) -> None:
+    """Default vs explicit ``raise_on_fault=False`` are identical (the kw-only
+    default keeps every existing caller byte-identical), and strict mode
+    RE-RAISES the store fault (``duckdb.Error`` — a dropped table) the default
+    folds to 0 — the round-8 probe→compute TOCTOU root fix."""
+    store = _open_empty(tmp_path)
+    store.connection.execute("DROP TABLE instrument_runs")
+    default = table_summary(store.connection)
+    explicit = table_summary(store.connection, raise_on_fault=False)
+    assert explicit == default
+    assert {r["table"]: r["row_count"] for r in default}["instrument_runs"] == 0
+    with pytest.raises(duckdb.Error):
+        table_summary(store.connection, raise_on_fault=True)
+
+
+def test_table_summary_strict_reraises_wedge_catalog_error() -> None:
+    """The DEC-STORE-WRITE-DEADLINE-001 wedge latch's ``CatalogError`` (a
+    ``DataLakeError``, NOT a ``duckdb.Error``) re-raises under strict mode
+    instead of folding into a cacheable all-zero summary — the exact round-8
+    wedge-after-probe poison class. ``CatalogError`` is also pinned as a
+    :data:`TABLE_SUMMARY_FAULT_TYPES` member here."""
+
+    class _Wedged:
+        def execute(self, _sql: str) -> object:
+            raise CatalogError("store wedged: abandoned coverage write")
+
+    assert CatalogError in TABLE_SUMMARY_FAULT_TYPES
+    assert all(r["row_count"] == 0 for r in table_summary(_Wedged()))  # default folds
+    with pytest.raises(CatalogError, match="wedged"):
+        table_summary(_Wedged(), raise_on_fault=True)
+
+
+def test_table_summary_non_fault_exception_folds_in_both_modes() -> None:
+    """An exception OUTSIDE :data:`TABLE_SUMMARY_FAULT_TYPES` still folds to 0
+    even under strict mode — the never-a-500 posture for unexpected defect
+    classes is unchanged by the round-8 flag."""
+
+    class _Broken:
+        def execute(self, _sql: str) -> object:
+            raise RuntimeError("unexpected defect class")
+
+    for flag in (False, True):
+        rows = table_summary(_Broken(), raise_on_fault=flag)
+        assert [r["table"] for r in rows] == list(KNOWN_TABLES)
+        assert all(r["row_count"] == 0 for r in rows)
 
 
 # ── sample_rows ──────────────────────────────────────────────────────
@@ -368,6 +417,7 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
         "attempts",
         "empty_streak",
         "in_pull_fetches",
+        "streak_provenance",
         "last_error",
         "first_seen_at",
         "last_attempt_at",
@@ -612,7 +662,9 @@ class TestOptionWindowDecode:
         monkeypatch.setattr(
             db_view_module,
             "_LEDGER_READ_CACHE",
-            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+            db_view_module._make_ledger_read_cache(
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
 
         ledger = WindowLedger()
@@ -738,7 +790,9 @@ class TestSpotWindowRollup:
         monkeypatch.setattr(
             db_view_module,
             "_LEDGER_READ_CACHE",
-            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+            db_view_module._make_ledger_read_cache(
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
         ledger = WindowLedger()
         ledger.record(
@@ -769,10 +823,18 @@ class TestSpotWindowRollup:
         os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
         clock["t"] += 121.0  # step past the adaptive-floor cap
         before = calls["n"]
+        # Past the cap the records key rides stale-while-revalidate
+        # (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001): the read serves the
+        # last-known rollup while the (inline) revalidator re-parses ONCE.
         third = spot_window_rollup(tmp_path)
         assert calls["n"] == before + 1  # mtime bump re-parses exactly once…
-        assert third is not first  # …and re-groups (a genuinely new rollup)
-        assert spot_window_rollup(tmp_path) is third  # then cached again
+        assert third is first  # …served last-known — never a blocking regroup
+        spot_window_rollup(tmp_path)  # the rollup key's own one-serve SWR cycle
+        fresh = spot_window_rollup(tmp_path)
+        assert calls["n"] == before + 1  # STILL exactly one re-parse (the law)
+        assert fresh is not first  # the landed revalidates re-grouped anew
+        assert fresh == first
+        assert spot_window_rollup(tmp_path) is fresh  # then cached again
 
     def test_spot_rows_are_byte_unchanged_by_the_map(self, tmp_path: Path) -> None:
         ledger = WindowLedger()
@@ -969,6 +1031,91 @@ class TestBuildWindowPayloadDuckDB:
         assert "WHEN 'FAILED' THEN 0" in sql
         assert "WHEN 'EMPTY' THEN 1" in sql
         assert sql.endswith("ELSE 9 END")
+
+    # ── counts-only mode (DEC-WINDOWS-COUNTS-ONLY-001, ``limit=0``) ──────────
+
+    def test_counts_only_meta_equals_the_default_call(self, tmp_path: Path) -> None:
+        """``limit=0`` ships the IDENTICAL counts/meta with ``windows=[]``.
+
+        The byte-parity pin for the counts-only consumers: every meta field the
+        default call carries is unchanged — only the row list is empty (and
+        ``returned``/``capped`` reflect that honestly: matching rows exist,
+        none shipped).
+        """
+        _save_mixed_ledger(tmp_path)
+        conn = duckdb.connect()
+        default = build_window_payload(tmp_path, conn=conn)
+        counts_only = build_window_payload(tmp_path, conn=conn, limit=0)
+        assert counts_only == {
+            **default,
+            "windows": [],
+            "returned": 0,
+            "capped": True,  # matched (5) > limit (0) — rows exist, none shipped
+        }
+        assert counts_only["counts"] == default["counts"]
+        assert counts_only["count"] == 6
+        assert counts_only["matched"] == 5
+
+    def test_counts_only_skips_the_row_page_query(self, tmp_path: Path) -> None:
+        """``limit=0`` never issues the row-page ``LIMIT ? OFFSET ?`` query.
+
+        The point of the mode: the counts GROUP BY is stamp-cached and computed
+        independently, so counts-only costs ZERO row-page work — spied on the
+        real connection's SQL text (never a ``LIMIT 0`` plan either).
+        """
+        _save_mixed_ledger(tmp_path)
+        real = duckdb.connect()
+        executed: list[str] = []
+
+        class _SpyConn:
+            def execute(self, sql: str, params: list[object] | None = None) -> object:
+                executed.append(sql)
+                return real.execute(sql, params) if params is not None else real.execute(sql)
+
+        payload = build_window_payload(tmp_path, conn=_SpyConn(), limit=0)
+        assert payload["windows"] == []
+        assert payload["counts"]["spot"]["FAILED"] == 1  # counts still complete
+        assert not any("LIMIT ? OFFSET ?" in sql for sql in executed), (
+            "counts-only must skip the row-page query entirely"
+        )
+        # A rowful call on the same spy DOES issue the page query (spy sanity).
+        build_window_payload(tmp_path, conn=_SpyConn(), limit=1)
+        assert any("LIMIT ? OFFSET ?" in sql for sql in executed)
+
+    def test_counts_only_market_and_status_filters_shape_matched(self, tmp_path: Path) -> None:
+        """counts-only ``matched`` still honours the market/status filters (from counts)."""
+        _save_mixed_ledger(tmp_path)
+        conn = duckdb.connect()
+        assert build_window_payload(tmp_path, conn=conn, limit=0, market="options") == {
+            **build_window_payload(tmp_path, conn=conn, market="options"),
+            "windows": [],
+            "returned": 0,
+            "capped": True,
+        }
+        failed = build_window_payload(tmp_path, conn=conn, limit=0, status="FAILED")
+        assert failed["matched"] == 1
+        assert failed["windows"] == []
+
+    def test_counts_only_on_the_legacy_paths(self, tmp_path: Path) -> None:
+        """``limit=0`` on the ``conn=None`` pyarrow path and the empty-lake default."""
+        _save_mixed_ledger(tmp_path)
+        legacy = build_window_payload(tmp_path, conn=None, limit=0)
+        assert legacy["source"] == "ledger"
+        assert legacy["windows"] == []
+        assert legacy["matched"] == 5
+        assert legacy["counts"] == build_window_payload(tmp_path, conn=None)["counts"]
+        # An empty lake stays the honest all-zero payload (capped False — no rows hidden).
+        empty = build_window_payload(tmp_path / "nowhere", limit=0)
+        assert empty["windows"] == []
+        assert empty["matched"] == 0
+        assert empty["capped"] is False
+
+    def test_negative_limit_still_clamps_up_to_one(self, tmp_path: Path) -> None:
+        """Only EXACTLY 0 means counts-only — a negative direct-caller limit keeps
+        the historical clamp-to-1 (the route already refuses negatives via ge=0)."""
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), limit=-3)
+        assert payload["returned"] == 1  # clamped UP to 1, not counts-only
 
     def test_direct_duckdb_builder_with_symbol_map(self, tmp_path: Path) -> None:
         # Exercise _build_window_payload_duckdb directly (the option symbol_for_id decode
@@ -1444,6 +1591,21 @@ class TestWindowStatusLabel:
     def test_failed_reads_will_repull(self) -> None:
         assert window_status_label("FAILED", 0) == "FAILED (will re-pull)"
 
+    def test_window_status_label_today_incomplete_failed_wording(self) -> None:
+        """DEC-PULL-TODAY-COMPLETENESS-GATE-001: a covers-today window demoted
+        because the vendor has not settled TODAY yet reads the honest deferral
+        wording — a time-transient re-pull, never an error / never a data hole."""
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        assert window_status_label("FAILED", 0, TODAY_INCOMPLETE) == (
+            "today's session not yet settled by vendor (will re-pull)"
+        )
+        # The (structurally unreachable) SKIPPED arm is covered defensively by
+        # DEMOTED_SETTLE_REASONS membership — never "vendor confirmed no trades".
+        assert window_status_label("SKIPPED", 1, TODAY_INCOMPLETE) == (
+            f"completeness gap accepted ({TODAY_INCOMPLETE}, 1 flagged attempt(s)) — settled"
+        )
+
     def test_success_is_the_bare_status(self) -> None:
         assert window_status_label("SUCCESS", 0) == "SUCCESS"
 
@@ -1806,7 +1968,9 @@ class TestLedgerDeltaAwareness:
         monkeypatch.setattr(
             db_view_module,
             "_LEDGER_READ_CACHE",
-            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+            db_view_module._make_ledger_read_cache(
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
         base = WindowLedger()
         base.record(
@@ -1816,6 +1980,9 @@ class TestLedgerDeltaAwareness:
         assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {"NIFTY"}
         self._append_delta(tmp_path, "SENSEX")  # base mtime UNTOUCHED
         clock["t"] += 121.0  # step past the adaptive-floor cap
+        # One last-known SWR serve (the prior fold), then the landed (inline)
+        # revalidate serves the delta row — bounded, logged, never blocking.
+        assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {"NIFTY"}
         assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {
             "NIFTY",
             "SENSEX",
@@ -1831,7 +1998,9 @@ class TestLedgerDeltaAwareness:
         monkeypatch.setattr(
             db_view_module,
             "_LEDGER_READ_CACHE",
-            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+            db_view_module._make_ledger_read_cache(
+                clock=lambda: clock["t"], swr_runner=lambda job: job()
+            ),
         )
         base = WindowLedger()
         base.record(
@@ -1841,6 +2010,10 @@ class TestLedgerDeltaAwareness:
         assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
         self._append_delta(tmp_path, "BANKNIFTY")  # base mtime UNTOUCHED
         clock["t"] += 121.0  # step past the adaptive-floor cap
+        # Layer-by-layer SWR convergence (records, then the derived rollup):
+        # two last-known serves, then the delta row lands — never blocking.
+        assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
+        spot_window_rollup(tmp_path)  # the rollup key's own one-serve cycle
         assert spot_window_rollup(tmp_path) == {
             ("NIFTY", "1minute"): (1, 0, 0),
             ("BANKNIFTY", "1minute"): (1, 0, 0),
@@ -1871,3 +2044,281 @@ class TestLedgerDeltaAwareness:
         spot_row = next(r for r in rows if r["phase"] == "spot")
         assert spot_row["done"] == 2  # the delta row is COUNTED mid-pull
         assert spot_row["total"] == 2
+
+
+# ── the legacy window-payload fallback honours offset (DEC-DB-FNO-DISPLAY-TRUTH-001 item 2) ──
+
+
+class TestBuildWindowPayloadLegacyOffset:
+    """The legacy pyarrow / status_log fallback pages with the SAME
+    ``clamp_offset`` law the DuckDB fast path binds — pre-fix its slice was
+    ``selected[:limit]``, so every "Next ›" click on a legacy backing silently
+    re-served page 1."""
+
+    @staticmethod
+    def _seed_ledger(tmp_path: Path, n: int = 5) -> list[str]:
+        # Symbols seeded in sorted order with identical interval/dates so the
+        # legacy stable sort and the DuckDB secondary ORDER BY agree row-for-row.
+        symbols = [f"SYM{i}" for i in range(n)]
+        ledger = WindowLedger()
+        for s in symbols:
+            ledger.record(
+                _window_key(s), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+            )
+        save_window_ledger(ledger, tmp_path)
+        return symbols
+
+    def test_legacy_offset_returns_the_offset_slice(self, tmp_path: Path) -> None:
+        # FAILS BEFORE THE FIX: offset=2 returned rows 1-2 (page 1 again).
+        symbols = self._seed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, limit=2, offset=2)  # conn=None → legacy
+        assert [w["symbol"] for w in payload["windows"]] == symbols[2:4]
+        assert payload["matched"] == 5
+        assert payload["returned"] == 2
+
+    def test_legacy_offset_past_the_end_is_an_empty_page(self, tmp_path: Path) -> None:
+        self._seed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, limit=2, offset=10_000)
+        assert payload["windows"] == []
+        assert payload["returned"] == 0
+        assert payload["matched"] == 5  # matched is the filter total, not the page
+
+    def test_legacy_negative_offset_clamps_to_zero(self, tmp_path: Path) -> None:
+        symbols = self._seed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, limit=2, offset=-5)
+        assert [w["symbol"] for w in payload["windows"]] == symbols[:2]
+
+    def test_legacy_page_matches_the_duckdb_fast_path_page(self, tmp_path: Path) -> None:
+        # Parity pin: the SAME filter/sort inputs at the SAME offset yield the SAME
+        # rows on both backings (the seeded tier order is deterministic on both).
+        self._seed_ledger(tmp_path)
+        legacy = build_window_payload(tmp_path, limit=2, offset=2)
+        fast = build_window_payload(tmp_path, limit=2, offset=2, conn=duckdb.connect())
+        assert legacy["windows"] == fast["windows"]
+        assert legacy["matched"] == fast["matched"]
+
+    def test_status_log_fallback_honours_offset_too(self, tmp_path: Path) -> None:
+        # The frozen window_status.json backing pages identically.
+        log = WindowStatusLog()
+        for s in ("AAA", "BBB", "CCC"):
+            log.record(
+                _window_key(s),
+                raw_bars=0,
+                error_type="DhanRateLimitError",
+                bars_appended=0,
+                now=_WINDOW_NOW,
+            )
+        save_window_status(log, tmp_path)
+        payload = build_window_payload(tmp_path, limit=2, offset=2)
+        assert payload["source"] == "status_log"
+        assert [w["symbol"] for w in payload["windows"]] == ["CCC"]
+        assert payload["returned"] == 1
+
+
+class TestWindowStatusLabelProvenance:
+    """DEC-STREAK-PROVENANCE-001 — the 4th (streak_provenance) param: mixed-evidence
+    settles render per channel; legacy None + pure-channel lineages BYTE-IDENTICAL."""
+
+    # -- legacy None: byte-identical on EVERY branch (the back-compat pin) -----
+
+    @pytest.mark.parametrize(
+        ("status", "streak", "last_error"),
+        [
+            ("EMPTY", 2, None),
+            ("SKIPPED", 3, None),
+            ("SKIPPED", 3, "ALL_FILTERED"),
+            ("FAILED", 1, "ALL_FILTERED"),
+            ("SUCCESS", 0, None),
+            ("PLANNED", 0, None),
+        ],
+    )
+    def test_legacy_none_provenance_is_byte_identical(
+        self, status: str, streak: int, last_error: str | None
+    ) -> None:
+        assert window_status_label(status, streak, last_error, None) == window_status_label(
+            status, streak, last_error
+        )
+
+    def test_legacy_none_expired_stamp_verbatim(self) -> None:
+        from brutex.data.window_ledger import expired_window_settle_reason
+
+        stamp = expired_window_settle_reason(2)
+        assert window_status_label("SKIPPED", 3, stamp, None) == f"{stamp} — settled"
+
+    # -- pure-channel lineages: byte-identical strings (edge 23) ---------------
+
+    def test_pure_clean_lineage_renders_byte_identical(self) -> None:
+        prov = "EMPTY@a|EMPTY@b|EMPTY@c"
+        assert window_status_label("SKIPPED", 3, None, prov) == (
+            "vendor confirmed no trades (3 clean attempt(s) — settled)"
+        )
+        assert window_status_label("EMPTY", 2, None, "EMPTY@a|EMPTY@b") == (
+            "vendor confirmed no trades (2 clean attempt(s))"
+        )
+
+    def test_pure_flagged_lineage_renders_byte_identical(self) -> None:
+        prov = "ALL_FILTERED@a|ALL_FILTERED@b|ALL_FILTERED@c"
+        assert window_status_label("SKIPPED", 3, "ALL_FILTERED", prov) == (
+            "completeness gap accepted (ALL_FILTERED, 3 flagged attempt(s)) — settled"
+        )
+
+    # -- mixed-evidence settles: the honest per-channel split (edge 22) --------
+
+    def test_mixed_clean_final_names_the_flagged_attempts(self) -> None:
+        # ALL_FILTERED,ALL_FILTERED,EMPTY → SKIPPED with last_error=None: was the
+        # lie "3 clean attempt(s)"; now names the 2 boundary-filter demotions.
+        prov = "ALL_FILTERED@a|ALL_FILTERED@b|EMPTY@c"
+        assert window_status_label("SKIPPED", 3, None, prov) == (
+            "vendor confirmed no trades (1 clean attempt(s); 2 completeness-flagged) — settled"
+        )
+
+    def test_mixed_flagged_final_names_the_clean_attempts(self) -> None:
+        # EMPTY,EMPTY,ALL_FILTERED → SKIPPED with last_error=ALL_FILTERED: was
+        # "3 flagged attempt(s)"; now names the 2 clean empties.
+        prov = "EMPTY@a|EMPTY@b|ALL_FILTERED@c"
+        assert window_status_label("SKIPPED", 3, "ALL_FILTERED", prov) == (
+            "completeness gap accepted (ALL_FILTERED, 1 flagged + 2 clean attempt(s)) — settled"
+        )
+
+    def test_mixed_empty_status_names_the_flagged_attempts(self) -> None:
+        prov = "ALL_FILTERED@a|EMPTY@b"
+        assert window_status_label("EMPTY", 2, None, prov) == (
+            "vendor confirmed no trades (1 clean attempt(s); 1 completeness-flagged)"
+        )
+
+    def test_expired_stamp_wins_over_provenance(self) -> None:
+        # The stamp is provenance-honest at WRITE time — the label renders it
+        # verbatim even when a mixed lineage rides the row.
+        from brutex.data.window_ledger import expired_window_settle_reason
+
+        stamp = expired_window_settle_reason(1)
+        prov = "ALL_FILTERED@a|EMPTY@b"
+        assert window_status_label("SKIPPED", 3, stamp, prov) == f"{stamp} — settled"
+
+    def test_known_zero_lineage_floors_like_today(self) -> None:
+        # "" = KNOWN zero bumps (a fresh reset) — the defensive floor keeps the
+        # wording at 1, exactly as the streak floor does today.
+        assert window_status_label("EMPTY", 0, None, "") == (
+            "vendor confirmed no trades (1 clean attempt(s))"
+        )
+        assert window_status_label("SKIPPED", 0, None, "") == (
+            "vendor confirmed no trades (1 clean attempt(s) — settled)"
+        )
+        assert window_status_label("SKIPPED", 0, "ALL_FILTERED", "") == (
+            "completeness gap accepted (ALL_FILTERED, 1 flagged attempt(s)) — settled"
+        )
+
+
+class TestWindowRowStreakProvenance:
+    """``_window_row`` threads the provenance into the label + the JSON row —
+    the ONE chokepoint both /coverage/windows payload paths share."""
+
+    def test_window_row_carries_and_threads_the_field(self, tmp_path: Path) -> None:
+        from datetime import UTC, date, datetime
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ledger = WindowLedger()
+        key = WindowKey(
+            market="dhan",
+            security_id="MIXED",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 2, 1),
+        )
+        now = datetime(2026, 6, 9, tzinfo=UTC)
+        for pull, (degraded, reason) in enumerate(
+            [(True, "ALL_FILTERED"), (True, "ALL_FILTERED"), (False, None)]
+        ):
+            ledger.record(
+                key,
+                raw_bars=3 if degraded else 0,
+                error_type=None,
+                bars_appended=0,
+                now=now,
+                degraded=degraded,
+                degraded_reason=reason,
+                pull_id=f"pl{pull}",
+            )
+        rec = ledger.records()[0]
+        assert rec.status == "SKIPPED"  # the mixed-evidence threshold settle
+        save_window_ledger(ledger, tmp_path)
+        # BOTH payload paths render the SAME honest mixed label + carry the field.
+        fast = build_window_payload(tmp_path, conn=duckdb.connect())
+        legacy = build_window_payload(tmp_path)
+        for payload in (fast, legacy):
+            (row,) = payload["windows"]
+            assert row["streak_provenance"] == "ALL_FILTERED@pl0|ALL_FILTERED@pl1|EMPTY@pl2"
+            assert row["status_label"] == (
+                "vendor confirmed no trades (1 clean attempt(s); 2 completeness-flagged) — settled"
+            )
+
+    def test_duckdb_fast_path_reads_a_legacy_file_without_error(self, tmp_path: Path) -> None:
+        # Edge 29: a post-R1 file that PREDATES streak_provenance (has
+        # empty_streak + in_pull_fetches, so the fast path does NOT defer) —
+        # the missing column reads None (legacy label), never a SELECT error.
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from brutex.data.window_ledger_store import ledger_path
+
+        path = ledger_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "market": ["dhan"],
+                    "security_id": ["LEGACY"],
+                    "interval": ["1minute"],
+                    "window_start": ["2021-01-01"],
+                    "window_end": ["2021-02-01"],
+                    "status": ["SKIPPED"],
+                    "bars": [0],
+                    "attempts": [3],
+                    "last_error": ["ALL_FILTERED"],
+                    "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                    "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+                    "empty_streak": [3],
+                    "in_pull_fetches": [1],
+                    "bars_net_new": [None],
+                }
+            ),
+            path,
+        )
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        assert payload["source"] == "ledger"
+        (row,) = payload["windows"]
+        assert row["streak_provenance"] is None  # honest unknown, never ""
+        # The legacy wording, byte-identical (counts is None → streak fallback).
+        assert row["status_label"] == (
+            "completeness gap accepted (ALL_FILTERED, 3 flagged attempt(s)) — settled"
+        )
+
+    def test_duckdb_fast_path_reads_a_new_file_with_the_column(self, tmp_path: Path) -> None:
+        from datetime import UTC, date, datetime
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ledger = WindowLedger()
+        key = WindowKey(
+            market="dhan",
+            security_id="NEWROW",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 2, 1),
+        )
+        ledger.record(
+            key,
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=datetime(2026, 6, 9, tzinfo=UTC),
+            pull_id="px",
+        )
+        save_window_ledger(ledger, tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        (row,) = payload["windows"]
+        assert row["streak_provenance"] == "EMPTY@px"

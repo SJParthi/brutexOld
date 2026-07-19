@@ -65,6 +65,7 @@ from brutex.adapters.protocol import (
     MarketCapabilities,
     single_instrument_page,
 )
+from brutex.calendars.nse import IST, IST_TZ_NAME, SESSION_CLOSE_IST, SESSION_OPEN_IST
 from brutex.data.models import CandleBar
 from brutex.data.window_ledger import CONFIRMED_EMPTY_MIN_FETCHES
 from brutex.models import BruteXError, Exchange, Instrument
@@ -160,8 +161,10 @@ DAILY_INTERVAL: str = _DAILY
 
 #: IST clock pieces for the settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001). The
 #: NSE/BSE market is the same for every vendor, so the clamp reality is shared.
-_IST_ZONE = ZoneInfo("Asia/Kolkata")
-_MARKET_CLOSE_IST: time = time(15, 30)
+#: Both derive from the ONE :mod:`brutex.calendars.nse` roots
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001) — never re-minted here.
+_IST_ZONE = IST
+_MARKET_CLOSE_IST: time = SESSION_CLOSE_IST
 
 
 def now_ist() -> datetime:
@@ -211,8 +214,15 @@ def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
     return min(end, today)
 
 
-def drop_bars_after(bars: Sequence[CandleBar], window_end: date) -> list[CandleBar]:
+def drop_bars_after(bars: Sequence[CandleBar], window_end: date) -> tuple[list[CandleBar], int]:
     """Drop every bar whose IST trading date is STRICTLY AFTER *window_end* — a FUTURE phantom.
+
+    Returns a ``(kept, dropped_count)`` tuple (DEC-AUDIT-ALERT-CLAMP-OBS-001):
+    the count is surfaced so the caller can emit ONE aggregated WARNING per
+    window naming it — a future-phantom bar mixed with good bars used to vanish
+    SILENTLY here, unlike the session-filter sibling which WARNs with per-cause
+    counts. The KEPT bars are byte-identical to before; only the count is newly
+    reported.
 
     DEC-CANDLE-DROP-FUTURE-BAR-001. *window_end* is the CLAMPED window end (the
     spine never requests current-day / future data — :func:`clamp_window_end`). A
@@ -237,7 +247,7 @@ def drop_bars_after(bars: Sequence[CandleBar], window_end: date) -> list[CandleB
     for bar in bars:
         if bar.timestamp.astimezone(_IST_ZONE).date() <= window_end:
             kept.append(bar)
-    return kept
+    return kept, len(bars) - len(kept)
 
 
 #: Resolve a canonical interval to its per-call max-window width (days), or
@@ -612,11 +622,14 @@ def retry_failed_windows(
 # Synthetic spot source (relocated from the original vendor ``synthetic`` +
 # ``synthetic_adapter`` modules in PR-J4a — the dry-run, offline data source).
 # --------------------------------------------------------------------------- #
-#: India Standard Time — the synthetic bars use the NSE/BSE wall clock.
-_IST: ZoneInfo = ZoneInfo("Asia/Kolkata")
+#: India Standard Time — the synthetic bars use the NSE/BSE wall clock (the ONE
+#: canonical :data:`brutex.calendars.nse.IST` root,
+#: DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: ZoneInfo = IST
 
-#: Session open (09:15 IST) — the first synthetic bar's wall-clock time.
-_SESSION_OPEN: time = time(9, 15)
+#: Session open (09:15 IST) — the first synthetic bar's wall-clock time
+#: (DERIVED from :data:`brutex.calendars.nse.SESSION_OPEN_IST`).
+_SESSION_OPEN: time = SESSION_OPEN_IST
 
 
 def synthetic_spot_bars(
@@ -688,7 +701,7 @@ _SYNTHETIC_CAPABILITIES: MarketCapabilities = MarketCapabilities(
     has_option_chains=False,
     supports_intraday=True,
     earliest_history=date(2020, 1, 1),
-    native_timezone="Asia/Kolkata",
+    native_timezone=IST_TZ_NAME,
     rate_limit_rps=5.0,
     supported_intervals=frozenset({"1minute", "1day"}),
 )
@@ -768,6 +781,7 @@ PullVerdictKind = Literal[
     "auth_expired",
     "mass_empty_halt",
     "quota_exhausted",
+    "cancelled",
     "transient_residual",
     "quarantined_symbols",
     "known_gap_only",
@@ -784,6 +798,7 @@ _HEADLINE: Final[dict[str, str]] = {
         "(suspected vendor soft-throttle or mis-addressing)."
     ),
     "quota_exhausted": "📊 Daily Groww quota reached — auto-resume paused for today.",
+    "cancelled": "⏹️ Pull CANCELLED at operator request — an honest partial, stopped cleanly.",
     "transient_residual": "⏳ Some windows are still pending after retries.",
     "quarantined_symbols": "✅ Pull complete — some symbols were quarantined (not on Groww).",
     "known_gap_only": "ℹ️ No new bars — these symbols have no intraday on Groww.",
@@ -811,6 +826,11 @@ _ACTION: Final[dict[str, str]] = {
         "The 100,000/day Groww quota is spent — the auto-resume paused itself "
         "(it will NOT keep burning a dead quota). Re-pull after the IST-midnight "
         "reset; already-pulled windows are skipped, so only the gaps re-fetch."
+    ),
+    "cancelled": (
+        "Re-run the pull to resume the remainder — the pull stopped at a window "
+        "boundary on the operator's Stop, so every settled window is durably in the "
+        "ledger and only the un-pulled windows are re-fetched on the next pull."
     ),
     "transient_residual": (
         "Re-pull to finish — already-pulled windows are skipped and only the "
@@ -880,6 +900,9 @@ class PullVerdict:
         ``mass_empty_halt`` counts (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the pull
         halted on a suspected soft-throttle / mis-addressing episode — blindly
         re-pulling into the same episode is exactly what the breaker prevents.
+        ``cancelled`` counts (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3): the
+        operator's Stop left an honest PARTIAL — only a human re-running the pull
+        can land the remainder, so the amber "re-run to resume" banner must show.
         A ``settled_skipped`` count ABOVE
         :data:`SETTLED_SKIPPED_OPERATOR_THRESHOLD` also counts, on EVERY kind
         (minor M-4): a pull that permanently wrote off that many windows must be
@@ -893,6 +916,7 @@ class PullVerdict:
             "auth_expired",
             "mass_empty_halt",
             "quota_exhausted",
+            "cancelled",
             "transient_residual",
         )
 
@@ -922,6 +946,7 @@ def classify_pull(
     auth_cause: str | None = None,
     quota_exhausted: bool = False,
     mass_empty_cause: str | None = None,
+    cancelled: bool = False,
     settled_skipped: int = 0,
 ) -> PullVerdict:
     """Classify a finished pull into ONE prioritised, actionable :class:`PullVerdict`.
@@ -944,17 +969,26 @@ def classify_pull(
        IST-midnight reset (DEC-AUTO-RESUME-QUOTA-001). Ranked just under a dead
        token because, like it, NO amount of immediate retrying can land a bar
        today — only the reset can.
-    4. **transient_residual** — retryable WINDOWS are still failing
+    4. **cancelled** — the operator's cooperative Stop halted the pull at a window
+       boundary (``cancelled``, DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3):
+       an honest PARTIAL — every settled window is durably in the ledger, unissued
+       windows stay PLANNED/FAILED, and the action reads "re-run the pull to
+       resume the remainder" — NEVER a fabricated green "✅ Pull complete." /
+       "No action needed." (the pre-fix classification, which stamped the GREEN
+       banner + the durable G5 journal ``verdict="clean"`` after a Stop). Ranked
+       above ``transient_residual``: the cancel is the CAUSE of the residual, so
+       it must headline (the residual windows ride ``pending_windows``).
+    5. **transient_residual** — retryable WINDOWS are still failing
        (``still_failed_windows`` > 0) but the token is alive: a re-pull / the
        auto-retry layer will finish them. The loud "re-pull to finish" verdict.
-    5. **quarantined_symbols** — NO retryable windows remain; the only "failures"
+    6. **quarantined_symbols** — NO retryable windows remain; the only "failures"
        are quarantined symbols (``failed_pairs`` > 0, e.g. a ticker not on Groww):
        a re-pull can NEVER recover them, so this is a COMPLETE pull with a note,
        NOT "re-pull to finish" (``needs_operator`` is False — grey, not amber).
-    6. **known_gap_only** — nothing completed and nothing failed, but the vendor
+    7. **known_gap_only** — nothing completed and nothing failed, but the vendor
        returned empty for some symbols (``no_data``): the vendor genuinely has no
        intraday for them (reference-only). Expected, not an error.
-    7. **clean** — everything that could complete did.
+    8. **clean** — everything that could complete did.
 
     *settled_skipped* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 honest-verdict rule) is
     the count of windows THIS pull newly settled as terminal ``SKIPPED``
@@ -992,6 +1026,21 @@ def classify_pull(
     if quota_exhausted:
         return _make_verdict(
             "quota_exhausted",
+            still_failed_windows,
+            failed_pairs,
+            no_data,
+            completed,
+            None,
+            settled_skipped=settled_skipped,
+        )
+    if cancelled:
+        # The operator's cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): an
+        # honest amber PARTIAL naming the stop + the re-run remediation — never
+        # the fabricated green "✅ Pull complete." the pre-fix fall-through
+        # produced (continuation-v3 MAJOR). Ranked ABOVE transient_residual: the
+        # cancel is the cause of any residual, so it headlines.
+        return _make_verdict(
+            "cancelled",
             still_failed_windows,
             failed_pairs,
             no_data,
@@ -1249,6 +1298,7 @@ LoopVerdict = Literal[
     "continue",
     "stop_clean",
     "stop_dead",
+    "stop_market_hours",
     "stop_quota",
     "stop_no_progress",
     "stop_budget",
@@ -1392,6 +1442,16 @@ class UntilCleanOutcome:
         return self.verdict == "stop_no_progress"
 
     @property
+    def stopped_market_hours(self) -> bool:
+        """True iff the loop paused because the market-hours window opened.
+
+        DEC-GROWW-MARKET-HOURS-GUARD-001 — the NEXT round would have run inside the
+        NSE market-hours window, so the loop stopped to keep the shared Groww account
+        free for TickVault's live feed; the pull resumes on the next out-of-hours run.
+        """
+        return self.verdict == "stop_market_hours"
+
+    @property
     def final_still_failed(self) -> int:
         """Transient residual after the LAST round ran (0 when none ran / clean)."""
         return self.rounds[-1].still_failed_windows if self.rounds else 0
@@ -1433,6 +1493,7 @@ class UntilCleanOutcome:
             "stopped_on_budget": self.stopped_on_budget,
             "stopped_on_quota": self.stopped_on_quota,
             "stopped_no_progress": self.stopped_no_progress,
+            "stopped_market_hours": self.stopped_market_hours,
             "final_still_failed": self.final_still_failed,
         }
 
@@ -1446,8 +1507,9 @@ def decide_until_clean(
     quota_exhausted: bool = False,
     made_progress: bool = True,
     outstanding_windows: int | None = None,
+    market_closed: bool = False,
 ) -> LoopVerdict:
-    """Decide what the until-clean loop does after a round — the pure 6-way controller.
+    """Decide what the until-clean loop does after a round — the pure 7-way controller.
 
     Priority (matching :func:`retry_failed_windows` + :func:`classify_pull`, worst
     first):
@@ -1456,21 +1518,29 @@ def decide_until_clean(
        (``RenewToken`` cannot revive a dead token) — halt for re-auth.
     2. **stop_clean** — ``still_failed_windows == 0``: the coverage ledger is clean
        (success outranks every "can't continue" reason — if we're done, we're done).
-    3. **stop_quota** — ``quota_exhausted``: the day's 100,000-call quota is
+    3. **stop_market_hours** — ``market_closed`` (DEC-GROWW-MARKET-HOURS-GUARD-001):
+       the NEXT round would run inside the NSE market-hours window ``[08:45, 15:35)``
+       IST, so the loop must NOT re-fire a vendor pass that would compete with
+       TickVault's live feed for the shared account. Like a dead token, no immediate
+       retry can proceed — the pull resumes on the next out-of-hours run. Ranked above
+       ``stop_quota`` because it is a HARD external gate on issuing any vendor call at
+       all (the between-rounds belt; the mid-round per-window guard raises
+       ``MarketHoursHalt`` directly).
+    4. **stop_quota** — ``quota_exhausted``: the day's 100,000-call quota is
        spent (DEC-AUTO-RESUME-QUOTA-001). Like a dead token, NO amount of immediate
        retrying can land a bar today — the auto-resume pauses itself rather than
        burn a dead quota; the operator re-pulls after the IST-midnight reset. Ranked
        above ``no_progress`` because it is the SPECIFIC reason no progress is
        possible.
-    4. **stop_no_progress** — ``not made_progress``: the last round shrank the
+    5. **stop_no_progress** — ``not made_progress``: the last round shrank the
        residual by ZERO. A stuck window can never be drained by more identical
        rounds, so spinning is futile — halt instead of churning to the budget cap.
        This is what makes a LARGE ``max_rounds`` (the auto-resume budget) safe: the
        loop self-terminates the instant it stops making headway.
-    5. **stop_budget** — ``rounds_used >= max_rounds``: residual remains, the loop is
+    6. **stop_budget** — ``rounds_used >= max_rounds``: residual remains, the loop is
        still making progress, but the bounded outer budget is spent (the final
        backstop).
-    6. **continue** — residual remains, progress is being made, budget is left.
+    7. **continue** — residual remains, progress is being made, budget is left.
 
     Pure + O(1) (a constant number of comparisons). No I/O, no clock. The
     ``quota_exhausted`` + ``made_progress`` args default to the
@@ -1485,6 +1555,11 @@ def decide_until_clean(
     window is SUCCESS / SKIPPED (the "pull until successful" guarantee), not merely
     until the transient failures clear (which left PLANNED + EMPTY windows behind).
     ``None`` falls back to the ``still_failed_windows == 0`` test (byte-identical).
+
+    *market_closed* (DEC-GROWW-MARKET-HOURS-GUARD-001) defaults to ``False`` (the
+    pre-guard behaviour, byte-unchanged for every existing caller). ``True`` means
+    the NEXT round would run inside the NSE market-hours window — the loop stops with
+    ``stop_market_hours`` rather than re-firing a vendor pass into the shared account.
     """
     if auth_aborted:
         return "stop_dead"
@@ -1493,6 +1568,8 @@ def decide_until_clean(
     )
     if clean:
         return "stop_clean"
+    if market_closed:
+        return "stop_market_hours"
     if quota_exhausted:
         return "stop_quota"
     if not made_progress:
@@ -1509,6 +1586,7 @@ def run_until_clean(
     sleep: Callable[[int], None] | None = None,
     decide: Callable[..., LoopVerdict] = decide_until_clean,
     quota_exhausted: Callable[[], bool] | None = None,
+    market_closed: Callable[[], bool] | None = None,
     stop_when_stuck: bool = False,
 ) -> UntilCleanOutcome:
     """Run bounded re-pull rounds until CLEAN, the token dies, or the budget is spent.
@@ -1557,6 +1635,16 @@ def run_until_clean(
         bounded ``DEFAULT_MAX_ROUNDS`` path + tests). The hook reads the shared
         persisted :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`, so
         it reflects the SAME counter the rate bucket increments per call.
+    market_closed
+        Optional ``() -> bool`` hook checked AFTER each round (DEC-GROWW-MARKET-HOURS-
+        GUARD-001): ``True`` means the NEXT round would run inside the NSE
+        market-hours window ``[08:45, 15:35)`` IST, so the loop stops with
+        ``stop_market_hours`` rather than re-firing a vendor pass that would compete
+        with TickVault's live feed for the shared Groww account. ``None`` (the
+        default) → the market never stops the loop (the pre-feature behaviour, for
+        tests + the bounded path). This is the BETWEEN-ROUNDS belt; a round already
+        in flight when the market opens is halted mid-round by the per-window
+        ``MarketHoursHalt`` raise in the spines.
     stop_when_stuck
         When ``True`` (the auto-resume path, DEC-AUTO-RESUME-QUOTA-001), a round
         that shrinks the residual by ZERO stops the loop with ``stop_no_progress``
@@ -1632,6 +1720,7 @@ def run_until_clean(
             quota_exhausted=quota_exhausted() if quota_exhausted is not None else False,
             made_progress=made_progress,
             outstanding_windows=outcome.outstanding_windows,
+            market_closed=market_closed() if market_closed is not None else False,
         )
         prev_failed = outcome.still_failed_windows
         # Per-round observability (DEC-PULL-TELEMETRY-TRIAD-001): the loop that rescues
@@ -1813,6 +1902,42 @@ def partition_spot_steps(instruments: Sequence[Instrument]) -> tuple[SpotStepGro
     return tuple(groups)
 
 
+class PullCancelled(BruteXError):
+    """Operator cooperative cancel — a GRACEFUL pull-wide stop, NEVER an alert-bearing halt.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001: raised at a SAFE boundary ONLY (before a
+    window's vendor fetch — never mid-write), it rides both ingest spines'
+    ``_GLOBAL_STOP_ERRORS`` so the existing graceful-halt propagation applies
+    for free: the per-symbol/contract quarantine is bypassed, the fetch
+    pipeline drains its in-flight write tails, and the durable window ledger
+    is persisted by the controllers' existing ``finally`` blocks — so a
+    cancelled pull's on-disk state is bit-identical to a graceful stop at that
+    window boundary, and the next pull idempotently re-pulls ONLY the windows
+    the cancel left unsettled (Golden Rule #7). Deliberately EXCLUDED from the
+    job layer's :func:`~brutex.dashboard.pull_jobs.is_pull_halt` — an operator
+    cancel must never fire the CRITICAL Telegram pull-halt alert nor read as
+    an ``error`` terminal.
+    """
+
+
+#: The zero-arg cooperative-cancel probe threaded down the pull spines
+#: (DEC-JOB-COOPERATIVE-CANCEL-001). ``True`` ⇒ stop at the next safe boundary.
+CancelCheck: TypeAlias = Callable[[], bool]  # noqa: UP040
+
+
+def raise_if_cancelled(should_stop: CancelCheck | None) -> None:
+    """Raise :class:`PullCancelled` iff *should_stop* is wired and reads ``True`` — O(1).
+
+    The ONE boundary-check helper (CLAUDE.md §11 COMMON) both spines call at
+    their window/contract boundaries: a ``None`` probe (every legacy caller)
+    is a no-op, so an un-wired path is byte-identical to before the feature.
+    """
+    if should_stop is not None and should_stop():
+        raise PullCancelled(
+            "pull cancelled at operator request (cooperative stop at the window boundary)"
+        )
+
+
 class StepOrderError(BruteXError):
     """A pull-step rank regression under ``StepOrderMonitor(raise_on_violation=True)``.
 
@@ -1947,8 +2072,10 @@ __all__ = [
     "OLD_GAP_HORIZON_DAYS",
     "SETTLED_SKIPPED_OPERATOR_THRESHOLD",
     "SYNTHETIC_DRY_RUN_LABEL",
+    "CancelCheck",
     "DateWindow",
     "LoopVerdict",
+    "PullCancelled",
     "PullStep",
     "PullVerdict",
     "PullVerdictKind",
@@ -1974,6 +2101,7 @@ __all__ = [
     "now_ist",
     "partition_spot_steps",
     "plan_windows",
+    "raise_if_cancelled",
     "retry_failed_windows",
     "run_until_clean",
     "summarize_conflicts",

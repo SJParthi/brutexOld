@@ -25,12 +25,21 @@ so demotions survive). This suite pins:
         ORDER convergence to the DuckDB contract is asserted explicitly);
 * T-a10 the steady-state (no-deltas) SQL text is BYTE-identical to the pre-fold
         fast path (spy conn) + payload golden vs the legacy fold;
+* T-a11 a MIXED-schema fold — a base that PREDATES ``streak_provenance``
+        (14-col, the pre-#1512/#1585 writer shape) unioned with a CURRENT
+        17-col delta — is SERVED by the fast path with the trailing column
+        CARRIED: the delta row surfaces its real lineage, the legacy base row
+        NULL-fills to the honest ``None`` (never a binder error, never a
+        silent column drop); parity with the pyarrow fold (the ``/db`` grid's
+        row source) is pinned;
 * count-cache teeth: composite-stamp keys recount on a delta append AND a
   cross-process base save, never on a mark_dirty/generation storm;
 * a hypothesis parity oracle: random upsert sequences across base + N deltas →
   SQL fold ≡ the reference Python dict fold, record-for-record;
 * drift pins: ``_WINDOW_KEY_COLUMNS == window_ledger_store._COLUMNS[:5]`` and
-  ``append_ledger_delta`` writing the full 16-column schema (the base-less
+  ``append_ledger_delta`` writing the full 17-column schema — trailing
+  ``empty_retries``/``transient_retries`` per DEC-RETRY-COUNTER-SPLIT-001 then
+  ``streak_provenance`` per DEC-STREAK-PROVENANCE-001 (the base-less
   probe-skip's safety precondition).
 
 Tests MAY import ``window_ledger_store`` (the module itself must not — the
@@ -50,15 +59,22 @@ import duckdb
 import pytest
 from brutex.dashboard.db_view import (
     _DUCKDB_RETRY_DELAY_S,
+    _UNKNOWN_WINDOW_STATUS,
     _WINDOW_KEY_COLUMNS,
+    WINDOW_PAGE_CACHE_CAPACITY,
     _build_window_payload_duckdb,
+    _close_cursor,
+    _compute_cursor,
     _ledger_scan_source,
     _ledger_stamp_token,
     _window_counts_from_records,
     _window_counts_total,
     _window_severity_order_sql,
+    _window_symbol_map_token,
     build_window_payload,
+    make_window_payload_caches,
     phase_progress_payload,
+    query_window_ledger_page,
 )
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.data import window_ledger_store as wls
@@ -91,11 +107,14 @@ def _row(
     bars: int = 0,
     attempts: int = 1,
 ) -> tuple[Any, ...]:
-    """One 16-field ledger row tuple (the exact ``_COLUMNS`` shape).
+    """One 17-field ledger row tuple (the exact ``_COLUMNS`` shape).
 
     The trailing ``empty_retries``/``transient_retries`` pair is ``None`` — the
     honest-unknown optional-column default (DEC-RETRY-COUNTER-SPLIT-001,
-    MIGRATION.md #1585), exactly what a pre-split ledger row loads as.
+    MIGRATION.md #1585), exactly what a pre-split ledger row loads as — and the
+    LAST ``streak_provenance`` cell (DEC-STREAK-PROVENANCE-001) rides the same
+    ``bars_net_new`` tri-state convention: ``None`` here (legacy-unknown),
+    matching what a pre-provenance writer's row loads as.
     """
     return (
         "groww",
@@ -114,11 +133,12 @@ def _row(
         None,
         None,
         None,
+        None,
     )
 
 
 def _write_base(lake: Path, rows: Sequence[tuple[Any, ...]]) -> None:
-    """Write a REAL 16-column base ledger Parquet directly (full status control)."""
+    """Write a REAL 17-column base ledger Parquet directly (full status control)."""
     import pyarrow.parquet as pq
 
     path = wls.ledger_path(lake)
@@ -127,7 +147,7 @@ def _write_base(lake: Path, rows: Sequence[tuple[Any, ...]]) -> None:
 
 
 def _write_delta(lake: Path, rows: Sequence[tuple[Any, ...]]) -> Path:
-    """Append one REAL 16-column delta Parquet via the store's own name minting."""
+    """Append one REAL 17-column delta Parquet via the store's own name minting."""
     import pyarrow.parquet as pq
 
     directory = wls.deltas_dir(lake)
@@ -174,7 +194,7 @@ def test_window_key_columns_pinned_to_the_store_schema() -> None:
     assert wls._COLUMNS[:5] == _WINDOW_KEY_COLUMNS
 
 
-def test_append_ledger_delta_emits_all_14_columns(tmp_path: Path) -> None:
+def test_append_ledger_delta_emits_the_full_column_schema(tmp_path: Path) -> None:
     """The base-less probe-skip's precondition: EVERY delta carries the full schema."""
     import pyarrow.parquet as pq
 
@@ -587,6 +607,112 @@ def test_steady_state_sql_text_is_byte_identical(tmp_path: Path) -> None:
     assert payload == build_window_payload(tmp_path)
 
 
+# ── T-a11 — MIXED-schema fold: pre-provenance base + 17-col delta (#1512) ─────
+
+
+def _write_pre_provenance_base(lake: Path, security_id: str, *, bars: int = 5) -> None:
+    """A 14-column post-R1 base — the EXACT on-disk shape the pre-merge writer
+    produced BEFORE the branch appended ``streak_provenance`` (#1512) and main
+    appended the ``empty_retries``/``transient_retries`` split (#1585): the 11
+    core columns + ``empty_streak`` + ``in_pull_fetches`` + ``bars_net_new``.
+    Carries the base-only probe's columns, so the fast path SERVES it (T-a7's
+    11-column pre-R1 base defers instead)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    schema = pa.schema(
+        [
+            ("market", pa.string()),
+            ("security_id", pa.string()),
+            ("interval", pa.string()),
+            ("window_start", pa.string()),
+            ("window_end", pa.string()),
+            ("status", pa.string()),
+            ("bars", pa.int64()),
+            ("attempts", pa.int64()),
+            ("last_error", pa.string()),
+            ("first_seen_at", pa.string()),
+            ("last_attempt_at", pa.string()),
+            ("empty_streak", pa.int64()),
+            ("in_pull_fetches", pa.int64()),
+            ("bars_net_new", pa.int64()),
+        ]
+    )
+    # Drift pin: "14-col" IS the store schema's pre-#1512/#1585 prefix, by name.
+    assert tuple(schema.names) == wls._COLUMNS[:14]
+    table = pa.table(
+        {
+            "market": ["groww"],
+            "security_id": [security_id],
+            "interval": ["1minute"],
+            "window_start": ["2021-01-01"],
+            "window_end": ["2021-04-01"],
+            "status": ["SUCCESS"],
+            "bars": [bars],
+            "attempts": [1],
+            "last_error": [None],
+            "first_seen_at": [_ISO],
+            "last_attempt_at": [_ISO],
+            "empty_streak": [0],
+            "in_pull_fetches": [1],
+            "bars_net_new": [None],
+        },
+        schema=schema,
+    )
+    path = wls.ledger_path(lake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path)  # type: ignore[no-untyped-call, unused-ignore]
+
+
+def test_mixed_pre_provenance_base_plus_new_delta_folds_on_the_fast_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-a11 (the #1512 × #1238 composition pin — merge finding B): ONE fold
+    unions a base that PREDATES ``streak_provenance`` with a delta the CURRENT
+    17-column production writer produced. ``union_by_name=true`` must CARRY the
+    trailing column — the delta row surfaces its REAL lineage while the legacy
+    base row NULL-fills to the honest ``None`` (never ``""``, never a binder
+    error, never a silent column drop) — and the fast path must SERVE the mixed
+    shape (the base-only probe sees ``empty_streak``/``in_pull_fetches``, so it
+    does NOT defer). The pyarrow-fold parity assertion pins the ``/db`` grid's
+    row source (``ledger_record_row`` over ``load_window_ledger``) to the same
+    answer as the ``/coverage/windows`` DuckDB page — one truth on both routes.
+    """
+    _write_pre_provenance_base(tmp_path, "NIFTY", bars=5)
+    live = wls.load_window_ledger(tmp_path)
+    live.record(
+        _window_key("BANKNIFTY"),
+        raw_bars=0,
+        error_type=None,
+        bars_appended=0,
+        now=_NOW,
+        pull_id="px",
+    )
+    # The REAL 17-col writer appends only the dirty row → a genuinely MIXED union.
+    assert wls.append_ledger_delta(live, tmp_path) == 1
+
+    def _boom(*_a: object, **_k: object) -> tuple[Any, ...]:
+        raise AssertionError("the fast path must not fall back to the Python fold")
+
+    monkeypatch.setattr("brutex.dashboard.db_view._ledger_records_cached", _boom)
+    with capture_logs() as logs:
+        fast = build_window_payload(tmp_path, conn=duckdb.connect())
+    assert _events(logs, "window_payload.duckdb_fallback") == []  # served, never deferred
+    assert fast["source"] == "ledger"
+    by_symbol = {w["symbol"]: w for w in fast["windows"]}
+    assert set(by_symbol) == {"NIFTY", "BANKNIFTY"}
+    # The 17-col delta row's lineage survives the union — no silent column drop.
+    assert by_symbol["BANKNIFTY"]["streak_provenance"] == "EMPTY@px"
+    # The 14-col base row NULL-fills → the honest legacy-unknown None, never "".
+    assert by_symbol["NIFTY"]["streak_provenance"] is None
+    # Parity with the pyarrow fold — the /db window-ledger grid's row source.
+    monkeypatch.undo()
+    legacy = build_window_payload(tmp_path)  # conn=None → the Python fold
+    assert {tuple(sorted(w.items())) for w in legacy["windows"]} == {
+        tuple(sorted(w.items())) for w in fast["windows"]
+    }
+
+
 # ── count-cache teeth — the composite stamp token is the COMPLETE signal ──────
 
 
@@ -725,3 +851,539 @@ def test_direct_builder_midpull_with_since_uncached(tmp_path: Path) -> None:
     )
     assert payload["counts"]["spot"] == {"SUCCESS": 1, "FAILED": 1}
     assert payload["counts_since_pull_start"]["spot"] == {"SUCCESS": 1, "FAILED": 1}
+
+
+# ── PACK-L1: stamp-generation keying, the mid-pull floor + the page-row cache ─
+# (DEC-WINDOWS-MIDPULL-FLOOR-001)
+
+
+class _FamilyCountingCache:
+    """A real :class:`MoversSnapshotCache` (injectable — the floor tests pass the
+    production-shaped floored instance) that counts recomputes per key FAMILY
+    (``window-counts`` / ``window-counts-since`` / ``window-page``)."""
+
+    def __init__(self, inner: MoversSnapshotCache | None = None) -> None:
+        self.inner = inner if inner is not None else MoversSnapshotCache()
+        self.computes: dict[str, int] = {}
+
+    def get_or_compute(self, key: str, *, generation: int, compute: Any) -> Any:
+        family = key.split("|", 1)[0]
+
+        def _wrapped() -> Any:
+            self.computes[family] = self.computes.get(family, 0) + 1
+            return compute()
+
+        return self.inner.get_or_compute(key, generation=generation, compute=_wrapped)
+
+
+def test_page_rows_cached_within_stamp_and_recomputed_on_stamp_move(tmp_path: Path) -> None:
+    """The row PAGE is cached per stamp (fails pre-fix: the page query re-ran the
+    whole O(total rows + delta footers) fold on EVERY poll — only the counts were
+    cached), and ONE delta append (stamp move) recomputes it exactly once."""
+    _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
+    _write_delta(tmp_path, [_row("BANKNIFTY", "SUCCESS", bars=3)])
+    conn = duckdb.connect()
+    cache = _FamilyCountingCache()
+    first = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0
+    )
+    assert cache.computes == {"window-counts": 1, "window-page": 1}
+    for _ in range(5):
+        repeat = build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0
+        )
+        assert repeat["windows"] == first["windows"]
+    assert cache.computes == {"window-counts": 1, "window-page": 1}  # pure hits
+    _write_delta(tmp_path, [_row("SENSEX", "FAILED")])  # the stamp moves
+    moved = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0
+    )
+    assert cache.computes == {"window-counts": 2, "window-page": 2}
+    assert any(r["symbol"] == "SENSEX" for r in moved["windows"])  # fresh rows served
+
+
+def test_page_cache_fresh_compute_byte_identical(tmp_path: Path) -> None:
+    """The cached-arm FRESH compute is byte-identical to the uncached arm across
+    filter/page permutations (the change-2 payload pin)."""
+    _write_base(
+        tmp_path,
+        [
+            _row("NIFTY", "SUCCESS", bars=5),
+            _row("BANKNIFTY", "FAILED"),
+            _row("SENSEX", "EMPTY"),
+        ],
+    )
+    _write_delta(tmp_path, [_row("RELIANCE", "SUCCESS", bars=2)])
+    conn = duckdb.connect()
+    permutations: list[dict[str, Any]] = [
+        {},
+        {"market": "spot"},
+        {"status": "FAILED"},
+        {"market": "spot", "status": "SUCCESS"},
+        {"limit": 2},
+        {"limit": 1, "offset": 1},
+        {"market": "nonsense"},
+    ]
+    for kwargs in permutations:
+        uncached_arm = build_window_payload(
+            tmp_path, conn=conn, count_cache=None, generation=0, **kwargs
+        )
+        # Every injection arm — both caches (the production wiring), counts-only,
+        # page-only — must produce the identical fresh payload.
+        both = build_window_payload(
+            tmp_path,
+            conn=conn,
+            count_cache=MoversSnapshotCache(),
+            page_cache=MoversSnapshotCache(),
+            generation=0,
+            **kwargs,
+        )
+        counts_only = build_window_payload(
+            tmp_path, conn=conn, count_cache=MoversSnapshotCache(), generation=0, **kwargs
+        )
+        page_only = build_window_payload(
+            tmp_path, conn=conn, page_cache=MoversSnapshotCache(), generation=0, **kwargs
+        )
+        for arm_name, arm in (
+            ("both", both),
+            ("counts_only", counts_only),
+            ("page_only", page_only),
+        ):
+            assert arm == uncached_arm, f"{arm_name}-vs-uncached drift for {kwargs}"
+
+
+def test_page_cache_distinct_filter_page_coordinates_never_collide(tmp_path: Path) -> None:
+    """Every (market, status, limit, offset) coordinate caches its OWN page —
+    repeat polls of two different coordinates each serve their own rows."""
+    _write_base(
+        tmp_path,
+        [
+            _row("NIFTY", "SUCCESS", bars=5),
+            _row("BANKNIFTY", "FAILED"),
+        ],
+    )
+    _write_delta(tmp_path, [_row("SENSEX", "EMPTY")])
+    conn = duckdb.connect()
+    cache = MoversSnapshotCache()
+    failed = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="FAILED"
+    )
+    empty = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="EMPTY"
+    )
+    paged = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, limit=1, offset=1
+    )
+    assert [r["symbol"] for r in failed["windows"]] == ["BANKNIFTY"]
+    assert [r["symbol"] for r in empty["windows"]] == ["SENSEX"]
+    assert len(paged["windows"]) == 1
+    # Repeat each coordinate — served from ITS own cached page, never a sibling's.
+    assert (
+        build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="FAILED"
+        )
+        == failed
+    )
+    assert (
+        build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="EMPTY"
+        )
+        == empty
+    )
+    assert (
+        build_window_payload(
+            tmp_path,
+            conn=conn,
+            count_cache=cache,
+            page_cache=cache,
+            generation=0,
+            limit=1,
+            offset=1,
+        )
+        == paged
+    )
+
+
+def test_symbol_map_token_content_sensitive_order_free() -> None:
+    """`_window_symbol_map_token`: None/empty key identically ("0" — both project
+    raw coordinates); content moves the token; insertion order does not."""
+    assert _window_symbol_map_token(None) == "0"
+    assert _window_symbol_map_token({}) == "0"
+    a = _window_symbol_map_token({"25": "BANKNIFTY", "13": "NIFTY"})
+    b = _window_symbol_map_token({"13": "NIFTY", "25": "BANKNIFTY"})
+    assert a == b  # order-independent
+    assert a != _window_symbol_map_token({"25": "BANKNIFTY", "13": "MIDCPNIFTY"})  # value moves it
+    assert a != _window_symbol_map_token({"25": "BANKNIFTY"})  # entry set moves it
+
+
+def test_page_cache_symbol_map_change_rekeys_within_one_stamp(tmp_path: Path) -> None:
+    """An instrument-master reload (a CHANGED id→symbol map) re-keys the page
+    within one ledger stamp — a cached page can never serve the old display
+    names (Golden Rule #1); the original map's page stays a hit."""
+    _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
+    _write_delta(tmp_path, [_row("BANKNIFTY", "SUCCESS", bars=3)])
+    conn = duckdb.connect()
+    cache = _FamilyCountingCache()
+    map_a = {"13": "NIFTY"}
+    map_b = {"13": "RENAMED"}
+    build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, symbol_for_id=map_a
+    )
+    assert cache.computes["window-page"] == 1
+    build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, symbol_for_id=map_b
+    )
+    assert cache.computes["window-page"] == 2  # a different map content = a different page key
+    build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, symbol_for_id=map_a
+    )
+    assert cache.computes["window-page"] == 2  # …and the first map's page is still warm
+    assert cache.computes["window-counts"] == 1  # counts carry no symbols — ONE entry throughout
+
+
+def test_midpull_floor_throttles_recomputes_bounded_and_logged(tmp_path: Path) -> None:
+    """THE change-1 teeth (fails pre-fix): with the PRODUCTION-shaped cache pair
+    (`make_window_payload_caches` — the `_LEDGER_READ_CACHE` probe/floor shape:
+    constant-True stamp-moved probe + the 120 s cap), a ledger stamp move
+    within the #920 floor serves the PRIOR stamp's counts+page STALE (zero
+    recomputes, ``movers_cache.stale_served`` logged — bounded + visible), and
+    the floor RELEASES once the entries age past it. The churn here is
+    writer-agnostic — exactly the CROSS-PROCESS CLI shape too (no in-process
+    pull exists in this test; the constant-True probe floors it regardless —
+    the round-2 review's option (a), closing the probe asymmetry vs the
+    round-1 ``_pull_live`` wiring).
+
+    Pre-fix this test fails at the first stale assertion: the stamp token lived
+    IN the cache key (fixed ``generation=0``), so a stamp move was a cache MISS
+    — a new key — and the adaptive floor (which fires only on a generation
+    mismatch of one stable key) structurally never engaged.
+    """
+    _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
+    _write_delta(tmp_path, [_row("BANKNIFTY", "SUCCESS", bars=3)])
+    conn = duckdb.connect()
+    now = {"t": 100.0}
+    # The SWR revalidator runs INLINE (the injectable swr_runner seam —
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001) so the past-floor
+    # serve-last-known + background-store sequence is deterministic.
+    counts_inner, page_inner = make_window_payload_caches(
+        clock=lambda: now["t"], swr_runner=lambda job: job()
+    )
+    counts = _FamilyCountingCache(counts_inner)
+    page = _FamilyCountingCache(page_inner)
+    first = build_window_payload(
+        tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
+    )
+    assert counts.computes == {"window-counts": 1}
+    assert page.computes == {"window-page": 1}
+    # A delta append moves the stamp (a CLI-style cross-process flush — no pull
+    # anywhere) — the entries are age-0, inside the min(max(2 s, own duration),
+    # 120 s) floor → the PRIOR stamp is served stale, ZERO recomputes, logged.
+    _write_delta(tmp_path, [_row("SENSEX", "FAILED")])
+    with capture_logs() as logs:
+        stale = build_window_payload(
+            tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
+        )
+    assert counts.computes == {"window-counts": 1}
+    assert page.computes == {"window-page": 1}
+    assert stale["counts"] == first["counts"]  # the bounded-stale serve (no SENSEX yet)
+    assert not any(r["symbol"] == "SENSEX" for r in stale["windows"])
+    assert _events(logs, "movers_cache.stale_served")  # never a silent illusion
+    # The floor AGES OUT (past even the 120 s cap, whatever the measured
+    # durations) → the SWR arm serves the PRIOR payload ONCE MORE (never a
+    # blocking inline fold) while the revalidators — inline here — land the
+    # fresh fold of BOTH families; the NEXT poll serves the delta row.
+    now["t"] += 121.0
+    aged_stale = build_window_payload(
+        tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
+    )
+    assert counts.computes == {"window-counts": 2}  # the revalidate DID fold fresh…
+    assert page.computes == {"window-page": 2}
+    assert not any(r["symbol"] == "SENSEX" for r in aged_stale["windows"])  # …served next
+    fresh = build_window_payload(
+        tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
+    )
+    assert counts.computes == {"window-counts": 2}  # the landed store — no re-fold
+    assert page.computes == {"window-page": 2}
+    assert any(r["symbol"] == "SENSEX" for r in fresh["windows"])
+
+
+def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
+    """The pull-progress poll shares the floored counts entry: a stamp move
+    within the floor serves the prior counts (zero recomputes), the stale serve
+    is logged, and the floor releases on aging — the same bounded envelope as
+    the windows page (production counts instance via the factory)."""
+    _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
+    conn = duckdb.connect()
+    now = {"t": 50.0}
+    counts_inner, _page_inner = make_window_payload_caches(
+        clock=lambda: now["t"], swr_runner=lambda job: job()
+    )
+    cache = _FamilyCountingCache(counts_inner)
+    path = wls.ledger_path(tmp_path)
+    rows = phase_progress_payload(conn, path, current_phase="spot", count_cache=cache, generation=0)
+    assert next(r for r in rows if r["phase"] == "spot")["done"] == 1
+    assert cache.computes == {"window-counts": 1}
+    _write_delta(tmp_path, [_row("BANKNIFTY", "SUCCESS", bars=3)])  # the stamp moves
+    with capture_logs() as logs:
+        stale_rows = phase_progress_payload(
+            conn, path, current_phase="spot", count_cache=cache, generation=0
+        )
+    assert cache.computes == {"window-counts": 1}  # floor-stale serve, no recount
+    assert next(r for r in stale_rows if r["phase"] == "spot")["done"] == 1  # prior stamp
+    assert _events(logs, "movers_cache.stale_served")
+    now["t"] += 121.0  # past the 120 s cap → the SWR arm: one more last-known
+    # serve while the (inline) revalidator lands the fresh counts.
+    swr_rows = phase_progress_payload(
+        conn, path, current_phase="spot", count_cache=cache, generation=0
+    )
+    assert cache.computes == {"window-counts": 2}  # the revalidate folded fresh
+    assert next(r for r in swr_rows if r["phase"] == "spot")["done"] == 1  # last-known
+    fresh_rows = phase_progress_payload(
+        conn, path, current_phase="spot", count_cache=cache, generation=0
+    )
+    assert cache.computes == {"window-counts": 2}  # the landed store — no re-fold
+    assert next(r for r in fresh_rows if r["phase"] == "spot")["done"] == 2
+
+
+def test_make_window_payload_caches_dedicated_small_page_instance() -> None:
+    """The round-2 MEDIUM fold's structural pin: the factory returns TWO
+    distinct instances — the page cache SMALL (`WINDOW_PAGE_CACHE_CAPACITY`,
+    bounding retained pages to ≤ capacity × min(limit, WINDOW_ROWS_CAP) rows,
+    and structurally unable to LRU-evict the counts entries) — both riding the
+    `_LEDGER_READ_CACHE` probe/floor shape (constant-True probe, floor on,
+    120 s cap)."""
+    counts_cache, page_cache = make_window_payload_caches()
+    assert counts_cache is not page_cache
+    assert page_cache.capacity == WINDOW_PAGE_CACHE_CAPACITY == 8
+    assert counts_cache.capacity == MoversSnapshotCache().capacity  # the 256 default
+    for instance in (counts_cache, page_cache):
+        assert instance._adaptive_floor is True
+        assert instance._adaptive_floor_cap_s == 120.0
+        probe = instance._pull_active_probe
+        assert probe is not None and probe() is True  # constant-True stamp-moved probe
+
+
+def test_unknown_status_values_collapse_to_one_page_key(tmp_path: Path) -> None:
+    """Round-2 hardening: every NOT-allow-listed ?status= value collapses onto
+    the ONE `_UNKNOWN_WINDOW_STATUS` sentinel BEFORE key minting — N distinct
+    bogus values cost ONE page compute + ONE counts entry (no key churn), serve
+    empty rows / matched=0 (legacy parity, pinned against the uncached arm),
+    and a KNOWN status still pages normally."""
+    _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5), _row("BANKNIFTY", "FAILED")])
+    _write_delta(tmp_path, [_row("SENSEX", "EMPTY")])
+    conn = duckdb.connect()
+    cache = _FamilyCountingCache()
+    bogus = ("BOGUS", "definitely-not-a-status", "%%%", "planned-ish", "__UNKNOWN_STATUS__")
+    payloads = [
+        build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status=value
+        )
+        for value in bogus
+    ]
+    assert cache.computes == {"window-counts": 1, "window-page": 1}  # ONE key for all five
+    uncached = build_window_payload(tmp_path, conn=conn, status="BOGUS")
+    for payload in payloads:
+        assert payload["windows"] == []
+        assert payload["matched"] == 0
+        assert payload == uncached  # legacy parity, cached == uncached
+    # A KNOWN status is untouched by the allow-list: real rows, its own key.
+    failed = build_window_payload(
+        tmp_path, conn=conn, count_cache=cache, page_cache=cache, generation=0, status="FAILED"
+    )
+    assert [r["symbol"] for r in failed["windows"]] == ["BANKNIFTY"]
+    assert cache.computes == {"window-counts": 1, "window-page": 2}
+    assert _UNKNOWN_WINDOW_STATUS not in repr(failed)  # the sentinel never leaks into a payload
+
+
+class TestComputeCursor:
+    """`_compute_cursor` (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001): the
+    flagged window caches may run a compute on a BACKGROUND revalidator daemon
+    concurrent with the request thread's statements on the SAME shared DuckDB
+    connection — whose execute→fetch pending-result state is per-connection
+    (reproduced in-suite: a background counts fold fetched the request's
+    16-column page rows). Every cached compute therefore rides an isolated
+    cursor; fakes without `cursor()` fall back to the conn itself."""
+
+    def test_real_conn_yields_an_independent_cursor(self) -> None:
+        conn = duckdb.connect()
+        cursor = _compute_cursor(conn)
+        assert cursor is not conn  # statement-isolated — its own pending state
+        assert cursor.execute("SELECT 42").fetchone() == (42,)
+
+    def test_conn_without_cursor_falls_back(self) -> None:
+        spy = _SpyConn()  # the suite's fake — records calls, has no cursor()
+        assert _compute_cursor(spy) is spy
+
+    def test_raising_cursor_falls_back(self) -> None:
+        class _Wedged:
+            def cursor(self) -> Any:
+                raise RuntimeError("connection closed")
+
+        wedged = _Wedged()
+        assert _compute_cursor(wedged) is wedged
+
+    def test_background_revalidate_never_corrupts_the_request_statements(
+        self, tmp_path: Path
+    ) -> None:
+        """THE interleave regression (fails without `_compute_cursor`): a
+        revalidator folding counts on the shared conn CONCURRENT with the
+        request thread's page query corrupted each other's pending results
+        (`too many values to unpack (expected 3)`). With isolation, heavy
+        stamp churn + concurrent polls stay clean."""
+        _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
+        conn = duckdb.connect()
+        counts_cache, page_cache = make_window_payload_caches()  # REAL daemon runner
+        errors: list[Exception] = []
+
+        def _poll() -> None:
+            try:
+                for _ in range(10):
+                    build_window_payload(
+                        tmp_path,
+                        conn=conn,
+                        count_cache=counts_cache,
+                        page_cache=page_cache,
+                        generation=0,
+                    )
+            except Exception as exc:  # the oracle collects every failure
+                errors.append(exc)
+
+        import threading as _threading
+        import time as _time
+
+        pollers = [_threading.Thread(target=_poll, daemon=True) for _ in range(4)]
+        for t in pollers:
+            t.start()
+        # Churn the stamp while the pollers run (the mid-pull delta cadence).
+        for i in range(6):
+            _write_delta(tmp_path, [_row(f"SYM{i}", "SUCCESS", bars=1)])
+            _time.sleep(0.02)
+        for t in pollers:
+            t.join(timeout=30)
+        assert not errors, f"interleaved statements corrupted a result: {errors[0]!r}"
+
+    def test_store_locked_read_conn_yields_a_fresh_locked_view(self, tmp_path: Path) -> None:
+        """THE round-1 BLOCKER pin: the PRODUCTION conn (`store.connection`, a
+        `_LockedReadConn`) must never fall back to itself — `cursor()` yields
+        a FRESH view with its own hold state. Pre-fix, `_LockedReadConn` had
+        no `cursor()`, so `_compute_cursor` silently returned the ONE
+        single-thread-per-view instance the SWR revalidator daemons then
+        shared with the request thread — corrupting `_held` cross-thread and
+        leaking the store read lock (a permanent dashboard-read freeze, the
+        exact class this branch exists to fix)."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+            view = store.connection
+            isolated = _compute_cursor(view)
+            assert isolated is not view, "production store conn fell back to the shared view"
+            assert type(isolated) is type(view)
+            assert isolated.execute("SELECT 42").fetchone() == (42,)
+
+    def test_concurrent_compute_on_store_conn_waits_never_corrupts(self, tmp_path: Path) -> None:
+        """The refuter's deterministic held-lock interleave, at db_view's own
+        seam: the request view HOLDS the read lock mid-statement (executed,
+        not yet fetched) while a background compute rides
+        `_compute_cursor(view)`. Pre-fix (same shared view) the background
+        `execute()` released the holder's lock from a NON-owner thread
+        (`RuntimeError: cannot release un-acquired lock`) and the holder then
+        LEAKED its acquisition — every later read deadlocked. Post-fix the
+        fresh view WAITS, completes cleanly, and the lock ends FREE."""
+        import threading as _threading
+
+        from brutex.data.instrument_store import InstrumentStore
+
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+            view = store.connection
+            view.execute("SELECT 1")  # the request thread's live hold — no fetch yet
+            errors: list[Exception] = []
+            finished = _threading.Event()
+
+            def _revalidator() -> None:
+                try:
+                    assert _compute_cursor(view).execute("SELECT 2").fetchone() == (2,)
+                except Exception as exc:  # the oracle collects every failure
+                    errors.append(exc)
+                finally:
+                    finished.set()
+
+            reval = _threading.Thread(target=_revalidator, daemon=True)
+            reval.start()
+            # The isolated view must WAIT on the read lock, never break the holder.
+            assert not finished.wait(timeout=0.3), f"finished against a held lock: {errors!r}"
+            assert view.fetchone() == (1,)  # the holder completes + releases
+            assert finished.wait(timeout=5.0)
+            reval.join(timeout=5.0)
+            assert not errors, f"background compute corrupted the shared hold: {errors[0]!r}"
+            # The lock is FREE: a fresh view's read completes within the bound.
+            done = _threading.Event()
+
+            def _probe() -> None:
+                assert store.connection.execute("SELECT 3").fetchone() == (3,)
+                done.set()
+
+            probe = _threading.Thread(target=_probe, daemon=True)
+            probe.start()
+            assert done.wait(timeout=5.0), "store read lock leaked — later reads deadlock"
+            probe.join(timeout=5.0)
+
+    def test_legacy_probe_raise_never_leaks_the_store_read_lock(self, tmp_path: Path) -> None:
+        """The `_close_cursor` hygiene regression: the legacy-shape probe
+        raises AFTER a description-only read, leaving its `_LockedReadConn`
+        view HOLDING the store read lock — without the compute's `finally`
+        close, that hold is stranded forever (deadlock on a legacy-shape
+        ledger; pre-fix this leaked on BOTH shapes — the shared request view
+        and, with `cursor()` alone, the per-compute view)."""
+        import threading as _threading
+
+        from brutex.data.instrument_store import InstrumentStore
+
+        _write_legacy_base(tmp_path, "EMPTYCO")
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+            rows, total = query_window_ledger_page(store.connection, tmp_path, limit=100, offset=0)
+            assert total == 1  # served by the byte-identical legacy parse
+            assert len(rows) == 1
+            done = _threading.Event()
+
+            def _probe() -> None:
+                assert store.connection.execute("SELECT 42").fetchone() == (42,)
+                done.set()
+
+            probe = _threading.Thread(target=_probe, daemon=True)
+            probe.start()
+            assert done.wait(timeout=5.0), (
+                "the legacy-shape probe's description-only raise stranded the "
+                "store read lock — later dashboard reads deadlock"
+            )
+            probe.join(timeout=5.0)
+
+    def test_close_cursor_never_closes_the_shared_conn(self) -> None:
+        """The fallback arm (`cursor is conn` — the caller's own connection)
+        must never be closed out from under the request thread."""
+
+        class _Conn:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        conn = _Conn()
+        _close_cursor(conn, conn)
+        assert not conn.closed
+
+    def test_close_cursor_tolerates_missing_and_raising_close(self) -> None:
+        """Cleanup is best-effort: a cursor without `close()` is a no-op and a
+        raising `close()` is swallowed — hygiene never masks the compute's own
+        outcome or 500s a poll."""
+
+        class _NoClose:
+            pass
+
+        _close_cursor(_NoClose(), object())  # no close attr — a clean no-op
+
+        class _Boom:
+            def close(self) -> None:
+                raise RuntimeError("wedged mid-close")
+
+        _close_cursor(_Boom(), object())  # swallowed

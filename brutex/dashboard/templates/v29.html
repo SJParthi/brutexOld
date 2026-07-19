@@ -235,58 +235,6 @@
   }
   .shake-on-reveal { animation: cameraShake 0.5s ease-in-out 0.6s 1; }
 
-  /* v24.4 — First-frame HOOK banner (TOP) — the viral stopper */
-  .hook-banner {
-    position: relative;
-    margin: 0;
-    padding: 14px 24px;
-    background: linear-gradient(90deg,
-      rgba(255,176,122,0.18) 0%,
-      rgba(91,141,239,0.22) 50%,
-      rgba(255,200,87,0.18) 100%);
-    background-size: 250% 100%;
-    border-bottom: 1px solid rgba(91,141,239,0.3);
-    overflow: hidden;
-    animation: gradientShift 5s ease-in-out infinite;
-  }
-  .hook-banner .scroll-track {
-    display: flex;
-    gap: 32px;
-    white-space: nowrap;
-    animation: tickerScroll 30s linear infinite;
-    font-family: "SF Mono", ui-monospace, Menlo, monospace;
-    font-size: 13px;
-    font-weight: 700;
-  }
-  @keyframes tickerScroll {
-    0% { transform: translateX(0); }
-    100% { transform: translateX(-50%); }
-  }
-  .hook-banner .tick { display: inline-flex; align-items: center; gap: 6px; }
-  .hook-banner .tick.up { color: var(--green-bright); }
-  .hook-banner .tick.down { color: var(--red); }
-  .hook-banner .tick .sym { color: var(--muted); font-weight: 600; }
-  .hook-banner .live-dot {
-    width: 8px; height: 8px;
-    background: var(--green-bright);
-    border-radius: 50%;
-    box-shadow: 0 0 10px var(--green-bright);
-    animation: pulse 1.5s ease-in-out infinite;
-    flex-shrink: 0;
-  }
-  .hook-banner .live-tag {
-    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
-    z-index: 5;
-    background: var(--bg);
-    padding: 5px 10px;
-    border-radius: 5px;
-    border: 1px solid var(--green);
-    color: var(--green-bright);
-    font-size: 11px; font-weight: 900; letter-spacing: 0.1em;
-    display: inline-flex; align-items: center; gap: 6px;
-    box-shadow: 0 0 16px rgba(255,200,87,0.4);
-  }
-
   /* v24.5 — Glow ring on hero rank-pill (cumulative attention magnet) */
   .rank-pill { position: relative; }
   .rank-pill::before {
@@ -2169,6 +2117,23 @@
   .hb-big.hb-bad { color: var(--red); }
   .hb-big.hb-idle { color: var(--muted); font-weight: 600; }
 
+  /* ══ Health hub (DEC-OPERATOR-HEALTH-TRUTH-001) ══
+     One green/red fold over nightly · backup dead-man · doctor · mutation ·
+     pull. Rendered by bx-health-hub.js (textContent only); a lane with no
+     local signal reads the grey "not wired" — never a fabricated green. */
+  .hh-body { display: flex; flex-direction: column; gap: 7px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+  .hh-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+  .hh-lane { min-width: 128px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 800; }
+  .hh-badge { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-strong); font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .hh-badge-ok { color: var(--green-bright); border-color: var(--green-dim); }
+  .hh-badge-warn, .hh-badge-unknown { color: var(--yellow); border-color: var(--yellow); }
+  .hh-badge-bad { color: var(--red); border-color: var(--red); }
+  .hh-main { color: var(--text-bright); font-weight: 600; overflow-wrap: anywhere; }
+  .hh-note { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+  .hh-fold-ok { color: var(--green-bright); border-color: var(--green-dim); }
+  .hh-fold-warn { color: var(--yellow); border-color: var(--yellow); }
+  .hh-fold-bad { color: var(--red); border-color: var(--red); }
+
   /* ══ One-click REAL wiring surfaces (DEC-OPERATOR-PAGE-REAL-001) ══
      Run bar · awaiting banner · chain map · timeline · VERIFY-ME panel ·
      run controls. All values arrive via textContent from the
@@ -2191,6 +2156,10 @@
   .oc-chain-amber { color: var(--yellow); border-color: var(--yellow); }
   .oc-chain-red { color: var(--red); border-color: var(--red); }
   .oc-chain-pending { opacity: 0.7; }
+  /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the rank-1 cascade verdict badge —
+     a cascade-FAILED winner stays rank-1 (annotation never reranks) but can
+     NEVER read silently green: the fail state paints the red badge. */
+  .oc-cascade-fail { color: var(--red); font-weight: 800; }
   #ocTimeline { max-height: 260px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.7; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 10px 12px; }
   .oc-event-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
   .oc-verify-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
@@ -2209,7 +2178,13 @@
   .oc-msg { font-size: 12px; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; }
   .oc-source-badge { padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 10.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .oc-disabled-note { font-size: 11px; color: var(--muted); }
-  #bxTip { position: absolute; z-index: 1200; max-width: 340px; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text); box-shadow: var(--elev-2); pointer-events: none; }
+  /* R6-a11y-2 (round 5): the tip must paint ABOVE the strategy drawer
+     (z 1300) + backdrop (z 1290) — both body-level siblings in the ROOT
+     stacking context — or every [data-explain] hover inside the open
+     drawer is invisible. 1310 sits above the drawer stack and below the
+     2000/3000 modal layers (which hold no explain targets); the tip is
+     pointer-events:none so painting above is interaction-safe. */
+  #bxTip { position: absolute; z-index: 1310; max-width: 340px; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text); box-shadow: var(--elev-2); pointer-events: none; }
   .equity-host { min-height: 120px; }
   .equity-host svg { width: 100%; height: 220px; display: block; }
   .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
@@ -2237,49 +2212,81 @@
      back in. The hidden-tab pause rides BXUI.initVisibilityPause()'s
      .bx-paused rule in bx-design.css. */
   .bx-anim-off, .bx-anim-off *, .bx-anim-off *::before, .bx-anim-off *::after { animation-play-state: paused !important; }
+
+  /* ── All-100-winners unfold (DEC-OPERATOR-PAGE-CONSOLIDATE-001) ──
+     HONESTY NOTE (R9): the grid-template-rows 0fr→1fr unfold is the ONE
+     sanctioned LAYOUT transition in the portal — one container, one-shot,
+     browser-managed; every other portal motion is transform/opacity/
+     stroke-dashoffset only. The idiom restyles the existing
+     .filter-reveal-toggle pattern. */
+  #ocWinnersSection .winners-body { display: grid; grid-template-rows: 0fr;
+    transition: grid-template-rows .38s var(--ease); }
+  #ocWinnersSection .winners-body.open { grid-template-rows: 1fr; }
+  /* overflow: clip (with the hidden fallback for older engines) clips the
+     unfold EXACTLY like hidden but does NOT create a scroll container —
+     so the .wn-filterbar position:sticky actually engages against the
+     PAGE scrollport (adversarial-review fold, E-M3; under the hidden
+     fallback the bar simply never sticks — the pre-fix behavior).
+     The COLLAPSED body is visibility:hidden (the drawer's own delayed-
+     visibility idiom — adversarial-review fold, C-M2) so its 8 filter
+     controls + rows + Show-all are untabbable while clipped; the flip is
+     instant on open and delayed past the .38s fold on close. */
+  #ocWinnersSection .winners-body-inner { overflow: hidden; overflow: clip;
+    min-height: 0; visibility: hidden; transition: visibility 0s linear .4s; }
+  #ocWinnersSection .winners-body.open .winners-body-inner {
+    visibility: visible; transition: visibility 0s; }
+  .winners-toggle { display: inline-flex; align-items: center; gap: 8px;
+    cursor: pointer; border: 1px solid var(--border-strong); border-radius: 10px;
+    padding: 8px 14px; font: inherit; font-size: 13px; font-weight: 800;
+    color: var(--text); background: var(--surface-2); }
+  .winners-toggle .chev { display: inline-block; transition: transform .3s var(--ease); }
+  .winners-toggle.expanded .chev { transform: rotate(180deg); }
+  #ocWinnersJump { cursor: pointer; border: 1px dashed var(--border-strong);
+    border-radius: 8px; padding: 4px 10px; font: inherit; font-size: 11px;
+    color: var(--muted); background: transparent; }
+  /* The winners copy reuses the shared .bx-scpanel component rules from
+     bx-oneclick-panels.css; only this page-chrome unfold lives inline. */
 </style>
 <!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens, skeleton
      shimmer, honest .bx-state states, .bx-live-dot, .bx-wrap fluid layout.
      Linked AFTER the page's inline styles so shared tokens win ties. -->
 <link rel="stylesheet" href="/static/bx-design.css">
+<!-- Shared panel-component + choreography CSS (DEC-OPERATOR-PAGE-
+     CONSOLIDATE-001) — the winners section + strategy drawer styles,
+     shared with screener.html/strategy.html. -->
+<link rel="stylesheet" href="/static/bx-oneclick-panels.css">
 <script defer src="/static/bx-ui.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 <!-- One-click REAL wiring (DEC-OPERATOR-PAGE-REAL-001) — load order law:
-     bx-ui → bx-poll → bx-explain → bx-chart → bx-oneclick (defer preserves
-     document order, so BXOneclick sees every dependency namespace). -->
+     bx-ui → bx-poll → bx-explain → bx-chart → bx-screener →
+     bx-portal-state → bx-oneclick → bx-screener-panel → bx-strategy-panel
+     → bx-operator-portal (defer preserves document order, so every
+     consumer sees its dependency namespaces —
+     DEC-OPERATOR-PAGE-CONSOLIDATE-001 extends the chain). -->
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
 <script defer src="/static/bx-chart.js"></script>
+<script defer src="/static/bx-screener.js"></script>
+<script defer src="/static/bx-portal-state.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
+<script defer src="/static/bx-screener-panel.js"></script>
+<script defer src="/static/bx-strategy-panel.js"></script>
+<script defer src="/static/bx-operator-portal.js"></script>
+<!-- Health hub widget (DEC-OPERATOR-HEALTH-TRUTH-001): ONE BXPoll-disciplined
+     poller over /api/v1/health/hub — loaded AFTER bx-poll.js (defer preserves
+     document order, so window.BXPoll exists when the widget boots). -->
+<script defer src="/static/bx-health-hub.js"></script>
 </head>
 <body class="operator-mode">
 
-<!-- v24.4: First-frame HOOK — live ticker banner (the viral stopper) -->
-<div class="hook-banner">
-  <span class="live-tag"><span class="live-dot"></span>LIVE</span>
-  <div class="scroll-track" id="liveTickerTrack">
-    <span class="tick up">+1.34% <span class="sym">NIFTY · 09:35→11:48 · TP hit</span></span>
-    <span class="tick up">+0.81% <span class="sym">BANKNIFTY · 09:42→15:20 · forced 15:20</span></span>
-    <span class="tick down">−0.61% <span class="sym">NIFTY SHORT · 09:38→10:24 · SL hit</span></span>
-    <span class="tick up">+1.39% <span class="sym">SENSEX · 09:36→13:11 · TP hit</span></span>
-    <span class="tick down">−0.59% <span class="sym">NIFTY · 09:34→09:51 · SL hit</span></span>
-    <span class="tick up">+2.12% <span class="sym">BANKNIFTY · 09:31→12:04 · TP hit</span></span>
-    <span class="tick up">+0.94% <span class="sym">SENSEX · 09:38→11:22 · TP hit</span></span>
-    <span class="tick up">+1.71% <span class="sym">NIFTY · 09:33→14:11 · TP hit</span></span>
-    <!-- duplicated for seamless ticker loop -->
-    <span class="tick up">+1.34% <span class="sym">NIFTY · 09:35→11:48 · TP hit</span></span>
-    <span class="tick up">+0.81% <span class="sym">BANKNIFTY · 09:42→15:20 · forced 15:20</span></span>
-    <span class="tick down">−0.61% <span class="sym">NIFTY SHORT · 09:38→10:24 · SL hit</span></span>
-    <span class="tick up">+1.39% <span class="sym">SENSEX · 09:36→13:11 · TP hit</span></span>
-    <span class="tick down">−0.59% <span class="sym">NIFTY · 09:34→09:51 · SL hit</span></span>
-    <span class="tick up">+2.12% <span class="sym">BANKNIFTY · 09:31→12:04 · TP hit</span></span>
-    <span class="tick up">+0.94% <span class="sym">SENSEX · 09:38→11:22 · TP hit</span></span>
-    <span class="tick up">+1.71% <span class="sym">NIFTY · 09:33→14:11 · TP hit</span></span>
-  </div>
-</div>
+<!-- The v24.4 "LIVE" hook-banner ticker is REMOVED (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, coordinator ruling): its 16 trade
+     ticks were FABRICATED mockup numbers behind a LIVE tag — a Golden-Rule-#1
+     violation. An absent widget beats a lying one; the HONEST #bxTickerStrip
+     below (sweep status + latest run id from the real runs payload, awaiting
+     states) is the one ticker that stays. -->
 
 <!-- v24.2: particle burst container -->
 <div class="particle-burst" id="particleBurst"></div>
@@ -2377,6 +2384,23 @@
   </div>
 </section>
 
+<!-- ══ HEALTH HUB (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747) ══════
+     ONE green/red fold over the automation lanes: pull outcome · nightly
+     chain · backup dead-man · doctor-daily · mutation gate. Rendered by
+     bx-health-hub.js from GET /api/v1/health/hub (one BXPoll-disciplined
+     poller — the #1720 one-poller-per-endpoint law; textContent only).
+     HONESTY LAW: a lane with no local signal reads the explicit grey
+     "not wired"; a degraded lane LOOKS degraded — never a fabricated green. -->
+<section class="hb show-operator-only" id="bxHealthHub" aria-label="Unified health hub">
+  <div class="hb-head">
+    <span class="hb-title">Health hub</span>
+    <span class="hb-sub">nightly · backup dead-man · doctor · mutation · pull — per-lane honest verdicts</span>
+    <span class="oc-pill" id="bxHealthFold">—</span>
+    <span class="oc-updated" id="bxHealthUpdated">awaiting first poll</span>
+  </div>
+  <div id="bxHealthHubBody" class="hh-body"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
+</section>
+
 <!-- ══ One-click REAL wiring (DEC-OPERATOR-PAGE-REAL-001) ══
      Ticker strip (R36 always visible) · run bar · honest awaiting banner ·
      Run controls (moved here from /reports per R25). Everything below is
@@ -2448,6 +2472,11 @@
   </div>
   <div class="oc-controls-row">
     <button class="oc-run-btn" id="run-sweep" type="button">🚀 Run Sweep</button>
+    <!-- Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): shown while the
+         sweep reports running; POSTs /api/v1/sweep/cancel. The engine stops at
+         the TUPLE boundary (the in-flight tuple finishes its durable write +
+         checkpoint), so a cancelled run is a clean resumable checkpoint. -->
+    <button class="oc-cascade-btn" id="stop-sweep" type="button" hidden>⏹ Stop</button>
     <button class="oc-cascade-btn" id="run-cascade" type="button">🪜 Run cascade</button>
     <span class="oc-disabled-note" id="ocPreflight">estimator not wired yet — lands at merge-integration (P1); every time estimate is PROVISIONAL until the smoke run calibrates it (R23)</span>
   </div>
@@ -2462,7 +2491,7 @@
   <div class="picker">
     <span class="rank-pill" data-oc="r1_rank" data-explain="rank">—</span>
     <span class="strategy-name" data-oc="r1_name">— awaiting real run artifact —</span>
-    <span class="meta"><span data-oc="sel_symbols">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · <span data-oc="tested_rank_line">rank line awaits the top-100 artifact</span></span>
+    <span class="meta"><span data-oc="r1_instrument" data-explain="instrument">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · selection <span data-oc="sel_symbols">—</span> · <span data-oc="tested_rank_line">rank line awaits the top-100 artifact</span></span>
   </div>
   <div class="date-range">📅 <span data-oc="date_range">—</span></div>
   <nav class="tabs">
@@ -2483,8 +2512,9 @@
     </div>
     <div class="verdict-text">
       <span class="tldr">In plain English</span>
-      Best stored winner: <strong data-oc="r1_name">—</strong>. Net P&amp;L
-      <strong class="pos" data-oc="r1_net" data-explain="net_pnl_paisa">—</strong>
+      Best stored winner: <strong data-oc="r1_name">—</strong>. Gross signal P&amp;L
+      <strong class="pos" data-oc="r1_net" data-explain="gross_signal_pnl">—</strong>
+      <span class="dim">(signal-only — costs modeled in the options-translation track)</span>
       over <span data-oc="r1_trades" data-explain="trades">—</span> trades ·
       <span data-oc="r1_vix_band" data-explain="vix_band">no VIX band</span>.
       Every number on this card comes from the stored run artifact — nothing is invented (R27).
@@ -2497,11 +2527,11 @@
 
   <section class="hero">
     <div class="hero-cards">
-      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = net trade P&L from the stored run artifact (R27: Σ trade P&L − full costs).">
+      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = gross signal P&L from the stored run artifact (R27: Σ trade P&L; signal-only — costs modeled in the options-translation track).">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4 12l8 10 8-10L12 2z"/></svg>EDGE</div>
-        <div class="big" data-oc="r1_net" data-explain="net_pnl_paisa">—</div>
-        <div class="sub">net P&amp;L · buy-&amp;-hold baseline lands with P3</div>
+        <div class="big" data-oc="r1_net" data-explain="gross_signal_pnl">—</div>
+        <div class="sub">gross signal P&amp;L (signal-only — costs modeled in the options-translation track) · buy-&amp;-hold baseline render is a named follow-up (baseline data ships on the run artifact)</div>
       </div>
       <div class="card green anim-card" style="animation-delay: 0.35s" data-tooltip="RISK = worst drop in equity from a peak.">
         <div class="dot"></div>
@@ -2519,7 +2549,7 @@
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2v6.5L3 12l6 3.5V22h6v-6.5l6-3.5-6-3.5V2H9z"/></svg><span class="jargon">REAL OR FLUKE?</span><span class="plain-eng" style="display:none">PROOF</span></div>
         <div class="big" data-oc="r1_dsr" data-explain="dsr">—</div>
-        <div class="sub"><span class="jargon">DSR · CPCV <span data-oc="r1_cpcv">—</span>% pass</span><span class="plain-eng" style="display:none">Statistical verification from the stored run</span></div>
+        <div class="sub"><span class="jargon">DSR · CPCV <span data-oc="r1_cpcv">—</span>% pass · cascade <span data-oc="r1_cascade" data-explain="cascade_status">—</span></span><span class="plain-eng" style="display:none">Statistical verification from the stored run</span></div>
       </div>
     </div>
 
@@ -2543,8 +2573,13 @@
     <summary>Standard metrics<span class="hint">— how is it making money?</span></summary>
     <div class="body">
       <div class="oc-sub" id="ocTop100Note">awaiting real run artifact — the metrics below fill from top100.json</div>
+      <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+           the Top-100 order is the ARTIFACT preset (default min_dd_first),
+           which deliberately DIFFERS from /results (Rank-by metric, desc);
+           bx-oneclick.js fills the live preset — neither sort is changed. -->
+      <div class="oc-sub" data-oc="top100_sort_basis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending)</div>
       <div class="kpi-strip">
-        <div class="kpi-cell"><div class="k">Net P&amp;L</div><div class="v" data-oc="r1_net" data-explain="net_pnl_paisa">—</div></div>
+        <div class="kpi-cell"><div class="k">Gross signal P&amp;L</div><div class="v" data-oc="r1_net" data-explain="gross_signal_pnl">—</div></div>
         <div class="kpi-cell"><div class="k">Max DD</div><div class="v" data-oc="r1_max_dd" data-explain="max_dd_paisa">—</div></div>
         <div class="kpi-cell"><div class="k">Trades</div><div class="v" data-oc="r1_trades" data-explain="trades">—</div></div>
         <div class="kpi-cell"><div class="k">% Win</div><div class="v" data-oc="r1_win_rate" data-explain="win_rate">—</div></div>
@@ -2557,10 +2592,11 @@
         <div class="panel">
           <h3>Returns</h3>
           <table>
-            <tr><td>Net P&amp;L</td><td data-oc="r1_net">—</td></tr>
+            <tr><td>Gross signal P&amp;L <span class="dim">(signal-only)</span></td><td data-oc="r1_net">—</td></tr>
+            <tr><td>Instrument</td><td data-oc="r1_instrument" data-explain="instrument">—</td></tr>
             <tr><td>Trades</td><td data-oc="r1_trades">—</td></tr>
             <tr><td>SL/TP arm</td><td data-oc="r1_arm">—</td></tr>
-            <tr><td>Buy &amp; hold baseline</td><td>— (lands with P3 — O-n)</td></tr>
+            <tr><td>Buy &amp; hold baseline</td><td>— (render is a named follow-up — baseline data ships on the run artifact)</td></tr>
           </table>
         </div>
         <div class="panel">
@@ -2569,8 +2605,19 @@
             <tr><td>Sharpe (full precision)</td><td data-oc="r1_sharpe">—</td></tr>
             <tr><td>DSR</td><td data-oc="r1_dsr">—</td></tr>
             <tr><td>CPCV pass %</td><td data-oc="r1_cpcv">—</td></tr>
+            <!-- DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade
+                 verdict joined onto the winner (server-built status_text;
+                 "—" until a cascade-joined artifact lands). -->
+            <tr><td>Cascade verdict</td><td data-oc="r1_cascade" data-explain="cascade_status">—</td></tr>
             <tr><td>Max drawdown</td><td data-oc="r1_max_dd">—</td></tr>
             <tr><td>VIX band</td><td data-oc="r1_vix_band">no VIX band</td></tr>
+            <!-- Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
+                 breakdown + worst-5-days the card previously omitted —
+                 one_regime_wonder/by_trend from entry.regime; worst5_days
+                 is a METRICS key (writer truth, top100_artifact.py). -->
+            <tr><td>P&amp;L by trend regime</td><td data-oc="r1_trend_split" data-explain="by_trend">—</td></tr>
+            <tr><td>Regime concentration</td><td data-oc="r1_regime_wonder" data-explain="one_regime_wonder">—</td></tr>
+            <tr><td>Worst 5 days</td><td data-oc="r1_worst5" data-explain="worst5_days">—</td></tr>
           </table>
         </div>
       </div>
@@ -2851,7 +2898,11 @@
     <div class="filter-bar">
       <label>Filter:</label>
       <label style="margin-left:0">Instrument</label>
-      <select id="fInst"><option value="">All</option><option>NIFTY 50</option><option>BANKNIFTY</option><option>SENSEX</option></select>
+      <!-- Options carry the ENGINE instrument tokens the Inst cell now
+           renders from the artifact's per-entry `instrument` key
+           (DEC-ONECLICK-INSTRUMENT-DISPLAY-001) — the old v29-preview
+           display names ("NIFTY 50") could never match a real cell. -->
+      <select id="fInst"><option value="">All</option><option>NSE-NIFTY</option><option>NSE-BANKNIFTY</option><option>BSE-SENSEX</option></select>
       <label>TF</label>
       <select id="fTF"><option value="">All</option><option>5m</option><option>15m</option><option>30m</option><option>1h</option><option>1d</option></select>
       <label>Direction</label>
@@ -2864,6 +2915,9 @@
     </div>
 
     <!-- TABLE for ranks 4-20 -->
+    <!-- [11] sort-basis honesty label — same live-filled hook as the metrics
+         card above (setOc fills every data-oc node in one pass). -->
+    <div class="oc-sub" data-oc="top100_sort_basis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending)</div>
     <div class="combos-table-wrap">
       <table class="combos-table" id="combosTable">
         <thead>
@@ -2892,6 +2946,7 @@
       </table>
       <div class="show-more-row">
         <a class="show-more-btn" href="/screener" style="text-decoration:none; display:inline-block;">🏆 Winners — open the full strategy screener →</a>
+        <button id="ocWinnersJump" type="button">↓ or unfold all 100 winners right here</button>
       </div>
     </div>
   </div>
@@ -2932,6 +2987,64 @@
     <div class="oc-sub" style="margin-top:12px;">Selected run <span data-oc="run_id">—</span> · window <span data-oc="date_range">—</span> · symbols <span data-oc="sel_symbols">—</span> · <span data-oc="suspect">verification pending</span></div>
   </div>
 </div>
+
+<!-- ══ All 100 winners (DEC-OPERATOR-PAGE-CONSOLIDATE-001): the screener
+     panel folded into the Operator page. The markup below is the VERBATIM
+     twin of screener.html's panel block (the hook-parity fence asserts BOTH
+     copies against ONE canonical inventory); wiring is the SAME shared
+     bx-screener-panel.js, mounted LAZILY by bx-operator-portal.js on the
+     first expand (a collapsed section costs zero row work). A row click
+     opens the in-page strategy drawer; /screener stays a first-class
+     deep-link page. -->
+<section class="oc-section show-operator-only bx-scpanel" id="ocWinnersSection" aria-label="All 100 winners">
+  <h3><button class="winners-toggle" id="ocWinnersToggle" type="button" aria-expanded="false" aria-controls="ocWinnersBody">🏆 All 100 winners <span class="chev">▾</span></button></h3>
+  <div class="oc-sub">the stored top-100 Best-of-Best — filter/sort in place; a row click opens the strategy drawer (the same artifact rows /screener serves)</div>
+  <div class="winners-body" id="ocWinnersBody">
+    <div class="winners-body-inner">
+      <div class="strip">
+        <span>run <code id="scRunId">—</code></span>
+        <span id="scDetail">awaiting real run artifact — run a sweep from the Operator page Run controls</span>
+      </div>
+
+      <div class="controls wn-filterbar">
+        <div class="ctl"><label for="scTf">Timeframe</label>
+          <select id="scTf"><option value="">All</option></select></div>
+        <div class="ctl"><label for="scDir">Direction</label>
+          <select id="scDir"><option value="">All</option></select></div>
+        <div class="ctl"><label for="scInstrument">Instrument</label>
+          <select id="scInstrument"><option value="">All</option></select></div>
+        <div class="ctl"><label for="scMinWin">Min win %</label>
+          <input id="scMinWin" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scMinPf">Min PF</label>
+          <input id="scMinPf" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scMaxDd">Max |DD| (paisa)</label>
+          <input id="scMaxDd" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scVixLo">VIX band ≥</label>
+          <input id="scVixLo" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scVixHi">VIX band ≤</label>
+          <input id="scVixHi" type="number" step="any" placeholder="any"></div>
+      </div>
+
+      <div class="count" id="scCount">no rows loaded yet — awaiting real run artifact</div>
+      <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+           the artifact order is its R30 preset (default min_dd_first), which
+           deliberately DIFFERS from /results (Rank-by metric, descending);
+           loadRows fills the live preset via textContent — no sort is changed. -->
+      <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
+
+      <div id="scPanel"></div>
+      <div class="tablewrap">
+        <table id="scTable">
+          <thead><tr id="scHead"></tr></thead>
+          <tbody id="scRows"></tbody>
+        </table>
+      </div>
+      <div class="showall" id="scShowAllWrap" hidden>
+        <button id="scShowAll" type="button">show all rows (itself render-capped at 1000 — an oversized/corrupt artifact never freezes the tab)</button>
+      </div>
+    </div>
+  </div>
+</section>
 
 <!-- ══ Live run observability (DEC-OPERATOR-PAGE-REAL-001) — always
      visible, never tab-gated: chain map (R41) · per-stage progress strips ·
@@ -2987,15 +3100,161 @@
      contract source exists for a share reel; it can return fed from real
      artifacts. -->
 
+<!-- ══ Strategy drawer (DEC-OPERATOR-PAGE-CONSOLIDATE-001): the strategy
+     panel folded into the Operator page as a slide-over dialog. Body-level
+     sibling of <main> so the open-state `inert` on main never touches it.
+     The drawer-head chrome is portal-owned (v29-only); the panel content
+     below is the VERBATIM twin of strategy.html's panel block (hook-parity
+     fenced), wired by the SAME shared bx-strategy-panel.js via
+     bx-operator-portal.js (mount once + gen-guarded update per rank).
+     /strategy stays a first-class deep-link page. -->
+<div class="drawer-back" id="ocDrawerBack" hidden></div>
+<aside class="strategy-drawer bx-stpanel" id="ocStrategyDrawer" role="dialog"
+       aria-modal="true" aria-label="Strategy detail" hidden>
+  <div class="drawer-head">
+    <button id="ocDrawerPrev" type="button" title="previous winner" disabled>‹</button>
+    <span class="drawer-rank-pill" id="ocDrawerRankPill">—</span>
+    <button id="ocDrawerNext" type="button" title="next winner" disabled>›</button>
+    <a id="ocDrawerOpenFull" href="/strategy" hidden>open full page ↗</a>
+    <button id="ocDrawerClose" class="drawer-close" type="button" aria-label="Close">✕</button>
+  </div>
+  <div class="drawer-body">
+  <section id="stHeadCard">
+    <h3><span id="stRank">—</span> · <span id="stName">awaiting real run artifact</span></h3>
+    <div class="note">run <code id="stRunId">—</code> ·
+      instrument <span id="stInstr" data-explain="instrument">—</span> · TF <span id="stTf">—</span> ·
+      direction <span id="stDir">—</span> · SL/TP arm <span id="stArm">—</span> ·
+      mask <code id="stMask">—</code> · family <span id="stFamily">—</span> ·
+      cascade <span id="stCascade" data-explain="cascade_status">—</span></div>
+  </section>
+
+  <section aria-label="Candle chart">
+    <h3>📈 Candle chart · entry/exit arrows drawn on it</h3>
+    <div class="note" id="stChartCoords">chart window resolves from the trade (?trade=N centers on that trade's entry) or the run's last session</div>
+    <div id="stChartError"></div>
+    <div class="chart-host" id="stChartHost">
+      <div class="note">no candles loaded yet — awaiting run + stored 1-minute data</div>
+    </div>
+    <div class="warnnote" id="stArrowNote" hidden></div>
+  </section>
+
+  <section aria-label="Equity curve">
+    <h3>📉 Equity curve <span class="note" style="display:inline" id="stEquityLabel">awaiting real run artifact</span></h3>
+    <!-- DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (item 4C — the #48 overlap):
+         the stored minute-path equity SERIES (/api/v1/oneclick/equity, the
+         entry's equity_ref sidecar) renders when it exists; the per-trade
+         close cumsum stays the HONEST fallback, relabeled so the two can
+         never be confused. The operator #ocEquityHost above deliberately
+         stays per-trade (the #48 owner ruling). -->
+    <div class="equity-host" id="stEquityHost">
+      <div class="note">no trades yet — awaiting real run artifact</div>
+    </div>
+  </section>
+
+  <!-- F-M5: the trade list is an INLINE section, visible AT LOAD — never a
+       tab-gated reveal. -->
+  <section aria-label="List of trades" id="stTradesSection">
+    <h3>📜 List of trades <span class="oc-source-badge" id="stTradesSource">source: none</span></h3>
+    <div class="note" id="stTradesNote">awaiting real run artifact — trades appear once the run's results-depth sidecars land</div>
+    <div id="stTradesError"></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Dir</th><th>Entry ts</th><th>Entry px</th><th>Exit ts</th><th>Exit px</th><th>Lots</th><th>Exit reason</th><th>P&amp;L</th><th>Costs</th><th>MAE</th><th>MFE</th><th>VIX in</th><th>VIX out</th><th>Chart</th></tr></thead>
+        <tbody id="stTradesBody"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button id="stPrev" type="button">← prev page</button>
+      <span id="stPage">page 1</span>
+      <button id="stNext" type="button">next page →</button>
+    </div>
+  </section>
+
+  <section aria-label="Combo story card">
+    <h3>🧾 Combo story — Edge · Risk · Consistency · Real-or-Fluke</h3>
+    <!-- HIGH #12 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the persistent
+         signal-only honesty chip — Track 1 never trades, so the P&L is the
+         GROSS signal figure, never a costed "net". -->
+    <div class="vixband" id="stSignalOnly">signal-only — costs modeled in the options-translation track</div>
+    <div class="story-grid" style="margin-top:10px">
+      <div class="story-cell"><div class="k">Edge — gross signal P&amp;L</div><div class="v" id="stNet" data-explain="gross_signal_pnl">—</div></div>
+      <div class="story-cell"><div class="k">Risk — max drawdown</div><div class="v" id="stMaxDd" data-explain="max_dd_paisa">—</div></div>
+      <div class="story-cell"><div class="k">Consistency — Sharpe</div><div class="v" id="stSharpe" data-explain="sharpe">—</div></div>
+      <div class="story-cell"><div class="k">Real-or-Fluke — DSR</div><div class="v" id="stDsr" data-explain="dsr">—</div></div>
+      <div class="story-cell"><div class="k">CPCV pass %</div><div class="v" id="stCpcv" data-explain="cpcv_pass_pct">—</div></div>
+      <div class="story-cell"><div class="k">Win rate</div><div class="v" id="stWinRate" data-explain="win_rate">—</div></div>
+      <div class="story-cell"><div class="k">Profit factor</div><div class="v" id="stPf" data-explain="profit_factor">—</div></div>
+      <div class="story-cell"><div class="k">Trades</div><div class="v" id="stTrades" data-explain="trades">—</div></div>
+    </div>
+    <!-- R31: the per-combo VIX regime band, rendered on the card -->
+    <div class="vixband" id="stVixBand" data-explain="vix_band">no VIX band</div>
+    <div class="note" id="stArith"></div>
+  </section>
+
+  <!-- HIGH #14 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the SHIPPED
+       results-depth aggregates the card previously omitted — rendered
+       verbatim from entry.metrics (top100_artifact._metrics_payload keys),
+       honest "—" for anything the artifact does not carry. Pro mode shows
+       the numbers; Beginner sees the fixed plain-English summary (the
+       jargon/plain-eng block convention). -->
+  <section aria-label="Deep stats — stored results-depth aggregates">
+    <h3>🔬 <span class="jargon">Deep stats — stored results-depth aggregates</span><span class="plain-eng">How rough was the ride?</span></h3>
+    <div class="plain-eng-block">
+      <div class="note">Worst days, losing streaks, adverse moves and how trades ended — from the stored run. Switch to Pro for the numbers.</div>
+    </div>
+    <div class="jargon-block">
+      <div class="story-grid">
+        <div class="story-cell"><div class="k">Expectancy / trade</div><div class="v" id="stExpectancy" data-explain="expectancy_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Recovery factor</div><div class="v" id="stRecovery" data-explain="recovery_factor">—</div></div>
+        <div class="story-cell"><div class="k">Max consecutive losses</div><div class="v" id="stLossStreak" data-explain="max_consecutive_losses">—</div></div>
+        <div class="story-cell"><div class="k">MAE (tf)</div><div class="v" id="stMae" data-explain="mae_avg_paisa">—</div></div>
+        <div class="story-cell"><div class="k">MFE (tf)</div><div class="v" id="stMfe" data-explain="mfe_avg_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Minute-path max DD</div><div class="v" id="stMinuteDd" data-explain="max_dd_minute_path_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Exit mix</div><div class="v" id="stExitMix" data-explain="exit_mix" style="font-size:13px">—</div></div>
+        <div class="story-cell"><div class="k">Worst 5 days</div><div class="v" id="stWorst5" data-explain="worst5_days" style="font-size:13px">—</div></div>
+        <!-- DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the joined Stage-4 verdict
+             line — server-built status_text + the verdict's own detail /
+             survivor rank / provisional caveat (mechanical joins only). -->
+        <div class="story-cell"><div class="k">Cascade validation</div><div class="v" id="stCascadeDeep" data-explain="cascade_status" style="font-size:13px">—</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown
+       from entry.regime (one_regime_wonder + axis + by_trend) — rendered
+       for real; family drill-down (R34) stays a named later PR. -->
+  <section aria-label="Regime breakdown">
+    <h3>🌦 Regime breakdown</h3>
+    <div class="story-grid">
+      <div class="story-cell"><div class="k">P&amp;L by trend regime</div><div class="v" id="stTrendSplit" data-explain="by_trend" style="font-size:13px">—</div></div>
+      <div class="story-cell"><div class="k">Regime concentration</div><div class="v" id="stRegimeWonder" data-explain="one_regime_wonder" style="font-size:13px">—</div></div>
+    </div>
+    <div class="note">family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
+  </section>
+  </div>
+</aside>
+
+<!-- Hover-explain tooltip host: v29 carried the #bxTip CSS but no node —
+     bx-oneclick binds hover explain iff the node exists (the single-bind
+     law; DEC-OPERATOR-PAGE-CONSOLIDATE-001 adds the node once). -->
+<div id="bxTip" hidden></div>
+
 <div class="modal-back" id="modalBack">
   <div class="modal">
     <h3>Screenshot instructions</h3>
     <p>PNG export needs the html2canvas library (offline?). For now use your OS screenshot tool: macOS <kbd>⌘+Shift+4</kbd> · Windows <kbd>Win+Shift+S</kbd>. For a real reel: open Reel mode → screen-record while scrolling.</p>
-    <button onclick="document.getElementById('modalBack').classList.remove('open')">Got it</button>
+    <!-- Bound via addEventListener in the tail script (fix round 2,
+         seccov LOW-1): the page carries ZERO inline on*= handlers, so the
+         widened hostile sink scan can ban the raw-HTML handler class. -->
+    <button id="modalBackOk" type="button">Got it</button>
   </div>
 </div>
 
 <script>
+  document.getElementById('modalBackOk').addEventListener('click', () => {
+    document.getElementById('modalBack').classList.remove('open');
+  });
+
   document.querySelectorAll('.tabs button').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
@@ -3037,7 +3296,7 @@
       piece.style.transform = `rotate(${Math.random() * 360}deg)`;
       c.appendChild(piece);
     }
-    setTimeout(() => { c.innerHTML = ''; }, 4500);
+    setTimeout(() => { c.replaceChildren(); }, 4500);
   }
 
   // Export
@@ -3301,9 +3560,13 @@
     btn.addEventListener('click', () => {
       const expanded = grid.classList.toggle('show-all');
       btn.classList.toggle('expanded', expanded);
-      btn.innerHTML = expanded
-        ? 'Hide last 6 filters <span class="chev">▾</span>'
-        : 'Show 6 more filters <span class="chev">▾</span>';
+      // Static-string label rebuilt sink-free: textContent + one span node
+      // (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — v29 joins the hostile sink scan).
+      btn.textContent = expanded ? 'Hide last 6 filters ' : 'Show 6 more filters ';
+      const chev = document.createElement('span');
+      chev.className = 'chev';
+      chev.textContent = '▾';
+      btn.appendChild(chev);
     });
   })();
 
@@ -3315,9 +3578,13 @@
         const card = btn.closest('.rule-card.v29-collapse');
         if (!card) return;
         const expanded = card.classList.toggle('v29-expanded');
-        btn.innerHTML = expanded
-          ? 'Hide mechanics <span class="chev">▾</span>'
-          : 'Show mechanics <span class="chev">▾</span>';
+        // Static-string label rebuilt sink-free (same law as the filter
+        // reveal toggle above).
+        btn.textContent = expanded ? 'Hide mechanics ' : 'Show mechanics ';
+        const chev = document.createElement('span');
+        chev.className = 'chev';
+        chev.textContent = '▾';
+        btn.appendChild(chev);
       });
     });
   })();
@@ -3352,38 +3619,32 @@
     // only; backend payloads are frozen (no generation field added).
     let lastFunnelPayload = '';
 
-    async function pollState() {
-      // Hidden-tab pause (DEC-DASHBOARD-UX-ANIMATE-001): a background tab
-      // holds no socket open for this poll; visibilitychange below fires an
-      // immediate refresh tick on return. Pure scheduling — the skip-render
-      // memo + bound-field semantics are unchanged.
-      if (document.hidden) return;
-      try {
-        const res = await fetch('/api/v1/state');
-        if (!res.ok) return;  // server hiccup; next tick retries
-        const snap = await res.json();
-        // Sweep funnel may be null when no sweep has started yet —
-        // the honest em-dash placeholders stay in that case (the manifest
-        // fill in bx-oneclick.js covers the completed-run view — C-M2).
-        const funnel = snap.sweep_funnel;
-        if (!funnel) return;
-        const payload = JSON.stringify(funnel);
-        if (payload === lastFunnelPayload) return;  // unchanged → skip render
-        lastFunnelPayload = payload;
-        stateBoundEls.forEach(function (el) {
-          const key = el.getAttribute('data-bind');
-          if (funnel[key] !== undefined && funnel[key] !== null) {
-            el.textContent = formatNumber(funnel[key]);
-          }
-        });
-        // C-M2 funnel write precedence: the LIVE writer stamps its
-        // provenance beside the funnel (bx-oneclick's manifest fill labels
-        // the completed-run side) — two sources never interleave silently.
-        const prov = document.getElementById('ocFunnelProvenance');
-        if (prov && window.BXOneclick) {
-          prov.textContent = 'funnel source: ' + window.BXOneclick.funnelProvenance('live', funnel.sweep_id || '');
+    // Render one /api/v1/state snapshot (the fetch/scheduling moved onto the
+    // shared BXPoll core below — DEC-FRONTEND-LATENCY-HARDENING-001,
+    // MIGRATION.md #1720; the skip-render memo + bound-field semantics are
+    // byte-identical to the old pollState body).
+    function renderStateSnap(snap) {
+      // Sweep funnel may be null when no sweep has started yet —
+      // the honest em-dash placeholders stay in that case (the manifest
+      // fill in bx-oneclick.js covers the completed-run view — C-M2).
+      const funnel = snap.sweep_funnel;
+      if (!funnel) return;
+      const payload = JSON.stringify(funnel);
+      if (payload === lastFunnelPayload) return;  // unchanged → skip render
+      lastFunnelPayload = payload;
+      stateBoundEls.forEach(function (el) {
+        const key = el.getAttribute('data-bind');
+        if (funnel[key] !== undefined && funnel[key] !== null) {
+          el.textContent = formatNumber(funnel[key]);
         }
-      } catch (e) { /* network blip; next tick retries */ }
+      });
+      // C-M2 funnel write precedence: the LIVE writer stamps its
+      // provenance beside the funnel (bx-oneclick's manifest fill labels
+      // the completed-run side) — two sources never interleave silently.
+      const prov = document.getElementById('ocFunnelProvenance');
+      if (prov && window.BXOneclick) {
+        prov.textContent = 'funnel source: ' + window.BXOneclick.funnelProvenance('live', funnel.sweep_id || '');
+      }
     }
 
     // Cadence per §6.0: 2s while running (caller can adjust by reading
@@ -3392,18 +3653,52 @@
     // Skip when offline / file:// — the mockup is served standalone
     // from the docs folder for design review; the poller only matters
     // when the file is served by the FastAPI app on 127.0.0.1:9080.
+    // Scheduling rides the ONE shared BXPoll discipline core (bx-poll.js —
+    // hidden-tab guard, one-in-flight chain, 10 s fetch abort, capped
+    // 3 s→30 s failure backoff, visibilitychange catch-up); the poller
+    // starts at DOMContentLoaded, by which every deferred script has
+    // executed. bx-poll.js failing to load degrades to the legacy guarded
+    // interval — the funnel never goes pollerless.
     if (window.location.protocol !== 'file:') {
-      pollState();  // first call immediate so the page is fresh on load
-      setInterval(pollState, 2000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) pollState(); });
+      const startStatePolling = () => {
+        if (window.BXPoll) {
+          window.BXPoll.createPoller({
+            url: '/api/v1/state',
+            pollMs: 2000,
+            onData: renderStateSnap
+          }).start();
+        } else {
+          const legacyTick = async () => {
+            if (document.hidden) return;
+            try {
+              const res = await fetch('/api/v1/state');
+              if (!res.ok) return;  // server hiccup; next tick retries
+              renderStateSnap(await res.json());
+            } catch (e) { /* network blip; next tick retries */ }
+          };
+          legacyTick();
+          setInterval(legacyTick, 2000);
+          document.addEventListener('visibilitychange', () => { if (!document.hidden) legacyTick(); });
+        }
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startStatePolling);
+      } else {
+        startStatePolling();
+      }
     }
   })();
 
-  // Live sweep-progress poller (DEC-SWEEP-WIRE-GA-001) — fetches the dedicated
-  // /api/v1/sweep-progress route every 2s and fills every [data-sweep="<field>"]
-  // element. Idle until the supervisor's first snapshot; the panel un-hides once
-  // a sweep is running or done. HONEST envelope: rate/percent are at the grid
-  // TUPLE grain (the supervised unit), not per-mask.
+  // Live sweep-progress renderer (DEC-SWEEP-WIRE-GA-001) — fills every
+  // [data-sweep="<field>"] element. Idle until the supervisor's first
+  // snapshot; the panel un-hides once a sweep is running or done. HONEST
+  // envelope: rate/percent are at the grid TUPLE grain (the supervised
+  // unit), not per-mask. Since DEC-FRONTEND-LATENCY-HARDENING-001
+  // (MIGRATION.md #1720) this block owns NO timer: it SUBSCRIBES to the ONE
+  // /api/v1/sweep-progress poller (bx-oneclick.js progressPoller, the
+  // BXPoll-disciplined 3 s consumer) — the former second 2 s setInterval on
+  // the same endpoint is gone (measured BEFORE: 99 sweep-progress requests
+  // per idle 120 s = the two pollers summed).
   (function () {
     function fmtEta(secs) {
       if (secs === null || secs === undefined) return '—';
@@ -3423,47 +3718,57 @@
     // tick). CLIENT-side compare only; backend payloads are frozen.
     const sweepBoundEls = document.querySelectorAll('[data-sweep]');
     let lastSweepPayload = '';
-    async function pollSweepProgress() {
-      // Hidden-tab pause — see pollState; visibilitychange refreshes on return.
-      if (document.hidden) return;
-      try {
-        const res = await fetch('/api/v1/sweep-progress');
-        if (!res.ok) {
-          // Heartbeat hook (DEC-DASHBOARD-UX-ANIMATE-001): surface the honest
-          // "unreachable — retrying" state; the panel itself keeps its
-          // silent-retry contract.
-          if (window.__bxHbSweepErr) window.__bxHbSweepErr(res.status);
-          return;  // server hiccup; next tick retries
+    function renderSweepProgress(sp) {
+      // Heartbeat hook: the hero's sweep slot rides the SAME shared poll —
+      // zero extra sockets. Fires before the idle-return so "idle" renders
+      // honestly.
+      if (window.__bxHbSweep) window.__bxHbSweep(sp);
+      // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): this ALWAYS-ON
+      // renderer owns the attach case — the Stop button is visible exactly
+      // while a sweep reports running, even when this page never clicked Run.
+      // Runs BEFORE the idle-return so an idle snapshot re-hides the button
+      // and un-wedges a disabled one.
+      const stopAttach = document.getElementById('stop-sweep');
+      if (stopAttach && sp) {
+        stopAttach.hidden = !sp.running;
+        // Attach-case reset (DEC-JOB-COOPERATIVE-CANCEL-001 review fold): a
+        // Stop click disables the button + stamps "Stopping…", and the
+        // onRunSweepProgress settle reset only runs when THIS page clicked Run —
+        // so the always-on renderer restores the idle label once no sweep is
+        // running, never leaving a wedged dead disabled button for the
+        // NEXT sweep to un-hide.
+        if (!sp.running && stopAttach.disabled) {
+          stopAttach.disabled = false;
+          stopAttach.textContent = '⏹ Stop';
         }
-        const sp = await res.json();
-        // Heartbeat hook: the hero's sweep slot rides THIS fetch — zero extra
-        // sockets. Fires before the idle-return so "idle" renders honestly.
-        if (window.__bxHbSweep) window.__bxHbSweep(sp);
-        if (!sp || sp.state === 'idle') return;  // nothing running yet
-        const panel = document.getElementById('sweepProgressPanel');
-        // Un-hide BEFORE the skip gate so the first running snapshot always
-        // reveals the panel (re-assigning hidden=false is a no-op after that).
-        if (panel) panel.hidden = false;
-        const payload = JSON.stringify(sp);
-        if (payload === lastSweepPayload) return;  // unchanged → skip render
-        lastSweepPayload = payload;
-        sweepBoundEls.forEach(function (el) {
-          const key = el.getAttribute('data-sweep');
-          let v = sp[key];
-          if (key === 'eta_seconds') v = fmtEta(v);
-          else if (key === 'combos_per_sec') v = fmtRate(v);
-          else if (key === 'percent') v = (v === null || v === undefined) ? '0' : v;
-          el.textContent = (v === null || v === undefined) ? '' : String(v);
-        });
-      } catch (e) {
-        if (window.__bxHbSweepErr) window.__bxHbSweepErr(e);
-        /* network blip; next tick retries */
       }
+      if (!sp || sp.state === 'idle') return;  // nothing running yet
+      const panel = document.getElementById('sweepProgressPanel');
+      // Un-hide BEFORE the skip gate so the first running snapshot always
+      // reveals the panel (re-assigning hidden=false is a no-op after that).
+      if (panel) panel.hidden = false;
+      const payload = JSON.stringify(sp);
+      if (payload === lastSweepPayload) return;  // unchanged → skip render
+      lastSweepPayload = payload;
+      sweepBoundEls.forEach(function (el) {
+        const key = el.getAttribute('data-sweep');
+        let v = sp[key];
+        if (key === 'eta_seconds') v = fmtEta(v);
+        else if (key === 'combos_per_sec') v = fmtRate(v);
+        else if (key === 'percent') v = (v === null || v === undefined) ? '0' : v;
+        el.textContent = (v === null || v === undefined) ? '' : String(v);
+      });
     }
     if (window.location.protocol !== 'file:') {
-      pollSweepProgress();
-      setInterval(pollSweepProgress, 2000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) pollSweepProgress(); });
+      // Subscribe to the ONE shared sweep-progress poller (bx-oneclick.js
+      // reads these arrays at CALL time, so registering before the deferred
+      // file executes is safe). The failure twin surfaces the honest
+      // "unreachable — retrying" heartbeat state; BXPoll's hidden guard +
+      // backoff + visibilitychange catch-up cover this renderer for free.
+      (window.__bxSweepProgressSubs = window.__bxSweepProgressSubs || []).push(renderSweepProgress);
+      (window.__bxSweepProgressFailSubs = window.__bxSweepProgressFailSubs || []).push(function (failures) {
+        if (window.__bxHbSweepErr) window.__bxHbSweepErr(failures);
+      });
     }
   })();
 
@@ -3471,9 +3776,10 @@
   // Live system-heartbeat hero: three async slots, each resolving skeleton →
   // data / honest idle / honest "unreachable — retrying". All DOM writes go
   // through textContent (zero innerHTML sinks). The sweep slot rides the
-  // existing /api/v1/sweep-progress poller via the window.__bxHbSweep hooks;
-  // pull-rate + liveproof poll on their own gentle cadences (5 s / 10 s),
-  // paused while the tab is hidden.
+  // shared /api/v1/sweep-progress poller via the window.__bxHbSweep hooks;
+  // the pull-rate + liveproof slots ride the site-wide widgets' OWN polls
+  // via the __bxPullRateSubs / __bxLiveproofSubs fan-outs
+  // (DEC-FRONTEND-LATENCY-HARDENING-001) — this hero owns ZERO timers.
   (function () {
     const hb = document.getElementById('bxHeartbeat');
     if (!hb) return;
@@ -3536,30 +3842,66 @@
       setSlot('sweep', 'bad', 'sweep feed unreachable — retrying', 'the 2 s poller keeps retrying automatically');
     };
 
-    // ── pull slot: /api/v1/pull/rate every 5 s ──
-    async function pollPull() {
-      if (document.hidden) return;
-      try {
-        const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/pull/rate', 10000) : fetch('/api/v1/pull/rate'));
-        if (!r.ok) { setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 5 s'); return; }
-        const d = await r.json();
-        const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
-        if (state === 'flowing') {
-          setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
-            'pull active · measured completed rate');
-        } else if (state === 'stalled') {
-          setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
-        } else if (state === 'done') {
-          setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
+    // ── pull slot: fed by the site-wide bx-rate-monitor.js widget's ONE
+    //    /api/v1/pull/rate poll via the __bxPullRateSubs fan-out
+    //    (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720) — the
+    //    former second 5 s setInterval on the same endpoint is gone
+    //    (measured BEFORE: 63 pull/rate requests per idle 120 s = the two
+    //    pollers summed). ──
+    function renderHbPull(d) {
+      const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
+      // DEC-OPERATOR-HEALTH-TRUTH-001: 'done' means ONLY "no pull running +
+      // a fresh tick" (pull_rate_view.py) — the pre-fix green "last pull
+      // completed cleanly" showed the SAME green for a disk-full /
+      // market-hours / quota HALT. The additive `last_pull` OUTCOME block
+      // (classified backend-side from the job's recorded state + the pull
+      // verdict) now decides; its tone ∈ ok|warn|bad|idle maps 1:1 onto
+      // setSlot. All strings land via textContent (never markup).
+      const lp = (d && d.last_pull && typeof d.last_pull === 'object') ? d.last_pull : null;
+      if (state === 'flowing') {
+        setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
+          'pull active · measured completed rate');
+      } else if (state === 'failing') {
+        // Previously fell through to "idle — no pull running" — dishonest for
+        // an ACTIVE pull burning calls that all fail.
+        setSlot('pull', 'bad', 'pull active — calls FAILING',
+          'calls are being issued and every one fails (' + fmtRps(d.req_per_sec_failed) + ' failed r/s)');
+      } else if (state === 'stalled') {
+        setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
+      } else if (state === 'local') {
+        // Previously fell through to "idle" — an ACTIVE pull in a
+        // zero-vendor-call local stage (prebuild/movers) reads amber, not idle.
+        setSlot('pull', 'warn', 'pull active — local processing',
+          (d && typeof d.flow_detail === 'string' && d.flow_detail) ? d.flow_detail : 'prebuild/movers — no vendor calls by design');
+      } else if (state === 'done') {
+        if (lp && lp.outcome === 'clean') {
+          setSlot('pull', 'ok', 'pull finished — completed cleanly', String(lp.detail || 'classified clean by the pull verdict'));
+        } else if (lp && (lp.tone === 'warn' || lp.tone === 'bad')) {
+          // HALTED / deferred / failed / completed-with-issues: the named
+          // degraded state — NEVER the clean-completion green.
+          setSlot('pull', lp.tone, String(lp.headline || 'pull finished — degraded'), String(lp.detail || ''));
+        } else if (lp && lp.outcome === 'completed') {
+          setSlot('pull', 'ok', 'pull finished', String(lp.detail || 'completed — no classified verdict recorded'));
+        } else {
+          // No outcome evidence (an idle-tone outcome / an older backend):
+          // an honest neutral — never an unevidenced "completed cleanly".
+          setSlot('pull', 'idle', 'pull finished', 'outcome unknown — no classified verdict recorded');
+        }
+      } else {
+        // idle: a degraded LAST outcome stays visible after the rate tick
+        // ages out — a halted pull must not fade into a neutral "idle".
+        if (lp && (lp.tone === 'warn' || lp.tone === 'bad')) {
+          setSlot('pull', lp.tone, String(lp.headline || 'last pull degraded'),
+            (lp.detail ? String(lp.detail) + ' · ' : '') + 'no pull running now');
         } else {
           setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
         }
-      } catch (e) {
-        setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'retries every 5 s');
       }
     }
 
-    // ── proof slot: /api/v1/liveproof every 10 s ──
+    // ── proof slot: fed by the site-wide bx-liveproof.js widget's ONE
+    //    /api/v1/liveproof poll via the __bxLiveproofSubs fan-out (same law:
+    //    the former second 10 s setInterval is gone). ──
     const KIND_TONE = { pass: 'ok', na: 'idle', warn: 'warn', fail: 'bad', error: 'bad' };
     const KIND_RANK = { ok: 0, idle: 1, warn: 2, bad: 3 };
     function verdictTone(block) {
@@ -3567,36 +3909,36 @@
       if (!v) return null;
       return KIND_TONE[v.kind] || 'warn';
     }
-    async function pollProof() {
-      if (document.hidden) return;
-      try {
-        const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/liveproof', 10000) : fetch('/api/v1/liveproof'));
-        if (!r.ok) { setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 10 s'); return; }
-        const d = await r.json();
-        const pre = verdictTone(d && d.preflight);
-        const prb = verdictTone(d && d.probes);
-        if (pre === null && prb === null) {
-          setSlot('proof', 'idle', 'not yet run', 'preflight + probes run around the first real pull');
-          return;
-        }
-        const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
-        const head = (d.preflight && d.preflight.verdict && d.preflight.verdict.headline) ||
-                     (d.probes && d.probes.verdict && d.probes.verdict.headline) || '';
-        if (worst === 'ok') setSlot('proof', 'ok', 'all checks pass', head);
-        else if (worst === 'idle') setSlot('proof', 'idle', 'not applicable', head);
-        else if (worst === 'warn') setSlot('proof', 'warn', 'checks degraded', head);
-        else setSlot('proof', 'bad', 'checks FAILING', head || 'see the live-proof pill for the failing stages');
-      } catch (e) {
-        setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'retries every 10 s');
+    function renderHbProof(d) {
+      const pre = verdictTone(d && d.preflight);
+      const prb = verdictTone(d && d.probes);
+      if (pre === null && prb === null) {
+        setSlot('proof', 'idle', 'not yet run', 'preflight + probes run around the first real pull');
+        return;
       }
+      const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
+      const head = (d.preflight && d.preflight.verdict && d.preflight.verdict.headline) ||
+                   (d.probes && d.probes.verdict && d.probes.verdict.headline) || '';
+      if (worst === 'ok') setSlot('proof', 'ok', 'all checks pass', head);
+      else if (worst === 'idle') setSlot('proof', 'idle', 'not applicable', head);
+      else if (worst === 'warn') setSlot('proof', 'warn', 'checks degraded', head);
+      else setSlot('proof', 'bad', 'checks FAILING', head || 'see the live-proof pill for the failing stages');
     }
 
     if (window.location.protocol !== 'file:') {
-      pollPull();
-      pollProof();
-      setInterval(pollPull, 5000);
-      setInterval(pollProof, 10000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollPull(); pollProof(); } });
+      // Both slots SUBSCRIBE to the widgets' own polls (the fan-out arrays
+      // are read at call time inside bx-rate-monitor.js / bx-liveproof.js,
+      // so registering before those deferred files execute is safe). The
+      // widgets own the hidden guard, 10 s fetch abort, capped 3 s→30 s
+      // backoff and visibilitychange catch-up — this page adds NO timer.
+      (window.__bxPullRateSubs = window.__bxPullRateSubs || []).push(renderHbPull);
+      (window.__bxPullRateFailSubs = window.__bxPullRateFailSubs || []).push(function () {
+        setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'rides the shared pull-rate widget poll (backoff capped at 30 s)');
+      });
+      (window.__bxLiveproofSubs = window.__bxLiveproofSubs || []).push(renderHbProof);
+      (window.__bxLiveproofFailSubs = window.__bxLiveproofFailSubs || []).push(function () {
+        setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'rides the shared live-proof widget poll (backoff capped at 30 s)');
+      });
     } else {
       // Standalone design review (file://): no endpoints exist — resolve the
       // skeletons to an honest static note instead of infinite shimmer.
@@ -3615,8 +3957,17 @@
     const sweepMsg = document.getElementById('sweep-msg');
     const sweepBar = document.getElementById('sweep-bar');
     const sweepFill = document.getElementById('sweep-bar-fill');
+    const stopBtn = document.getElementById('stop-sweep');
     if (!sweepBtn || !sweepMsg) return;
-    let sweepPoll = null;
+    // Watching flag (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720):
+    // the former THIRD /api/v1/sweep-progress poller (a 1.2 s setInterval with
+    // no hidden guard / backoff / fetch timeout, armed on the Run click) is
+    // replaced by a SUBSCRIPTION to the ONE shared bx-oneclick progressPoller
+    // (BXPoll-disciplined, 3 s). The Run click flips `watching` on + fires an
+    // immediate shared pollNow(); the terminal snapshot flips it off. The
+    // progress bar therefore updates at the shared 3 s cadence (was 1.2 s) —
+    // an accepted trade for one-poller-per-endpoint.
+    let watching = false;
 
     function renderSweep(p) {
       const pct = Math.max(0, Math.min(100, p.percent || 0));
@@ -3627,21 +3978,59 @@
         p.state + ' · ' + pct.toFixed(1) + '% · enumerated=' + (p.enumerated || 0) +
         ' · evaluated=' + (p.evaluated || 0) + ' · survivors=' + (p.survivors || 0) +
         ' · ' + rate + ' combos/sec';
+      // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): visible exactly
+      // while the sweep reports running (covers attach-to-already-running).
+      if (stopBtn) stopBtn.hidden = !p.running;
     }
 
-    async function pollRunSweep() {
-      try {
-        const r = await fetch('/api/v1/sweep-progress');
-        const p = await r.json();
-        renderSweep(p);
-        if (!p.running && p.state !== 'idle') {
-          clearInterval(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
+    function onRunSweepProgress(p) {
+      if (!watching || !p) return;
+      renderSweep(p);
+      if (!p.running && p.state !== 'idle') {
+        watching = false; sweepBtn.disabled = false;
+        // Cooperative Stop settle (DEC-JOB-COOPERATIVE-CANCEL-001): reset the
+        // Stop button on terminal settle, and name a cancelled run honestly
+        // instead of a fabricated ✅.
+        if (stopBtn) { stopBtn.hidden = true; stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop'; }
+        if (p.state === 'cancelled') {
+          sweepMsg.textContent = '⏹ Sweep cancelled — ' + (p.detail || 'stopped at the tuple boundary') +
+            '. Run again to resume from the checkpoint.';
+        } else {
           sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
             ' survivor(s). The report above refreshes from the new run artifacts.';
         }
-      } catch (e) {
-        sweepMsg.textContent = 'Could not read sweep progress: ' + e;
       }
+    }
+    (window.__bxSweepProgressSubs = window.__bxSweepProgressSubs || []).push(onRunSweepProgress);
+    (window.__bxSweepProgressFailSubs = window.__bxSweepProgressFailSubs || []).push(function (failures) {
+      if (!watching) return;
+      sweepMsg.textContent = 'Could not read sweep progress (poll failure ×' + failures +
+        ') — the shared poller keeps retrying.';
+    });
+
+    if (stopBtn) {
+      stopBtn.onclick = async () => {
+        stopBtn.disabled = true;
+        stopBtn.textContent = '⏳ Stopping — finishing current tuple…';
+        try {
+          const r = await fetch('/api/v1/sweep/cancel', { method: 'POST' });
+          const j = await r.json();
+          if (!j.cancelling) {
+            // Continuation-v2 fix: the route's refusal payload carries an
+            // actionable `error` exactly when a sweep IS running but the
+            // cancel sidecar write failed (ENOSPC / read-only lake) — render
+            // it (textContent-only, the cascade handler's j.error precedent)
+            // instead of the factually false "No running sweep to cancel.".
+            sweepMsg.textContent = j.error
+              ? ('Cancel failed: ' + j.error + ' — fix the lake volume and retry')
+              : 'No running sweep to cancel.';
+            stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop';
+          }
+        } catch (e) {
+          sweepMsg.textContent = 'Cancel request failed: ' + e;
+          stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop';
+        }
+      };
     }
 
     sweepBtn.onclick = async () => {
@@ -3680,9 +4069,9 @@
         }
         sweepMsg.textContent = 'Sweep started — ' + j.symbols + ' · ' + j.intervals +
           ' · ' + j.start + ' → ' + j.end + '. Watching progress…';
-        if (sweepPoll) clearInterval(sweepPoll);
-        sweepPoll = setInterval(pollRunSweep, 1200);
-        pollRunSweep();
+        watching = true;
+        // Immediate refresh through the ONE shared poller (no second timer).
+        if (window.__bxSweepProgressPollNow) window.__bxSweepProgressPollNow();
       } catch (e) {
         sweepMsg.textContent = 'Sweep request failed: ' + e;
         sweepBtn.disabled = false;
@@ -3726,7 +4115,7 @@
       const io = new IntersectionObserver((entries) => {
         entries.forEach((en) => en.target.classList.toggle('bx-anim-off', !en.isIntersecting));
       }, { rootMargin: '80px' });
-      ['.hook-banner', '.verdict', '.equity-wrap'].forEach((sel) => {
+      ['.verdict', '.equity-wrap'].forEach((sel) => {
         const n = document.querySelector(sel);
         if (n) io.observe(n);
       });

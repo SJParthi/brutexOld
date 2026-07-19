@@ -2961,14 +2961,20 @@ class TestPullAllLedgerRescueSurface:
         # Run 1 settles the range SUCCESS (real sink + ledger, dry_run=False with an
         # injected synthetic adapter); run 2 skips the settled window WITHOUT a
         # vendor hit and SAYS so — in the report, its dict, the spine INFO line,
-        # and the pull-done INFO.
+        # and the pull-done INFO. The range is bounded to 2026-02-06 so the
+        # synthetic adapter's first-day-only bars stay WITHIN the 5-session
+        # truncation tolerance: a live bulk pull now arms
+        # ``detect_completeness_gaps`` (DEC-BULK-SPOT-COMPLETENESS-FLAG-001), and
+        # the original 2026-02-13 range (9 missing sessions) would legitimately
+        # DEMOTE the index window (SUSPECTED_PARTIAL) instead of settling it —
+        # this test pins the SETTLED-window skip law, so the fixture must settle.
         first = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
             from_date="2026-02-02",
-            to_date="2026-02-13",
+            to_date="2026-02-06",
             adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
         )
         assert first.windows_skipped == 0  # a fresh lake has nothing skippable
@@ -2979,7 +2985,7 @@ class TestPullAllLedgerRescueSurface:
                 dry_run=False,
                 now=_BULK_NOW,
                 from_date="2026-02-02",
-                to_date="2026-02-13",
+                to_date="2026-02-06",
                 adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
             )
         # One symbol × the 1-minute default interval × one 30-day tile = 1 window.
@@ -3539,7 +3545,7 @@ class TestObservedHolidaysArming:
     def test_pull_all_spot_dry_run_threads_empty_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         assert expected  # the sidecar IS present — the dry-run must still ignore it
@@ -3558,7 +3564,7 @@ class TestObservedHolidaysArming:
     def test_pull_all_spot_live_threads_loaded_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3582,7 +3588,7 @@ class TestObservedHolidaysArming:
     def test_pull_candles_live_threads_loaded_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3607,7 +3613,7 @@ class TestObservedHolidaysArming:
     def test_pull_candles_dry_run_threads_empty_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3770,3 +3776,710 @@ class TestIngestAuditWiring:
     def test_pull_candles_dry_run_writes_no_audit(self, tmp_path: Path) -> None:
         pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert not (tmp_path / "audit").exists()
+
+
+class TestCooperativeCancel:
+    """DEC-JOB-COOPERATIVE-CANCEL-001: a cooperative cancel maps to the honest partial verdict."""
+
+    def test_cancel_at_window_boundary_sets_cancelled_and_keeps_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """A should_stop that fires stops the spot pull gracefully — cancelled=True, no crash.
+
+        The spine raises ``PullCancelled`` at the first window boundary (before any
+        vendor call); ``pull_all_spot`` CATCHES it like the quota / mass-empty global
+        stops, latches ``final_cancelled``, halts the remaining step groups, and the
+        report reads ``cancelled=True`` — an honest partial, NOT an ``error`` and with
+        NO Telegram alert (the operator asked for it).
+        """
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=True,
+                now=_BULK_NOW,
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        assert report.auth_aborted is False
+        assert report.quota_exhausted is False
+        assert report.to_dict()["cancelled"] is True
+        events = {log["event"] for log in logs}
+        assert "universe.pull_all.cancelled" in events
+
+    def test_cancelled_verdict_is_never_a_fabricated_green_clean(self, tmp_path: Path) -> None:
+        """Continuation-v3 MAJOR (fails-before): a cancelled pull's verdict kind is `cancelled`.
+
+        Pre-fix ``BulkSpotReport.verdict`` never passed the ``cancelled`` latch
+        into :func:`classify_pull`, so an operator Stop fell through to the
+        GREEN ``clean`` kind — the "✅ Pull complete. / No action needed."
+        banner stamped into ``_last_pull_verdict`` on all three cancel-wired
+        surfaces AND the durable G5 pull journal (``record_pull_finish``
+        stamps ``verdict=verdict.kind``). The honest verdict is the amber
+        ``cancelled`` partial naming the operator stop + the re-run remedy.
+        """
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            should_stop=lambda: True,
+        )
+        assert report.cancelled is True
+        verdict = report.verdict
+        # A dry-run verdict is mark_synthetic-relabeled; the KIND is preserved
+        # (the classifier stays the one authority) — pin the kind itself.
+        assert verdict.kind == "cancelled"
+        assert verdict.needs_operator is True
+        assert "CANCELLED at operator request" in verdict.headline
+        assert "✅ Pull complete." not in verdict.headline
+        assert "Re-run the pull to resume the remainder" in verdict.action
+        d = report.to_dict()
+        assert d["verdict"]["kind"] == "cancelled"
+        # The emit-on-cancel note: pull_jobs._finish_detail reads a Mapping's
+        # non-empty "note" as the job's completion headline, so a cancelled
+        # pull never finishes with the bare back-compat "done".
+        assert "CANCELLED at operator request" in d["note"]
+
+    def test_no_probe_is_not_cancelled(self, tmp_path: Path) -> None:
+        """The default (no should_stop) pull is never cancelled — byte-compatible."""
+        report = pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert report.cancelled is False
+        d = report.to_dict()
+        assert d["cancelled"] is False
+        # No emit-on-cancel note on an uncancelled payload (byte-identical wire;
+        # the job's completion headline stays the back-compat "done").
+        assert "note" not in d
+        assert d["verdict"]["kind"] != "cancelled"
+
+    def test_cancelled_group_settle_event_reads_clean_false(self, tmp_path: Path) -> None:
+        """Continuation-v2 fix (fails-before): a cancelled group's settle is NOT clean.
+
+        ``PullCancelled`` is consumed inside ``_run_phase``, so the truncated
+        group still emits its ``pull.step.settled`` event with the unissued
+        windows left PLANNED (``group_failed == 0``) — pre-fix the event read
+        a false ``clean=True``. The ``final_cancelled`` latch now folds into
+        the ``clean=`` conjunction exactly like the adjacent market-hours /
+        auth / quota / mass-empty latches.
+        """
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=True,
+                now=_BULK_NOW,
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        settled = [log for log in logs if log["event"] == "pull.step.settled"]
+        assert settled, "the cancelled group must still emit its settle event"
+        assert all(log["clean"] is False for log in settled)
+
+    def test_uncancelled_group_settle_event_stays_clean(self, tmp_path: Path) -> None:
+        """The clean-run settle event stays ``clean=True`` — the latch fold is additive."""
+        with capture_logs() as logs:
+            pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        settled = [log for log in logs if log["event"] == "pull.step.settled"]
+        assert settled
+        assert all(log["clean"] is True for log in settled)
+
+    def test_cancel_withholds_post_drain_heal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Continuation-v2 fix (fails-before): a cancelled pull skips the L2 heal, loudly.
+
+        ``PullCancelled`` is consumed inside ``_run_phase`` so execution reaches
+        ``fetch_phases_ok = True``, and the finally's O(pulled-scope)
+        ``_heal_after_pull`` previously ran AFTER the operator's Stop —
+        contradicting the "finishing current window, then stop" latency
+        contract (the F&O twin was fixed in combined-PR round 2 via
+        ``cancelled_tail``; this is its spot mirror). The heal is now WITHHELD
+        with ONE ``pull.cancel_heal_skipped`` WARN naming the next-pull cover.
+        """
+        calls: list[str] = []
+        monkeypatch.setattr(pull_controller, "_heal_after_pull", lambda **_kw: calls.append("heal"))
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        assert calls == []
+        events = {log["event"] for log in logs}
+        assert "pull.cancel_heal_skipped" in events
+
+    def test_uncancelled_pull_still_runs_post_drain_heal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The no-cancel pull keeps the L2 heal — the withholding is cancel-gated only."""
+        calls: list[str] = []
+        monkeypatch.setattr(pull_controller, "_heal_after_pull", lambda **_kw: calls.append("heal"))
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+        assert report.cancelled is False
+        assert calls == ["heal"]
+        events = {log["event"] for log in logs}
+        assert "pull.cancel_heal_skipped" not in events
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-LEDGER-LOAD-SPACE-V1-001 — the shared pipeline ledger seam
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSharedLedgerSeam:
+    """`ledger=` injection + the production `shared_pull_ledger_scope` engagement.
+
+    Mutant-killing wiring pins (the register-site precedent): the injected /
+    scope-shared instance must be the EXACT object the spot phase records into
+    and persists — a severed kwarg or a dropped scope consult fails by identity.
+    """
+
+    def _capture_end(self, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        """Capture the ledger handed to `end_pull_ledger` (then save for real)."""
+        real_end = pull_controller.end_pull_ledger
+        captured: list[object] = []
+
+        def _spy(ledger: object, lake_root: Path, *, dry_run: bool) -> None:
+            captured.append(ledger)
+            real_end(ledger, lake_root, dry_run=dry_run)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pull_controller, "end_pull_ledger", _spy)
+        return captured
+
+    def test_injected_ledger_is_used_and_begin_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        mine = WindowLedger()
+        captured = self._capture_end(monkeypatch)
+
+        def _never(*args: object, **kwargs: object) -> None:
+            raise AssertionError("begin_pull_ledger must be SKIPPED for an injected ledger")
+
+        monkeypatch.setattr(pull_controller, "begin_pull_ledger", _never)
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+            now=_BULK_NOW,
+            ledger=mine,
+        )
+        assert report.total_symbols == 1
+        # The spot phase recorded into + persisted EXACTLY the injected instance.
+        assert captured and captured[-1] is mine
+        assert mine.count > 0  # the phase genuinely planned/recorded on it
+
+    def test_injected_ledger_is_ignored_under_dry_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        mine = WindowLedger()
+        captured = self._capture_end(monkeypatch)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            ledger=mine,
+        )
+        # A dry-run NEVER records/persists — the injected instance is ignored.
+        assert captured and captured[-1] is None
+        assert mine.count == 0
+
+    def test_scope_shared_instance_reaches_spot_phase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production engagement: under an active scope, the spot phase's own
+        `begin_pull_ledger` (no kwarg passed) returns the scope's ONE instance."""
+        from brutex.data.window_ledger_store import (
+            begin_pull_ledger,
+            shared_pull_ledger_scope,
+        )
+
+        captured = self._capture_end(monkeypatch)
+        with shared_pull_ledger_scope():
+            first = begin_pull_ledger(tmp_path, dry_run=False)
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+                now=_BULK_NOW,
+            )
+        assert captured and captured[-1] is first
+
+
+class TestTodayCompletenessGateArming:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001: both dashboard spot arm sites resolve the
+    env kill switch ONCE per pull and thread the flag — live pull only (a dry-run
+    threads ``False``, the ``detect_completeness_gaps`` gating pattern). The gate
+    rides its OWN parameter on the bulk ``pull_all_spot`` phase — which now ALSO
+    arms ``detect_completeness_gaps`` itself (DEC-BULK-SPOT-COMPLETENESS-FLAG-001,
+    pinned by :class:`TestCompletenessDemotionArming`)."""
+
+    def test_pull_all_spot_arms_today_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert captured
+        assert all(flag is True for flag in captured)
+
+    def test_pull_all_spot_dry_run_threads_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        # Junk env MUST NOT crash a dry-run: the resolve is short-circuited away
+        # (dry-run ⇒ False without touching the env).
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert captured
+        assert all(flag is False for flag in captured)
+
+    def test_pull_candles_arms_today_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest", _spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert captured
+        assert all(flag is True for flag in captured)
+
+    #: Thread-name families owned by the pull's thread-owning resources — a junk
+    #: kill-switch raise must never orphan any of these (round-1 R3-MAJOR-1: the
+    #: pre-hoist ordering leaked groww-fetch-consumer-0..3 + groww-fetch-watchdog
+    #: + volume-keepalive per attempt, the keepalive fsync-ing the lake forever).
+    _LEAKABLE_THREAD_PREFIXES = ("groww-fetch-consumer", "groww-fetch-watchdog", "volume-keepalive")
+
+    def _leaked_pull_threads(self, before: set[str]) -> set[str]:
+        import threading
+
+        after = {t.name for t in threading.enumerate()}
+        return {name for name in after - before if name.startswith(self._LEAKABLE_THREAD_PREFIXES)}
+
+    def test_pull_all_spot_live_junk_env_fails_loud_at_pull_start(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A LIVE pull with a junk kill-switch value fails LOUD at pull start
+        # (the resolve_market_closed posture) — never a silent coercion, never
+        # a mid-run crash — and CLEAN: the resolve is hoisted ABOVE the
+        # thread-owning resource builds, so the raise leaks ZERO pipeline /
+        # consumer / keepalive threads (name-set delta, not absolute counts —
+        # the suite process owns unrelated threads).
+        import threading
+
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        before = {t.name for t in threading.enumerate()}
+        with pytest.raises(ValueError, match=TODAY_COMPLETENESS_GATE_ENV):
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+        assert self._leaked_pull_threads(before) == set()
+
+    def test_pull_candles_live_junk_env_fails_loud_and_leaks_no_threads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The single-symbol twin of the bulk no-leak pin (round-1 R3-MAJOR-1):
+        # pull_candles resolves the kill switch BEFORE building its fetch
+        # pipeline / write consumer, so a junk env raises with zero orphans.
+        import threading
+
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        before = {t.name for t in threading.enumerate()}
+        with pytest.raises(ValueError, match=TODAY_COMPLETENESS_GATE_ENV):
+            pull_candles(
+                _index(),
+                lake_root=tmp_path,
+                dry_run=False,
+                from_date="2021-01-04",
+                to_date="2021-01-08",
+                adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+            )
+        assert self._leaked_pull_threads(before) == set()
+
+    def test_pull_candles_kill_switch_off_threads_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "0")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest", _spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert captured
+        assert all(flag is False for flag in captured)
+
+
+class TestCompletenessDemotionArming:
+    """DEC-BULK-SPOT-COMPLETENESS-FLAG-001: the bulk ``pull_all_spot`` phase arms
+    ``detect_completeness_gaps`` on a LIVE pull (``not dry_run`` — the cli.py
+    ``cmd_fetch`` idiom), so the #1031 interior-gap / trailing-truncation
+    demotions run on every production bulk path; a dry-run threads ``False``
+    (the synthetic adapter's first-day-only bars would false-red every wide
+    window). The exact spy template of :class:`TestTodayCompletenessGateArming`."""
+
+    def test_pull_all_spot_live_arms_detect_completeness_gaps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2026-02-02",
+            to_date="2026-02-06",
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert captured
+        assert all(flag is True for flag in captured)
+
+    def test_pull_all_spot_dry_run_threads_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A dry-run is double-protected: the flag is False (never a demotion of
+        # the synthetic first-day-only shape) AND begin_pull_ledger(dry_run=True)
+        # returns None, so a demotion would be record-inert anyway.
+        from brutex.dashboard import pull_controller as pc
+
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert captured
+        assert all(flag is False for flag in captured)
+
+
+def _equity(symbol: str = "RELIANCE") -> Instrument:
+    """A minimal non-index NSE cash equity (the ~750 REFERENCE_ONLY class)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=2,
+        symbol_name=symbol,
+        display_name=None,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,  # EQ requires a positive lot size
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+class _InteriorGapAdapter(SyntheticSpotAdapter):
+    """Bars at the window's START + END with a >5-session interior hole between.
+
+    2024-03-04 (Mon) then 2024-03-27/28 (Wed/Thu): the contiguous bar-less run
+    2024-03-05 → 2024-03-26 spans exactly 14 real NSE sessions (the 03-08
+    Maha Shivaratri + 03-25 Holi holidays excluded) — far past the
+    INTERIOR_GAP_TOLERANCE_SESSIONS=5 tolerance — while the last stored bar sits
+    ON the window's final session (2024-03-28; 2024-03-29 is Good Friday), so the
+    interior-gap detector fires and the truncation detector does not. The
+    interior-gap classifier is CLOCK-FREE (its coverage abstention keys only on
+    the covered bar dates, all 2024), so this fixture is deterministic forever.
+    """
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Return bars bookending a 14-session interior hole (never truncated)."""
+        del symbol, exchange, interval, start, end
+        return (
+            synthetic_spot_bars(date(2024, 3, 4), count=self.bars_per_window)
+            + synthetic_spot_bars(date(2024, 3, 27), count=self.bars_per_window)
+            + synthetic_spot_bars(date(2024, 3, 28), count=self.bars_per_window)
+        )
+
+
+class TestBulkSpotCompletenessDemotionE2E:
+    """DEC-BULK-SPOT-COMPLETENESS-FLAG-001 end-to-end: the bulk twin of
+    ``TestIngestSpotCompletenessRepull`` — a LIVE ``pull_all_spot`` over a real
+    tmp lake demotes an INDEX window with a confirmed interior hole to a
+    re-pullable FAILED + ``INTERIOR_GAP``, while a non-index equity on the SAME
+    pull with the SAME holey shape stays observe-only SUCCESS (the spine's
+    ``is_index`` gate — the #1031 illiquid-name re-pull-storm protection)."""
+
+    def test_live_bulk_pull_demotes_holey_index_and_keeps_equity_success(
+        self, tmp_path: Path
+    ) -> None:
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13"), _equity("RELIANCE")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2024-03-04",
+                to_date="2024-03-28",
+                adapter_factory=_real_bulk_factory(_InteriorGapAdapter()),
+            )
+        assert report.dry_run is False
+        ledger = load_window_ledger(tmp_path)
+        rows = {r.security_id: r for r in ledger.records()}
+        assert set(rows) == {"13", "RELIANCE"}
+        # The INDEX window is DEMOTED — re-pullable FAILED with the honest reason,
+        # never a silently-settled SUCCESS the skip rule would freeze forever.
+        index_row = rows["13"]
+        assert index_row.status == "FAILED"
+        assert index_row.status not in {"SUCCESS", "SKIPPED"}  # the skip-authority set
+        assert index_row.last_error == "INTERIOR_GAP"
+        # The non-index equity with the IDENTICAL holey shape is observed but
+        # NEVER demoted (legitimately sparse names must not re-pull-storm).
+        equity_row = rows["RELIANCE"]
+        assert equity_row.status == "SUCCESS"
+        assert equity_row.last_error is None
+        # The observe-only WARNING fired for BOTH symbols (visibility is never
+        # gated — only the re-pull action is index-gated).
+        gap_events = [e for e in logs if e["event"] == "window.interior_gap"]
+        assert {e["symbol"] for e in gap_events} == {"'13'", "'RELIANCE'"}
+
+    def test_dry_run_same_shape_is_never_demoted(self, tmp_path: Path) -> None:
+        # The dry-run counterfactual: the SAME holey shape through the SAME bulk
+        # entry with dry_run=True threads detect_completeness_gaps=False AND a
+        # None ledger (begin_pull_ledger dry-run contract) — no demotion, no
+        # ledger rows, nothing persisted (the false-red protection this flag's
+        # ``not dry_run`` gating exists for).
+        from brutex.data.window_ledger_store import ledger_path
+
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            from_date="2024-03-04",
+            to_date="2024-03-28",
+        )
+        assert report.dry_run is True
+        assert not ledger_path(tmp_path).is_file()  # record-inert — no ledger written
+
+
+class TestSeedObservedOverlayOrdering:
+    """DEC-SEED-OBSERVED-OVERLAY-001 — the overlay load is HOISTED above the
+    cold-start reconcile and ONE snapshot feeds BOTH the seed gate and the
+    fetch-time detectors (single source of truth; exactly one load per pull)."""
+
+    def test_pull_all_spot_loads_once_and_threads_the_seed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+
+        expected = _write_overlay_sidecar(tmp_path)
+        order: list[str] = []
+        seed_observed: list[object] = []
+        ingest_observed: list[object] = []
+        real_load = pc.load_observed_holidays
+        real_reconcile = pc.reconcile_ledger_windows  # the bulk MINUTE-phase seed
+        real_ingest = pc.run_groww_spot_ingest_with_retry
+
+        def _load_spy(root: Path) -> frozenset:
+            order.append("load")
+            return real_load(root)
+
+        def _reconcile_spy(*args: object, **kwargs: object) -> int:
+            order.append("reconcile")
+            seed_observed.append(kwargs.get("observed"))
+            return real_reconcile(*args, **kwargs)  # type: ignore[arg-type]
+
+        def _ingest_spy(*args: object, **kwargs: object) -> object:
+            ingest_observed.append(kwargs.get("observed_holidays"))
+            return real_ingest(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "load_observed_holidays", _load_spy)
+        monkeypatch.setattr(pc, "reconcile_ledger_windows", _reconcile_spy)
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _ingest_spy)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        # ONE load per pull, strictly BEFORE the reconcile (the hoist).
+        assert order.count("load") == 1
+        assert "reconcile" in order
+        assert order.index("load") < order.index("reconcile")
+        # The SAME snapshot feeds the seed gate AND the fetch-time detectors.
+        assert seed_observed and all(o == expected for o in seed_observed)
+        assert ingest_observed and all(o == expected for o in ingest_observed)
+
+    def test_pull_candles_loads_once_and_threads_both_reconciles(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+
+        expected = _write_overlay_sidecar(tmp_path)
+        order: list[str] = []
+        seed_observed: list[object] = []
+        real_load = pc.load_observed_holidays
+        real_reconcile = pc.reconcile_ledger_with_lake
+
+        def _load_spy(root: Path) -> frozenset:
+            order.append("load")
+            return real_load(root)
+
+        def _reconcile_spy(*args: object, **kwargs: object) -> int:
+            order.append("reconcile")
+            seed_observed.append(kwargs.get("observed"))
+            return real_reconcile(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "load_observed_holidays", _load_spy)
+        monkeypatch.setattr(pc, "reconcile_ledger_with_lake", _reconcile_spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert order.count("load") == 1
+        assert "reconcile" in order  # daily and/or minute — every one post-load
+        assert order.index("load") < order.index("reconcile")
+        assert seed_observed and all(o == expected for o in seed_observed)
+
+    def test_pull_all_spot_dry_run_never_loads_the_overlay(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+
+        _write_overlay_sidecar(tmp_path)
+        loads: list[Path] = []
+        real_load = pc.load_observed_holidays
+        monkeypatch.setattr(
+            pc, "load_observed_holidays", lambda root: loads.append(root) or real_load(root)
+        )
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert loads == []  # the frozenset()-if-dry_run guard survived the hoist
+
+
+class TestBulkSpotReportOkProperty:
+    """``BulkSpotReport.ok`` — the StageOutcome home of the spot-gate predicate
+    (DEC-STAGED-SEQUENCER-SEAMS-001; ``pipeline_pull.spot_phase_ok`` delegates)."""
+
+    @staticmethod
+    def _report(
+        *,
+        auth_aborted: bool = False,
+        quota_exhausted: bool = False,
+        still_failed_windows: int = 0,
+        mass_empty_cause: str | None = None,
+    ) -> pull_controller.BulkSpotReport:
+        return pull_controller.BulkSpotReport(
+            dry_run=False,
+            start_date="2020-01-01",
+            end_date="2026-06-20",
+            auth_aborted=auth_aborted,
+            quota_exhausted=quota_exhausted,
+            still_failed_windows=still_failed_windows,
+            mass_empty_cause=mass_empty_cause,
+        )
+
+    def test_clean_report_ok_true(self) -> None:
+        assert self._report().ok is True
+
+    def test_each_failure_arm_flips_ok_false(self) -> None:
+        assert self._report(auth_aborted=True).ok is False
+        assert self._report(quota_exhausted=True).ok is False
+        assert self._report(still_failed_windows=1).ok is False
+        assert self._report(mass_empty_cause="halted").ok is False

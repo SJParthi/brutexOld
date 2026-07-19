@@ -47,7 +47,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.orchestrator.audit import AuditWriter
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import FibAnchorKind, PriceSource, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -191,6 +191,14 @@ class TestResidentSweepKernel:
         wide = ResidentSweepKernel(bars, proximity=ProximityParams(50, 50, 50), prior_n=4)
         assert tight.n_bars == wide.n_bars == len(bars)
 
+    def test_apply_1day_mask_flag_is_recorded(self) -> None:
+        # Review round-1 finding 5: the D12 flag is recorded on the kernel so
+        # run_persisted_sweep can fail-fast on a hand-built mismatched kernel
+        # (the symmetry twin of the fib_anchor / roll_schedule records).
+        bars = _trending_bars(n_days=1, per_day=20)
+        assert ResidentSweepKernel(bars).apply_1day_mask is False
+        assert ResidentSweepKernel(bars, apply_1day_mask=True).apply_1day_mask is True
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # ResidentKernelCache
@@ -201,21 +209,53 @@ class _FakeKernel:
     """A stand-in kernel so cache tests assert build-once without a real build."""
 
     def __init__(
-        self, bars: object, *, proximity: object, prior_n: int, fib_anchor: object
+        self,
+        bars: object,
+        *,
+        proximity: object,
+        prior_n: int,
+        fib_anchor: object,
+        vwap_source: object = PriceSource.HLC3,
+        ema_source: object = PriceSource.CLOSE,
+        roll_schedule: tuple[int, ...] | None = None,
+        apply_1day_mask: bool = False,
     ) -> None:
         self.bars = bars
         self.proximity = proximity
         self.prior_n = prior_n
         self.fib_anchor = fib_anchor
+        self.vwap_source = vwap_source
+        self.ema_source = ema_source
+        self.roll_schedule = roll_schedule
+        self.apply_1day_mask = apply_1day_mask
 
 
 def _fake_builder() -> tuple[list[int], object]:
     """Return ``(call_log, builder)`` — the builder appends 1 per build call."""
     calls: list[int] = []
 
-    def build(bars: object, *, proximity: object, prior_n: int, fib_anchor: object) -> _FakeKernel:
+    def build(
+        bars: object,
+        *,
+        proximity: object,
+        prior_n: int,
+        fib_anchor: object,
+        vwap_source: object = PriceSource.HLC3,
+        ema_source: object = PriceSource.CLOSE,
+        roll_schedule: tuple[int, ...] | None = None,
+        apply_1day_mask: bool = False,
+    ) -> _FakeKernel:
         calls.append(1)
-        return _FakeKernel(bars, proximity=proximity, prior_n=prior_n, fib_anchor=fib_anchor)
+        return _FakeKernel(
+            bars,
+            proximity=proximity,
+            prior_n=prior_n,
+            fib_anchor=fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
+        )
 
     return calls, build
 
@@ -251,6 +291,15 @@ class TestResidentKernelCache:
             # bar_bits matrix is anchor-specific, so a different anchor must build
             # its own kernel, never reuse a stale one (R-1).
             {"fib_anchor": FibAnchorKind.ROLLING_WEEKLY},
+            # DEC-NIFTY-PRICE-SOURCE-AXIS-001: the VWAP / EMA price source is part
+            # of the key — bar_bits bits 52-53 / 0-5 are source-specific, so a
+            # different source must build its own kernel, never reuse a stale one.
+            {"vwap_source": PriceSource.OPEN},
+            {"ema_source": PriceSource.HLC3},
+            # DEC-STAGE1A-ROLL-RESET-001: the ADR-0012 roll schedule is a key
+            # slot — a long-lived daemon re-launching over a changed lake
+            # must never serve a stale-schedule kernel (roll twin of R-1).
+            {"roll_schedule": (739428, 739463)},
         ],
     )
     def test_each_key_field_distinguishes_kernels(self, differing: dict[str, object]) -> None:
@@ -262,6 +311,7 @@ class TestResidentKernelCache:
             "proximity": None,
             "prior_n": 3,
             "fib_anchor": FibAnchorKind.PREV_DAY,
+            "roll_schedule": None,
         }
         a = cache.get([], **base)  # type: ignore[arg-type]
         b = cache.get([], **{**base, **differing})  # type: ignore[arg-type]
@@ -392,3 +442,50 @@ class TestGridReuseBarBits:
         # 2 directions × 2 sl × 2 proximities = 8 tuples; all run (bars present).
         seen = self._run(reuse=True, root=tmp_path / "g")
         assert len(seen) == 8
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# kernel_columns — the W2 rider of DEC-STAGE1A-RUST-BATCH-001
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestKernelColumns:
+    def test_kernel_columns_derived_once_and_memoised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ONE derive_price_columns call per kernel lifetime (spy) — repeat
+        # property reads are the memo handoff.
+        from brutex.engine import sweep_kernel as sk_module
+        from brutex.engine.rust_trade_sim import PriceColumns, derive_price_columns
+
+        calls = [0]
+        real = derive_price_columns
+
+        def _counting(bars: object) -> PriceColumns:
+            calls[0] += 1
+            return real(bars)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(sk_module, "derive_price_columns", _counting)
+        bars = _trending_bars(n_days=2, per_day=10)
+        kernel = ResidentSweepKernel(bars)
+        assert calls[0] == 0  # lazy: construction derives nothing
+        first = kernel.kernel_columns
+        second = kernel.kernel_columns
+        assert calls[0] == 1
+        assert first is second
+        # The columns equal a fresh module-level derivation (same seam).
+        assert first == real(bars)
+
+    def test_kernel_columns_feed_the_trade_sim_byte_identically(self) -> None:
+        from brutex.engine.rust_trade_sim import ResidentTradeSim
+
+        bars = _trending_bars(n_days=2, per_day=10)
+        kernel = ResidentSweepKernel(bars)
+        injected = ResidentTradeSim(
+            bars, kernel.bar_bits, tf_minutes=1, precomputed_columns=kernel.kernel_columns
+        )
+        derived = ResidentTradeSim(bars, kernel.bar_bits, tf_minutes=1)
+        assert (
+            injected._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+            == derived._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        )

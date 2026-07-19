@@ -191,7 +191,7 @@ def test_sweep_override_proceeds_loudly_over_vix_lake(
     assert "INDIAVIX" in out
     events = [entry for entry in logs if entry.get("event") == "sweep.scope_override"]
     assert len(events) == 1
-    assert events[0]["symbols"] == ["INDIAVIX"]
+    assert events[0]["symbols"] == ["'INDIAVIX'"]  # repr-quoted (round-4 finding 3)
 
 
 def test_sweep_argv_out_of_scope_refused(
@@ -272,7 +272,7 @@ def test_sweep_all_override_runs_and_is_logged_and_audit_stamped(
     # structlog event names the let-through symbols (Golden Rule #8).
     events = [entry for entry in logs if entry.get("event") == "sweep.scope_override"]
     assert len(events) == 1
-    assert events[0]["symbols"] == ["INDIAVIX"]
+    assert events[0]["symbols"] == ["'INDIAVIX'"]  # repr-quoted (round-4 finding 3)
     assert events[0]["exchange"] == _EXCHANGE
     # The hash-chained launch audit carries the override stamp.
     audit_lines = [

@@ -2,8 +2,10 @@
 """Composition tests + fault injection for `brutex.nightly.run`
 (DEC-SWEEP-NIGHTLY-AUTOMATION-001).
 
-Lock acquisition ORDER (nightly → account → lake), the account release after
-PREBUILD with the lake lock held through SWEEP, CredentialsError → account
+Lock acquisition ORDER (nightly → account → lake), BOTH pull locks released
+after PULL+PREBUILD with the lake lock FREE during the SWEEP leg
+(DEC-SWEEP-LOCK-PULL-CONCURRENCY-001 — the sweep leg's exclusion is
+cmd_sweep_all's own G10+G6), CredentialsError → account
 skip + WARN, pull-halt → `emit_pull_halt_alert` then FAILED, report + bundle
 written in a ``finally`` even on a raise, the Telegram-disabled arm, dry-run
 takes NO locks + mutates nothing (tree oracle), skip levers, the T2/T4/T5
@@ -161,8 +163,8 @@ def _plan(lake: Path, results: Path, tmp_path: Path, **overrides: Any) -> Nightl
 
 
 @contextmanager
-def _noop_keep_awake(reason: str) -> Generator[None]:
-    yield
+def _noop_keep_awake(reason: str) -> Generator[bool]:
+    yield False
 
 
 def _seams(
@@ -304,10 +306,30 @@ def test_lock_order_nightly_account_lake_and_hold_spans(
     monkeypatch.setattr(ps, "account_pull_singleflight_lock", rec_account)
     monkeypatch.setattr(ps, "pull_singleflight_lock", rec_pull)
 
+    def probing_execute(hp: object) -> object:
+        # DURING the PULL(+PREBUILD) leg BOTH pull locks are HELD: a peer
+        # pull's EX acquire on a second open file description must be REFUSED
+        # (pins the release point can't drift EARLIER than post-PREBUILD).
+        with (
+            pytest.raises(ps.PullAlreadyRunningError),
+            real_pull(lake),  # pragma: no cover — must NOT acquire
+        ):
+            pass
+        order.append("probed:lake-held-during-pull")
+        return _FakePipeReport()
+
     def probing_sweep(**kwargs: Any) -> int:
-        # By the SWEEP leg the ACCOUNT lock is released; the LAKE lock is held.
+        # By the SWEEP leg BOTH pull locks are RELEASED
+        # (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001 — supersedes the #1612
+        # held-through-SWEEP clause): the leg's own cmd_sweep_all G10+G6 own
+        # the exclusion, and a daily pull/crossverify can run CONCURRENTLY.
         assert "account-released" in order
-        assert "lake-released" not in order
+        assert "lake-released" in order
+        # LIVE probe: a second open file description takes the lake EX freely
+        # — a pull started during the sweep leg would NOT defer.
+        with real_pull(lake):
+            pass
+        order.append("probed:lake-free-during-sweep")
         _write_sweep_completion(results, _COHERENT)
         return 0
 
@@ -316,6 +338,9 @@ def test_lock_order_nightly_account_lake_and_hold_spans(
         results,
         credentials=lambda: SimpleNamespace(api_key="k-1"),
     )
+    # AFTER _seams (which installs its own fake): the hold-span probe is the
+    # execute seam for THIS test — it runs while both pull locks are held.
+    monkeypatch.setattr("brutex.nightly.run.execute_headless_pipeline", probing_execute)
     seams = NightlySeams(
         build_pipeline=seams.build_pipeline,
         run_sweep=probing_sweep,
@@ -327,7 +352,12 @@ def test_lock_order_nightly_account_lake_and_hold_spans(
     report = run_nightly(_plan(lake, results, tmp_path), seams=seams)
     assert report.ok is True
     assert order[:3] == ["nightly", "account", "lake"]  # the FIXED order
-    assert order.index("account-released") < order.index("lake-released")
+    # Held through PULL+PREBUILD (the probe ran BEFORE either release), then
+    # BOTH released BEFORE the sweep leg's own probes.
+    assert order.index("probed:lake-held-during-pull") < order.index("account-released")
+    assert order.index("probed:lake-held-during-pull") < order.index("lake-released")
+    assert order.index("account-released") < order.index("probed:lake-free-during-sweep")
+    assert order.index("lake-released") < order.index("probed:lake-free-during-sweep")
 
 
 def test_collision_second_nightly_refused_no_chain(
@@ -566,6 +596,10 @@ def test_capability_refusal_maps_to_refused(
     assert pull.status is LinkStatus.REFUSED
     assert "no instrument master" in pull.detail
     assert report.exit_code == 1
+    # Crash-safety (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): the refusal arm
+    # releases the lake pull lock too — re-acquirable after the run.
+    with ps.pull_singleflight_lock(lake):
+        pass
 
 
 def test_pull_halt_fires_alert_then_failed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -585,6 +619,80 @@ def test_pull_halt_fires_alert_then_failed(monkeypatch: pytest.MonkeyPatch, tmp_
     assert report.exit_code == 2
     assert pipeline.closed == 1  # closed in the finally even on the raise
     assert calls["sweep"] == 0
+    # Crash-safety (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): the pull-halt FAILED
+    # path releases the lake pull lock (pull_fn's finally) — re-acquirable.
+    with ps.pull_singleflight_lock(lake):
+        pass
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "backup_enospc",
+        "capability_refused",
+        "pull_halt",
+        "pull_generic_error",
+        "sweep_exit_one",
+        "sweep_raise",
+    ],
+)
+def test_every_failure_path_releases_both_pull_locks(
+    shape: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DEC-SWEEP-LOCK-PULL-CONCURRENCY-001 crash-safety, over the failure
+    POSITIONS: whatever link breaks — backup, pull refusal, pull halt, a
+    generic pull bug, a failing or RAISING sweep — ``run_nightly`` returns
+    with the LAKE pull lock and the nightly single-flight both re-acquirable
+    (the ``lake_stack`` close in ``pull_fn``'s ``finally`` + the chain-lifetime
+    ``locks`` backstop). A broken nightly never wedges the next pull."""
+    lake, results = _lake(tmp_path)
+    kwargs: dict[str, Any] = {}
+    if shape == "pull_halt":
+        kwargs["execute_raises"] = LakeWriteHalt("disk_full")
+    elif shape == "pull_generic_error":
+        kwargs["execute_raises"] = ValueError("bug")
+    elif shape == "sweep_exit_one":
+        kwargs["sweep_exit"] = 1
+        kwargs["sweep_payload"] = None
+    elif shape == "backup_enospc":
+
+        def _enospc(_src: Path, _dst: Path) -> None:
+            raise OSError(28, "No space left on device")
+
+        kwargs["copy_file"] = _enospc
+    seams, _alerter, _pipeline, _calls = _seams(monkeypatch, results, **kwargs)
+    if shape == "capability_refused":
+        from brutex.nightly.pipeline_binding import NightlyCapabilityError
+
+        def refusing_build(**_kwargs: Any) -> Any:
+            raise NightlyCapabilityError("no instrument master")
+
+        seams = NightlySeams(
+            build_pipeline=refusing_build,
+            run_sweep=seams.run_sweep,
+            alerter=seams.alerter,
+            keep_awake_cm=_noop_keep_awake,
+            credentials=seams.credentials,
+            now=seams.now,
+        )
+    elif shape == "sweep_raise":
+
+        def raising_sweep(**_kwargs: Any) -> int:
+            raise RuntimeError("sweep exploded")
+
+        seams = NightlySeams(
+            build_pipeline=seams.build_pipeline,
+            run_sweep=raising_sweep,
+            alerter=seams.alerter,
+            keep_awake_cm=_noop_keep_awake,
+            credentials=seams.credentials,
+            now=seams.now,
+        )
+    report = run_nightly(_plan(lake, results, tmp_path), seams=seams)
+    assert report.ok is False  # every shape genuinely broke the chain
+    # BOTH single-flight files re-acquirable — nothing left wedged.
+    with ps.nightly_singleflight_lock(lake), ps.pull_singleflight_lock(lake):
+        pass
 
 
 def test_generic_pull_error_fails_without_halt_alert(
@@ -1010,9 +1118,9 @@ def test_keep_awake_wraps_the_whole_chain(monkeypatch: pytest.MonkeyPatch, tmp_p
     marks: list[str] = []
 
     @contextmanager
-    def recording_keep_awake(reason: str) -> Generator[None]:
+    def recording_keep_awake(reason: str) -> Generator[bool]:
         marks.append(f"enter:{reason}")
-        yield
+        yield False
         marks.append("exit")
 
     def marking_sweep(**kwargs: Any) -> int:
@@ -1142,3 +1250,68 @@ def test_resolve_credentials_delegates_to_aws_resolver(
     sentinel = SimpleNamespace(api_key="aws-key")
     monkeypatch.setattr("brutex.config.credentials.resolve_groww_aws_credentials", lambda: sentinel)
     assert _resolve_credentials() is sentinel
+
+
+def test_box_update_block_rides_the_full_six_link_composition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§10 test 13 — the box_update + env_preflight blocks ride a FULL
+    ``run_nightly`` composition (all six links faked green) into the durable
+    ``report.json``, and the six R42 links are BREAKER-FREE w.r.t. the leg —
+    even a rolled_back block never blocks/blocks-by/refuses any link
+    (DEC-BOX-AUTODEPLOY-LANE-001 §5/§6 — the leg is pre-chain, never a link).
+    """
+    from brutex.nightly.box_update import BoxUpdateOutcome, BoxUpdateStatus
+
+    lake, results = _lake(tmp_path)
+    seams, alerter, _pipeline, calls = _seams(monkeypatch, results)
+    block = BoxUpdateOutcome(
+        status=BoxUpdateStatus.ROLLED_BACK,
+        from_sha="a" * 40,
+        to_sha="b" * 40,
+        running_sha="a" * 40,
+        skip_reason=None,
+        delta_rust=True,
+        delta_pyproject=False,
+        wheels=(),
+        gate="stale",
+        repair="rebuilt",
+        pip_restore="not_needed",
+        lock_restored=(),
+        quarantined=(),
+        alarm_signature="rolled_back||stale|rebuilt|not_needed|",
+        alarm_repeats=0,
+        reexec=False,
+        duration_s=1.0,
+        detail="",
+    ).to_dict()
+    preflight = {"flagged": [], "dotenv_errors": []}
+    plan = _plan(lake, results, tmp_path, box_update=block, env_preflight=preflight)
+    report = run_nightly(plan, seams=seams)
+    # The six links are UNAFFECTED by the (non-green) leg block — breaker-free.
+    assert [o.status for o in report.links] == [LinkStatus.OK] * 6
+    assert report.ok is True
+    assert report.exit_code == 0
+    assert calls["sweep"] == 1
+    # The blocks land VERBATIM in the durable report.json (the §5 contract).
+    on_disk = json.loads(
+        (nightly_dir(results, report.nightly_id) / "report.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["box_update"] == block
+    assert on_disk["env_preflight"] == preflight
+    # The 📦 honesty-note line rides the report for the non-quiet status.
+    assert any(n.startswith("📦 box-update: rolled_back") for n in report.honesty_notes)
+    # The one Telegram summary still fired with its ordinary verdict.
+    assert [s["verdict"] for s in alerter.summaries] == ["OK"]
+
+
+def test_box_update_note_quiet_statuses_are_silent() -> None:
+    """§5 — the 📦 note is SILENT on absent/up_to_date/disabled blocks (the
+    quiet statuses carry no operator-actionable news)."""
+    from brutex.nightly.run import _box_update_note
+
+    assert _box_update_note(None) is None
+    assert _box_update_note({"status": "up_to_date"}) is None
+    assert _box_update_note({"status": "disabled"}) is None
+    note = _box_update_note({"status": "updated", "wheels": "junk-not-a-list"})
+    assert note == "📦 box-update: updated ?→? · wheels ok 0/0 · gate skipped"

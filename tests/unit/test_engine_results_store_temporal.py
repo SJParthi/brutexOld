@@ -66,6 +66,12 @@ _PRE_EXTENSION_COLUMNS = [
     "avg_exit_price",
 ]
 
+#: The CURRENT baseline column set the merged writer always emits: the
+#: pre-extension set + the ALWAYS-WRITTEN nullable VIX trio landed on main
+#: while this branch was in flight (DEC-VIX-STAMP-WIRE-001; 2026-07-18
+#: merge-reconcile — the temporal columns stay emit-on-present AFTER it).
+_BASELINE_COLUMNS = [*_PRE_EXTENSION_COLUMNS, "vix_mean", "vix_min", "vix_max"]
+
 _TEMPORAL_COLUMNS = [
     "stats_by_year_json",
     "stats_by_quarter_json",
@@ -133,29 +139,51 @@ def _row(seed: int = 1, *, with_temporal: bool = False, **overrides: object) -> 
 
 
 class TestEmitOnPresent:
-    def test_all_none_flush_is_byte_identical_to_the_pre_extension_fixture(
+    def test_all_none_flush_is_byte_identical_to_the_current_baseline_writer(
         self, tmp_path: Path
     ) -> None:
         """THE emit-on-present proof: flushing the pre-extension golden's exact
-        literals through the EXTENDED writer reproduces the COMMITTED fixture
-        bytes — the schema extension is provably invisible on the all-None arm.
-        (Byte-level, so polars/zstd-build sensitive like _GOLDEN_CONTENT_HASH;
-        the schema test below is the version-robust twin.)"""
+        literals emits NO temporal column and lands on the CURRENT baseline
+        writer's schema + a deterministic byte stream.
+
+        2026-07-18 merge-reconcile (lawful baseline shift, in-file
+        justification): between this branch's fork and the merge, main's
+        writer gained the ALWAYS-WRITTEN nullable VIX trio
+        (DEC-VIX-STAMP-WIRE-001), so a fresh all-temporal-None flush can no
+        longer be byte-identical to the pre-VIX committed fixture — the
+        pre-extension fixture stays FROZEN (its own docstring forbids
+        regeneration) and this test now pins the version-robust equivalents:
+        temporal columns structurally ABSENT, the baseline column set exactly
+        pre-extension + the VIX trio, byte-determinism across flushes, and a
+        load round-trip equal to the frozen fixture's rows. The frozen
+        `_GOLDEN_CONTENT_HASH` sweep golden remains the byte-level all-None
+        proof on the CURRENT writer."""
+        import polars as pl
+
         from tests.golden.test_results_store_pre_extension_golden import _expected_rows
 
-        store = ResultsStore(path=tmp_path / "a.parquet")
-        for row in _expected_rows():
-            store.append(row)
-        store.flush()
-        assert (tmp_path / "a.parquet").read_bytes() == _PRE_EXTENSION_FIXTURE.read_bytes()
+        for tag in ("a", "b"):
+            store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+            for row in _expected_rows():
+                store.append(row)
+            store.flush()
+        a_bytes = (tmp_path / "a.parquet").read_bytes()
+        assert a_bytes == (tmp_path / "b.parquet").read_bytes()
+        assert pl.read_parquet(tmp_path / "a.parquet").columns == _BASELINE_COLUMNS
+        # Round-trip: the flushed rows equal the frozen fixture's rows
+        # field-for-field (the pre-VIX fixture loads its absent optional
+        # columns as honest None — exactly what _expected_rows() constructs).
+        assert sorted(
+            ResultsStore.load(tmp_path / "a.parquet").rows(), key=lambda r: r.run_id
+        ) == sorted(ResultsStore.load(_PRE_EXTENSION_FIXTURE).rows(), key=lambda r: r.run_id)
 
-    def test_all_none_flush_emits_exactly_the_pre_extension_columns(self, tmp_path: Path) -> None:
+    def test_all_none_flush_emits_exactly_the_baseline_columns(self, tmp_path: Path) -> None:
         import polars as pl
 
         store = ResultsStore(path=tmp_path / "a.parquet")
         store.append(_row(1))
         store.flush()
-        assert pl.read_parquet(tmp_path / "a.parquet").columns == _PRE_EXTENSION_COLUMNS
+        assert pl.read_parquet(tmp_path / "a.parquet").columns == _BASELINE_COLUMNS
 
     def test_temporal_flush_appends_the_four_utf8_columns_last(self, tmp_path: Path) -> None:
         import polars as pl
@@ -164,7 +192,7 @@ class TestEmitOnPresent:
         store.append(_row(1, with_temporal=True))
         store.flush()
         df = pl.read_parquet(tmp_path / "a.parquet")
-        assert df.columns == _PRE_EXTENSION_COLUMNS + _TEMPORAL_COLUMNS
+        assert df.columns == _BASELINE_COLUMNS + _TEMPORAL_COLUMNS
         assert all(df.schema[name] == pl.Utf8 for name in _TEMPORAL_COLUMNS)
 
     def test_temporal_flush_is_deterministic(self, tmp_path: Path) -> None:

@@ -27,7 +27,12 @@ from typing import Any
 
 import pytest
 
-from tests.golden.generate_oneclick_fixture import NULL_VIX_RANK, RUN_ID, TIE_RANKS
+from tests.golden.generate_oneclick_fixture import (
+    NULL_ARM_RANK,
+    NULL_VIX_RANK,
+    RUN_ID,
+    TIE_RANKS,
+)
 
 _STATIC = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static"
 _SCREENER_JS = _STATIC / "bx-screener.js"
@@ -62,7 +67,18 @@ def _node_call(expr: str, *argv: str) -> Any:
 
 
 def _fixture_rows() -> list[dict[str, Any]]:
-    return json.loads(_TOP100_FIXTURE.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
+    """The committed fixture's rows THROUGH the real display reader.
+
+    DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the fixture is the writer's OBJECT
+    root with ENGINE metric names; the screener consumes rows the reader has
+    already validated + metric-mapped (``metrics.sharpe`` et al. are the
+    reader's aliases), so the JS goldens run over EXACTLY the wire rows.
+    """
+    from brutex.dashboard import oneclick_artifacts as oc
+
+    result = oc.load_top100(_TOP100_FIXTURE.parent)
+    assert result.status == "ok", result.detail
+    return [dict(row) for row in result.rows]
 
 
 class TestComparatorTotalOrder:
@@ -214,6 +230,30 @@ class TestApplyFilters:
         assert [r["rank"] for r in out["rows"]] == [r["rank"] for r in expected]
         assert len(out["rows"]) > 0  # a non-vacuous predicate over the fixture
 
+    def test_engine_named_metrics_without_the_mapping_drop_every_row(self) -> None:
+        """The metric-drift BLAST RADIUS (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+        RAW engine-named rows (``max_drawdown_paisa`` — no ``max_dd_paisa``
+        alias) fail the Max|DD| band filter's number check, so EVERY row is
+        dropped — not merely "—" columns. The reader's ONE metric-key mapping
+        is what keeps the filter alive; the mapped fixture keeps all rows."""
+        raw_engine_rows = [
+            {"rank": 1, "metrics": {"max_drawdown_paisa": -100}},
+            {"rank": 2, "metrics": {"max_drawdown_paisa": -300}},
+        ]
+        dropped = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(raw_engine_rows),
+            json.dumps({"max_abs_dd_paisa": 1_000_000}),
+        )
+        assert dropped["rows"] == []  # the pre-fix failure mode, pinned
+        mapped = _fixture_rows()  # the SAME filter over reader-mapped rows
+        kept = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(mapped),
+            json.dumps({"max_abs_dd_paisa": 10_000_000_000}),
+        )
+        assert len(kept["rows"]) == 100  # every row survives the wide cap
+
     def test_max_abs_dd_cap_compares_the_magnitude_of_the_negative_dd(self) -> None:
         rows = [
             {"rank": 1, "metrics": {"max_dd_paisa": -100}},
@@ -238,3 +278,218 @@ class TestApplyFilters:
         """The F-m3 count-line suffix is pinned verbatim (UI cannot drift)."""
         out = _node_call("S.nullVixNote(ARGS[0])", json.dumps(n))
         assert out == expected
+
+
+class TestInstrumentFilter:
+    """DEC-ONECLICK-INSTRUMENT-DISPLAY-001 — the instrument column + filter.
+
+    Fails-before: the screener had NO instrument column/filter, so the
+    operator could not tell (or filter by) WHICH index a winner trades.
+    The column is config-driven off BXScreener.COLUMNS; the filter is the
+    direction-style exact match with the documented absent-key law (a
+    pre-instrument artifact row never matches an ACTIVE filter — and the
+    page only offers options harvested from rows that carry the key).
+    """
+
+    def test_columns_config_carries_the_instrument_column(self) -> None:
+        cols = _node_call("S.COLUMNS")
+        keys = [c["key"] for c in cols]
+        assert "instrument" in keys
+        col = cols[keys.index("instrument")]
+        assert col == {
+            "key": "instrument",
+            "label": "Inst",  # the combos-table header vocabulary (audit item 1c)
+            "type": "str",
+            "explain": "instrument",
+        }
+        # Placed in the identity block, right after the strategy name.
+        assert keys.index("instrument") == keys.index("conditions") + 1
+
+    def test_matching_instrument_filter_keeps_every_fixture_row(self) -> None:
+        rows = _fixture_rows()
+        assert all(r["instrument"] == "NSE-NIFTY" for r in rows)  # fixture truth
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"instrument": "NSE-NIFTY"}),
+        )
+        assert len(out["rows"]) == 100
+
+    def test_non_matching_instrument_filter_drops_every_fixture_row(self) -> None:
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(_fixture_rows()),
+            json.dumps({"instrument": "NSE-BANKNIFTY"}),
+        )
+        assert out["rows"] == []
+
+    def test_absent_instrument_row_never_matches_an_active_filter(self) -> None:
+        """The documented pre-instrument-artifact law: no key ⇒ excluded under
+        an ACTIVE filter, kept when the filter is inactive."""
+        rows = [
+            {"rank": 1, "instrument": "NSE-NIFTY", "metrics": {}},
+            {"rank": 2, "metrics": {}},  # a pre-instrument artifact row
+        ]
+        active = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"instrument": "NSE-NIFTY"}),
+        )
+        assert [r["rank"] for r in active["rows"]] == [1]
+        inactive = _node_call("S.applyFilters(ARGS[0], ARGS[1])", json.dumps(rows), json.dumps({}))
+        assert [r["rank"] for r in inactive["rows"]] == [1, 2]
+
+    def test_instrument_column_sorts_deterministically_with_rank_tie_break(self) -> None:
+        rows = [
+            {"rank": 1, "instrument": "NSE-NIFTY"},
+            {"rank": 2, "instrument": "BSE-SENSEX"},
+            {"rank": 3, "instrument": "NSE-NIFTY"},
+        ]
+        out = _node_call(
+            'S.sortRows(ARGS[0], "instrument", "str", "asc").map((r) => r.rank)',
+            json.dumps(rows),
+        )
+        assert out == [2, 1, 3]  # alpha ascending; the NIFTY tie keeps rank order
+
+
+class TestArmRenderString:
+    """Hostile-round F1 node golden: the arm column renders the BRIDGED string.
+
+    Every display sink ``String()``s the arm field (screener.html's str-cell
+    fallback / strategy.html stArm / bx-oneclick.js r1_arm); these goldens
+    run the writer-DICT fixture rows THROUGH the real reader and pin that
+    the JS-side ``String()`` yields the bridged money string, never
+    ``"[object Object]"`` — plus the teeth proving the raw writer dict
+    WOULD render exactly that without the bridge.
+    """
+
+    def test_reader_bridged_arm_renders_the_money_string(self) -> None:
+        rows = _fixture_rows()
+        out = _node_call(
+            'ARGS[0].map((r) => String(S.fieldValue(r, "arm")))',
+            json.dumps([rows[0], rows[NULL_ARM_RANK - 1]]),
+        )
+        assert out == ["SL ₹51.50 · TP ₹93.75", "SL — · TP —"]
+        assert "[object Object]" not in out
+
+    def test_raw_writer_arm_dict_would_render_object_object(self) -> None:
+        """The pre-bridge failure mode, pinned: the SHIPPED writer's arm dict
+        ``String()``s to "[object Object]" — what every real sweep card
+        showed until the reader bridge (the fixture's old STRING arm had
+        masked it)."""
+        raw = {"rank": 1, "arm": {"sl_paisa": 80, "tp_paisa": 50}}
+        out = _node_call('String(S.fieldValue(ARGS[0], "arm"))', json.dumps(raw))
+        assert out == "[object Object]"
+
+
+class TestRenderCaps:
+    """A-r4 node goldens (DEC-ONECLICK-PERF-CLUB-001): the cap/note math.
+
+    Fails-before: "Show all" rendered ``sorted.length`` rows UNBOUNDED —
+    Playwright-measured 4.8 s @ 10k / 14.1 s @ 20k rows of tab freeze — and
+    applyFilters/sortRows processed the whole untrusted payload. The caps
+    below bound every work surface with the truncation NAMED, never silent.
+    """
+
+    def test_cap_constants_are_exported_and_ordered(self) -> None:
+        caps = _node_call("[S.RENDER_CAP, S.SHOW_ALL_CAP, S.INPUT_CAP]")
+        assert caps == [200, 1000, 5000]
+        assert caps[0] < caps[1] < caps[2]  # default < show-all < input bound
+
+    @pytest.mark.parametrize(
+        ("sorted_length", "show_all", "expected"),
+        [
+            (100, False, 100),  # the ≤100-row contract renders whole
+            (100, True, 100),
+            (250, False, 200),  # default view caps at RENDER_CAP
+            (250, True, 250),  # show-all serves it in full (under its cap)
+            (20_000, False, 200),
+            (20_000, True, 1000),  # A-r4: Show all is ITSELF bounded
+            (0, False, 0),
+            (0, True, 0),
+        ],
+    )
+    def test_render_count_law(self, sorted_length: int, show_all: bool, expected: int) -> None:
+        out = _node_call(
+            "S.renderCount(ARGS[0], ARGS[1])", json.dumps(sorted_length), json.dumps(show_all)
+        )
+        assert out == expected
+
+    @pytest.mark.parametrize(
+        ("shown", "sorted_length", "show_all", "expected"),
+        [
+            (100, 100, False, ""),  # nothing truncated — no note
+            (1000, 1000, True, ""),
+            (200, 250, False, " (render cap 200 — use Show all)"),
+            (1000, 20_000, True, " (showing first 1000 of 20000 (render cap 1000))"),
+        ],
+    )
+    def test_cap_note_wording_golden(
+        self, shown: int, sorted_length: int, show_all: bool, expected: str
+    ) -> None:
+        out = _node_call(
+            "S.capNote(ARGS[0], ARGS[1], ARGS[2])",
+            json.dumps(shown),
+            json.dumps(sorted_length),
+            json.dumps(show_all),
+        )
+        assert out == expected
+
+    def test_input_cap_rows_passes_contract_payloads_through_untouched(self) -> None:
+        rows = [{"rank": i} for i in range(100)]
+        out = _node_call("S.inputCapRows(ARGS[0])", json.dumps(rows))
+        assert out == {"rows": rows, "dropped": 0}
+
+    def test_input_cap_rows_truncates_and_counts(self) -> None:
+        rows = [{"rank": i} for i in range(5100)]
+        out = _node_call(
+            "(function () { var c = S.inputCapRows(ARGS[0]);"
+            " return [c.rows.length, c.dropped, c.rows[0].rank, c.rows[4999].rank]; })()",
+            json.dumps(rows),
+        )
+        assert out == [5000, 100, 0, 4999]
+
+    def test_input_cap_rows_non_array_reads_empty(self) -> None:
+        out = _node_call("S.inputCapRows(ARGS[0])", json.dumps(None))
+        assert out == {"rows": [], "dropped": 0}
+
+    @pytest.mark.parametrize(
+        ("dropped", "payload_length", "expected"),
+        [
+            (0, 100, ""),
+            (-1, 100, ""),  # defensive — never a negative claim
+            (100, 5100, " (input capped: first 5000 of 5100 payload rows loaded)"),
+        ],
+    )
+    def test_input_cap_note_wording_golden(
+        self, dropped: int, payload_length: int, expected: str
+    ) -> None:
+        # args ride ONE json array — a bare "-1" argv would read as a node flag
+        out = _node_call(
+            "S.inputCapNote(ARGS[0][0], ARGS[0][1])",
+            json.dumps([dropped, payload_length]),
+        )
+        assert out == expected
+
+    def test_sort_rows_is_input_bounded(self) -> None:
+        """A-r4: rows past INPUT_CAP are never sorted (out-of-contract payload).
+
+        The 5010-row array is generated IN node — a >128 KiB argv would trip
+        the kernel's per-arg limit (the point is the bound, not the wire).
+        """
+        out = _node_call(
+            "(function () { var rows = [];"
+            ' for (var i = 0; i < 5010; i++) { rows.push({rank: i, tf: "5m"}); }'
+            ' return S.sortRows(rows, "rank", "num", "asc").length; })()'
+        )
+        assert out == 5000
+
+    def test_apply_filters_is_input_bounded(self) -> None:
+        """A-r4: rows past INPUT_CAP are never examined (bounded filter work)."""
+        out = _node_call(
+            "(function () { var rows = [];"
+            ' for (var i = 0; i < 5010; i++) { rows.push({rank: i, tf: "5m", metrics: {}}); }'
+            " var a = S.applyFilters(rows, {});"
+            " return [a.rows.length, a.null_vix_excluded]; })()"
+        )
+        assert out == [5000, 0]

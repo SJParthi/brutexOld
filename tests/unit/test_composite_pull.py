@@ -41,6 +41,8 @@ from brutex.dashboard.composite_pull import (
     CompositePullReport,
     pull_historical_for_underlyings,
 )
+from brutex.dashboard.historical_pull import HistoricalPullReport
+from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.pipeline_pull import PriorStepsVerdict
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.registry_store import RegistryStore
@@ -542,6 +544,30 @@ def test_underlying_kind_map_first_wins_on_key_collision() -> None:
     assert cp._underlying_kind_map(list(reversed(stock_first))) == {"BAJAJAUTO": True}
 
 
+def test_registry_read_keys_and_kind_map_survive_blank_symbol_row() -> None:
+    """DEC-FNO-UNDERLYING-EMPTY-GUARD-001 (guarantee-audit BUG-3): a blank-symbol row
+    never crashes the whole-map helpers.
+
+    Pre-fix, ``primary_fno_underlying("")`` raised ``IndexError`` inside BOTH
+    ``_registry_read_keys`` and ``_underlying_kind_map``, so ONE junk vendor row
+    poisoned the whole build. With the guard the blank row yields one inert ``""``
+    key (matched by no real registry/coverage row — the disclosed benign residue;
+    per-row skip here is deliberately out of the mandated scope) and every real
+    name is byte-identical.
+    """
+    instruments = [
+        _instrument("RELIANCE", 1),
+        _instrument("", 2),
+        _instrument("TCS", 3),
+    ]
+    keys = cp._registry_read_keys(instruments)
+    assert keys == ("RELIANCE", "", "TCS")
+    kinds = cp._underlying_kind_map(instruments)
+    assert set(kinds) == {"RELIANCE", "", "TCS"}
+    assert kinds["RELIANCE"] is True  # _instrument builds IDX rows — is_index=True.
+    assert kinds[""] is True  # present-but-inert (the disclosed residue).
+
+
 def test_aliased_underlying_chain_visible_to_candle_phase(tmp_path: Path) -> None:
     """FAILS-BEFORE regression: an aliased index's fresh chain must reach phase (b).
 
@@ -695,7 +721,15 @@ def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
     uncaught terminal ``RegistryError`` that kills the whole composite job."""
     sdk = _nifty_sdk()
     sink = _RecordingSink()
+    # De-flake: open the store BEFORE arming the 0.2 s wedge deadline —
+    # RegistryStore.open runs its own connect+DDL under the env-resolved
+    # deadline, and a COLD DuckDB open on a loaded CI runner can legitimately
+    # exceed 0.2 s (a spurious terminal RegistryError, not the wedge under
+    # test). The wedge teeth are untouched: StoreWriteDeadlineGuard.run
+    # re-resolves the env PER WRITE BATCH, so the phase-(a) upsert still
+    # runs under the 0.2 s bound.
     registry = _registry(tmp_path)
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
     coverage = _CoverageSink()
     # Shrink the deadline only ONCE the store is open + the wedge is installed —
     # never during the open itself, whose healthy connect/DDL would otherwise
@@ -738,7 +772,10 @@ def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
         proxy.gate.set()
     # RE-ATTEMPT ON THE NEXT PULL: the volume heals (the zombie's idempotent write
     # completes, the wedge latch self-clears) and the SAME selection runs WHOLE —
-    # metadata re-pulled, candles pulled.
+    # metadata re-pulled, candles pulled. Restore the generous default deadline
+    # first — the 0.2 s wedge deadline was for pull 1 ONLY; a loaded CI runner
+    # must never spuriously defer the healed re-pull.
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
     deadline_at = time.monotonic() + 10.0
     while registry._write_guard.wedged:
         if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang
@@ -1189,3 +1226,75 @@ def test_prior_steps_folds_inner_metadata_failure(
     assert forwarded.spot_clean is True
     assert forwarded.strict is True
     assert forwarded.prior_clean is False
+
+
+class TestCompositeReportOkProperty:
+    """``CompositePullReport.ok`` — the StageOutcome home of the composite-gate
+    predicate (DEC-STAGED-SEQUENCER-SEAMS-001; ``pipeline_pull.historical_phase_ok``
+    delegates here; a ``None`` sub-report is a no-op, never a failure)."""
+
+    @staticmethod
+    def _meta(*, expiry_failures: int = 0) -> MetadataPullReport:
+        return MetadataPullReport(
+            dry_run=False,
+            years=(2024,),
+            underlyings=("NIFTY",),
+            expiry_cells=1,
+            cells_skipped=0,
+            expiry_failures=expiry_failures,
+            expiries_persisted=1,
+            contract_jobs=1,
+            contract_failures=0,
+            contracts_persisted=1,
+            note="ok",
+        )
+
+    @staticmethod
+    def _hist(*, failed_pairs: int = 0) -> HistoricalPullReport:
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1minute",),
+            contracts_selected=1,
+            contracts_completed=1,
+            bars_appended=1,
+            windows=1,
+            failed_pairs=failed_pairs,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="ok",
+            phase1_clean=True,
+            phase1_complete=("NSE-NIFTY-25Jan24-FUT",),
+            start_dates={"NSE-NIFTY-25Jan24-FUT": "2024-01-01"},
+            minute_requested=True,
+            minute_skipped=False,
+        )
+
+    def _composite(
+        self,
+        *,
+        metadata: MetadataPullReport | None,
+        historical: HistoricalPullReport | None,
+    ) -> CompositePullReport:
+        return CompositePullReport(
+            dry_run=False,
+            requested=("NIFTY",),
+            tradable=("NIFTY",),
+            skipped_reference_only=(),
+            metadata=metadata,
+            historical=historical,
+            note="ok",
+        )
+
+    def test_clean_subreports_ok_true(self) -> None:
+        assert self._composite(metadata=self._meta(), historical=self._hist()).ok is True
+
+    def test_none_subreports_are_noop_not_failure(self) -> None:
+        assert self._composite(metadata=None, historical=None).ok is True
+
+    def test_failing_inner_metadata_flips_ok_false(self) -> None:
+        composite = self._composite(metadata=self._meta(expiry_failures=1), historical=self._hist())
+        assert composite.ok is False
+
+    def test_failing_inner_historical_flips_ok_false(self) -> None:
+        composite = self._composite(metadata=self._meta(), historical=self._hist(failed_pairs=1))
+        assert composite.ok is False

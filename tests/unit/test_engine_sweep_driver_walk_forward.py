@@ -443,6 +443,94 @@ def test_walk_forward_sweep_end_to_end_matches_single() -> None:
         assert swept_result.fold_results == single.fold_results
 
 
+def test_walk_forward_roll_schedule_threads_and_rekeys_the_run_hash() -> None:
+    # ADR-0012 pass-through (review round-2 finding 2): the WF evaluators now
+    # accept roll_schedule/apply_1day_mask; a schedule-aware evaluation is a
+    # DIFFERENT computation so its run-hash re-keys, while the defaults stay
+    # byte-identical to the pre-launch spot derivation.
+    bars = _stream(25)
+    covering = (bars[-1].timestamp.astimezone(_IST).date().toordinal(),)
+    base = evaluate_combo_walk_forward(
+        bars,
+        required_mask=0,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=10,
+        test_days=5,
+        step_days=5,
+    )
+    explicit_defaults = evaluate_combo_walk_forward(
+        bars,
+        required_mask=0,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=10,
+        test_days=5,
+        step_days=5,
+        roll_schedule=None,
+        apply_1day_mask=False,
+    )
+    scheduled = evaluate_combo_walk_forward(
+        bars,
+        required_mask=0,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=10,
+        test_days=5,
+        step_days=5,
+        roll_schedule=covering,
+    )
+    assert explicit_defaults.run_hash == base.run_hash  # spot byte-identity
+    assert scheduled.run_hash != base.run_hash  # conditional identity entry
+    # walk_forward_sweep threads the SAME params → identical to the single.
+    [(_, swept)] = walk_forward_sweep(
+        bars,
+        [0],
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=10,
+        test_days=5,
+        step_days=5,
+        roll_schedule=covering,
+    )
+    assert swept.run_hash == scheduled.run_hash
+    assert swept.fold_results == scheduled.fold_results
+
+
+@pytest.mark.parametrize("entry", ["single", "sweep"])
+def test_walk_forward_schedule_reaches_the_stage1a_build(entry: str) -> None:
+    # A schedule ending BEFORE the stream provably reaches Stage-1A: its
+    # loud desync raise fires (pre-fix the kwarg did not exist — TypeError).
+    bars = _stream(25)
+    stale = (bars[0].timestamp.astimezone(_IST).date().toordinal() - 1,)
+
+    def _run() -> object:
+        if entry == "single":
+            return evaluate_combo_walk_forward(
+                bars,
+                required_mask=0,
+                direction=Side.BUY,
+                tf_minutes=1,
+                train_days=10,
+                test_days=5,
+                step_days=5,
+                roll_schedule=stale,
+            )
+        return walk_forward_sweep(
+            bars,
+            [0],
+            direction=Side.BUY,
+            tf_minutes=1,
+            train_days=10,
+            test_days=5,
+            step_days=5,
+            roll_schedule=stale,
+        )
+
+    with pytest.raises(ValueError, match="beyond the last roll_schedule expiry"):
+        _run()
+
+
 def test_no_trade_mask_aggregates_to_zero() -> None:
     result = evaluate_combo_walk_forward(
         _stream(25),

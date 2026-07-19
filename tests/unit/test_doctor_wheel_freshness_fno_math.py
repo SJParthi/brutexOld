@@ -21,8 +21,13 @@ an always-on production risk. Covers BOTH halves of the handshake:
 HONEST residual gap (Golden Rule #10, pinned in the source too): version +
 symbol-set checks catch a stale wheel that dropped/added a symbol or changed
 crate version; they do NOT catch same-version symbol-compatible BEHAVIORAL
-drift — the CI golden/parity suites remain the correctness proof for that
-class (spec Risk row 1); a wheel-baked source digest is the named follow-up.
+drift — that class is covered by the SHIPPED source-digest handshake
+(DEC-RUST-SOURCE-DIGEST-TWIN-001, MIGRATION.md #1258 — the follow-up
+previously named here) plus the LAYERED CI correctness nets: the in-crate
+cargo bit-level tests at the Rust-source level and the Python-side
+parity/golden suites, whose ULP-boundary discriminators reach WHEEL-level
+rounding-order drift too (refuter round 5, MIGRATION.md #1928 — value-level
+parity cases alone were proven blind to a 1-ULP fold-op-order mutant wheel).
 """
 
 # Whitebox test of the shim's private handshake internals — same convention as

@@ -1,0 +1,704 @@
+# pyright: reportPrivateUsage=none
+"""End-to-end cross-verify producer chain (DEC-CROSSVERIFY-PRODUCER-001 §9.3,
+SPOT-ONLY per DEC-CROSSVERIFY-SPOT-ONLY-001 — MIGRATION.md #1788).
+
+A REAL lake written through the production ``ParquetBarSink`` (the golden
+harness's build law: 3 pinned trio indices + an OBSERVE-tier ``NIFTYIT``
+index (374/375 minutes, close edge complete — the #1788-fix-round
+index-policy arm) + an ``M&M`` stock enumerated from a
+REAL ``instruments.duckdb``, PLUS a NIFTY-future lake partition AND a REAL
+``registry.duckdb`` holding live FUT rows — the #1788 NEGATIVE-pin fixture:
+futures data present, futures files NEVER produced) driven through the FULL
+:func:`run_crossverify` step machine over :func:`default_seams` — real locks
+(tmp-lake flocks + lease), real reader/gate-seam/export/staging/journal/
+prebuild legs — with exactly TWO injected seams: :class:`FakeS3Client` (no
+AWS in CI) and a recording alerter (the exactly-once summary pin). The pull
+leg is exercised in ``--skip-pull`` mode (the vendor is out of CI's reach by
+design; the spot pull leg's call shapes are spy-pinned in
+``tests/unit/test_crossverify_pull_leg.py``).
+
+GATE HONESTY: the sibling completeness-gate module
+(``brutex.data.today_completeness``, MIGRATION.md #1774 — PR #1503) is NOW in
+this tree, so ``_classifier_factory`` binds the REAL gate (the
+contract-faithful fake twin remains only as the honest degrade for a tree
+where the module is absent), and ``TestRealGateBinding`` pins the real-module
+binding STRICTLY — ``bind_production_classifier`` with NO fallback — through
+the full chain (complete day publishes; truncated index withholds exit 2).
+Asserted: published object bytes vs the committed golden fixtures,
+journal contents + staging cleanup, idempotent second run (0 new puts),
+truncated-index withhold → exit 2 with the file ABSENT from S3, crash-mid-
+publish → next-run convergence, and the derive leg via the independent
+``lake_derived_freshness_verdicts`` oracle.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import pytest
+from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity
+from brutex.crossverify.config import resolve_crossverify_config
+from brutex.crossverify.gate_seam import (
+    CompletenessGateUnavailable,
+    bind_production_classifier,
+)
+from brutex.crossverify.journal import load_journal, load_last_run, staging_dir
+from brutex.crossverify.run import CrossverifyReport, default_seams, run_crossverify
+from brutex.data.instrument_store import InstrumentStore
+from brutex.data.registry_store import RegistryStore
+from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
+from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+from tests.fakes.fake_completeness_gate import faithful_classify
+from tests.fakes.fake_s3_client import FakeS3Client
+from tests.golden._crossverify_harness import (
+    FIXTURES_DIR,
+    GOLDEN_DAY,
+    GOLDEN_IDENTITIES,
+    _bars,
+)
+
+if TYPE_CHECKING:
+    from brutex.crossverify.run import CrossverifySeams
+
+_SESSION_MINUTES = 375
+
+#: The keys the clean-lake run publishes (the s3_key law, prefix default) —
+#: SPOT ONLY (#1788): despite the fixture lake's FNO partition + registry
+#: FUT rows, NO futures key is ever minted.
+_KEY_NIFTY = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/NIFTY.csv"
+_KEY_BANKNIFTY = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/BANKNIFTY.csv"
+_KEY_SENSEX = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/SENSEX.csv"
+_KEY_MM = f"crossverify/groww/{GOLDEN_DAY}/NSE_EQ/M&M.csv"
+#: The OBSERVE-tier arm (#1788 fix round): a non-trio index with a SHORT but
+#: close-edge-complete day (374 minutes, last bar 15:29) PUBLISHES under the
+#: observe-only count law — never a withhold, never a blocked exit.
+_KEY_NIFTYIT = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/NIFTYIT.csv"
+_ALL_KEYS = {_KEY_NIFTY, _KEY_BANKNIFTY, _KEY_SENSEX, _KEY_MM, _KEY_NIFTYIT}
+
+
+def _must_identity(exchange: str, segment: str, symbol: str) -> CanonicalIdentity:
+    identity = canonical_identity(exchange=exchange, segment=segment, lake_symbol=symbol)
+    assert identity is not None
+    return identity
+
+
+_NIFTYIT_IDENTITY = _must_identity("NSE", "INDEX", "NIFTYIT")
+
+
+class _RecordingAlerter:
+    """The exactly-once-summary pin's recorder (satisfies CrossverifyAlerter)."""
+
+    def __init__(self) -> None:
+        self.summaries: list[tuple[str, CrossverifyReport]] = []
+        self.refusals: list[tuple[str, str]] = []
+
+    def crossverify_summary(self, *, run_id: str, report: CrossverifyReport) -> bool:
+        self.summaries.append((run_id, report))
+        return True
+
+    def crossverify_refused(self, *, run_id: str, reason: str) -> bool:
+        self.refusals.append((run_id, reason))
+        return True
+
+
+def _idx(symbol: str, security_id: int) -> Instrument:
+    """A real IDX master row — the observe-tier index enumerates via the store."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=0,
+        tick_size=Decimal(0),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def _eq(symbol: str, security_id: int) -> Instrument:
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def _build_lake(lake_root: Path, *, truncated_banknifty: bool) -> None:
+    """The golden-harness build law over THIS test's enumeration surface."""
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    full = range(_SESSION_MINUTES)
+    plans: list[tuple[str, list[Any]]] = [
+        ("NIFTY", _bars(base_price="24000.00", minutes=full, oi_base=None)),
+        ("SENSEX", _bars(base_price="80000.00", minutes=full, oi_base=None)),
+        (
+            "BANKNIFTY",
+            _bars(
+                base_price="52000.00",
+                minutes=range(3) if truncated_banknifty else full,
+                oi_base=None,
+            ),
+        ),
+        ("M&M", _bars(base_price="2900.00", minutes=range(3), oi_base=None)),
+        # The OBSERVE-tier index arm (#1788 fix round): 374 of 375 minutes
+        # (one interior hole) with the CLOSE EDGE present (minute 374 =
+        # 15:29 IST) — count_short under the real gate, PUBLISHED under the
+        # observe-only count law (a non-trio index never count-withholds).
+        (
+            "NIFTYIT",
+            _bars(base_price="43000.00", minutes=[m for m in full if m != 100], oi_base=None),
+        ),
+        # The #1788 NEGATIVE-pin fixture: a FULL futures contract day IS in
+        # the lake — the spot-only producer must still emit ZERO *_FNO keys.
+        ("NIFTY-2026-07-30-FUT", _bars(base_price="24100.00", minutes=full, oi_base=50_000)),
+    ]
+    identities = {**GOLDEN_IDENTITIES, "NIFTYIT": _NIFTYIT_IDENTITY}
+    for symbol, bars in plans:
+        identity = identities[symbol]
+        sink.append(
+            exchange=identity.exchange,
+            segment=identity.lake_segment,
+            symbol=identity.lake_symbol,
+            interval="1minute",
+            bars=bars,
+        )
+    # The stock enumeration surface — a REAL instruments.duckdb EQ row.
+    store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        store.upsert_many(
+            [_eq("M&M", 2031), _idx("NIFTYIT", 5001)],
+            snapshot_date=GOLDEN_DAY,
+            run_id="cv-e2e",
+            csv_source_sha256="0" * 64,
+        )
+    finally:
+        store.close()
+    # A registry WITH live FUT rows — the #1788 negative pin: the spot-only
+    # producer never reads it, so these rows must yield ZERO exports.
+    with RegistryStore.open(lake_root / "registry.duckdb") as registry:
+        registry.upsert_contracts(
+            "NSE",
+            "NIFTY",
+            date(2026, 7, 30),
+            [("NSE-NIFTY-30Jul26-FUT", "FUT", None)],
+            run_id="cv-e2e",
+            fetched_at=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+
+
+def _classifier_factory() -> Any:
+    """The real gate when importable, else the contract-faithful fake twin."""
+    try:
+        return bind_production_classifier()
+    except CompletenessGateUnavailable:
+        return faithful_classify
+
+
+def _seams(lake_root: Path, fake_s3: FakeS3Client, alerter: _RecordingAlerter) -> CrossverifySeams:
+    config = resolve_crossverify_config(lake_root=lake_root, day=GOLDEN_DAY, skip_pull=True)
+    seams = default_seams(
+        config,
+        account_key_resolver=lambda: None,  # no AWS credentials in CI
+        s3_client_factory=lambda: fake_s3,
+        alerter=alerter,
+    )
+    return dataclasses.replace(seams, classifier_factory=_classifier_factory)
+
+
+def _run(lake_root: Path, fake_s3: FakeS3Client, alerter: _RecordingAlerter) -> CrossverifyReport:
+    config = resolve_crossverify_config(lake_root=lake_root, day=GOLDEN_DAY, skip_pull=True)
+    return run_crossverify(config, _seams(lake_root, fake_s3, alerter))
+
+
+@pytest.fixture
+def clean_lake(tmp_path: Path) -> Path:
+    lake = tmp_path / "lake"
+    lake.mkdir()
+    _build_lake(lake, truncated_banknifty=False)
+    return lake
+
+
+class TestCleanChain:
+    def test_full_chain_publishes_pinned_bytes_then_idempotent_rerun(
+        self, clean_lake: Path
+    ) -> None:
+        fake_s3 = FakeS3Client()
+        alerter = _RecordingAlerter()
+        report = _run(clean_lake, fake_s3, alerter)
+
+        assert report.verdict == "published"
+        assert report.exit_code == 0
+        assert report.published == 5
+        assert report.blocked == 0
+        assert report.withheld == 0
+        # The #1788-fix-round three-way split: NIFTYIT (374/375, close edge
+        # complete) ships under the OBSERVE law; the other four are strict.
+        assert report.publish_strict == 4
+        assert report.publish_observe == 1
+        assert set(fake_s3.objects) == _ALL_KEYS
+
+        # #1788 NEGATIVE PIN: the lake HOLDS a full futures contract day and
+        # the registry HOLDS its live FUT row — yet ZERO *_FNO keys exist
+        # anywhere (S3, journal, staging); futures absence is BY DESIGN.
+        assert all("_FNO" not in key for key in fake_s3.objects)
+        assert all("-FUT" not in key for key in fake_s3.objects)
+
+        # Byte-verified against the COMMITTED golden fixtures (same bar law).
+        for key, fixture in (
+            (_KEY_NIFTY, "NIFTY.csv"),
+            (_KEY_SENSEX, "SENSEX.csv"),
+            (_KEY_MM, "M&M.csv"),
+        ):
+            assert fake_s3.objects[key] == (FIXTURES_DIR / fixture).read_bytes(), key
+
+        # Journal = the durable done-record; staging dir deleted on full publish.
+        journal = load_journal(clean_lake, GOLDEN_DAY)
+        assert journal is not None
+        assert set(journal.entries) == _ALL_KEYS
+        assert all("_FNO" not in key for key in journal.entries)  # the #1788 pin
+        assert journal.pending_keys() == ()
+        assert journal.withheld == {}
+        assert not staging_dir(clean_lake, GOLDEN_DAY).exists()
+
+        # Exactly ONE summary, zero refusals.
+        assert len(alerter.summaries) == 1
+        assert alerter.refusals == []
+        assert alerter.summaries[0][1].verdict == "published"
+
+        # Idempotent second run: journal-verified skips ⇒ ZERO new puts.
+        puts_before = len(fake_s3.puts)
+        alerter2 = _RecordingAlerter()
+        report2 = _run(clean_lake, fake_s3, alerter2)
+        assert report2.verdict == "published"
+        assert report2.exit_code == 0
+        assert report2.published == 0
+        assert report2.skipped_already == 5
+        assert len(fake_s3.puts) == puts_before
+        assert len(alerter2.summaries) == 1
+
+    def test_derive_leg_verified_by_the_independent_freshness_oracle(
+        self, clean_lake: Path
+    ) -> None:
+        fake_s3 = FakeS3Client()
+        report = _run(clean_lake, fake_s3, _RecordingAlerter())
+        assert report.derive_failed == 0
+        assert report.derived > 0
+        # The independent oracle: every stored derived TF equals a fresh
+        # re-derivation from the 1-minute base (DEC-CROSSVERIFY-DAY-DERIVE-001).
+        verdicts = lake_derived_freshness_verdicts(
+            clean_lake,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY", "BANKNIFTY"],
+            intervals=["5minute", "15minute"],
+        )
+        assert verdicts, "expected stored derived partitions to judge"
+        assert set(verdicts.values()) == {"fresh"}
+
+
+class TestWithheldIndex:
+    def test_truncated_index_day_withholds_exits_2_and_never_publishes_it(
+        self, tmp_path: Path
+    ) -> None:
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _build_lake(lake, truncated_banknifty=True)
+        fake_s3 = FakeS3Client()
+        alerter = _RecordingAlerter()
+        report = _run(lake, fake_s3, alerter)
+
+        assert report.verdict == "withheld_partial"
+        assert report.exit_code == 2
+        assert report.withheld == 1
+        # Never-publish-partial: the truncated index reached NEITHER staging
+        # NOR S3; the healthy files still published (per-file law).
+        assert _KEY_BANKNIFTY not in fake_s3.objects
+        assert _KEY_NIFTY in fake_s3.objects
+        journal = load_journal(lake, GOLDEN_DAY)
+        assert journal is not None
+        assert "BANKNIFTY" in journal.withheld
+        assert _KEY_BANKNIFTY not in journal.entries
+        # The summary fired once, CRITICAL-bound verdict carried verbatim.
+        assert len(alerter.summaries) == 1
+        assert alerter.summaries[0][1].verdict == "withheld_partial"
+
+
+class TestRealGateBinding:
+    """The integration moment (MIGRATION.md #1774 merged): the REAL sibling
+    module drives the chain — ``bind_production_classifier`` STRICT, no
+    fake-twin fallback anywhere in these tests."""
+
+    def _seams_real_gate(
+        self, lake: Path, fake_s3: FakeS3Client, alerter: _RecordingAlerter
+    ) -> CrossverifySeams:
+        config = resolve_crossverify_config(lake_root=lake, day=GOLDEN_DAY, skip_pull=True)
+        seams = default_seams(
+            config,
+            account_key_resolver=lambda: None,
+            s3_client_factory=lambda: fake_s3,
+            alerter=alerter,
+        )
+        # STRICT: the real binding — a CompletenessGateUnavailable here FAILS
+        # the test (the module is in-tree post-#1503; no fallback allowed).
+        return dataclasses.replace(seams, classifier_factory=bind_production_classifier)
+
+    def test_real_module_binds_without_fallback(self) -> None:
+        classifier = bind_production_classifier()  # raises ⇒ test fails
+        assert callable(classifier)
+
+    def test_real_gate_complete_index_day_publishes(self, clean_lake: Path) -> None:
+        fake_s3 = FakeS3Client()
+        alerter = _RecordingAlerter()
+        config = resolve_crossverify_config(lake_root=clean_lake, day=GOLDEN_DAY, skip_pull=True)
+        report = run_crossverify(config, self._seams_real_gate(clean_lake, fake_s3, alerter))
+        assert report.verdict == "published"
+        assert report.exit_code == 0
+        assert report.published == 5
+        # The REAL gate reads NIFTYIT count_short (374 < 375); the producer's
+        # observe tier publishes it (close edge complete) — the F1 e2e arm.
+        assert report.publish_strict == 4
+        assert report.publish_observe == 1
+        assert _KEY_NIFTYIT in fake_s3.objects
+        assert set(fake_s3.objects) == _ALL_KEYS  # spot only — no *_FNO key (#1788)
+        assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
+
+    def test_real_gate_truncated_index_day_withholds_exit_2(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _build_lake(lake, truncated_banknifty=True)
+        fake_s3 = FakeS3Client()
+        alerter = _RecordingAlerter()
+        config = resolve_crossverify_config(lake_root=lake, day=GOLDEN_DAY, skip_pull=True)
+        report = run_crossverify(config, self._seams_real_gate(lake, fake_s3, alerter))
+        assert report.verdict == "withheld_partial"
+        assert report.exit_code == 2
+        assert report.withheld == 1
+        assert _KEY_BANKNIFTY not in fake_s3.objects
+        assert _KEY_NIFTY in fake_s3.objects
+        journal = load_journal(lake, GOLDEN_DAY)
+        assert journal is not None
+        assert "BANKNIFTY" in journal.withheld
+        # The REAL classifier's token for a truncated index day (never the
+        # fake twin's fabrication): count_short (0/short < expected minutes).
+        assert journal.withheld["BANKNIFTY"] == "count_short"
+
+
+class TestWithheldAutoRegate:
+    """DEC-CROSSVERIFY-WITHHELD-REGATE-001 e2e over the REAL gate: day D
+    withheld → the lake heals → the NEXT daily run auto-publishes D with
+    ZERO manual ``--day`` intervention (and never re-puts D's published
+    keys)."""
+
+    #: The next trading day after GOLDEN_DAY (Fri 2026-07-10 → Mon 2026-07-13,
+    #: a verified REGULAR NSE session).
+    NEXT_DAY = date(2026, 7, 13)
+
+    def _shifted_bars(self, bars: list[Any], days: int) -> list[Any]:
+        return [
+            dataclasses.replace(bar, timestamp=bar.timestamp + timedelta(days=days)) for bar in bars
+        ]
+
+    def _append(self, lake: Path, symbol: str, bars: list[Any]) -> None:
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        identities = {**GOLDEN_IDENTITIES, "NIFTYIT": _NIFTYIT_IDENTITY}
+        identity = identities[symbol]
+        ParquetBarSink(writer=ParquetWriter(lake_root=lake)).append(
+            exchange=identity.exchange,
+            segment=identity.lake_segment,
+            symbol=identity.lake_symbol,
+            interval="1minute",
+            bars=bars,
+        )
+
+    def _run_on(
+        self, lake: Path, day: date, fake_s3: FakeS3Client, alerter: _RecordingAlerter
+    ) -> CrossverifyReport:
+        config = resolve_crossverify_config(lake_root=lake, day=day, skip_pull=True)
+        seams = default_seams(
+            config,
+            account_key_resolver=lambda: None,
+            s3_client_factory=lambda: fake_s3,
+            alerter=alerter,
+        )
+        # STRICT real-gate binding (the TestRealGateBinding law).
+        return run_crossverify(
+            config, dataclasses.replace(seams, classifier_factory=bind_production_classifier)
+        )
+
+    def test_healed_withheld_day_auto_publishes_on_the_next_daily_run(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _build_lake(lake, truncated_banknifty=True)
+        fake_s3 = FakeS3Client()
+
+        # Day D: BANKNIFTY truncated → withheld exit 2 (the real gate).
+        report_d = self._run_on(lake, GOLDEN_DAY, fake_s3, _RecordingAlerter())
+        assert (report_d.verdict, report_d.exit_code) == ("withheld_partial", 2)
+        assert _KEY_BANKNIFTY not in fake_s3.objects
+        journal_d = load_journal(lake, GOLDEN_DAY)
+        assert journal_d is not None and journal_d.withheld == {"BANKNIFTY": "count_short"}
+        # The durable last-run record captured the failure (reload-proof).
+        record = load_last_run(lake)
+        assert record is not None and record["verdict"] == "withheld_partial"
+
+        # HEAL: the vendor re-pull lands the full BANKNIFTY day (keep-first
+        # dedup absorbs the 3 already-stored bars).
+        self._append(
+            lake, "BANKNIFTY", _bars(base_price="52000.00", minutes=range(375), oi_base=None)
+        )
+        # The NEXT trading day's bars land too (the daily pull's normal work).
+        for symbol, price in (
+            ("NIFTY", "24100.00"),
+            ("BANKNIFTY", "52100.00"),
+            ("SENSEX", "80100.00"),
+        ):
+            self._append(
+                lake,
+                symbol,
+                self._shifted_bars(_bars(base_price=price, minutes=range(375), oi_base=None), 3),
+            )
+        self._append(
+            lake,
+            "M&M",
+            self._shifted_bars(_bars(base_price="2910.00", minutes=range(3), oi_base=None), 3),
+        )
+        self._append(
+            lake,
+            "NIFTYIT",
+            self._shifted_bars(
+                _bars(
+                    base_price="43100.00",
+                    minutes=[m for m in range(375) if m != 100],
+                    oi_base=None,
+                ),
+                3,
+            ),
+        )
+
+        # Day D+1 (the next daily run): NO --day, NO manual step — the
+        # withheld re-gate publishes D's BANKNIFTY alongside D+1's files.
+        puts_before = {key for _b, key, _c in fake_s3.puts}
+        alerter = _RecordingAlerter()
+        report_next = self._run_on(lake, self.NEXT_DAY, fake_s3, alerter)
+        assert (report_next.verdict, report_next.exit_code) == ("published", 0)
+        assert report_next.regated == 1
+        assert _KEY_BANKNIFTY in fake_s3.objects  # day D's file, auto-published
+        # D's healed bytes match a from-scratch D re-render (deterministic).
+        assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
+        # Never-re-put law: D's already-published keys saw NO second PUT.
+        d_reputs = [
+            key for _b, key, _c in fake_s3.puts if key in puts_before and key != _KEY_BANKNIFTY
+        ]
+        assert len(d_reputs) == len([k for k in puts_before if k != _KEY_BANKNIFTY])
+        # D's journal: withheld map cleared, the key published, staging gone.
+        journal_d2 = load_journal(lake, GOLDEN_DAY)
+        assert journal_d2 is not None
+        assert journal_d2.withheld == {}
+        assert journal_d2.entries[_KEY_BANKNIFTY].published is True
+        assert not staging_dir(lake, GOLDEN_DAY).exists()
+        # D+1's own files published (the run's normal output).
+        assert f"crossverify/groww/{self.NEXT_DAY}/IDX_I/NIFTY.csv" in fake_s3.objects
+        # ONE summary; the last-run record now reads the healthy outcome.
+        assert len(alerter.summaries) == 1
+        assert alerter.summaries[0][1].regated == 1
+        record2 = load_last_run(lake)
+        assert record2 is not None
+        assert record2["verdict"] == "published"
+        assert record2["regated"] == 1
+        assert record2["day"] == self.NEXT_DAY.isoformat()
+
+
+class TestPublishCrashConvergence:
+    def test_exhausted_retries_leave_pending_and_the_next_run_converges(
+        self, clean_lake: Path
+    ) -> None:
+        # First run: one key throttles past the whole 3-attempt ladder.
+        failing = FakeS3Client(fail_times={_KEY_MM: 99})
+        alerter = _RecordingAlerter()
+        report = _run(clean_lake, failing, alerter)
+        assert report.verdict == "publish_failed"
+        assert report.exit_code == 2
+        assert report.publish_failed == 1
+        journal = load_journal(clean_lake, GOLDEN_DAY)
+        assert journal is not None
+        assert journal.pending_keys() == (_KEY_MM,)
+        # The staged bytes survive for the convergence run.
+        assert staging_dir(clean_lake, GOLDEN_DAY).exists()
+
+        # Next run against a healthy backend: the pending key publishes from
+        # frozen staged bytes; the already-published keys skip (0 re-puts).
+        healthy = FakeS3Client()
+        report2 = _run(clean_lake, healthy, _RecordingAlerter())
+        assert report2.verdict == "published"
+        assert report2.exit_code == 0
+        assert report2.skipped_already == 4
+        assert report2.published == 1
+        assert set(healthy.objects) == {_KEY_MM}
+        assert healthy.objects[_KEY_MM] == (FIXTURES_DIR / "M&M.csv").read_bytes()
+        journal2 = load_journal(clean_lake, GOLDEN_DAY)
+        assert journal2 is not None
+        assert journal2.pending_keys() == ()
+        assert not staging_dir(clean_lake, GOLDEN_DAY).exists()
+
+
+class TestOwedDayCatchup:
+    """DEC-CROSSVERIFY-OWED-SENTINEL-001 e2e over the REAL seams: day D's
+    pull wrote its bars + the owed marker, then the box DIED before the
+    crossverify tail ever started (NO journal for D — invisible to the
+    pending/withheld scans); the NEXT daily run's step-D3 owed catchup
+    completes D with the manual ``--day`` machinery (full export → gate →
+    stage → publish through the recursive ``run_day`` binding of
+    ``default_seams``), clears D's marker, and converges idempotently
+    (the crash-after-publish-before-clear window re-runs to ZERO puts)."""
+
+    #: The next trading day after GOLDEN_DAY (Fri 2026-07-10 → Mon 2026-07-13).
+    NEXT_DAY = date(2026, 7, 13)
+
+    def _shifted_bars(self, bars: list[Any], days: int) -> list[Any]:
+        return [
+            dataclasses.replace(bar, timestamp=bar.timestamp + timedelta(days=days)) for bar in bars
+        ]
+
+    def _append(self, lake: Path, symbol: str, bars: list[Any]) -> None:
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        identities = {**GOLDEN_IDENTITIES, "NIFTYIT": _NIFTYIT_IDENTITY}
+        identity = identities[symbol]
+        ParquetBarSink(writer=ParquetWriter(lake_root=lake)).append(
+            exchange=identity.exchange,
+            segment=identity.lake_segment,
+            symbol=identity.lake_symbol,
+            interval="1minute",
+            bars=bars,
+        )
+
+    def _append_next_day(self, lake: Path) -> None:
+        for symbol, price in (
+            ("NIFTY", "24100.00"),
+            ("BANKNIFTY", "52100.00"),
+            ("SENSEX", "80100.00"),
+        ):
+            self._append(
+                lake,
+                symbol,
+                self._shifted_bars(_bars(base_price=price, minutes=range(375), oi_base=None), 3),
+            )
+        self._append(
+            lake,
+            "M&M",
+            self._shifted_bars(_bars(base_price="2910.00", minutes=range(3), oi_base=None), 3),
+        )
+        self._append(
+            lake,
+            "NIFTYIT",
+            self._shifted_bars(
+                _bars(
+                    base_price="43100.00",
+                    minutes=[m for m in range(375) if m != 100],
+                    oi_base=None,
+                ),
+                3,
+            ),
+        )
+
+    def _run_on(
+        self, lake: Path, day: date, fake_s3: FakeS3Client, alerter: _RecordingAlerter
+    ) -> CrossverifyReport:
+        config = resolve_crossverify_config(lake_root=lake, day=day, skip_pull=True)
+        seams = default_seams(
+            config,
+            account_key_resolver=lambda: None,
+            s3_client_factory=lambda: fake_s3,
+            alerter=alerter,
+        )
+        return run_crossverify(
+            config, dataclasses.replace(seams, classifier_factory=bind_production_classifier)
+        )
+
+    def test_never_started_owed_day_completed_on_the_next_run(self, clean_lake: Path) -> None:
+        from brutex.crossverify.owed import list_owed_days, mark_owed
+
+        # Day D: the pull wrote its bars + the OWED marker, then the box
+        # died BEFORE the tail — NO journal, NO staging, NO S3 objects.
+        assert mark_owed(clean_lake, GOLDEN_DAY, source="dashboard-pipeline") is True
+        assert load_journal(clean_lake, GOLDEN_DAY) is None
+        self._append_next_day(clean_lake)
+
+        # The NEXT daily run: NO --day, NO manual step — step D3 completes D.
+        fake_s3 = FakeS3Client()
+        alerter = _RecordingAlerter()
+        report = self._run_on(clean_lake, self.NEXT_DAY, fake_s3, alerter)
+        assert (report.verdict, report.exit_code) == ("published", 0)
+
+        # Day D's files published with the PINNED bytes (the --day machinery
+        # verbatim — deterministic render, byte-verified vs the goldens).
+        assert set(fake_s3.objects) >= _ALL_KEYS
+        assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
+        assert fake_s3.objects[_KEY_MM] == (FIXTURES_DIR / "M&M.csv").read_bytes()
+        # D's journal now exists (the rerun's durable done-record).
+        journal_d = load_journal(clean_lake, GOLDEN_DAY)
+        assert journal_d is not None
+        assert journal_d.pending_keys() == ()
+        # D+1's own files published too (the run's normal output).
+        assert f"crossverify/groww/{self.NEXT_DAY}/IDX_I/NIFTY.csv" in fake_s3.objects
+        # D's marker CLEARED by the rerun's completed verdict.
+        assert list_owed_days(clean_lake) == []
+        # TWO summaries — the rerun's (day D, loud catch-up) + today's.
+        assert [r.day for _rid, r in alerter.summaries] == [GOLDEN_DAY, self.NEXT_DAY]
+        assert all(r.verdict == "published" for _rid, r in alerter.summaries)
+
+    def test_tail_started_then_died_converges_without_double_puts(self, clean_lake: Path) -> None:
+        from brutex.crossverify.owed import list_owed_days, mark_owed
+
+        # Day D ran to a FULL publish, but the box died in the tiny window
+        # between the publish and the marker clear (simulated by re-marking):
+        # the journal exists AND the marker exists — both catchup paths must
+        # converge with ZERO double-puts (the mark_staged sha idempotency +
+        # publish-pending-only laws).
+        fake_s3 = FakeS3Client()
+        report_d = _run(clean_lake, fake_s3, _RecordingAlerter())
+        assert report_d.verdict == "published"
+        assert mark_owed(clean_lake, GOLDEN_DAY, source="dashboard-pipeline") is True
+        self._append_next_day(clean_lake)
+
+        puts_before = len(fake_s3.puts)
+        alerter = _RecordingAlerter()
+        report = self._run_on(clean_lake, self.NEXT_DAY, fake_s3, alerter)
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        # ZERO second puts for day D (idempotent convergence).
+        d_prefix = f"crossverify/groww/{GOLDEN_DAY}/"
+        new_puts = fake_s3.puts[puts_before:]
+        assert all(not key.startswith(d_prefix) for _b, key, _c in new_puts)
+        # The marker cleared; the rerun read every D key as already-published.
+        assert list_owed_days(clean_lake) == []

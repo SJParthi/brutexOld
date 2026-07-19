@@ -13,6 +13,10 @@ plus the REAL ``fcntl.flock`` probe against a tmp lake root.
 from __future__ import annotations
 
 import json
+import os
+import signal
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -34,8 +38,35 @@ from brutex.dashboard.pull_intent import (
     pull_intent_resume_active,
     resolve_pull_intent_resume,
     restart_cap_message,
+    restore_intent_after_refused_start,
     run_auto_resume,
+    run_legacy_resume,
+    synthesize_legacy_intent,
 )
+from structlog.testing import capture_logs
+
+
+@contextmanager
+def _hang_watchdog(seconds: int = 5) -> Generator[None]:
+    """Turn an indefinite block inside the body into a LOUD failure.
+
+    The fails-before shape of the round-7 P-1 defect is a read that blocks
+    FOREVER (a FIFO read waits for a writer; ``/dev/zero`` yields infinite
+    zeros), so a plain regression would HANG rather than fail; the
+    ``SIGALRM`` handler interrupts the blocked syscall and fails the test
+    instead (the #1614 round-6 watchdog idiom).
+    """
+
+    def _alarm(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"intent load blocked > {seconds}s (non-regular-inode hang)")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _intent(**overrides: Any) -> PullIntent:
@@ -88,11 +119,27 @@ def test_from_payload_rejects_non_mapping() -> None:
     assert PullIntent.from_payload(None) is None
 
 
-@pytest.mark.parametrize("field", ["symbols", "symbol", "from_date", "to_date"])
+@pytest.mark.parametrize("field", ["symbols", "symbol", "from_date", "to_date", "scope"])
 def test_from_payload_rejects_non_string_request_field(field: str) -> None:
     payload = _intent().to_payload()
     payload[field] = 42
     assert PullIntent.from_payload(payload) is None
+
+
+def test_scope_round_trips_and_pre_scope_payload_defaults_none() -> None:
+    """DEC-PULL-SCOPED-ALL-ONECLICK-001: a persisted spot-only intent resumes
+    SPOT-ONLY (the scope rides the payload verbatim); a PRE-scope intent file
+    (no ``scope`` key at all — every file written before #1779) parses to
+    ``None`` = the full chain (optional-field back-compat)."""
+    intent = PullIntent(symbols=None, symbol=None, from_date=None, to_date=None, scope="spot-only")
+    parsed = PullIntent.from_payload(intent.to_payload())
+    assert parsed is not None
+    assert parsed.scope == "spot-only"
+    legacy = _intent().to_payload()
+    del legacy["scope"]
+    legacy_parsed = PullIntent.from_payload(legacy)
+    assert legacy_parsed is not None
+    assert legacy_parsed.scope is None
 
 
 def test_from_payload_accepts_none_request_fields() -> None:
@@ -139,9 +186,11 @@ def test_banner_starts_unset_and_set_clear_roundtrip() -> None:
     assert banner.snapshot() is None
     banner.set(level="critical", message="boom")
     assert banner.snapshot() == {"level": "critical", "message": "boom"}
-    assert banner.clear() is True, "a REAL clear reports the payload it dropped"
+    cleared = banner.clear()
+    assert cleared is True, "a REAL clear reports the payload it dropped"
     assert banner.snapshot() is None
-    assert banner.clear() is False, "an idempotent no-op clear reports nothing dropped"
+    cleared_again = banner.clear()
+    assert cleared_again is False, "an idempotent no-op clear reports nothing dropped"
     assert banner.snapshot() is None
 
 
@@ -220,10 +269,120 @@ def test_load_missing_is_none(tmp_path: Path) -> None:
     assert PullIntentStore(tmp_path).load() is None
 
 
-def test_load_unreadable_is_none_and_never_raises(tmp_path: Path) -> None:
+def test_load_directory_is_none_and_never_raises(tmp_path: Path) -> None:
+    """A DIRECTORY at the intent path is a non-regular inode → the corrupt-arm
+    ``None`` naming the shape (pre-round-7 it folded via the read's OSError —
+    same answer); the best-effort delete cannot unlink a directory, which the
+    swallowed ``pull_intent.clear_failed`` already covers."""
     store = PullIntentStore(tmp_path)
-    store.path.mkdir()  # the intent path is a DIRECTORY → read_text raises OSError
-    assert store.load() is None
+    store.path.mkdir()
+    with capture_logs() as logs:
+        assert store.load() is None
+    corrupt = [entry for entry in logs if entry["event"] == "pull_intent.corrupt"]
+    assert len(corrupt) == 1
+    assert corrupt[0]["shape"] == "not_regular"
+    assert store.path.is_dir()  # unlink cannot remove it — logged, never raised
+
+
+def test_load_fifo_is_none_deleted_no_hang(tmp_path: Path) -> None:
+    """[F/B — refuter round 7 P-1] a FIFO planted at the intent path reads as
+    corrupt (``None`` + one WARN naming the shape) and is DELETED (healed),
+    WITHOUT blocking. Fails-before (executed at 68d18dea in a bounded
+    subprocess): the plain ``read_bytes`` blocked FOREVER — the launcher's
+    held-mutex ``prior_intent = store.load()`` snapshot wedged a REAL
+    /pull-pipeline click's request thread with no exception to catch."""
+    store = PullIntentStore(tmp_path)
+    os.mkfifo(store.path)
+    with _hang_watchdog(), capture_logs() as logs:
+        assert store.load() is None
+    corrupt = [entry for entry in logs if entry["event"] == "pull_intent.corrupt"]
+    assert len(corrupt) == 1
+    assert corrupt[0]["shape"] == "not_regular"
+    assert "not a regular file" in str(corrupt[0]["detail"])
+    assert not store.path.exists(), "the planted FIFO is unlinked — the path heals"
+
+
+def test_load_devzero_symlink_is_none_unlinks_link_only(tmp_path: Path) -> None:
+    """[F/B — refuter round 7 P-1] a symlink to ``/dev/zero`` (infinite-read
+    character device) reads as corrupt without reading forever; the
+    best-effort delete removes the LINK, never its target."""
+    store = PullIntentStore(tmp_path)
+    store.path.symlink_to("/dev/zero")
+    with _hang_watchdog(), capture_logs() as logs:
+        assert store.load() is None
+    corrupt = [entry for entry in logs if entry["event"] == "pull_intent.corrupt"]
+    assert len(corrupt) == 1
+    assert corrupt[0]["shape"] == "not_regular"
+    assert not store.path.is_symlink(), "the LINK is unlinked"
+    assert Path("/dev/zero").exists(), "the target is untouched"
+
+
+def test_load_dangling_symlink_is_absent_no_warn(tmp_path: Path) -> None:
+    """A DANGLING symlink opens ``FileNotFoundError`` → the normal absent
+    ``None`` (no corruption WARN, nothing deleted — nothing readable ever
+    existed behind it)."""
+    store = PullIntentStore(tmp_path)
+    store.path.symlink_to(tmp_path / "nowhere.json")
+    with capture_logs() as logs:
+        assert store.load() is None
+    assert [entry for entry in logs if entry["event"] == "pull_intent.corrupt"] == []
+    assert [entry for entry in logs if entry["event"] == "pull_intent.read_failed"] == []
+
+
+def test_load_open_denied_is_read_failed_none_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permission-denied ``os.open`` (the ``read_error`` arm) keeps the
+    pre-round-7 posture: ``pull_intent.read_failed`` + ``None``, the file
+    KEPT (it may become readable again). Deterministic via a monkeypatched
+    ``os.open`` — a real ``chmod 0`` file does not deny a root-run CI user
+    (the #1614 ``test_shard_read_error`` idiom)."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent())
+    real_open = os.open
+
+    def _boom(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(os.fspath(path)) == store.path:
+            raise PermissionError("read denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _boom)
+    with capture_logs() as logs:
+        assert store.load() is None
+    failed = [entry for entry in logs if entry["event"] == "pull_intent.read_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_type"] == "PermissionError"
+    monkeypatch.undo()
+    assert store.path.exists(), "a read_error keeps the file — never deleted"
+
+
+def test_load_failure_after_open_is_read_failed_and_closes_the_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``OSError`` AFTER a successful ``os.open`` (fstat / fdopen / read on
+    the OPEN descriptor) maps to the same ``read_error`` arm via the second
+    handler of the owned-flag split, and the still-owned descriptor is closed
+    exactly once (the #1614 fd-ownership discipline, mirrored)."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent())
+    closed: list[int] = []
+    real_close = os.close
+
+    def _close_spy(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    def _fstat_boom(fd: int) -> os.stat_result:
+        raise PermissionError("fstat denied")
+
+    monkeypatch.setattr(os, "close", _close_spy)
+    monkeypatch.setattr(os, "fstat", _fstat_boom)
+    with capture_logs() as logs:
+        assert store.load() is None
+    monkeypatch.undo()
+    failed = [entry for entry in logs if entry["event"] == "pull_intent.read_failed"]
+    assert len(failed) == 1
+    assert len(closed) == 1  # owned-flag: closed exactly once, never leaked
 
 
 def test_load_corrupt_json_is_none_and_deleted(tmp_path: Path) -> None:
@@ -236,6 +395,43 @@ def test_load_corrupt_json_is_none_and_deleted(tmp_path: Path) -> None:
 def test_load_wrong_shape_is_none_and_deleted(tmp_path: Path) -> None:
     store = PullIntentStore(tmp_path)
     store.path.write_text(json.dumps({"restarts": "three"}), encoding="utf-8")
+    assert store.load() is None
+    assert not store.path.exists()
+
+
+def test_load_invalid_utf8_is_none_and_deleted(tmp_path: Path) -> None:
+    """[F/B — refuter round 6 N-1 inherited note, the #1776 round-2 M1
+    template] a bit-rotted intent file (ONE bad byte) reads as corrupt →
+    ``None`` + deleted. Pre-fix ``read_text`` raised ``UnicodeDecodeError``
+    (a ValueError subclass the OSError-only read guard missed) — executed:
+    the launcher's held-mutex ``prior_intent`` snapshot 500'd a REAL
+    /pull-pipeline click."""
+    store = PullIntentStore(tmp_path)
+    store.path.write_bytes(b'\xff{"version": 1}')
+    assert store.load() is None
+    assert not store.path.exists(), "a corrupt intent is deleted so it never re-trips"
+
+
+def test_load_nesting_bomb_is_none_and_deleted(tmp_path: Path) -> None:
+    """[refuter round 6 N-1] a deeply-nested payload's ``RecursionError``
+    folds into the corrupt-file answer instead of escaping."""
+    store = PullIntentStore(tmp_path)
+    depth = 200_000
+    store.path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+    assert store.load() is None
+    assert not store.path.exists()
+
+
+def test_load_oversized_is_none_and_deleted_before_read(tmp_path: Path) -> None:
+    """[refuter round 6 N-1, the size-cap belt] an over-cap intent file is
+    refused BEFORE the read. TEETH: the content is a VALID intent payload
+    padded past the cap with legal JSON whitespace — were it read + parsed
+    it would load — so the ``None`` answer proves the cap decided."""
+    from brutex.dashboard.pull_intent import MAX_INTENT_BYTES
+
+    store = PullIntentStore(tmp_path)
+    body = json.dumps(_intent().to_payload()).encode()
+    store.path.write_bytes(body + b" " * (MAX_INTENT_BYTES + 1 - len(body)))
     assert store.load() is None
     assert not store.path.exists()
 
@@ -436,6 +632,103 @@ def test_started_launch_with_no_banner_stays_silent_and_unchanged(tmp_path: Path
         "2024-01-01",
         "2024-02-01",
     )
+
+
+# ── restore_intent_after_refused_start (refuter round 3 F-1) ─────────────────
+
+
+def test_refused_start_restores_the_prior_intent_verbatim(tmp_path: Path) -> None:
+    # THE r3 F-1 root fix: a refused start's pre-start persist has clobbered
+    # the RUNNING pull's on-disk intent — the restore puts the prior snapshot
+    # back VERBATIM (scope + restarts + created_at included), so a crash in
+    # the window resumes the RUNNING pull's scope, never the refused click's.
+    store = PullIntentStore(tmp_path)
+    prior = _intent(scope="spot-only", restarts=1)
+    prior_written = store.write(prior)
+    assert prior_written is True
+    # The refused click's persist (the clobber the pre-start ordering leaves).
+    persist_intent_for_launch(
+        store, dry_run=False, symbols=None, symbol=None, from_date=None, to_date=None
+    )
+    clobbered = store.load()
+    assert clobbered is not None and clobbered.scope is None, "precondition: clobber landed"
+    restored = restore_intent_after_refused_start(store, prior=prior, dry_run=False, started=False)
+    assert restored is True
+    assert store.load() == prior, "the prior intent must round-trip field-for-field"
+
+
+def test_refused_start_with_no_prior_clears_the_orphan_clobber(tmp_path: Path) -> None:
+    # The A2 sibling shape: a launch refused by a FOREIGN-process flock left a
+    # fresh intent on disk with nothing in-process to ever clear it — a later
+    # boot would "resume" a pull that never started. prior=None ⇒ clear.
+    store = PullIntentStore(tmp_path)
+    persist_intent_for_launch(
+        store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+    )
+    assert store.path.exists()
+    restored = restore_intent_after_refused_start(store, prior=None, dry_run=False, started=False)
+    assert restored is True
+    assert store.load() is None
+    assert not store.path.exists()
+
+
+def test_refused_start_current_absent_never_resurrects(tmp_path: Path) -> None:
+    # The winner's on_finally clear raced between the persist and the restore
+    # (its pull FINISHED) — "no intent" is the correct durable record; writing
+    # the prior back would resurrect an intent for a completed pull.
+    store = PullIntentStore(tmp_path)
+    prior = _intent(scope="spot-only")
+    restored = restore_intent_after_refused_start(store, prior=prior, dry_run=False, started=False)
+    assert restored is False
+    assert store.load() is None
+    assert not store.path.exists()
+
+
+def test_started_launch_restores_nothing(tmp_path: Path) -> None:
+    # A STARTED launch's own persisted intent is the correct durable record —
+    # the restore must not touch it (the started gate).
+    store = PullIntentStore(tmp_path)
+    persist_intent_for_launch(
+        store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+    )
+    restored = restore_intent_after_refused_start(store, prior=None, dry_run=False, started=True)
+    assert restored is False
+    loaded = store.load()
+    assert loaded is not None and loaded.symbols == "NIFTY"
+
+
+def test_dry_run_restores_nothing(tmp_path: Path) -> None:
+    # A dry-run never persisted an intent (persist_intent_for_launch's law) —
+    # there is nothing to undo, and a pre-existing REAL intent must survive.
+    store = PullIntentStore(tmp_path)
+    prior = _intent()
+    prior_written = store.write(prior)
+    assert prior_written is True
+    restored = restore_intent_after_refused_start(store, prior=None, dry_run=True, started=False)
+    assert restored is False
+    assert store.load() == prior
+
+
+def test_refused_start_restore_write_failure_degrades_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Best-effort like every store I/O: a failed restore write is logged
+    # (pull_intent.write_failed + restored="write_failed") and returns False —
+    # never a raise into the launch path.
+    store = PullIntentStore(tmp_path)
+    prior = _intent(scope="spot-only")
+    prior_written = store.write(prior)
+    assert prior_written is True
+    persist_intent_for_launch(
+        store, dry_run=False, symbols=None, symbol=None, from_date=None, to_date=None
+    )
+
+    def _boom(dest: Path, write_to: Any, **kwargs: Any) -> None:
+        raise OSError("disk exploded mid-restore")
+
+    monkeypatch.setattr(pull_intent_module, "atomic_write_simple", _boom)
+    restored = restore_intent_after_refused_start(store, prior=prior, dry_run=False, started=False)
+    assert restored is False
 
 
 # ── probe_pull_singleflight (the REAL flock against a tmp lake root) ──────────
@@ -711,3 +1004,220 @@ def test_run_default_probe_uses_the_real_flock(tmp_path: Path) -> None:
     free_action = run_auto_resume(store, launch=launched.append)
     assert free_action is ResumeAction.FIRED
     assert len(launched) == 1
+
+
+# ── synthesize_legacy_intent + run_legacy_resume (DEC-AUTO-RESUME-INPROCESS-001) ──
+
+
+def test_synthesize_legacy_intent_is_whole_universe_fresh() -> None:
+    """The synthesized legacy intent is the whole-universe default pull, restarts=0."""
+    from datetime import datetime
+
+    intent = synthesize_legacy_intent()
+    assert intent.symbols is None
+    assert intent.symbol is None
+    assert intent.from_date is None
+    assert intent.to_date is None
+    assert intent.restarts == 0
+    # created_at is a real UTC ISO timestamp (forensics), parseable round-trip.
+    parsed = datetime.fromisoformat(intent.created_at)
+    assert parsed.tzinfo is not None
+    # The synthesized intent survives the store's strict payload round trip.
+    assert PullIntent.from_payload(intent.to_payload()) == intent
+
+
+def test_legacy_resume_fires_whole_universe_with_bumped_token(tmp_path: Path) -> None:
+    """Fresh lake ⇒ synthesized intent persisted, token bumped BEFORE launch, FIRED."""
+    store = PullIntentStore(tmp_path)
+    launched: list[PullIntent] = []
+
+    def _launch(intent: PullIntent) -> None:
+        on_disk = store.load()
+        assert on_disk is not None
+        assert on_disk.restarts == 1, "the token is burnt (persisted) BEFORE the launch"
+        launched.append(intent)
+
+    action = run_legacy_resume(store, launch=_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.FIRED
+    assert len(launched) == 1
+    fired = launched[0]
+    assert (fired.symbols, fired.symbol, fired.from_date, fired.to_date) == (
+        None,
+        None,
+        None,
+        None,
+    ), "the legacy resume re-fires the WHOLE-universe pipeline pull"
+    assert fired.restarts == 1
+
+
+def test_legacy_resume_peer_active_skips_quietly_and_cleans_synth_intent(
+    tmp_path: Path,
+) -> None:
+    """A held peer flock ⇒ PEER_ACTIVE — no launch, no banner, and the intent
+    THIS call synthesized is cleaned up (the next boot re-decides from the
+    ledger, never an unconditional intent-arm whole-universe re-fire)."""
+    store = PullIntentStore(tmp_path)
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: False)
+    assert action is ResumeAction.PEER_ACTIVE
+    assert launched == []
+    assert store.load() is None, "the synthesized intent must not outlive the skip"
+    assert store.banner.snapshot() is None
+
+
+def test_legacy_resume_peer_active_preserves_operator_intent_written_in_window(
+    tmp_path: Path,
+) -> None:
+    """Boot-window race regression: an operator intent persisted BETWEEN the
+    synthetic write and the PEER_ACTIVE cleanup is PRESERVED — ownership is
+    re-derived at cleanup time (exact equality against the instance this call
+    wrote), never assumed from entry-time state, so the cleanup can never
+    delete the operator's click."""
+    store = PullIntentStore(tmp_path)
+    operator_intent = _intent(symbols="NIFTY", restarts=0)
+
+    def _probe() -> bool:
+        # The race window: our synthetic intent is already on disk; the
+        # operator's REAL click lands before the PEER_ACTIVE cleanup runs.
+        assert store.load() is not None, "the synthetic intent was persisted first"
+        wrote = store.write(operator_intent)
+        assert wrote, "the operator's click must persist inside the race window"
+        return False  # a peer pull holds the flock ⇒ PEER_ACTIVE
+
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=_probe)
+    assert action is ResumeAction.PEER_ACTIVE
+    assert launched == []
+    assert store.load() == operator_intent, "the operator's intent survives the cleanup"
+    assert store.banner.snapshot() is None
+
+
+def test_legacy_resume_peer_active_created_at_alone_defeats_a_false_match(
+    tmp_path: Path,
+) -> None:
+    """An operator intent that HAPPENS to be whole-universe (the synthetic
+    shape: all-``None`` quadruple, ``restarts=0``) but carries a DIFFERENT
+    ``created_at`` must NOT false-match the synthetic intent — ``created_at``
+    participates in the frozen-dataclass equality, so it is preserved."""
+    store = PullIntentStore(tmp_path)
+    operator_intent = _intent(
+        symbols=None,
+        symbol=None,
+        from_date=None,
+        to_date=None,
+        restarts=0,
+        created_at="2020-01-01T00:00:00+00:00",
+    )
+
+    def _probe() -> bool:
+        wrote = store.write(operator_intent)
+        assert wrote, "the operator's click must persist inside the race window"
+        return False
+
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=_probe)
+    assert action is ResumeAction.PEER_ACTIVE
+    assert launched == []
+    assert store.load() == operator_intent, (
+        "a whole-universe operator intent with its own created_at is NOT ours"
+    )
+
+
+def test_legacy_resume_peer_active_leaves_preexisting_intent_untouched(
+    tmp_path: Path,
+) -> None:
+    """PEER_ACTIVE over a PRE-existing intent burns no token and deletes nothing."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(restarts=1))
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: False)
+    assert action is ResumeAction.PEER_ACTIVE
+    assert launched == []
+    persisted = store.load()
+    assert persisted is not None
+    assert persisted == _intent(restarts=1), "a pre-existing intent survives verbatim"
+    assert store.banner.snapshot() is None
+
+
+def test_legacy_resume_over_cap_alerts_banners_and_never_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A surviving over-cap intent refuses through the legacy arm: ONE CRITICAL
+    alert (the default `emit_restart_cap_alert` binding) + red banner, no launch,
+    intent KEPT for forensics — the inherited cap surface, verbatim."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(symbols=None, symbol=None, restarts=MAX_AUTO_RESTARTS))
+    alerts: list[PullIntent] = []
+    monkeypatch.setattr(pull_intent_module, "emit_restart_cap_alert", alerts.append)
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: True)
+    assert action is ResumeAction.OVER_CAP
+    assert launched == []
+    assert len(alerts) == 1, "exactly ONE CRITICAL alert on the over-cap refusal"
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == "critical"
+    assert store.path.exists(), "the over-cap intent is kept for forensics"
+
+
+def test_legacy_resume_never_overwrites_a_preexisting_intent(tmp_path: Path) -> None:
+    """A pre-existing intent (escape hatch OFF boots) keeps its quadruple + count."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent(symbols="NIFTY", restarts=1))
+    launched: list[PullIntent] = []
+    action = run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: True)
+    assert action is ResumeAction.FIRED
+    assert len(launched) == 1
+    assert launched[0].symbols == "NIFTY", "the existing quadruple survives verbatim"
+    assert launched[0].restarts == 2, "the existing crash-loop count keeps accruing"
+
+
+def test_legacy_resume_write_failure_raises_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unpersistable synthesized intent REFUSES with RuntimeError (never silent).
+
+    The raise lands in ``maybe_resume_on_boot``'s guard in production — one
+    honest ``auto_resume.error`` + verdict ``error``, never a false ``resumed``.
+    """
+    store = PullIntentStore(tmp_path)
+
+    def _boom(dest: Path, write_to: Any, **kwargs: Any) -> None:
+        raise OSError("unwritable lake volume")
+
+    monkeypatch.setattr(pull_intent_module, "atomic_write_simple", _boom)
+    launched: list[PullIntent] = []
+    with pytest.raises(RuntimeError, match="could not be persisted"):
+        run_legacy_resume(store, launch=launched.append, probe_singleflight=lambda: True)
+    assert launched == []
+
+
+def test_legacy_resume_launch_valueerror_clears_intent_and_banners(tmp_path: Path) -> None:
+    """The inherited ValueError-clears law: a deterministic refusal never loops."""
+    store = PullIntentStore(tmp_path)
+
+    def _launch(intent: PullIntent) -> None:
+        raise ValueError("stale selection no longer resolves")
+
+    action = run_legacy_resume(store, launch=_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.LAUNCH_FAILED
+    assert store.load() is None, "a deterministic refusal clears the intent (no loop)"
+    banner = store.banner.snapshot()
+    assert banner is not None
+    assert banner["level"] == "critical"
+    assert "stale" in banner["message"]
+
+
+def test_legacy_resume_transient_launch_error_keeps_intent(tmp_path: Path) -> None:
+    """The inherited RuntimeError-keeps law: a transient failure retries ≤ cap."""
+    store = PullIntentStore(tmp_path)
+
+    def _launch(intent: PullIntent) -> None:
+        raise RuntimeError("credentials not yet fixed at boot")
+
+    action = run_legacy_resume(store, launch=_launch, probe_singleflight=lambda: True)
+    assert action is ResumeAction.LAUNCH_FAILED
+    persisted = store.load()
+    assert persisted is not None
+    assert persisted.restarts == 1, "the intent survives (token burnt) — retried ≤ cap"
+    assert store.banner.snapshot() is not None
