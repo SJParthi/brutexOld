@@ -34,6 +34,15 @@ from brutex.engine.sweep_audit import (  # noqa: E402
     _entry_hash_python,
     verify_chain,
 )
+from brutex.engine.sweep_checkpoint import (  # noqa: E402
+    SweepCheckpointError,
+    SweepCheckpointStore,
+)
+from brutex.engine.sweep_exit_status import (  # noqa: E402
+    RunState,
+    read_exit_status,
+    write_exit_status,
+)
 from brutex.engine.sweep_identity import (  # noqa: E402
     _gate_config_fragment,
     _gate_config_fragment_python,
@@ -59,6 +68,7 @@ from brutex.engine.sweep_progress import (  # noqa: E402
     SweepProgressSnapshot,
     _derived_python,
 )
+from brutex.engine.sweep_quarantine import quarantine_tuple_trio  # noqa: E402
 from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla  # noqa: E402
 from brutex.engine.sweep_stall_policy import (  # noqa: E402
     StallPolicy,
@@ -871,3 +881,197 @@ class TestSliceTwoBurnInSteadyState:
         assert sweep_ops_rust_disabled() is False
         # Steady state still value-identical to the oracle.
         assert verify_chain(log) == 18
+
+
+# ────────────────── slice 3 — the durable-artifacts family ──────────────────
+
+
+class TestSliceThreeCrateDriftPins:
+    def test_run_state_tokens_twin(self) -> None:
+        """The crate's RUN_STATE_TOKENS is the RunState wire vocabulary."""
+        assert set(brutex_sweep_ops.RUN_STATE_TOKENS) == {s.value for s in RunState}
+
+    def test_resolution_float_bits_pass_through(self) -> None:
+        one_ulp = 1.0 + 2.0**-52
+        started, ended, suspect = brutex_sweep_ops.exit_status_resolution(
+            "halted", None, one_ulp, None, None
+        )
+        assert started == one_ulp
+        assert ended == one_ulp
+        assert suspect is False
+
+
+class TestExitStatusParity:
+    def _write_lifecycle(self, root: Path) -> list[bytes]:
+        """RUNNING → mid-run RUNNING rewrite → SUSPECT_COMPLETE, fixed clocks."""
+        run_id = "cafe" * 16
+        snapshots: list[bytes] = []
+        write_exit_status(
+            root, run_id=run_id, state=RunState.RUNNING, attempt=1, pid=42, clock=lambda: 100.5
+        )
+        snapshots.append((root / "runs" / run_id / "exit-status.json").read_bytes())
+        # The #1712 round-3 law: a mid-run RUNNING write must preserve the start.
+        write_exit_status(
+            root,
+            run_id=run_id,
+            state=RunState.RUNNING,
+            attempt=1,
+            pid=42,
+            suspect=True,
+            clock=lambda: 150.25,
+        )
+        snapshots.append((root / "runs" / run_id / "exit-status.json").read_bytes())
+        write_exit_status(
+            root,
+            run_id=run_id,
+            state=RunState.SUSPECT_COMPLETE,
+            exit_code=0,
+            attempt=1,
+            pid=42,
+            clock=lambda: 200.75,
+        )
+        snapshots.append((root / "runs" / run_id / "exit-status.json").read_bytes())
+        return snapshots
+
+    def test_flag_on_artifacts_byte_identical_to_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on = self._write_lifecycle(tmp_path / "on")
+        assert sweep_ops_rust_disabled() is False
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = self._write_lifecycle(tmp_path / "off")
+        assert on == off
+
+    def test_flag_on_preserves_start_and_forces_suspect(self, tmp_path: Path) -> None:
+        self._write_lifecycle(tmp_path)
+        doc = read_exit_status(tmp_path, "cafe" * 16)
+        assert doc is not None
+        assert doc["wall_started_utc"] == 100.5  # preserved across all three writes
+        assert doc["wall_ended_utc"] == 200.75
+        assert doc["suspect"] is True  # SUSPECT_COMPLETE forces True
+        assert sweep_ops_rust_disabled() is False
+
+
+class TestQuarantineOrdinalParity:
+    def _quarantine_twice(self, root: Path) -> list[str]:
+        store_dir = root / "sweeps"
+        store_dir.mkdir(parents=True, exist_ok=True)
+        dests: list[str] = []
+        for _ in range(2):
+            store = store_dir / "tuple.parquet"
+            store.write_bytes(b"corrupt")
+            outcome = quarantine_tuple_trio(
+                store, results_root=root, reason="parity", run_id="runx"
+            )
+            dests.append(outcome.dest.name)
+        return dests
+
+    def test_flag_on_dirnames_match_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on = self._quarantine_twice(tmp_path / "on")
+        assert on == ["runx-1", "runx-2"]  # monotonic ordinals via the crate fold
+        assert sweep_ops_rust_disabled() is False
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        assert self._quarantine_twice(tmp_path / "off") == on
+
+    def test_unicode_dirname_degrades_to_oracle_same_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A planted NON-ASCII quarantine dirname refuses to the oracle — the
+        served ordinal is the ORACLE's (Python int() reads the Unicode digits)
+        on BOTH arms."""
+        parent = tmp_path / ".quarantine" / "runtime"
+        parent.mkdir(parents=True)
+        (parent / "runx-٢").mkdir()  # Arabic-Indic TWO — int("٢") == 2 in Python
+        (tmp_path / "sweeps").mkdir()
+        store = tmp_path / "sweeps" / "tuple.parquet"
+        store.write_bytes(b"corrupt")
+        on = quarantine_tuple_trio(
+            store, results_root=tmp_path, reason="parity", run_id="runx"
+        ).dest.name
+        assert on == "runx-3"  # max(2) + 1 — the oracle's Unicode-digit answer
+        assert sweep_ops_rust_disabled() is False  # degrade, never a latch
+
+
+class TestCheckpointParity:
+    def _drive_store(self, path: Path) -> list[object]:
+        outcomes: list[object] = []
+        store = SweepCheckpointStore(path=path, sweep_id="s1", total_combos=10, clock=lambda: 5.0)
+        outcomes.append(store.record(0))  # advance
+        outcomes.append(store.record(3))  # advance
+        outcomes.append(store.record(2))  # noop — the never-rewind law
+        with pytest.raises(SweepCheckpointError) as below:
+            store.record(-1)
+        outcomes.append(str(below.value))
+        with pytest.raises(SweepCheckpointError) as beyond:
+            store.record(10)
+        outcomes.append(str(beyond.value))
+        outcomes.append(path.read_bytes())
+        # Adoption arms: same-id adopt, foreign None, tampered-total refusal.
+        adopt = SweepCheckpointStore(path=path, sweep_id="s1", total_combos=10)
+        loaded = adopt.load()
+        assert loaded is not None
+        outcomes.append(loaded.last_completed_index)
+        foreign = SweepCheckpointStore(path=path, sweep_id="other", total_combos=10)
+        outcomes.append(foreign.load())
+        tampered = SweepCheckpointStore(path=path, sweep_id="s1", total_combos=99)
+        with pytest.raises(SweepCheckpointError) as mismatch:
+            tampered.load()
+        outcomes.append(str(mismatch.value))
+        return outcomes
+
+    def test_flag_on_store_behavior_identical_to_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on = self._drive_store(tmp_path / "on.json")
+        assert on[:3] == [True, True, False]
+        assert sweep_ops_rust_disabled() is False
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = self._drive_store(tmp_path / "off.json")
+        # Byte-equal checkpoints + identical outcomes INCLUDING the refusal
+        # message bytes (path differs by arm — normalise it out).
+        assert [str(x).replace("on.json", "X").replace("off.json", "X") for x in on] == [
+            str(x).replace("on.json", "X").replace("off.json", "X") for x in off
+        ]
+
+
+class TestSliceThreeBurnInSteadyState:
+    def test_burn_in_completes_and_serves_rust(self, tmp_path: Path) -> None:
+        """>16 engaged calls per slice-3 law with zero autoreverts."""
+        run_id = "beef" * 16
+        for i in range(18):  # 18 engaged resolution calls
+            write_exit_status(
+                tmp_path,
+                run_id=run_id,
+                state=RunState.RUNNING,
+                attempt=1,
+                pid=42,
+                clock=lambda i=i: 100.0 + i,
+            )
+        doc = read_exit_status(tmp_path, run_id)
+        assert doc is not None and doc["wall_started_utc"] == 100.0
+
+        store_path = tmp_path / "checkpoint.json"
+        store = SweepCheckpointStore(path=store_path, sweep_id="s1", total_combos=100)
+        for i in range(18):  # 18 engaged record decisions
+            assert store.record(i) is True
+        for _ in range(18):  # 18 engaged adoption verdicts
+            reloaded = SweepCheckpointStore(path=store_path, sweep_id="s1", total_combos=100)
+            checkpoint = reloaded.load()
+            assert checkpoint is not None and checkpoint.last_completed_index == 17
+
+        sweeps = tmp_path / "sweeps"
+        sweeps.mkdir()
+        for i in range(18):  # 18 engaged ordinal folds
+            store_file = sweeps / "tuple.parquet"
+            store_file.write_bytes(b"corrupt")
+            outcome = quarantine_tuple_trio(
+                store_file, results_root=tmp_path, reason="burn-in", run_id="runx"
+            )
+            assert outcome.dest.name == f"runx-{i + 1}"
+
+        assert sweep_ops_rust_disabled() is False

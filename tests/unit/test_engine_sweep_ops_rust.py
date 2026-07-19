@@ -23,12 +23,16 @@ from brutex.engine.sweep_ops_rust import (
     routed_audit_entry_hash,
     routed_chain_link_state,
     routed_chain_verify_step,
+    routed_checkpoint_adoption_verdict,
+    routed_checkpoint_record_decision,
     routed_count_violations,
+    routed_exit_status_resolution,
     routed_freshness_stale,
     routed_gate_fragment,
     routed_liveness_tail,
     routed_preflight_missing,
     routed_progress_derived,
+    routed_quarantine_next_ordinal,
     routed_rank_plan,
     routed_run_path,
     routed_sla_decision,
@@ -167,6 +171,18 @@ class TestFlagLaw:
             "sweep", 1, None, False, None, None, None, None, python_law=lambda: ("pending", "d")
         ) == ("pending", "d")
         assert routed_count_violations(1, 1, 0, 0, 0, 0, None, False, python_law=lambda: "") == ""
+        # Slice-3 laws: equally crate-free when the flag is OFF.
+        assert routed_exit_status_resolution(
+            "running", None, 1.0, None, None, python_law=lambda: (1.0, None, False)
+        ) == (1.0, None, False)
+        assert routed_quarantine_next_ordinal([], "run-", "", python_law=lambda: 1) == 1
+        assert (
+            routed_checkpoint_record_decision(0, -1, 10, python_law=lambda: "advance") == "advance"
+        )
+        assert (
+            routed_checkpoint_adoption_verdict("a", 10, "a", 10, python_law=lambda: "adopt")
+            == "adopt"
+        )
         assert calls == []
 
     def test_disabled_latch_predicate(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1857,3 +1873,385 @@ class TestSliceTwoDriftPins:
         from brutex.engine.sweep_audit import BLAKE3_HEX_LEN
 
         assert sweep_ops_rust._HASH_HEX_LEN == BLAKE3_HEX_LEN
+
+
+# ─────────────────── slice 3 — the durable-artifacts family ───────────────────
+
+
+class TestRoutedExitStatusResolution:
+    _OK = ("running", None, 100.5, None, None)
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            (("running", None, 100.5, None, None), (100.5, None, False)),
+            (("running", 50.25, 100.5, True, None), (50.25, None, True)),
+            (("complete", 50.25, 100.5, None, None), (50.25, 100.5, False)),
+            (("failed", None, 100.5, None, True), (100.5, 100.5, True)),
+            (("suspect_complete", None, 100.5, False, False), (100.5, 100.5, True)),
+            (("refused", None, 100.5, False, True), (100.5, 100.5, False)),
+        ],
+    )
+    def test_parity_with_oracle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        args: tuple[Any, ...],
+        expected: tuple[Any, ...],
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_exit_status_resolution(*args, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("exploded", None, 1.0, None, None),  # unknown state token
+            (b"running", None, 1.0, None, None),  # non-str state
+            ("running", 5, 1.0, None, None),  # int prior (exact-float gate)
+            ("running", float("nan"), 1.0, None, None),  # non-finite prior
+            ("running", None, float("inf"), None, None),  # non-finite now
+            ("running", None, 1, None, None),  # int now
+            ("running", None, 1.0, 1, None),  # int suspect
+            ("running", None, 1.0, None, 0),  # int prior_suspect
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...]
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        sentinel = (1.0, None, False)
+        with capture_logs() as logs:
+            assert routed_exit_status_resolution(*args, python_law=lambda: sentinel) == sentinel
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "exit_status_resolution_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            "ok",  # not a tuple
+            (1.0, None),  # wrong arity
+            (float("nan"), None, False),  # non-finite started
+            (1.0, float("inf"), False),  # non-finite ended
+            (1.0, None, 1),  # non-bool suspect
+            (1, None, False),  # int started
+        ],
+    )
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.exit_status_resolution = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        sentinel = (1.0, None, False)
+        with capture_logs() as logs:
+            assert routed_exit_status_resolution(*self._OK, python_law=lambda: sentinel) == sentinel
+        warns = [e for e in logs if e.get("reason") == "exit_status_resolution_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.exit_status_resolution = lambda *args: (2.0, None, False)  # wrong start
+        _install_crate(monkeypatch, crate)
+        oracle = (100.5, None, False)
+        with capture_logs() as logs:
+            assert routed_exit_status_resolution(*self._OK, python_law=lambda: oracle) == oracle
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_exit_status_resolution"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> tuple[float, float | None, bool]:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert routed_exit_status_resolution(*self._OK, python_law=forbidden_oracle) == (
+            100.5,
+            None,
+            False,
+        )
+
+
+class TestRoutedQuarantineNextOrdinal:
+    @pytest.mark.parametrize(
+        ("names", "prefix", "suffix", "expected"),
+        [
+            ([], "run-", "", 1),
+            (["run-1", "run-7", "run-3"], "run-", "", 8),
+            (["other-9", "run-x", "run-", "run-4"], "run-", "", 5),
+            (["1.json", "12.json", "x.json"], "", ".json", 13),
+            (["ab"], "ab", "b", 1),  # overlapping prefix/suffix — empty-slice arm
+            (["007"], "", "", 8),  # leading zeros
+        ],
+    )
+    def test_parity_with_oracle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        names: list[str],
+        prefix: str,
+        suffix: str,
+        expected: int,
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert (
+            routed_quarantine_next_ordinal(names, prefix, suffix, python_law=lambda: expected)
+            == expected
+        )
+
+    @pytest.mark.parametrize(
+        ("names", "prefix", "suffix"),
+        [
+            (["run-٢٢"], "run-", ""),  # Unicode digits (Python int() accepts)
+            (["run-12\n"], "run-", ""),  # trailing newline (re `$` accepts)
+            (["run-1"], "run-ß", ""),  # non-ASCII prefix
+            (["run-1"], "run-", "\n"),  # newline suffix
+            ((), "run-", ""),  # tuple, not list
+            ([b"run-1"], "run-", ""),  # non-str name
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        names: Any,
+        prefix: str,
+        suffix: str,
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert (
+                routed_quarantine_next_ordinal(names, prefix, suffix, python_law=lambda: 23) == 23
+            )
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "quarantine_next_ordinal_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", ["1", 0, -3, True])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.quarantine_next_ordinal = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_quarantine_next_ordinal([], "run-", "", python_law=lambda: 1) == 1
+        warns = [e for e in logs if e.get("reason") == "quarantine_ordinal_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.quarantine_next_ordinal = lambda *args: 99  # wrong ordinal
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_quarantine_next_ordinal(["run-1"], "run-", "", python_law=lambda: 2) == 2
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_quarantine_ordinal"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> int:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert (
+            routed_quarantine_next_ordinal(["run-6"], "run-", "", python_law=forbidden_oracle) == 7
+        )
+
+
+class TestRoutedCheckpointRecordDecision:
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ((-1, -1, 10), "reject_below_zero"),
+            ((10, -1, 10), "reject_beyond_total"),
+            ((3, 3, 10), "noop"),
+            ((2, 3, 10), "noop"),
+            ((4, 3, 10), "advance"),
+            ((0, -1, 1), "advance"),
+            ((-1, -1, 0), "reject_below_zero"),  # guard order at total==0
+        ],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[int, ...], expected: str
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_checkpoint_record_decision(*args, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (True, -1, 10),  # bool index
+            (0, -1.0, 10),  # float last
+            (0, -1, "10"),  # str total
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...]
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_checkpoint_record_decision(*args, python_law=lambda: "noop") == "noop"
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "checkpoint_record_input_refused"]
+        assert len(warns) == 1
+
+    def test_out_of_i64_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The REAL wheel's pyo3 i64 conversion raises OverflowError on an
+        # out-of-band index (parity-suite-proven); the fake mirrors it here
+        # via a raising stand-in (the slice-2 overflow-test idiom).
+        _enable(monkeypatch)
+        crate = _good_crate()
+
+        def raising(*args: Any) -> str:
+            raise OverflowError("out of i64")
+
+        crate.checkpoint_record_decision = raising
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_checkpoint_record_decision(2**64, -1, 2**65, python_law=lambda: "advance")
+                == "advance"
+            )
+        warns = [e for e in logs if e.get("reason") == "checkpoint_record_error"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", [7, "banana", None])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.checkpoint_record_decision = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_checkpoint_record_decision(4, 3, 10, python_law=lambda: "advance") == (
+                "advance"
+            )
+        warns = [e for e in logs if e.get("reason") == "checkpoint_record_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.checkpoint_record_decision = lambda *args: "noop"  # silent-rewind poison
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_checkpoint_record_decision(4, 3, 10, python_law=lambda: "advance")
+                == "advance"
+            )
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_checkpoint_record"
+
+
+class TestRoutedCheckpointAdoptionVerdict:
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            (("a", 10, "b", 10), "foreign"),
+            (("a", 10, "b", 99), "foreign"),  # foreign wins over total drift
+            (("a", 10, "a", 99), "total_mismatch"),
+            (("a", 10, "a", 10), "adopt"),
+        ],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...], expected: str
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_checkpoint_adoption_verdict(*args, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (b"a", 10, "a", 10),  # non-str id
+            ("a", True, "a", 10),  # bool total
+            ("a", 10, "a", 10.0),  # float total
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...]
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_checkpoint_adoption_verdict(*args, python_law=lambda: "adopt") == "adopt"
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "checkpoint_adoption_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", [7, "quarantine", None])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.checkpoint_adoption_verdict = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_checkpoint_adoption_verdict("a", 10, "a", 10, python_law=lambda: "adopt")
+                == "adopt"
+            )
+        warns = [e for e in logs if e.get("reason") == "checkpoint_adoption_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.checkpoint_adoption_verdict = lambda *args: "adopt"  # tamper-blessing poison
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_checkpoint_adoption_verdict(
+                    "a", 10, "a", 99, python_law=lambda: "total_mismatch"
+                )
+                == "total_mismatch"
+            )
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_checkpoint_adoption"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> str:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert (
+            routed_checkpoint_adoption_verdict("a", 10, "b", 10, python_law=forbidden_oracle)
+            == "foreign"
+        )
+
+
+class TestSliceThreeDriftPins:
+    def test_run_state_tokens_mirror_enum(self) -> None:
+        from brutex.engine.sweep_exit_status import RunState
+
+        assert {s.value for s in RunState} == sweep_ops_rust._RUN_STATE_TOKENS
+
+    def test_record_decision_tokens_cover_the_wiring_arms(self) -> None:
+        from brutex.engine.sweep_checkpoint import _record_decision_python
+
+        produced = {
+            _record_decision_python(-1, -1, 10),
+            _record_decision_python(10, -1, 10),
+            _record_decision_python(3, 3, 10),
+            _record_decision_python(4, 3, 10),
+        }
+        assert produced == sweep_ops_rust._RECORD_DECISION_TOKENS
+
+    def test_adoption_tokens_cover_the_wiring_arms(self) -> None:
+        from brutex.engine.sweep_checkpoint import _adoption_verdict_python
+
+        produced = {
+            _adoption_verdict_python("a", 10, "b", 10),
+            _adoption_verdict_python("a", 10, "a", 99),
+            _adoption_verdict_python("a", 10, "a", 10),
+        }
+        assert produced == sweep_ops_rust._ADOPTION_TOKENS

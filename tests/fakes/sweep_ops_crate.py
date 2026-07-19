@@ -282,6 +282,79 @@ def _count_reconciliation(
     return "; ".join(violations)
 
 
+_FAKE_RUN_STATE_TOKENS = [
+    "running",
+    "complete",
+    "failed",
+    "refused",
+    "halted",
+    "suspect_complete",
+]
+
+
+def _exit_status_resolution(
+    state: str,
+    prior_started: float | None,
+    now: float,
+    suspect: bool | None,
+    prior_suspect: bool | None,
+) -> tuple[float, float | None, bool]:
+    """The sweep_exit_status wall-clock + suspect resolution (fake twin)."""
+    if state not in _FAKE_RUN_STATE_TOKENS:
+        raise ValueError(f"unknown run state token: {state!r}")
+    started = prior_started if prior_started is not None else now
+    ended = None if state == "running" else now
+    if state == "suspect_complete":
+        resolved = True
+    elif suspect is not None:
+        resolved = suspect
+    else:
+        resolved = prior_suspect if prior_suspect is not None else False
+    return (started, ended, resolved)
+
+
+def _quarantine_next_ordinal(names: list[str], prefix: str, suffix: str) -> int:
+    """The sweep_quarantine monotonic-ordinal fold (fake twin — ASCII-exact)."""
+    if not (prefix.isascii() and suffix.isascii()):
+        raise ValueError("next_ordinal: non-ASCII prefix/suffix")
+    highest = 0
+    for name in names:
+        if not name.isascii():
+            raise ValueError(f"next_ordinal: non-ASCII name {name!r}")
+        if not (name.startswith(prefix) and name.endswith(suffix)):
+            continue
+        core_end = len(name) - len(suffix)
+        if core_end < len(prefix):
+            continue
+        core = name[len(prefix) : core_end]
+        if not core or not all(char in "0123456789" for char in core):
+            continue
+        highest = max(highest, int(core))
+    return highest + 1
+
+
+def _checkpoint_record_decision(completed_index: int, last_index: int, total_combos: int) -> str:
+    """The sweep_checkpoint monotonic-advance decision (fake twin)."""
+    if completed_index < 0:
+        return "reject_below_zero"
+    if completed_index >= total_combos:
+        return "reject_beyond_total"
+    if completed_index <= last_index:
+        return "noop"
+    return "advance"
+
+
+def _checkpoint_adoption_verdict(
+    store_sweep_id: str, store_total: int, cp_sweep_id: str, cp_total: int
+) -> str:
+    """The sweep_checkpoint load-tail adoption verdict (fake twin)."""
+    if cp_sweep_id != store_sweep_id:
+        return "foreign"
+    if cp_total != store_total:
+        return "total_mismatch"
+    return "adopt"
+
+
 def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespace:
     """Return a fresh behavior-correct fake crate namespace.
 
@@ -307,4 +380,9 @@ def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespac
         stamp_verdict=_stamp_verdict,
         chain_link_state=_chain_link_state,
         count_reconciliation=_count_reconciliation,
+        RUN_STATE_TOKENS=list(_FAKE_RUN_STATE_TOKENS),
+        exit_status_resolution=_exit_status_resolution,
+        quarantine_next_ordinal=_quarantine_next_ordinal,
+        checkpoint_record_decision=_checkpoint_record_decision,
+        checkpoint_adoption_verdict=_checkpoint_adoption_verdict,
     )

@@ -96,6 +96,40 @@ is the DISTINCT family and has NO seam here — never conflated:
     crosses). The tripwire engine's fail-soft law (#1712 I-3) holds by
     construction: every seam degrades to the oracle, never a new raise.
 
+Slice-3 routed laws (the DURABLE-ARTIFACTS family — same wiring shape,
+same shared engage core). The hard rail: NO write, fsync, rename or lock
+EVER crosses the FFI — the durability / crash-convergence ORDERING of
+these modules is #1712-hostile-reviewed and stays Python verbatim; ONLY
+pure decisions route, and RENDERING (``json.dumps`` float repr) stays
+Python (the float-repr trap):
+
+14. **Exit-status resolution law** (:func:`routed_exit_status_resolution`)
+    — ``brutex/engine/sweep_exit_status.py``'s wall-clock preservation +
+    suspect resolution (the #1712 round-3 ``wall_started_utc``
+    preservation fix). Floats cross as f64 BIT-exactly both ways; the
+    prior-artifact READ, the doc build and the atomic write stay Python.
+15. **Quarantine ordinal fold** (:func:`routed_quarantine_next_ordinal`) —
+    ``brutex/engine/sweep_quarantine.py``'s monotonic dirname-ordinal fold
+    over ALREADY-LISTED entry names (``iterdir`` stays Python). Gated
+    ASCII-only WITHOUT embedded newlines: Python's ``int()`` accepts
+    Unicode digits and ``re``'s ``$`` matches before a trailing newline —
+    both shapes are refused to the oracle rather than mirrored.
+16. **Checkpoint record decision** (:func:`routed_checkpoint_record_decision`)
+    + **adoption verdict** (:func:`routed_checkpoint_adoption_verdict`) —
+    ``brutex/engine/sweep_checkpoint.py``'s monotonic high-water advance
+    decision (the never-rewind law) and the load-tail adoption verdict
+    (foreign-id → ignore; same-id total mismatch → the tamper refusal).
+    The JSON parse + ``int()``/``float()`` coercions of ``from_dict``, the
+    corruption-class → ``SweepCheckpointError`` mapping, every message
+    byte and the atomic save stay Python (marshaling-heavy by design).
+
+Slice-3 N/A disposition: ``sweep_artifact_guard`` stays Python until the
+endgame — its ONLY pure decision is a one-line set membership
+(``_is_legacy_schema_keyerror``) whose column set is single-sourced from
+``results_store``'s field tuples by the module's OWN §11 anti-copy law; a
+crate-side copy would mint a second source, and marshaling ~50 column
+names per exception call is overhead, not conversion.
+
 ## The fail-closed layers (the window_ledger_rust template, adapted)
 
 * **Flag** — ``BRUTEX_SWEEP_OPS_RUST`` default OFF; truthy → ON, falsy →
@@ -145,6 +179,7 @@ modules (run_layout et al.) stay light.
 from __future__ import annotations
 
 import importlib
+import math
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -198,6 +233,14 @@ _LAW_STAMP_VERDICT: Final[str] = "stamp_verdict"
 _LAW_CHAIN_LINK_STATE: Final[str] = "chain_link_state"
 #: The count-reconciliation-fold burn-in budget key (slice 2).
 _LAW_COUNT_VIOLATIONS: Final[str] = "count_violations"
+#: The exit-status-resolution-law burn-in budget key (slice 3).
+_LAW_EXIT_STATUS_RESOLUTION: Final[str] = "exit_status_resolution"
+#: The quarantine-ordinal-fold burn-in budget key (slice 3).
+_LAW_QUARANTINE_ORDINAL: Final[str] = "quarantine_ordinal"
+#: The checkpoint-record-decision burn-in budget key (slice 3).
+_LAW_CHECKPOINT_RECORD: Final[str] = "checkpoint_record"
+#: The checkpoint-adoption-verdict burn-in budget key (slice 3).
+_LAW_CHECKPOINT_ADOPTION: Final[str] = "checkpoint_adoption"
 
 #: Every routed law's burn-in budget key (the reset seam iterates this).
 _ALL_LAWS: Final[tuple[str, ...]] = (
@@ -215,6 +258,10 @@ _ALL_LAWS: Final[tuple[str, ...]] = (
     _LAW_STAMP_VERDICT,
     _LAW_CHAIN_LINK_STATE,
     _LAW_COUNT_VIOLATIONS,
+    _LAW_EXIT_STATUS_RESOLUTION,
+    _LAW_QUARANTINE_ORDINAL,
+    _LAW_CHECKPOINT_RECORD,
+    _LAW_CHECKPOINT_ADOPTION,
 )
 
 #: Process-local OFF latch — the disable reason, or ``None`` when live.
@@ -230,13 +277,17 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "audit_entry_hash",
     "chain_link_state",
     "chain_verify_step",
+    "checkpoint_adoption_verdict",
+    "checkpoint_record_decision",
     "count_reconciliation",
+    "exit_status_resolution",
     "freshness_stale",
     "gate_config_fragment",
     "join_path_segments",
     "liveness_tail",
     "preflight_missing",
     "progress_derived",
+    "quarantine_next_ordinal",
     "rank_plan_decision",
     "sla_decision",
     "stall_scaled_timeout",
@@ -309,6 +360,21 @@ _CHAIN_LINKS: Final[tuple[str, ...]] = ("preflight", "sweep", "stage3", "cascade
 _LINK_STATE_TOKENS: Final[frozenset[str]] = frozenset(
     {"pending", "running", "green", "amber", "red"}
 )
+#: The exit-status run-state wire tokens (``sweep_exit_status.RunState``
+#: values — drift-pinned by the facade suite; no import,
+#: ``sweep_exit_status`` imports THIS module) — the state input gate.
+_RUN_STATE_TOKENS: Final[frozenset[str]] = frozenset(
+    {"running", "complete", "failed", "refused", "halted", "suspect_complete"}
+)
+#: The exit-status resolution triple's arity (refuse-poison gate — slice 3).
+_RESOLUTION_TRIPLE_ARITY: Final[int] = 3
+#: The checkpoint record-decision tokens (the crate ↔ wiring contract; the
+#: non-advance members key ``sweep_checkpoint``'s raise/noop arms).
+_RECORD_DECISION_TOKENS: Final[frozenset[str]] = frozenset(
+    {"reject_below_zero", "reject_beyond_total", "noop", "advance"}
+)
+#: The checkpoint adoption-verdict tokens (the crate ↔ wiring contract).
+_ADOPTION_TOKENS: Final[frozenset[str]] = frozenset({"adopt", "foreign", "total_mismatch"})
 
 #: Once-per-process-per-reason log memo.
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
@@ -1231,6 +1297,184 @@ def routed_count_violations(
     )
 
 
+def _validate_resolution(raw: object) -> tuple[float, float | None, bool] | None:
+    """Structural OUTPUT gate for the ``(started, ended, suspect)`` triple."""
+    if not (isinstance(raw, tuple) and len(raw) == _RESOLUTION_TRIPLE_ARITY):
+        return None
+    started, ended, suspect = raw
+    if type(started) is not float or not math.isfinite(started):
+        return None
+    if ended is not None and (type(ended) is not float or not math.isfinite(ended)):
+        return None
+    if type(suspect) is not bool:
+        return None
+    return (started, ended, suspect)
+
+
+def routed_exit_status_resolution(
+    state_value: str,
+    prior_started: float | None,
+    now: float,
+    suspect: bool | None,
+    prior_suspect: bool | None,
+    *,
+    python_law: Callable[[], tuple[float, float | None, bool]],
+) -> tuple[float, float | None, bool]:
+    """The routed exit-status wall-clock + suspect resolution law (slice 3).
+
+    Exact-type input gates: *state_value* an exact ``str`` in the mirrored
+    :data:`_RUN_STATE_TOKENS`; *prior_started* ``None`` or an exact FINITE
+    ``float`` (the caller's ``_finite_float`` already guarantees this — the
+    gate is the belt); *now* an exact finite ``float``; the two suspect
+    flags ``None`` or exact ``bool``. Floats cross the FFI as f64
+    BIT-exactly, so the returned ``started``/``ended`` render to the SAME
+    ``json.dumps`` bytes either arm — rendering itself stays Python.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if (
+        type(state_value) is not str
+        or state_value not in _RUN_STATE_TOKENS
+        or (
+            prior_started is not None
+            and (type(prior_started) is not float or not math.isfinite(prior_started))
+        )
+        or type(now) is not float
+        or not math.isfinite(now)
+        or (suspect is not None and type(suspect) is not bool)
+        or (prior_suspect is not None and type(prior_suspect) is not bool)
+    ):
+        _warn_once("exit_status_resolution_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_EXIT_STATUS_RESOLUTION,
+        "exit_status_resolution",
+        (state_value, prior_started, now, suspect, prior_suspect),
+        python_law=python_law,
+        validate=_validate_resolution,
+    )
+
+
+def _validate_ordinal(raw: object) -> int | None:
+    """Structural OUTPUT gate for the next quarantine ordinal (``>= 1``)."""
+    if type(raw) is not int or raw < 1:
+        return None
+    return raw
+
+
+def routed_quarantine_next_ordinal(
+    names: Sequence[str],
+    prefix: str,
+    suffix: str,
+    *,
+    python_law: Callable[[], int],
+) -> int:
+    """The routed monotonic quarantine-ordinal fold (slice 3).
+
+    Exact-type input gates: *names* a ``list`` of exact ``str`` entries,
+    *prefix*/*suffix* exact ``str`` — and EVERY string ASCII-only with NO
+    embedded newline. Python's ``int()`` accepts non-ASCII Unicode digits
+    and ``re``'s ``$`` matches before a trailing ``"\\n"`` (so a planted
+    ``"run-12\\n"`` dirname IS an ordinal to the oracle) — both shapes are
+    refused to the oracle rather than mirrored in Rust. The ``iterdir``
+    that produced *names* — and the quarantine MOVE itself — stay Python.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if (
+        type(names) is not list
+        or any(type(name) is not str or not name.isascii() or "\n" in name for name in names)
+        or any(
+            type(token) is not str or not token.isascii() or "\n" in token
+            for token in (prefix, suffix)
+        )
+    ):
+        _warn_once("quarantine_next_ordinal_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_QUARANTINE_ORDINAL,
+        "quarantine_next_ordinal",
+        (names, prefix, suffix),
+        python_law=python_law,
+        validate=_validate_ordinal,
+    )
+
+
+def _validate_record_decision(raw: object) -> str | None:
+    """Structural OUTPUT gate for the checkpoint record-decision token."""
+    if type(raw) is not str or raw not in _RECORD_DECISION_TOKENS:
+        return None
+    return raw
+
+
+def routed_checkpoint_record_decision(
+    completed_index: int,
+    last_index: int,
+    total_combos: int,
+    *,
+    python_law: Callable[[], str],
+) -> str:
+    """The routed checkpoint monotonic-advance decision (slice 3).
+
+    Exact-type input gates: all three indices exact ``int`` (``bool``
+    excluded; out-of-``i64`` degrades via ``OverflowError``). The refusal
+    MESSAGE bytes, the in-memory high-water mutation and the atomic save
+    stay with :meth:`SweepCheckpointStore.record` — only the decision
+    routes, so the never-rewind ordering law is untouched.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if any(type(value) is not int for value in (completed_index, last_index, total_combos)):
+        _warn_once("checkpoint_record_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_CHECKPOINT_RECORD,
+        "checkpoint_record_decision",
+        (completed_index, last_index, total_combos),
+        python_law=python_law,
+        validate=_validate_record_decision,
+    )
+
+
+def _validate_adoption_verdict(raw: object) -> str | None:
+    """Structural OUTPUT gate for the checkpoint adoption-verdict token."""
+    if type(raw) is not str or raw not in _ADOPTION_TOKENS:
+        return None
+    return raw
+
+
+def routed_checkpoint_adoption_verdict(
+    store_sweep_id: str,
+    store_total: int,
+    cp_sweep_id: str,
+    cp_total: int,
+    *,
+    python_law: Callable[[], str],
+) -> str:
+    """The routed checkpoint load-tail adoption verdict (slice 3).
+
+    Exact-type input gates: the two ids exact ``str``, the two totals exact
+    ``int`` (``bool`` excluded; out-of-``i64`` degrades via
+    ``OverflowError``). The tamper-refusal MESSAGE bytes and the adoption
+    side effect (the in-memory high-water set) stay with
+    :meth:`SweepCheckpointStore.load` — only the verdict routes.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if any(type(value) is not str for value in (store_sweep_id, cp_sweep_id)) or any(
+        type(value) is not int for value in (store_total, cp_total)
+    ):
+        _warn_once("checkpoint_adoption_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_CHECKPOINT_ADOPTION,
+        "checkpoint_adoption_verdict",
+        (store_sweep_id, store_total, cp_sweep_id, cp_total),
+        python_law=python_law,
+        validate=_validate_adoption_verdict,
+    )
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "SWEEP_OPS_RUST_ENV",
@@ -1238,12 +1482,16 @@ __all__ = [
     "routed_audit_entry_hash",
     "routed_chain_link_state",
     "routed_chain_verify_step",
+    "routed_checkpoint_adoption_verdict",
+    "routed_checkpoint_record_decision",
     "routed_count_violations",
+    "routed_exit_status_resolution",
     "routed_freshness_stale",
     "routed_gate_fragment",
     "routed_liveness_tail",
     "routed_preflight_missing",
     "routed_progress_derived",
+    "routed_quarantine_next_ordinal",
     "routed_rank_plan",
     "routed_run_path",
     "routed_sla_decision",
