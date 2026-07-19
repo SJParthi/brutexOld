@@ -527,13 +527,26 @@ jobs:
           else
             echo "(brutex.costs test files not present yet — gate inactive)"
           fi
+          # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): the
+          # whole-package --cov=brutex.engine gate must also run the
+          # losing-streak resilience suites — brutex/engine/resilience_streaks.py
+          # is stem-matched by tests/unit/test_resilience_streaks.py and the new
+          # brutex/engine/results_depth_pass.py adoption-backfill + resilience
+          # fence branches are covered by tests/unit/test_resilience_sidecar.py
+          # + the integration tests/integration/test_resilience_end_to_end.py,
+          # none of which the test_engine_*.py glob collects (the same
+          # static-list addition precedent as the costs/pull_jobs gates, PRs
+          # #1248/#1542, and the brutex.data.catalog integration-test gate).
           if compgen -G "tests/unit/test_engine_*.py" > /dev/null; then
             pytest \
               --cov=brutex.engine \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_engine_*.py
+              tests/unit/test_engine_*.py \
+              tests/unit/test_resilience_streaks.py \
+              tests/unit/test_resilience_sidecar.py \
+              tests/integration/test_resilience_end_to_end.py
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
@@ -2780,10 +2793,49 @@ jobs:
           else
             echo "(brutex.engine.top100_artifact test file not present yet — gate inactive)"
           fi
+          # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): results_depth_pass.py
+          # gains an adoption-backfill + resilience-fence path whose lines
+          # (~492-528, 760-773) are exercised by the differently-stemmed
+          # tests/unit/test_resilience_sidecar.py +
+          # tests/integration/test_resilience_end_to_end.py — the
+          # test_engine_results_depth_pass.py stem file alone tops out at ~94.88%.
+          # This per-module gate therefore runs the CURATED multi-file suite (the
+          # same static-list multi-file precedent as brutex.pull_controller /
+          # brutex.data.catalog), and the auto-discovery gate below EXCLUDES this
+          # module (its 100% cannot be reached by a single stem-matched file).
           if compgen -G "tests/unit/test_engine_results_depth_pass.py" > /dev/null; then
-            pytest --cov=brutex.engine.results_depth_pass --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_depth_pass.py
+            pytest --cov=brutex.engine.results_depth_pass --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_engine_results_depth_pass.py \
+              tests/unit/test_resilience_sidecar.py \
+              tests/integration/test_resilience_end_to_end.py
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958): the
+          # brutex/acceptance/ package — the operator acceptance verifier —
+          # ships every module at 100% line+branch from the start (design
+          # §10; real-writer fixtures only, the #1631 lesson). The selftest
+          # gate runs its unit file together with the CI-mandatory full
+          # poison battery (tests/integration/test_acceptance_selftest.py);
+          # the checks-registry lines ride the run/movers/latency suites.
+          if compgen -G "tests/unit/test_acceptance_model.py" > /dev/null; then
+            pytest --cov=brutex.acceptance.model --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_model.py
+            pytest --cov=brutex.acceptance.sampling --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_sampling.py
+            pytest --cov=brutex.acceptance.context --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_context.py
+            pytest --cov=brutex.acceptance.independent --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_independent.py tests/unit/test_acceptance_independent_fence.py
+            pytest --cov=brutex.acceptance.report --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_report.py
+            pytest --cov=brutex.acceptance.selftest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_selftest.py tests/integration/test_acceptance_selftest.py
+            pytest --cov=brutex.acceptance.run --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_run.py
+            pytest --cov=brutex.acceptance.checks.unique --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_unique.py
+            pytest --cov=brutex.acceptance.checks.tf --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_tf.py
+            pytest --cov=brutex.acceptance.checks.pull --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_pull.py
+            pytest --cov=brutex.acceptance.checks.rate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_rate.py
+            pytest --cov=brutex.acceptance.checks.movers --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_movers.py
+            pytest --cov=brutex.acceptance.checks.sanity --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_sanity.py
+            pytest --cov=brutex.acceptance.checks.latency --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_latency.py
+            pytest --cov=brutex.acceptance.checks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_run.py tests/unit/test_acceptance_checks_unique.py tests/unit/test_acceptance_checks_tf.py tests/unit/test_acceptance_checks_pull.py tests/unit/test_acceptance_checks_rate.py tests/unit/test_acceptance_checks_movers.py tests/unit/test_acceptance_checks_sanity.py tests/unit/test_acceptance_checks_latency.py
+          else
+            echo "(brutex.acceptance test files not present yet — gate inactive)"
           fi
           # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (MIGRATION.md #1749): the ONE
           # pure cascade-report → display-join law (flattener/validator shared
@@ -2800,6 +2852,24 @@ jobs:
             pytest --cov=brutex.dashboard.composite_join --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_composite_join.py
           else
             echo "(brutex.dashboard.composite_join test file not present yet — gate inactive)"
+          fi
+          # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): the NEW
+          # brutex/engine/resilience_streaks.py (losing-streak fold + sidecar +
+          # annotation) is 1172 lines whose 100% line+branch is reached only by a
+          # CURATED multi-file suite — test_resilience_streaks.py alone is ~62.94%;
+          # the fold/annotation/backfill branches live in test_resilience_sidecar.py
+          # + the integration test_resilience_end_to_end.py (differently stemmed, so
+          # the auto-discovery gate below EXCLUDES this module — the pull_controller
+          # multi-file precedent). This dedicated static per-module gate asserts its
+          # independent 100% with that suite (it also rides the whole-package
+          # --cov=brutex.engine floor above).
+          if compgen -G "tests/unit/test_resilience_streaks.py" > /dev/null; then
+            pytest --cov=brutex.engine.resilience_streaks --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_resilience_streaks.py \
+              tests/unit/test_resilience_sidecar.py \
+              tests/integration/test_resilience_end_to_end.py
+          else
+            echo "(brutex.engine.resilience_streaks test file not present yet — gate inactive)"
           fi
 
   # ─────────────────────────────────────────────────────────────────

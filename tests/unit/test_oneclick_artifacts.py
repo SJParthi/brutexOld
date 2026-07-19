@@ -533,7 +533,10 @@ class TestLoadTop100:
         assert f"schema_version {pun!r}" in result.detail
 
     def test_object_root_without_entries_array_is_corrupt(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"schema_version": 1, "rows": []}))
+        _write(
+            tmp_path / oc.TOP100_FILENAME,
+            json.dumps({"schema_version": oc.TOP100_SCHEMA_VERSION, "rows": []}),
+        )
         result = oc.load_top100(tmp_path)
         assert result.status == "corrupt"
         assert "no entries array" in result.detail
