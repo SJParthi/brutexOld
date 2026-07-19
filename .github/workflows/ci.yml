@@ -468,6 +468,33 @@ jobs:
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Cache the brutex-lake cargo build (rev-pinned polars graph)
+        # DEC-RUST-LAKE-WAVED-001 W-6a: the brutex_lake wheel is now a HARD
+        # test prerequisite — the Python lake scan/heal/reconcile/read cores
+        # are DELETED, so an absent wheel is a loud typed refusal
+        # (LakeRustWavedUnavailableError) and every lake suite would FAIL,
+        # not skip. The crate compiles the whole rev-pinned polars graph
+        # (~10+ min cold), so the build is cached across the wheel-needing
+        # jobs via ONE shared key + the crate content hash.
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-lake -> target
+          shared-key: brutex-lake-wheel
+          key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
+      - name: Install brutex_lake Rust extension (DEC-RUST-LAKE-WAVED-001 W-6a)
+        # REQUIRED wheel (see the cache step). Belt-and-suspenders
+        # crates.io/git flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-lake; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-lake failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-lake failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest with coverage gate
         run: |
           # Coverage floor at 100 (DEC-COV-APP-BACKFILL-001, 2026-06-12):
@@ -2911,6 +2938,10 @@ jobs:
       # dual-arm parity gate's execution home is the `test:` job
       # ([dev,data,ui] + the wheel), which runs tests/property in its
       # coverage pass.
+      # DEC-RUST-LAKE-WAVED-001 W-6a: NO brutex_lake wheel here for the
+      # SAME reason — every lake property suite is polars/pyarrow-guarded
+      # and module-skips in this [dev]-only job; the wheel-armed execution
+      # home for tests/property is the `test:` job's coverage pass.
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -3149,6 +3180,29 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Cache the brutex-lake cargo build (rev-pinned polars graph)
+        # DEC-RUST-LAKE-WAVED-001 W-6a — see the test job's twin step: the
+        # wheel is a HARD prerequisite (deleted Python lake cores), shared
+        # cache key across the wheel-needing jobs.
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-lake -> target
+          shared-key: brutex-lake-wheel
+          key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
+      - name: Install brutex_lake Rust extension (DEC-RUST-LAKE-WAVED-001 W-6a)
+        # REQUIRED wheel — the golden lake suites (daily-open substitution,
+        # observed sessions) read through the ONE Rust-backed lake read.
+        run: |
+          n=0
+          until pip install ./rust/brutex-lake; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-lake failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-lake failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest golden tests
@@ -3481,6 +3535,14 @@ jobs:
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache the brutex-lake cargo build (rev-pinned polars graph)
+        # DEC-RUST-LAKE-WAVED-001 W-6a — see the test job's twin step:
+        # shared cache key across the wheel-needing jobs.
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-lake -> target
+          shared-key: brutex-lake-wheel
+          key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
       # CRITICAL: install ONLY what `make run` installs — `.[data,ui]`,
       # NOT [dev]. Installing [dev] here would re-mask numpy-class bugs
       # (numpy used to live in [dev]); the whole point is to prove the
@@ -3507,6 +3569,11 @@ jobs:
           }
           install_with_retry ./rust/fno-math
           install_with_retry ./rust/trading-core
+          # DEC-RUST-LAKE-WAVED-001 W-6a: the brutex_lake wheel is REQUIRED
+          # at runtime now (the Python lake scan/heal/reconcile/read cores
+          # are deleted — the L3 boot sweep + every lake read refuses loudly
+          # without it), so the make-run set builds it too (Makefile twin).
+          install_with_retry ./rust/brutex-lake
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
           python -c "import trading_core, fno_math; print('kernels OK')"
@@ -3603,6 +3670,28 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Cache the brutex-lake cargo build (rev-pinned polars graph)
+        # DEC-RUST-LAKE-WAVED-001 W-6a — see the test job's twin step:
+        # shared cache key across the wheel-needing jobs.
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-lake -> target
+          shared-key: brutex-lake-wheel
+          key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
+      - name: Install brutex_lake Rust extension (DEC-RUST-LAKE-WAVED-001 W-6a)
+        # REQUIRED wheel — a chaos interleaving that reaches the lake
+        # scan/heal/read seams must run the ONE Rust path, never a skip.
+        run: |
+          n=0
+          until pip install ./rust/brutex-lake; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-lake failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-lake failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: Run chaos suite
