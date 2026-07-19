@@ -39,6 +39,14 @@ _RUN = "a1" * 32
 
 #: Locked digest (sha256 hex of the rendered top100.json bytes).
 #: Regeneration is a deliberate, ledgered act — see the module docstring.
+#: RE-LOCKED at the 2026-07-15 club-O integration merge of
+#: DEC-RESILIENCE-STREAKS-001 (#1395) with main: the merged writer emits the
+#: additive per-entry ``resilience`` block ON TOP of the two deltas the
+#: 2026-07-12 re-lock below records (root ``cascade_join`` meta + per-entry
+#: ``cascade`` object + ``metrics.exits."session_gap"``); the digest below is
+#: re-derived from the merged writer's rendered bytes (additive-only — every
+#: committed pre-change artifact fixture still loads byte-untouched).
+#: Prior lock history:
 #: RE-LOCKED at the 2026-07-12 merge of DEC-RESULTS-CASCADE-VERDICT-JOIN-001
 #: (MIGRATION.md #1749) with main's DEC-TRADESIM-OPEN-SESSION-GUARD-001
 #: (MIGRATION.md #1743): the merged writer emits BOTH additive deltas — the
@@ -50,7 +58,7 @@ _RUN = "a1" * 32
 #: (zero-count on this fixture — the wp5 fixture aggs carry no session-gap
 #: closes). Readers stay presence-tolerant, so every committed pre-change
 #: artifact fixture still loads byte-untouched.
-_GOLDEN_TOP100_SHA256 = "c890213a1c1b19cb892fd2a45d7bcd2cb8a3fb8ed8037c7a1d03c429052d138d"
+_GOLDEN_TOP100_SHA256 = "9fa6a166f3370f6d3099bd86022e1d8282a2e9bef18a4efc1f735655d71ebed2"
 
 
 def _fixture_artifact() -> Top100Artifact:

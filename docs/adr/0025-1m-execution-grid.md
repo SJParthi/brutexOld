@@ -12,7 +12,7 @@
   `docs/design/fills/PRB_1M_EXECUTION_GRID_DESIGN.md`, absorbed verbatim
   onto this branch — draft PR #1564, the do-not-merge review vehicle,
   closes without merge when this lands)
-- **Decision ID:** DEC-FILL-EXEC-GRID-1M-001 (MIGRATION.md #1979;
+- **Decision ID:** DEC-FILL-EXEC-GRID-1M-001 (MIGRATION.md #1989;
   supersedes the INTERIM-HONESTY clause of DEC-FILL-WORST-CASE-ONLY-001 —
   MIGRATION.md #1825 / ADR-0023 — whose rider records the supersession)
 - **Date:** 2026-07-18
@@ -147,7 +147,7 @@ the session-bounded SLIDE, ratified and unified with PR-A's shipped walker.
   cannot be imported in-process; disclosed in the module docstring. The
   pre-existing throughput/O(1) benches remain re-shaped dual-feed and
   pass.
-- The fill-sensitivity annotation (the R13 half, MIGRATION.md #1979) is a
+- The fill-sensitivity annotation (the R13 half, MIGRATION.md #1989) is a
   run-end O(|top100|·bars) batch on the Python oracle — disclosed, never
   the sweep hot path; annotation never re-ranks or hides.
 - The B1 provenance law is STRUCTURAL in v1 (the engine reads the primary
@@ -156,5 +156,5 @@ the session-bounded SLIDE, ratified and unified with PR-A's shipped walker.
   REQUIRED if dual-vendor engine reads ever become reachable.
 - The born-rust placement of `exec_grid.py` (a Python stdlib leaf whose law
   is mirrored in-kernel via the precomputed `arm_source`) is recorded and
-  coordinator-flagged in MIGRATION.md #1979 — the hot path IS Rust; moving
+  coordinator-flagged in MIGRATION.md #1989 — the hot path IS Rust; moving
   the map BUILD into the crate stays open.

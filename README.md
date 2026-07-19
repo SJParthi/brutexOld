@@ -126,9 +126,11 @@ lake are never touched); installs the runtime + pull extras
 they are required, `brutex.indicators.*` import `trading_core` at module top);
 decides the data-lake location with **zero input** (an existing lake is
 auto-detected and recorded permanently, else the default `~/.brutex/lake` is
-created — you never type a path) and enables auto-resume-on-boot, both
-recorded **once** in `~/.brutex/.env` (loaded at every boot — no per-session
-exports ever again);
+created — you never type a path) and documents the boot auto-resume opt-in
+(**OFF by default** by operator directive — set `BRUTEX_AUTO_RESUME=1` in
+`~/.brutex/.env` to enable crash-recovery auto-resume; the legacy sub-gate is
+pre-armed so that one flip suffices), both recorded **once** in
+`~/.brutex/.env` (loaded at every boot — no per-session exports ever again);
 runs a self-check chain (deps → AWS identity → Groww daily token readable from
 AWS SSM, strictly read-only — **it never mints a token** — → lake root
 writable), each line PASS or the exact cause + fix; then boots the dashboard

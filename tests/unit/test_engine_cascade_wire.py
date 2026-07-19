@@ -1984,6 +1984,38 @@ class TestBuildStage2CascadeSpecs:
         assert specs
         assert all(len(spec.winners) == 1 for spec in specs)
 
+    def test_corrupt_store_raises_typed_cascade_error(self, tmp_path: Path) -> None:
+        """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
+
+        A corrupt / old-schema Stage-2 finalist store surfaces as a typed
+        ``CascadeWireError`` naming the UNREADABLE file — never a raw error and
+        never a silent skip (dropping a tuple's finalists would change Stage-2
+        selection invisibly, a false green).
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import (
+            TUPLE_STORE_CORRUPT_REMEDIATION,
+            iter_sweep_tuples,
+            tuple_store_path,
+        )
+
+        grid = _two_anchor_grid()
+        first = next(iter_sweep_tuples(grid))
+        _seed_tuple_store(tmp_path, first, grid, rows=[_result_row(1, mask=1, sharpe=0.5)])
+        # Corrupt the persisted store parquet (VECTOR: overwrite *.parquet).
+        store_path = tuple_store_path(tmp_path, first, grid)
+        store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+        with pytest.raises(cw.CascadeWireError, match="UNREADABLE") as excinfo:
+            cw.build_stage2_cascade_specs(tmp_path, grid, top_k=None)
+        message = str(excinfo.value)
+        assert str(store_path) in message
+        # Review round 1 MINOR-1: the message carries the ONE shared RUNNABLE
+        # remediation chain (real flags — TestRemediationFlagsRunnable pins them
+        # against the live argparse surface), never the fictional --out-root.
+        assert TUPLE_STORE_CORRUPT_REMEDIATION in message
+        assert "--results-root" in message
+        assert "--out-root" not in message
+
 
 @dataclass(frozen=True)
 class _FakeRefinedCell:
@@ -2476,6 +2508,79 @@ class TestEndToEnd:
         path = cw.write_report(tmp_path, _manual_report())
         assert path.exists()
         assert path.read_bytes() == cw.serialize_wire_report(_manual_report())
+
+
+class TestCascadeSidecarAtomicWrite:
+    """R2N-08 (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1923).
+
+    The manifest / report writes are atomic (tmp→fsync→os.replace); a crash /
+    ENOSPC mid-write leaves the prior complete copy INTACT (never torn), maps to a
+    typed ``CascadeWireError`` (NOT the lake-wide ``LakeWriteHalt`` escalation), and
+    leaves no orphan ``.brutex-write-*`` temp.
+    """
+
+    def test_manifest_write_atomic_enospc_preserves_prior(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        from brutex.data.errors import LakeWriteHalt
+
+        # Pre-seed a good manifest.
+        good = _manifest()
+        cw.write_manifest(tmp_path, good)
+        prior_bytes = cw.manifest_path(tmp_path).read_bytes()
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        # A DIFFERENT manifest write now fails mid-replace.
+        with pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.write_manifest(tmp_path, _manifest(specs=(_spec(),)))
+        # Typed cascade abort — NOT a lake-wide halt escalation.
+        assert not isinstance(excinfo.value, LakeWriteHalt)
+        assert str(cw.manifest_path(tmp_path)) in str(excinfo.value)
+        # The prior manifest bytes are UNCHANGED (the atomic replace never landed).
+        monkeypatch.undo()
+        assert cw.manifest_path(tmp_path).read_bytes() == prior_bytes
+        # No orphan .brutex-write-* temp left behind.
+        assert list(cw.manifest_path(tmp_path).parent.glob(".brutex-write-*")) == []
+
+    def test_report_write_atomic_enospc_typed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        from brutex.data.errors import LakeWriteHalt
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        with pytest.raises(cw.CascadeWireError, match="cascade report") as excinfo:
+            cw.write_report(tmp_path, _manual_report())
+        assert not isinstance(excinfo.value, LakeWriteHalt)
+        monkeypatch.undo()
+        assert list((tmp_path / cw.CASCADE_DIRNAME).glob(".brutex-write-*")) == []
+
+    def test_kill_mid_write_load_manifest_returns_old(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        good = _manifest()
+        cw.write_manifest(tmp_path, good)
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        with pytest.raises(cw.CascadeWireError):
+            cw.write_manifest(tmp_path, _manifest(specs=(_spec(),)))
+        monkeypatch.undo()
+        # load_manifest still serves the OLD complete cascade.
+        assert cw.load_manifest(tmp_path) == good
 
     def test_auto_path_writes_manifest_and_report(self, tmp_path: Path) -> None:
         bars = _session_bars()

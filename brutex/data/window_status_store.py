@@ -31,6 +31,7 @@ from time import monotonic
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.data.window_status import WindowStatusLog
 
 #: Structured logger — surfaces a corrupt/absent sidecar into ``/logs``.
@@ -61,7 +62,7 @@ def load_window_status(lake_root: Path) -> WindowStatusLog:
     if not path.is_file():
         return WindowStatusLog()
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = read_regular_text(path)
         records = json.loads(raw)
         coerced = [
             (

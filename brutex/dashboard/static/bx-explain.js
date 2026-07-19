@@ -88,6 +88,39 @@ var BX_EXPLAIN = {
   mfe: "The best the trade went FOR you before it closed (favorable excursion).",
   vix_entry: "India VIX (market fear gauge) when the trade entered — blank means no VIX bar stored.",
   vix_exit: "India VIX when the trade exited — blank means no VIX bar stored.",
+  max_consecutive_losses:
+    "The longest run of consecutive losses, measured by count — the worst cold streak the strategy ever " +
+    "put you through. A loss is P&L < 0; a scratch (exactly 0) ends a streak. This is a different run " +
+    "from the single most damaging streak measured in ₹, which can be a shorter run of larger losses.",
+  losing_streak_p50:
+    "The typical (median) losing-streak length — half of this strategy's cold streaks were shorter, half " +
+    "longer. Your everyday 'this is normal' number.",
+  losing_streak_p95:
+    "95% of this strategy's cold streaks were this long or shorter. Deeper than this is rare territory — " +
+    "but not yet past its worst ever.",
+  worst_streak_pnl:
+    "The single most damaging run of consecutive losses, measured in ₹ (its most-negative sum), and that " +
+    "₹ as a % of your starting account equity. A shorter run of larger losses can cost more than the " +
+    "longest cold streak by count, so this is a different run from that one. Signal-only backtest: gross " +
+    "of brokerage & taxes, per-unit (no position sizing).",
+  worst_streak_len:
+    "The length — number of consecutive losses — of the single most damaging streak measured in ₹ " +
+    "(paired with the 'Worst streak ₹' amount). It is commonly SHORTER than the longest cold streak by " +
+    "count, which is why the two are shown as separate columns.",
+  longest_underwater:
+    "The most trades — and the most calendar days (IST) — the strategy ever spent below a prior equity " +
+    "high before making a new high. 'Still underwater' means it had not recovered by the last trade, so " +
+    "those figures are a lower bound, never a promise of recovery.",
+  worst_loss_month:
+    "The calendar month (and the ISO week) with the most losing trades — where the losses bunched up. " +
+    "Eyeball it against real market events; the card asserts the count, never a cause.",
+  win_rate_year_spread:
+    "How much the win rate swings between years (only years with at least 20 trades count) — smaller is " +
+    "steadier, proof the edge didn't come from one lucky year. Shown as '—' with fewer than two " +
+    "qualifying years, because stability needs at least two.",
+  resilience_guide:
+    "A plain-English read of this strategy's cold-streak envelope, built only from the numbers on this " +
+    "card — hold if you're inside it, reassess only past its worst ever.",
   enumerated: "Every strategy combination the run planned to look at.",
   tested: "Combinations actually tested against the data.",
   skipped: "Combinations skipped because an identical run already computed them (dedup).",

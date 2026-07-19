@@ -374,10 +374,12 @@ class TestLoadManifest:
         assert result.revision is None
 
     def test_unreadable_is_corrupt(self, tmp_path: Path) -> None:
-        (tmp_path / oc.MANIFEST_FILENAME).mkdir()  # a directory → IsADirectoryError
+        # A directory is a non-regular inode → NotRegularFileError
+        # (DEC-LAKE-READ-INODE-GUARD-001 — the fd-level S_ISREG gate).
+        (tmp_path / oc.MANIFEST_FILENAME).mkdir()
         result = oc.load_manifest(tmp_path)
         assert result.status == "corrupt"
-        assert "IsADirectoryError" in result.detail
+        assert "NotRegularFileError" in result.detail
 
     def test_invalid_utf8_is_corrupt(self, tmp_path: Path) -> None:
         (tmp_path / oc.MANIFEST_FILENAME).write_bytes(b"\xff\xfe\x00garbage")
@@ -531,7 +533,10 @@ class TestLoadTop100:
         assert f"schema_version {pun!r}" in result.detail
 
     def test_object_root_without_entries_array_is_corrupt(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"schema_version": 1, "rows": []}))
+        _write(
+            tmp_path / oc.TOP100_FILENAME,
+            json.dumps({"schema_version": oc.TOP100_SCHEMA_VERSION, "rows": []}),
+        )
         result = oc.load_top100(tmp_path)
         assert result.status == "corrupt"
         assert "no entries array" in result.detail
@@ -755,7 +760,7 @@ class TestTailEvents:
         (tmp_path / oc.EVENTS_FILENAME).mkdir()
         page = oc.tail_events(tmp_path)
         assert page.status == "corrupt"
-        assert "IsADirectoryError" in page.detail
+        assert "NotRegularFileError" in page.detail
 
     def test_paging_resumes_at_next_offset(self, tmp_path: Path) -> None:
         _write_events(tmp_path, _event_bodies(10))
@@ -915,7 +920,7 @@ class TestVerifyEventsChain:
         (tmp_path / oc.EVENTS_FILENAME).mkdir()
         ok, _, _, detail = oc.verify_events_chain(tmp_path)
         assert ok is False
-        assert "IsADirectoryError" in detail
+        assert "NotRegularFileError" in detail
 
     def test_empty_file_verifies_zero_records(self, tmp_path: Path) -> None:
         _write(tmp_path / oc.EVENTS_FILENAME, "")
@@ -1738,7 +1743,7 @@ class TestFixtureTradesReader:
     def test_unreadable_file_is_corrupt(self, tmp_path: Path) -> None:
         oc.trades_path(oc.fixture_results_root(tmp_path), "r-x", 1).mkdir(
             parents=True
-        )  # dir → IsADirectoryError
+        )  # dir → NotRegularFileError (inode guard)
         page = oc.FixtureTradesReader(tmp_path).page("r-x", 1, offset=0, limit=10)
         assert page.status == "corrupt"
 
@@ -3085,3 +3090,198 @@ class TestBridgeEntryObjects:
         assert result.detail == _drop_clause("fill_sensitivity")
         assert result.rows[0]["options_exec"] == opt
         assert "fill_sensitivity" not in result.rows[0]
+
+
+# ── The B1 stored buy-&-hold baseline read (DEC-RESULTS-TRUST-HONESTY-001) ──
+
+
+def _baseline_series(instrument: str = "NSE-NIFTY", *, total_return_pct: float = 3.0) -> Any:
+    """A tiny valid :class:`BaselineSeries` (two ascending sessions)."""
+    from datetime import date
+    from decimal import Decimal
+
+    from brutex.engine.baseline import BaselineSeries
+
+    return BaselineSeries(
+        instrument=instrument,
+        start=date(2024, 1, 5),
+        end=date(2024, 1, 8),
+        anchor_open=Decimal("100.00"),
+        sessions=((date(2024, 1, 5), Decimal("101.00")), (date(2024, 1, 8), Decimal("103.00"))),
+        total_return_pct=total_return_pct,
+        source_note="unit fixture",
+    )
+
+
+def _write_run_baseline(run_dir: Path, instrument: str = "NSE-NIFTY") -> Path:
+    """Write a REAL engine-writer baseline artifact into *run_dir*."""
+    from brutex.engine.baseline import baseline_filename, write_baseline
+
+    path = run_dir / baseline_filename(instrument)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_baseline(path, _baseline_series(instrument), data_snapshot_hash="ab" * 32)
+    return path
+
+
+def _write_top100_baselines(run_dir: Path, baselines: Any) -> None:
+    """An OBJECT-root top100.json carrying exactly the *baselines* value."""
+    _write(run_dir / oc.TOP100_FILENAME, json.dumps({"rows": [], "baselines": baselines}))
+
+
+class TestLoadBaselinesMap:
+    """The top100 object-root ``baselines`` map read (B1 resolution step 1)."""
+
+    def test_absent_top100_is_awaiting(self, tmp_path: Path) -> None:
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert oc.AWAITING_DETAIL in detail
+        assert not detail.startswith("corrupt")
+
+    def test_unreadable_top100_is_corrupt(self, tmp_path: Path) -> None:
+        (tmp_path / oc.TOP100_FILENAME).mkdir(parents=True)  # IsADirectoryError
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert detail.startswith("corrupt: ")
+
+    def test_invalid_json_is_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, "{nope")
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert detail == f"corrupt: {oc.TOP100_FILENAME} is not valid JSON"
+
+    def test_array_root_is_the_interim_contract_not_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, "[]")
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert "ARRAY root" in detail
+        assert not detail.startswith("corrupt")
+
+    def test_scalar_root_is_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, "42")
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert detail == f"corrupt: {oc.TOP100_FILENAME} root is neither object nor array"
+
+    def test_object_without_baselines_key(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"rows": []}))
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert "carries no baselines map" in detail
+        assert not detail.startswith("corrupt")
+
+    @pytest.mark.parametrize("bad", [["x"], {"NSE-NIFTY": 7}, {"NSE-NIFTY": None}])
+    def test_wrong_typed_baselines_is_corrupt(self, tmp_path: Path, bad: Any) -> None:
+        _write_top100_baselines(tmp_path, bad)
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert detail == f"corrupt: {oc.TOP100_FILENAME} baselines is not a string→string map"
+
+    def test_ok_map_round_trips(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines == {"NSE-NIFTY": "baseline-NSE-NIFTY.json"}
+        assert detail == ""
+
+
+class TestLoadBaselineResult:
+    """The full B1 resolution law — STORED bytes only, every degrade NAMED."""
+
+    def test_awaiting_map_propagates_awaiting(self, tmp_path: Path) -> None:
+        result = oc.load_baseline_result(tmp_path, None)
+        assert result.status == "awaiting"
+        assert result.series is None
+        assert result.instruments == ()
+        assert oc.AWAITING_DETAIL in result.detail
+
+    def test_corrupt_map_propagates_corrupt_without_prefix(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, "{nope")
+        result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "corrupt"
+        assert result.instrument == "NSE-NIFTY"
+        assert not result.detail.startswith("corrupt")
+        assert "not valid JSON" in result.detail
+
+    def test_auto_select_single_stored_instrument(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        _write_run_baseline(tmp_path)
+        result = oc.load_baseline_result(tmp_path, None)
+        assert result.status == "ok"
+        assert result.instrument == "NSE-NIFTY"
+        assert result.filename == "baseline-NSE-NIFTY.json"
+        assert result.series is not None
+        assert result.series.total_return_pct == 3.0
+        assert result.instruments == ("NSE-NIFTY",)
+        assert result.detail == ""
+        assert result.revision is not None
+
+    def test_multi_instrument_requires_explicit_choice(self, tmp_path: Path) -> None:
+        _write_top100_baselines(
+            tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json", "BSE-SENSEX": "b.json"}
+        )
+        result = oc.load_baseline_result(tmp_path, None)
+        assert result.status == "awaiting"
+        assert result.instrument is None
+        assert "instrument required — 2 baseline(s) stored" in result.detail
+        assert "BSE-SENSEX, NSE-NIFTY" in result.detail
+        assert result.instruments == ("BSE-SENSEX", "NSE-NIFTY")
+
+    def test_empty_map_names_zero_stored(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {})
+        result = oc.load_baseline_result(tmp_path, None)
+        assert result.status == "awaiting"
+        assert result.detail == "instrument required — 0 baseline(s) stored"
+
+    def test_unknown_instrument_names_the_stored_set(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        result = oc.load_baseline_result(tmp_path, "BSE-SENSEX")
+        assert result.status == "awaiting"
+        assert "no stored baseline for 'BSE-SENSEX'" in result.detail
+        assert "stored: NSE-NIFTY" in result.detail
+
+    def test_unknown_instrument_on_empty_map(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {})
+        result = oc.load_baseline_result(tmp_path, "BSE-SENSEX")
+        assert result.status == "awaiting"
+        assert result.detail == "no stored baseline for 'BSE-SENSEX'"
+
+    def test_unsafe_filename_ref_is_corrupt_and_never_touches_disk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tampered map ref (traversal) is refused BEFORE any read."""
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "../../etc/passwd"})
+
+        def _boom(_path: Path) -> None:  # pragma: no cover - must never run
+            raise AssertionError("load_baseline must not be reached for an unsafe ref")
+
+        monkeypatch.setattr(oc, "load_baseline", _boom)
+        with structlog.testing.capture_logs() as logs:
+            result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "corrupt"
+        assert "not one safe path segment" in result.detail
+        assert result.filename == "../../etc/passwd"
+        assert any(log["event"] == "oneclick.baseline_ref_unsafe" for log in logs)
+
+    def test_safe_ref_but_absent_file_is_awaiting(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "awaiting"
+        assert "baseline-NSE-NIFTY.json absent" in result.detail
+        assert result.revision is None
+
+    def test_damaged_baseline_file_is_corrupt(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        _write(tmp_path / "baseline-NSE-NIFTY.json", "{nope")
+        result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "corrupt"
+        assert "failed validation" in result.detail
+        assert result.series is None
+
+    def test_explicit_instrument_ok(self, tmp_path: Path) -> None:
+        _write_top100_baselines(
+            tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json", "BSE-SENSEX": "b.json"}
+        )
+        _write_run_baseline(tmp_path)
+        result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "ok"
+        assert result.series is not None
+        assert result.series.instrument == "NSE-NIFTY"

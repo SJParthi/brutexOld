@@ -341,3 +341,81 @@ class TestOnClampObserveHook:
             open_interest=None,
         )
         assert clamped_with_hook == clamped_without  # parse behavior unchanged
+
+
+class TestOnNegativeCountClampObserveHook:
+    """The observe-only negative count-field clamp hook (DEC-AUDIT-ALERT-CLAMP-OBS-001).
+
+    Fails-before: the DEC-VENDOR-VOLUME-NORMALIZE-001 ``max(0, ...)`` clamp on a
+    vendor-emitted NEGATIVE volume / open-interest fired SILENTLY — no counter,
+    no log — so a vendor systematically emitting junk negatives could never
+    surface. The hook only OBSERVES: the stored 0 is byte-identical either way.
+    """
+
+    def _call(
+        self,
+        *,
+        volume: object = "10",
+        open_interest: object = None,
+        on_negative_count_clamp: object,
+    ) -> CandleBar:
+        return assemble_candle(
+            ts_raw="ignored",
+            parse_timestamp=_fixed_ts,
+            open_="100",
+            high="110",
+            low="90",
+            close="105",
+            volume=volume,
+            open_interest=open_interest,
+            on_negative_count_clamp=on_negative_count_clamp,  # type: ignore[arg-type]
+        )
+
+    def test_hook_fires_once_on_negative_volume(self) -> None:
+        calls: list[int] = []
+        bar = self._call(volume="-2", on_negative_count_clamp=lambda: calls.append(1))
+        assert calls == [1]  # the live ``-2`` index quirk → clamped + COUNTED
+        assert bar.volume == 0
+
+    def test_hook_fires_once_on_negative_open_interest(self) -> None:
+        calls: list[int] = []
+        bar = self._call(open_interest="-5", on_negative_count_clamp=lambda: calls.append(1))
+        assert calls == [1]
+        assert bar.open_interest == 0
+
+    def test_hook_fires_once_when_both_counts_negative(self) -> None:
+        # ONE clamped-bar observation per bar, never per field — the hook is a
+        # bar-level counter, so volume AND open_interest both negative still
+        # fire exactly once.
+        calls: list[int] = []
+        bar = self._call(
+            volume="-2",
+            open_interest="-5",
+            on_negative_count_clamp=lambda: calls.append(1),
+        )
+        assert calls == [1]
+        assert (bar.volume, bar.open_interest) == (0, 0)
+
+    def test_hook_silent_on_non_negative_counts(self) -> None:
+        calls: list[int] = []
+        bar = self._call(
+            volume="10", open_interest="50", on_negative_count_clamp=lambda: calls.append(1)
+        )
+        assert calls == []
+        assert (bar.volume, bar.open_interest) == (10, 50)
+
+    def test_default_none_hook_returns_identical_bar(self) -> None:
+        clamped_with_hook = self._call(
+            volume="-2", open_interest="-5", on_negative_count_clamp=lambda: None
+        )
+        clamped_without = assemble_candle(
+            ts_raw="ignored",
+            parse_timestamp=_fixed_ts,
+            open_="100",
+            high="110",
+            low="90",
+            close="105",
+            volume="-2",
+            open_interest="-5",
+        )
+        assert clamped_with_hook == clamped_without  # parse behavior unchanged

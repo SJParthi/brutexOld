@@ -43,8 +43,9 @@
  * @param {object} row - a top-100 artifact row.
  * @param {object} col - a BXScreener.COLUMNS entry ({key, type, money…}).
  * @param {{fieldValue: function, vixBandCellText: function,
- *   money: function}} deps - injected formatters (node goldens are
- *   formatter-explicit; the browser wires the shared builders).
+ *   winRateSpreadText: function, money: function}} deps - injected
+ *   formatters (node goldens are formatter-explicit; the browser wires the
+ *   shared builders).
  * @returns {string} the rendered cell text — full precision for metrics,
  *   honest '—' for absent values (never a fabricated figure).
  */
@@ -57,6 +58,14 @@ function bxScreenerCellText(row, col, deps) {
     /* [W3-R4]: the ONE shared compact band cell — a null-lo/hi writer band
        reads "not stamped" (R31 honest NULL), never "null–null". */
     return deps.vixBandCellText(v);
+  }
+  if (col.key === 'resilience.win_rate_year_spread') {
+    /* DEC-RESILIENCE-STREAKS-001 (re-ported at the club-O merge-forward from
+       screener.html's pre-refold inline fmtCell): the ONE shared
+       win-rate-spread law (broker-grade percentage points at 2dp) — the
+       SAME string the /strategy panel renders, never a raw IEEE fraction
+       ("0.15000000000000002"); null → "—". */
+    return deps.winRateSpreadText(v);
   }
   if (v === null || v === undefined) {
     return '—';
@@ -183,6 +192,9 @@ function bxHarvestFilterOptions(rows) {
       vixBandCellText: function (v) {
         return window.BXOneclick.vixBandCellText(v);
       },
+      winRateSpreadText: function (v) {
+        return window.BXOneclick.winRateSpreadText(v);
+      },
       money: money
     });
   }
@@ -222,6 +234,14 @@ function bxHarvestFilterOptions(rows) {
     if (minWin !== null) { filters.min_win_rate = minWin; }
     var minPf = num('scMinPf');
     if (minPf !== null) { filters.min_pf = minPf; }
+    /* DEC-RESULTS-TRUST-HONESTY-001 (B2a): the min_trades / min_dsr floors —
+       relocated from the pre-refold inline screener script into this panel
+       (the #1552 extraction convention). BXScreener.applyFilters owns the
+       math; a missing stored value is EXCLUDED under an active floor. */
+    var minTrades = num('scMinTrades');
+    if (minTrades !== null) { filters.min_trades = minTrades; }
+    var minDsr = num('scMinDsr');
+    if (minDsr !== null) { filters.min_dsr = minDsr; }
     var maxDd = num('scMaxDd');
     if (maxDd !== null) { filters.max_abs_dd_paisa = maxDd; }
     var lo = num('scVixLo');
@@ -432,7 +452,8 @@ function bxHarvestFilterOptions(rows) {
       clearTimeout(renderDebounceTimer);
       renderDebounceTimer = setTimeout(render, 200);
     }
-    ['scTf', 'scDir', 'scInstrument', 'scExec', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+    ['scTf', 'scDir', 'scInstrument', 'scExec', 'scMinWin', 'scMinPf', 'scMinTrades',
+     'scMinDsr', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
       byId(id).addEventListener('input', renderDebounced);
     });
     byId('scShowAll').addEventListener('click', function () {

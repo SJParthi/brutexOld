@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.nightly.backup import (
     MANIFEST_NAME,
     BackupManifest,
@@ -145,7 +146,7 @@ class NightlyPlan:
     env_preflight: Mapping[str, object] | None = None
 
 
-def _default_keep_awake(reason: str) -> AbstractContextManager[None]:
+def _default_keep_awake(reason: str) -> AbstractContextManager[bool]:
     """Return a no-op keep-awake context manager for the given reason."""
     return keep_awake(reason)
 
@@ -157,7 +158,7 @@ class NightlySeams:
     build_pipeline: Callable[..., HeadlessPipeline] = build_headless_pipeline
     run_sweep: Callable[..., int] | None = None  # None → cli.cmd_sweep_all (call-time import)
     alerter: SweepAlerter | None = None  # None → SweepAlerter() lazy singleton
-    keep_awake_cm: Callable[[str], AbstractContextManager[None]] = _default_keep_awake
+    keep_awake_cm: Callable[[str], AbstractContextManager[bool]] = _default_keep_awake
     credentials: Callable[[], Any] | None = None  # None → resolve_groww_aws_credentials
     copy_file: Callable[[Path, Path], None] | None = None
     disk_usage: Callable[[str], Any] = shutil.disk_usage
@@ -473,9 +474,7 @@ def _run_locked(
         # disk and fired a FALSE tripwire every healthy night (review round 2).
         try:
             own_manifest = result.snapshot_path / MANIFEST_NAME
-            manifest = BackupManifest.from_dict(
-                json.loads(own_manifest.read_text(encoding="utf-8"))
-            )
+            manifest = BackupManifest.from_dict(json.loads(read_regular_text(own_manifest)))
             on_disk = sum(
                 1 for p in result.snapshot_path.rglob("*") if p.is_file() and p != own_manifest
             )
@@ -565,7 +564,8 @@ def _run_locked(
         absent_artifacts = probe.absent
         if "run_manifest" in probe.found:
             with contextlib.suppress(OSError, ValueError, TypeError, KeyError):
-                manifest = json.loads(Path(probe.paths["run_manifest"]).read_text(encoding="utf-8"))
+                raw_manifest = read_regular_text(Path(probe.paths["run_manifest"]))
+                manifest = json.loads(raw_manifest)
                 dedup = manifest["dedup_skips"]
                 if isinstance(dedup, int) and counts is not None:
                     counts = {**counts, "skipped_dedup_manifest": dedup}
@@ -716,7 +716,7 @@ def _own_audit_events(path: Path, nightly_id: str) -> list[tuple[str, str | None
     """
     events: list[tuple[str, str | None]] = []
     with contextlib.suppress(OSError):
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in read_regular_text(path).splitlines():
             try:
                 entry = json.loads(line)
             except ValueError:

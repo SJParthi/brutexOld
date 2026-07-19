@@ -36,7 +36,7 @@ push per decision bar, exactly the PR-A single-feed walk envelope). Same
 binary + same process makes the wall-clock ratio FAIRER than a cross-commit
 A/B (no compiler/flag/runner drift); the literal old-tree A/B remains
 un-runnable in shared CI and is the honestly-narrowed residual documented in
-MIGRATION.md #1979.
+MIGRATION.md #1989.
 
 Second disclosed observation: growing N_1m by COARSENING tf (fixed armed
 count, wider armed stride) measured 2.73× on the build sandbox — a

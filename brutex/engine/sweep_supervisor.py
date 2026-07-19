@@ -101,6 +101,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
+import math
 import os
 import threading
 import time
@@ -111,8 +112,10 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import blake3
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR, ExecGridMap
-from brutex.engine.results_store import VixTrioConflictError
+from brutex.engine.results_store import ResultsStoreSchemaError, VixTrioConflictError
+from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_cache import SweepCache, combo_digest
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
 from brutex.engine.sweep_identity import (
@@ -120,11 +123,13 @@ from brutex.engine.sweep_identity import (
 )
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_orchestrator import (
+    TUPLE_STORE_CORRUPT_REMEDIATION,
     StoreQuarantine,
     SweepGridConfig,
     SweepTuple,
     TupleDiffCheck,
     count_sweep_tuples,
+    hit_memo_cell_key,
     iter_sweep_tuples,
     run_one_tuple,
 )
@@ -170,6 +175,10 @@ _ACTION_TUPLE_NO_BARS: Final[str] = "TUPLE_NO_BARS"
 _ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
 _ACTION_COMPLETE: Final[str] = "SUPERVISOR_COMPLETE"
 _ACTION_ABORT: Final[str] = "SUPERVISOR_ABORT"
+#: Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the run
+#: stopped CLEANLY at the tuple boundary — appears ONLY on cancelled runs
+#: (a clean run's chain is byte-identical to before the feature).
+_ACTION_CANCELLED: Final[str] = "SUPERVISOR_CANCELLED"
 
 #: PUBLIC aliases of the supervisor audit-action labels, so the parallel driver
 #: (:mod:`brutex.engine.sweep_parallel`, DEC-MULTICORE-SWEEP-PHASE1-001) can emit
@@ -183,6 +192,7 @@ SUPERVISOR_ACTION_TUPLE_NO_BARS: Final[str] = _ACTION_TUPLE_NO_BARS
 SUPERVISOR_ACTION_TUPLE_FAILED: Final[str] = _ACTION_TUPLE_FAILED
 SUPERVISOR_ACTION_COMPLETE: Final[str] = _ACTION_COMPLETE
 SUPERVISOR_ACTION_ABORT: Final[str] = _ACTION_ABORT
+SUPERVISOR_ACTION_CANCELLED: Final[str] = _ACTION_CANCELLED
 
 #: Default supervisor worker name for the (single) sweep thread's heartbeat.
 DEFAULT_WORKER_NAME: Final[str] = "sweep-worker-0"
@@ -303,6 +313,26 @@ class SupervisedGridSummary:
         hole is always visible; delete the sidecar entries (after relieving the
         memory pressure) and resume to genuinely recompute them. Always ``0`` on
         the sequential path (only the parallel driver quarantines).
+    tuples_failed_apriori_budget
+        The SUBSET of ``tuples_failed`` whose failure was the deterministic
+        Apriori mask·bar breaker
+        (:class:`~brutex.engine.sweep_run.SweepAprioriBudgetError`,
+        DEC-SWEEP-APRIORI-DEFAULT-001): a budget trip is target-invariant, so
+        the SAME cell's every deeper-k tuple re-trips identically — counted
+        DISTINCTLY so the CLI/Telegram done-line can name the ONE remediation
+        (raise ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` — or pass an explicit
+        ``--k`` — and re-run; the frozen checkpoint re-runs exactly the
+        refused tuples). Defaulted ``0`` (the ``tuples_quarantined_prior``
+        precedent) so every existing constructor/consumer is unchanged;
+        always ``0`` on a legacy (non-apriori) run.
+    cancelled
+        ``True`` iff the run stopped at a tuple boundary on an operator
+        cooperative-cancel request (DEC-JOB-COOPERATIVE-CANCEL-001 — the
+        ``should_stop`` probe fired). A cancelled run's checkpoint / cache /
+        stores are EXACTLY a graceful stop's at that boundary: a resume behaves
+        bit-identically to a resume after a clean end-of-grid. Additive +
+        defaulted (the ``tuples_quarantined_prior`` precedent) so every
+        existing constructor call is byte-identical.
     store_guard_forced
         Tuples the resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001)
         FORCED back through ``run_one_tuple`` because a persisted artifact
@@ -328,6 +358,8 @@ class SupervisedGridSummary:
     persisted: int
     tuples_failed: int
     tuples_quarantined_prior: int = 0
+    tuples_failed_apriori_budget: int = 0
+    cancelled: bool = False
     store_guard_forced: int = 0
 
 
@@ -429,7 +461,9 @@ def grid_identity(grid: SweepGridConfig) -> str:
         The 64-char lowercase BLAKE3 hex digest of the grid identity.
     """
     canonical = json.dumps(_grid_descriptor(grid), sort_keys=True, separators=(",", ":"))
-    return blake3.blake3(canonical.encode("utf-8")).hexdigest()
+    # str(...) keeps this typed str where the blake3 stubs are absent (the
+    # isolated pre-commit mypy env — the #575 hook-portability precedent).
+    return str(blake3.blake3(canonical.encode("utf-8")).hexdigest())
 
 
 def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, Any]:
@@ -613,6 +647,7 @@ def run_supervised_grid(
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     watchdog_poll_seconds: float | None = None,
     reuse_bar_bits: bool = True,
+    should_stop: Callable[[], bool] | None = None,
     diffcheck: TupleDiffCheck | None = None,
     store_quarantine: StoreQuarantine | None = None,
     store_path_for: Callable[[SweepTuple], Path] | None = None,
@@ -731,6 +766,20 @@ def run_supervised_grid(
         :class:`~brutex.engine.sweep_kernel.ResidentKernelCache`
         (DEC-SWEEP-RESIDENT-KERNEL-001) — byte-identical results, only the
         redundant rebuild is skipped; ``False`` rebuilds per tuple.
+    should_stop
+        Optional COOPERATIVE-cancel probe (DEC-JOB-COOPERATIVE-CANCEL-001),
+        consulted ONCE at the top of each tuple iteration — strictly at the
+        TUPLE boundary, so the in-flight tuple's whole durable chain (store
+        flush → completion sentinel → ``cache.record`` → ``checkpoint.record``)
+        has already landed before the probe can fire again. ``True`` breaks the
+        loop with ONE ``SUPERVISOR_CANCELLED`` audit line + the ``cancelled``
+        progress state and returns ``cancelled=True`` — NO checkpoint mutation,
+        NO cache record for unrun tuples, so a resume behaves bit-identically
+        to a resume after a graceful stop at that boundary. ``None`` (the
+        default — every existing caller) short-circuits before any probe: a
+        clean run is byte-identical. HONEST latency (Golden Rule #10): cancel
+        waits for the in-flight tuple to finish — a heavy k=5 tuple
+        legitimately runs many minutes (the #1608 arithmetic).
     diffcheck, store_quarantine
         The optional DEC-SWEEP-UNKILLABLE-CORE-001 per-tuple seams, forwarded
         verbatim to :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`
@@ -805,27 +854,49 @@ def run_supervised_grid(
         if path_probe is None:
             _LOG.info("sweep_supervisor.resume_store_guard_inert", subject=subject)
 
-    guards.checkpoint.load()
+    # Resilient resume (G12): a corrupt checkpoint is quarantined + logged LOUD,
+    # and the sweep starts fresh (next_index == 0) instead of aborting the whole
+    # run with a CRITICAL alert. A clean/absent checkpoint is byte-identical to
+    # the prior ``load()`` (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001).
+    guards.checkpoint.load_or_quarantine()
     resume_from = guards.checkpoint.next_index
 
+    # Resolved ONCE per supervised run (DEC-SWEEP-APRIORI-DEFAULT-001): gates
+    # the EMIT-ON-apriori START/COMPLETE payload keys + the per-cell hit-count
+    # memo threading — a legacy run's payloads stay byte-identical.
+    apriori_on = apriori_enabled()
     guards.progress.start(enumerated=total, detail=subject)
-    guards.audit.append(
-        action=_ACTION_START,
-        subject=subject,
-        payload={
-            "sweep_id": sweep_id,
-            "tuples_total": total,
-            "resume_from": resume_from,
-            "instruments": list(grid.instruments),
-            "timeframes": [tf.label for tf in grid.timeframes],
-            "directions": [d.value for d in grid.directions],
-            "k_values": list(grid.k_values),
-            "mode": grid.mode,
-            "data_snapshot_hash": grid.data_snapshot_hash,
-            "indicator_version": grid.indicator_version,
-            "code_commit_sha": grid.code_commit_sha,
-        },
-    )
+    start_payload: dict[str, Any] = {
+        "sweep_id": sweep_id,
+        "tuples_total": total,
+        "resume_from": resume_from,
+        "instruments": list(grid.instruments),
+        "timeframes": [tf.label for tf in grid.timeframes],
+        "directions": [d.value for d in grid.directions],
+        "k_values": list(grid.k_values),
+        "mode": grid.mode,
+        "data_snapshot_hash": grid.data_snapshot_hash,
+        "indicator_version": grid.indicator_version,
+        "code_commit_sha": grid.code_commit_sha,
+    }
+    if apriori_on:
+        # The per-run MODE record (DEC-SWEEP-APRIORI-DEFAULT-001) — consumed
+        # by sweep-verify's recorded-mode gate; absence == legacy (which also
+        # classifies every pre-flip tree correctly).
+        start_payload["apriori"] = {"enabled": True, "max_mask_bars": resolve_max_mask_bars()}
+    overfit_fragment = _gate_config_fragment(grid)
+    if overfit_fragment is not None and "overfit" in overfit_fragment:
+        # The per-run OVERFIT-gate record (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001)
+        # — consumed by sweep-verify's recorded-overfit reconcile
+        # (recorded_overfit_from_audit) so `sweep-verify --recount` re-derives
+        # the gate-folded store addresses instead of reading a grid_mismatch
+        # FALSE-POSITIVE on every healthy overfit-gated tree. ONLY the overfit
+        # leg is persisted — the stage3 leg already rides its own
+        # STAGE_3_PASS_START record (recorded_stage3_from_audit), so persisting
+        # it here would double-record it. EMIT-ON-active: absence == legacy,
+        # keeping every ungated/legacy payload byte-identical.
+        start_payload["gate_config"] = {"overfit": overfit_fragment["overfit"]}
+    guards.audit.append(action=_ACTION_START, subject=subject, payload=start_payload)
 
     tuples_run = 0
     tuples_skipped_no_bars = 0
@@ -886,6 +957,7 @@ def run_supervised_grid(
     skipped_resume = resume_count - len(forced)
     cache_forced = 0
     tuples_failed = 0
+    tuples_failed_apriori_budget = 0
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
@@ -900,11 +972,21 @@ def run_supervised_grid(
     # that succeeded AFTER the failure are short-circuited on resume by the CACHE tier
     # (guards.cache.record still runs on success), not re-evaluated, so resume stays cheap.
     had_failure = False
+    # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): latched at the
+    # tuple boundary ONLY — the last completed tuple's durable chain landed before
+    # the probe is reachable again, so cancel ≡ a graceful stop at that boundary.
+    cancelled = False
 
     # Bounded resident-kernel cache (DEC-SWEEP-RESIDENT-KERNEL-001): reuse one
     # Stage-1A bar window per distinct (instrument, tf, proximity, prior_n) across
     # its direction/K/sl/tp tuples; None disables reuse (legacy per-tuple rebuild).
     kernel_cache = ResidentKernelCache(capacity=len(grid.proximities)) if reuse_bar_bits else None
+
+    # Per-cell hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001): ONE single-cell
+    # memo beside the kernel cache — keyed on the bar_bits determinants
+    # (hit_memo_cell_key), reset on a cell change, threaded ONLY when the
+    # Apriori mode is on (legacy runs pass None — structurally untouched).
+    hit_memo_state: tuple[tuple[Any, ...], dict[int, int]] | None = None
 
     stop_event = threading.Event()
     wd_thread: threading.Thread | None = None
@@ -918,10 +1000,10 @@ def run_supervised_grid(
         wd_thread.start()
 
     def _advance(*, current: str, survived: bool, skipped: bool) -> None:
-        """Tick progress once + stream the fresh snapshot to *on_progress*."""
+        """Tick progress once + stream the fresh snapshot to *on_progress* (fenced)."""
         guards.progress.advance(current=current, survived=survived, skipped=skipped)
         if on_progress is not None:
-            on_progress(guards.progress.snapshot())
+            publish_progress_safe(on_progress, guards.progress.snapshot(), log=_LOG)
 
     try:
         if resume_count > 0:
@@ -939,7 +1021,7 @@ def run_supervised_grid(
             for _ in range(skipped_resume):
                 guards.progress.advance(survived=False, skipped=True)
             if on_progress is not None:
-                on_progress(guards.progress.snapshot())
+                publish_progress_safe(on_progress, guards.progress.snapshot(), log=_LOG)
             resume_payload: dict[str, Any] = {
                 "resumed_count": skipped_resume,
                 "resume_from": resume_from,
@@ -962,6 +1044,36 @@ def run_supervised_grid(
             )
         for index, tuple_ in enumerate(iter_sweep_tuples(grid)):
             guards.watchdog.beat(guards.worker_name)
+
+            if should_stop is not None and should_stop():
+                # COOPERATIVE cancel (DEC-JOB-COOPERATIVE-CANCEL-001) — the safe
+                # boundary: the previous tuple's store flush → sentinel →
+                # cache.record → checkpoint.record chain already landed, and
+                # NOTHING is mutated for this (unrun) tuple, so the on-disk
+                # state is bit-identical to a graceful stop here. ONE audit
+                # line (Golden Rule #8 — direct hash-chained append, never
+                # structlog) + the honest ``cancelled`` progress terminal.
+                cancelled = True
+                guards.audit.append(
+                    action=_ACTION_CANCELLED,
+                    subject=subject,
+                    payload={
+                        "index_reached": index,
+                        "tuples_run": tuples_run,
+                        "checkpoint_next_index": guards.checkpoint.next_index,
+                    },
+                )
+                guards.progress.cancelled(detail=f"cancelled at tuple {index}/{total}")
+                if on_progress is not None:
+                    on_progress(guards.progress.snapshot())
+                _LOG.warning(
+                    "sweep_supervisor.cancelled",
+                    subject=subject,
+                    index_reached=index,
+                    tuples_run=tuples_run,
+                    checkpoint_next_index=guards.checkpoint.next_index,
+                )
+                break
 
             if index < resume_from and index not in forced:
                 # Already-complete resumed prefix: counted + summarised ONCE
@@ -1024,6 +1136,18 @@ def run_supervised_grid(
             # `except Exception` (record-then-reraise ABORT) still handles every
             # genuinely-fatal error, including the PLAIN ResultsStoreError
             # run-identity conflict.
+            hit_count_memo: dict[int, int] | None = None
+            if apriori_on:
+                cell_key = hit_memo_cell_key(
+                    tuple_,
+                    grid,
+                    roll_schedule_by_instrument.get(tuple_.instrument)
+                    if roll_schedule_by_instrument is not None
+                    else None,
+                )
+                if hit_memo_state is None or hit_memo_state[0] != cell_key:
+                    hit_memo_state = (cell_key, {})
+                hit_count_memo = hit_memo_state[1]
             try:
                 summary = run_one_tuple(
                     grid,
@@ -1039,18 +1163,39 @@ def run_supervised_grid(
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
                     exec_map_for=exec_map_for,
+                    hit_count_memo=hit_count_memo,
                 )
-            except (SweepComboError, VixTrioConflictError) as exc:
+            except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
+                # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921):
+                # a CORRUPT / old-schema finalist store raised at its LOAD boundary
+                # on resume is CONTAINED to this tuple exactly like a SweepComboError,
+                # never a whole-grid abort. Only the G14 ResultsStoreSchemaError is
+                # caught, NOT its parent ResultsStoreError (a run-identity conflict /
+                # missing-polars fault keeps the documented global abort).
+                # Local import (review fix round 1 m8): the EXACT class, not a
+                # name-string compare — a look-alike `SweepAprioriBudgetErrorX`
+                # must never count as a budget trip. Function-local like the
+                # generator's own lazy import (no new module-top edge).
+                from brutex.engine.sweep_run import SweepAprioriBudgetError
+
                 tuples_failed += 1
+                if isinstance(exc, SweepAprioriBudgetError):
+                    # The DISTINCT budget-trip counter
+                    # (DEC-SWEEP-APRIORI-DEFAULT-001): a trip is
+                    # target-invariant — the cell's deeper-k tuples re-trip
+                    # identically — so the done-line can name the ONE
+                    # remediation apart from generic tuple failures.
+                    tuples_failed_apriori_budget += 1
                 had_failure = True
                 _advance(current=label, survived=False, skipped=False)
+                error = f"{type(exc).__name__}: {exc}"
                 guards.audit.append(
                     action=_ACTION_TUPLE_FAILED,
                     subject=subject,
                     payload={
                         "index": index,
                         "tuple": label,
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": error,
                     },
                 )
                 _LOG.warning(
@@ -1058,8 +1203,17 @@ def run_supervised_grid(
                     subject=subject,
                     index=index,
                     tuple=label,
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=error,
                 )
+                if isinstance(exc, ResultsStoreSchemaError):
+                    _LOG.warning(
+                        "sweep_grid.tuple_store_corrupt",
+                        subject=subject,
+                        index=index,
+                        tuple=label,
+                        error=error,
+                        remediation=TUPLE_STORE_CORRUPT_REMEDIATION,
+                    )
                 continue
             if summary is None:
                 tuples_skipped_no_bars += 1
@@ -1119,35 +1273,40 @@ def run_supervised_grid(
                 suppressed=guard_warns_suppressed,
                 total_forced=len(forced) + cache_forced,
             )
-        payload = {
-            "sweep_id": sweep_id,
-            "tuples_total": total,
-            "tuples_run": tuples_run,
-            "tuples_skipped_no_bars": tuples_skipped_no_bars,
-            "skipped_cache": skipped_cache,
-            "skipped_resume": skipped_resume,
-            "tuples_failed": tuples_failed,
-            "enumerated": enumerated,
-            "conflict_pruned": conflict_pruned,
-            "skipped_dedup": skipped_dedup,
-            "evaluated": evaluated,
-            "ranked": ranked,
-            "persisted": persisted,
-        }
-        if forced or cache_forced:
-            # Additive EMIT-ON-NONZERO (chain-safe; the zero-forced payload is
-            # byte-identical to pre-guard).
-            payload["store_guard_forced"] = len(forced) + cache_forced
-        guards.progress.finish(
-            detail=(
-                f"{tuples_run} run · {skipped_cache} cached · "
-                f"{skipped_resume} resumed · {tuples_failed} failed"
+        if not cancelled:
+            payload: dict[str, Any] = {
+                "sweep_id": sweep_id,
+                "tuples_total": total,
+                "tuples_run": tuples_run,
+                "tuples_skipped_no_bars": tuples_skipped_no_bars,
+                "skipped_cache": skipped_cache,
+                "skipped_resume": skipped_resume,
+                "tuples_failed": tuples_failed,
+                "enumerated": enumerated,
+                "conflict_pruned": conflict_pruned,
+                "skipped_dedup": skipped_dedup,
+                "evaluated": evaluated,
+                "ranked": ranked,
+                "persisted": persisted,
+            }
+            if apriori_on:
+                # EMIT-ON-apriori (DEC-SWEEP-APRIORI-DEFAULT-001): legacy COMPLETE
+                # payloads stay byte-identical (frozen-key-set pinned).
+                payload["tuples_failed_apriori_budget"] = tuples_failed_apriori_budget
+            if forced or cache_forced:
+                # Additive EMIT-ON-NONZERO (chain-safe; the zero-forced payload is
+                # byte-identical to pre-guard).
+                payload["store_guard_forced"] = len(forced) + cache_forced
+            guards.progress.finish(
+                detail=(
+                    f"{tuples_run} run · {skipped_cache} cached · "
+                    f"{skipped_resume} resumed · {tuples_failed} failed"
+                )
             )
-        )
-        if on_progress is not None:
-            on_progress(guards.progress.snapshot())
-        guards.audit.append(action=_ACTION_COMPLETE, subject=subject, payload=payload)
-        _LOG.info("sweep_supervisor.complete", **payload)
+            if on_progress is not None:
+                publish_progress_safe(on_progress, guards.progress.snapshot(), log=_LOG)
+            guards.audit.append(action=_ACTION_COMPLETE, subject=subject, payload=payload)
+            _LOG.info("sweep_supervisor.complete", **payload)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         # Record-then-re-raise EVERY in-band failure; the bare `raise` preserves
         # it unchanged. The secondary progress/audit writes are suppressed so a
@@ -1177,8 +1336,103 @@ def run_supervised_grid(
         ranked=ranked,
         persisted=persisted,
         tuples_failed=tuples_failed,
+        tuples_failed_apriori_budget=tuples_failed_apriori_budget,
+        cancelled=cancelled,
         store_guard_forced=len(forced) + cache_forced,
     )
+
+
+def publish_progress_safe(
+    on_progress: Callable[[SweepProgressSnapshot], None],
+    snapshot: SweepProgressSnapshot,
+    *,
+    log: Any = _LOG,
+) -> None:
+    """Fire the progress hook, SWALLOWING any error (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G11).
+
+    The live progress file is a best-effort dashboard bridge; a disk-full /
+    read-only-mount / permission failure while publishing it must NEVER kill a
+    running multi-day sweep. This fences ONLY the progress hook — the checkpoint
+    ``record`` and the hash-chained audit append stay FATAL (Golden Rule #8), so
+    a broken audit/checkpoint still aborts loudly. The caller guards ``None``
+    (this helper is only invoked with a real hook), so both branches here are
+    "the hook raised" (logged + swallowed) and "the hook returned".
+
+    Parameters
+    ----------
+    on_progress
+        The caller's progress hook (already known non-``None``).
+    snapshot
+        The fresh :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot`.
+    log
+        The structlog logger for the swallowed-error WARNING.
+    """
+    try:
+        on_progress(snapshot)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — the progress bridge is best-effort
+        log.warning(
+            "sweep.progress.publish_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
+def deliver_summary_safe(
+    on_summary: Callable[[SupervisedGridSummary], None] | None,
+    summary: SupervisedGridSummary,
+    *,
+    log: Any = _LOG,
+) -> None:
+    """Fire the optional run-end summary hook, SWALLOWING any error (G5b fence).
+
+    The ``on_summary`` consumer (the dashboard job's finish-note capture) runs
+    AFTER a successful sweep whose results are already persisted; a raising
+    consumer must NEVER mask that success. Inside ``cmd_sweep_all`` this call sits
+    under the ``sweep_abort_alert`` block, so an unfenced raise would fire a false
+    CRITICAL Telegram abort alert on an already-successful sweep. This mirrors
+    :func:`publish_progress_safe`: only the best-effort hook is fenced, the
+    sweep's own result / exit path is untouched. A ``None`` hook is a no-op.
+
+    Parameters
+    ----------
+    on_summary
+        The caller's run-end summary hook, or ``None`` (no-op).
+    summary
+        The completed run's :class:`SupervisedGridSummary`.
+    log
+        The structlog logger for the swallowed-error WARNING.
+    """
+    if on_summary is None:
+        return
+    try:
+        on_summary(summary)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — the summary hook is best-effort
+        log.warning(
+            "sweep.on_summary_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
+#: Maximum age (seconds) a bridge file's ``running=True`` claim stays credible
+#: without a fresh publish — the sweep twin of DEC-RATE-METER-LIFECYCLE-001's
+#: ``BRIDGE_MAX_AGE_S``. A SIGKILLed / power-lost ``brutex sweep-all`` leaves the
+#: last-published file frozen at ``running=True`` FOREVER (no process remains to
+#: publish a terminal), which showed the dashboard a phantom live sweep + Stop
+#: button indefinitely. JUSTIFICATION for 6 h (Golden Rule #10 — an honest
+#: trade-off, not a proof): the writer publishes per TUPLE, and a legitimately
+#: heavy k=5 tuple can run for HOURS with no tick (the #1608 stall arithmetic:
+#: ``C(60,5) × N_bars / 2.5e8 mask·bars/s`` ≈ 3 h on the deepest 1-minute
+#: history), so a #1593-style 15-minute bound would false-decay a LIVE run
+#: mid-tuple; 6 h sits above that envelope while bounding the phantom to hours
+#: instead of forever. DISCLOSED residual: a >6 h single tuple decays the view
+#: to idle until its next tick (the run itself is untouched); a stale-running
+#: file is treated as DEAD EVIDENCE ≡ absent by the reader, never rewritten.
+SWEEP_PROGRESS_MAX_AGE_S: Final[float] = 6 * 3600.0
+
+#: The additive wall-clock stamp key ``publish_progress`` folds into the bridge
+#: file (NOT a ``SweepProgressSnapshot`` field — the snapshot stays pure).
+PROGRESS_WALL_TIME_KEY: Final[str] = "wall_time"
 
 
 #: G11 warn-once latch — one WARN per progress path per process, so a dead disk
@@ -1199,6 +1453,7 @@ def publish_progress(
     path: Path,
     snapshot: SweepProgressSnapshot,
     *,
+    wall_time: Callable[[], float] = time.time,
     run_id: str | None = None,
     suspect: bool | None = None,
     stage: str | None = None,
@@ -1210,7 +1465,10 @@ def publish_progress(
     at ``/api/v1/sweep-progress`` by reading *path*. The write is atomic
     (tempfile → ``os.replace``, via the proven
     :func:`brutex.engine.sweep_checkpoint._atomic_write`) so the reader never sees
-    a half-written file.
+    a half-written file. The payload additionally carries the
+    :data:`PROGRESS_WALL_TIME_KEY` wall-clock stamp so the reader can decay a
+    dead writer's frozen ``running=True`` claim (see
+    :func:`progress_bridge_stale` / :data:`SWEEP_PROGRESS_MAX_AGE_S`).
 
     DEC-SWEEP-UNKILLABLE-CORE-001 additions — every pre-existing key is
     byte-unchanged:
@@ -1233,6 +1491,9 @@ def publish_progress(
         Destination JSON file (parents created).
     snapshot
         The progress snapshot to publish.
+    wall_time
+        Injected wall clock (tests pin the :data:`PROGRESS_WALL_TIME_KEY`
+        stamp deterministically).
     run_id
         The run identity (D-1) to stamp, or ``None`` (key omitted).
     suspect
@@ -1244,6 +1505,7 @@ def publish_progress(
 
     try:
         payload = snapshot.to_dict()
+        payload[PROGRESS_WALL_TIME_KEY] = float(wall_time())
         payload["wall_time_utc"] = time.time()
         payload["pid"] = os.getpid()
         if run_id is not None:
@@ -1267,6 +1529,34 @@ def publish_progress(
             error=str(exc),
             error_type=type(exc).__name__,
         )
+
+
+def progress_bridge_stale(
+    parsed: Mapping[str, Any],
+    *,
+    now: Callable[[], float] = time.time,
+    max_age_s: float = SWEEP_PROGRESS_MAX_AGE_S,
+) -> bool:
+    """``True`` iff *parsed* claims ``running`` on DEAD evidence — the decay gate.
+
+    The #1593 rate-bridge posture applied to the sweep bridge: a ``running=True``
+    file whose :data:`PROGRESS_WALL_TIME_KEY` stamp is older than *max_age_s* —
+    or missing / non-finite (a pre-stamp leftover or junk) — is dead evidence
+    ≡ absent, so the dashboard falls through to its in-process push / idle view
+    instead of showing a phantom live sweep forever after a SIGKILL/power loss.
+    A NON-running file (done / cancelled / error terminals, idle) is NEVER
+    stale — a finished sweep's terminal is a legitimate historical record.
+    Clock skew into the future reads fresh (age clamps at 0, the honest bias).
+    """
+    if not parsed.get("running"):
+        return False
+    stamp = parsed.get(PROGRESS_WALL_TIME_KEY)
+    if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+        return True  # missing / junk stamp on a running claim = dead evidence
+    age = float(now()) - float(stamp)
+    if not math.isfinite(age):
+        return True  # NaN / infinite stamp — dead evidence, never trusted
+    return age > max_age_s
 
 
 def read_progress(path: Path) -> dict[str, Any]:
@@ -1300,7 +1590,7 @@ def read_progress(path: Path) -> dict[str, Any]:
     from brutex.engine.sweep_exit_status import enrich_progress_payload
 
     try:
-        parsed: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        parsed: dict[str, Any] = json.loads(read_regular_text(path))
     except (OSError, json.JSONDecodeError):
         return dict(_IDLE_PROGRESS)
     return enrich_progress_payload(parsed, results_root=path.parent.parent)
@@ -1313,8 +1603,10 @@ def idle_progress() -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_WORKER_NAME",
+    "PROGRESS_WALL_TIME_KEY",
     "RESUME_STORE_GUARD_WARN_CAP",
     "SUPERVISOR_ACTION_ABORT",
+    "SUPERVISOR_ACTION_CANCELLED",
     "SUPERVISOR_ACTION_COMPLETE",
     "SUPERVISOR_ACTION_START",
     "SUPERVISOR_ACTION_TUPLE_CACHE",
@@ -1322,11 +1614,15 @@ __all__ = [
     "SUPERVISOR_ACTION_TUPLE_FAILED",
     "SUPERVISOR_ACTION_TUPLE_NO_BARS",
     "SUPERVISOR_ACTION_TUPLE_RESUME",
+    "SWEEP_PROGRESS_MAX_AGE_S",
     "SupervisedGridSummary",
     "SweepGuards",
+    "deliver_summary_safe",
     "grid_identity",
     "idle_progress",
+    "progress_bridge_stale",
     "publish_progress",
+    "publish_progress_safe",
     "read_progress",
     "reset_progress_write_warnings",
     "run_supervised_grid",

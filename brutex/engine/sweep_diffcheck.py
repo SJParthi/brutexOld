@@ -92,9 +92,20 @@ result byte, mirroring the burn-in ship-the-oracle stance and the
 ## Honest envelope (Golden Rule #10)
 
 Per tuple the hook's simulation work is bounded by K (bench-pinned flat
-vs mask count), but the canonical enumeration it samples from is
-O(n_masks) — a cheap integer walk strictly dominated by the tuple's own
-production sweep (which simulates ALL n_masks). K=200 is a sampling
+vs mask count), and the population it samples from is the tuple's
+EXECUTED mask population: on the LEGACY arm (``mask_population=None``)
+that is the canonical raw enumeration — an O(n_masks) integer walk
+strictly dominated by the tuple's own production sweep (which simulates
+ALL n_masks; the legacy ``max_combos`` preflight bounds it); on the
+APRIORI arm (DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 3) the caller
+injects the tuple's Apriori CANDIDATE list and the envelope is
+O(candidates) — never the raw C(n, k) walk, which the extinction-mode
+``effective_max_combos`` auto-raise UNBOUNDS (Σ C(60, k) ≈ 1.18e17;
+pre-fix an EXTINCT k=6 tuple paid a measured ~128 s materialising
+C(60,6)=50,063,860 masks, k=8 ≈ 5 h + a ~20 GB list). An extinct tuple
+(zero executed masks) SKIPS with one counted
+``sweep_diffcheck.apriori_empty_skip`` INFO — there is no executed work
+to verify, and skipping never consumes the K budget. K=200 is a sampling
 assurance, not a proof (~0.004% of a 5M-mask grid); the reference verifies
 projection + trade sim + drawdown from CERTIFIED ``bar_bits`` — NOT the 60
 indicator evaluators (they carry their own golden/property/shared-crate
@@ -836,11 +847,19 @@ class DiffCheckReport:
         How many of them diverged.
     masks_mismatched
         Mismatching mask hexes, capped at :data:`MASKS_MISMATCHED_CAP`.
+    skipped_empty
+        ``True`` when an INJECTED executed population held zero
+        conflict-free masks (an EXTINCT Apriori tuple —
+        DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 3): the tuple was
+        honestly SKIPPED (one ``sweep_diffcheck.apriori_empty_skip``
+        INFO), never silently, and no budget was spent. Defaulted so
+        every legacy constructor/compare site is byte-identical.
     """
 
     checked: int
     mismatches: int
     masks_mismatched: tuple[str, ...]
+    skipped_empty: bool = False
 
 
 class _TimeframeLike(Protocol):
@@ -1040,18 +1059,23 @@ class DiffCheckHook:
         tuple_: DiffCheckTupleLike,
         grid: DiffCheckGridLike,
         budget_left: int,
+        mask_population: Sequence[int] | None = None,
     ) -> DiffCheckReport:
         """Spot-check up to *budget_left* sampled masks of one tuple.
 
-        Enumerates the tuple's masks in the canonical production order
-        (:func:`iter_masks_k_of_bits` + conflict pruning — an O(n_masks)
-        integer walk, honest envelope), samples deterministically, then for
-        each sampled mask re-derives the signal projection inline
-        (``(bits & mask) == mask``) and compares the injected production
-        legs against the reference field-for-field (ints/datetimes exact;
-        drawdown 4-tuple by bit key). Fail-soft: an internal error is
-        WARNed and the accumulated report returned — never raised into the
-        sweep (I-3).
+        Builds the tuple's EXECUTED mask population — the canonical raw
+        enumeration (:func:`iter_masks_k_of_bits` + conflict pruning, an
+        O(n_masks) integer walk the legacy ``max_combos`` preflight bounds)
+        when *mask_population* is ``None``, else the INJECTED population
+        (the Apriori candidate list, conflict-pruned exactly like the
+        production enumeration loop — O(candidates),
+        DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 3) — samples
+        deterministically, then for each sampled mask re-derives the signal
+        projection inline (``(bits & mask) == mask``) and compares the
+        injected production legs against the reference field-for-field
+        (ints/datetimes exact; drawdown 4-tuple by bit key). Fail-soft: an
+        internal error is WARNed and the accumulated report returned —
+        never raised into the sweep (I-3).
 
         Parameters
         ----------
@@ -1065,6 +1089,18 @@ class DiffCheckHook:
             The sweep tuple + owning grid (structural views).
         budget_left
             Remaining run-level K budget; ``<= 0`` returns an empty report.
+        mask_population
+            The tuple's executed mask population, or ``None`` (the legacy
+            default — byte-identical raw enumeration). An injected
+            population with ZERO conflict-free masks (an extinct Apriori
+            tuple) returns an honest ``skipped_empty`` report after one
+            counted ``sweep_diffcheck.apriori_empty_skip`` INFO — never the
+            raw C(n, k) walk, never a silent skip. The D-11 seeding law is
+            unchanged (:func:`sample_masks` — run identity only); the
+            sampler draws ``min(K, len(population))`` masks, so the SAME
+            identity over the SAME population always picks the SAME masks
+            (a different population legitimately re-keys the picks — the
+            population length feeds the deterministic index draw).
         """
         if budget_left <= 0:
             return DiffCheckReport(checked=0, mismatches=0, masks_mismatched=())
@@ -1072,11 +1108,24 @@ class DiffCheckHook:
         mismatches = 0
         hexes: list[str] = []
         try:
-            masks = [
-                mask
-                for mask in iter_masks_k_of_bits(grid.condition_bits, tuple_.k)
-                if not has_conflict(mask)
-            ]
+            if mask_population is None:
+                masks = [
+                    mask
+                    for mask in iter_masks_k_of_bits(grid.condition_bits, tuple_.k)
+                    if not has_conflict(mask)
+                ]
+            else:
+                masks = [mask for mask in mask_population if not has_conflict(mask)]
+                if not masks:
+                    _LOG.info(
+                        "sweep_diffcheck.apriori_empty_skip",
+                        tuple_digest=self._tuple_digest_of(tuple_, grid),
+                        k=tuple_.k,
+                        population=len(mask_population),
+                    )
+                    return DiffCheckReport(
+                        checked=0, mismatches=0, masks_mismatched=(), skipped_empty=True
+                    )
             digest = self._tuple_digest_of(tuple_, grid)
             picked = sample_masks(
                 sweep_id=self._sweep_id,

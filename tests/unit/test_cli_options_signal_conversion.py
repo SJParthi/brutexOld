@@ -1,7 +1,7 @@
 """Direct unit coverage of the pure ``cli._options_signals_from_trades`` seam.
 
 The options-conversion half split out of ``_replay_spot_signals_for_row`` at
-the DEC-OPTIONS-EXEC-FEEDBACK-001 change (MIGRATION.md #1980). Its own
+the DEC-OPTIONS-EXEC-FEEDBACK-001 change (MIGRATION.md #1990). Its own
 docstring states "no lake I/O, directly unit-testable" and it carries NO
 ``# pragma: no cover`` — yet its only two callers
 (``_replay_spot_signals_for_row`` / ``_maybe_run_exec_sims_on_winners``) are

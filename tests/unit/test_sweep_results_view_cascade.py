@@ -139,14 +139,18 @@ class TestLoadCascadeJoinFile:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         path = _seed_report(tmp_path)
-        real_read = Path.read_bytes
+        # DEC-LAKE-READ-INODE-GUARD-001: the report read rides the guarded
+        # deadline reader now — fault THAT seam (Path.read_bytes is unused).
+        from brutex.dashboard import sweep_results_view as srv_mod
 
-        def _boom(self: Path) -> bytes:
-            if self == path:
+        real_read = srv_mod.read_regular_bytes_deadline
+
+        def _boom(target: Path, **kwargs: object) -> bytes:
+            if target == path:
                 raise PermissionError("wedged mid-read")
-            return real_read(self)
+            return real_read(target, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(Path, "read_bytes", _boom)
+        monkeypatch.setattr(srv_mod, "read_regular_bytes_deadline", _boom)
         assert load_cascade_join_file(tmp_path / "sweeps", token=None).state == "unreadable"
 
     def test_oversized_never_read_whole(

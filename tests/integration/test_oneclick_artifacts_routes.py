@@ -1055,3 +1055,108 @@ class TestTradesRebindEndToEnd:
         checks = {check["id"]: check for check in payload["checks"]}
         assert checks[3]["state"] == "ready"  # operator-judged cap — never pass
         assert checks[4]["state"] == "ready"
+
+
+# ── /api/v1/oneclick/baseline (DEC-RESULTS-TRUST-HONESTY-001 · B1) ──────
+
+
+def _baseline_lake(tmp_path: Path, run_id: str = RUN_ID) -> Path:
+    """A lake whose run dir carries an object-root top100 + a REAL baseline."""
+    from datetime import date
+    from decimal import Decimal
+
+    from brutex.engine.baseline import BaselineSeries, baseline_filename, write_baseline
+
+    lake = tmp_path / "lake"
+    run_dir = lake / "sweep_runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / oc.TOP100_FILENAME).write_text(
+        json.dumps({"rows": [], "baselines": {"NSE-NIFTY": baseline_filename("NSE-NIFTY")}}),
+        encoding="utf-8",
+    )
+    series = BaselineSeries(
+        instrument="NSE-NIFTY",
+        start=date(2024, 1, 5),
+        end=date(2024, 1, 8),
+        anchor_open=Decimal("100.00"),
+        sessions=((date(2024, 1, 5), Decimal("101.00")), (date(2024, 1, 8), Decimal("103.00"))),
+        total_return_pct=3.0,
+        source_note="route fixture",
+    )
+    write_baseline(run_dir / baseline_filename("NSE-NIFTY"), series, data_snapshot_hash="ab" * 32)
+    return lake
+
+
+class TestBaselineRoute:
+    def test_happy_serves_the_stored_series(self, tmp_path: Path) -> None:
+        client = _client(_baseline_lake(tmp_path))
+        payload = client.get(f"/api/v1/oneclick/baseline?run_id={RUN_ID}").json()
+        assert payload["status"] == "ok"
+        assert payload["instrument"] == "NSE-NIFTY"  # auto-selected — one stored
+        assert payload["anchor_open"] == "100.00"
+        assert payload["sessions"] == [["2024-01-05", "101.00"], ["2024-01-08", "103.00"]]
+        assert payload["total_return_pct"] == 3.0
+        assert payload["fixture_root_active"] is False
+
+    def test_explicit_instrument_param(self, tmp_path: Path) -> None:
+        client = _client(_baseline_lake(tmp_path))
+        payload = client.get(
+            f"/api/v1/oneclick/baseline?run_id={RUN_ID}&instrument=NSE-NIFTY"
+        ).json()
+        assert payload["status"] == "ok"
+        assert payload["instrument"] == "NSE-NIFTY"
+
+    def test_blank_instrument_param_means_auto_select(self, tmp_path: Path) -> None:
+        client = _client(_baseline_lake(tmp_path))
+        payload = client.get(f"/api/v1/oneclick/baseline?run_id={RUN_ID}&instrument=%20%20").json()
+        assert payload["status"] == "ok"
+        assert payload["instrument"] == "NSE-NIFTY"
+
+    def test_unknown_instrument_is_200_awaiting(self, tmp_path: Path) -> None:
+        client = _client(_baseline_lake(tmp_path))
+        response = client.get(f"/api/v1/oneclick/baseline?run_id={RUN_ID}&instrument=NOPE")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting"
+        assert "no stored baseline for 'NOPE'" in payload["detail"]
+
+    def test_missing_run_id_is_400(self, tmp_path: Path) -> None:
+        client = _client(_baseline_lake(tmp_path))
+        assert client.get("/api/v1/oneclick/baseline").status_code == 400
+
+    def test_traversal_run_id_is_400(self, tmp_path: Path) -> None:
+        client = _client(_baseline_lake(tmp_path))
+        response = client.get("/api/v1/oneclick/baseline?run_id=..%2Fescape")
+        assert response.status_code == 400
+
+    def test_no_store_is_200_awaiting_never_503(self) -> None:
+        response = _client(None).get("/api/v1/oneclick/baseline?run_id=r-x")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting"
+        assert "no lake configured" in payload["detail"]
+
+    def test_unknown_run_dir_computes_fresh_uncached(self, tmp_path: Path) -> None:
+        """Absent run dir ⇒ None revisions ⇒ the fresh-uncached branch (200 awaiting)."""
+        client = _client(_baseline_lake(tmp_path))
+        payload = client.get("/api/v1/oneclick/baseline?run_id=r-unknown01").json()
+        assert payload["status"] == "awaiting"
+        assert oc.AWAITING_DETAIL in payload["detail"]
+
+    def test_repeat_poll_is_served_from_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same artifact revisions ⇒ ONE resolve across two polls (stat-token law)."""
+        client = _client(_baseline_lake(tmp_path))
+        calls = {"n": 0}
+        real = oc.load_baseline_result
+
+        def _counting(run_dir: Path, instrument: str | None) -> Any:
+            calls["n"] += 1
+            return real(run_dir, instrument)
+
+        monkeypatch.setattr(oc, "load_baseline_result", _counting)
+        first = client.get(f"/api/v1/oneclick/baseline?run_id={RUN_ID}").json()
+        second = client.get(f"/api/v1/oneclick/baseline?run_id={RUN_ID}").json()
+        assert first == second
+        assert calls["n"] == 1

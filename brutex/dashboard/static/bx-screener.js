@@ -140,9 +140,26 @@ var BX_SCREENER_COLUMNS = [
   { key: "metrics.profit_factor", label: "PF", type: "num", explain: "profit_factor" },
   { key: "metrics.max_dd_paisa", label: "Max DD", type: "num", money: true, explain: "max_dd_paisa" },
   { key: "metrics.sharpe", label: "Sharpe", type: "num", explain: "sharpe" },
-  { key: "metrics.dsr", label: "DSR", type: "num", explain: "dsr" },
+  /* The tuple-N honesty label (DEC-RESULTS-TRUST-HONESTY-001 — the /results
+     law): the stored dsr is the per-tuple figure, never shown unlabeled. */
+  { key: "metrics.dsr", label: "DSR (tuple-N)", type: "num", explain: "dsr" },
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
+  // Losing-streak resilience columns (the sibling block; dotted keys resolve
+  // row.resilience.* / row.metrics.* generically; null → "—", never a
+  // fabricated 0, and a null value sorts LAST — never sortable-into-a-lie).
+  // TWO DISTINCT runs — the conflation guard (R4): the LONGEST streak is
+  // measured BY COUNT (max_consecutive_losses); the WORST streak is measured
+  // BY ₹ (worst_streak_pnl_paisa) and is a DIFFERENT, commonly SHORTER run,
+  // so its OWN length (worst_streak_len) sits immediately beside its ₹ column
+  // — a trader can never read "the longest streak (N losses) cost ₹X".
+  { key: "metrics.max_consecutive_losses", label: "Longest streak (count)", type: "num", explain: "max_consecutive_losses" },
+  { key: "resilience.losing_streak_p95", label: "Cold streak P95", type: "num", explain: "losing_streak_p95" },
+  { key: "resilience.worst_streak_len", label: "Worst streak len", type: "num", explain: "worst_streak_len" },
+  { key: "resilience.worst_streak_pnl_paisa", label: "Worst streak ₹", type: "num", money: true, explain: "worst_streak_pnl" },
+  { key: "resilience.longest_underwater_days", label: "Underwater days", type: "num", explain: "longest_underwater" },
+  { key: "resilience.worst_loss_month_count", label: "Worst-month losses", type: "num", explain: "worst_loss_month" },
+  { key: "resilience.win_rate_year_spread", label: "Win-rate swing", type: "num", explain: "win_rate_year_spread" },
   { key: "vix_band", label: "VIX band", type: "vix", explain: "vix_band" },
   /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
      cascade.status_text is SERVER-built (oneclick_view.cascade_status_text);
@@ -287,12 +304,17 @@ function bxVixOverlap(band, lo, hi) {
  *            instrument: string|null (exact match; an absent-instrument row
  *            never matches an active filter),
  *            min_win_rate: number|null, min_pf: number|null,
+ *            min_trades: number|null, min_dsr: number|null,
  *            max_abs_dd_paisa: number|null (magnitude cap — max_dd_paisa is
  *            stored NEGATIVE, the cap compares |dd|),
  *            executability: ""|"priced"|"positive"|undefined (the
  *            options_exec selection — absent-key rows never match an active
  *            filter, `DEC-OPTIONS-EXEC-FEEDBACK-001`) }.
- * A null/absent filter key never excludes.
+ * A null/absent filter key never excludes. min_dsr floors the row's
+ * metrics.dsr — the TUPLE-scoped Deflated Sharpe (an inflating under-count;
+ * the /results DSR label law, DEC-RESULTS-TRUST-HONESTY-001) — a row without
+ * the value cannot demonstrate an active floor and is excluded from that
+ * filtered view only (the >= comparison is false for null/undefined).
  *
  * @param {object} row - a top100 contract row.
  * @param {object|null} filters - the active filters.
@@ -342,6 +364,12 @@ function bxFilterRow(row, filters) {
     return false;
   }
   if (typeof filters.min_pf === "number" && !(m.profit_factor >= filters.min_pf)) {
+    return false;
+  }
+  if (typeof filters.min_trades === "number" && !(m.trades >= filters.min_trades)) {
+    return false;
+  }
+  if (typeof filters.min_dsr === "number" && !(m.dsr >= filters.min_dsr)) {
     return false;
   }
   if (typeof filters.max_abs_dd_paisa === "number") {

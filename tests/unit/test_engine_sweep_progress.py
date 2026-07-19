@@ -21,6 +21,7 @@ from __future__ import annotations
 import threading
 
 from brutex.engine.sweep_progress import (
+    STATE_CANCELLED,
     STATE_DONE,
     STATE_ERROR,
     STATE_IDLE,
@@ -155,6 +156,28 @@ def test_finish_and_fail() -> None:
     s = sp.snapshot()
     assert s.state == STATE_ERROR
     assert s.detail == "boom"
+
+
+def test_cancelled_terminal_state() -> None:
+    """cancelled() is the honest operator-cancel terminal (DEC-JOB-COOPERATIVE-CANCEL-001).
+
+    The state reads ``cancelled`` (never ``error``/``done``), ``running`` flips
+    False (so the v29 settle branch fires), the detail names the boundary, the
+    clock stamps the mutation, and the wire dict round-trips the state string.
+    """
+    clk = _Clock()
+    sp = SweepProgress(clock=clk)
+    sp.start(enumerated=4)
+    clk.t = 2.0
+    sp.cancelled(detail="cancelled at tuple 2/4")
+    s = sp.snapshot()
+    assert s.state == STATE_CANCELLED
+    assert s.state == "cancelled"
+    assert s.detail == "cancelled at tuple 2/4"
+    assert s.running is False
+    assert s.updated_at == 2.0
+    assert s.to_dict()["state"] == "cancelled"
+    assert s.to_dict()["running"] is False
 
 
 def test_start_resets_for_reuse() -> None:

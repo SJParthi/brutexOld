@@ -57,12 +57,17 @@ from brutex.engine.sweep_progress import (
 from brutex.engine.sweep_run import ComboDedup, SweepComboError
 from brutex.engine.sweep_supervisor import (
     DEFAULT_WORKER_NAME,
+    PROGRESS_WALL_TIME_KEY,
+    SWEEP_PROGRESS_MAX_AGE_S,
     SupervisedGridSummary,
     SweepGuards,
     _drive_watchdog,
+    deliver_summary_safe,
     grid_identity,
     idle_progress,
+    progress_bridge_stale,
     publish_progress,
+    publish_progress_safe,
     read_progress,
     run_supervised_grid,
     tuple_cache_key,
@@ -75,6 +80,7 @@ from brutex.strategies.types import PriceSource, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
 from hypothesis import assume, given
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -508,6 +514,37 @@ class TestRunSupervisedGrid:
             )
         assert isinstance(summary, SupervisedGridSummary)
         assert summary.tuples_run == 1
+
+    def test_corrupt_checkpoint_resume_starts_fresh_and_completes(self, tmp_path: Path) -> None:
+        """G12: a corrupt resume checkpoint is quarantined; the sweep starts fresh.
+
+        A genuinely corrupt ``ckpt.json`` planted before the run no longer aborts
+        the whole sweep with a ``SweepCheckpointError`` (+ CRITICAL alert) — the
+        driver's ``load_or_quarantine`` renames it aside, logs LOUD, and the grid
+        completes from index 0.
+        """
+        pytest.importorskip("polars")
+        grid = _grid()
+        bars = _trending_bars()
+        (tmp_path / "ckpt.json").write_text("{corrupt-resume-checkpoint", encoding="utf-8")
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            capture_logs() as logs,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+            assert summary.skipped_resume == 0  # fresh start — nothing resumed
+            assert summary.tuples_run == 1
+            assert guards.progress.snapshot().state == STATE_DONE
+        assert any(e["event"] == "sweep.checkpoint_ignored" for e in logs)
+        assert list(tmp_path.glob("ckpt.json.corrupt-*"))  # forensic quarantine kept
 
     def test_no_bars_tuple_is_skipped_and_checkpointed(self, tmp_path: Path) -> None:
         grid = _grid()
@@ -1366,6 +1403,167 @@ class TestProgressBridge:
         first["state"] = "mutated"
         assert idle_progress()["state"] == "idle"
 
+    def test_publish_stamps_wall_time(self, tmp_path: Path) -> None:
+        """The bridge file carries the wall-clock stamp the staleness decay keys on.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 review fold (fails-before): the file had NO
+        freshness signal, so a SIGKILLed writer's frozen ``running=True`` claim was
+        indistinguishable from a live run forever.
+        """
+        progress = SweepProgress()
+        progress.start(enumerated=10)
+        path = tmp_path / "progress.json"
+        publish_progress(path, progress.snapshot(), wall_time=lambda: 1234.5)
+        out = read_progress(path)
+        assert out[PROGRESS_WALL_TIME_KEY] == 1234.5
+        # Default clock: a real wall stamp lands too.
+        publish_progress(path, progress.snapshot())
+        assert isinstance(read_progress(path)[PROGRESS_WALL_TIME_KEY], float)
+
+
+class TestProgressBridgeStale:
+    """``progress_bridge_stale`` — the #1593 dead-evidence decay gate."""
+
+    def _running(self, **extra: object) -> dict[str, object]:
+        return {"state": "running", "running": True, **extra}
+
+    def test_fresh_running_is_not_stale(self) -> None:
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 1000.0})
+        assert progress_bridge_stale(parsed, now=lambda: 1010.0) is False
+
+    def test_running_past_max_age_is_stale(self) -> None:
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 1000.0})
+        now = 1000.0 + SWEEP_PROGRESS_MAX_AGE_S + 1.0
+        assert progress_bridge_stale(parsed, now=lambda: now) is True
+
+    def test_running_exactly_at_max_age_is_not_stale(self) -> None:
+        """Boundary law: strictly-greater-than decays (the #1534 strict-`>` posture)."""
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 1000.0})
+        now = 1000.0 + SWEEP_PROGRESS_MAX_AGE_S
+        assert progress_bridge_stale(parsed, now=lambda: now) is False
+
+    def test_non_running_never_stale(self) -> None:
+        for state in ("done", "cancelled", "error", "idle"):
+            parsed = {
+                "state": state,
+                "running": False,
+                PROGRESS_WALL_TIME_KEY: 0.0,  # ancient — still never decays
+            }
+            assert progress_bridge_stale(parsed, now=lambda: 1e12) is False
+
+    def test_missing_stamp_on_running_is_stale(self) -> None:
+        assert progress_bridge_stale(self._running()) is True
+
+    def test_junk_stamp_on_running_is_stale(self) -> None:
+        for junk in ("soon", None, True, [1.0]):
+            assert progress_bridge_stale(self._running(**{PROGRESS_WALL_TIME_KEY: junk})) is True
+
+    def test_non_finite_age_is_stale(self) -> None:
+        for stamp in (float("nan"), float("-inf")):
+            parsed = self._running(**{PROGRESS_WALL_TIME_KEY: stamp})
+            assert progress_bridge_stale(parsed, now=lambda: 1000.0) is True
+
+    def test_future_stamp_reads_fresh(self) -> None:
+        """Clock skew into the future biases fresh (age < 0 — the honest bias)."""
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 2000.0})
+        assert progress_bridge_stale(parsed, now=lambda: 1000.0) is False
+
+    def test_custom_max_age(self) -> None:
+        parsed = self._running(**{PROGRESS_WALL_TIME_KEY: 1000.0})
+        assert progress_bridge_stale(parsed, now=lambda: 1002.0, max_age_s=1.0) is True
+        assert progress_bridge_stale(parsed, now=lambda: 1002.0, max_age_s=5.0) is False
+
+
+class TestPublishProgressSafe:
+    """G11: the fenced progress-hook wrapper (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001).
+
+    The progress file is a best-effort dashboard bridge; a failed publish must
+    NEVER kill a running multi-day sweep. ``publish_progress_safe`` swallows any
+    exception + logs ONE ``sweep.progress.publish_failed`` WARNING (checkpoint /
+    audit writes stay FATAL — only the progress hook is fenced).
+    """
+
+    @staticmethod
+    def _snapshot() -> SweepProgressSnapshot:
+        progress = SweepProgress()
+        progress.start(enumerated=1)
+        return progress.snapshot()
+
+    def test_normal_hook_is_called_through(self) -> None:
+        seen: list[SweepProgressSnapshot] = []
+        snap = self._snapshot()
+        with capture_logs() as logs:
+            publish_progress_safe(seen.append, snap)
+        assert seen == [snap]  # the hook ran, received the exact snapshot
+        assert not any(e["event"] == "sweep.progress.publish_failed" for e in logs)
+
+    def test_raising_hook_is_swallowed_and_logged(self) -> None:
+        def _boom(_snap: SweepProgressSnapshot) -> None:
+            raise OSError("read-only file system")
+
+        with capture_logs() as logs:
+            publish_progress_safe(_boom, self._snapshot())  # must NOT raise
+        failures = [e for e in logs if e["event"] == "sweep.progress.publish_failed"]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["error_type"] == "OSError"
+        assert "read-only file system" in failures[0]["error"]
+
+
+class TestDeliverSummarySafe:
+    """G5b fence: the run-end summary hook is best-effort (review fold).
+
+    ``deliver_summary_safe`` runs AFTER a successful sweep whose results are
+    persisted; inside ``cmd_sweep_all`` it sits under ``sweep_abort_alert``, so a
+    raising consumer must NEVER propagate (it would fire a false CRITICAL abort
+    alert). Mirrors ``publish_progress_safe`` — swallow + one
+    ``sweep.on_summary_failed`` WARNING; a ``None`` hook is a no-op.
+    """
+
+    @staticmethod
+    def _summary() -> SupervisedGridSummary:
+        return SupervisedGridSummary(
+            sweep_id="x",
+            tuples_total=1,
+            tuples_run=1,
+            tuples_skipped_no_bars=0,
+            skipped_cache=0,
+            skipped_resume=0,
+            enumerated=5,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=5,
+            ranked=2,
+            persisted=2,
+            tuples_failed=0,
+        )
+
+    def test_none_hook_is_a_noop(self) -> None:
+        # The ``on_summary is None`` early-return branch — nothing invoked/logged.
+        with capture_logs() as logs:
+            deliver_summary_safe(None, self._summary())
+        assert not any(e["event"] == "sweep.on_summary_failed" for e in logs)
+
+    def test_normal_hook_is_called_through(self) -> None:
+        seen: list[SupervisedGridSummary] = []
+        summary = self._summary()
+        with capture_logs() as logs:
+            deliver_summary_safe(seen.append, summary)
+        assert seen == [summary]  # invoked once with the exact summary
+        assert not any(e["event"] == "sweep.on_summary_failed" for e in logs)
+
+    def test_raising_hook_is_swallowed_and_logged(self) -> None:
+        def _boom(_summary: SupervisedGridSummary) -> None:
+            raise RuntimeError("consumer blew up")
+
+        with capture_logs() as logs:
+            deliver_summary_safe(_boom, self._summary())  # must NOT raise
+        failures = [e for e in logs if e["event"] == "sweep.on_summary_failed"]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["error_type"] == "RuntimeError"
+        assert "consumer blew up" in failures[0]["error"]
+
 
 # ────── dataclasses ──────
 
@@ -1389,3 +1587,516 @@ def test_summary_and_guards_are_frozen() -> None:
     assert summary.sweep_id == "x"
     with pytest.raises((AttributeError, TypeError)):
         summary.persisted = 9  # type: ignore[misc]
+
+
+class TestRunSupervisedGridCorruptStoreContained:
+    """DB-02 supervisor twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
+
+    A corrupt finalist store raised at LOAD on resume is CONTAINED to one tuple
+    (``tuples_failed``), fires the ``sweep_grid.tuple_store_corrupt`` WARN, and does
+    not abort the whole grid.
+    """
+
+    def test_corrupt_store_contained_tuple_failed(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        bars = _trending_bars()
+        results_root = tmp_path / "results"
+        victim = next(t for t in iter_sweep_tuples(grid) if t.instrument == "BANKNIFTY")
+        victim_path = tuple_store_path(results_root, victim, grid)
+        victim_path.parent.mkdir(parents=True, exist_ok=True)
+        victim_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+
+        from structlog.testing import capture_logs
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            capture_logs() as logs,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(results_root, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 1
+        assert victim_path.read_bytes() == b"CORRUPT\x00\x01" * 40
+        failed = [e for e in read_entries(tmp_path / "sup.jsonl") if e.action == "TUPLE_FAILED"]
+        assert len(failed) == 1
+        assert "ResultsStoreSchemaError" in failed[0].payload["error"]
+        assert any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)
+
+
+# ────── cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001) ──────
+
+
+class TestCooperativeCancel:
+    """The sequential driver's tuple-boundary cooperative cancel.
+
+    The CORE GUARANTEE: cancel at the tuple boundary leaves a CLEAN resumable
+    checkpoint — bit-for-bit the state a graceful stop at that boundary leaves —
+    so a resume after cancel completes to the SAME final tree an uninterrupted
+    run produces (byte-compared), while a hard kill mid-tuple (the pre-feature
+    only option) leaves the in-flight tuple's chain UNRECORDED (deterministic
+    redo, never a half-trusted artifact).
+    """
+
+    @staticmethod
+    def _tree(root: Path) -> dict[str, str]:
+        """SHA-256 of every file under *root*, keyed by relative path."""
+        import hashlib
+
+        return {
+            str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob("*"))
+            if p.is_file()
+        }
+
+    def test_none_probe_is_byte_identical_clean_run(self, tmp_path: Path) -> None:
+        """should_stop=None (every legacy caller): zero probes, zero new audit actions."""
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        assert summary.cancelled is False
+        actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
+        assert "SUPERVISOR_CANCELLED" not in actions
+        assert actions[-1] == "SUPERVISOR_COMPLETE"
+
+    def test_false_probe_completes_normally(self, tmp_path: Path) -> None:
+        """A wired-but-never-firing probe is a normal complete (the False branch)."""
+        grid = _grid()
+        probes: list[int] = []
+
+        def _never(count: list[int] = probes) -> bool:
+            count.append(1)
+            return False
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                should_stop=_never,
+            )
+        assert summary.cancelled is False
+        assert len(probes) == 1  # one probe per tuple boundary — O(1)/tuple
+        assert [e.action for e in read_entries(tmp_path / "sup.jsonl")][-1] == (
+            "SUPERVISOR_COMPLETE"
+        )
+
+    def test_cancel_at_boundary_after_first_tuple(self, tmp_path: Path) -> None:
+        """Cancel after tuple 0's durable chain: audit + progress + summary honest.
+
+        The probe fires at the SECOND tuple boundary, so tuple 0 completed its
+        FULL durable chain (store flush → sentinel → cache.record →
+        checkpoint.record) and tuple 1 was never touched: checkpoint holds
+        exactly the clean prefix, ONE SUPERVISOR_CANCELLED line carries the
+        boundary payload, NO SUPERVISOR_COMPLETE lands, the progress terminal is
+        the honest ``cancelled``, and the on_progress hook streamed it.
+        """
+        pytest.importorskip("polars")
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        bars = _trending_bars()
+        calls: list[int] = []
+        snaps: list[SweepProgressSnapshot] = []
+
+        def _cancel_second(count: list[int] = calls) -> bool:
+            count.append(1)
+            return len(count) >= 2
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                on_progress=snaps.append,
+                should_stop=_cancel_second,
+            )
+            assert summary.cancelled is True
+            assert summary.tuples_run == 1
+            assert summary.tuples_total == 2
+            # The clean prefix: tuple 0 recorded, tuple 1 untouched.
+            assert guards.checkpoint.last_completed_index == 0
+            assert guards.checkpoint.next_index == 1
+            tuples = list(iter_sweep_tuples(grid))
+            assert guards.cache.seen_digest(tuple_cache_key(tuples[0], grid))
+            assert not guards.cache.seen_digest(tuple_cache_key(tuples[1], grid))
+            # Store for tuple 0 exists; tuple 1's was never created.
+            assert tuple_store_path(tmp_path / "results", tuples[0], grid).exists()
+            assert not tuple_store_path(tmp_path / "results", tuples[1], grid).exists()
+            snap = guards.progress.snapshot()
+            assert snap.state == "cancelled"
+            assert snap.detail == "cancelled at tuple 1/2"
+        # The audit chain: START + TUPLE_DONE(0) + SUPERVISOR_CANCELLED, verifying,
+        # with NO SUPERVISOR_COMPLETE (the honest aborted-at-boundary marker).
+        entries = read_entries(tmp_path / "sup.jsonl")
+        actions = [e.action for e in entries]
+        assert actions == ["SUPERVISOR_START", "TUPLE_DONE", "SUPERVISOR_CANCELLED"]
+        assert verify_chain(tmp_path / "sup.jsonl") == 3
+        cancel = entries[-1]
+        assert cancel.payload == {
+            "index_reached": 1,
+            "tuples_run": 1,
+            "checkpoint_next_index": 1,
+        }
+        # The streamed snapshots end on the cancelled terminal.
+        assert snaps[-1].state == "cancelled"
+
+    def test_cancel_at_index_zero_runs_nothing(self, tmp_path: Path) -> None:
+        """A pre-armed cancel runs ZERO tuples (the empty-resume edge)."""
+        grid = _grid()
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                should_stop=lambda: True,
+            )
+            assert summary.cancelled is True
+            assert summary.tuples_run == 0
+            assert summary.tuples_skipped_no_bars == 0
+            assert guards.checkpoint.next_index == 0
+        actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
+        assert actions == ["SUPERVISOR_START", "SUPERVISOR_CANCELLED"]
+
+    def test_core_guarantee_resume_after_cancel_equals_uninterrupted(self, tmp_path: Path) -> None:
+        """THE CORE GUARANTEE: run(cancel@1) + run(resume) ≡ run(uninterrupted), by BYTES.
+
+        The cancelled run stops at the tuple-1 boundary with tuple 0's durable
+        chain complete; the resume (same checkpoint/cache/audit files, fresh
+        objects — a process restart) completes the grid. The final per-tuple
+        Parquet store tree is byte-identical to a NEVER-cancelled control run of
+        the same grid in a sibling root, and both audit chains verify — cancel ≡
+        a graceful stop, bit-for-bit (DEC-JOB-COOPERATIVE-CANCEL-001).
+        """
+        pytest.importorskip("polars")
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        bars = _trending_bars()
+
+        # ── Arm A: cancel at the tuple-1 boundary, then RESUME with fresh objects ──
+        a_dir = tmp_path / "a"
+        a_dir.mkdir()
+        calls: list[int] = []
+        with (
+            _open_guards(a_dir, grid) as guards,
+            AuditWriter.open(a_dir / "ingest.jsonl") as ingest,
+        ):
+            first = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(a_dir / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                should_stop=lambda: bool(calls.append(1) is None and len(calls) >= 2),
+            )
+        assert first.cancelled is True
+        assert first.tuples_run == 1
+        # Fresh guards over the SAME durable files = a process restart resume
+        # (the supervisor audit chain + cache + checkpoint all RESUME in place).
+        audit2 = SweepAuditWriter.open(a_dir / "sup.jsonl", resume=True)
+        cache2 = SweepCache.open(a_dir / "cache", bloom_capacity=10_000)
+        guards2 = SweepGuards(
+            audit=audit2,
+            progress=SweepProgress(),
+            checkpoint=SweepCheckpointStore(
+                path=a_dir / "ckpt.json",
+                sweep_id=grid_identity(grid),
+                total_combos=count_sweep_tuples(grid),
+            ),
+            cache=cache2,
+            watchdog=SweepWatchdog(),
+        )
+        try:
+            with AuditWriter.open(a_dir / "ingest.jsonl", resume=True) as ingest2:
+                resumed = run_supervised_grid(
+                    grid,
+                    bars_for=lambda _i, _t: bars,
+                    store_for=make_store_for(a_dir / "results", grid),
+                    dedup=_dedup(),
+                    ingest_audit=ingest2,
+                    guards=guards2,
+                )
+        finally:
+            audit2.close()
+            cache2.close()
+        assert resumed.cancelled is False
+        assert resumed.skipped_resume == 1  # tuple 0 — the checkpointed clean prefix
+        assert resumed.tuples_run == 1  # tuple 1 — the cancelled remainder, now run
+
+        # ── Arm B: the uninterrupted control run ──
+        b_dir = tmp_path / "b"
+        b_dir.mkdir()
+        with (
+            _open_guards(b_dir, grid) as control_guards,
+            AuditWriter.open(b_dir / "ingest.jsonl") as control_ingest,
+        ):
+            control = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(b_dir / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=control_ingest,
+                guards=control_guards,
+            )
+        assert control.cancelled is False
+        assert control.tuples_run == 2
+
+        # THE BYTES: cancelled+resumed tree == uninterrupted tree, file for file.
+        assert self._tree(a_dir / "results") == self._tree(b_dir / "results")
+        # Both supervisor chains verify end-to-end (Golden Rule #8).
+        assert verify_chain(a_dir / "sup.jsonl") > 0
+        assert verify_chain(b_dir / "sup.jsonl") > 0
+
+    def test_hard_kill_mid_tuple_contrast(self, tmp_path: Path) -> None:
+        """The RISK the feature closes: a mid-tuple kill leaves NO recorded chain.
+
+        Simulated SIGKILL inside tuple 0's evaluation (an exception raised from
+        the store factory mid-tuple): the checkpoint holds NOTHING, the cache
+        holds NOTHING — the tuple redoes deterministically on resume (the
+        pre-existing crash-safety contract) — while a COOPERATIVE cancel at the
+        SAME point instead lands a complete recorded boundary (the sibling
+        tests above). Both end safe; cancel ends CHEAP (no redo of tuple 0).
+        """
+        grid = _grid()
+
+        def _killed_store(_tuple: object) -> object:
+            raise KeyboardInterrupt("simulated SIGKILL mid-tuple")
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: _trending_bars(n_days=2, per_day=30),
+                store_for=_killed_store,  # type: ignore[arg-type]
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        # Nothing recorded for the in-flight tuple — deterministic redo on resume.
+        assert not (tmp_path / "ckpt.json").exists()
+
+    def test_cancel_precedence_with_had_failure(self, tmp_path: Path) -> None:
+        """Cancel after a failed tuple keeps the FROZEN checkpoint frozen."""
+        pytest.importorskip("polars")
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        bars = _trending_bars()
+        calls: list[int] = []
+
+        def _fail_first_store(tuple_: object) -> object:
+            raise SweepComboError("boom on the first tuple")
+
+        # Tuple 0 fails (had_failure latch), then cancel fires at the tuple-1
+        # boundary: the checkpoint must stay at its pre-failure frozen state.
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=_fail_first_store,  # type: ignore[arg-type]
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                should_stop=lambda: bool(calls.append(1) is None and len(calls) >= 2),
+            )
+            assert summary.cancelled is True
+            assert summary.tuples_failed == 1
+            assert guards.checkpoint.next_index == 0  # frozen — the failed tuple redoes
+        actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
+        assert actions == ["SUPERVISOR_START", "TUPLE_FAILED", "SUPERVISOR_CANCELLED"]
+
+
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
+# The supervised driver's apriori wiring: EMIT-ON-apriori START/COMPLETE
+# payload keys, the DISTINCT tuples_failed_apriori_budget counter, and the
+# per-cell hit-count memo threading (reset on a cell change; None on legacy).
+
+
+class TestSupervisorAprioriWiring:
+    @staticmethod
+    def _run_with_fake(
+        tmp_path: Path,
+        grid: SweepGridConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: object,
+    ) -> tuple[SupervisedGridSummary, list[object]]:
+        """Run the supervised grid with *fake* in run_one_tuple's place."""
+        memos: list[object] = []
+
+        def _spy(grid_: object, tuple_: object, **kwargs: object) -> object:
+            memos.append(kwargs["hit_count_memo"])
+            return fake(grid_, tuple_, **kwargs)  # type: ignore[operator]
+
+        monkeypatch.setattr("brutex.engine.sweep_supervisor.run_one_tuple", _spy)
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        return summary, memos
+
+    def test_legacy_payloads_carry_no_apriori_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(k_values=[1, 2])
+        _summary, memos = self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        assert memos == [None, None]
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert "apriori" not in start.payload
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert "tuples_failed_apriori_budget" not in complete.payload
+
+    def test_apriori_start_mode_record_and_complete_counter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_apriori import DEFAULT_MAX_MASK_BARS
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(k_values=[1, 2])
+        _summary, memos = self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        assert len(memos) == 2
+        assert isinstance(memos[0], dict)
+        assert memos[0] is memos[1]  # ONE memo across the cell's k-ladder
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert start.payload["apriori"] == {
+            "enabled": True,
+            "max_mask_bars": DEFAULT_MAX_MASK_BARS,
+        }
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 0
+
+    def test_overfit_gated_start_records_gate_config_overfit_leg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 (MIGRATION.md #1851): an
+        overfit-gated grid's SUPERVISOR_START payload records the #1336
+        overfit fragment ``[dsr_min, weight, default_skew,
+        default_excess_kurtosis]`` under ``gate_config`` — the MINT side of
+        the recount recovery channel `recorded_overfit_from_audit` reads."""
+        from brutex.ranking import OverfitGateConfig
+
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(overfit=OverfitGateConfig(dsr_min=0.9))
+        self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert start.payload["gate_config"] == {"overfit": [0.9, 0.05, 0.0, 0.0]}
+
+    def test_ungated_start_carries_no_gate_config_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EMIT-ON-active absence pin (#1851): an UNGATED grid writes NO
+        ``gate_config`` key — absent == legacy, never a recorded default."""
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(k_values=[1])
+        self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert "gate_config" not in start.payload
+
+    def test_memo_resets_on_a_cell_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(timeframes=[Timeframe("1minute", 1), Timeframe("5minute", 5)], k_values=[1, 2])
+        _summary, memos = self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        assert len(memos) == 4
+        assert memos[0] is memos[1]
+        assert memos[2] is memos[3]
+        assert memos[0] is not memos[2]
+
+    def test_budget_trip_counts_distinctly_beside_generic_failures(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EXACT-isinstance classifier (review fix round 1 m8): a LOOK-ALIKE
+        class name (``SweepAprioriBudgetErrorX``) is never miscounted."""
+        from brutex.engine.sweep_run import SweepAprioriBudgetError
+
+        class SweepAprioriBudgetErrorX(SweepComboError):
+            """The impostor: a name-PREFIX collision that must never count."""
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(k_values=[1, 2, 3])
+
+        def _fake(_grid: object, tuple_: object, **_kwargs: object) -> object:
+            k = tuple_.k  # type: ignore[attr-defined]
+            if k == 1:
+                raise SweepAprioriBudgetErrorX("an impostor class name")
+            if k == 2:
+                raise SweepAprioriBudgetError("apriori cell 'x': k=2 ... exceeds ...")
+            if k == 3:
+                raise SweepComboError("generic combo failure")
+            return None
+
+        summary, _memos = self._run_with_fake(tmp_path, grid, monkeypatch, _fake)
+        assert summary.tuples_failed == 3
+        assert summary.tuples_failed_apriori_budget == 1  # the k=2 trip ONLY
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 1
+
+    def test_summary_field_defaults_zero(self) -> None:
+        summary = SupervisedGridSummary(
+            sweep_id="x",
+            tuples_total=1,
+            tuples_run=1,
+            tuples_skipped_no_bars=0,
+            skipped_cache=0,
+            skipped_resume=0,
+            enumerated=1,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=1,
+            ranked=0,
+            persisted=0,
+            tuples_failed=0,
+        )
+        assert summary.tuples_failed_apriori_budget == 0
+        assert summary.tuples_quarantined_prior == 0

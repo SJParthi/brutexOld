@@ -98,7 +98,11 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     // ok-verdict-but-zero-rows sidecar (hostile-round fold): distinguishes
     // "series EMPTY for this run" from "sidecar unavailable" in the label.
     equityOkEmpty: false,
-    cascadeDone: null // one trades cascade per (rank, page) — animate only
+    cascadeDone: null, // one trades cascade per (rank, page) — animate only
+    baseline: null,        // the last OK /api/v1/oneclick/baseline payload (B1)
+    baselinePayload: null, // the last baseline payload of ANY status (card re-render)
+    netPaisa: null,        // the top-100 row's STORED whole-run net (excess stat)
+    resilienceRow: null // the loaded row, for the pure self-locate verdict
   };
   var deps = {
     getTop100: null,
@@ -122,6 +126,78 @@ function bxEquityLabelText(hasSeries, okEmpty) {
      every browser, never a browser-local Date parse of a naive string. */
   function parseTs(raw) {
     return window.BXChart.parseTsIst(raw);
+  }
+
+  /* ── B1: the STORED buy-&-hold benchmark (DEC-RESULTS-TRUST-HONESTY-001) ──
+     Relocated VERBATIM from the pre-refold strategy.html inline IIFE into
+     this shared panel (the #1552 extraction convention — the standalone page
+     AND the v29 drawer render through it). STORED values only: the baseline
+     artifact's exact 2-dp price STRINGS are parsed digit-wise to integer
+     paisa (never a float multiply); any parse miss returns null and the
+     overlay/excess is honestly SKIPPED — nothing is ever recomputed from
+     bars at serve time. */
+
+  function rupees2paisa(s) {
+    var m = /^(\d+)\.(\d{2})$/.exec(String(s));
+    if (!m) { return null; }
+    return parseInt(m[1], 10) * 100 + parseInt(m[2], 10);
+  }
+
+  /* The per-unit buy-&-hold pnl series in paisa (one point per stored
+     session: close − anchor_open), or null when no OK baseline / any
+     unparseable stored price. Per-unit = the SAME sizing the per-trade
+     close equity uses (signal-only, lots honestly null — ruling 18). */
+  function benchSeriesPaisa() {
+    var b = state.baseline;
+    if (!b || !Array.isArray(b.sessions) || b.sessions.length === 0) { return null; }
+    var anchor = rupees2paisa(b.anchor_open);
+    if (anchor === null) { return null; }
+    var pts = [];
+    for (var i = 0; i < b.sessions.length; i++) {
+      var close = rupees2paisa(b.sessions[i] && b.sessions[i][1]);
+      if (close === null) { return null; }
+      pts.push(close - anchor);
+    }
+    return pts;
+  }
+
+  function renderBenchCard(payload) {
+    var cell = byId('stBench');
+    var detail = byId('stBenchDetail');
+    if (!cell || !detail) { return; }
+    if (!payload || payload.status !== 'ok') {
+      cell.textContent = '—';
+      detail.textContent = 'benchmark: ' +
+        String((payload && payload.detail) || 'awaiting stored baseline artifact (R27)');
+      return;
+    }
+    var pct = Number(payload.total_return_pct);
+    cell.textContent = (pct >= 0 ? '+' : '') +
+      pct.toLocaleString('en-US', { maximumFractionDigits: 2 }) + '%';
+    var bits = ['buy & hold ' + String(payload.instrument) + ' · ' +
+      String(payload.start) + ' → ' + String(payload.end) +
+      ' (stored by the results-depth pass — never recomputed)'];
+    var pts = benchSeriesPaisa();
+    if (pts !== null && typeof state.netPaisa === 'number') {
+      // Excess = the row's STORED whole-run net minus the stored buy-&-hold
+      // pnl, both per-unit paisa — arithmetic over stored values only.
+      bits.push('combo net vs buy & hold (per-unit): ' +
+        money(state.netPaisa - pts[pts.length - 1]));
+    }
+    detail.textContent = bits.join(' · ');
+  }
+
+  function loadBaseline() {
+    var url = '/api/v1/oneclick/baseline?run_id=' + encodeURIComponent(state.runId);
+    if (state.symbol) { url += '&instrument=' + encodeURIComponent(state.symbol); }
+    var gen = state.gen;
+    window.BXOneclick.oneshotFetch(url, null, function (payload) {
+      if (gen !== state.gen) { return; } // stale-target response — discarded
+      state.baselinePayload = payload;
+      state.baseline = payload.status === 'ok' ? payload : null;
+      renderBenchCard(payload);
+      renderEquity();
+    });
   }
 
   /* Motion covenant #1/#2: values snap to truth via textContent FIRST; a
@@ -379,18 +455,59 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       return;
     }
     var svg = window.BXChart.svgEl('svg', { viewBox: '0 0 1000 220', preserveAspectRatio: 'none' });
-    var path = window.BXChart.equityPathNode(series, 1000, 220, 8);
-    if (path) {
-      if (deps.animate) {
-        // The labeled per-trade fallback draws in the SAME way — the label
-        // above was set first, so the two can never be confused mid-motion.
-        path.setAttribute('pathLength', '1');
-        path.classList.add('bxd-equity-draw');
+    var bits = [fallbackLabel];
+    var bench = benchSeriesPaisa();
+    if (bench === null) {
+      var path = window.BXChart.equityPathNode(series, 1000, 220, 8);
+      if (path) {
+        if (deps.animate) {
+          // The labeled per-trade fallback draws in the SAME way — the label
+          // above was set first, so the two can never be confused mid-motion.
+          path.setAttribute('pathLength', '1');
+          path.classList.add('bxd-equity-draw');
+        }
+        svg.appendChild(path);
       }
-      svg.appendChild(path);
+    } else {
+      // B1 buy-&-hold overlay: BOTH lines on ONE shared y-scale (per-unit
+      // paisa; independently-scaled lines would fake relative magnitude).
+      // X-axes are honestly stated: equity = loaded trades, overlay = the
+      // run window's stored sessions.
+      var lo = 0; var hi = 0; var i; var v;
+      for (i = 0; i < series.points.length; i++) {
+        v = series.points[i].cum_paisa;
+        if (v < lo) { lo = v; }
+        if (v > hi) { hi = v; }
+      }
+      for (i = 0; i < bench.length; i++) {
+        v = bench[i];
+        if (v < lo) { lo = v; }
+        if (v > hi) { hi = v; }
+      }
+      var yS = window.BXChart.scaleLinear([lo, hi], [212, 8]);
+      var xT = window.BXChart.scaleLinear([0, Math.max(1, series.points.length - 1)], [8, 992]);
+      var xB = window.BXChart.scaleLinear([0, Math.max(1, bench.length - 1)], [8, 992]);
+      var benchPts = [];
+      for (i = 0; i < bench.length; i++) { benchPts.push({ x: xB(i), y: yS(bench[i]) }); }
+      svg.appendChild(window.BXChart.svgEl('path',
+        { d: window.BXChart.pathD(benchPts), 'class': 'bx-buyhold-line', fill: 'none' }));
+      var eqPts = [];
+      for (i = 0; i < series.points.length; i++) {
+        eqPts.push({ x: xT(i), y: yS(series.points[i].cum_paisa) });
+      }
+      var eqPath = window.BXChart.svgEl('path',
+        { d: window.BXChart.pathD(eqPts), 'class': 'bx-equity-line', fill: 'none' });
+      if (deps.animate) {
+        // The overlaid equity line draws in the SAME way (covenant #2 — the
+        // honesty label was set first); the stored benchmark stays static.
+        eqPath.setAttribute('pathLength', '1');
+        eqPath.classList.add('bxd-equity-draw');
+      }
+      svg.appendChild(eqPath);
+      bits.push('buy & hold overlay (dashed, per-unit, stored R27 baseline — '
+        + 'session-indexed over the run window; equity shows the loaded page)');
     }
     host.appendChild(svg);
-    var bits = [fallbackLabel];
     if (series.overflow) { bits.push('OVERFLOW: curve truncated at the safe-integer wall'); }
     if (series.invalid_rows) { bits.push(String(series.invalid_rows) + ' invalid row(s) skipped'); }
     // [W2-4] Ruling-18 null costs: counted at ₹0 — the curve is honestly
@@ -547,6 +664,7 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         var reg = row.regime && typeof row.regime === 'object' ? row.regime : {};
         byId('stTrendSplit').textContent = window.BXOneclick.trendSplitText(reg.by_trend, money);
         byId('stRegimeWonder').textContent = window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis);
+        fillResilience(row);
         /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (#1749): the joined cascade
            verdict. status_text is SERVER-built (never composed here); the
            deep line appends the verdict's own detail/rank/provisional caveat
@@ -570,6 +688,12 @@ function bxEquityLabelText(hasSeries, okEmpty) {
           cascDeep.push('provisional — DSR deflated against the pool-N fallback');
         }
         byId('stCascadeDeep').textContent = cascDeep.join(' · ');
+        // B1: the STORED whole-run net feeds the vs-buy-&-hold excess stat;
+        // a baseline that already answered re-renders the card with it.
+        // (#1459's own vix-band composition was DROPPED at the club S2 fold —
+        // superseded by main's [W3-R4] vixBandText null-band fix above.)
+        state.netPaisa = typeof m.net_pnl_paisa === 'number' ? m.net_pnl_paisa : null;
+        if (state.baselinePayload) { renderBenchCard(state.baselinePayload); }
         // Motion covenant #1/#2: values landed via textContent above; the
         // one-shot pop rides ONLY nodes that show a real value.
         popRealValues([
@@ -586,6 +710,58 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         byId('stName').textContent =
           'top-100 read failed — retry from the winners table or reload';
       });
+  }
+
+  /* ── Losing-streak resilience (DEC-RESILIENCE-STREAKS-001; re-ported at
+     the club-O merge-forward from strategy.html's pre-refold inline IIFE
+     into this shared panel — the standalone /strategy page AND the v29
+     #ocStrategyDrawer render through it, their markup mirrors
+     #stResilienceSection per the hook-parity fence). Every value reaches
+     the DOM via textContent — never a string-to-HTML sink; the pure cell
+     builders live in bx-oneclick.js (BXOneclick.resilienceCells /
+     resilienceSelfLocate — node-goldened). ── */
+
+  /* Fill the losing-streak resilience panel from the sibling block (pure
+     BXOneclick.resilienceCells; money via the shared exact converter). */
+  function fillResilience(row) {
+    state.resilienceRow = row;
+    var c = window.BXOneclick.resilienceCells(row, money);
+    var set = function (id, text) {
+      var n = byId(id);
+      if (n) { n.textContent = text; }
+    };
+    set('stResWorstStreak', c.worstStreak);
+    set('stResWorstStreakSub', c.worstStreakSub);
+    set('stResCost', c.cost);
+    set('stResCostSub', c.costSub);
+    set('stResUnderwater', c.underwater);
+    var badge = byId('stResUnderwaterBadge');
+    if (badge) {
+      badge.textContent = c.underwaterBadge;
+      badge.className = 'sub' + (c.badgeLevel === 'bad' ? ' badge-bad' : c.badgeLevel === 'ok' ? ' badge-ok' : '');
+    }
+    set('stResWorstMonth', c.worstMonth);
+    set('stResWorstMonthSub', c.worstMonthSub);
+    set('stResWinSpread', c.winSpread);
+    set('stResGuide', c.guide);
+    updateSelfLocate();
+  }
+
+  /* The pure "you are N losses in" self-locate verdict — zero backend, only
+     the shipped numbers (P95 + max). Colour tracks the verdict level. */
+  function updateSelfLocate() {
+    var out = byId('stResLocate');
+    var input = byId('stResLossesIn');
+    if (!out || !input) { return; } // host page without the section
+    var raw = input.value;
+    if (!state.resilienceRow || raw === '') {
+      out.textContent = 'enter a number';
+      out.className = 'resilience-verdict na';
+      return;
+    }
+    var v = window.BXOneclick.resilienceSelfLocate(Number(raw), state.resilienceRow);
+    out.textContent = v.symbol + ' ' + v.text;
+    out.className = 'resilience-verdict ' + v.level;
   }
 
   function loadManifestSymbol(next) {
@@ -649,6 +825,10 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       state.tradeIdx = null;
       loadTrades();
     });
+    /* Presence-guarded (the resetPanelDom `if (n)` idiom): a host page
+       without the resilience section mounts cleanly. */
+    var resIn = byId('stResLossesIn');
+    if (resIn) { resIn.addEventListener('input', updateSelfLocate); }
   }
 
   /* The story-card / trades / chart / equity hosts painted for the PREVIOUS
@@ -676,7 +856,12 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       'stWinRate', 'stPf', 'stTrades', 'stVixBand', 'stArith',
       'stExpectancy', 'stRecovery', 'stLossStreak', 'stMae', 'stMfe',
       'stMinuteDd', 'stExitMix', 'stWorst5', 'stTrendSplit', 'stRegimeWonder',
-      'stCascade', 'stCascadeDeep'
+      'stCascade', 'stCascadeDeep', 'stBench',
+      // DEC-RESILIENCE-STREAKS-001: the resilience hero cells join the
+      // no-previous-target-residue law (NEW-R3-1) — a reopen under a new
+      // rank pill must never show the old run's cold-streak envelope.
+      'stResWorstStreak', 'stResCost', 'stResUnderwater',
+      'stResWorstMonth', 'stResWinSpread', 'stResGuide'
     ];
     for (var i = 0; i < dashIds.length; i++) {
       var n = byId(dashIds[i]);
@@ -689,6 +874,22 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     if (stCascReset) {
       stCascReset.classList.remove('cascade-fail');
       stCascReset.title = '';
+    }
+    /* DEC-RESILIENCE-STREAKS-001: the sub-lines empty out (they render '' on
+       a live row too, never '—') and the self-locate verdict returns to its
+       honest idle copy — state.resilienceRow is nulled by update(), so the
+       verdict can never re-derive from the previous target. */
+    var resSubs = ['stResWorstStreakSub', 'stResCostSub', 'stResWorstMonthSub'];
+    for (var r = 0; r < resSubs.length; r++) {
+      var rs = byId(resSubs[r]);
+      if (rs) { rs.textContent = ''; }
+    }
+    var resBadge = byId('stResUnderwaterBadge');
+    if (resBadge) { resBadge.textContent = ''; resBadge.className = 'sub'; }
+    var resLocate = byId('stResLocate');
+    if (resLocate) {
+      resLocate.textContent = 'enter a number';
+      resLocate.className = 'resilience-verdict na';
     }
     var tbody = byId('stTradesBody');
     if (tbody) {
@@ -731,6 +932,11 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     if (page) { page.textContent = 'page 1'; }
     var badge = byId('stTradesSource');
     if (badge) { badge.textContent = 'source: none'; }
+    // B1: the benchmark detail resets to its honest awaiting copy.
+    var benchDetail = byId('stBenchDetail');
+    if (benchDetail) {
+      benchDetail.textContent = 'benchmark: awaiting stored baseline artifact (R27)';
+    }
   }
 
   function bxStrategyPanelUpdate(target) {
@@ -747,10 +953,19 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     state.equity = [];
     state.equityTotal = null;
     state.equityOkEmpty = false;
+    // B1: clear the previous target's baseline residue too — the benchmark
+    // card + overlay re-resolve for the NEW run/rank (stale-gen discarded).
+    state.baseline = null;
+    state.baselinePayload = null;
+    state.netPaisa = null;
+    state.resilienceRow = null;
     if (!state.runId) { return; }
     resetPanelDom(); // NEW-R3-1: no previous-target residue while fetching
     byId('stRunId').textContent = String(state.runId);
-    loadManifestSymbol(loadRow);
+    loadManifestSymbol(function () {
+      loadBaseline(); // B1 — needs the manifest symbol when one is recorded
+      loadRow();
+    });
   }
 
   function bxStrategyPanelMountFromLocation() {
