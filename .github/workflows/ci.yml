@@ -125,6 +125,93 @@ jobs:
   # LINT — ruff + ruff format check
   # Fast — should finish in under 15 seconds.
   # ─────────────────────────────────────────────────────────────────
+  # ──────────────────────── docs-only paths filter ────────────────────────
+  detect-changes:
+    # DEC-CI-DOCS-PATHS-FILTER-001: pure-git docs-only diff detection.
+    # docs_only=true ONLY when EVERY changed file is under docs/ or has a
+    # `.md` basename. ANY failure / unknown event / unresolvable SHA /
+    # empty diff ⇒ docs_only=false — FAIL CLOSED: the full gate graph runs
+    # exactly as today. Anticipated degrade paths exit 0 (a transient git
+    # hiccup runs the FULL gates rather than redding the run); an
+    # unanticipated crash fails this job, every gated dependant skips, and
+    # ci-ok's skipped-only-when-proven law turns that RED — never a silent
+    # green. Deliberately NOT a workflow-level `paths:` filter — the
+    # DEC-SWEEP-COVERAGE-SHARD-001 entry records why that shape is banned
+    # (merge_group supports none; path-filtered required contexts hang
+    # merges). Here every required context still REPORTS on every run.
+    name: Detect docs-only diff (paths filter)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      docs_only: ${{ steps.diff.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # Full history: the pull_request arm diffs merge-base→head, and a
+          # shallow clone has no merge base to resolve (the
+          # DEC-CICD-GATE-HONESTY-001 fetch-depth precedent in `test`).
+          fetch-depth: 0
+      - name: Compute changed-file set (fail closed)
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          DOCS_ONLY="false"
+          write_output() {
+            echo "docs_only=${DOCS_ONLY}" >> "$GITHUB_OUTPUT"
+            echo "detect-changes verdict: docs_only=${DOCS_ONLY}"
+          }
+          trap write_output EXIT
+          fail_closed() {
+            echo "::notice::detect-changes: $1 -> docs_only=false (fail closed; full gates run)"
+            DOCS_ONLY="false"
+            exit 0
+          }
+          case "$EVENT_NAME" in
+            pull_request) BASE="$PR_BASE_SHA"; HEAD_SHA="$PR_HEAD_SHA"; MODE="merge-base" ;;
+            push)         BASE="$PUSH_BEFORE"; HEAD_SHA="$PUSH_AFTER"; MODE="two-dot" ;;
+            merge_group)  BASE="$MG_BASE_SHA"; HEAD_SHA="$MG_HEAD_SHA"; MODE="two-dot" ;;
+            *)            fail_closed "event '$EVENT_NAME' has no diff basis" ;;
+          esac
+          [ -n "$BASE" ] && [ -n "$HEAD_SHA" ] || fail_closed "empty base/head SHA"
+          case "$BASE" in
+            *[!0]*) : ;;
+            *) fail_closed "all-zero base SHA (branch-creation push)" ;;
+          esac
+          git fetch --no-tags --quiet origin "$BASE" "$HEAD_SHA" 2>/dev/null || true
+          git cat-file -e "${BASE}^{commit}" 2>/dev/null || fail_closed "base SHA ${BASE} not resolvable"
+          git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null || fail_closed "head SHA ${HEAD_SHA} not resolvable"
+          if [ "$MODE" = "merge-base" ]; then
+            RANGE_FROM="$(git merge-base "$BASE" "$HEAD_SHA")" || fail_closed "no merge base between ${BASE} and ${HEAD_SHA}"
+            [ -n "$RANGE_FROM" ] || fail_closed "empty merge base"
+          else
+            RANGE_FROM="$BASE"
+          fi
+          CHANGED="$(git diff --name-only "$RANGE_FROM" "$HEAD_SHA")" || fail_closed "git diff failed"
+          [ -n "$CHANGED" ] || fail_closed "empty diff (nothing to classify)"
+          echo "changed files (${RANGE_FROM} -> ${HEAD_SHA}):"
+          printf '%s\n' "$CHANGED" | sed 's/^/  /'
+          DOCS_ONLY="true"
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+              docs/*) : ;;
+              *.md)   : ;;
+              *)
+                echo "non-docs change detected: $f"
+                DOCS_ONLY="false"
+                break
+                ;;
+            esac
+          done <<< "$CHANGED"
+
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-24.04
@@ -184,7 +271,11 @@ jobs:
     name: Type check (mypy + pyright)
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -245,6 +336,11 @@ jobs:
   build-wheels:
     name: Build Rust wheels (shared, cache-keyed)
     runs-on: ubuntu-24.04
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -323,7 +419,11 @@ jobs:
   test-shard:
     name: Unit test shard ${{ matrix.shard }} (coverage data)
     runs-on: ubuntu-24.04
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -442,7 +542,11 @@ jobs:
   per-module-static:
     name: Per-module coverage gates (static list)
     runs-on: ubuntu-24.04
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -2842,7 +2946,11 @@ jobs:
   per-module-touched:
     name: Touched-module coverage gate (auto-discovered)
     runs-on: ubuntu-24.04
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -2958,10 +3066,29 @@ jobs:
       - test-shard
       - per-module-static
       - per-module-touched
+      # DEC-CI-DOCS-PATHS-FILTER-001: the docs-only paths filter —
+      # read by every step-level gate below.
+      - detect-changes
     if: ${{ !cancelled() }}
     timeout-minutes: 45
     steps:
+      # DEC-CI-DOCS-PATHS-FILTER-001: explicit-success short-circuit.
+      # This fan-in is the branch-protection REQUIRED context
+      # "Unit tests + coverage (100% gate)", so on a PROVEN docs-only
+      # diff it still REPORTS success rather than skipping. Every real
+      # step below (including the upstream-results check, which would
+      # otherwise demand shard results/artifacts that were legitimately
+      # skipped) is step-level gated on docs_only != 'true'; with all
+      # real steps skipped the job completes green. When docs_only is
+      # anything but 'true' every step runs exactly as before — zero
+      # gate weakening for any code-touching diff.
+      - name: Docs-only short-circuit (DEC-CI-DOCS-PATHS-FILTER-001)
+        if: needs.detect-changes.outputs.docs_only == 'true'
+        run: |
+          echo "docs-only diff proven by detect-changes — coverage fan-in"
+          echo "short-circuits green (upstream shards skipped by design)"
       - name: Verify upstream shard + per-module gate jobs succeeded (fail-closed)
+        if: needs.detect-changes.outputs.docs_only != 'true'
         env:
           WHEELS_RESULT: ${{ needs.build-wheels.result }}
           SHARDS_RESULT: ${{ needs.test-shard.result }}
@@ -2987,6 +3114,7 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        if: needs.detect-changes.outputs.docs_only != 'true'
         with:
           # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
           # coverage gate can diff the PR against origin/main (the merge
@@ -2994,11 +3122,13 @@ jobs:
           # has no base to diff against.
           fetch-depth: 0
       - name: Set up Python
+        if: needs.detect-changes.outputs.docs_only != 'true'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps (includes [data] + [ui] extras)
+        if: needs.detect-changes.outputs.docs_only != 'true'
         # DEC-P0-001 (2026-05-17): added `[data]` extra so polars + duckdb +
         # pyarrow are installed in CI. Without these, ~6 tests in
         # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
@@ -3014,6 +3144,7 @@ jobs:
         # class the dashboard unmask closed).
         run: pip install -e ".[dev,data,ui,optimize]"
       - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        if: needs.detect-changes.outputs.docs_only != 'true'
         # Built ONCE per run by the `build-wheels` job (cache-keyed on the
         # crate sources). `pip install ./rust/<crate>` itself builds a wheel
         # via the same maturin PEP 517 backend and installs it, so
@@ -3025,17 +3156,20 @@ jobs:
           name: rust-wheels
           path: wheelhouse
       - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+        if: needs.detect-changes.outputs.docs_only != 'true'
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
         run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
       - name: Download shard coverage data
+        if: needs.detect-changes.outputs.docs_only != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: coverage-shard-*
           path: covdata
           merge-multiple: true
       - name: Zero-skip / zero-dup integrity guard (collection-count law)
+        if: needs.detect-changes.outputs.docs_only != 'true'
         # Proves the shard partition ran EVERY test exactly once: the
         # full collect-only count must equal the sum of the per-shard
         # collect-only counts (identical counting pipeline both sides;
@@ -3058,6 +3192,7 @@ jobs:
             exit 1
           fi
       - name: Combine shard coverage + enforce the 100% gate
+        if: needs.detect-changes.outputs.docs_only != 'true'
         run: |
           # Coverage floor at 100 (DEC-COV-APP-BACKFILL-001, 2026-06-12):
           # dashboard/app.py — the last sub-100 module — was backfilled
@@ -3085,6 +3220,7 @@ jobs:
           coverage report --fail-under=100
           coverage xml -o coverage.xml
       - name: Smoke + red-team gates (DEC-DASHBOARD-OMIT-AUDIT-001)
+        if: needs.detect-changes.outputs.docs_only != 'true'
         # The 5-agent verification (2026-06-01) found two test classes that
         # never gated merges: tests/smoke (12 pre-push smoke tests, wired into
         # NO workflow) and tests/redteam (32 gate-integrity meta-tests that
@@ -3096,9 +3232,10 @@ jobs:
         # guards (ruff / mypy / bandit installed).
         run: pytest -q tests/smoke tests/redteam
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
+        if: needs.detect-changes.outputs.docs_only != 'true'
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
-        if: always()
+        if: always() && needs.detect-changes.outputs.docs_only != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-xml
@@ -3113,7 +3250,11 @@ jobs:
     name: Browser truth (headless Chromium dashboard DOM)
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     # DEC-DASHBOARD-BROWSER-TRUTH-001: Playwright + Chromium renders the REAL
     # /universe /movers /db /results templates + static JS against
     # fixture-backed build_app apps and asserts the pinned DOM behaviors
@@ -3203,7 +3344,11 @@ jobs:
     name: Property tests (hypothesis)
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -3273,7 +3418,11 @@ jobs:
     name: Benchmarks (O(1) NFR gates)
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     # Budget raised 15 -> 25 (DEC-CI-SWEEP-REHEARSAL-TIMEOUT-001, #1765):
     # a banked observation put the real bench wall-time at ~10.9 min, only
     # ~4.1 min under the old 15-min cap (~27% headroom) — thin enough that a
@@ -3373,7 +3522,11 @@ jobs:
     name: Golden-master tests
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -3536,6 +3689,11 @@ jobs:
   rust:
     name: Rust (fno-math build + clippy + test)
     runs-on: ubuntu-24.04
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 20
     defaults:
       run:
@@ -3566,6 +3724,11 @@ jobs:
   rust-trading-core:
     name: Rust (trading-core build + clippy + golden bit-identity test)
     runs-on: ubuntu-24.04
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 20
     defaults:
       run:
@@ -3630,6 +3793,11 @@ jobs:
   rust-brutex-feed:
     name: Rust (brutex-feed build + clippy + test)
     runs-on: ubuntu-24.04
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 20
     defaults:
       run:
@@ -3676,6 +3844,11 @@ jobs:
     # jobs, which install the wheel via `pip install ./rust/brutex-strategies`
     # (type installs it too for the wheel-present import arm).
     runs-on: ubuntu-24.04
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 20
     defaults:
       run:
@@ -3720,6 +3893,11 @@ jobs:
     # (tests/integration/test_sidecar_parity_static.py) additionally builds
     # this crate inside the test job whenever cargo is present.
     runs-on: ubuntu-24.04
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 20
     defaults:
       run:
@@ -3770,6 +3948,11 @@ jobs:
   run-smoke:
     name: make run smoke (cold-start boot)
     runs-on: ubuntu-24.04
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -3856,7 +4039,11 @@ jobs:
     name: Chaos / race (randomized + crash-restart + concurrent)
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -3930,7 +4117,11 @@ jobs:
     name: Sweep full-chain rehearsal (R38)
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -4165,6 +4356,11 @@ jobs:
   codeql:
     name: CodeQL (Python SAST)
     runs-on: ubuntu-24.04
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs_only != 'true'
     timeout-minutes: 15
     permissions:
       contents: read
@@ -4394,7 +4590,11 @@ jobs:
     name: Python mutation (mutmut on critical modules)
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
+    # DEC-CI-DOCS-PATHS-FILTER-001: heavy code gate — may skip ONLY on a
+    # PROVEN docs-only diff (docs/** + *.md); ci-ok's
+    # skipped-only-when-proven law turns any other skip RED.
+    if: needs.detect-changes.outputs.docs_only != 'true'
     # 20 -> 90 (DEC-SWEEP-UNKILLABLE-CORE-001 D-19): the four Phase-2
     # run-core critical modules join the gate. Measured GREEN path (ship
     # time): ~40 min of mutmut on the four + ~9 min state.py/money.py +
@@ -4804,9 +5004,13 @@ jobs:
     name: Bug-fix fix-reversion check (STANDARDS row 10 hardening)
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
-    needs: build-wheels
+    needs: [build-wheels, detect-changes]
     timeout-minutes: 20
-    if: github.event_name == 'pull_request'
+    # DEC-CI-DOCS-PATHS-FILTER-001: also skips on a PROVEN docs-only
+    # diff. This job ALREADY legitimately skips on push/merge_group
+    # (PR-only), so it stays in ci-ok's lenient skipped==pass tier —
+    # exactly today's enforcement, no wider.
+    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.docs_only != 'true'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -5153,6 +5357,11 @@ jobs:
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
       # gates per Golden Rule #12.
+      # DEC-CI-DOCS-PATHS-FILTER-001: the docs-only paths filter. Wired
+      # here so its output feeds the skipped-only-when-proven law below;
+      # ci-ok keeps `if: always()`, so a failed/skipped detect-changes
+      # can never skip the aggregate itself.
+      - detect-changes
     if: always()
     steps:
       - name: Verify all required jobs passed
@@ -5244,6 +5453,48 @@ jobs:
             "${{ needs.sweep-rehearsal.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
+              exit 1
+            fi
+          done
+          # DEC-CI-DOCS-PATHS-FILTER-001: skipped-only-when-proven law.
+          # The loop above deliberately treats `skipped` as pass — the
+          # PR-only sub-gates legitimately skip on push/merge_group. The
+          # HEAVY code jobs below may now ALSO skip (their job-level
+          # `if:` is the docs-only paths filter) — but ONLY on a PROVEN
+          # docs-only diff. A gated job that skipped while detect-changes
+          # did NOT report docs_only=true (detect failure/crash,
+          # cancellation, any other cause) is a RED aggregate — never a
+          # silent green. rust-brutex-feed + rust-brutex-strategies are
+          # deliberately enumerated here although absent from the loop
+          # above (a pre-existing gap — they were in `needs:` only, and
+          # `if: always()` means needs alone enforce nothing): gating
+          # them without checking their skip state would widen that gap.
+          DOCS_ONLY="${{ needs.detect-changes.outputs.docs_only }}"
+          echo "  docs_only (detect-changes): ${DOCS_ONLY:-<unset>}"
+          for entry in \
+            "build-wheels:${{ needs.build-wheels.result }}" \
+            "test-shard:${{ needs.test-shard.result }}" \
+            "per-module-static:${{ needs.per-module-static.result }}" \
+            "per-module-touched:${{ needs.per-module-touched.result }}" \
+            "type:${{ needs.type.result }}" \
+            "browser:${{ needs.browser.result }}" \
+            "property:${{ needs.property.result }}" \
+            "bench:${{ needs.bench.result }}" \
+            "golden:${{ needs.golden.result }}" \
+            "rust:${{ needs.rust.result }}" \
+            "rust-trading-core:${{ needs.rust-trading-core.result }}" \
+            "rust-brutex-feed:${{ needs.rust-brutex-feed.result }}" \
+            "rust-brutex-strategies:${{ needs.rust-brutex-strategies.result }}" \
+            "rust-brutexd:${{ needs.rust-brutexd.result }}" \
+            "run-smoke:${{ needs.run-smoke.result }}" \
+            "codeql:${{ needs.codeql.result }}" \
+            "mutation-py:${{ needs.mutation-py.result }}" \
+            "chaos-race:${{ needs.chaos-race.result }}" \
+            "sweep-rehearsal:${{ needs.sweep-rehearsal.result }}"; do
+            job="${entry%%:*}"
+            result="${entry#*:}"
+            if [[ "$result" == "skipped" && "$DOCS_ONLY" != "true" ]]; then
+              echo "❌ gated job '$job' was skipped without a proven docs-only diff (docs_only='${DOCS_ONLY}')"
               exit 1
             fi
           done
