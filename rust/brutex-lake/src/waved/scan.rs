@@ -408,7 +408,7 @@ fn leaf_candidates(interval_dir: &Path) -> Result<Vec<PathBuf>, ScanFail> {
 }
 
 /// `int()`-twin verdict for a year/month path token.
-enum IntParse {
+pub(super) enum IntParse {
     /// Pure-ASCII-digit parse (the writer-minted shape).
     Value(i64),
     /// Python `int()` provably fails too → the `PartitionError` class.
@@ -418,7 +418,7 @@ enum IntParse {
     Ambiguous,
 }
 
-fn int_twin(token: &str) -> IntParse {
+pub(super) fn int_twin(token: &str) -> IntParse {
     if token.is_empty() {
         return IntParse::Fail;
     }

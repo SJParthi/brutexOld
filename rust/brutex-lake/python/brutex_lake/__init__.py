@@ -32,7 +32,9 @@ W-1 ships the timeframe_materialize read core ``waved_read_1m_ipc`` + the
 twins; W-2 the ``lake_heal`` mutation core ``waved_heal_batch`` + the
 ``waved_lake_content_token`` walk twin; W-3 the ``catalog_reconcile``
 per-file scan primitive ``waved_reconcile_file``; W-4 the
-``lake_invariants`` scan core ``waved_scan_lake``). Nothing else in
+``lake_invariants`` scan core ``waved_scan_lake``; W-2b the multi-file heal
+port — foreign/option-foreign/drift join the heal engaged set, witnessed by
+``waved_heal_engaged_kinds``). Nothing else in
 ``brutex/`` imports this package, and
 every facade treats an absent/stale install as "stay on the Python law"
 (one loud WARN), so a missing wheel can never break a lake write, a derived
@@ -66,6 +68,7 @@ from brutex_lake._brutex_lake import (
     resample_all_ipc,
     waved_has_stored_1m_bars,
     waved_heal_batch,
+    waved_heal_engaged_kinds,
     waved_lake_content_token,
     waved_month_partition_files,
     waved_read_1m_ipc,
@@ -90,6 +93,7 @@ __all__ = [
     "resample_all_ipc",
     "waved_has_stored_1m_bars",
     "waved_heal_batch",
+    "waved_heal_engaged_kinds",
     "waved_lake_content_token",
     "waved_month_partition_files",
     "waved_read_1m_ipc",

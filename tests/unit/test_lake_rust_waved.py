@@ -77,7 +77,7 @@ def _fake_crate(
 ) -> types.ModuleType:
     """Build a fake ``brutex_lake`` module with injectable behaviour.
 
-    Carries the FULL W-1 + W-2 + W-3 + W-4
+    Carries the FULL W-1 + W-2 + W-2b + W-3 + W-4
     :data:`brutex.data.lake_rust_waved._CRATE_API` surface (the
     all-or-nothing import guard — a fake missing any name would latch
     ``crate_unavailable`` and every engaged-path test would silently
@@ -104,6 +104,15 @@ def _fake_crate(
     if scan is None:
         scan = lambda *args: _scan_clean_wire()  # noqa: E731
     module.waved_scan_lake = scan  # type: ignore[attr-defined]
+    # W-2b: the multi-file heal engagement witness (all-or-nothing lockstep).
+    module.waved_heal_engaged_kinds = lambda: [  # type: ignore[attr-defined]
+        "IntraFileDup",
+        "OptionIntraFileDup",
+        "SchemaAlienFile",
+        "ForeignMonthRows",
+        "OptionForeignMonthRows",
+        "LegacyKeyDrift",
+    ]
     return module
 
 

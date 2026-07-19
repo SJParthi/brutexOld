@@ -252,6 +252,11 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "waved_lake_content_token",
     "waved_reconcile_file",
     "waved_scan_lake",
+    # W-2b: the multi-file heal engagement witness (drift + bars-foreign +
+    # option-foreign join the engaged set). A wheel lacking it predates the
+    # multi-file heal port and MUST latch crate_unavailable — its
+    # waved_heal_batch would degrade those kinds back to Python silently.
+    "waved_heal_engaged_kinds",
 )
 
 #: Once-per-process-per-reason warn memo + per-surface engaged latches.
@@ -739,8 +744,10 @@ def heal_batch_via_rust(
     degrade = outcome.get("degrade")
     if degrade is not None:
         # The crate's read-only preflight refused the batch BEFORE touching a
-        # byte (an unported finding kind / a file outside the W-2 byte-parity
-        # envelope) — the sanctioned pre-mutation degrade arm (§B2).
+        # byte (a file/destination outside the byte-parity envelope, or — as
+        # defense in depth — a foreign future finding kind; since W-2b all
+        # six healable kinds are ported) — the sanctioned pre-mutation
+        # degrade arm (§B2).
         _warn_once("heal_degrade", degrade_reason=str(degrade))
         return None
     if set(outcome) != _HEAL_OUTCOME_KEYS:

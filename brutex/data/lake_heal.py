@@ -113,7 +113,7 @@ from brutex.data.lake_invariants import (
     scan_lake_invariants,
     utc_aware,
 )
-from brutex.data.lake_manifest import invalidate_manifest
+from brutex.data.lake_manifest import invalidate_manifest, record_dataset
 from brutex.data.lake_stats_manifest import (
     KIND_BARS,
     KIND_OPTIONS,
@@ -1359,16 +1359,17 @@ def _heal_one(finding: _HealableFinding, state: _BatchState) -> bool:
 
 def _serialize_rust_findings(
     ordered: Sequence[_HealableFinding],
-) -> list[dict[str, object]] | None:
+) -> list[dict[str, object]]:
     """Project *ordered* into the crate's plain-dict finding wire (deviation D-10).
 
-    ``None`` when the batch carries ANY kind outside the W-2 engaged set
-    (``IntraFileDup`` / ``OptionIntraFileDup`` / ``SchemaAlienFile``) — the
-    crate's read-only preflight would degrade such a batch anyway; the
-    short-circuit skips the FFI round-trip AND never serializes the
-    differently-shaped unported dataclasses (``LegacyKeyDrift`` has a
-    ``drifted_dir``, not a ``path``). The crate-side kind check stays as
-    defense in depth.
+    W-2b (deviation D-22) closes the W-2 unported set: ALL SIX healable kinds
+    now serialize — ``LegacyKeyDrift`` maps ``drifted_dir``→``path`` /
+    ``drifted_symbol``→``symbol`` / ``canonical_symbol``→``canonical`` (the
+    crate ``Finding`` wire is path-keyed), ``ForeignMonthRows`` rides its
+    coords, ``OptionForeignMonthRows`` its stem-month ``year``/``month``. The
+    crate-side preflight stays the zero-mutation degrade authority for
+    out-of-envelope SHAPES (read probes), and its unknown-kind arm stays as
+    defense in depth against a foreign future kind.
     """
     out: list[dict[str, object]] = []
     for finding in ordered:
@@ -1396,7 +1397,48 @@ def _serialize_rust_findings(
                     "has_coords": False,
                 }
             )
-        elif isinstance(finding, SchemaAlienFile):
+        elif isinstance(finding, ForeignMonthRows):
+            coords = finding.coords
+            out.append(
+                {
+                    "kind": "ForeignMonthRows",
+                    "path": str(finding.path),
+                    "exchange": coords.exchange,
+                    "segment": coords.segment,
+                    "symbol": coords.symbol,
+                    "interval": coords.interval,
+                    "year": coords.year,
+                    "month": coords.month,
+                    "has_coords": True,
+                }
+            )
+        elif isinstance(finding, OptionForeignMonthRows):
+            out.append(
+                {
+                    "kind": "OptionForeignMonthRows",
+                    "path": str(finding.path),
+                    "series": finding.series,
+                    "year": finding.year,
+                    "month": finding.month,
+                    "has_coords": False,
+                }
+            )
+        elif isinstance(finding, LegacyKeyDrift):
+            # The path-keyed wire: `drifted_dir` rides the `path` slot; the
+            # DRIFTED symbol rides `symbol` (its legacy rows are the ones
+            # moved) and the canonical target rides the D-22 `canonical` slot.
+            out.append(
+                {
+                    "kind": "LegacyKeyDrift",
+                    "path": str(finding.drifted_dir),
+                    "exchange": finding.exchange,
+                    "segment": finding.segment,
+                    "symbol": finding.drifted_symbol,
+                    "canonical": finding.canonical_symbol,
+                    "has_coords": False,
+                }
+            )
+        else:
             record: dict[str, object] = {
                 "kind": "SchemaAlienFile",
                 "path": str(finding.path),
@@ -1416,8 +1458,6 @@ def _serialize_rust_findings(
                     }
                 )
             out.append(record)
-        else:
-            return None
     return out
 
 
@@ -1440,8 +1480,12 @@ def _rust_heal_on_event(state: _BatchState) -> Callable[[str, dict[str, Any]], N
 
     Wave-D house laws i-iii: the crate streams STRUCTURED side-effect records
     and this closure replays each through the SAME Python surface the
-    verbatim loop uses — the pinned structlog WARN sites (with the #907
-    ``repr()`` law applied exactly where the Python arm applies it), the
+    verbatim loop uses — the pinned structlog sites (WARN default; the
+    ``level="info"`` wire carries the writer's ``lake.partition.write``
+    telemetry at its default-level INFO; the #907
+    ``repr()`` law applied exactly where the Python arm applies it — the
+    single-field ``partition_repr`` W-2 form plus the W-2b ``repr_fields``
+    name-list generalization), the
     best-effort hash-chained audit sink (:func:`_audit_append`), the catalog
     upsert/delete (Golden Rule #4 — via the writer's own
     ``make_catalog_entry`` so the ``year``/``month`` derivation stays ONE
@@ -1477,7 +1521,7 @@ def _rust_heal_on_event(state: _BatchState) -> Callable[[str, dict[str, Any]], N
             fields = {
                 key: value
                 for key, value in payload.items()
-                if key not in ("event", "partition_repr")
+                if key not in ("event", "partition_repr", "level", "repr_fields")
             }
             event = str(payload["event"])
             if payload.get("partition_repr"):
@@ -1485,9 +1529,22 @@ def _rust_heal_on_event(state: _BatchState) -> Callable[[str, dict[str, Any]], N
                 # vendor-derived series dir name — repr()'d at the LOG site
                 # exactly as the Python arm does (HealAction/audit copies raw).
                 fields["partition"] = repr(str(fields["partition"]))
+            for name in cast("list[str]", payload.get("repr_fields", [])):
+                # The W-2b generalized #907 wire: the crate NAMES the fields
+                # whose values embed RAW vendor-derived tokens; the shell
+                # repr()'s each at the LOG site exactly as the Python arm does
+                # (`drift_merged` drifted/canonical, the options-arm `series`).
+                fields[name] = repr(str(fields[name]))
             if event == "lake_heal.partition_error":
                 fields["error"] = repr(str(fields["error"]))
-            _LOG.warning(event, **fields)
+            level = payload.get("level")
+            if level == "info":
+                # The writer's default `partition_log_level` — the heal state's
+                # writers are built level-default, so `lake.partition.write`
+                # telemetry rides INFO exactly as the Python arm does.
+                _LOG.info(event, **fields)
+            else:
+                _LOG.warning(event, **fields)
         elif kind == "audit":
             _audit_append(
                 state.audit,
@@ -1548,6 +1605,35 @@ def _rust_heal_on_event(state: _BatchState) -> Callable[[str, dict[str, Any]], N
                 _record_option_stats(
                     state.lake_root, dest=dest, frame=pl.read_parquet(dest, glob=False)
                 )
+        elif kind == "bars_stats_remove":
+            # The bars writer's wholly-removed quarantine-MOVE twin hooks,
+            # verbatim order (`_heal_partition_locked`'s kept==0 branch):
+            # manifest invalidation + the writer's OWN stats-remove hook
+            # (self-gated on `stats_manifest_enabled`).
+            invalidate_manifest(state.lake_root)
+            state.writer._remove_stats_hook(  # pyright: ignore[reportPrivateUsage]
+                Path(str(payload["path"]))
+            )
+        elif kind == "option_stats_remove":
+            # The options twin (`OptionParquetWriter.heal_partition` kept==0):
+            # stats-remove ONLY — deliberately NO invalidate_manifest (the
+            # options tree is uncatalogued/unmanifested by design).
+            from brutex.data.option_parquet_writer import (
+                _remove_option_stats,  # pyright: ignore[reportPrivateUsage]
+            )
+
+            _remove_option_stats(state.lake_root, dest=Path(str(payload["path"])))
+        elif kind == "record_dataset":
+            # The write()'s dataset-created manifest upsert (W-2b — a foreign
+            # reassignment / drift merge can CREATE a dataset dir), emitted
+            # after the partition locks are released exactly as write() does.
+            record_dataset(
+                state.lake_root,
+                exchange=str(payload["exchange"]),
+                segment=str(payload["segment"]),
+                symbol=str(payload["symbol"]),
+                interval=str(payload["interval"]),
+            )
         else:
             raise WriterError(f"unknown waved heal replay event kind {kind!r}")
 
@@ -1576,8 +1662,6 @@ def _rust_heal_route(
     if not lake_rust_waved_enabled():
         return None
     serialized = _serialize_rust_findings(ordered)
-    if serialized is None:
-        return None
     with lake_write_guard():
         outcome = heal_batch_via_rust(
             lake_root=str(state.lake_root),

@@ -35,6 +35,7 @@
 //!   `lib.rs`, never in place of them.
 
 pub mod heal;
+pub mod heal_multi;
 pub mod read;
 pub mod reconcile;
 pub mod scan;

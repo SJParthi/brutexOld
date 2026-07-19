@@ -12,20 +12,26 @@
 //! this module returns/streams STRUCTURED OUTCOMES through the ONE `on_event`
 //! channel and the shell replays them (Wave-D house laws i-iii).
 //!
-//! ## The W-2 ENGAGED SET (recorded deviation D-7, `waved_deviations.md`)
+//! ## The ENGAGED SET (W-2 + W-2b — deviations D-7/D-22, `waved_deviations.md`)
 //!
 //! Natively healed: `IntraFileDup` (bars keep-first dedup rewrite),
 //! `OptionIntraFileDup` (options `(side, timestamp)` dedup rewrite, both
-//! containment rails enforced) and `SchemaAlienFile` (whole-file quarantine
-//! move, both trees) — plus the `lake_content_token` walk (§C-5). A batch
-//! containing ANY other healable kind (`ForeignMonthRows` /
-//! `OptionForeignMonthRows` / `LegacyKeyDrift` — the multi-file
-//! reassignment/merge algorithms) or any file shape outside the byte-parity
-//! envelope below DEGRADES WHOLE-BATCH, PRE-MUTATION: [`heal_batch_impl`]
-//! returns a `{"degrade": reason}` verdict without touching a single byte and
-//! the facade runs the verbatim Python core (§B2's sanctioned pre-mutation
-//! degrade arm). Their native port is the named lane completion item blocking
-//! the W-5 flip.
+//! containment rails enforced), `SchemaAlienFile` (whole-file quarantine
+//! move, both trees), and — since W-2b (`waved/heal_multi.rs`) — the three
+//! multi-file algorithms: `ForeignMonthRows` (bars foreign-month
+//! reassignment, copy-forward-FIRST/remove-SECOND), `OptionForeignMonthRows`
+//! (options reassignment through the canonical-sibling keep-first merge) and
+//! `LegacyKeyDrift` (the drifted-dir keep-first merge + quarantine move).
+//! Plus the `lake_content_token` walk (§C-5). EVERY production finding kind
+//! now engages; a batch containing any file shape outside the byte-parity
+//! envelope below — or, for the multi-file kinds, any shape whose Python
+//! heal would produce an exception-MESSAGE-bearing isolated error (an
+//! unreadable/symlinked source or destination, a schema-incompatible merge
+//! sibling, an int()-ambiguous drifted dir name — the D-22 posture) —
+//! DEGRADES WHOLE-BATCH, PRE-MUTATION: [`heal_batch_core`] returns a
+//! `{"degrade": reason}` verdict without touching a single byte and the
+//! facade runs the verbatim Python core (§B2's sanctioned pre-mutation
+//! degrade arm).
 //!
 //! ## The byte-parity envelope (preflight-enforced, read-only)
 //!
@@ -90,7 +96,7 @@ const BARS_COLUMNS: [&str; 7] = [
 // ── error plumbing ───────────────────────────────────────────────────────────
 
 /// One heal fault, classified per the Python isolation law.
-pub(crate) enum HealErr {
+pub(super) enum HealErr {
     /// The `_PER_FINDING_HEAL_ERRORS` twin — counted, batch continues.
     Isolated(String),
     /// Disk-full class — propagates as `OSError(errno)` for the shell's
@@ -115,7 +121,7 @@ impl From<PolarsError> for HealErr {
 /// Classify an `io::Error`: `ENOSPC`/`EDQUOT` are the pull-wide halt class
 /// (the `lake_write_guard` law); everything else is a per-finding isolated
 /// fault (`OSError` is a `parquet_read_skip_errors` member).
-fn classify_io(err: std::io::Error) -> HealErr {
+pub(super) fn classify_io(err: std::io::Error) -> HealErr {
     match err.raw_os_error() {
         Some(code) if code == libc::ENOSPC || code == libc::EDQUOT => HealErr::Fatal(err),
         _ => HealErr::Isolated(format!("io: {err}")),
@@ -172,7 +178,7 @@ fn lock_path(lake_root: &Path, dest: &Path) -> PathBuf {
 }
 
 /// Convert a physical datetime value to µs. `None` on ms overflow (degrade).
-fn to_us(value: i64, unit: TimeUnit) -> Option<i64> {
+pub(super) fn to_us(value: i64, unit: TimeUnit) -> Option<i64> {
     match unit {
         TimeUnit::Microseconds => Some(value),
         TimeUnit::Milliseconds => value.checked_mul(1_000),
@@ -244,35 +250,61 @@ pub(crate) fn snap_2dp(value: f64) -> Option<(i64, f64)> {
 
 /// The ONE `on_event(kind, payload_dict)` channel (design §C-4). A raising
 /// callback propagates — the shell wraps the best-effort kinds itself.
-struct EventSink<'a, 'py> {
-    py: Python<'py>,
-    on_event: &'a Bound<'py, PyAny>,
+pub(super) struct EventSink<'a, 'py> {
+    pub(super) py: Python<'py>,
+    pub(super) on_event: &'a Bound<'py, PyAny>,
 }
 
 impl<'py> EventSink<'_, 'py> {
-    fn dict(&self) -> Bound<'py, PyDict> {
+    pub(super) fn dict(&self) -> Bound<'py, PyDict> {
         PyDict::new(self.py)
     }
 
-    fn emit(&self, kind: &str, payload: &Bound<'py, PyDict>) -> PyResult<()> {
+    pub(super) fn emit(&self, kind: &str, payload: &Bound<'py, PyDict>) -> PyResult<()> {
         self.on_event.call1((kind, payload))?;
         Ok(())
     }
 
-    fn beat(&self) -> PyResult<()> {
+    pub(super) fn beat(&self) -> PyResult<()> {
         self.emit("beat", &self.dict())
     }
 
-    fn log(&self, event: &str, fields: &[(&str, Py<PyAny>)]) -> PyResult<()> {
+    pub(super) fn log(&self, event: &str, fields: &[(&str, Py<PyAny>)]) -> PyResult<()> {
+        self.log_ex(event, None, &[], fields)
+    }
+
+    /// The full-control log emitter: an optional non-WARNING `level`
+    /// (`"info"`/`"debug"` — the `_partition_log` twin) and the W-2b
+    /// `repr_fields` wire (field NAMES the shell wraps `repr(str(v))` at
+    /// the replay site — the #907 log-injection law stays Python-applied;
+    /// `partition_repr` remains the W-2 back-compat single-field form).
+    pub(super) fn log_ex(
+        &self,
+        event: &str,
+        level: Option<&str>,
+        repr_fields: &[&str],
+        fields: &[(&str, Py<PyAny>)],
+    ) -> PyResult<()> {
         let payload = self.dict();
         payload.set_item("event", event)?;
+        if let Some(level) = level {
+            payload.set_item("level", level)?;
+        }
+        if !repr_fields.is_empty() {
+            payload.set_item("repr_fields", repr_fields.to_vec())?;
+        }
         for (key, value) in fields {
             payload.set_item(*key, value)?;
         }
         self.emit("log", &payload)
     }
 
-    fn audit(&self, action: &str, subject: &str, payload: &Bound<'py, PyDict>) -> PyResult<()> {
+    pub(super) fn audit(
+        &self,
+        action: &str,
+        subject: &str,
+        payload: &Bound<'py, PyDict>,
+    ) -> PyResult<()> {
         let wrapper = self.dict();
         wrapper.set_item("action", action)?;
         wrapper.set_item("subject", subject)?;
@@ -282,7 +314,7 @@ impl<'py> EventSink<'_, 'py> {
 }
 
 /// Convenience: a Python object from anything `IntoPyObject`.
-fn obj<'py, T: pyo3::IntoPyObject<'py>>(py: Python<'py>, value: T) -> Py<PyAny> {
+pub(super) fn obj<'py, T: pyo3::IntoPyObject<'py>>(py: Python<'py>, value: T) -> Py<PyAny> {
     match value.into_pyobject(py) {
         Ok(bound) => bound.into_any().unbind(),
         Err(_) => py.None(),
@@ -293,7 +325,7 @@ fn obj<'py, T: pyo3::IntoPyObject<'py>>(py: Python<'py>, value: T) -> Py<PyAny> 
 
 /// A held cross-process partition flock (released on drop — the fd close
 /// releases the advisory lock, kernel-guaranteed).
-struct PartitionFlock {
+pub(super) struct PartitionFlock {
     _file: std::fs::File,
 }
 
@@ -304,7 +336,7 @@ struct PartitionFlock {
 /// per-OPEN-FILE-DESCRIPTION, so this single layer also excludes
 /// same-process Python writers (the #1785 G10 lesson; deviation D-8 —
 /// the in-process `BoundedLockRegistry` layer is not separately taken).
-fn acquire_partition_flock(
+pub(super) fn acquire_partition_flock(
     lake_root: &Path,
     dest: &Path,
     sink: &EventSink<'_, '_>,
@@ -354,7 +386,7 @@ fn partition_lock_timeout_seconds() -> f64 {
 /// The `atomic_write_via(dest, tmp.write_bytes)` twin: a same-dir
 /// `.brutex-write-*.parquet.tmp` temp (mode 0600, the `mkstemp` default) →
 /// write → `fsync` → atomic `rename`; the temp is removed on any error.
-fn atomic_write_bytes(dest: &Path, content: &[u8]) -> Result<(), HealErr> {
+pub(super) fn atomic_write_bytes(dest: &Path, content: &[u8]) -> Result<(), HealErr> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let parent = dest
@@ -404,7 +436,7 @@ fn atomic_write_bytes(dest: &Path, content: &[u8]) -> Result<(), HealErr> {
 /// One decoded + 2dp-snapped bars row (the `CandleBar` value twin: the f64
 /// fields are exactly Python's `float(Decimal)` renders).
 #[derive(Clone)]
-pub(crate) struct BarRow {
+pub(super) struct BarRow {
     pub ts_us: i64,
     pub open: f64,
     pub high: f64,
@@ -415,7 +447,7 @@ pub(crate) struct BarRow {
 }
 
 /// Why a file is OUTSIDE the W-2 byte-parity envelope (whole-batch degrade).
-pub(crate) enum Envelope {
+pub(super) enum Envelope {
     Ok,
     Degrade(String),
 }
@@ -425,7 +457,9 @@ pub(crate) enum Envelope {
 /// unreadable/corrupt classification the Python arm makes (`WriterError`);
 /// `Ok(Envelope::Degrade)` = readable but outside the parity envelope.
 #[allow(clippy::type_complexity)]
-fn read_bars_file(path: &Path) -> Result<(Vec<u8>, String, Vec<BarRow>, Envelope), HealErr> {
+pub(super) fn read_bars_file(
+    path: &Path,
+) -> Result<(Vec<u8>, String, Vec<BarRow>, Envelope), HealErr> {
     let bytes = std::fs::read(path).map_err(|err| match err.raw_os_error() {
         Some(code) if code == libc::ENOSPC || code == libc::EDQUOT => HealErr::Fatal(err),
         _ => HealErr::Isolated(format!("unreadable existing partition: {err}")),
@@ -547,7 +581,7 @@ fn read_bars_file(path: &Path) -> Result<(Vec<u8>, String, Vec<BarRow>, Envelope
 
 /// Keep-FIRST collapse by timestamp, preserving first-physical order — the
 /// `_read_existing_bars` dict law.
-fn collapse_keep_first(rows: Vec<BarRow>) -> Vec<BarRow> {
+pub(super) fn collapse_keep_first(rows: Vec<BarRow>) -> Vec<BarRow> {
     let mut seen: HashMap<i64, ()> = HashMap::with_capacity(rows.len());
     let mut out: Vec<BarRow> = Vec::with_capacity(rows.len());
     for row in rows {
@@ -561,7 +595,7 @@ fn collapse_keep_first(rows: Vec<BarRow>) -> Vec<BarRow> {
 /// Render sorted bars rows through the byte-locked bars render core — the
 /// `_render_bytes` twin (7-column frame; heal rows are never overlay-bearing
 /// by the preflight envelope).
-fn render_bars(rows: &[BarRow]) -> Result<Vec<u8>, HealErr> {
+pub(super) fn render_bars(rows: &[BarRow]) -> Result<Vec<u8>, HealErr> {
     let ts: Vec<i64> = rows.iter().map(|r| r.ts_us).collect();
     let timestamp = Series::new("timestamp".into(), ts)
         .cast(&DataType::Datetime(
@@ -609,26 +643,26 @@ fn render_bars(rows: &[BarRow]) -> Result<Vec<u8>, HealErr> {
 // ── shared context ───────────────────────────────────────────────────────────
 
 /// Mutable batch state (the `_BatchState` counters that live crate-side).
-struct BatchCtx {
-    lake_root: PathBuf,
-    quarantine_root: PathBuf,
-    healed: u64,
-    skipped: u64,
-    errors: u64,
-    quarantined_files: u64,
-    actions: Vec<Py<PyDict>>,
-    touched: BTreeMap<(String, String, String), std::collections::BTreeSet<(i32, u32)>>,
+pub(super) struct BatchCtx {
+    pub(super) lake_root: PathBuf,
+    pub(super) quarantine_root: PathBuf,
+    pub(super) healed: u64,
+    pub(super) skipped: u64,
+    pub(super) errors: u64,
+    pub(super) quarantined_files: u64,
+    pub(super) actions: Vec<Py<PyDict>>,
+    pub(super) touched: BTreeMap<(String, String, String), std::collections::BTreeSet<(i32, u32)>>,
 }
 
 impl BatchCtx {
-    fn quarantine_path(&self, source: &Path) -> Result<PathBuf, HealErr> {
+    pub(super) fn quarantine_path(&self, source: &Path) -> Result<PathBuf, HealErr> {
         let rel = source.strip_prefix(&self.lake_root).map_err(|_| {
             HealErr::Isolated(format!("{} is outside the lake root", source.display()))
         })?;
         Ok(self.quarantine_root.join(rel))
     }
 
-    fn relpath(&self, source: &Path) -> String {
+    pub(super) fn relpath(&self, source: &Path) -> String {
         source
             .strip_prefix(&self.lake_root)
             .map(|rel| {
@@ -638,7 +672,7 @@ impl BatchCtx {
             .unwrap_or_else(|_| source.to_string_lossy().into_owned())
     }
 
-    fn touch(&mut self, exchange: &str, segment: &str, symbol: &str, month: (i32, u32)) {
+    pub(super) fn touch(&mut self, exchange: &str, segment: &str, symbol: &str, month: (i32, u32)) {
         self.touched
             .entry((
                 exchange.to_string(),
@@ -652,7 +686,7 @@ impl BatchCtx {
 
 /// Append one `HealAction`-shaped dict to the batch's action list.
 #[allow(clippy::too_many_arguments)]
-fn push_action(
+pub(super) fn push_action(
     py: Python<'_>,
     ctx: &mut BatchCtx,
     action: &str,
@@ -681,7 +715,7 @@ fn push_action(
 
 // ── quarantine move (the `_quarantine_move` twin) ────────────────────────────
 
-fn quarantine_move(
+pub(super) fn quarantine_move(
     ctx: &mut BatchCtx,
     source: &Path,
     sink: &EventSink<'_, '_>,
@@ -723,18 +757,19 @@ fn quarantine_move(
 
 /// One parsed healable finding (the shell serializes the dataclasses into
 /// plain dicts — deviation D-10: typed Python objects cross, not JSON).
-struct Finding {
-    kind: String,
-    path: PathBuf,
-    exchange: String,
-    segment: String,
-    symbol: String,
-    interval: String,
-    year: i32,
-    month: u32,
-    series: String,
-    has_coords: bool,
-    reason: String,
+pub(super) struct Finding {
+    pub(super) kind: String,
+    pub(super) path: PathBuf,
+    pub(super) exchange: String,
+    pub(super) segment: String,
+    pub(super) symbol: String,
+    pub(super) interval: String,
+    pub(super) year: i32,
+    pub(super) month: u32,
+    pub(super) series: String,
+    pub(super) has_coords: bool,
+    pub(super) reason: String,
+    pub(super) canonical: String,
 }
 
 fn get_str(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<String> {
@@ -773,6 +808,7 @@ fn parse_findings(findings: &Bound<'_, PyList>) -> PyResult<Vec<Finding>> {
             series: get_str(dict, "series")?,
             has_coords,
             reason: get_str(dict, "reason")?,
+            canonical: get_str(dict, "canonical")?,
         });
     }
     Ok(out)
@@ -782,7 +818,7 @@ fn parse_findings(findings: &Bound<'_, PyList>) -> PyResult<Vec<Finding>> {
 
 /// Probe an options file's key columns for the W-2 envelope. Unreadable →
 /// `None` (both arms classify it identically at heal time).
-fn option_file_envelope(path: &Path) -> Option<String> {
+pub(super) fn option_file_envelope(path: &Path) -> Option<String> {
     let Ok(bytes) = std::fs::read(path) else {
         return None;
     };
@@ -822,8 +858,8 @@ fn option_file_envelope(path: &Path) -> Option<String> {
 }
 
 /// Whole-batch preflight: `Some(reason)` = degrade (the facade runs the
-/// Python core); `None` = every finding is inside the W-2 envelope.
-fn preflight(findings: &[Finding]) -> Option<String> {
+/// Python core); `None` = every finding is inside the engaged envelope.
+fn preflight(lake_root: &Path, findings: &[Finding]) -> Option<String> {
     for finding in findings {
         match finding.kind.as_str() {
             "IntraFileDup" => {
@@ -847,9 +883,28 @@ fn preflight(findings: &[Finding]) -> Option<String> {
                 }
             }
             "SchemaAlienFile" => {} // a verbatim byte move — any content engages
+            // The W-2b multi-file algorithms (deviation D-22): every shape
+            // whose Python heal would raise an exception-MESSAGE-bearing
+            // isolated error degrades PRE-mutation instead — read-only probes.
+            "ForeignMonthRows" => {
+                if let Some(reason) = super::heal_multi::preflight_bars_foreign(lake_root, finding)
+                {
+                    return Some(reason);
+                }
+            }
+            "OptionForeignMonthRows" => {
+                if let Some(reason) = super::heal_multi::preflight_option_foreign(finding) {
+                    return Some(reason);
+                }
+            }
+            "LegacyKeyDrift" => {
+                if let Some(reason) = super::heal_multi::preflight_drift(lake_root, finding) {
+                    return Some(reason);
+                }
+            }
             other => {
-                // ForeignMonthRows / OptionForeignMonthRows / LegacyKeyDrift —
-                // the W-2 unported algorithms (deviation D-7).
+                // An unknown kind can only come from a NEWER shell — a
+                // crate/repo lockstep break; degrade loudly (zero mutation).
                 return Some(format!("unported_algorithm: {other}"));
             }
         }
@@ -859,9 +914,32 @@ fn preflight(findings: &[Finding]) -> Option<String> {
 
 // ── options containment + heal ───────────────────────────────────────────────
 
+/// `Path.resolve(strict=False)`'s twin for the containment probe (W-2b):
+/// canonicalize the deepest EXISTING ancestor (symlinks resolved — a
+/// symlink LOOP surfaces as the error, exactly the Python round-5 guarded
+/// class) and append the non-existent tail lexically (a non-existent
+/// component cannot be a symlink). A FRESH reassignment destination — the
+/// W-2b copy-forward leg's normal shape — resolves through its existing
+/// series dir instead of refusing on strict-`canonicalize` ENOENT.
+pub(super) fn resolve_nonstrict(path: &Path) -> std::io::Result<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => Ok(resolved),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let Some(parent) = path.parent() else {
+                return Err(err);
+            };
+            let Some(name) = path.file_name() else {
+                return Err(err);
+            };
+            Ok(resolve_nonstrict(parent)?.join(name))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// The `_assert_options_containment` twin — both rails, message-equivalent
 /// control flow (the refusal is an isolated counted error either arm).
-fn assert_options_containment(lake_root: &Path, dest: &Path) -> Result<(), HealErr> {
+pub(super) fn assert_options_containment(lake_root: &Path, dest: &Path) -> Result<(), HealErr> {
     let options_root = match std::fs::canonicalize(lake_root) {
         Ok(root) => root.join("options"),
         Err(err) => {
@@ -871,7 +949,7 @@ fn assert_options_containment(lake_root: &Path, dest: &Path) -> Result<(), HealE
             )));
         }
     };
-    let resolved_parent = match std::fs::canonicalize(dest) {
+    let resolved_parent = match resolve_nonstrict(dest) {
         Ok(resolved) => match resolved.parent() {
             Some(parent) => parent.to_path_buf(),
             None => {
@@ -1229,6 +1307,9 @@ fn heal_one(
         "IntraFileDup" => heal_bars_dup(ctx, finding, sink),
         "OptionIntraFileDup" => heal_option_dup(ctx, finding, sink),
         "SchemaAlienFile" => heal_schema_alien(ctx, finding, sink),
+        "ForeignMonthRows" => super::heal_multi::heal_bars_foreign(ctx, finding, sink),
+        "OptionForeignMonthRows" => super::heal_multi::heal_option_foreign(ctx, finding, sink),
+        "LegacyKeyDrift" => super::heal_multi::heal_drift(ctx, finding, sink),
         other => Err(HealErr::Isolated(format!("unported finding kind {other}"))),
     }
 }
@@ -1264,7 +1345,7 @@ pub(crate) fn heal_batch_core<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let parsed = parse_findings(findings)?;
     let out = PyDict::new(py);
-    if let Some(reason) = preflight(&parsed) {
+    if let Some(reason) = preflight(Path::new(lake_root), &parsed) {
         out.set_item("degrade", reason)?;
         return Ok(out);
     }
@@ -1469,6 +1550,23 @@ pub(crate) fn waved_heal_batch<'py>(
             "brutex-lake waved_heal_batch panicked (caught at the FFI boundary)",
         )),
     }
+}
+
+/// The W-2b lockstep witness: the finding kinds the crate heals NATIVELY.
+/// A shell serializing all six kinds against a pre-W-2b wheel would silently
+/// run Python for the multi-file classes forever (the D-7 flip blocker), so
+/// the facade lists this name in its ALL-OR-NOTHING `_CRATE_API` — a stale
+/// wheel latches `crate_unavailable` LOUDLY instead.
+#[pyfunction]
+pub(crate) fn waved_heal_engaged_kinds() -> Vec<&'static str> {
+    vec![
+        "IntraFileDup",
+        "OptionIntraFileDup",
+        "SchemaAlienFile",
+        "ForeignMonthRows",
+        "OptionForeignMonthRows",
+        "LegacyKeyDrift",
+    ]
 }
 
 /// The `lake_content_token` twin (§C-5): `(token_hex, skip_events)` where

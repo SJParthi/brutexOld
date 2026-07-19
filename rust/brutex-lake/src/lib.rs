@@ -593,6 +593,11 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // scan core). Appended AFTER the W-1/W-2/W-3 registrations (§4.1
     // additive merge law).
     m.add_function(wrap_pyfunction!(waved::scan::waved_scan_lake, m)?)?;
+    // ADR-0020 Wave-D W-2b (`BRUTEX_LAKE_WAVED_RUST` — the multi-file heal
+    // engagement witness: drift + bars-foreign + option-foreign join the
+    // engaged set). Appended AFTER the W-1..W-4 registrations (§4.1
+    // additive merge law).
+    m.add_function(wrap_pyfunction!(waved::heal::waved_heal_engaged_kinds, m)?)?;
     Ok(())
 }
 

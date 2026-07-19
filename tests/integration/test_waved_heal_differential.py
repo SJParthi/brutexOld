@@ -19,12 +19,13 @@ The comparison is FOUR-strength:
 4. a convergence RE-SCAN (the second sweep's finding-type multiset — equal
    across arms; empty for the fully-healable classes).
 
-Engagement is asserted anti-vacuously: the W-2 ENGAGED cases must run the
-crate core (no ``heal_degrade`` fallback event), the unported/enveloped
-cases must DEGRADE pre-mutation to the Python core (the crate preflight's
-``{"degrade": ...}`` verdict) — either way the four-strength parity holds.
-The content-token twin is compared per case too (token string + skip-event
-replay parity).
+Engagement is asserted anti-vacuously: the ENGAGED cases (W-2b closes the
+set — dup + alien + foreign + option-foreign + drift) must run the crate
+core (no ``heal_degrade`` fallback event), the enveloped cases must DEGRADE
+pre-mutation to the Python core (the crate preflight's ``{"degrade": ...}``
+verdict) — either way the four-strength parity holds. A degrade-only pass
+over an engaged-set case FAILS loudly. The content-token twin is compared
+per case too (token string + skip-event replay parity).
 
 Skips cleanly when the installed wheel predates the Wave-D W-2 API (the
 lockstep law: crate and repo move together).
@@ -69,11 +70,11 @@ if TYPE_CHECKING:
 #: forming-session cutoff derive from it, so the twin lakes stay comparable.
 _FIXED_NOW = datetime(2026, 6, 15, 18, 30, tzinfo=UTC)
 
-#: Corpus cases whose batch the W-2 crate core must ENGAGE natively
-#: (IntraFileDup / OptionIntraFileDup / SchemaAlienFile inside the
-#: byte-parity envelope). Everything else with findings must DEGRADE
-#: pre-mutation (unported kind or out-of-envelope file); finding-less cases
-#: never reach the seam (the empty-batch short-circuit).
+#: Corpus cases whose batch the crate core must ENGAGE natively — since
+#: W-2b (deviation D-22) that is EVERY healable kind inside the byte-parity
+#: envelope: dup + alien (W-2) PLUS foreign / option-foreign / drift.
+#: Everything else with findings must DEGRADE pre-mutation (out-of-envelope
+#: shape) or never reach the seam (mass-rail refusal / empty batch).
 _ENGAGED_CASES = frozenset(
     {
         "bars_intra_file_dup",
@@ -88,31 +89,37 @@ _ENGAGED_CASES = frozenset(
         "option_nested_dtype_list_side",
         "option_out_of_range_datetime",
         "dangling_symlink_option_file",
-    }
-)
-
-#: Cases carrying an UNPORTED finding kind (foreign / drift): the shell's
-#: ``_serialize_rust_findings`` short-circuits BEFORE the FFI — the crate is
-#: never consulted (no facade event at all) and the Python core runs.
-#: (No CORPUS case feeds an out-of-envelope file into the batch itself —
-#: the scanner's dtype/range gates skip such files BEFORE a finding exists;
-#: the crate-preflight degrade arm is exercised by
-#: :class:`TestCrateEnvelopeDegrade`'s custom plants below.)
-_UNPORTED_KIND_CASES = frozenset(
-    {
+        # W-2b: the multi-file heal kinds now engage (D-22 closes the D-7
+        # flip blocker — foreign reassignment, option multi-month
+        # reassignment + canonical-sibling merge, legacy-key drift merge).
         "bars_foreign_month_pure",
         "bars_foreign_month_overlap",
         "legacy_key_drift_sibling",
         "legacy_key_drift_canonical_keys",
-        "bars_naive_timestamp_routing",
         "option_foreign_month_pure",
         "option_foreign_month_overlap",
         "option_multi_month_overlap",
         "option_null_side_foreign_key",
-        "option_mass_poison_majority",
+    }
+)
+
+#: Cases the crate is CONSULTED on but must DEGRADE pre-mutation (the D-22
+#: read-only preflight probes): a tz-NAIVE bars file is outside the W-2
+#: us/UTC bars envelope (Python's as-if-UTC routing heals it — the crate
+#: never risks a byte drift), and a symlink at a reassignment DESTINATION
+#: is the containment-rail class whose Python error path embeds
+#: exception-MESSAGE text the crate cannot reproduce byte-exactly.
+_CRATE_DEGRADE_CASES = frozenset(
+    {
+        "bars_naive_timestamp_routing",
         "symlink_loop_partition_file",
     }
 )
+
+#: Cases whose batch never reaches the seam at all: the mass-heal rail
+#: refuses BEFORE the per-finding loop (shell policy — stays Python), so
+#: the crate is never consulted (no facade event).
+_NO_CONSULT_CASES = frozenset({"option_mass_poison_majority"})
 
 #: The volatile per-event timing keys dropped before the log comparison.
 _TIMING_SUFFIXES = ("_ms",)
@@ -295,18 +302,20 @@ class TestHealDifferential:
         rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
         _assert_arms_equal(python_arm, rust_arm)
         # Anti-vacuous engagement census: the engaged set runs the crate
-        # core (crate consulted, no pre-mutation degrade); the enveloped set
-        # reaches the crate and MUST degrade; the unported-kind set
-        # short-circuits shell-side (the crate is never consulted); every
-        # finding-less batch never reaches the seam either.
+        # core (crate consulted, no pre-mutation degrade — a degrade-only
+        # pass over an engaged case FAILS here); the enveloped set reaches
+        # the crate and MUST degrade; the mass-rail case never reaches the
+        # seam; every finding-less batch never reaches the seam either.
         if case.name in _ENGAGED_CASES:
             assert _engaged(rust_arm) and not _degraded(rust_arm), case.name
+        elif case.name in _CRATE_DEGRADE_CASES:
+            assert _engaged(rust_arm) and _degraded(rust_arm), case.name
         else:
             assert not rust_arm.facade_events, case.name
 
     def test_corpus_expectation_census_is_total(self) -> None:
         """Every corpus case with healable findings is classified exactly once."""
-        buckets = (_ENGAGED_CASES, _UNPORTED_KIND_CASES)
+        buckets = (_ENGAGED_CASES, _CRATE_DEGRADE_CASES, _NO_CONSULT_CASES)
         for i, left in enumerate(buckets):
             for right in buckets[i + 1 :]:
                 assert not (left & right)
@@ -324,7 +333,11 @@ class TestHealDifferential:
         with_healable = {
             case.name for case in CORPUS if case.expected_finding_types & healable_kinds
         }
-        assert with_healable == _ENGAGED_CASES | _UNPORTED_KIND_CASES
+        assert with_healable == _ENGAGED_CASES | _CRATE_DEGRADE_CASES | _NO_CONSULT_CASES
+        # The W-2b lockstep witness: the installed wheel's engaged-kind list
+        # covers ALL SIX healable kinds (a stale pre-W-2b wheel fails here,
+        # never silently degrades the multi-file kinds back to Python).
+        assert set(_crate.waved_heal_engaged_kinds()) == healable_kinds
 
     def test_mass_rail_arm_refuses_identically(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -372,14 +385,15 @@ class TestHealDifferential:
 
 
 class TestCrateEnvelopeDegrade:
-    """The crate-preflight degrade arm — batches OUTSIDE the W-2 byte-parity
+    """The crate-preflight degrade arm — batches OUTSIDE the byte-parity
     envelope must degrade PRE-MUTATION to the Python core with full parity.
 
-    No poison-corpus case reaches this arm (the scanner's dtype/range gates
-    skip envelope-violating files before a finding exists), so the plants
+    Two corpus cases exercise the W-2b MULTI-FILE degrade probes in the main
+    parametrized run (``_CRATE_DEGRADE_CASES``); the plants
     here build IN-envelope-for-the-SCANNER files the CRATE refuses: a
     beyond-2^53-paisa price, a 17-column Greeks-overlay schema, and a MIXED
-    engaged+unported batch (the shell-side short-circuit).
+    dup+foreign batch (since W-2b BOTH kinds engage natively — the mixed
+    test pins that the whole batch runs the crate core with parity).
     """
 
     @staticmethod
@@ -423,8 +437,8 @@ class TestCrateEnvelopeDegrade:
 
     @staticmethod
     def _build_mixed_batch(lake: Path) -> None:
-        # An engaged-kind dup file PLUS an unported-kind foreign file in ONE
-        # batch: the shell short-circuits the whole batch to Python.
+        # A dup file PLUS a foreign file in ONE batch: since W-2b both kinds
+        # are ported, the whole mixed batch engages the crate natively.
         from tests.fakes.poison_corpus import _dest, _plant_raw, _ts
 
         _plant_raw(_dest(lake), [_ts(1), _ts(1), _ts(2)])
@@ -468,9 +482,13 @@ class TestCrateEnvelopeDegrade:
         )
         assert len(pl.read_parquet(healed, glob=False).columns) == 17
 
-    def test_mixed_batch_short_circuits_with_parity(
+    def test_mixed_batch_engages_with_parity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The W-2 shell-side short-circuit is DEAD (W-2b): a mixed
+        dup+foreign batch serializes whole and runs the crate core natively
+        — the contract this test previously pinned (no crate consult) is
+        consciously FLIPPED with the D-22 port."""
         case = self._case(
             "mixed_batch",
             self._build_mixed_batch,
@@ -479,10 +497,56 @@ class TestCrateEnvelopeDegrade:
         python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
         rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
         _assert_arms_equal(python_arm, rust_arm)
-        # The unported kind short-circuits shell-side: no crate consult.
-        assert not rust_arm.facade_events
+        assert _engaged(rust_arm) and not _degraded(rust_arm)
         assert rust_arm.report["healed"] == 2
         assert rust_arm.rescan_types == ()
+
+
+class TestCrashConvergence:
+    """The W-2b reassignment crash-safety law: copy-forward FIRST, remove
+    SECOND — a crash between the legs leaves rows in BOTH files, the finding
+    re-appears, and the keep-first union converges idempotently.
+    """
+
+    def test_copy_forward_precedes_source_removal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ordering pin: the destination-month write telemetry
+        (``lake.partition.write`` — the copy-forward leg) is emitted BEFORE
+        the source's ``lake_heal.rows_reassigned`` (the removal leg) on BOTH
+        arms — the crate preserves the Python arm's crash-safe leg order.
+        """
+        case = next(c for c in CORPUS if c.name == "bars_foreign_month_pure")
+        python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
+        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
+        _assert_arms_equal(python_arm, rust_arm)
+        assert _engaged(rust_arm) and not _degraded(rust_arm)
+        for arm in (python_arm, rust_arm):
+            events = [str(event.get("event", "")) for event in arm.logs]
+            assert "lake.partition.write" in events
+            assert "lake_heal.rows_reassigned" in events
+            assert events.index("lake.partition.write") < events.index("lake_heal.rows_reassigned")
+
+    def test_mid_crash_state_converges_keep_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The overlap corpus shapes ARE the post-copy-forward pre-removal
+        crash state (the foreign keys already live in their canonical home):
+        the finding re-appears on scan and the engaged heal CONVERGES — the
+        keep-first union never duplicates a key, the source is cleaned, the
+        second sweep is empty — byte-identically on both arms (bars +
+        options multi-month).
+        """
+        for name in ("bars_foreign_month_overlap", "option_multi_month_overlap"):
+            case = next(c for c in CORPUS if c.name == name)
+            base = tmp_path / name
+            base.mkdir()
+            python_arm = _run_arm(base, case, flag_on=False, monkeypatch=monkeypatch)
+            rust_arm = _run_arm(base, case, flag_on=True, monkeypatch=monkeypatch)
+            _assert_arms_equal(python_arm, rust_arm)
+            assert _engaged(rust_arm) and not _degraded(rust_arm), name
+            assert rust_arm.report["healed"] >= 1, name
+            assert rust_arm.rescan_types == (), name
 
 
 class TestCatalogReplayParity:

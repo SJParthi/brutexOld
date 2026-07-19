@@ -150,35 +150,66 @@ class TestSerializeRustFindings:
         assert solo is not None
         assert solo[0]["series"] == ""
 
-    @pytest.mark.parametrize(
-        "finding",
-        [
-            ForeignMonthRows(
-                path=Path("/x/07.parquet"), coords=_COORDS, foreign_rows=1, overlap_rows=0
-            ),
-            LegacyKeyDrift(
-                exchange="NSE",
-                segment="CASH",
-                drifted_symbol="NSE-M&M",
-                canonical_symbol="M&M",
-                drifted_dir=Path("/x"),
-                intervals=("1minute",),
-                files=1,
-            ),
-            OptionForeignMonthRows(
-                path=Path("/x/2024-06.parquet"),
-                series="S",
-                year=2024,
-                month=6,
-                foreign_rows=1,
-                overlap_rows=0,
-            ),
-        ],
-        ids=["foreign", "drift", "option_foreign"],
-    )
-    def test_unported_kind_short_circuits_to_none(self, finding: Any, tmp_path: Path) -> None:
-        # Even when an ENGAGED kind sits beside it — whole-batch Python.
-        assert _serialize_rust_findings([_dup(tmp_path / "06.parquet"), finding]) is None
+    def test_multi_file_kinds_serialize_since_w2b(self, tmp_path: Path) -> None:
+        """The W-2 short-circuit-to-``None`` contract is consciously FLIPPED
+        (W-2b, deviation D-22): the three multi-file kinds now serialize onto
+        the path-keyed crate wire — ``LegacyKeyDrift`` maps
+        ``drifted_dir``→``path`` / ``drifted_symbol``→``symbol`` /
+        ``canonical_symbol``→``canonical`` — and a mixed batch serializes
+        WHOLE (the crate engages every kind).
+        """
+        foreign = ForeignMonthRows(
+            path=Path("/x/07.parquet"), coords=_COORDS, foreign_rows=1, overlap_rows=0
+        )
+        drift = LegacyKeyDrift(
+            exchange="NSE",
+            segment="CASH",
+            drifted_symbol="NSE-M&M",
+            canonical_symbol="M&M",
+            drifted_dir=Path("/x"),
+            intervals=("1minute",),
+            files=1,
+        )
+        option_foreign = OptionForeignMonthRows(
+            path=Path("/x/2024-06.parquet"),
+            series="S",
+            year=2024,
+            month=6,
+            foreign_rows=1,
+            overlap_rows=0,
+        )
+        out = _serialize_rust_findings(
+            [_dup(tmp_path / "06.parquet"), foreign, drift, option_foreign]
+        )
+        assert len(out) == 4
+        assert out[1] == {
+            "kind": "ForeignMonthRows",
+            "path": str(Path("/x/07.parquet")),
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "symbol": "NIFTY",
+            "interval": "1minute",
+            "year": 2024,
+            "month": 6,
+            "has_coords": True,
+        }
+        assert out[2] == {
+            "kind": "LegacyKeyDrift",
+            "path": str(Path("/x")),
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-M&M",
+            "canonical": "M&M",
+            "has_coords": False,
+        }
+        assert out[3] == {
+            "kind": "OptionForeignMonthRows",
+            "path": str(Path("/x/2024-06.parquet")),
+            "series": "S",
+            "year": 2024,
+            "month": 6,
+            "has_coords": False,
+        }
 
 
 class TestRustHealOnEvent:
@@ -396,6 +427,113 @@ class TestRustHealOnEvent:
         handle("option_stats_record", {"path": str(dest)})
         assert recorded == [(state.lake_root, dest, 1)]
 
+    def test_log_level_info_wire_and_repr_fields(self, tmp_path: Path) -> None:
+        """The W-2b log wires: ``level="info"`` routes to ``_LOG.info`` (the
+        writer's default-level ``lake.partition.write`` telemetry) and the
+        ``repr_fields`` name-list generalizes the #907 repr law to arbitrary
+        fields (``drift_merged`` drifted/canonical)."""
+        handle = _rust_heal_on_event(_state(tmp_path))
+        with capture_logs() as logs:
+            handle(
+                "log",
+                {
+                    "event": "lake.partition.write",
+                    "level": "info",
+                    "partition": "bars/x.parquet",
+                    "rows": 2,
+                },
+            )
+            handle(
+                "log",
+                {
+                    "event": "lake_heal.drift_merged",
+                    "repr_fields": ["drifted", "canonical"],
+                    "drifted": "NSE-M&M",
+                    "canonical": "M&M",
+                    "files": 1,
+                },
+            )
+        assert logs[0]["event"] == "lake.partition.write"
+        assert logs[0]["log_level"] == "info"
+        assert "level" not in logs[0]
+        assert logs[0]["partition"] == "bars/x.parquet"
+        assert logs[1]["log_level"] == "warning"
+        assert "repr_fields" not in logs[1]
+        assert logs[1]["drifted"] == repr("NSE-M&M")
+        assert logs[1]["canonical"] == repr("M&M")
+        assert logs[1]["files"] == 1
+
+    def test_bars_stats_remove_invalidates_and_removes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bars wholly-removed twin hooks: manifest invalidation + the
+        writer's OWN self-gated stats-remove hook (verbatim order)."""
+        state = _state(tmp_path)
+        invalidated: list[Path] = []
+        removed: list[Path] = []
+        monkeypatch.setattr(lake_heal, "invalidate_manifest", invalidated.append)
+        monkeypatch.setattr(
+            type(state.writer),
+            "_remove_stats_hook",
+            lambda self, dest: removed.append(dest),
+        )
+        handle = _rust_heal_on_event(state)
+        dest = state.lake_root / "bars" / "x.parquet"
+        handle("bars_stats_remove", {"path": str(dest)})
+        assert invalidated == [state.lake_root]
+        assert removed == [dest]
+
+    def test_option_stats_remove_delegates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The options wholly-removed twin: stats-remove ONLY — the options
+        tree is deliberately unmanifested (no invalidate_manifest)."""
+        from brutex.data import option_parquet_writer as opw
+
+        state = _state(tmp_path)
+        invalidated: list[Path] = []
+        removed: list[tuple[Path, Path]] = []
+        monkeypatch.setattr(lake_heal, "invalidate_manifest", invalidated.append)
+        monkeypatch.setattr(
+            opw,
+            "_remove_option_stats",
+            lambda lake_root, *, dest: removed.append((lake_root, dest)),
+        )
+        handle = _rust_heal_on_event(state)
+        dest = state.lake_root / "options" / "S" / "2024-06.parquet"
+        handle("option_stats_remove", {"path": str(dest)})
+        assert removed == [(state.lake_root, dest)]
+        assert invalidated == []
+
+    def test_record_dataset_delegates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dataset-CREATING reassignment/drift write replays the write()'s
+        manifest upsert through the ONE lake_manifest law."""
+        state = _state(tmp_path)
+        recorded: list[tuple[Path, dict[str, str]]] = []
+        monkeypatch.setattr(
+            lake_heal,
+            "record_dataset",
+            lambda lake_root, **kwargs: recorded.append((lake_root, kwargs)),
+        )
+        handle = _rust_heal_on_event(state)
+        handle(
+            "record_dataset",
+            {"exchange": "NSE", "segment": "CASH", "symbol": "M&M", "interval": "1minute"},
+        )
+        assert recorded == [
+            (
+                state.lake_root,
+                {
+                    "exchange": "NSE",
+                    "segment": "CASH",
+                    "symbol": "M&M",
+                    "interval": "1minute",
+                },
+            )
+        ]
+
     def test_unknown_kind_raises_loud(self, tmp_path: Path) -> None:
         handle = _rust_heal_on_event(_state(tmp_path))
         with pytest.raises(WriterError, match="unknown waved heal replay event kind"):
@@ -421,15 +559,22 @@ class TestRustHealRoute:
         monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", _bomb)
         assert _rust_heal_route((_dup(tmp_path / "06.parquet"),), _state(tmp_path)) is None
 
-    def test_unengaged_batch_short_circuits_before_the_ffi(
+    def test_multi_file_batch_reaches_the_ffi_since_w2b(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The W-2 shell-side short-circuit is DEAD (W-2b, deviation D-22):
+        a drift-only batch now serializes and reaches the facade, which owns
+        the engage-vs-degrade verdict via the crate's read-only preflight —
+        the contract this test previously pinned is consciously FLIPPED."""
         monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "1")
+        calls: list[dict[str, Any]] = []
 
-        def _bomb(**kwargs: Any) -> dict[str, Any]:
-            raise AssertionError("an unengaged batch must never reach the facade")
+        def _fake(**kwargs: Any) -> None:
+            # Returning None = the crate-preflight degrade verdict (zero
+            # mutation) — the shell must fall back to the Python core.
+            calls.append(kwargs)
 
-        monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", _bomb)
+        monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", _fake)
         drift = LegacyKeyDrift(
             exchange="NSE",
             segment="CASH",
@@ -440,6 +585,10 @@ class TestRustHealRoute:
             files=1,
         )
         assert _rust_heal_route((drift,), _state(tmp_path)) is None
+        assert len(calls) == 1
+        findings = calls[0]["findings"]
+        assert findings[0]["kind"] == "LegacyKeyDrift"
+        assert findings[0]["canonical"] == "M&M"
 
     def test_facade_none_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
