@@ -51,7 +51,10 @@ def _install_fake(monkeypatch: pytest.MonkeyPatch, decision: object) -> None:
     module = types.ModuleType("brutex_ops")
     for name in backup_rust._CRATE_API:
         setattr(module, name, lambda *a, **k: None)
-    module.evaluate_deadman_decision = lambda *a, **k: decision
+    # setattr (not `module.attr = ...`): pyright's reportAttributeAccessIssue
+    # refuses direct unknown-attribute assignment on ModuleType — the loop
+    # idiom above is the structural, ignore-free spelling (CI review-round fix).
+    setattr(module, "evaluate_deadman_decision", lambda *a, **k: decision)  # noqa: B010
     monkeypatch.setitem(sys.modules, "brutex_ops", module)
 
 
@@ -158,7 +161,12 @@ class TestOffArmIdentity:
             calls.append(1)
             return NOW
 
-        evaluate_deadman(None, DeadmanState(), clock=_counting_clock, **THRESHOLDS)
+        # `state_error=None` explicit (the _oracle/_routed call shape): without
+        # it pyright reads `**THRESHOLDS` (dict[str, float]) as possibly
+        # supplying the `state_error: str | None` keyword (CI review-round fix).
+        evaluate_deadman(
+            None, DeadmanState(), clock=_counting_clock, state_error=None, **THRESHOLDS
+        )
         assert len(calls) == 1
 
 
