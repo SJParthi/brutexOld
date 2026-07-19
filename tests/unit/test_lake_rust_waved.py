@@ -72,12 +72,14 @@ def _fake_crate(
     read: Any = None,
     heal: Any = None,
     token: Any = None,
+    reconcile: Any = None,
 ) -> types.ModuleType:
     """Build a fake ``brutex_lake`` module with injectable behaviour.
 
-    Carries the FULL W-1 + W-2 :data:`brutex.data.lake_rust_waved._CRATE_API`
-    surface (the all-or-nothing import guard — a fake missing any name would
-    latch ``crate_unavailable`` and every engaged-path test would silently
+    Carries the FULL W-1 + W-2 + W-3
+    :data:`brutex.data.lake_rust_waved._CRATE_API` surface (the
+    all-or-nothing import guard — a fake missing any name would latch
+    ``crate_unavailable`` and every engaged-path test would silently
     exercise the oracle arm instead).
     """
     module = types.ModuleType("brutex_lake")
@@ -95,6 +97,9 @@ def _fake_crate(
     if token is None:
         token = lambda lake_root: ("0" * 64, [])  # noqa: E731
     module.waved_lake_content_token = token  # type: ignore[attr-defined]
+    if reconcile is None:
+        reconcile = lambda path, classify_home: _RECON_CLEAN_WIRE  # noqa: E731
+    module.waved_reconcile_file = reconcile  # type: ignore[attr-defined]
     return module
 
 
@@ -1016,4 +1021,359 @@ class TestContentTokenSurface:
         assert replayed == [
             ("lake_heal.token_stat_skipped", "/p1", "e1"),
             ("lake_heal.token_walk_skipped", "/p2", "e2"),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# W-3: the reconcile-file surface
+# ---------------------------------------------------------------------------
+
+#: 2024-06-03T04:01:00Z, epoch microseconds (the reconcile fixtures' anchor).
+_JUNE_US = 1_717_387_260_000_000
+
+#: A well-formed clean-file crate wire ``(row_count, first_ts_us, last_ts_us,
+#: tz_aware, sha256_hex, dup, foreign_rows)``.
+_RECON_CLEAN_WIRE = (2, _JUNE_US, _JUNE_US + 60_000_000, True, "a" * 64, None, 0)
+
+
+def _recon_coords() -> Any:
+    """The reconcile fixtures' partition coords (June 2024 home month)."""
+    from brutex.data.lake_invariants import PartitionCoords
+
+    return PartitionCoords(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        year=2024,
+        month=6,
+    )
+
+
+def _recon_scan(findings: tuple[Any, ...] = ()) -> tuple[Any, ...]:
+    """The scan tuple matching :data:`_RECON_CLEAN_WIRE` (the oracle twin)."""
+    from datetime import UTC, datetime, timedelta
+
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    return (
+        2,
+        epoch + timedelta(microseconds=_JUNE_US),
+        epoch + timedelta(microseconds=_JUNE_US + 60_000_000),
+        "a" * 64,
+        findings,
+    )
+
+
+#: "Use the default scan" sentinel for :class:`_CountingScanOracle` — a
+#: plain ``None`` default would shadow the legitimate zero-row ``None`` scan.
+_DEFAULT_SCAN = object()
+
+
+class _CountingScanOracle:
+    """Reconcile oracle stub counting invocations."""
+
+    def __init__(self, result: Any = _DEFAULT_SCAN) -> None:
+        self.calls = 0
+        self._result = _recon_scan() if result is _DEFAULT_SCAN else result
+
+    def __call__(self) -> Any:
+        self.calls += 1
+        return self._result
+
+
+def _recon_call(
+    monkeypatch: pytest.MonkeyPatch,
+    module: types.ModuleType | None,
+    *,
+    coords: Any = None,
+    oracle: Any = None,
+) -> Any:
+    _install_crate(monkeypatch, module)
+    monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
+    return lrw.reconcile_file_via_rust(
+        path="/lake/bars/NSE/INDEX/NIFTY/1minute/2024/06.parquet",
+        coords=coords,
+        oracle=_CountingScanOracle() if oracle is None else oracle,
+    )
+
+
+class TestReconcileFileSurface:
+    """The §B3/§C-3 per-file scan — the full W-1 read-surface doctrine."""
+
+    def test_absent_crate_serves_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        oracle = _CountingScanOracle()
+        assert _recon_call(monkeypatch, None, oracle=oracle) == _recon_scan()
+        assert oracle.calls == 1
+        assert lrw.rust_waved_disabled()
+
+    def test_missing_w3_api_latches_crate_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The all-or-nothing lockstep: a W-2-era wheel (no waved_reconcile_file)
+        # is a stale install — the WHOLE waved seam latches.
+        module = _fake_crate()
+        delattr(module, "waved_reconcile_file")
+        with capture_logs() as logs:
+            assert _recon_call(monkeypatch, module) == _recon_scan()
+        assert lrw.rust_waved_disabled()
+        assert any(
+            e["event"] == "lake_rust_waved.rust_path_disabled"
+            and e["reason"] == "crate_unavailable"
+            for e in logs
+        )
+
+    def test_degrade_error_serves_oracle_with_one_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(path: str, home: Any) -> Any:
+            raise ValueError("brutex-lake waved reconcile failed: corrupt")
+
+        with capture_logs() as logs:
+            assert _recon_call(monkeypatch, _fake_crate(reconcile=_boom)) == _recon_scan()
+        assert any(
+            e["event"] == "lake_rust_waved.fallback" and e["reason"] == "reconcile_error"
+            for e in logs
+        )
+        assert not lrw.rust_waved_disabled()
+
+    def test_oracle_raise_after_crate_refusal_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The degrade-to-oracle law end-to-end: the crate refuses, the oracle
+        # re-raises the REAL skip-class exception — the caller's GAP-#9 guard
+        # owns the verdict (production-identical on a corrupt file).
+        def _boom(path: str, home: Any) -> Any:
+            raise ValueError("brutex-lake waved reconcile failed: corrupt")
+
+        def _oracle() -> Any:
+            raise OverflowError("date value out of range")
+
+        with pytest.raises(OverflowError):
+            _recon_call(monkeypatch, _fake_crate(reconcile=_boom), oracle=_oracle)
+
+    def test_memory_error_escapes_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _oom(path: str, home: Any) -> Any:
+            raise MemoryError
+
+        with pytest.raises(MemoryError):
+            _recon_call(monkeypatch, _fake_crate(reconcile=_oom))
+
+    def test_panic_exception_latches_and_serves_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import polars.exceptions as pl_exc
+
+        def _panic(path: str, home: Any) -> Any:
+            raise pl_exc.PanicException("boom")
+
+        assert _recon_call(monkeypatch, _fake_crate(reconcile=_panic)) == _recon_scan()
+        assert lrw.rust_waved_disabled()
+
+    @pytest.mark.parametrize(
+        "wire",
+        [
+            "not-a-tuple",
+            (1, 2, 3),
+            (True, _JUNE_US, _JUNE_US, True, "a" * 64, None, 0),
+            (2, "x", _JUNE_US, True, "a" * 64, None, 0),
+            (0, _JUNE_US, _JUNE_US, True, "a" * 64, None, 0),
+            (2, _JUNE_US, _JUNE_US, True, "a" * 64, None, 3),
+            (2, _JUNE_US + 1, _JUNE_US, True, "a" * 64, None, 0),
+            (2, _JUNE_US, _JUNE_US, "yes", "a" * 64, None, 0),
+            (2, _JUNE_US, _JUNE_US, True, "short", None, 0),
+            (2, _JUNE_US, _JUNE_US, True, 1234, None, 0),
+            (2, _JUNE_US, _JUNE_US, True, "a" * 64, (2,), 0),
+            (2, _JUNE_US, _JUNE_US, True, "a" * 64, (2, True), 0),
+            (2, _JUNE_US, _JUNE_US, True, "a" * 64, (3, 1), 0),
+            (2, _JUNE_US, _JUNE_US, True, "a" * 64, (2, 2), 0),
+            (2, 2**62, 2**62 + 1, True, "a" * 64, None, 0),
+        ],
+        ids=[
+            "non_tuple",
+            "wrong_arity",
+            "bool_row_count",
+            "non_int_first",
+            "zero_rows_nonnull",
+            "foreign_gt_rows",
+            "inverted_span",
+            "non_bool_tz",
+            "short_hash",
+            "non_str_hash",
+            "dup_wrong_arity",
+            "dup_bool_member",
+            "dup_physical_drift",
+            "dup_not_greater",
+            "span_past_datetime_range",
+        ],
+    )
+    def test_refuse_poison_shapes_serve_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, wire: Any
+    ) -> None:
+        with capture_logs() as logs:
+            result = _recon_call(monkeypatch, _fake_crate(reconcile=lambda p, h: wire))
+        assert result == _recon_scan()
+        assert any(
+            e["event"] == "lake_rust_waved.fallback" and e["reason"] == "reconcile_result_refused"
+            for e in logs
+        )
+        assert not lrw.rust_waved_disabled()
+
+    def test_zero_row_none_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Burn-in arm: crate None vs oracle None — equal, counts down.
+        lrw.reset_lake_rust_waved_for_tests(remaining=1)
+        oracle = _CountingScanOracle(result=None)
+        crate = _fake_crate(reconcile=lambda p, h: None)
+        assert _recon_call(monkeypatch, crate, oracle=oracle) is None
+        assert oracle.calls == 1
+        assert not lrw.rust_waved_disabled()
+        # Steady state: the oracle never runs, None served from the crate.
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+
+        def _bomb() -> Any:
+            raise AssertionError("oracle must not run in steady state")
+
+        assert _recon_call(monkeypatch, crate, oracle=_bomb) is None
+
+    def test_burn_in_match_counts_down_and_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=2)
+        with capture_logs() as first_logs:
+            assert _recon_call(monkeypatch, _fake_crate()) == _recon_scan()
+        # 2 → 1: counted down, NOT complete yet.
+        assert lrw._BURN_IN_REMAINING[lrw.SURFACE_RECONCILE_FILE] == 1
+        assert not any(e["event"] == "lake_rust_waved.burn_in_complete" for e in first_logs)
+        with capture_logs() as logs:
+            assert _recon_call(monkeypatch, _fake_crate()) == _recon_scan()
+        assert lrw._BURN_IN_REMAINING[lrw.SURFACE_RECONCILE_FILE] == 0
+        assert any(
+            e["event"] == "lake_rust_waved.burn_in_complete"
+            and e["surface"] == lrw.SURFACE_RECONCILE_FILE
+            for e in logs
+        )
+        assert not lrw.rust_waved_disabled()
+
+    def test_burn_in_mismatch_autoreverts_and_ships_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The sha256 tooth: a hash-divergent scan autoreverts the WHOLE seam.
+        lrw.reset_lake_rust_waved_for_tests(remaining=lrw.BURN_IN_SAMPLES)
+        divergent = (2, _JUNE_US, _JUNE_US + 60_000_000, True, "b" * 64, None, 0)
+        oracle = _CountingScanOracle()
+        with capture_logs() as logs:
+            result = _recon_call(
+                monkeypatch, _fake_crate(reconcile=lambda p, h: divergent), oracle=oracle
+            )
+        assert result == _recon_scan()  # the ORACLE scan shipped
+        assert lrw.rust_waved_disabled()
+        assert any(
+            e["event"] == "lake_rust_waved.autoreverted"
+            and e["reason"] == "burn_in_reconcile_mismatch"
+            for e in logs
+        )
+
+    def test_burn_in_none_vs_scan_mismatch_autoreverts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=lrw.BURN_IN_SAMPLES)
+        oracle = _CountingScanOracle()  # a real scan; the crate says zero-row
+        result = _recon_call(monkeypatch, _fake_crate(reconcile=lambda p, h: None), oracle=oracle)
+        assert result == _recon_scan()
+        assert lrw.rust_waved_disabled()
+
+    def test_oracle_raise_during_burn_in_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=lrw.BURN_IN_SAMPLES)
+
+        def _oracle() -> Any:
+            raise OverflowError("date value out of range")
+
+        with pytest.raises(OverflowError):
+            _recon_call(monkeypatch, _fake_crate(), oracle=_oracle)
+
+    def test_unseen_shape_token_compares_after_budget_spent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=1)
+        # Burn the whole budget on the classify=False shape.
+        first = _CountingScanOracle()
+        assert _recon_call(monkeypatch, _fake_crate(), oracle=first) == _recon_scan()
+        assert first.calls == 1
+        assert lrw._BURN_IN_REMAINING[lrw.SURFACE_RECONCILE_FILE] == 0
+        # classify=True is an UNSEEN shape — the oracle is still consulted.
+        second = _CountingScanOracle()
+        assert _recon_call(monkeypatch, _fake_crate(), coords=_recon_coords(), oracle=second) == (
+            _recon_scan()
+        )
+        assert second.calls == 1
+        # A repeat classify=True shape is steady state — no oracle.
+        third = _CountingScanOracle()
+        assert _recon_call(monkeypatch, _fake_crate(), coords=_recon_coords(), oracle=third) == (
+            _recon_scan()
+        )
+        assert third.calls == 0
+
+    def test_steady_state_never_calls_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+
+        def _bomb() -> Any:
+            raise AssertionError("oracle must not run in steady state")
+
+        assert _recon_call(monkeypatch, _fake_crate(), oracle=_bomb) == _recon_scan()
+
+    def test_findings_reconstruction_matches_classify_law(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Steady state: dup + foreign counts rebuild the finding OBJECTS —
+        # relpath-stamped, coords-carrying, dup-then-foreign order,
+        # overlap_rows=None (the free L1 path).
+        from pathlib import Path
+
+        from brutex.data.lake_invariants import ForeignMonthRows, IntraFileDup
+
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        coords = _recon_coords()
+        wire = (3, _JUNE_US, _JUNE_US + 60_000_000, True, "a" * 64, (3, 2), 1)
+        result = _recon_call(
+            monkeypatch, _fake_crate(reconcile=lambda p, h: wire), coords=coords, oracle=object
+        )
+        assert result is not None
+        rel = Path(coords.relpath())
+        assert result[4] == (
+            IntraFileDup(path=rel, coords=coords, physical_rows=3, unique_keys=2),
+            ForeignMonthRows(path=rel, coords=coords, foreign_rows=1, overlap_rows=None),
+        )
+
+    def test_no_coords_builds_no_findings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # check_invariants=False: even a count-carrying wire builds NOTHING
+        # (the classification is the caller's choice, not the crate's).
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        wire = (3, _JUNE_US, _JUNE_US + 60_000_000, True, "a" * 64, (3, 2), 1)
+        result = _recon_call(
+            monkeypatch, _fake_crate(reconcile=lambda p, h: wire), coords=None, oracle=object
+        )
+        assert result is not None
+        assert result[4] == ()
+
+    def test_naive_column_builds_naive_datetimes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from datetime import datetime, timedelta
+
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        wire = (2, _JUNE_US, _JUNE_US + 60_000_000, False, "a" * 64, None, 0)
+        result = _recon_call(monkeypatch, _fake_crate(reconcile=lambda p, h: wire), oracle=object)
+        assert result is not None
+        expected = datetime(1970, 1, 1) + timedelta(microseconds=_JUNE_US)
+        assert result[1] == expected
+        assert result[1].tzinfo is None and result[2].tzinfo is None
+
+    def test_arguments_cross_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        seen: list[tuple[Any, Any]] = []
+
+        def _record(path: str, home: Any) -> Any:
+            seen.append((path, home))
+            return _RECON_CLEAN_WIRE
+
+        _recon_call(monkeypatch, _fake_crate(reconcile=_record), coords=_recon_coords())
+        _recon_call(monkeypatch, _fake_crate(reconcile=_record), coords=None)
+        assert seen == [
+            ("/lake/bars/NSE/INDEX/NIFTY/1minute/2024/06.parquet", (2024, 6)),
+            ("/lake/bars/NSE/INDEX/NIFTY/1minute/2024/06.parquet", None),
         ]

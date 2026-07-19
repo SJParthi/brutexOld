@@ -25,12 +25,18 @@
 //!   read core — enumeration + collect + ts-range gate + price-sanity gate
 //!   and bad-tick screen — plus the `has_stored_1m_bars` and
 //!   `month_partition_files` drift-pinned twins.
-//! * `heal` (W-2) / `reconcile` (W-3) / `scan` (W-4): future sibling
-//!   modules per the Wave-D design §H; they register ADDITIVELY below the
-//!   W-1 functions in `lib.rs`, never in place of them.
+//! * `heal` (W-2): the `lake_heal` mutation core (`waved_heal_batch`) + the
+//!   `lake_content_token` walk twin.
+//! * `reconcile` (W-3, this PR): the `catalog_reconcile` per-file scan
+//!   primitive (`waved_reconcile_file` — timestamp span + sha256 raw_hash +
+//!   the L1 dup/foreign classify counts).
+//! * `scan` (W-4): the future `lake_invariants` sibling per the Wave-D
+//!   design §H; it registers ADDITIVELY below the earlier functions in
+//!   `lib.rs`, never in place of them.
 
 pub mod heal;
 pub mod read;
+pub mod reconcile;
 
 /// One per-session bad-tick WARN record the Python shell replays through
 /// `brutex.data.bad_tick.emit_bad_tick_warn` (the SINGLE emission seam —

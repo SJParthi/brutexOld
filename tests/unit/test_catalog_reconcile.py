@@ -313,6 +313,64 @@ class TestReconcile:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# The Wave-D W-3 seam (BRUTEX_LAKE_WAVED_RUST)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestWavedSeam:
+    """The flag gate around the per-file scan body (DEC-RUST-LAKE-WAVED-001).
+
+    Wheel-free by design: the flag-ON arm poisons ``sys.modules`` so the
+    facade's import guard latches and the ORACLE (the verbatim
+    ``_scan_file``) serves — proving the routed branch is
+    behaviour-identical without the crate; the real-wheel parity gate is
+    ``tests/integration/test_waved_reconcile_differential.py``.
+    """
+
+    def test_flag_off_never_calls_the_facade(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The never-routes bomb spy: flag OFF (the default) must not touch
+        # the routing function at all.
+        import brutex.data.catalog_reconcile as cr
+
+        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
+
+        def _bomb(**kwargs: object) -> object:
+            raise AssertionError("reconcile_file_via_rust must not run flag-OFF")
+
+        monkeypatch.setattr(cr, "reconcile_file_via_rust", _bomb)
+        _write_partition(tmp_path, n=3)
+        with _open(tmp_path) as cat:
+            result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+        assert result.partitions_reconciled == 1
+
+    def test_flag_on_without_crate_serves_the_oracle_identically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Flag ON + an absent wheel: the facade latches crate_unavailable and
+        # every per-file call serves the verbatim Python body — the result is
+        # byte-identical to the flag-OFF run over the same lake.
+        import sys
+
+        from brutex.data import lake_rust_waved as lrw
+
+        _write_partition(tmp_path, n=4)
+        with _open(tmp_path) as cat:
+            baseline = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+        monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex_lake", None)  # ImportError → latch
+        lrw.reset_lake_rust_waved_for_tests()
+        try:
+            with _open(tmp_path) as cat:
+                routed = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+        finally:
+            lrw.reset_lake_rust_waved_for_tests()
+        assert routed == baseline
+        assert routed.partitions_reconciled == 1 and routed.bars_total == 4
+
+
+# ────────────────────────────────────────────────────────────────────────
 # _as_utc
 # ────────────────────────────────────────────────────────────────────────
 

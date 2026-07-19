@@ -22,6 +22,20 @@ and makes no O(1)-total claim. It is additive (upsert-only): partitions whose
 Parquet file was deleted out from under the lake are left as stale catalog rows
 (this append-only lake does not delete partitions); callers reading a missing
 file get the catalog's existing missing-file error, unchanged.
+
+Wave-D seam (ADR-0020 §6, ``BRUTEX_LAKE_WAVED_RUST`` — DEFAULT OFF): when the
+flag is ON, the PER-FILE read/hash/classify body (:func:`_scan_file` — the
+``timestamp``-column read + row count + min/max span + the run-identity
+``sha256`` + the L1 dup/foreign classification) routes through
+:func:`brutex.data.lake_rust_waved.reconcile_file_via_rust` with the verbatim
+Python body as the LIVE parity oracle — every guard / degrade /
+burn-in-mismatch path serves it, so a genuine skip-class file keeps its exact
+exception type + message bytes (the facade's degrade-to-oracle law) and the
+``raw_hash`` sha256 stays byte-equal (Golden Rule #4 — it feeds the FR-CAT-004
+catalog rollup). The LOOP — enumeration, ``parse_partition_path``, the
+stat-cache branch, ``CatalogEntry`` build + upsert, the drift fold, all
+logging — stays here. Flag OFF (the default) never calls the facade routing
+function and never imports the crate (spy-pinned).
 """
 
 from __future__ import annotations
@@ -30,6 +44,7 @@ import hashlib
 import os
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -44,16 +59,26 @@ from brutex.data.errors import (
     parquet_read_skip_errors,
 )
 from brutex.data.lake_invariants import (
+    ForeignMonthRows,
+    IntraFileDup,
     LakeFinding,
     PartitionCoords,
     classify_bar_keys,
     detect_legacy_drift,
     log_lake_finding,
 )
+from brutex.data.lake_rust_waved import lake_rust_waved_enabled, reconcile_file_via_rust
 from brutex.data.models import CatalogEntry
 from brutex.data.partition import BAR_DIR_NAME, parse_partition_path
 
 __all__ = ["ReconcileResult", "reconcile_catalog_from_lake"]
+
+#: The per-file scan payload ``(row_count, first_ts, last_ts, raw_hash,
+#: findings)`` shared by the verbatim Python body and the Wave-D seam
+#: (``None`` = a zero-row file — the caller's counted skip). ``first_ts``/
+#: ``last_ts`` are the raw ``Series.min()/max()`` values; :func:`_as_utc`
+#: normalises them at ``CatalogEntry`` build exactly as before.
+_FileScan = tuple[int, object, object, str, tuple[IntraFileDup | ForeignMonthRows, ...]]
 
 #: One ``catalog.reconcile.parquet_skip`` warning per unreadable partition file, so a
 #: corrupt Parquet that would otherwise crash the FIRST step of every sweep load + F&O
@@ -122,6 +147,46 @@ def _partition_files(
         return []
     pattern = f"{exchange or '*'}/{segment or '*'}/{symbol or '*'}/{interval or '*'}/*/*.parquet"
     return sorted(base.glob(pattern))
+
+
+def _scan_file(path: Path, coords: PartitionCoords | None) -> _FileScan | None:
+    """The verbatim per-file read/hash/classify body — the Wave-D W-3 oracle.
+
+    ``None`` = a zero-row file (the caller's counted skip). Raises whatever
+    the read/min/max/hash raise (the caller's GAP-#9 guard owns the skip
+    verdict). *coords* ``None`` = ``check_invariants=False`` — the L1
+    classification is skipped entirely (the pre-DEC-LAKE-HEAL-001 hot-path
+    behaviour); a :class:`PartitionCoords` runs
+    :func:`~brutex.data.lake_invariants.classify_bar_keys` on the SAME
+    timestamp column this body already read (zero extra I/O — the free-claim
+    spy pin) and folds the non-``None`` findings into the scan payload
+    (relpath-stamped; the caller substitutes the concrete file path). The
+    classification's only fault surface is the stored-timestamp conversion
+    already gated by the min/max above (the round-18 argument at the
+    caller's guard), so folding it inside the guarded body adds no
+    reachable verdict change.
+    """
+    # glob=False: ONE concrete walked file (DEC-SPOT-DERIVE-TS-RANGE-
+    # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
+    # symbol dir must never glob-read a sibling's rows into this row's
+    # reconcile stats.
+    timestamps = pl.read_parquet(path, columns=["timestamp"], glob=False).get_column("timestamp")
+    row_count = timestamps.len()
+    if row_count == 0:
+        return None
+    first_ts = timestamps.min()
+    last_ts = timestamps.max()
+    raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    findings: tuple[IntraFileDup | ForeignMonthRows, ...] = ()
+    if coords is not None:
+        # DEC-LAKE-HEAL-001 L1: classification rides the timestamp column
+        # this body ALREADY read — zero extra I/O (spy-pinned), only the
+        # n_unique hash pass. overlap_rows stays None (no canonical-sibling
+        # read here).
+        findings = tuple(
+            finding for finding in classify_bar_keys(coords, timestamps) if finding is not None
+        )
+    return (row_count, first_ts, last_ts, raw_hash, findings)
 
 
 def reconcile_catalog_from_lake(
@@ -219,6 +284,10 @@ def reconcile_catalog_from_lake(
     stat_token_maps: dict[
         tuple[str, str, str, str], dict[tuple[int, int], tuple[int, int, int] | None]
     ] = {}
+    # Wave-D seam gate (module docstring): resolved ONCE per reconcile pass —
+    # one env probe, never per file. Flag OFF never calls the routing
+    # function (spy-pinned byte-identity).
+    use_rust = lake_rust_waved_enabled()
     for path in files:
         try:
             coords = parse_partition_path(path, lake_root=lake_root)
@@ -263,10 +332,19 @@ def reconcile_catalog_from_lake(
                 # shared heal/census callers pass stat_cache=False (never skip).
                 stat_cache_hits += 1
                 continue
+        partition_coords: PartitionCoords | None = None
         if check_invariants:
             symbol_dirs.setdefault(
                 (cast(str, coords["exchange"]), cast(str, coords["segment"])), set()
             ).add(cast(str, coords["symbol"]))
+            partition_coords = PartitionCoords(
+                exchange=cast(str, coords["exchange"]),
+                segment=cast(str, coords["segment"]),
+                symbol=cast(str, coords["symbol"]),
+                interval=cast(str, coords["interval"]),
+                year=cast(int, coords["year"]),
+                month=cast(int, coords["month"]),
+            )
         # GAP #9: a single corrupt / version-incompatible Parquet file (a polars
         # PolarsError, or an OSError fault) must NOT crash the whole reconcile — which
         # runs at the START of every sweep load + F&O window derivation. Log + skip that
@@ -280,41 +358,30 @@ def reconcile_catalog_from_lake(
         # this ONE guard covers the L1 piggyback as well): a genuine code bug still
         # propagates (Golden Rule #1).
         try:
-            # glob=False: ONE concrete walked file (DEC-SPOT-DERIVE-TS-RANGE-
-            # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
-            # symbol dir must never glob-read a sibling's rows into this row's
-            # reconcile stats.
-            timestamps = pl.read_parquet(path, columns=["timestamp"], glob=False).get_column(
-                "timestamp"
-            )
-            row_count = timestamps.len()
-            if row_count == 0:
-                skipped += 1
-                continue
-            first_ts = timestamps.min()
-            last_ts = timestamps.max()
-            raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            if use_rust:
+                # The Wave-D W-3 seam (module docstring): the per-file body
+                # routes through the crate with `_scan_file` as the live
+                # parity oracle — every degrade path serves it, so the skip
+                # verdict below stays byte-identical either way.
+                scan = reconcile_file_via_rust(
+                    path=str(path),
+                    coords=partition_coords,
+                    oracle=partial(_scan_file, path, partition_coords),
+                )
+            else:
+                scan = _scan_file(path, partition_coords)
         except (*parquet_read_skip_errors(), *datetime_out_of_range_errors()) as exc:
             _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
             skipped += 1
             continue
-        if check_invariants:
-            # DEC-LAKE-HEAL-001 L1: classification rides the timestamp column this
-            # loop ALREADY read — zero extra I/O (spy-pinned), only the n_unique
-            # hash pass. overlap_rows stays None (no canonical-sibling read here).
-            partition_coords = PartitionCoords(
-                exchange=cast(str, coords["exchange"]),
-                segment=cast(str, coords["segment"]),
-                symbol=cast(str, coords["symbol"]),
-                interval=cast(str, coords["interval"]),
-                year=cast(int, coords["year"]),
-                month=cast(int, coords["month"]),
-            )
-            for finding in classify_bar_keys(partition_coords, timestamps):
-                if finding is not None:
-                    located = replace(finding, path=path)
-                    log_lake_finding(located)
-                    findings.append(located)
+        if scan is None:
+            skipped += 1
+            continue
+        row_count, first_ts, last_ts, raw_hash, file_findings = scan
+        for finding in file_findings:
+            located = replace(finding, path=path)
+            log_lake_finding(located)
+            findings.append(located)
         entry = CatalogEntry(
             exchange=cast(str, coords["exchange"]),
             segment=cast(str, coords["segment"]),

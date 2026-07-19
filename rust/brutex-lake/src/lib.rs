@@ -585,6 +585,10 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // (§4.1 additive merge law); W-3/W-4 append below in their own PRs.
     m.add_function(wrap_pyfunction!(waved::heal::waved_heal_batch, m)?)?;
     m.add_function(wrap_pyfunction!(waved::heal::waved_lake_content_token, m)?)?;
+    // ADR-0020 Wave-D W-3 (`BRUTEX_LAKE_WAVED_RUST` — the catalog_reconcile
+    // per-file scan primitive). Appended AFTER the W-1/W-2 registrations
+    // (§4.1 additive merge law); W-4 appends below in its own PR.
+    m.add_function(wrap_pyfunction!(waved::reconcile::waved_reconcile_file, m)?)?;
     Ok(())
 }
 

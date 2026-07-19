@@ -54,6 +54,27 @@ the offline heal differential
 :func:`lake_content_token_via_rust` routes the read-only sentinel walk with
 the full W-1 doctrine (degrade-to-oracle + burn-in token compare).
 
+## W-3 (this slice): the ``catalog_reconcile`` per-file scan
+
+:func:`reconcile_file_via_rust` routes the per-file read/hash/classify body
+of ``reconcile_catalog_from_lake`` — the ``timestamp``-column read + row
+count + physical min/max span + the ``sha256(file bytes)`` ``raw_hash``
+(**run-identity-adjacent**, Golden Rule #4: it feeds the FR-CAT-004 catalog
+rollup → ``data_snapshot_hash``) + the L1 ``classify_bar_keys`` dup/foreign
+counts — through ``brutex_lake.waved_reconcile_file``. The LOOP (glob
+enumeration, ``parse_partition_path``, the stat-cache branch,
+``CatalogEntry`` build + upsert, the drift fold, all logging) stays in
+``catalog_reconcile.py``. Read-only, so the full W-1 fail-closed doctrine
+applies — degrade-to-oracle (a crate refusal re-runs the verbatim Python
+body, which raises the REAL skip-class exception with today's message
+bytes, so the GAP-#9 ``catalog.reconcile.parquet_skip`` verdict stays
+byte-identical by construction), refuse-poison shapes, and the per-surface
+burn-in whose tuple compare makes the sha256 hex the tooth. The
+``IntraFileDup`` / ``ForeignMonthRows`` finding OBJECTS are reconstructed
+facade-side from the crate counts (dataclasses stay Python), value-equal to
+``classify_bar_keys``' output by the frozen-dataclass equality the burn-in
+compares.
+
 ## The flag — ``BRUTEX_LAKE_WAVED_RUST`` (DEFAULT OFF)
 
 A truthy literal (``1/true/yes/on``) → ON; a falsy literal
@@ -97,6 +118,8 @@ import importlib
 import io
 import json
 import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -108,6 +131,13 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from types import ModuleType
 
     import polars as pl
+
+    from brutex.data.lake_invariants import ForeignMonthRows, IntraFileDup, PartitionCoords
+
+    #: The per-file reconcile scan wire ``(row_count, first_ts, last_ts,
+    #: raw_hash, findings)`` — the W-3 seam's shared oracle/crate shape
+    #: (``None`` = a zero-row file, the caller's counted skip).
+    WavedFileScan = tuple[int, object, object, str, tuple["IntraFileDup | ForeignMonthRows", ...]]
 
 _LOG = structlog.get_logger("brutex.data.lake_rust_waved")
 
@@ -121,6 +151,9 @@ SURFACE_READ_1M: Final[str] = "read_1m"
 
 #: The W-2 read-only surface token (the ``lake_content_token`` walk twin).
 SURFACE_CONTENT_TOKEN: Final[str] = "content_token"  # noqa: S105 — a surface NAME, not a secret
+
+#: The W-3 surface token (the ``catalog_reconcile`` per-file scan).
+SURFACE_RECONCILE_FILE: Final[str] = "reconcile_file"
 
 #: Engaged calls compared against the Python oracle per process PER surface
 #: (the burn-in self-check) — 16, the render/resample/#1531 precedent.
@@ -144,6 +177,7 @@ _DISABLED_REASON: Final[list[str | None]] = [None]
 _BURN_IN_REMAINING: Final[dict[str, int]] = {
     SURFACE_READ_1M: BURN_IN_SAMPLES,
     SURFACE_CONTENT_TOKEN: BURN_IN_SAMPLES,
+    SURFACE_RECONCILE_FILE: BURN_IN_SAMPLES,
 }
 
 #: Per-surface shape tokens already compared this process (the shape gate).
@@ -154,6 +188,7 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = {
 _BURN_IN_SHAPES_SEEN: Final[dict[str, set[str]]] = {
     SURFACE_READ_1M: set(),
     SURFACE_CONTENT_TOKEN: set(),
+    SURFACE_RECONCILE_FILE: set(),
 }
 
 #: Whether each surface's shape gate is armed (the resample-facade shape:
@@ -162,6 +197,7 @@ _BURN_IN_SHAPES_SEEN: Final[dict[str, set[str]]] = {
 _BURN_IN_SHAPE_GATE: Final[dict[str, bool]] = {
     SURFACE_READ_1M: True,
     SURFACE_CONTENT_TOKEN: True,
+    SURFACE_RECONCILE_FILE: True,
 }
 
 #: The crate API surface the import guard verifies — ALL-OR-NOTHING over
@@ -175,6 +211,7 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "waved_month_partition_files",
     "waved_heal_batch",
     "waved_lake_content_token",
+    "waved_reconcile_file",
 )
 
 #: Once-per-process-per-reason warn memo + per-surface engaged latches.
@@ -763,16 +800,224 @@ def lake_content_token_via_rust(
     return token
 
 
+#: The waved reconcile result's tuple arity — ``(row_count, first_ts_us,
+#: last_ts_us, tz_aware, sha256_hex, dup, foreign_rows)``.
+_RECONCILE_RESULT_ARITY: Final[int] = 7
+
+#: The sha256 hexdigest length (the ``raw_hash`` wire shape).
+_SHA256_HEX_LEN: Final[int] = 64
+
+#: The dup-counts pair arity — ``(physical_rows, unique_keys)``.
+_DUP_PAIR_ARITY: Final[int] = 2
+
+#: Epoch anchors for rebuilding polars' ``Series.min()/max()`` datetimes
+#: from the crate's PHYSICAL epoch-µs: an AWARE column's min/max compare
+#: instant-equal under any tz (aware ``datetime`` equality is by instant),
+#: a NAIVE column's are the naive wall times — both are epoch + physical µs.
+_EPOCH_UTC: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
+_EPOCH_NAIVE: Final[datetime] = datetime(1970, 1, 1)
+
+
+def _is_count(value: object) -> bool:
+    """``True`` iff *value* is a genuine int (a bool-punned int is poison)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _reconcile_findings(
+    coords: PartitionCoords, dup: tuple[int, int] | None, foreign_rows: int
+) -> tuple[IntraFileDup | ForeignMonthRows, ...]:
+    """Rebuild the L1 finding objects from the crate's classify counts.
+
+    Value-equal to ``classify_bar_keys``' output by construction: the same
+    lake-relative ``coords.relpath()`` path stamp, the same coords object,
+    the same dup-then-foreign order, ``overlap_rows=None`` (the free L1 path
+    never reads the canonical sibling) — pinned by the burn-in's
+    frozen-dataclass tuple compare and the twin-catalog differential. Lazy
+    import: the finding dataclasses live in ``lake_invariants`` (which
+    imports polars); this leaf stays polars-free at module scope.
+    """
+    from brutex.data.lake_invariants import ForeignMonthRows, IntraFileDup
+
+    rel = Path(coords.relpath())
+    findings: list[IntraFileDup | ForeignMonthRows] = []
+    if dup is not None:
+        findings.append(
+            IntraFileDup(
+                path=rel, coords=coords, physical_rows=int(dup[0]), unique_keys=int(dup[1])
+            )
+        )
+    if foreign_rows:
+        findings.append(
+            ForeignMonthRows(
+                path=rel, coords=coords, foreign_rows=int(foreign_rows), overlap_rows=None
+            )
+        )
+    return tuple(findings)
+
+
+def _reconcile_scan_from_result(
+    result: object, coords: PartitionCoords | None
+) -> WavedFileScan | None:
+    """Shape-validate + convert the crate's reconcile wire to the scan tuple.
+
+    Raises ``ValueError`` on ANY junk shape (a non-tuple/None root, wrong
+    arity, bool-punned/non-int counts, a law-violating count relation, a
+    non-64-char hash, an out-of-``datetime``-range span) — the caller treats
+    that as refuse-poison and serves the oracle. ``None`` (the crate's
+    zero-row verdict) passes through as ``None``.
+    """
+    if result is None:
+        return None
+    if not isinstance(result, tuple) or len(result) != _RECONCILE_RESULT_ARITY:
+        raise ValueError(f"reconcile result must be a 7-tuple or None, got {type(result).__name__}")
+    row_count, first_us, last_us, tz_aware, raw_hash, dup, foreign_rows = result
+    for label, value in (
+        ("row_count", row_count),
+        ("first_ts_us", first_us),
+        ("last_ts_us", last_us),
+        ("foreign_rows", foreign_rows),
+    ):
+        if not _is_count(value):
+            raise ValueError(f"reconcile {label} must be an int")
+    if row_count < 1 or foreign_rows < 0 or foreign_rows > row_count or first_us > last_us:
+        raise ValueError("reconcile counts/span violate the scan laws")
+    if not isinstance(tz_aware, bool):
+        raise ValueError("reconcile tz_aware must be a bool")
+    if not isinstance(raw_hash, str) or len(raw_hash) != _SHA256_HEX_LEN:
+        raise ValueError("reconcile sha256 must be a 64-char hex string")
+    if dup is not None and (
+        not isinstance(dup, tuple)
+        or len(dup) != _DUP_PAIR_ARITY
+        or not all(_is_count(value) for value in dup)
+        or dup[0] != row_count
+        or not dup[0] > dup[1] >= 1
+    ):
+        raise ValueError("reconcile dup counts violate the classify law")
+    try:
+        epoch = _EPOCH_UTC if tz_aware else _EPOCH_NAIVE
+        first_ts = epoch + timedelta(microseconds=first_us)
+        last_ts = epoch + timedelta(microseconds=last_us)
+    except OverflowError as exc:
+        raise ValueError(f"reconcile span outside the datetime range: {exc}") from exc
+    findings: tuple[IntraFileDup | ForeignMonthRows, ...] = ()
+    if coords is not None:
+        findings = _reconcile_findings(coords, dup, foreign_rows)
+    return (int(row_count), first_ts, last_ts, raw_hash, findings)
+
+
+def reconcile_file_via_rust(
+    *,
+    path: str,
+    coords: PartitionCoords | None,
+    oracle: Callable[[], WavedFileScan | None],
+) -> WavedFileScan | None:
+    """The routed per-file reconcile scan — called by ``reconcile_catalog_from_lake`` ONLY flag-ON.
+
+    Read-only, so the full W-1 fail-closed doctrine applies (module
+    docstring): guard latches / crate refusals / refuse-poison shapes serve
+    ``oracle()`` — the verbatim Python read/hash/classify body, which either
+    returns the scan tuple or raises the REAL skip-class exception
+    (``PolarsError`` / ``OverflowError`` / ``OSError`` …) the caller's
+    GAP-#9 guard maps to the pinned ``catalog.reconcile.parquet_skip``
+    verdict with today's message bytes (the degrade-to-oracle law) — and the
+    first :data:`BURN_IN_SAMPLES` engaged calls (plus each unseen
+    ``classify=`` shape) run BOTH arms, autoreverting the whole waved seam
+    on ANY tuple difference (the ``raw_hash`` sha256 equality is the
+    run-identity tooth — Golden Rule #4).
+
+    Parameters
+    ----------
+    path
+        The partition file's concrete path (the caller's walked file — the
+        crate reads it verbatim, never a glob pattern).
+    coords
+        The file's already-parsed :class:`PartitionCoords` when the L1
+        classify piggyback is on (``check_invariants=True``), else ``None``
+        — the crate then skips the dup/foreign counts and the scan carries
+        no findings (both arms agree by construction).
+    oracle
+        The verbatim Python per-file body — the live parity oracle every
+        degrade path serves.
+
+    Returns
+    -------
+    WavedFileScan | None
+        ``(row_count, first_ts, last_ts, raw_hash, findings)``, or ``None``
+        for a zero-row file (the caller's counted skip).
+    """
+    crate = _crate_ready()
+    if crate is None:
+        return oracle()
+    classify_home = None if coords is None else (coords.year, coords.month)
+    try:
+        result = crate.waved_reconcile_file(path, classify_home)
+    except degrade_errors() as exc:
+        # The degrade-to-oracle law: a crate refusal — including a GENUINE
+        # skip-class file (corrupt bytes, an out-of-range stamp) — re-runs
+        # the oracle, which raises the real exception with today's message
+        # bytes or succeeds; the oracle's verdict always wins.
+        _warn_once("reconcile_error", error_detail=repr(exc))
+        return oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        # The escape set (the errors.py doctrine) — never a fallback.
+        raise
+    except panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return oracle()
+    try:
+        scan = _reconcile_scan_from_result(result, coords)
+    except ValueError as exc:
+        # Refuse-poison gate: a mis-shaped wire is a crate BUG — served
+        # loudly from the oracle (structurally unreachable through the real
+        # crate; guards a stale/foreign install).
+        _warn_once("reconcile_result_refused", error_detail=repr(exc))
+        return oracle()
+    shape_token = f"classify={coords is not None}"
+    shape_unseen = (
+        _BURN_IN_SHAPE_GATE[SURFACE_RECONCILE_FILE]
+        and shape_token not in _BURN_IN_SHAPES_SEEN[SURFACE_RECONCILE_FILE]
+    )
+    if _BURN_IN_REMAINING[SURFACE_RECONCILE_FILE] > 0 or shape_unseen:
+        # Layer 3 — the burn-in self-check: both arms scan; ANY tuple
+        # difference (counts, span datetimes, the sha256 hex, the finding
+        # objects) ships the ORACLE scan and autoreverts the whole waved
+        # seam. An oracle RAISE propagates — production-identical on a file
+        # the Python arm refuses.
+        oracle_scan = oracle()
+        if scan != oracle_scan:
+            _disable(
+                "burn_in_reconcile_mismatch",
+                error=True,
+                surface=SURFACE_RECONCILE_FILE,
+                shape_token=shape_token,
+                file_path=path,
+            )
+            return oracle_scan
+        _BURN_IN_SHAPES_SEEN[SURFACE_RECONCILE_FILE].add(shape_token)
+        if _BURN_IN_REMAINING[SURFACE_RECONCILE_FILE] > 0:
+            _BURN_IN_REMAINING[SURFACE_RECONCILE_FILE] -= 1
+            if _BURN_IN_REMAINING[SURFACE_RECONCILE_FILE] == 0:
+                _LOG.info(
+                    "lake_rust_waved.burn_in_complete",
+                    surface=SURFACE_RECONCILE_FILE,
+                    samples=BURN_IN_SAMPLES,
+                )
+        return scan
+    return scan
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "LAKE_WAVED_RUST_ENV",
     "SURFACE_CONTENT_TOKEN",
     "SURFACE_READ_1M",
+    "SURFACE_RECONCILE_FILE",
     "env_flag_tristate",
     "heal_batch_via_rust",
     "lake_content_token_via_rust",
     "lake_rust_waved_enabled",
     "read_1m_via_rust",
+    "reconcile_file_via_rust",
     "reset_lake_rust_waved_for_tests",
     "rust_waved_disabled",
 ]
