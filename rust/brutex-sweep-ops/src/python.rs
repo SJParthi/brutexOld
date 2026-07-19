@@ -13,6 +13,7 @@
 
 use pyo3::prelude::*;
 
+use crate::artifacts;
 use crate::audit_chain;
 use crate::leaves;
 
@@ -260,6 +261,59 @@ fn count_reconciliation(
     .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
+// ───────────────────── slice 3 — artifacts ─────────────────────
+
+/// `sweep_exit_status` wall-clock + suspect resolution law (see
+/// [`artifacts::exit_status_resolution`]). An unknown state token raises
+/// `ValueError` (the facade degrades to the oracle) — the Python wiring
+/// gates the token against the mirrored `RunState` values, so the raise is
+/// a belt, never a live path. Floats cross as f64 BIT-exactly; the JSON
+/// rendering (float repr) stays Python.
+#[pyfunction]
+fn exit_status_resolution(
+    state: &str,
+    prior_started: Option<f64>,
+    now: f64,
+    suspect: Option<bool>,
+    prior_suspect: Option<bool>,
+) -> PyResult<(f64, Option<f64>, bool)> {
+    artifacts::exit_status_resolution(state, prior_started, now, suspect, prior_suspect)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// `sweep_quarantine` monotonic quarantine-ordinal fold (see
+/// [`artifacts::next_ordinal`]). Non-ASCII input or a u64 ordinal overflow
+/// raises `ValueError` (the facade gates non-ASCII to the oracle — Python's
+/// `int()` accepts Unicode digits; overflow degrades — Python ints are
+/// unbounded).
+#[pyfunction]
+fn quarantine_next_ordinal(names: Vec<String>, prefix: &str, suffix: &str) -> PyResult<u64> {
+    artifacts::next_ordinal(&names, prefix, suffix).map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// `sweep_checkpoint` monotonic `record` advance decision (see
+/// [`artifacts::checkpoint_record_decision`]).
+#[pyfunction]
+fn checkpoint_record_decision(
+    completed_index: i64,
+    last_index: i64,
+    total_combos: i64,
+) -> &'static str {
+    artifacts::checkpoint_record_decision(completed_index, last_index, total_combos)
+}
+
+/// `sweep_checkpoint` load-tail adoption verdict (see
+/// [`artifacts::checkpoint_adoption_verdict`]).
+#[pyfunction]
+fn checkpoint_adoption_verdict(
+    store_sweep_id: &str,
+    store_total: i64,
+    cp_sweep_id: &str,
+    cp_total: i64,
+) -> &'static str {
+    artifacts::checkpoint_adoption_verdict(store_sweep_id, store_total, cp_sweep_id, cp_total)
+}
+
 // ──────────────────────── module registration ────────────────────────
 
 #[pymodule]
@@ -284,7 +338,13 @@ fn _brutex_sweep_ops(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stamp_verdict, m)?)?;
     m.add_function(wrap_pyfunction!(chain_link_state, m)?)?;
     m.add_function(wrap_pyfunction!(count_reconciliation, m)?)?;
-    // slice 3..6 registration blocks append below this line, one fenced
+    // slice 3 — artifacts
+    m.add("RUN_STATE_TOKENS", artifacts::RUN_STATE_TOKENS)?;
+    m.add_function(wrap_pyfunction!(exit_status_resolution, m)?)?;
+    m.add_function(wrap_pyfunction!(quarantine_next_ordinal, m)?)?;
+    m.add_function(wrap_pyfunction!(checkpoint_record_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(checkpoint_adoption_verdict, m)?)?;
+    // slice 4..6 registration blocks append below this line, one fenced
     // block per slice (see the module docstring's registration law).
     Ok(())
 }

@@ -41,6 +41,20 @@ Slice 2 — the audit-chain family:
 * ``CHAIN_LINKS`` — the Rust twin of ``chain_map.LINKS`` (drift-pinned by
   the parity suite).
 
+Slice 3 — the durable-artifacts family (decisions ONLY — no write/fsync/
+rename/lock ever crosses the FFI):
+
+* ``exit_status_resolution`` — the ``sweep_exit_status`` wall-clock
+  preservation + suspect resolution law (floats cross as f64 bit-exactly;
+  the JSON rendering stays Python).
+* ``quarantine_next_ordinal`` — the ``sweep_quarantine`` monotonic
+  quarantine-dirname ordinal fold over ALREADY-LISTED entry names.
+* ``checkpoint_record_decision`` / ``checkpoint_adoption_verdict`` — the
+  ``sweep_checkpoint`` monotonic-advance decision + load-tail adoption
+  verdict.
+* ``RUN_STATE_TOKENS`` — the Rust twin of the ``RunState`` wire values
+  (drift-pinned by the parity suite).
+
 Wheel-source freshness handshake (the sibling-wheel pattern)
 ------------------------------------------------------------
 Import-time guard: the compiled ``.so`` is asserted to expose EVERY symbol
@@ -65,17 +79,22 @@ from collections.abc import Sequence
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "CHAIN_LINKS",
     "RUN_DIR_SUBDIR",
+    "RUN_STATE_TOKENS",
     "__version__",
     "audit_entry_hash",
     "chain_link_state",
     "chain_verify_step",
+    "checkpoint_adoption_verdict",
+    "checkpoint_record_decision",
     "count_reconciliation",
+    "exit_status_resolution",
     "freshness_stale",
     "gate_config_fragment",
     "join_path_segments",
     "liveness_tail",
     "preflight_missing",
     "progress_derived",
+    "quarantine_next_ordinal",
     "rank_plan_decision",
     "sla_decision",
     "stall_scaled_timeout",
@@ -109,17 +128,22 @@ _assert_compiled_surface(_compiled)
 from ._brutex_sweep_ops import (  # noqa: E402
     CHAIN_LINKS,
     RUN_DIR_SUBDIR,
+    RUN_STATE_TOKENS,
     __version__,
     audit_entry_hash,
     chain_link_state,
     chain_verify_step,
+    checkpoint_adoption_verdict,
+    checkpoint_record_decision,
     count_reconciliation,
+    exit_status_resolution,
     freshness_stale,
     gate_config_fragment,
     join_path_segments,
     liveness_tail,
     preflight_missing,
     progress_derived,
+    quarantine_next_ordinal,
     rank_plan_decision,
     sla_decision,
     stall_scaled_timeout,
@@ -133,17 +157,22 @@ __build_crate_version__: str = __version__
 __all__ = [
     "CHAIN_LINKS",
     "RUN_DIR_SUBDIR",
+    "RUN_STATE_TOKENS",
     "__version__",
     "audit_entry_hash",
     "chain_link_state",
     "chain_verify_step",
+    "checkpoint_adoption_verdict",
+    "checkpoint_record_decision",
     "count_reconciliation",
+    "exit_status_resolution",
     "freshness_stale",
     "gate_config_fragment",
     "join_path_segments",
     "liveness_tail",
     "preflight_missing",
     "progress_derived",
+    "quarantine_next_ordinal",
     "rank_plan_decision",
     "sla_decision",
     "stall_scaled_timeout",

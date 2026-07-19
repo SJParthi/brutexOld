@@ -101,3 +101,30 @@ def count_reconciliation(
     prev_evaluated: int | None,
     is_done: bool,
 ) -> str: ...
+
+# ── slice 3 — the durable-artifacts family ──────────────────────────
+RUN_STATE_TOKENS: list[str]
+
+def exit_status_resolution(
+    state: str,
+    prior_started: float | None,
+    now: float,
+    suspect: bool | None,
+    prior_suspect: bool | None,
+) -> tuple[float, float | None, bool]: ...
+def quarantine_next_ordinal(
+    names: list[str],
+    prefix: str,
+    suffix: str,
+) -> int: ...
+def checkpoint_record_decision(
+    completed_index: int,
+    last_index: int,
+    total_combos: int,
+) -> str: ...
+def checkpoint_adoption_verdict(
+    store_sweep_id: str,
+    store_total: int,
+    cp_sweep_id: str,
+    cp_total: int,
+) -> str: ...
