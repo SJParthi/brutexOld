@@ -83,6 +83,7 @@
 //!   O(N_masks · N_bars) — claiming O(1) total is a physical impossibility and is
 //!   FORBIDDEN (Golden Rule #10).
 
+use crate::mask_word::MaskWord;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -586,35 +587,13 @@ fn holding_bars(entry_idx: usize, exit_idx: usize) -> u64 {
     (exit_idx.saturating_sub(entry_idx) as u64) + 1
 }
 
-/// Width-generic mask word for the sweep-sim core (DEC-TRADE-SIM-U128-KERNEL-001).
-///
-/// The ONLY mask-touching operation in the whole trade walk is the per-bar
-/// SUPERSET containment test; every other instruction is width-independent
-/// i64 price arithmetic in [`Walker`]. Making that single operation generic
-/// lets the u64 production kernel and the u128 headroom kernel share ONE core
-/// (CLAUDE.md §11 COMMON — no parallel copy of the walk), monomorphized by
-/// the compiler to the exact pre-generic code for `W = u64` (the existing
-/// `#[cfg(test)]` suite passing UNMODIFIED is the frozen-behaviour gate).
-/// For `W = u128` the compiler's two-limb lowering of the 128-bit `&`/`==`
-/// is the "two-limb" evaluation — no hand-rolled limb pairs needed.
-trait MaskWord: Copy + Send + Sync {
-    /// True iff `bar` is a SUPERSET of `mask` — `(bar & mask) == mask`.
-    fn is_superset(bar: Self, mask: Self) -> bool;
-}
-
-impl MaskWord for u64 {
-    #[inline(always)]
-    fn is_superset(bar: u64, mask: u64) -> bool {
-        (bar & mask) == mask
-    }
-}
-
-impl MaskWord for u128 {
-    #[inline(always)]
-    fn is_superset(bar: u128, mask: u128) -> bool {
-        (bar & mask) == mask
-    }
-}
+// The width-generic MaskWord trait (DEC-TRADE-SIM-U128-KERNEL-001) was
+// introduced HERE module-internal and is HOISTED verbatim to the shared
+// `crate::mask_word` module (DEC-ENUM-KERNEL-U128-001 — the enum/count
+// kernels genericize over the SAME trait; CLAUDE.md §11 COMMON). Pure
+// relocation — behaviour byte-identical (`use crate::mask_word::MaskWord`
+// at the top of this file repoints the import); this suite passing
+// UNMODIFIED is the frozen-behaviour gate.
 
 /// The width-INDEPENDENT resident columns — OHLC paisa + forced flags + the
 /// per-bar session ordinals. Shared verbatim by both kernel widths; only the

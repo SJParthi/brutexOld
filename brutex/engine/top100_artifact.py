@@ -97,14 +97,16 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_bytes_deadline
 from brutex.engine.cascade_rust import require_cascade_rust
+from brutex.engine.resilience_streaks import project_resilience_annotation
 from brutex.models import BruteXError
 from brutex.ranking import MIN_TRADES
 from brutex.ranking.presets import (
@@ -122,6 +124,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
     from brutex.engine.cascade_join import CascadeJoin
     from brutex.engine.combo_aggregates import ComboAggregate
+    from brutex.engine.resilience_streaks import ResilienceStreaks
     from brutex.engine.results_store import ResultRow
     from brutex.engine.twin_detect import TwinFamilies
 
@@ -169,8 +172,10 @@ __all__ = [
 ]
 
 #: Artifact schema version — bump on ANY payload-shape change (a reader seeing
-#: an unknown version treats the artifact as absent → rebuild).
-TOP100_SCHEMA_VERSION: Final[int] = 1
+#: an unknown version treats the artifact as absent → rebuild). Bumped 1→2 by
+#: the resilience annotation (each entry now carries a top-level ``resilience``
+#: block; an old ``top100.json`` reads absent → rebuild).
+TOP100_SCHEMA_VERSION: Final[int] = 2
 
 #: The P2→P3 stage-stamp ``stage`` token, reused as the P3→P4 stamp shape.
 TOP100_STAGE: Final[str] = "top100"
@@ -314,6 +319,10 @@ class Top100Candidate:
     sl_paisa: int | None
     tp_paisa: int | None
     tuple_ref: str
+    #: The per-mask losing-streak resilience record (annotation-only; ``None``
+    #: when the resilience sidecar is absent → the entry carries an honest
+    #: all-``None`` ``resilience`` block, never a fabricated streak).
+    resilience: ResilienceStreaks | None = None
 
     def __post_init__(self) -> None:
         if self.row.run_id != self.agg.run_id:
@@ -575,7 +584,7 @@ def build_top100(
     Top100Error
         On a duplicate candidate ``run_id`` (one identity → one result).
     """
-    return cast(
+    artifact = cast(
         Top100Artifact,
         require_cascade_rust().top100_build(
             candidates,
@@ -597,6 +606,24 @@ def build_top100(
             _GATES,
             TOP100_LIMIT,
             TOP100_SCHEMA_VERSION,
+        ),
+    )
+    # DEC-RESILIENCE-STREAKS-001 (merged from main): the resilience annotation
+    # lands as ONE additive top-level ``resilience`` key per entry via
+    # :func:`brutex.engine.resilience_streaks.project_resilience_annotation`
+    # (a ``None`` record → an honest all-``None`` block, never fabricated) —
+    # applied SHIM-SIDE as a post-build pass over the crate-built entries
+    # (main's law appended the key inside ``_entry_payload``, whose body is
+    # crate-hosted; run_ids are unique by the crate's duplicate refusal, and
+    # the annotation appends LAST exactly as the upstream law did — the
+    # rendered ``dumps_sorted`` bytes are key-sorted either way). It never
+    # rewrites a ranking field (annotation-never-reranks).
+    resilience_by_run = {c.row.run_id: c.resilience for c in candidates}
+    return replace(
+        artifact,
+        entries=tuple(
+            project_resilience_annotation(entry, resilience_by_run.get(cast(str, entry["run_id"])))
+            for entry in artifact.entries
         ),
     )
 
@@ -669,7 +696,13 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
     rs = require_cascade_rust()
     target_dir = runs_dir / run_id
     try:
-        stamp_raw = (target_dir / TOP100_STAMP_FILENAME).read_bytes()
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — this loader
+        # feeds the oneclick top100 route's fresh parse): a planted FIFO /
+        # wedged volume folds into the existing NAMED-invalid arms (both
+        # guard errors are OSError subclasses), never a hung poll.
+        stamp_raw = read_regular_bytes_deadline(
+            target_dir / TOP100_STAMP_FILENAME, what="top100 stamp read"
+        )
     except OSError:
         _invalid("stamp_unreadable")
         return None
@@ -682,7 +715,7 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
         return None
 
     try:
-        raw = (target_dir / TOP100_FILENAME).read_bytes()
+        raw = read_regular_bytes_deadline(target_dir / TOP100_FILENAME, what="top100 artifact read")
     except OSError:
         _invalid("artifact_unreadable")
         return None

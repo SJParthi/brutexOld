@@ -67,6 +67,7 @@ from typing import Final, cast
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.cascade_rust import require_cascade_rust
 from brutex.engine.results_store import (
     ResultRow,
@@ -478,7 +479,10 @@ def render_cascade_sidecar(root: Path) -> str:
         return ""
     header = f"Stage-4 cascade sidecar — {path}"
     try:
-        content = path.read_text(encoding="utf-8")
+        # DEC-LAKE-READ-INODE-GUARD-001: the guarded regular-file-only read
+        # (a planted FIFO folds into the existing UNREADABLE arm — an OSError
+        # subclass); the JSON parse itself stays crate-side (the render law).
+        content = read_regular_text(path)
     except (OSError, ValueError) as exc:
         return f"{header}\n  UNREADABLE: {exc}"
     return cast(

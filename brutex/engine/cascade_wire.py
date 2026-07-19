@@ -122,6 +122,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.data.guarded_read import read_regular_bytes
 from brutex.engine.cascade_rust import require_cascade_rust
 from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
@@ -1307,7 +1308,7 @@ def build_leaderboard_trials(
                 f"trial-stats pairing mismatch at {sidecar}: sidecar digest "
                 f"{stats.tuple_digest} != expected tuple digest {expected_digest}"
             )
-        actual_hash = hashlib.sha256(store_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(read_regular_bytes(store_path)).hexdigest()
         if stats.store_content_hash != actual_hash:
             raise CascadeWireError(
                 f"trial-stats pairing mismatch at {sidecar}: sidecar store hash "
@@ -1730,8 +1731,12 @@ def build_stage2_cascade_specs(
     list[CascadeTupleSpec]
         One spec per non-empty grid tuple, in ``iter_sweep_tuples`` order.
     """
-    from brutex.engine.results_store import ResultsStore
-    from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+    from brutex.engine.results_store import ResultsStore, ResultsStoreSchemaError
+    from brutex.engine.sweep_orchestrator import (
+        TUPLE_STORE_CORRUPT_REMEDIATION,
+        iter_sweep_tuples,
+        tuple_store_path,
+    )
     from brutex.engine.sweep_run import _direction_label
 
     specs: list[CascadeTupleSpec] = []
@@ -1739,6 +1744,21 @@ def build_stage2_cascade_specs(
         store_path = tuple_store_path(results_root, sweep_tuple, grid)
         if not store_path.exists():
             continue
+        try:
+            rows = ResultsStore.load(store_path).rows()
+        except ResultsStoreSchemaError as exc:
+            # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921): a
+            # corrupt / old-schema finalist store surfaces as a typed cascade
+            # abort naming the file, NEVER a raw error and NEVER a silent skip
+            # (dropping a tuple's finalists would change Stage-2 selection
+            # invisibly — a false green; fabricating empty winners is equally
+            # forbidden, Golden Rule #1). The remediation is the ONE shared
+            # runnable command chain (review round 1 MINOR-1 — this site
+            # previously named sweep-verify/sweep-heal without the flags).
+            raise CascadeWireError(
+                f"stage-2 finalist store UNREADABLE at {store_path}: {exc} — "
+                f"{TUPLE_STORE_CORRUPT_REMEDIATION}; then re-run the cascade"
+            ) from exc
         proximity_bps = (
             None
             if sweep_tuple.proximity is None
@@ -1758,7 +1778,7 @@ def build_stage2_cascade_specs(
             prior_n=grid.prior_n,
             proximity_bps=proximity_bps,
             start_equity_paisa=grid.start_equity_paisa,
-            rows=ResultsStore.load(store_path).rows(),
+            rows=rows,
             top_k=top_k,
             fib_anchor=sweep_tuple.fib_anchor,
             vwap_source=sweep_tuple.price_source.vwap_source,
@@ -1788,14 +1808,22 @@ def write_manifest(results_root: Path, manifest: CascadeManifest) -> Path:
     G7 (DEC-SWEEP-UNKILLABLE-CORE-001): tmp→fsync→``os.replace`` via the COMMON
     :func:`~brutex.data.atomic_io.atomic_write_simple` — a crash mid-write can
     never leave a torn manifest for the replay to consume (same bytes, atomic
-    rename only).
+    rename only), and never a destroyed prior copy (``load_manifest`` still
+    serves the last complete cascade). A disk-full maps to
+    :class:`CascadeWireError` — a loud cascade-tail abort, deliberately NOT the
+    lake-wide ``LakeWriteHalt`` escalation (DEC-CASCADE-SIDECAR-ATOMIC-001,
+    MIGRATION.md #1923).
     """
-    from brutex.data.atomic_io import atomic_write_simple
-
     path = manifest_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     content = manifest_to_json(manifest)
-    atomic_write_simple(path, lambda tmp: tmp.write_bytes(content))
+    try:
+        atomic_write_simple(path, lambda tmp: tmp.write_bytes(content))
+    except OSError as exc:
+        raise CascadeWireError(
+            f"failed to write cascade manifest at {path}: {exc} — the prior copy "
+            f"(if any) is INTACT (atomic replace); free disk space and re-run the cascade"
+        ) from exc
     return path
 
 
@@ -1816,13 +1844,21 @@ def write_report(results_root: Path, report: CascadeWireReport) -> Path:
       torn-read mid-rewrite.
 
     Bytes rendered are IDENTICAL (:func:`serialize_wire_report` — the
-    auto==manual golden re-runs unchanged); only durability changed. Raw
-    ``OSError`` propagates unchanged (the engine sidecar error contract).
+    auto==manual golden re-runs unchanged); only durability changed. A
+    disk-full maps to the same typed :class:`CascadeWireError` contract as
+    :func:`write_manifest` (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md
+    #1923 — supersedes the interim raw-``OSError`` propagation).
     """
     path = report_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     rendered = serialize_wire_report(report)
-    atomic_write_simple(path, lambda tmp: tmp.write_bytes(rendered))
+    try:
+        atomic_write_simple(path, lambda tmp: tmp.write_bytes(rendered))
+    except OSError as exc:
+        raise CascadeWireError(
+            f"failed to write cascade report at {path}: {exc} — the prior copy "
+            f"(if any) is INTACT (atomic replace); free disk space and re-run the cascade"
+        ) from exc
     return path
 
 
@@ -1918,7 +1954,7 @@ def load_manifest(results_root: Path) -> CascadeManifest:
             f"no cascade manifest at {path} — run `brutex sweep-all` first "
             f"(the sweep writes the manifest its winners are cascaded from)"
         )
-    return manifest_from_json(path.read_bytes())
+    return manifest_from_json(read_regular_bytes(path))
 
 
 # ── End-to-end (auto path + manual path) ──────────────────────────────────────

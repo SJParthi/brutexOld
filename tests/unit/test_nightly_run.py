@@ -163,8 +163,8 @@ def _plan(lake: Path, results: Path, tmp_path: Path, **overrides: Any) -> Nightl
 
 
 @contextmanager
-def _noop_keep_awake(reason: str) -> Generator[None]:
-    yield
+def _noop_keep_awake(reason: str) -> Generator[bool]:
+    yield False
 
 
 def _seams(
@@ -1118,9 +1118,9 @@ def test_keep_awake_wraps_the_whole_chain(monkeypatch: pytest.MonkeyPatch, tmp_p
     marks: list[str] = []
 
     @contextmanager
-    def recording_keep_awake(reason: str) -> Generator[None]:
+    def recording_keep_awake(reason: str) -> Generator[bool]:
         marks.append(f"enter:{reason}")
-        yield
+        yield False
         marks.append("exit")
 
     def marking_sweep(**kwargs: Any) -> int:
@@ -1250,3 +1250,68 @@ def test_resolve_credentials_delegates_to_aws_resolver(
     sentinel = SimpleNamespace(api_key="aws-key")
     monkeypatch.setattr("brutex.config.credentials.resolve_groww_aws_credentials", lambda: sentinel)
     assert _resolve_credentials() is sentinel
+
+
+def test_box_update_block_rides_the_full_six_link_composition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§10 test 13 — the box_update + env_preflight blocks ride a FULL
+    ``run_nightly`` composition (all six links faked green) into the durable
+    ``report.json``, and the six R42 links are BREAKER-FREE w.r.t. the leg —
+    even a rolled_back block never blocks/blocks-by/refuses any link
+    (DEC-BOX-AUTODEPLOY-LANE-001 §5/§6 — the leg is pre-chain, never a link).
+    """
+    from brutex.nightly.box_update import BoxUpdateOutcome, BoxUpdateStatus
+
+    lake, results = _lake(tmp_path)
+    seams, alerter, _pipeline, calls = _seams(monkeypatch, results)
+    block = BoxUpdateOutcome(
+        status=BoxUpdateStatus.ROLLED_BACK,
+        from_sha="a" * 40,
+        to_sha="b" * 40,
+        running_sha="a" * 40,
+        skip_reason=None,
+        delta_rust=True,
+        delta_pyproject=False,
+        wheels=(),
+        gate="stale",
+        repair="rebuilt",
+        pip_restore="not_needed",
+        lock_restored=(),
+        quarantined=(),
+        alarm_signature="rolled_back||stale|rebuilt|not_needed|",
+        alarm_repeats=0,
+        reexec=False,
+        duration_s=1.0,
+        detail="",
+    ).to_dict()
+    preflight = {"flagged": [], "dotenv_errors": []}
+    plan = _plan(lake, results, tmp_path, box_update=block, env_preflight=preflight)
+    report = run_nightly(plan, seams=seams)
+    # The six links are UNAFFECTED by the (non-green) leg block — breaker-free.
+    assert [o.status for o in report.links] == [LinkStatus.OK] * 6
+    assert report.ok is True
+    assert report.exit_code == 0
+    assert calls["sweep"] == 1
+    # The blocks land VERBATIM in the durable report.json (the §5 contract).
+    on_disk = json.loads(
+        (nightly_dir(results, report.nightly_id) / "report.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["box_update"] == block
+    assert on_disk["env_preflight"] == preflight
+    # The 📦 honesty-note line rides the report for the non-quiet status.
+    assert any(n.startswith("📦 box-update: rolled_back") for n in report.honesty_notes)
+    # The one Telegram summary still fired with its ordinary verdict.
+    assert [s["verdict"] for s in alerter.summaries] == ["OK"]
+
+
+def test_box_update_note_quiet_statuses_are_silent() -> None:
+    """§5 — the 📦 note is SILENT on absent/up_to_date/disabled blocks (the
+    quiet statuses carry no operator-actionable news)."""
+    from brutex.nightly.run import _box_update_note
+
+    assert _box_update_note(None) is None
+    assert _box_update_note({"status": "up_to_date"}) is None
+    assert _box_update_note({"status": "disabled"}) is None
+    note = _box_update_note({"status": "updated", "wheels": "junk-not-a-list"})
+    assert note == "📦 box-update: updated ?→? · wheels ok 0/0 · gate skipped"

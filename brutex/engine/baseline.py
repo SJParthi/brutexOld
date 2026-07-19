@@ -66,6 +66,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.cascade_rust import EPOCH_DATE, epoch_us, require_cascade_rust
 from brutex.models import BruteXError
 
@@ -292,7 +293,7 @@ def load_baseline(path: Path) -> BaselineSeries | None:
         _LOG.warning("baseline.load_invalid", path=str(path), reason=reason)
 
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = read_regular_text(path)
     except OSError:
         _invalid("unreadable")
         return None

@@ -44,6 +44,7 @@ from typing import Any
 from brutex.engine.cascade_join import CascadeJoin, CascadeVerdictView
 from brutex.engine.top100_artifact import (
     TOP100_FILENAME,
+    TOP100_SCHEMA_VERSION,
     TOP100_STAMP_FILENAME,
     PoolCounts,
     Top100Artifact,
@@ -861,9 +862,11 @@ def load_scenarios() -> list[tuple[str, Callable[[Path], str]]]:
 
     Every damage class of the validating reader, each expected to log ONE
     named ``top100.load_invalid`` reason and return ``None`` — plus the two
-    bool==int PUNS that legally LOAD (``schema_version: true`` and an entry
-    ``rank: true`` at position 1 — ``True == 1``, the frozen law) and the
-    additive cascade_join tolerance arms.
+    bool==int PUNS (an entry ``rank: true`` at position 1 legally LOADS —
+    ``True == 1``, the frozen law; ``schema_version: true`` legally LOADED
+    under the schema-1 law and is the version-gate MISMATCH pin since the
+    DEC-RESILIENCE-STREAKS-001 1→2 bump) and the additive cascade_join
+    tolerance arms.
     """
     ok_raw = _small_artifact().rendered_bytes()
 
@@ -927,16 +930,24 @@ def load_scenarios() -> list[tuple[str, Callable[[Path], str]]]:
         _write_pair(runs_dir, _RUN, b"[1,2,3]")
         return _RUN
 
-    def schema_version_2(runs_dir: Path) -> str:
+    def schema_version_future(runs_dir: Path) -> str:
+        # Was the literal 2 (a FUTURE version under the schema-1 law this
+        # corpus first froze); DEC-RESILIENCE-STREAKS-001's schema bump (1→2,
+        # merged from main at the 2026-07-19 merge-forward) made 2 CURRENT, so
+        # the future-version mismatch arm now derives off the live constant.
         def edit(p: dict[str, Any]) -> None:
-            p["schema_version"] = 2
+            p["schema_version"] = TOP100_SCHEMA_VERSION + 1
 
         _write_pair(runs_dir, _RUN, _mutated_payload_bytes(edit))
         return _RUN
 
     def schema_version_true_bool_pun(runs_dir: Path) -> str:
         def edit(p: dict[str, Any]) -> None:
-            p["schema_version"] = True  # True == 1 → PASSES the version gate
+            # True == 1 PASSED the version gate under the schema-1 law this
+            # corpus first froze; since the DEC-RESILIENCE-STREAKS-001 1→2 bump
+            # (merged from main) True != 2, so the pun is now the version-gate
+            # MISMATCH pin (the rank: true entry pun still legally loads).
+            p["schema_version"] = True
 
         _write_pair(runs_dir, _RUN, _mutated_payload_bytes(edit))
         return _RUN
@@ -1040,7 +1051,7 @@ def load_scenarios() -> list[tuple[str, Callable[[Path], str]]]:
         ("artifact_tampered", artifact_tampered),
         ("artifact_not_json", artifact_not_json),
         ("artifact_json_array", artifact_json_array),
-        ("schema_version_2", schema_version_2),
+        ("schema_version_future", schema_version_future),
         ("schema_version_true_bool_pun", schema_version_true_bool_pun),
         ("artifact_wrong_run_id", artifact_wrong_run_id),
         ("preset_empty", preset_empty),

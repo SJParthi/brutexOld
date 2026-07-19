@@ -57,6 +57,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from datetime import date
     from decimal import Decimal
 
+    from brutex.adapters.all_filtered_breaker import AllFilteredTrip
+
 logger = logging.getLogger(__name__)
 
 
@@ -335,6 +337,11 @@ class GreeksBackfillReportLike(Protocol):
     @property
     def bars_written(self) -> int:
         """Bars carried in the latest-wins writes."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def cancelled(self) -> bool:
+        """Operator's cooperative Stop halted the run (DEC-JOB-CANCEL-CONTROL-001)."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -868,6 +875,66 @@ class SweepAlerter:
             severity=TelegramSeverity.CRITICAL,
             message=message,
             dedupe_key="loop-stalled",
+        )
+
+    def mass_all_filtered(
+        self,
+        *,
+        trip_rule: str,
+        all_filtered_windows: int,
+        observed_windows: int,
+        distinct_series: int,
+        series_sample: tuple[str, ...],
+        window_samples: tuple[str, ...],
+        rescinded_settles: int,
+        pull_id: str,
+    ) -> bool:
+        """Alert that the mass ALL-FILTERED breaker TRIPPED — settles halted (CRITICAL).
+
+        DEC-ALLFILTERED-MASS-BREAKER-001. Fired at most once per breaker PULL
+        (per phase) by
+        :func:`emit_mass_all_filtered_alert` at the breaker's trip transition: a
+        suspected vendor-wide timestamp/session bug is emptying windows at the
+        calendar boundary filter, so further ``ALL_FILTERED`` SKIPPED-settles are
+        suppressed for the pull and the same-pull pre-trip settles were
+        auto-rescinded. The counts are non-secret integers and are UNIQUE-window
+        quantities (the breaker's per-window dedupe, review round 6 — a window
+        re-attempted by a retry pass updates its verdict in place, so "N of M
+        windows" is literal, never attempt-inflated); *series_sample* rides
+        the structlog line (the message stays bounded — the window samples name
+        the shape). HONEST (review round 1, Golden Rule #10): the once-per-pull
+        guarantee is the BREAKER'S LATCH (``observe`` reports the trip
+        transition exactly once, and review round 4 threads ONE instance across
+        every retry pass / until-clean round of the pull's phase, so the latch
+        spans them), NOT notifier dedupe — ``PHASE_BLOCKED``'s
+        window in :data:`~brutex.notifications.telegram.DEDUPE_WINDOW_SECONDS`
+        is ``0.0`` s (never coalesced), so the pull-scoped ``dedupe_key``
+        (``pull_id``, falling back to the rule for a caller with no id) is
+        defence-in-depth only and coalesces nothing today. A NEW pull resolves
+        a FRESH breaker, so a persisting vendor bug re-alarms on each pull /
+        phase that trips — by design, never quietly.
+        """
+        del series_sample  # carried on the structlog line; the push stays bounded
+        samples = ", ".join(window_samples)
+        message = escape_markdown_v2(
+            f"🛑 Mass ALL-FILTERED event ({trip_rule} rule): {all_filtered_windows} "
+            f"of {observed_windows} filter-eligible windows returned bars that were "
+            "ALL dropped by the calendar session/date filter, across "
+            f"{distinct_series} distinct series ({rescinded_settles} same-pull "
+            "SKIPPED settle(s) auto-rescinded to FAILED). Suspected vendor-wide "
+            f"timestamp/session bug for this pull day — sample windows: {samples}. "
+            "Further ALL_FILTERED SKIPPED-settles are HALTED for this pull; "
+            "affected windows stay FAILED and re-pullable; genuine per-symbol "
+            "behavior below the threshold is unchanged. Settles from EARLIER "
+            "pulls (if any) are recoverable via brutex reopen-skipped. A "
+            "deliberate re-settle needs BRUTEX_ALLFILTERED_BREAKER=off for one "
+            "pull."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"allfiltered-trip:{pull_id or trip_rule}",
         )
 
     def nightly_summary(
@@ -1640,8 +1707,16 @@ class SweepAlerter:
         read never sees; a ✅ while such a stamp persists would be a false
         green; those need a lake repair, not a re-run). A zero-target run
         still reads honestly ("0/0 contracts re-stamped") — an
-        operator-initiated one-shot deserves an answer. Best-effort; silent
-        no-op when Telegram is disabled.
+        operator-initiated one-shot deserves an answer. A CANCELLED run
+        (DEC-JOB-CANCEL-CONTROL-001 — the operator's cooperative Stop) reads
+        the distinct ⏹ head naming the stop + the resume promise, under a
+        DISTINCT ``…:cancelled`` dedupe key — a LABELING convention only: at
+        the 0.0-window ``RUN_COMPLETE`` kind
+        (:data:`~brutex.notifications.telegram.DEDUPE_WINDOW_SECONDS`) the
+        dedupe_key does NO notifier-side suppression, so the resumed run's
+        own completion summary (same content-addressed ``backfill_id``)
+        fires regardless of the key choice. Best-effort; silent no-op when
+        Telegram is disabled.
         """
         clauses: list[str] = []
         if report.errored > 0:
@@ -1651,16 +1726,37 @@ class SweepAlerter:
                 f"{report.stale_unfixable} unfixable (driver-unactionable rows — "
                 "lake repair needed)"
             )
-        if clauses:
+        if report.cancelled:
+            # Operator's cooperative Stop (DEC-JOB-CANCEL-CONTROL-001): an
+            # honest ⏹ PARTIAL — never a ✅ for a run the operator halted, and
+            # never the ⚠️ "with failures" wording for a deliberate stop (any
+            # errored/unfixable clauses still ride along). The DISTINCT
+            # `…:cancelled` dedupe_key is a LABELING convention only (it names
+            # the outcome on the event record — the soak_drift precedent):
+            # at the 0.0-window RUN_COMPLETE kind the dedupe_key does NO
+            # notifier-side suppression (DEDUPE_WINDOW_SECONDS —
+            # check_dedupe_locked returns False for window <= 0.0), so the
+            # resumed run's completion summary (same content-addressed
+            # backfill_id) fires regardless of the key.
+            head = (
+                f"⏹ Greeks backfill CANCELLED by operator — "
+                f"{report.enriched}/{report.planned} contracts re-stamped v2 before "
+                f"the stop; resumable (re-run resumes)"
+                + ("; " + "; ".join(clauses) if clauses else "")
+            )
+            dedupe_key = f"greeks-backfill:{report.backfill_id[:12]}:cancelled"
+        elif clauses:
             head = (
                 f"⚠️ Greeks backfill complete with failures — "
                 f"{report.enriched}/{report.planned} contracts re-stamped v2; " + "; ".join(clauses)
             )
+            dedupe_key = f"greeks-backfill:{report.backfill_id[:12]}"
         else:
             head = (
                 f"✅ Greeks backfill complete — "
                 f"{report.enriched}/{report.planned} contracts re-stamped v2"
             )
+            dedupe_key = f"greeks-backfill:{report.backfill_id[:12]}"
         message = escape_markdown_v2(
             f"{head}; already current={report.already_current}, "
             f"bars written={report.bars_written} (backfill {report.backfill_id[:12]})."
@@ -1669,7 +1765,7 @@ class SweepAlerter:
             kind=TelegramEventKind.RUN_COMPLETE,
             severity=TelegramSeverity.INFO,
             message=message,
-            dedupe_key=f"greeks-backfill:{report.backfill_id[:12]}",
+            dedupe_key=dedupe_key,
         )
 
     # ── Callback adapters for the existing seams ────────────────────
@@ -1803,6 +1899,56 @@ def emit_run_suspect_alert(*, run_id: str, tripwire: str, detail: str) -> bool:
             "run_suspect_alert_failed"
         )
         return False
+
+
+def emit_mass_all_filtered_alert(
+    trip: AllFilteredTrip | None, *, rescinded: int, pull_id: str
+) -> None:
+    """Emit the ONE loud mass-ALL-FILTERED alarm — structlog ERROR + CRITICAL Telegram.
+
+    DEC-ALLFILTERED-MASS-BREAKER-001 — the COMMON emit source BOTH spine tails
+    call at the breaker's trip transition (CLAUDE.md §11: one alarm body, never
+    two spellings), mirroring :func:`emit_pull_halt_alert`'s best-effort shape
+    with the error-storm breaker's count-carrying content (the count-less
+    ``pull_halted`` is deliberately NOT the model). Emits exactly ONE
+    ``allfiltered_breaker.tripped`` structlog ERROR naming every count, then the
+    best-effort :meth:`SweepAlerter.mass_all_filtered` Telegram push (blanket
+    ``try/except`` — a notifier failure is swallowed + logged and can NEVER
+    break the pull; Telegram disabled ⇒ silent no-op). A ``None`` *trip* is a
+    defensive no-op — unreachable from the spine wiring, which calls this only
+    after ``observe()`` returned the trip transition (so ``trip_snapshot()`` is
+    non-``None`` by construction); directly unit-tested.
+    """
+    import structlog
+
+    if trip is None:
+        return
+    structlog.get_logger("brutex.notifications.sweep_alerts").error(
+        "allfiltered_breaker.tripped",
+        trip_rule=trip.trip_rule,
+        all_filtered_windows=trip.all_filtered_windows,
+        observed_windows=trip.observed_windows,
+        distinct_series=trip.distinct_series,
+        series_sample=list(trip.series_sample),
+        window_samples=list(trip.window_samples),
+        rescinded_settles=rescinded,
+        pull_id=pull_id,
+    )
+    try:
+        SweepAlerter().mass_all_filtered(
+            trip_rule=trip.trip_rule,
+            all_filtered_windows=trip.all_filtered_windows,
+            observed_windows=trip.observed_windows,
+            distinct_series=trip.distinct_series,
+            series_sample=trip.series_sample,
+            window_samples=trip.window_samples,
+            rescinded_settles=rescinded,
+            pull_id=pull_id,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never breaks the pull
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "mass_all_filtered_alert_failed"
+        )
 
 
 def emit_backup_failed_alert(reason: str, detail: str = "") -> None:

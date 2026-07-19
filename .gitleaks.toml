@@ -51,14 +51,28 @@ regexes = [
 # (NIFTYMIDCAP100), alert dedupe keys, the vendored Groww API reference's
 # placeholder Bearer tokens + truncated sample JWT header, and backticked
 # kwargs in MIGRATION.md ledger prose (`max_rounds=0`, `ceiling_per_min=500`).
+# 2026-07-15 addition (DEC-GDF-TRUEDATA-DOCS-001, PR #1543): the GDF +
+# TrueData vendor-doc packs — same class as docs/groww/: placeholder
+# credential examples (`accessKey=<key>`, `password=<p>`) + prose fragments
+# (the audited hit was the prose "UNVERIFIED/absent" after "API:" in
+# docs/truedata/api-reference/09-ops-misc.md — entropy 3.85 via the '/';
+# reworded, but the string remains in the PR commit's diff, so the
+# rule-scoped path allowlist is the history-safe fix). High-signal rules
+# stay live on these paths.
 
 [[rules]]
 id = "generic-api-key"
 [[rules.allowlists]]
 description = "Audited fixture/vendored-doc/ledger-prose paths — generic-api-key only"
+# ^brutex/dashboard/static/ — the one-click UI static JS assets carry column-key
+# descriptors like `key: "resilience.losing_streak_p95"` that trip generic-api-key
+# purely on entropy (the digits), never a credential; static UI assets never hold
+# secrets (DEC-AWS-ONLY-CREDS-001 — every credential lives ONLY in AWS SSM).
 paths = [
   '''^tests/''',
   '''^docs/groww/''',
+  '''^docs/gdf/''',
+  '''^docs/truedata/''',
   '''^docs/MIGRATION\.md$''',
   '''^brutex/dashboard/static/''',
 ]

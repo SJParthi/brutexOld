@@ -1,12 +1,16 @@
 # ADR-0021 — Capability-Driven Dual-Vendor Pull-Pipeline Orchestration (Groww ∥ Dhan)
 
-- **Status:** PROPOSED (operator sign-off pending; design-only — no code ships
-  under this ADR)
+- **Status:** ACCEPTED (2026-07-16 — the operator landed the ADR on main via
+  PR #1555, personally marking it ready-for-review and updating the branch,
+  and gave direct approval in the orchestration session ("accepted",
+  2026-07-16). Previously: PROPOSED (2026-07-15).)
 - **Date:** 2026-07-15
 - **Decision ID (reserved, not yet ledgered):** `DEC-DUAL-VENDOR-PIPELINE-001`
   — the MIGRATION.md entry lands only AFTER operator sign-off, with a
   coordinator-reserved entry number. This ADR file is the design record; the
   ledger row and the CLAUDE.md blurb land with the implementation PRs.
+  — LEDGERED 2026-07-16 as MIGRATION.md #2011 (the Status-ACCEPTED
+  paperwork PR beside this Status flip).
 - **Deciders:** operator (sign-off pending) · orchestration-track owner ·
   coordinator · the Dhan feed track (adapter-contract declarations only)
 - **Supersedes (draft-level):** the aborted same-day 2026-07-15 draft of this
@@ -1964,6 +1968,12 @@ fixes, no new mechanism — folded @ this commit:
   future DEC if ever).
 - **Q5** — Confirm the sequencer surface = ADDITIVE extension of
   `run_full_pipeline` (Decision 3) vs a new module.
+- **RESOLVED (2026-07-16):** the questions above are resolved by the
+  operator's landing decision (PR #1555 merged to main) + the 2026-07-15/16
+  rulings recorded in-ADR (§§2-9, §15.1) and in the ledger
+  (`DEC-DUAL-VENDOR-PIPELINE-001`, MIGRATION.md #2011; Q1's chosen
+  disposition (a) shipped as DEC-OPTIONS-PREBUILD-RETIRE-001,
+  MIGRATION.md #1831).
 
 ## 17. Implementation plan (workstreams; branch-now / land-after-coordination per the merge train)
 

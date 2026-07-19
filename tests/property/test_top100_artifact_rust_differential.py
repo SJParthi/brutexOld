@@ -50,6 +50,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from brutex.engine.resilience_streaks import project_resilience_annotation
 from brutex.engine.top100_artifact import (
     CASCADE_STATE_JOINED,
     CASCADE_STATE_NO_REPORT,
@@ -317,10 +318,18 @@ def _oracle_entry_payload(
     join: CascadeJoin | None = None,
     join_state: str = CASCADE_STATE_NO_REPORT,
 ) -> dict[str, object]:
-    """VERBATIM pre-conversion ``_entry_payload`` (dict-literal walk order)."""
+    """VERBATIM pre-conversion ``_entry_payload`` (dict-literal walk order).
+
+    Extended at the 2026-07-19 merge-forward with main's landed
+    DEC-RESILIENCE-STREAKS-001 law: the annotation appends ONE additive
+    top-level ``resilience`` key via the LIVE
+    :func:`brutex.engine.resilience_streaks.project_resilience_annotation`
+    (never crate-hosted — Python on BOTH sides, so the differential still
+    tests exactly the crate-hosted decisions).
+    """
     row = candidate.row
     cascade, cpcv_rate = _oracle_cascade_payload(row.run_id, join=join, state=join_state)
-    return {
+    entry: dict[str, object] = {
         "rank": rank,
         "run_id": row.run_id,
         "mask_hex": f"{row.mask_bits:0{_ORACLE_MASK_HEX_WIDTH}x}",
@@ -339,6 +348,7 @@ def _oracle_entry_payload(
         "equity_ref": {"tuple": candidate.tuple_ref, "sidecar": "equity"},
         "cascade": cascade,
     }
+    return project_resilience_annotation(entry, candidate.resilience)
 
 
 def _oracle_build_top100(
