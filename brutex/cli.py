@@ -9984,6 +9984,36 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     f"{list(derived_schedule or ())!r} only, which cannot be verified "
                     "against the schedule the tree's rows were minted under"
                 )
+        # The shadow re-sweep must run the SAME temporal-gate regime the tree
+        # RECORDED (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 — the condition-B1
+        # Stage-3-knobs twin + the VIX-stamper round-2 BLOCKER class one
+        # config over): the launcher ships with the `observe` default, and
+        # BOTH modes capture the four emit-on-present period-stats columns at
+        # the finalist re-sim — so a temporal-less shadow re-sweep over an
+        # observed tree byte-diverges on the columns (and a gate-mode tree
+        # additionally on WHICH rows persist) and false-condemns every good
+        # store as verdict-grade CORRUPT. The gate config never enters run
+        # identity, so the recorded channel is the tree's OWN hash-chained
+        # SWEEP_START `temporal_gate` payloads — NEVER the verify-time
+        # $BRUTEX_TEMPORAL environment (a verify under a different env than
+        # the launch must still round-trip). A MIXED history (the resume can
+        # mix gate regimes per tuple — the ledgered honest envelope) is a
+        # context MISMATCH: one shadow config cannot reproduce the tree, so
+        # divergence degrades to INCONCLUSIVE, never heal-grade.
+        from brutex.engine.sweep_verify import recorded_temporal_from_audit
+
+        try:
+            temporal_audit = recorded_temporal_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        except SweepVerifyError as exc:
+            print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if not temporal_audit.consistent:
+            mismatches.append(
+                "temporal_gate: the audit records MIXED temporal-gate configs across "
+                "SWEEP_START entries (a resumed grid can mix gate regimes per tuple — "
+                "DEC-SWEEP-TEMPORAL-ROBUSTNESS-001), so ONE shadow config cannot "
+                "reproduce the tree's per-tuple capture"
+            )
         context_match = not mismatches
         if mismatches:
             print(
@@ -10141,7 +10171,19 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # (the per-mode union loop is deleted with the mode vocabulary; a
             # precise-era generation was already refused by
             # recorded_audit_facts before any tier ran).
-            mode_grid = grid
+            # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: fold the RECORDED temporal
+            # regime into the recount grid (identity-safe — temporal never
+            # enters _tuple_digest, so plan_expected_stores addresses are
+            # unchanged either way); the stage3 recount grid below inherits
+            # it via replace(mode_grid, ...), so refined CELL stores capture
+            # the period-stats columns exactly like the launcher's pass did.
+            # A None config (temporal-less or mixed-history tree) recounts
+            # byte-identically to the pre-temporal law.
+            mode_grid = (
+                _dataclasses.replace(grid, temporal=temporal_audit.config)
+                if temporal_audit.config is not None
+                else grid
+            )
             scratch = scratch_base
             stage3_grid = (
                 _dataclasses.replace(mode_grid, **stage3_kwargs)
