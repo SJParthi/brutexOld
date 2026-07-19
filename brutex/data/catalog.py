@@ -13,19 +13,43 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from collections.abc import Generator, Sequence
+import time
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Final, Self
 
+import structlog
+
 from brutex.data.errors import CatalogError
 from brutex.data.models import CatalogEntry
 from brutex.data.partition import build_partition_path
 
 if TYPE_CHECKING:  # pragma: no cover
+    import polars as pl
     import pyarrow as pa
+
+_LOG = structlog.get_logger("brutex.data.catalog")
+
+#: Short back-off between a torn read and its single retry (the concurrent-writer
+#: inode-straddle window; the ``dashboard/db_view.py`` torn-read-retry scale,
+#: DEC-WINDOW-TORN-READ-RETRY-001). Injectable so tests never sleep.
+_PARTITION_READ_RETRY_DELAY_S: Final[float] = 0.05
+
+#: The canonical bar columns every readable partition must carry (mirrors
+#: :func:`_empty_bars_table`). A partition missing any of these is a foreign /
+#: old-schema file and is UNREADABLE (never silently skipped, Golden Rule #4).
+_CANONICAL_BAR_COLUMNS: Final[tuple[str, ...]] = (
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "open_interest",
+)
 
 
 #: DDL for the single ``partitions`` table. Keep this in sync with
@@ -484,6 +508,7 @@ class Catalog:
         interval: str,
         start: datetime,
         end: datetime,
+        retry_sleep: Callable[[float], None] | None = None,
     ) -> pa.Table:
         """Return a :class:`pyarrow.Table` of bars in ``[start, end]``.
 
@@ -515,6 +540,11 @@ class Catalog:
             queries should call :meth:`get_bars` per symbol.
         start, end
             Inclusive window. Must be timezone-aware.
+        retry_sleep
+            Optional ``sleep(seconds)`` injected into the per-partition
+            torn-read retry (see :func:`_read_partition_frame`) — defaults to
+            :func:`time.sleep`; tests pass a no-op so no wall-clock time is
+            spent. Additive: existing callers are unchanged.
 
         Returns
         -------
@@ -525,8 +555,14 @@ class Catalog:
         Raises
         ------
         CatalogError
-            If ``polars`` or ``pyarrow`` is not installed, or if a
-            referenced partition file is missing from disk.
+            If ``polars`` or ``pyarrow`` is not installed, if a referenced
+            partition file is missing from disk, or if a referenced partition
+            is **UNREADABLE** — corrupt/torn bytes surviving one retry, or a
+            foreign / wrong-dtype schema (:func:`_read_partition_frame`). A
+            corrupt partition is NEVER silently skipped: a dropped file would
+            hole the ``data_snapshot_hash`` inputs and silently change run
+            identity (Golden Rule #4), so the read refuses LOUDLY naming the
+            file.
         """
         if self._closed:
             raise CatalogError("Catalog is closed")
@@ -571,12 +607,13 @@ class Catalog:
                     f"catalog references missing partition file {path} "
                     f"— run 'brutex data verify' to re-sync the catalog"
                 )
-            # glob=False: the catalog resolves ONE concrete partition file —
-            # the ENGINE's feed mouth must never glob-interpret a `[`-carrying
+            # _read_partition_frame keeps the torn-read-retry helper
+            # (DEC-WINDOW-TORN-READ-RETRY-001, #1376) AND reads with glob=False
+            # so the ENGINE's feed mouth never glob-interprets a `[`-carrying
             # symbol dir into its siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-
             # HARDENING-001, the #1594 round-15 metachar law; the writer also
             # refuses to mint such dirs — partition._FORBIDDEN_SYMBOL_CHARS).
-            frames.append(pl.read_parquet(str(path), glob=False))
+            frames.append(_read_partition_frame(path, retry_sleep=retry_sleep))
 
         combined = pl.concat(frames, how="vertical_relaxed")
         # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): a partition poisoned
@@ -710,6 +747,102 @@ def _require_tz_aware(ts: datetime | None, *, name: str) -> None:
     """Raise :class:`CatalogError` if *ts* is a naive (tz-less) datetime."""
     if ts is not None and ts.tzinfo is None:
         raise CatalogError(f"{name} must be timezone-aware, got naive datetime {ts!r}")
+
+
+def _read_partition_frame(
+    path: Path,
+    *,
+    retry_sleep: Callable[[float], None] | None = None,
+) -> pl.DataFrame:
+    """Read ONE partition Parquet into a schema-validated frame — retry-once then fail LOUD.
+
+    The engine's load-bearing input mouth (:meth:`Catalog.get_bars`) NEVER
+    silently skips a corrupt partition: a dropped file would hole the
+    ``data_snapshot_hash`` inputs and silently change run identity (Golden
+    Rule #4).
+
+    A **torn read** — a :func:`~brutex.data.errors.parquet_read_skip_errors`
+    fault from a concurrent writer's ``os.replace`` straddling a multi-open
+    ``pl.read_parquet`` (footer + column-chunk reads on fresh handles →
+    transient ``ComputeError``), the ``dashboard/db_view.py`` torn-read-retry
+    precedent (DEC-WINDOW-TORN-READ-RETRY-001) — is retried ONCE after a short
+    sleep. A SECOND failure raises the typed :class:`CatalogError` naming the
+    **UNREADABLE** partition (the same verdict vocabulary the lake census's
+    ``lake.invariant.scan_skip`` / ``catalog.reconcile.parquet_skip`` warnings
+    use), so a genuinely corrupt lake refuses the launch loudly rather than
+    computing a snapshot hash over partial data.
+
+    Parameters
+    ----------
+    path
+        The partition Parquet file (already confirmed to exist by the caller).
+    retry_sleep
+        ``sleep(seconds)`` used between the tear and its single retry;
+        defaults to :func:`time.sleep`. Injectable so tests never sleep.
+    """
+    import polars as pl
+
+    from brutex.data.errors import parquet_read_skip_errors
+
+    sleep = retry_sleep if retry_sleep is not None else time.sleep
+    skip_errors = parquet_read_skip_errors()
+    # glob=False on every read below: the caller resolves ONE concrete partition
+    # file, so the ENGINE's feed mouth must never glob-interpret a `[`-carrying
+    # symbol dir into its siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001,
+    # the #1594 round-15 metachar law; partition._FORBIDDEN_SYMBOL_CHARS refuses
+    # to mint such dirs, but a legacy dir must still read its literal file).
+    try:
+        frame = pl.read_parquet(str(path), glob=False)
+    except skip_errors as first:
+        # Torn read (concurrent writer). Retry ONCE — the writer's os.replace is
+        # atomic, so a second open sees one consistent inode on a healthy lake.
+        _LOG.warning("catalog.read.parquet_retry", path=str(path), error=str(first))
+        sleep(_PARTITION_READ_RETRY_DELAY_S)
+        try:
+            frame = pl.read_parquet(str(path), glob=False)
+        except skip_errors as second:
+            raise CatalogError(
+                f"UNREADABLE partition file {path}: {second} — a corrupt partition "
+                f"is NEVER silently skipped (it would hole the data_snapshot_hash "
+                f"inputs, Golden Rule #4); quarantine/heal it "
+                f"('brutex lake audit-unique') or re-pull the month, then re-run"
+            ) from second
+    _validate_partition_schema(frame, path)
+    return frame
+
+
+def _validate_partition_schema(frame: pl.DataFrame, path: Path) -> None:
+    """Refuse a foreign / wrong-dtype partition frame as **UNREADABLE** (no row scan).
+
+    An O(columns) schema introspection (never a row scan, never a cast): the
+    canonical bar columns of :func:`_empty_bars_table` must be present, the four
+    prices numeric, ``timestamp`` temporal, and ``volume`` integer. A violation
+    raises :class:`CatalogError` naming the file + the offending columns, so a
+    ``timestamp``-only foreign parquet (C3) or a ``close`` stored as ``Utf8``
+    (C4) can never reach the Stage-1A condition masks or the snapshot hash.
+    """
+    schema = frame.schema
+    missing = [col for col in _CANONICAL_BAR_COLUMNS if col not in schema]
+    if missing:
+        raise CatalogError(
+            f"UNREADABLE partition file {path}: missing required bar column(s) "
+            f"{missing} (foreign / old-schema parquet) — quarantine/heal it "
+            f"('brutex lake audit-unique') or re-pull the month, then re-run"
+        )
+    bad_dtypes: list[str] = []
+    for col in ("open", "high", "low", "close"):
+        if not schema[col].is_numeric():
+            bad_dtypes.append(f"{col}={schema[col]} (want numeric)")
+    if not schema["timestamp"].is_temporal():
+        bad_dtypes.append(f"timestamp={schema['timestamp']} (want temporal)")
+    if not schema["volume"].is_integer():
+        bad_dtypes.append(f"volume={schema['volume']} (want integer)")
+    if bad_dtypes:
+        raise CatalogError(
+            f"UNREADABLE partition file {path}: wrong column dtype(s) "
+            f"{bad_dtypes} — quarantine/heal it ('brutex lake audit-unique') or "
+            f"re-pull the month, then re-run"
+        )
 
 
 def _empty_bars_table(pa_mod: Any) -> Any:

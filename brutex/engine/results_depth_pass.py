@@ -79,7 +79,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Final, cast
 
@@ -101,7 +102,7 @@ from brutex.engine.session_lens import build_session_lens
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
-from brutex.engine.sweep_supervisor import grid_identity
+from brutex.engine.sweep_supervisor import grid_identity, tuple_label
 from brutex.engine.top100_artifact import (
     DEFAULT_TOP100_PRESET,
     PoolCounts,
@@ -164,6 +165,18 @@ _N_TERMS: Final[int] = 7
 #: (``vix_missing_trades``) — only the per-combo log line is suppressed.
 VIX_MISS_WARN_CAP: Final[int] = 20
 
+#: Per-tuple ``results_depth.missing_store`` INFO cap
+#: (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1925 — the house
+#: capped-20 idiom, the :data:`VIX_MISS_WARN_CAP` precedent). A grid tuple with
+#: no persisted store on disk is COUNTED (``tuples_missing_store``) and, for the
+#: first :data:`_MISSING_STORE_LOG_CAP` such tuples per pass, named in one INFO
+#: line; later misses stay counted but the per-store log is suppressed.
+_MISSING_STORE_LOG_CAP: Final[int] = 20
+
+#: Cap on the ``missing_store_sample`` report tuple — a WARN without paths is
+#: unactionable, so the aggregate surfaces the first few absent store paths.
+_MISSING_STORE_SAMPLE_CAP: Final[int] = 10
+
 
 class ResultsDepthError(BruteXError):
     """Raised on a broken pass invariant (unreadable sidecar the stamp vouched for)."""
@@ -221,6 +234,27 @@ class ResultsDepthReport:
     skipped tuple's captures were counted by the run that built them. Pool
     counters (``pool`` / ``gate_passers`` / ``excluded_*`` / ``parity_excluded``
     / ``families_collapsed``) cover the WHOLE grid (fresh + resumed).
+    ``missing_store_sample`` (additive, capped
+    :data:`_MISSING_STORE_SAMPLE_CAP`) carries the first absent BARS-PRESENT
+    finalist-store paths so a missing-store WARN is actionable
+    (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1925).
+    ``missing_expected_no_bars`` (additive, review round 1 M2) is the
+    DETERMINISTICALLY-explained subset of ``tuples_missing_store``: the
+    tuple's own bar slice is EMPTY, so the sweep can never have written a
+    store — resume or not — and it NEVER counts toward the unexplained WARN.
+    ``missing_expected_quarantined`` (additive, review round 2 M1) is the
+    IDENTITY-explained subset: a BARS-PRESENT missing store whose
+    ``tuple_label`` is in the caller's quarantined-prior label SET (the
+    ``.sweep_quarantine.json`` sidecar, #1608) — a durable prior quarantine
+    that genuinely never wrote a store, attributed BY IDENTITY (not by a stale
+    COUNT) so a stale sidecar entry for a tuple whose store now EXISTS can no
+    longer LAUNDER an unrelated deletion into silence.
+    ``missing_store_unexplained`` (additive) is the pass's OWN computed
+    ``max(0, (tuples_missing_store - missing_expected_no_bars -
+    missing_expected_quarantined) - (expected_missing or 0))`` — the residual
+    bars-present-and-not-quarantined missing count beyond the caller's
+    run-scoped FAILED allowance — so the CLI adapter mirrors the SAME number
+    instead of re-deriving the formula.
     """
 
     tuples_processed: int
@@ -242,6 +276,10 @@ class ResultsDepthReport:
     families_collapsed: int
     top100_written: bool
     top100_entries: int
+    missing_store_sample: tuple[str, ...] = ()
+    missing_expected_no_bars: int = 0
+    missing_store_unexplained: int = 0
+    missing_expected_quarantined: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +297,8 @@ class _Tallies:
     tuples_processed: int = 0
     tuples_skipped_current: int = 0
     tuples_missing_store: int = 0
+    missing_expected_no_bars: int = 0
+    missing_expected_quarantined: int = 0
     tuples_errored: int = 0
     resilience_backfilled: int = 0
     resilience_errored: int = 0
@@ -272,11 +312,63 @@ class _Tallies:
     zero_trade_excluded: int = 0
     parity_excluded: int = 0
     stores_pooled: int = 0
+    missing_store_logged: int = 0
+    missing_store_sample: list[str] = field(default_factory=list)
 
 
 def _store_sha256(store_path: Path) -> str:
     """The CURRENT store bytes' sha256 — the sidecar stamp's idempotence key."""
     return hashlib.sha256(store_path.read_bytes()).hexdigest()
+
+
+#: The µs-since-epoch anchor for the reference-bar digest (deterministic; a
+#: minute bar's timestamp is tz-aware UTC so the delta arithmetic is exact).
+_EPOCH_UTC: Final = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _bar_ts_us(ts: datetime) -> int:
+    """Exact integer µs-since-epoch for a bar timestamp (no float rounding).
+
+    Fail-loud on a tz-NAIVE timestamp (review round 1 item 7): a naive
+    ``astimezone(UTC)`` interprets the value in the MACHINE's local zone, so
+    the digest — and therefore the resume decision — would silently vary by
+    host. Bars are stored tz-aware UTC; a naive one is a caller bug
+    (mirroring the ``_as_utc`` defensive posture — raise, never guess).
+    """
+    if ts.tzinfo is None:
+        raise ValueError(f"naive bar timestamp (tz-aware UTC required): {ts!r}")
+    delta = ts.astimezone(UTC) - _EPOCH_UTC
+    return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+
+
+def _bars_sha256(bars: Sequence[CandleBar]) -> str:
+    """Full-content sha256 over a bar stream's 7 canonical fields, in order.
+
+    DEC-DEPTH-STAMP-REFDATA-001 (MIGRATION.md #1926). Empty/absent series folds
+    the literal token ``"absent"`` so a null-VIX pass and a real-VIX pass differ
+    (forcing a re-derive) while two absent-vs-absent series match (no gratuitous
+    re-derive). Full-content — a count+endpoints fingerprint can false-match an
+    interior change (the DEC-SNAPSHOT-HASH-FULL-001 house law). This is
+    deliberately NOT the identity-bearing ``stage3_wire.data_snapshot_hash`` (a
+    run-END idempotence gate, a different hash primitive for a different,
+    non-identity purpose — same full-content streaming discipline).
+    """
+    hasher = hashlib.sha256()
+    if not bars:
+        hasher.update(b"absent")
+        return hasher.hexdigest()
+    for bar in bars:
+        hasher.update(str(_bar_ts_us(bar.timestamp)).encode("ascii"))
+        hasher.update(b"\x1f")
+        for price in (bar.open, bar.high, bar.low, bar.close):
+            hasher.update(str(price).encode("ascii"))
+            hasher.update(b"\x1f")
+        hasher.update(str(bar.volume).encode("ascii"))
+        hasher.update(b"\x1f")
+        oi = bar.open_interest
+        hasher.update(b"" if oi is None else str(oi).encode("ascii"))
+        hasher.update(b"\x1e")
+    return hasher.hexdigest()
 
 
 def _warn_vix_miss(run_id: str, missing: int, tallies: _Tallies) -> None:
@@ -306,6 +398,72 @@ def _warn_vix_miss(run_id: str, missing: int, tallies: _Tallies) -> None:
                 "misses stay counted in the report's vix_missing_trades"
             ),
         )
+
+
+def _note_missing_store(
+    store_path: Path, tallies: _Tallies, *, no_bars: bool, quarantined: bool
+) -> None:
+    """Count + (capped) log + (capped) sample a grid tuple with no store on disk.
+
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1925, review round 1 M2 +
+    round 2 M1 — deterministic + identity classification). A missing finalist
+    store falls into ONE of three classes, in precedence order:
+
+    1. ``no_bars=True`` — the tuple's own bar slice is EMPTY, so the sweep can
+       never have written a store (first run AND checkpoint resume alike):
+       counts ``missing_expected_no_bars`` + a capped INFO
+       (``results_depth.missing_store_no_bars``), NEVER feeds the unexplained
+       WARN.
+    2. ``quarantined=True`` (bars present) — the tuple's ``tuple_label`` is in
+       the caller's quarantined-prior label SET (the ``.sweep_quarantine.json``
+       sidecar, #1608): a durable prior quarantine that genuinely wrote no
+       store, explained BY IDENTITY. Counts ``missing_expected_quarantined`` +
+       a capped INFO (``results_depth.missing_store_quarantined``), NEVER feeds
+       the unexplained WARN. Because the match is per-tuple identity (not a
+       count allowance), a STALE sidecar entry for a tuple whose store now
+       EXISTS contributes ZERO allowance — it never matches a *different*
+       tuple's deletion, closing the count-based masking (round 2 M1).
+    3. otherwise (bars present, not quarantined-prior) — the actionable
+       deletion/foreign-identity SUSPECT class: capped INFO
+       (``results_depth.missing_store``) + the first
+       :data:`_MISSING_STORE_SAMPLE_CAP` paths sampled so the pass-end WARN +
+       the adapter summary can NAME them (a WARN without paths is
+       unactionable). This is the ONLY class compared against the caller's
+       run-scoped FAILED allowance.
+
+    The total (``tuples_missing_store``) ALWAYS increments for every class; the
+    per-store INFO volume is capped at :data:`_MISSING_STORE_LOG_CAP` across
+    all three. DISCLOSED COST (Golden Rule #10): classifying requires the caller
+    to load the tuple's bars via the memoised ``bars_for`` seam — paid ONLY when
+    a store is missing (zero lake reads on a clean run), at most once per
+    ``(instrument, tf)`` thanks to the memo.
+    """
+    tallies.tuples_missing_store += 1
+    if no_bars:
+        tallies.missing_expected_no_bars += 1
+        if tallies.missing_store_logged < _MISSING_STORE_LOG_CAP:
+            tallies.missing_store_logged += 1
+            _LOG.info(
+                "results_depth.missing_store_no_bars",
+                store=str(store_path),
+                note="empty bar slice — the sweep deterministically never writes this store",
+            )
+        return
+    if quarantined:
+        tallies.missing_expected_quarantined += 1
+        if tallies.missing_store_logged < _MISSING_STORE_LOG_CAP:
+            tallies.missing_store_logged += 1
+            _LOG.info(
+                "results_depth.missing_store_quarantined",
+                store=str(store_path),
+                note="tuple identity in the durable quarantine sidecar — never wrote a store",
+            )
+        return
+    if tallies.missing_store_logged < _MISSING_STORE_LOG_CAP:
+        tallies.missing_store_logged += 1
+        _LOG.info("results_depth.missing_store", store=str(store_path))
+    if len(tallies.missing_store_sample) < _MISSING_STORE_SAMPLE_CAP:
+        tallies.missing_store_sample.append(str(store_path))
 
 
 def _probe_manifest(run_dir: Path) -> None:
@@ -381,6 +539,7 @@ def _build_tuple_sidecars(
     context: _InstrumentContext,
     stamper: TradeReferenceStamper | None,
     store_hash: str,
+    reference_fingerprint: str,
     tallies: _Tallies,
 ) -> list[ComboCapture]:
     """Capture + aggregate + persist one STALE tuple's sidecar TRIO.
@@ -447,6 +606,7 @@ def _build_tuple_sidecars(
         captures,
         [agg.to_record() for agg in aggs],
         store_content_hash=store_hash,
+        reference_fingerprint=reference_fingerprint,
     )
     return captures
 
@@ -678,6 +838,8 @@ def run_results_depth_pass(
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
     cascade_join: CascadeJoin | None = None,
+    expected_missing: int | None = None,
+    quarantined_labels: frozenset[str] | None = None,
 ) -> ResultsDepthReport:
     """Run the full results-depth pass over one grid's persisted stores.
 
@@ -714,6 +876,48 @@ def run_results_depth_pass(
         there); ``None`` (the default — every pre-change caller) means no
         report was threaded. The fence law is unchanged: a pass failure
         never fails the sweep.
+    expected_missing
+        The caller-known RUN-SCOPED **FAILED-only** allowance
+        (``tuples_failed`` from the sweep's own summary) —
+        DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1925, review round 1 M2
+        + round 2 M1). A ``SweepComboError``-failed tuple genuinely never wrote
+        a store (it raised before the store flush and was NOT cache-recorded),
+        so its bars-present missing store is expected. This allowance is a
+        COUNT (not identities) DELIBERATELY: it is RUN-SCOPED + freshly
+        computed each run, so unlike the durable quarantine sidecar it cannot
+        go stale across runs. HONEST SCOPE: it cannot over-claim for
+        COMPLETED-run tuples (a completed tuple's dedup-cache record prevents
+        a re-dispatch, so a tuple that failed THIS run wrote no store this
+        run); the disclosed residual is a crash inside the store-write →
+        cache-record window — the re-dispatched tuple can fail this run while
+        its PRIOR-run store exists, granting one count an unrelated deletion
+        could consume. The no-bars class (round 1 M2) + the quarantined-prior class
+        (round 2 M1, ``quarantined_labels`` below) are attributed SEPARATELY and
+        are NOT part of this count. A bars-present, not-quarantined missing
+        count beyond this allowance is UNEXPLAINED (partial store deletion or a
+        foreign grid identity) and raises one
+        ``results_depth.missing_store_unexplained`` WARN. ``None`` (the
+        default — direct callers / unknown) treats EVERY such missing store as
+        unexplained (the fail-loud direction). HONEST residual heuristic
+        (disclosed in the WARN note): the allowance is run-scoped — a deletion
+        coinciding with PRIOR-run FAILURES (not quarantines) can be
+        under-attributed. DISCLOSED COST: classifying a missing store loads
+        that tuple's bars once via the memoised ``bars_for`` seam — paid only
+        when a store is missing, zero on clean runs.
+    quarantined_labels
+        The IDENTITY set of quarantined-prior tuple labels — the sweep's
+        ``.sweep_quarantine.json`` sidecar (#1608) read via
+        ``load_quarantined_tuple_labels(root, grid_identity(grid))``, each label
+        the byte-identical ``tuple_label`` the parallel driver wrote. A
+        bars-present missing store whose ``tuple_label(tuple_)`` is in this set
+        is explained BY IDENTITY (``missing_expected_quarantined``), never
+        unexplained. Because a durable quarantine sidecar is CLEARED MANUALLY,
+        a stale entry for a tuple whose store now EXISTS must NOT grant a COUNT
+        allowance that an unrelated deletion could consume (the round-2 M1
+        masking): per-tuple identity attribution contributes allowance ONLY for
+        the tuple that is actually missing, so a stale entry matches nothing.
+        ``None`` / empty (the default — direct callers, the sequential path
+        whose ``tuples_quarantined_prior`` is 0) ⇒ no identity attribution.
 
     Returns
     -------
@@ -721,6 +925,9 @@ def run_results_depth_pass(
         The honest counters — loud failures included, never masked.
     """
     run_id = grid_identity(grid)
+    # Review round 2 M1: the quarantined-prior IDENTITY set (empty when the
+    # caller passes None — direct callers / the sequential path).
+    quarantined = quarantined_labels or frozenset()
     # Ruling 4: EVERY run-end artifact path rides the ONE sweep_run_dir seam —
     # a SIBLING sweep_runs/ root beside the sweeps tree, never inside the
     # **/*.parquet-globbed tree (P2's run_layout.py rebinds this at
@@ -737,9 +944,15 @@ def run_results_depth_pass(
     else:
         stamper = TradeReferenceStamper.from_vix_bars(vix_bars)
 
+    # DEC-DEPTH-STAMP-REFDATA-001 (#1926): the shared VIX digest is computed ONCE
+    # per pass (a null-VIX pass folds the "absent" token, so a VIX feed pulled
+    # AFTER the first stamp re-derives every instrument's tuples).
+    vix_digest = _bars_sha256(vix_bars or ())
+
     tallies = _Tallies()
     contexts: dict[str, _InstrumentContext] = {}
     bars_cache: dict[tuple[str, str], Sequence[CandleBar]] = {}
+    ref_fp_cache: dict[str, str] = {}
     pool: list[Top100Candidate] = []
     twins: list[TwinCandidate] = []
     instruments_pooled: list[str] = []
@@ -770,17 +983,77 @@ def run_results_depth_pass(
         contexts[instrument] = context
         return context
 
+    def _reference_fingerprint(instrument: str) -> str:
+        """Per-instrument reference-data fingerprint (memoised, #1926).
+
+        Folds the shared VIX digest + this instrument's 1m/1day reference bars +
+        the WP3 provider-presence flags. DISCLOSED cost (Golden Rule #10): a
+        fully-current resume now invokes ``minute_bars_for``/``daily_bars_for``
+        for the fp — and because this memo (``ref_fp_cache``) is SEPARATE from
+        the ``_context`` memo, an instrument whose tuples also build a context
+        loads its reference series up to TWICE on first touch (once per memo) —
+        O(reference bars)/instrument/pass, run-end only, never on the
+        ~33B-trial hot path.
+        """
+        cached = ref_fp_cache.get(instrument)
+        if cached is not None:
+            return cached
+        minute_bars = minute_bars_for(instrument)
+        daily_bars = None if daily_bars_for is None else daily_bars_for(instrument)
+        # A provider going None→wired changes sidecar CONTENT; its CODE identity
+        # stays code_commit_hash's lane (the honest limit, recorded in the DEC).
+        flags = f"reasons={reason_provider is not None};margin={margin_roi_provider is not None}"
+        fp = hashlib.sha256(
+            "\x1f".join(
+                (
+                    "rdfp1",
+                    vix_digest,
+                    _bars_sha256(minute_bars or ()),
+                    _bars_sha256(daily_bars or ()),
+                    flags,
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        ref_fp_cache[instrument] = fp
+        return fp
+
     for tuple_ in iter_sweep_tuples(grid):
         store_path = tuple_store_path(out_root, tuple_, grid)
-        if not store_path.exists():
-            tallies.tuples_missing_store += 1
-            continue
         try:
+            if not store_path.exists():
+                # Review round 1 M2 + round 2 M1: classify the missing store.
+                # The `_bars` call is INSIDE this try (round 2 MUST-FIX 2): a
+                # future/alternate `bars_for` that reads the lake CAN raise
+                # (e.g. a CatalogError), and one missing store must quarantine
+                # ONLY that tuple (counted `tuples_errored`, logged) — never
+                # abort the whole pass. CONTRACT: `bars_for` need not be
+                # raise-free here; a raise fences to the per-tuple handler.
+                # An EMPTY slice ⇒ the sweep never writes this store (resume or
+                # not); else a bars-present miss is quarantined-prior (identity
+                # in the sidecar set) or deletion-suspect. Costs one memoised
+                # bars_for load, paid ONLY on a missing store.
+                no_bars = not _bars(tuple_.instrument, tuple_.tf.label)
+                is_quarantined = (not no_bars) and (tuple_label(tuple_) in quarantined)
+                _note_missing_store(
+                    store_path, tallies, no_bars=no_bars, quarantined=is_quarantined
+                )
+                continue
             store_hash = _store_sha256(store_path)
             paths = sidecar_paths_for(store_path, out_root, run_id=run_id)
             rows = ResultsStore.load(store_path).rows()
             stamp = load_stamp(paths)
-            trio_current = stamp is not None and stamp.store_content_hash == store_hash
+            current_fp = _reference_fingerprint(tuple_.instrument)
+            # DEC-DEPTH-STAMP-REFDATA-001 (#1926): a current tuple must match BOTH
+            # the store bytes AND the reference fingerprint. An OLD stamp's None
+            # fp can NEVER equal a hex digest → re-derive once, never a fabricated
+            # match. The fp gate folds into ``trio_current`` (club O #1395), so a
+            # reference-data move fails the trio and takes the FULL rebuild arm
+            # (which re-stamps the fp) — never the resilience-only backfill.
+            trio_current = (
+                stamp is not None
+                and stamp.store_content_hash == store_hash
+                and stamp.reference_fingerprint == current_fp
+            )
             res_stamp = load_resilience_stamp(paths)
             res_current = res_stamp is not None and res_stamp.store_content_hash == store_hash
             if trio_current and res_current:
@@ -818,6 +1091,23 @@ def run_results_depth_pass(
                         records=folded,
                     )
             else:
+                if (
+                    stamp is not None
+                    and stamp.store_content_hash == store_hash
+                    and stamp.reference_fingerprint != current_fp
+                ):
+                    # Store bytes unchanged but the reference data moved (e.g. a
+                    # VIX feed pulled after the first stamp) — a DISTINCT redo.
+                    _LOG.info(
+                        "results_depth.tuple_redo_reference_changed",
+                        store=str(store_path),
+                        old_fp=(
+                            None
+                            if stamp.reference_fingerprint is None
+                            else stamp.reference_fingerprint[:12]
+                        ),
+                        new_fp=current_fp[:12],
+                    )
                 # The TRIO build stays in the OUTER fence (a trio failure drops
                 # the tuple, exactly as ``aggregate_combo`` always could); the
                 # resilience fold/write is a SEPARATE nested-fenced step over the
@@ -832,6 +1122,7 @@ def run_results_depth_pass(
                     context=_context(tuple_.instrument),
                     stamper=stamper,
                     store_hash=store_hash,
+                    reference_fingerprint=current_fp,
                     tallies=tallies,
                 )
                 tallies.tuples_processed += 1
@@ -943,6 +1234,41 @@ def run_results_depth_pass(
             error=str(exc),
         )
 
+    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1925, review round 1 M2 + round 2 M1):
+    # a no-bars tuple (deterministic) AND a quarantined-prior tuple (identity in
+    # the sidecar set) are BOTH classified above as expected-storeless; the
+    # residual = bars-present AND not-quarantined. A residual beyond the caller's
+    # run-scoped FAILED allowance is UNEXPLAINED (partial store deletion or a
+    # foreign grid identity) and is NEVER silent again — one WARN naming the
+    # excess + a path sample. Identity attribution (round 2 M1) closes the
+    # count-based masking: a stale quarantine COUNT could be spent on an
+    # UNRELATED deletion; a stale quarantine IDENTITY matches nothing.
+    missing_suspect = (
+        tallies.tuples_missing_store
+        - tallies.missing_expected_no_bars
+        - tallies.missing_expected_quarantined
+    )
+    unexplained_missing = max(0, missing_suspect - (expected_missing or 0))
+    if unexplained_missing > 0:
+        _LOG.warning(
+            "results_depth.missing_store_unexplained",
+            missing=tallies.tuples_missing_store,
+            missing_no_bars=tallies.missing_expected_no_bars,
+            missing_quarantined=tallies.missing_expected_quarantined,
+            expected=expected_missing,
+            unexplained=unexplained_missing,
+            sample=tuple(tallies.missing_store_sample),
+            note=(
+                "bars-present, not-quarantined finalist stores absent beyond the "
+                "sweep's own run-scoped FAILED allowance — partial store deletion "
+                "or a foreign grid identity (quarantined-prior tuples are "
+                "attributed BY IDENTITY, so a stale sidecar can no longer mask a "
+                "deletion; the FAILED allowance is run-scoped, so a deletion "
+                "coinciding with prior-run FAILURES can be under-attributed); "
+                "run brutex sweep-verify --results-root <root>"
+            ),
+        )
+
     report = ResultsDepthReport(
         tuples_processed=tallies.tuples_processed,
         tuples_skipped_current=tallies.tuples_skipped_current,
@@ -963,6 +1289,10 @@ def run_results_depth_pass(
         families_collapsed=families_collapsed,
         top100_written=top100_written,
         top100_entries=top100_entries,
+        missing_store_sample=tuple(tallies.missing_store_sample),
+        missing_expected_no_bars=tallies.missing_expected_no_bars,
+        missing_store_unexplained=unexplained_missing,
+        missing_expected_quarantined=tallies.missing_expected_quarantined,
     )
     _LOG.info(
         "results_depth.pass_done",
@@ -970,6 +1300,9 @@ def run_results_depth_pass(
         tuples_processed=report.tuples_processed,
         tuples_skipped_current=report.tuples_skipped_current,
         tuples_missing_store=report.tuples_missing_store,
+        missing_expected_no_bars=report.missing_expected_no_bars,
+        missing_expected_quarantined=report.missing_expected_quarantined,
+        missing_store_unexplained=report.missing_store_unexplained,
         tuples_errored=report.tuples_errored,
         resilience_backfilled=report.resilience_backfilled,
         resilience_errored=report.resilience_errored,
