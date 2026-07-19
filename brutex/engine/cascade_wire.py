@@ -132,6 +132,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
     from brutex.engine.trial_stats import LeaderboardTrialStats
     from brutex.metrics.cascade import CandidateInput, CascadeConfig, CascadeReport
+    from brutex.metrics.types import ClosedTrade
 
 _LOG = structlog.get_logger("brutex.engine.cascade_wire")
 
@@ -147,7 +148,11 @@ MANIFEST_VERSION: Final[int] = 1
 #: per-group ``pool_pbo`` key was added without a bump — purely additive, no
 #: reader rejects unknown keys, and a pre-sidecar report (key ABSENT) stays
 #: distinguishable from a measured skip (key ``null``) — the same precedent as
-#: the manifest's additive ``stage3`` block (see ``manifest_from_json``).
+#: the manifest's additive ``stage3`` block (see ``manifest_from_json``). The
+#: per-group ``pool_rc_pvalue``/``pool_spa_pvalue`` keys and the per-verdict
+#: ``candidate_pbo`` key (DEC-CASCADE-STAT-TIER-WIRE-001) ride the SAME
+#: additive-at-1 precedent: raw full-precision floats or ``null``; a
+#: pre-change report simply lacks the keys (readers None-fill).
 REPORT_VERSION: Final[int] = 1
 
 #: 64-char lowercase-hex BLAKE3 run-identity length (mirrors COMBO_HASH_HEX_LEN).
@@ -160,6 +165,13 @@ _MASK_BITS_MAX: Final[int] = (1 << TOTAL_CONDITIONS) - 1
 _SEED_MODULUS: Final[int] = 2**31
 #: The three proximity tolerances ``(pivot, pdh_pdl, fib)`` carried per tuple.
 _PROXIMITY_LEN: Final[int] = 3
+#: A family coordinate is a ``(sl_paisa, tp_paisa)`` PAIR
+#: (DEC-CASCADE-STAT-TIER-WIRE-001).
+_FAMILY_PAIR_LEN: Final[int] = 2
+#: Minimum family width for the per-candidate CSCV columns — CSCV needs >= 2
+#: strategies to rank (mirrors ``cascade._MIN_POOL_FOR_PBO``); a 1-pair
+#: family builds no columns (the check is honestly skipped).
+_MIN_FAMILY_COLUMNS: Final[int] = 2
 
 
 class CascadeWireError(BruteXError):
@@ -209,12 +221,28 @@ class CascadeTupleSpec:
         re-scores a non-default survivor against ITS OWN source's bits (52-53 /
         0-5). Additive fields (default ``(HLC3, CLOSE)``) — DEFAULT-OMITTED from
         the manifest so a pre-axis manifest round-trips byte-compatibly.
+    family_sl_tp
+        The tuple's Stage-3 search FAMILY (DEC-CASCADE-STAT-TIER-WIRE-001):
+        the unique ``(sl_paisa, tp_paisa)`` configurations the winners' mask
+        was actually TRIED at during the Stage-3 refinement — sorted
+        ascending (the deterministic persisted order), the spec's OWN
+        ``(sl_paisa, tp_paisa)`` pair included. Drives the per-candidate
+        CSCV/PBO check at filter #5 (:func:`candidates_for_spec` re-simulates
+        one return column per pair). ``None`` (the default) = family
+        unavailable — a pure Stage-2 grid spec, a pre-family manifest, or a
+        refined cell whose winner masks carry DIFFERING families the
+        spec-level field cannot express (skipped LOUDLY at the spec build) —
+        the per-candidate PBO is then honestly skipped. Additive +
+        EMIT-ON-PRESENT in the manifest so a family-less manifest round-trips
+        byte-compatibly.
 
     Raises
     ------
     CascadeWireError
-        On an empty label, a non-positive knob, a malformed run_id, or an
-        out-of-range mask.
+        On an empty label, a non-positive knob, a malformed run_id, an
+        out-of-range mask, or a malformed ``family_sl_tp`` (empty /
+        non-positive legs / duplicate pairs / unsorted / missing the spec's
+        own pair / present while a leg is ``None``).
     """
 
     instrument: str
@@ -230,6 +258,7 @@ class CascadeTupleSpec:
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
     vwap_source: PriceSource = PriceSource.HLC3
     ema_source: PriceSource = PriceSource.CLOSE
+    family_sl_tp: tuple[tuple[int, int], ...] | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label", "direction_label"):
@@ -267,6 +296,33 @@ class CascadeTupleSpec:
             if not 0 <= mask <= _MASK_BITS_MAX:
                 raise CascadeWireError(
                     f"CascadeTupleSpec winner mask {mask} out of range [0, {_MASK_BITS_MAX}]"
+                )
+        if self.family_sl_tp is not None:
+            if not self.family_sl_tp:
+                raise CascadeWireError("CascadeTupleSpec.family_sl_tp must be non-empty or None")
+            if self.sl_paisa is None or self.tp_paisa is None:
+                raise CascadeWireError(
+                    "CascadeTupleSpec.family_sl_tp requires concrete sl_paisa/tp_paisa — "
+                    "the spec's own pair must be a family member (a disabled leg has no "
+                    "family coordinate)"
+                )
+            for pair in self.family_sl_tp:
+                if len(pair) != _FAMILY_PAIR_LEN or pair[0] <= 0 or pair[1] <= 0:
+                    raise CascadeWireError(
+                        f"CascadeTupleSpec.family_sl_tp pairs must be positive "
+                        f"(sl_paisa, tp_paisa) 2-tuples, got {pair!r}"
+                    )
+            if len(set(self.family_sl_tp)) != len(self.family_sl_tp):
+                raise CascadeWireError("CascadeTupleSpec.family_sl_tp pairs must be unique")
+            if list(self.family_sl_tp) != sorted(self.family_sl_tp):
+                raise CascadeWireError(
+                    "CascadeTupleSpec.family_sl_tp must be sorted ascending "
+                    "(the deterministic persisted order)"
+                )
+            if (self.sl_paisa, self.tp_paisa) not in self.family_sl_tp:
+                raise CascadeWireError(
+                    "CascadeTupleSpec.family_sl_tp must include the spec's own "
+                    f"(sl_paisa, tp_paisa) pair ({self.sl_paisa}, {self.tp_paisa})"
                 )
 
 
@@ -562,6 +618,56 @@ def cascade_config_for_sweep(
     return CascadeConfig(**kwargs)  # type: ignore[arg-type]
 
 
+def resolve_cascade_embargo_bars(tf_minutes: int, override: int | None) -> int:
+    """Resolve the Stage-4 embargo in decision-TF bars for one (instrument, tf) pool.
+
+    DEC-CASCADE-STAT-TIER-WIRE-001, applying the DEC-STAT-001 embargo law
+    (``docs/MIGRATION.md`` entry #123 —
+    ``max(label horizon, 1 trading day)``): the cascade's candidate series are
+    per-BAR equity returns, so the label span is ONE bar and the formula
+    floors at ONE TRADING DAY expressed in decision-TF bars —
+    ``ceil(DAILY_TF_MINUTES / tf_minutes)`` over the 375-minute NSE regular
+    session (:data:`brutex.data.timeframes.DAILY_TF_MINUTES`, never a
+    re-typed literal). The ``1day`` engine timeframe carries
+    ``minutes == 375`` (``trading_minutes_for_lake_interval``), so the
+    formula is uniform across all 21 TFs (``ceil(375/375) == 1``) — no
+    special case. Examples: 1minute → 375, 2minute → 188, 5minute → 75,
+    375minute/1day → 1.
+
+    Parameters
+    ----------
+    tf_minutes
+        The pool's decision timeframe in trading minutes (``>= 1`` — the
+        :class:`CascadeTupleSpec` invariant).
+    override
+        :attr:`~brutex.metrics.cascade.CascadeConfig.wfo_embargo` — ``None``
+        = AUTO (the formula above); an explicit ``int >= 0`` wins uniformly.
+
+    Returns
+    -------
+    int
+        The resolved embargo in bars (``>= 0``).
+
+    Raises
+    ------
+    CascadeWireError
+        On a negative *override* or a ``tf_minutes < 1``.
+    """
+    from brutex.data.timeframes import DAILY_TF_MINUTES
+
+    if override is not None:
+        if override < 0:
+            raise CascadeWireError(
+                f"CascadeConfig.wfo_embargo must be >= 0 or None (AUTO), got {override}"
+            )
+        return override
+    if tf_minutes < 1:
+        raise CascadeWireError(
+            f"resolve_cascade_embargo_bars: tf_minutes must be >= 1, got {tf_minutes}"
+        )
+    return (DAILY_TF_MINUTES + tf_minutes - 1) // tf_minutes
+
+
 def cascade_config_to_dict(config: CascadeConfig) -> dict[str, object]:
     """Return *config*'s fields as a JSON-serialisable dict (manifest storage)."""
     from dataclasses import asdict
@@ -570,7 +676,16 @@ def cascade_config_to_dict(config: CascadeConfig) -> dict[str, object]:
 
 
 def cascade_config_from_dict(data: dict[str, object]) -> CascadeConfig:
-    """Rebuild a :class:`CascadeConfig` from :func:`cascade_config_to_dict` output."""
+    """Rebuild a :class:`CascadeConfig` from :func:`cascade_config_to_dict` output.
+
+    Presence-tolerant for the NEW appended-with-default keys ONLY
+    (``wfo_embargo`` / ``candidate_pbo_family_cap``,
+    DEC-CASCADE-STAT-TIER-WIRE-001): an OLD manifest dict WITHOUT them
+    rebuilds with the dataclass defaults (they are ordinary defaulted
+    fields — no special-casing needed). Every OTHER drift keeps the
+    existing refusal law — an unknown key / missing required field is a
+    ``TypeError`` inside ``CascadeConfig(**data)`` → :class:`CascadeWireError`.
+    """
     from brutex.metrics.cascade import CascadeConfig
 
     try:
@@ -699,6 +814,7 @@ def build_candidate_input(
     start_equity_paisa: int,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+    family_sl_tp: tuple[tuple[int, int], ...] | None = None,
 ) -> CandidateInput:
     """Re-simulate one winning *mask* over *bars* into a cascade :class:`CandidateInput`.
 
@@ -727,6 +843,22 @@ def build_candidate_input(
         config, so both sides share the same window; a hard-coded default
         here would re-introduce a train/holdout mismatch for any non-default
         config). Defaults are the lockbox module's own public constants.
+    family_sl_tp
+        The candidate's Stage-3 search family
+        (DEC-CASCADE-STAT-TIER-WIRE-001; already cap-truncated by
+        :func:`candidates_for_spec`): with ``>= 2`` pairs, each pair is
+        re-simulated through the SAME simulation path the finalist uses —
+        identical bars / entry signals / direction / tf, ONLY the SL/TP legs
+        swapped — into one :func:`_per_bar_returns` column per pair (the
+        candidate's own pair reuses its already-computed series, never a
+        second sim), feeding the per-candidate CSCV/PBO check at filter #5.
+        The production caller guarantees the candidate's own
+        ``(sl_paisa, tp_paisa)`` is a family member (the
+        :class:`CascadeTupleSpec` invariant). ``None`` or fewer than 2 pairs
+        → ``family_returns=None`` (the check is honestly skipped). HONEST
+        cost: O(len(family) × bars) extra sim work per candidate — the same
+        cost class as the finalist re-sim, multiplied by the family width
+        (bounded by ``CascadeConfig.candidate_pbo_family_cap``).
 
     Returns
     -------
@@ -744,39 +876,72 @@ def build_candidate_input(
 
     side = Side.BUY if direction_label == "bull" else Side.SELL
     entry_signals = mask_to_entry_signals(bar_bits, mask)
-    trades = simulate_trades(
-        bars,
-        entry_signals,
-        direction=side,
-        tf_minutes=tf_minutes,
-        stop_loss_paisa=sl_paisa,
-        take_profit_paisa=tp_paisa,
-        # The candidate re-simulation reproduces the persisted finalist under
-        # the ONE hardcoded worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001).
-        # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
-        # candidate re-simulation's trades are a DISCARDED stream — every
-        # observable output is the CandidateInput SCALARS + returns tuples
-        # built below (no trade object, and no VIX field, survives the
-        # conversion), so the report bytes are provably identical stamped vs
-        # unstamped and a per-candidate stamp would be pure wasted work. The
-        # stream is EXPLICITLY unstamped via this literal (one of the FIVE
-        # enumerated sanctioned literal-None seam bindings, AST-pinned with
-        # exact counts by tests/unit/test_vix_stamper_binding_pin.py — never
-        # a silent omission); the old reference_stamper seam through the
-        # cascade chain was DELETED with the two manual-replay
-        # vix_stamper_for_manifest builds it existed to feed (each paid a
-        # full window-bounded VIX lake read per replay/click for zero
-        # output — the same dead-build class the round-2 review removed at
-        # the options-sim sites). REVERT LEVER: add a VIX surface to
-        # CandidateInput/the cascade report FIRST, then re-thread the seam.
-        reference_stamper=None,
-    )
+
+    def _trades_for_legs(leg_sl: int | None, leg_tp: int | None) -> list[ClosedTrade]:
+        """The ONE re-simulation law: this mask's trades for one (sl, tp) pair.
+
+        Shared by the finalist's own re-simulation AND the family columns
+        (DEC-CASCADE-STAT-TIER-WIRE-001) — ONE ``simulate_trades`` call site,
+        so the two can never drift and the VIX AST pin's exact literal count
+        (``tests/unit/test_vix_stamper_binding_pin.py``) is unchanged.
+        Reproduces the persisted finalist under the ONE hardcoded worst-case
+        fill law (DEC-FILL-WORST-CASE-ONLY-001).
+
+        HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
+        re-simulation's trades are a DISCARDED stream — every observable
+        output is the CandidateInput SCALARS + returns tuples built by the
+        caller (no trade object, and no VIX field, survives the conversion),
+        so the report bytes are provably identical stamped vs unstamped and a
+        per-candidate stamp would be pure wasted work. The stream is
+        EXPLICITLY unstamped via this literal (one of the FIVE enumerated
+        sanctioned literal-None seam bindings, AST-pinned with exact counts —
+        never a silent omission); the old reference_stamper seam through the
+        cascade chain was DELETED with the two manual-replay
+        vix_stamper_for_manifest builds it existed to feed (each paid a full
+        window-bounded VIX lake read per replay/click for zero output — the
+        same dead-build class the round-2 review removed at the options-sim
+        sites). REVERT LEVER: add a VIX surface to CandidateInput/the cascade
+        report FIRST, then re-thread the seam.
+        """
+        return simulate_trades(
+            bars,
+            entry_signals,
+            direction=side,
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=leg_sl,
+            take_profit_paisa=leg_tp,
+            reference_stamper=None,
+        )
+
+    trades = _trades_for_legs(sl_paisa, tp_paisa)
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
     metrics = compute_metrics(trades, equity, total_bars=len(bars))
 
     per_bar = _per_bar_returns(equity.equity_paisa, start_equity_paisa)
+
+    def _family_column(fam_sl: int, fam_tp: int) -> tuple[float, ...]:
+        """One family pair's aligned per-bar return column (legs swapped only)."""
+        fam_equity = build_equity_curve(
+            bars,
+            _trades_for_legs(fam_sl, fam_tp),
+            start_equity_paisa=start_equity_paisa,
+            tf_minutes=tf_minutes,
+        )
+        return _per_bar_returns(fam_equity.equity_paisa, start_equity_paisa)
+
+    # Per-candidate CSCV family columns (DEC-CASCADE-STAT-TIER-WIRE-001): one
+    # aligned per-bar return series per family (sl, tp) pair; the candidate's
+    # own pair reuses the just-computed series (identical by construction —
+    # same law, same inputs), every other pair is a real re-simulation with
+    # ONLY the legs swapped. Fewer than 2 pairs → honest None (skip).
+    family_returns: tuple[tuple[float, ...], ...] | None = None
+    if family_sl_tp is not None and len(family_sl_tp) >= _MIN_FAMILY_COLUMNS:
+        family_returns = tuple(
+            per_bar if (fam_sl, fam_tp) == (sl_paisa, tp_paisa) else _family_column(fam_sl, fam_tp)
+            for fam_sl, fam_tp in family_sl_tp
+        )
     day_ordinals = tuple(bar.timestamp.astimezone(IST).date().toordinal() for bar in bars)
     n_entries = sum(1 for signal in entry_signals if signal)
 
@@ -859,6 +1024,7 @@ def build_candidate_input(
             tp_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
         ),
+        family_returns=family_returns,
     )
 
 
@@ -869,6 +1035,7 @@ def candidates_for_spec(
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
     roll_schedule: tuple[int, ...] | None = None,
+    family_cap: int | None = None,
 ) -> list[CandidateInput]:
     """Re-build every winner of *spec* into a :class:`CandidateInput` over *bars*.
 
@@ -882,6 +1049,18 @@ def candidates_for_spec(
     MANUAL replay (``CascadeManifest.roll_schedules``), so a futures winner
     is re-scored under the SAME per-contract hard resets the sweep ranked it
     with (DEC-STAGE1A-ROLL-RESET-001 D11 — review round-1).
+
+    ``family_cap`` (DEC-CASCADE-STAT-TIER-WIRE-001) bounds the per-candidate
+    CSCV family width: a ``spec.family_sl_tp`` wider than the cap is
+    truncated to the FIRST ``family_cap`` pairs in the deterministic (sorted)
+    persisted order with ONE loud ``cascade_wire.family_capped`` WARNING per
+    spec — never silently. If the truncation would drop the spec's OWN
+    ``(sl_paisa, tp_paisa)`` pair, the family is DROPPED wholesale instead
+    (``cascade_wire.family_cap_dropped_own_pair`` — CSCV over a family that
+    excludes the candidate says nothing about it; the per-candidate PBO is
+    then honestly skipped). ``None`` (the default) applies no cap — direct
+    callers; the production wire always threads
+    ``CascadeConfig.candidate_pbo_family_cap``.
     """
     from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
     from brutex.vocabulary import ProximityParams
@@ -905,6 +1084,38 @@ def candidates_for_spec(
         roll_schedule=roll_schedule,
         apply_1day_mask=apply_1day_mask_for(spec.instrument, spec.tf_label),
     )
+    family = spec.family_sl_tp
+    if family is not None and family_cap is not None and len(family) > family_cap:
+        truncated = family[:family_cap]
+        dropped = len(family) - len(truncated)
+        if (spec.sl_paisa, spec.tp_paisa) not in truncated:
+            # The cap would exclude the finalists' own pair — CSCV over a
+            # family that excludes the candidate says nothing about it, so
+            # the per-candidate PBO is honestly SKIPPED for this spec.
+            _LOG.warning(
+                "cascade_wire.family_cap_dropped_own_pair",
+                instrument=spec.instrument,
+                tf=spec.tf_label,
+                direction=spec.direction_label,
+                sl_paisa=spec.sl_paisa,
+                tp_paisa=spec.tp_paisa,
+                family_size=len(family),
+                cap=family_cap,
+            )
+            family = None
+        else:
+            _LOG.warning(
+                "cascade_wire.family_capped",
+                instrument=spec.instrument,
+                tf=spec.tf_label,
+                direction=spec.direction_label,
+                sl_paisa=spec.sl_paisa,
+                tp_paisa=spec.tp_paisa,
+                family_size=len(family),
+                cap=family_cap,
+                dropped=dropped,
+            )
+            family = truncated
     return [
         build_candidate_input(
             run_id=run_id,
@@ -918,6 +1129,7 @@ def candidates_for_spec(
             start_equity_paisa=spec.start_equity_paisa,
             lockbox_default_window_days=lockbox_default_window_days,
             lockbox_min_trades=lockbox_min_trades,
+            family_sl_tp=family,
         )
         for run_id, mask in spec.winners
     ]
@@ -974,6 +1186,16 @@ def run_cascade_over_specs(
         One :class:`CascadeReport` per pooled slice, sorted by ``(instrument, tf)``.
     """
     from brutex.metrics.cascade import DsrTrialStats, run_stage4_cascade
+
+    # DEC-CASCADE-STAT-TIER-WIRE-001: CascadeConfig is a frozen no-__post_init__
+    # dataclass, so the family cap is validated HERE at the ONE production
+    # consumption point (the wfo_embargo override is validated inside
+    # resolve_cascade_embargo_bars per pool).
+    if config.candidate_pbo_family_cap < 1:
+        raise CascadeWireError(
+            f"CascadeConfig.candidate_pbo_family_cap must be >= 1, "
+            f"got {config.candidate_pbo_family_cap}"
+        )
 
     # The frozen per-leaderboard deflation inputs (DEC-TRIAL-STATS-CONSUME-001,
     # ADR-0008 condition 6): a group's record must be PRESENT, COMPLETE and
@@ -1053,8 +1275,23 @@ def run_cascade_over_specs(
                 remedy="re-run `brutex sweep-all` to record roll_schedules in the manifest",
             )
             continue
+        group_specs = grouped[(instrument, tf_label)]
+        # DEC-CASCADE-STAT-TIER-WIRE-001: ONE resolved embargo per pool. The
+        # group's tf_minutes must be unambiguous (tf_label <-> tf_minutes is
+        # 1:1 by construction; a disagreeing manifest is corrupt — refuse
+        # loudly rather than embargo one pool under two different clocks).
+        group_tf_minutes = {spec.tf_minutes for spec in group_specs}
+        if len(group_tf_minutes) != 1:
+            raise CascadeWireError(
+                f"specs for pool ({instrument!r}, {tf_label!r}) disagree on tf_minutes "
+                f"{sorted(group_tf_minutes)} — the manifest is corrupt; re-run "
+                "`brutex sweep-all` to mint a fresh one"
+            )
+        embargo_bars = resolve_cascade_embargo_bars(
+            next(iter(group_tf_minutes)), config.wfo_embargo
+        )
         candidates: list[CandidateInput] = []
-        for spec in grouped[(instrument, tf_label)]:
+        for spec in group_specs:
             candidates.extend(
                 candidates_for_spec(
                     spec,
@@ -1067,12 +1304,20 @@ def run_cascade_over_specs(
                     lockbox_min_trades=config.lockbox_min_trades,
                     # ADR-0012: the pool's OWN roll schedule (None = spot path).
                     roll_schedule=roll_schedule,
+                    # DEC-CASCADE-STAT-TIER-WIRE-001: the ONE config's family
+                    # cap bounds the per-candidate CSCV re-sim width.
+                    family_cap=config.candidate_pbo_family_cap,
                 )
             )
         if not candidates:
             continue
         report = run_stage4_cascade(
-            candidates, config, trial_stats=_trial_stats_for(instrument, tf_label)
+            candidates,
+            config,
+            trial_stats=_trial_stats_for(instrument, tf_label),
+            # The pool's resolved DEC-STAT-001 embargo (AUTO = one trading
+            # day in decision-TF bars; config.wfo_embargo overrides).
+            embargo_bars=embargo_bars,
         )
         groups.append((instrument, tf_label, report))
 
@@ -1103,7 +1348,10 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
     report simply lacks the key. The per-verdict ``cpcv_pass_rate`` key
     (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) rides the SAME additive-at-1
     precedent: the RAW full-precision stage-3 fraction or ``null`` (a
-    pre-change report simply lacks the key — readers None-fill).
+    pre-change report simply lacks the key — readers None-fill). The
+    report-level ``pool_rc_pvalue``/``pool_spa_pvalue`` and the per-verdict
+    ``candidate_pbo`` keys (DEC-CASCADE-STAT-TIER-WIRE-001) ride the SAME
+    precedent again — raw full-precision floats or ``null``.
     """
     return {
         "n_input": report.n_input,
@@ -1112,6 +1360,8 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
         "dsr_n_trials": report.dsr_n_trials,
         "dsr_trial_variance": report.dsr_trial_variance,
         "pool_pbo": report.pool_pbo,
+        "pool_rc_pvalue": report.pool_rc_pvalue,
+        "pool_spa_pvalue": report.pool_spa_pvalue,
         "survivor_ids": list(report.survivor_ids),
         "stage_survivors": dict(report.stage_survivors),
         "verdicts": [
@@ -1123,6 +1373,7 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
                 "composite_score": verdict.composite_score,
                 "provisional": verdict.provisional,
                 "cpcv_pass_rate": verdict.cpcv_pass_rate,
+                "candidate_pbo": verdict.candidate_pbo,
             }
             for verdict in report.verdicts
         ],
@@ -1403,6 +1654,11 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         # (modulo the unconditional fill_mode key above — the two laws compose).
         **price_source_params_fragment(spec.vwap_source, spec.ema_source),
     }
+    # EMIT-ON-PRESENT (DEC-CASCADE-STAT-TIER-WIRE-001): the Stage-3 search
+    # family is written only when recorded, so a family-less spec (a pure
+    # grid winner / pre-family era) serialises byte-identically to before.
+    if spec.family_sl_tp is not None:
+        payload["family_sl_tp"] = [[sl, tp] for sl, tp in spec.family_sl_tp]
     return payload
 
 
@@ -1460,6 +1716,15 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
                 PriceSource.CLOSE
                 if raw.get("ema_source") is None
                 else PriceSource(str(raw["ema_source"]))
+            ),
+            # Absent on pre-DEC-CASCADE-STAT-TIER-WIRE-001 manifests (additive
+            # parse): None = family unavailable → per-candidate PBO skipped.
+            # A malformed value falls into the existing refusal guard below;
+            # CascadeTupleSpec.__post_init__ enforces the family shape law.
+            family_sl_tp=(
+                None
+                if raw.get("family_sl_tp") is None
+                else tuple((int(sl), int(tp)) for sl, tp in raw["family_sl_tp"])
             ),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -1751,12 +2016,18 @@ def spec_from_store_rows(
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     vwap_source: PriceSource = PriceSource.HLC3,
     ema_source: PriceSource = PriceSource.CLOSE,
+    family_sl_tp: tuple[tuple[int, int], ...] | None = None,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
     Selects the top-``top_k`` *rows* by Sharpe (ties broken by ``run_id`` ascending
     — deterministic, matching :meth:`ResultsStore.top_k`) as the tuple's cascade
     winners. Returns ``None`` when *rows* is empty (nothing to cascade).
+    ``family_sl_tp`` (DEC-CASCADE-STAT-TIER-WIRE-001) is carried verbatim onto
+    the spec — the Stage-3 build path
+    (:func:`brutex.engine.stage3_wire.cascade_specs_for_refined_cells`)
+    supplies each refined cell's per-mask search family; the default ``None``
+    keeps every other caller byte-identical.
 
     Parameters
     ----------
@@ -1802,6 +2073,7 @@ def spec_from_store_rows(
         fib_anchor=fib_anchor,
         vwap_source=vwap_source,
         ema_source=ema_source,
+        family_sl_tp=family_sl_tp,
     )
 
 
@@ -2456,6 +2728,7 @@ __all__ = [
     "manifest_snapshot_hash",
     "manifest_to_json",
     "report_path",
+    "resolve_cascade_embargo_bars",
     "run_and_write_from_manifest",
     "run_and_write_from_specs",
     "run_cascade_over_specs",
