@@ -457,19 +457,22 @@ class TestCrossProcessPartitionLock:
         """
         w = _writer(tmp_path)
         # First write creates the partition so the SECOND write takes the merge
-        # (read-modify-write) path that calls ``pl.read_parquet(dest)``.
+        # (read-modify-write) path that reads the existing partition through the
+        # DEC-LAKE-READ-INODE-GUARD-001 ``read_parquet_regular`` seam (the spy
+        # targets that seam — the guarded read hands polars an OPEN handle, so
+        # a bare ``pl.read_parquet`` spy could no longer recover the dest path).
         w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
 
         observed: dict[str, bool] = {}
-        original_read = pl.read_parquet
+        from brutex.data.guarded_read import read_parquet_regular as real_read_parquet
 
         def _spy_read(source: object, *args: object, **kwargs: object) -> pl.DataFrame:
             observed["held_during_read"] = _partition_lock_is_held(
                 partition_lock_path(tmp_path, Path(str(source)))
             )
-            return original_read(source, *args, **kwargs)  # type: ignore[arg-type]
+            return real_read_parquet(source, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(pl, "read_parquet", _spy_read)
+        monkeypatch.setattr("brutex.data.option_parquet_writer.read_parquet_regular", _spy_read)
         w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=1)])
 
         assert observed["held_during_read"] is True

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from brutex.data.guarded_read import read_regular_bytes as real_read_bytes
 from brutex.observability.diag_bundle import (
     BUNDLE_FILENAME,
     REDACTED_VALUE,
@@ -138,12 +139,13 @@ class TestBuild:
         """A hardware_key probe failure degrades to 'unknown' + WARN, never fails
         the bundle (fail-soft, never a fabricated key)."""
         _seed_run_dir(tmp_path)
-        import brutex.observability.diag_bundle as mod
 
         def _boom() -> str:
             raise ValueError("bad override")
 
-        monkeypatch.setattr(mod, "hardware_key", _boom)
+        # String-target monkeypatch (the #1810 CodeQL convention): patches the
+        # module-level binding without a second `import ... as` style.
+        monkeypatch.setattr("brutex.observability.diag_bundle.hardware_key", _boom)
         with capture_logs() as logs:
             bundle = build_diagnostic_bundle(tmp_path, run_id=_RUN_ID, env={})
         assert bundle is not None
@@ -156,14 +158,18 @@ class TestBuild:
         """An unreadable member is skipped + WARNed + honestly listed in meta."""
         run_dir = _seed_run_dir(tmp_path)
         poison = run_dir / "manifest.json"
-        real_read_bytes = Path.read_bytes
 
-        def _boom(self: Path) -> bytes:
-            if self == poison:
+        # DEC-LAKE-READ-INODE-GUARD-001: the bundle member read rides the
+        # module-level guarded seam, not Path.read_bytes — fault it there via
+        # the string-target monkeypatch (the #1810 CodeQL convention). The
+        # delegate is guarded_read's identity-pinned object — the SAME function
+        # diag_bundle binds (`from brutex.data.guarded_read import ...`).
+        def _boom(path: Path) -> bytes:
+            if Path(path) == poison:
                 raise OSError("I/O error")
-            return real_read_bytes(self)
+            return real_read_bytes(path)
 
-        monkeypatch.setattr(Path, "read_bytes", _boom)
+        monkeypatch.setattr("brutex.observability.diag_bundle.read_regular_bytes", _boom)
         with capture_logs() as logs:
             bundle = build_diagnostic_bundle(tmp_path, run_id=_RUN_ID, env={})
         assert bundle is not None
@@ -209,12 +215,11 @@ class TestBuild:
     ) -> None:
         """A zip-write failure → ONE diag_bundle.build_failed WARN + None (I-3)."""
         _seed_run_dir(tmp_path)
-        import brutex.observability.diag_bundle as mod
 
         def _boom(dest: Path, write_to: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(mod, "atomic_write_simple", _boom)
+        monkeypatch.setattr("brutex.observability.diag_bundle.atomic_write_simple", _boom)
         with capture_logs() as logs:
             assert build_diagnostic_bundle(tmp_path, run_id=_RUN_ID, env={}) is None
         warns = [e for e in logs if e["event"] == "diag_bundle.build_failed"]
