@@ -1,0 +1,87 @@
+# brutex-data — pure-law kernels for brutex/data (ADR-0020 slice T10).
+#
+# DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940). PR-1 re-hosts the
+# STRUCTURAL half of the right-anchored F&O contract-symbol grammar
+# (`brutex/data/fno_symbol.py::parse_fno_symbol`) as ONE pure function
+# returning INTEGERS only (`parse_fno_symbol_coords` — token-role spans +
+# expiry y/m/d + a type code, or None). Python keeps ALL materialization
+# (string slices, `date`, `Decimal` strike, `FnoSymbolParts`) — the
+# DEC-FEED-RUST-CORE-001 discipline, so nothing that reaches displayed /
+# classified output is ever re-implemented in Rust.
+#
+# Stdlib-pure by design: NO polars, NO chrono, NO regex — the `%d%b%y`
+# grammar mirror is hand-rolled (src/fno_symbol.rs) against the EMPIRICAL
+# CPython `_strptime` truth table probed 2026-07-17 and transcribed into
+# this crate's unit tests. The Gregorian leap rule is 6 lines.
+#
+# OPTIONAL-class kernel (the brutex-lake school): consumed ONLY through the
+# import-guarded facade `brutex/data/fno_symbol_rust.py` behind the
+# default-OFF `BRUTEX_DATA_RUST` flag; deliberately NOT a turnkey build
+# prerequisite; built ONLY by its own CI lane
+# (.github/workflows/data-rust-parity.yml). Hence NO build.rs source
+# digest, NO EXPECTED_BUILD.json, NO deny.toml — the facade's SYMBOL
+# handshake is the stale-wheel guard, and the LOCALE guard (facade §3a) is
+# the lockstep guard this locale-coupled law actually needs. NO
+# rust-toolchain.toml either (consciously dropped vs brutex-lake, which
+# pins one only for its polars-graph MSRV cliff; a stdlib crate has none).
+#
+# Standalone crate — deliberately NOT in any Cargo workspace (every sibling
+# crate is standalone; CI targets crate dirs explicitly).
+
+[package]
+name = "brutex-data"
+version = "0.1.0"
+edition = "2024"
+# Stdlib-only crate; no polars graph → no sysinfo MSRV pressure.
+# NOTE: deliberately LOWER than the siblings' 1.93.1/1.95 — edition 2024's
+# true floor; brutex-data is the outlier by choice, harmless under --locked
+# on latest-stable CI.
+rust-version = "1.85"
+description = "BruteX data pure-law kernels — F&O symbol grammar (ADR-0020 slice T10 PR-1)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it
+# from the SPDX license check (mirrors fno-math / trading-core).
+publish = false
+
+[lib]
+name = "brutex_data"
+path = "src/lib.rs"
+# cdylib so `import brutex_data` finds the maturin-built extension; rlib so
+# `cargo test` links the pure-Rust core with ZERO libpython.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Pure-Rust-first: `cargo test` (default features) builds + links zero
+# Python symbols. maturin turns `python` on for the wheel build (the
+# brutex-feed / trading-core shape).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[dev-dependencies]
+# Property-based testing — never-panics + determinism over arbitrary input.
+# Test-only; same major as the sibling crates so the toolchains agree.
+proptest = "1.6.0"
+
+[profile.release]
+# Finance code — an overflow must never be silent (the brutex-feed law,
+# adopted: the hand-rolled date arithmetic — pivot/leap/day-in-month —
+# inherits it). panic deliberately LEFT at the default "unwind": the
+# facade's panic belt needs UNWINDING panics so a crate panic surfaces as
+# pyo3 PanicException / the catch_unwind RuntimeError and latches
+# `crate_panic` → oracle; with abort the belt would be cosmetic and a panic
+# would kill the process. brutex-lake (the OPTIONAL precedent) DOCUMENTS a
+# deliberate decline of overflow-checks for polars-wheel byte-parity —
+# that reason is N/A for a stdlib crate with no byte-parity render, so
+# brutex-data consciously diverges and adopts the feed's finance law,
+# adding ONLY this line (the feed's opt-level/lto/codegen-units/strip
+# tuning is NOT copied — a microsecond-scale parser has no throughput SLA;
+# expected payoff ≈ 0, ADR-0020 banner).
+overflow-checks = true

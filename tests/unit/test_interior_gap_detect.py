@@ -455,3 +455,35 @@ class TestObservedOverlayMargin:
             frozenset({date(2026, 5, 9)}),  # a Saturday
         )
         assert with_weekend == base == 6
+
+    def test_stale_overlay_on_covered_session_never_merges_runs(self) -> None:
+        # FAIL-BEFORE/PASS-AFTER (DEC-SEED-OBSERVED-OVERLAY-001 review fold): a
+        # STALE overlay entry over a since-BACKFILLED covered session (an entry
+        # self-heals only when `brutex detect-session-drift` next re-runs, NOT
+        # the moment bars appear, so ``observed ∩ covered != ∅`` IS reachable)
+        # must NOT merge the two flanking sub-tolerance runs into one
+        # super-tolerance hole — the covered session's bars are the heal
+        # EVIDENCE and always break the run. Pre-fix the walker consulted the
+        # overlay FIRST, skipped the covered day, and read one 8-session run
+        # (> tolerance 5 → INTERIOR_GAP / a new seed refusal).
+        t = _trading_days_from(date(2021, 6, 1), 11)
+        covered = [t[0], t[5], t[10]]  # two flanking 4-session bar-less runs
+        base = classify_interior_gap_dates(covered_dates=covered)  # tolerance 5
+        assert base.verdict == NO_INTERIOR_GAP
+        assert base.largest_gap_sessions == 4
+        stale = classify_interior_gap_dates(covered_dates=covered, observed=frozenset({t[5]}))
+        assert stale == base  # the stale entry is INERT — the runs did not merge to 8
+        assert interior_gap_runs(covered_dates=covered, observed=frozenset({t[5]})) == ()
+
+    def test_covered_static_nonsession_date_stays_inert(self) -> None:
+        # BYTE-COMPAT: a bar on a STATIC non-session date (a legacy weekend
+        # leak) still neither breaks nor extends a run — only the overlaid
+        # covered-SESSION shape changed, never the static-calendar shape.
+        t = _trading_days_from(date(2021, 6, 1), 8)
+        saturday = date(2021, 6, 5)
+        assert not is_trading_day(saturday)
+        covered = [t[0], t[7]]  # 6 interior bar-less sessions
+        with_leak = [t[0], saturday, t[7]]
+        assert (
+            _largest_interior_session_gap(with_leak) == _largest_interior_session_gap(covered) == 6
+        )
