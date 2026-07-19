@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1957 —
+_Last updated: 2026-07-18 (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1960 —
 renumbered #1954 → #1957 at the 2026-07-19 merge-reconcile over main tip
 4c11f7aaf (main's Club P train took #1954/#1955/#1956; DEC-IDs are the
 stable handles per DEC-LEDGER-RENUMBER-001) —
@@ -3660,7 +3660,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/optcost-tails-rust`
-  (**DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1957** — renumbered
+  (**DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1960** — renumbered
   #1954 → #1957 at the 2026-07-19 merge-reconcile over main tip 4c11f7aaf
   (main's Club P train took #1954/#1955/#1956) per
   DEC-LEDGER-RENUMBER-001, the DEC-ID is the stable handle —
@@ -11136,7 +11136,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/optcost-tails-rust`
-  (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1957 — renumbered
+  (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1960 — renumbered
   #1954 → #1957 at the 2026-07-19 merge-reconcile per
   DEC-LEDGER-RENUMBER-001 — the UNCLAIMED
   options/cost TAIL kernels (regime-rate bisect · moneyness
