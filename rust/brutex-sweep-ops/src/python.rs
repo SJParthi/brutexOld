@@ -16,6 +16,7 @@ use pyo3::prelude::*;
 use crate::artifacts;
 use crate::audit_chain;
 use crate::leaves;
+use crate::ops;
 
 // ───────────────────────── slice 1 — leaves ─────────────────────────
 
@@ -314,6 +315,73 @@ fn checkpoint_adoption_verdict(
     artifacts::checkpoint_adoption_verdict(store_sweep_id, store_total, cp_sweep_id, cp_total)
 }
 
+// ───────────────────── slice 4 — ops ─────────────────────
+
+/// `sweep_detach.probe_handle`'s liveness cross-check fold (see
+/// [`ops::detach_probe_verdict`]). A missing/unknown verdict token under a
+/// readable progress payload raises `ValueError` (the facade degrades to
+/// the oracle) — the Python wiring gates the token against the mirrored
+/// `RunVerdict` values, so the raise is a belt, never a live path.
+#[pyfunction]
+fn detach_probe_verdict(
+    has_progress: bool,
+    handle_pid_alive: bool,
+    verdict_token: Option<&str>,
+    pids_match: bool,
+) -> PyResult<&'static str> {
+    ops::detach_probe_verdict(has_progress, handle_pid_alive, verdict_token, pids_match)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// `sweep_heal.assess_heal`'s per-entry MISMATCH-TAIL decision (see
+/// [`ops::heal_mismatch_decision`]). A triple whose arity is not exactly
+/// three raises `ValueError` (the facade gates the shape — a belt).
+#[pyfunction]
+fn heal_mismatch_decision(
+    src: Vec<Option<String>>,
+    plan: Vec<Option<String>>,
+    dest: Vec<Option<String>>,
+) -> PyResult<&'static str> {
+    ops::heal_mismatch_decision(&src, &plan, &dest).map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// `sweep_scheduler.Schedule.next_fire_after`'s clock arithmetic (see
+/// [`ops::schedule_next_fire`]). Floats cross as f64 BIT-exactly; the
+/// Python wrapper reconstructs the daily arm's `int` return type so the
+/// `cycle_audit_payload` JSON bytes stay identical either arm.
+#[pyfunction]
+fn schedule_next_fire(
+    is_interval: bool,
+    interval_seconds: i64,
+    second_of_day: i64,
+    tz_offset_seconds: i64,
+    now: f64,
+    last_fire: Option<f64>,
+) -> PyResult<f64> {
+    ops::schedule_next_fire(
+        is_interval,
+        interval_seconds,
+        second_of_day,
+        tz_offset_seconds,
+        now,
+        last_fire,
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// `sweep_scheduler.decide_resume`'s pure classification (see
+/// [`ops::resume_decision`]) — `(token, resume_from_index)`; the REASON
+/// strings are rendered Python-side from the token.
+#[pyfunction]
+fn resume_decision(
+    exists: bool,
+    sweep_id_matches: bool,
+    next_index: i64,
+    total_combos: i64,
+) -> (&'static str, i64) {
+    ops::resume_decision(exists, sweep_id_matches, next_index, total_combos)
+}
+
 // ──────────────────────── module registration ────────────────────────
 
 #[pymodule]
@@ -344,7 +412,13 @@ fn _brutex_sweep_ops(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quarantine_next_ordinal, m)?)?;
     m.add_function(wrap_pyfunction!(checkpoint_record_decision, m)?)?;
     m.add_function(wrap_pyfunction!(checkpoint_adoption_verdict, m)?)?;
-    // slice 4..6 registration blocks append below this line, one fenced
+    // slice 4 — ops
+    m.add("RUN_VERDICT_TOKENS", ops::RUN_VERDICT_TOKENS)?;
+    m.add_function(wrap_pyfunction!(detach_probe_verdict, m)?)?;
+    m.add_function(wrap_pyfunction!(heal_mismatch_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(schedule_next_fire, m)?)?;
+    m.add_function(wrap_pyfunction!(resume_decision, m)?)?;
+    // slice 5..6 registration blocks append below this line, one fenced
     // block per slice (see the module docstring's registration law).
     Ok(())
 }

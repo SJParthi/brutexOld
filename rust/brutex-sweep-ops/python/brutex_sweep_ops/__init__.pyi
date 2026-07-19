@@ -128,3 +128,32 @@ def checkpoint_adoption_verdict(
     cp_sweep_id: str,
     cp_total: int,
 ) -> str: ...
+
+# ── slice 4 — the process/lock-ops family ───────────────────────────
+RUN_VERDICT_TOKENS: list[str]
+
+def detach_probe_verdict(
+    has_progress: bool,
+    handle_pid_alive: bool,
+    verdict_token: str | None,
+    pids_match: bool,
+) -> str: ...
+def heal_mismatch_decision(
+    src: list[str | None],
+    plan: list[str | None],
+    dest: list[str | None],
+) -> str: ...
+def schedule_next_fire(
+    is_interval: bool,
+    interval_seconds: int,
+    second_of_day: int,
+    tz_offset_seconds: int,
+    now: float,
+    last_fire: float | None,
+) -> float: ...
+def resume_decision(
+    exists: bool,
+    sweep_id_matches: bool,
+    next_index: int,
+    total_combos: int,
+) -> tuple[str, int]: ...
