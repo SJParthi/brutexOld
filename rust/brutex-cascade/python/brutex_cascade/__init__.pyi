@@ -96,5 +96,50 @@ def roll_schedules_parse(
 def manifest_version_gate(payload: Any, manifest_version: int) -> None: ...
 def bars_context_coerce(payload: Any) -> dict[str, str]: ...
 def finite_or_zero(value: float | None) -> float: ...
+
+# ── top100_artifact (slice 2b) ───────────────────────────────────────────
+
+def top100_dumps(payload: object) -> str: ...
+def top100_passes_hard_gates(
+    row: Any, agg: Any, gates: tuple[int, float, float, float, float, int]
+) -> bool: ...
+def top100_loads_object(rendered: str, error_cls: type[Exception]) -> dict[str, Any]: ...
+def top100_build(
+    candidates: Sequence[Any],
+    run_id: str,
+    preset: str,
+    families: Any,
+    counts: Any,
+    data_snapshot_hashes: Sequence[str],
+    baselines: Mapping[str, str],
+    reason_provider: Any | None,
+    margin_roi_provider: Any | None,
+    cascade_join: Any | None,
+    resolve_preset_fn: Any,
+    rank_fn: Any,
+    cond_names_fn: Any,
+    error_cls: type[Exception],
+    artifact_cls: Any,
+    logger: Any,
+    gates: tuple[int, float, float, float, float, int],
+    limit: int,
+    schema_version: int,
+) -> Any: ...
+def top100_cascade_payload(
+    run_id: str, join: Any | None, state: str
+) -> tuple[dict[str, Any], float | None]: ...
+def top100_load_stamp(
+    stamp_raw: bytes,
+    run_id: str,
+    stamp_keys: frozenset[str],
+    stage_token: str,
+) -> tuple[str | None, str | None]: ...
+def top100_load_artifact(
+    raw: bytes,
+    content_hash: str,
+    run_id: str,
+    schema_version: int,
+    entry_required_keys: frozenset[str],
+) -> tuple[str | None, tuple[Any, ...] | None]: ...
 def per_bar_returns(equity_paisa: Sequence[int], start_equity_paisa: int) -> list[float]: ...
 def max_drawdown_return_units(returns: Sequence[float]) -> float: ...

@@ -21,6 +21,22 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
+/// String-arm policy of the value walk. The two public entries are DISTINCT
+/// byte laws (DEC-RUST-CASCADE-RESULTS-001 slice 2b): identical on every
+/// UTF-8-extractable string, divergent ONLY on a lone-surrogate `str`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StrPolicy {
+    /// [`dumps_sorted`] (slice 2a — cascade_wire): a lone-surrogate str fails
+    /// UTF-8 extraction — the disclosed loud refusal (unreachable from the
+    /// cascade_wire projection builders).
+    RefuseSurrogates,
+    /// [`dumps_sorted_surrogatepass`] (slice 2b — top100_artifact): the full
+    /// CPython `py_encode_basestring_ascii` arm — a lone surrogate escapes as
+    /// its `\uXXXX` code unit (`ensure_ascii=True` never rejects it; the
+    /// frozen `lone_surrogate_instrument` corpus case).
+    EscapeSurrogates,
+}
+
 /// Append *s* to *out* as a JSON string literal, byte-identical to
 /// CPython's `py_encode_basestring_ascii` (`ensure_ascii=True`).
 pub fn push_json_string(out: &mut String, s: &str) {
@@ -64,6 +80,33 @@ pub fn dumps_str_int_map(map: &BTreeMap<String, i128>) -> String {
     }
     out.push('}');
     out
+}
+
+/// Append a string given as UTF-16-LE bytes (`str.encode("utf-16-le",
+/// "surrogatepass")`) as a JSON literal, byte-identical to CPython's
+/// `py_encode_basestring_ascii`. CPython escapes per CODE POINT: BMP points
+/// (lone surrogates included) render `\uXXXX`, astral points render their
+/// surrogate PAIR — which is exactly the UTF-16 code-unit sequence, so a
+/// per-unit walk reproduces both arms verbatim.
+fn push_json_string_utf16le(out: &mut String, bytes: &[u8]) {
+    out.push('"');
+    for chunk in bytes.chunks_exact(2) {
+        let unit = u16::from_le_bytes([chunk[0], chunk[1]]);
+        match unit {
+            0x22 => out.push_str("\\\""),
+            0x5c => out.push_str("\\\\"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            0x20..=0x7e => out.push(unit as u8 as char),
+            _ => {
+                let _ = write!(out, "\\u{unit:04x}");
+            }
+        }
+    }
+    out.push('"');
 }
 
 /// Render the worst-days `[[iso_date, pnl], …]` list exactly as
@@ -110,18 +153,46 @@ pub fn dumps_pairs(pairs: &[(String, i128)]) -> String {
 ///   `TypeError("Object of type {name} is not JSON serializable")`.
 pub fn dumps_sorted(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     let mut out = String::new();
-    write_json_value(obj, &mut out)?;
+    write_json_value(obj, &mut out, StrPolicy::RefuseSurrogates)?;
     Ok(out)
 }
 
-fn write_json_value(v: &Bound<'_, PyAny>, out: &mut String) -> PyResult<()> {
+/// The `top100_artifact._dumps` byte law (slice 2b) — IDENTICAL to
+/// [`dumps_sorted`] (`sort_keys=True`, `separators=(",", ":")`,
+/// `ensure_ascii=True`, `allow_nan=False`, no trailing newline — the shim
+/// appends the `"\n"` at its two call sites) EXCEPT the string arm, which
+/// carries CPython's full lone-surrogate `\uXXXX` escape (the frozen
+/// `lone_surrogate_instrument` corpus case) instead of the slice-2a refusal.
+/// A DISTINCT entry so neither law bends the other
+/// (DEC-RUST-CASCADE-RESULTS-001 slice-2b recorded decision). Residual
+/// divergence: a lone-surrogate dict KEY still refuses at extraction
+/// (CPython would escape it; unreachable — every top100 payload key is
+/// writer-minted ASCII or a `json.loads` product of the artifact's own
+/// ASCII bytes).
+pub fn dumps_sorted_surrogatepass(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    let mut out = String::new();
+    write_json_value(obj, &mut out, StrPolicy::EscapeSurrogates)?;
+    Ok(out)
+}
+
+fn write_json_value(v: &Bound<'_, PyAny>, out: &mut String, policy: StrPolicy) -> PyResult<()> {
     if v.is_none() {
         out.push_str("null");
     } else if v.is_instance_of::<PyString>() {
-        // A lone-surrogate str fails UTF-8 extraction — a loud refusal (the
-        // slice-1 disclosed divergence envelope; CPython would escape it).
-        let s = v.extract::<String>()?;
-        push_json_string(out, &s);
+        match v.extract::<String>() {
+            Ok(s) => push_json_string(out, &s),
+            // A lone-surrogate str fails UTF-8 extraction: under the slice-2a
+            // law a loud refusal (the slice-1 disclosed divergence envelope);
+            // under the top100 law CPython's own per-code-unit escape.
+            Err(err) => {
+                if policy == StrPolicy::RefuseSurrogates {
+                    return Err(err);
+                }
+                let encoded = v.call_method1("encode", ("utf-16-le", "surrogatepass"))?;
+                let bytes: Vec<u8> = encoded.extract()?;
+                push_json_string_utf16le(out, &bytes);
+            }
+        }
     } else if v.is_instance_of::<PyBool>() {
         out.push_str(if v.is_truthy()? { "true" } else { "false" });
     } else if v.is_instance_of::<PyInt>() {
@@ -150,7 +221,7 @@ fn write_json_value(v: &Bound<'_, PyAny>, out: &mut String) -> PyResult<()> {
             if i > 0 {
                 out.push(',');
             }
-            write_json_value(&item?, out)?;
+            write_json_value(&item?, out, policy)?;
         }
         out.push(']');
     } else if v.is_instance_of::<PyDict>() {
@@ -174,7 +245,7 @@ fn write_json_value(v: &Bound<'_, PyAny>, out: &mut String) -> PyResult<()> {
             }
             push_json_string(out, key);
             out.push(':');
-            write_json_value(value, out)?;
+            write_json_value(value, out, policy)?;
         }
         out.push('}');
     } else {
@@ -217,6 +288,40 @@ mod tests {
             dumps_pairs(&pairs),
             "[[\"2024-01-04\",-2500],[\"2024-01-02\",3000]]"
         );
+    }
+
+    #[test]
+    fn utf16le_escaper_matches_cpython_lone_surrogate_law() {
+        // "BAD-" + lone U+D800 + "-S😀" as UTF-16-LE code units
+        // (`str.encode("utf-16-le", "surrogatepass")`): CPython renders the
+        // lone surrogate as its own \ud800 escape and the astral char as its
+        // surrogate pair — the frozen `lone_surrogate_instrument` law.
+        let mut bytes: Vec<u8> = Vec::new();
+        for unit in [
+            0x42u16, 0x41, 0x44, 0x2d, 0xd800, 0x2d, 0x53, 0xd83d, 0xde00,
+        ] {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let mut out = String::new();
+        push_json_string_utf16le(&mut out, &bytes);
+        assert_eq!(out, "\"BAD-\\ud800-S\\ud83d\\ude00\"");
+    }
+
+    #[test]
+    fn utf16le_escaper_short_escapes_and_ascii() {
+        // The short-escape + printable-ASCII arms are the push_json_string
+        // law verbatim (byte-parity of the two escapers on valid strings).
+        let s = "a\"b\\c\u{08}\t\n\u{0c}\r\u{7f}é";
+        let mut bytes: Vec<u8> = Vec::new();
+        for unit in s.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let mut via_utf16 = String::new();
+        push_json_string_utf16le(&mut via_utf16, &bytes);
+        let mut via_str = String::new();
+        push_json_string(&mut via_str, s);
+        assert_eq!(via_utf16, via_str);
+        assert_eq!(via_utf16, "\"a\\\"b\\\\c\\b\\t\\n\\f\\r\\u007f\\u00e9\"");
     }
 
     #[test]

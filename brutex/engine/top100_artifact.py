@@ -75,20 +75,36 @@ header — never invented text (R27/R33/R47).
   the run-end pass; the artifact bytes are a pure function of the pool
   (``produced_at_utc`` lives ONLY in the stamp), so a rebuild from the same
   sources converges to the IDENTICAL bytes (golden-pinned).
+
+## Rust hosting (DEC-RUST-CASCADE-RESULTS-001, slice 2b)
+
+The LAW BODIES live on the ``rust/brutex-cascade`` crate
+(``src/top100_artifact.rs`` — the ``_dumps`` byte law, the gate predicate,
+the whole ``build_top100`` pass, the ``load_top100`` validation ladder),
+verified against the FROZEN pre-conversion parity corpus
+(``tests/golden/fixtures/cascade_rust_parity/top100_artifact.json``). This
+module is the TYPE-FACE SHIM: the dataclasses + their ``__post_init__``
+raises, the constants, file I/O (atomic writes, the read arms, the stamp's
+wall-clock ``produced_at_utc``), the ``top100.load_invalid`` /
+``top100.written`` log emissions, and the ranking/presets delegation
+(``brutex.ranking`` is a hard carve-out — ``resolve_preset`` /
+``rank_candidates`` stay Python and are passed to the crate as data,
+alongside ``matched_condition_names``, the ``Top100Error`` /
+``Top100Artifact`` classes and the module logger).
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, TypeAlias
+from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.cascade_rust import require_cascade_rust
 from brutex.models import BruteXError
 from brutex.ranking import MIN_TRADES
 from brutex.ranking.presets import (
@@ -104,10 +120,19 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Sequence
     from pathlib import Path
 
-    from brutex.engine.cascade_join import CascadeJoin, CascadeVerdictView
+    from brutex.engine.cascade_join import CascadeJoin
     from brutex.engine.combo_aggregates import ComboAggregate
     from brutex.engine.results_store import ResultRow
     from brutex.engine.twin_detect import TwinFamilies
+
+    #: The crate's `top100_load_artifact` success pieces (static-only alias).
+    type _LoadPieces = tuple[
+        str,
+        Mapping[str, object],
+        dict[str, str],
+        list[Mapping[str, object]],
+        Mapping[str, object] | None,
+    ]
 
 _LOG = structlog.get_logger("brutex.engine.top100_artifact")
 
@@ -218,11 +243,10 @@ ENTRY_REQUIRED_KEYS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: The u128 mask hex width (the ``mask:%032x`` run-identity convention).
-_MASK_HEX_WIDTH: Final[int] = 32
-
-#: sha256 hex digest length (stamp validation).
-_SHA256_HEX_LEN: Final[int] = 64
+# The u128 mask hex width (the ``mask:%032x`` run-identity convention) and
+# the sha256 digest length now live in the crate (``MASK_HEX_WIDTH`` /
+# ``SHA256_HEX_LEN`` in ``rust/brutex-cascade/src/top100_artifact.rs``) —
+# no shim copies (the COMMON rule).
 
 #: The stamp's exact key set (the P2→P3 stage-stamp shape, reused P3→P4).
 _STAMP_KEYS: Final[frozenset[str]] = frozenset(
@@ -367,13 +391,31 @@ class Top100Artifact:
 
 
 def _dumps(payload: object) -> str:
-    """The ONE deterministic JSON rendering law (sorted, compact, ASCII)."""
-    return json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
-    )
+    """The ONE deterministic JSON rendering law (sorted, compact, ASCII).
+
+    Hosted on the crate (``pyjson::dumps_sorted_surrogatepass``): CPython's
+    ``json.dumps(payload, sort_keys=True, separators=(",", ":"),
+    ensure_ascii=True, allow_nan=False)`` byte twin — shortest-repr floats,
+    ``\\uXXXX`` escapes (lone surrogates included), the verbatim
+    ``allow_nan=False`` refusal message. NO trailing newline (the two
+    writer call sites append it).
+    """
+    return cast(str, require_cascade_rust().top100_dumps(payload))
 
 
 # ── Gates + ranking ──────────────────────────────────────────────────────────
+
+#: The 5 gate constants as the crate's threading tuple — the SINGLE source
+#: stays the Python constants above (cross-pinned against
+#: ``brutex.ranking``'s private twins by the unit suite).
+_GATES: Final[tuple[int, float, float, float, float, int]] = (
+    GATE_MIN_TRADES,
+    GATE_MIN_PROFIT_FACTOR,
+    GATE_MAX_DRAWDOWN_PCT,
+    GATE_MIN_WIN_RATE,
+    GATE_MIN_WIN_LOSS_RATIO,
+    GATE_MAX_CONSECUTIVE_LOSSES,
+)
 
 
 def passes_hard_gates(row: ResultRow, agg: ComboAggregate) -> bool:
@@ -386,18 +428,10 @@ def passes_hard_gates(row: ResultRow, agg: ComboAggregate) -> bool:
     construction and the agg ratios derive from exact integer folds, so the
     upstream non-finite fail-closed guard has no reachable input here. A
     ``None`` ``win_loss_ratio`` contributes ``0.0`` to the combined gate —
-    the upstream ``passes_gates`` substitution, verbatim.
+    the upstream ``passes_gates`` substitution, verbatim (the comparison law
+    runs in the crate; the constants thread from HERE).
     """
-    if row.total_trades < GATE_MIN_TRADES:
-        return False
-    if row.profit_factor < GATE_MIN_PROFIT_FACTOR:
-        return False
-    if row.max_drawdown_pct > GATE_MAX_DRAWDOWN_PCT:
-        return False
-    wlr = agg.win_loss_ratio if agg.win_loss_ratio is not None else 0.0
-    if row.win_rate < GATE_MIN_WIN_RATE and wlr < GATE_MIN_WIN_LOSS_RATIO:
-        return False
-    return agg.max_consecutive_losses <= GATE_MAX_CONSECUTIVE_LOSSES
+    return cast(bool, require_cascade_rust().top100_passes_hard_gates(row, agg, _GATES))
 
 
 def resolve_preset(name: str) -> str:
@@ -448,117 +482,17 @@ def rank_candidates(
 
 
 def _loads_object(rendered: str) -> dict[str, object]:
-    """Parse one of the agg's deterministic JSON columns back to a dict."""
-    payload = json.loads(rendered)
-    if not isinstance(payload, dict):  # defensive: the agg writer only emits objects
-        raise Top100Error(f"agg JSON column did not decode to an object: {rendered!r}")
-    return payload
+    """Parse one of the agg's deterministic JSON columns back to a dict.
 
-
-def _metrics_payload(
-    row: ResultRow, agg: ComboAggregate, *, cpcv_pass_rate: float | None = None
-) -> dict[str, object]:
-    """Every ResultRow metric + the agg's depth stats — full precision, ints exact.
-
-    ``cpcv_pass_rate`` is the joined cascade verdict's RAW stage-3 fraction
-    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001): when non-``None`` the payload
-    gains the display alias ``cpcv_pass_pct = rate * 100.0`` — an EXACT float
-    unit projection, never a rounding (CLAUDE.md §4). Emitted ONLY when the
-    rate is known: an absent key renders the honest "—" on every display
-    site, NEVER a fabricated 0 (the oneclick_artifacts absent-key law).
+    Crate-hosted: a raw ``json.JSONDecodeError`` escapes UNWRAPPED (CPython's
+    own ``json.loads`` is called from Rust — the frozen quirk law); a
+    valid-JSON non-object raises :class:`Top100Error` with the repr-carrying
+    message (defensive: the agg writer only emits objects).
     """
-    payload: dict[str, object] = {
-        # ── the persisted ResultRow, field-for-field (R27 traceability) ──
-        "net_pnl_paisa": row.net_pnl_paisa,
-        "gross_profit_paisa": row.gross_profit_paisa,
-        "gross_loss_paisa": row.gross_loss_paisa,
-        "max_drawdown_paisa": row.max_drawdown_paisa,
-        "expectancy_paisa": row.expectancy_paisa,
-        "total_trades": row.total_trades,
-        "winning_trades": row.winning_trades,
-        "losing_trades": row.losing_trades,
-        "sharpe_ratio": row.sharpe_ratio,
-        "sortino_ratio": row.sortino_ratio,
-        "calmar_ratio": row.calmar_ratio,
-        "profit_factor": row.profit_factor,
-        "win_rate": row.win_rate,
-        "max_drawdown_pct": row.max_drawdown_pct,
-        "deflated_sharpe": row.deflated_sharpe,
-        "avg_entry_price": str(row.avg_entry_price),
-        "avg_exit_price": str(row.avg_exit_price),
-        # ── the recomputed depth aggregates (R22/R30) ──
-        "composite_score": agg.composite_score,
-        "win_loss_ratio": agg.win_loss_ratio,
-        "recovery_factor": agg.recovery_factor,
-        "max_consecutive_losses": agg.max_consecutive_losses,
-        "max_consecutive_wins": agg.max_consecutive_wins,
-        "mae_avg_paisa": agg.mae_avg_paisa,
-        "mae_worst_paisa": agg.mae_worst_paisa,
-        "mae_p95_paisa": agg.mae_p95_paisa,
-        "mfe_avg_paisa": agg.mfe_avg_paisa,
-        "mfe_best_paisa": agg.mfe_best_paisa,
-        "mfe_p95_paisa": agg.mfe_p95_paisa,
-        "mae_1m_avg_paisa": agg.mae_1m_avg_paisa,
-        "mae_1m_worst_paisa": agg.mae_1m_worst_paisa,
-        "mae_1m_p95_paisa": agg.mae_1m_p95_paisa,
-        "mfe_1m_avg_paisa": agg.mfe_1m_avg_paisa,
-        "mfe_1m_best_paisa": agg.mfe_1m_best_paisa,
-        "mfe_1m_p95_paisa": agg.mfe_1m_p95_paisa,
-        "trades_with_1m": agg.trades_with_1m,
-        "max_dd_minute_path_paisa": agg.max_dd_minute_path_paisa,
-        "max_dd_minute_path_pct": agg.max_dd_minute_path_pct,
-        "equity_status": agg.equity_status,
-        "worst5_days": json.loads(agg.worst5_days_json),
-        "exits": {
-            "stop_loss": agg.exits_stop_loss,
-            "take_profit": agg.exits_take_profit,
-            "signal": agg.exits_signal,
-            "forced_1520": agg.exits_forced_1520,
-            "end_of_data": agg.exits_end_of_data,
-            "session_gap": agg.exits_session_gap,
-        },
-        "fingerprint": agg.fingerprint,
-    }
-    if cpcv_pass_rate is not None:
-        payload["cpcv_pass_pct"] = cpcv_pass_rate * 100.0
-    return payload
-
-
-def _regime_payload(agg: ComboAggregate) -> dict[str, object]:
-    """The R46/R51 regime block, parsed from the agg's deterministic JSON."""
-    return {
-        "by_year": _loads_object(agg.pnl_by_year_json),
-        "by_trend": _loads_object(agg.pnl_by_trend_json),
-        "one_regime_wonder": agg.one_regime_wonder,
-        "regime_wonder_axis": agg.regime_wonder_axis,
-        "entry_hour_hist": _loads_object(agg.entry_hour_hist_json),
-        "event_days": {
-            "counts": _loads_object(agg.event_day_counts_json),
-            "pnl": _loads_object(agg.event_day_pnl_json),
-        },
-    }
-
-
-def _vix_band_payload(agg: ComboAggregate) -> dict[str, object]:
-    """The R31 VIX block: band + win/loss stats, honest ``None`` when unstamped."""
-    win: dict[str, float] | None = None
-    if agg.vix_win_min is not None and agg.vix_win_avg is not None and agg.vix_win_max is not None:
-        win = {"min": agg.vix_win_min, "avg": agg.vix_win_avg, "max": agg.vix_win_max}
-    loss: dict[str, float] | None = None
-    if (
-        agg.vix_loss_min is not None
-        and agg.vix_loss_avg is not None
-        and agg.vix_loss_max is not None
-    ):
-        loss = {"min": agg.vix_loss_min, "avg": agg.vix_loss_avg, "max": agg.vix_loss_max}
-    return {
-        "lo": agg.vix_band_lo,
-        "hi": agg.vix_band_hi,
-        "stamped": agg.vix_stamped_trades,
-        "missing": agg.vix_missing_trades,
-        "win": win,
-        "loss": loss,
-    }
+    return cast(
+        "dict[str, object]",
+        require_cascade_rust().top100_loads_object(rendered, Top100Error),
+    )
 
 
 def _cascade_payload(
@@ -566,75 +500,17 @@ def _cascade_payload(
 ) -> tuple[dict[str, object], float | None]:
     """One entry's ``cascade`` object + its joined CPCV rate (or ``None``).
 
-    The DEC-RESULTS-CASCADE-VERDICT-JOIN-001 law table: a non-``joined``
-    *state* / a duplicate candidate_id / an id absent from the report pool
-    each read the honest ``not_validated`` with a NAMED reason; a matched
-    verdict projects verbatim (``pass`` / ``provisional_pass`` / ``fail``) —
-    the annotation NEVER reranks or hides an entry (R13: a cascade-FAILED
-    rank-1 stays rank-1 and is flagged by the display layer).
+    The DEC-RESULTS-CASCADE-VERDICT-JOIN-001 law table (crate-hosted): a
+    non-``joined`` *state* / a duplicate candidate_id / an id absent from the
+    report pool each read the honest ``not_validated`` with a NAMED reason; a
+    matched verdict projects verbatim (``pass`` / ``provisional_pass`` /
+    ``fail``) — the annotation NEVER reranks or hides an entry (R13: a
+    cascade-FAILED rank-1 stays rank-1 and is flagged by the display layer).
     """
-    if state != CASCADE_STATE_JOINED or join is None:
-        return {"status": "not_validated", "reason": state}, None
-    if run_id in join.ambiguous_ids:
-        return {"status": "not_validated", "reason": "duplicate_candidate_id"}, None
-    verdict: CascadeVerdictView | None = join.by_candidate.get(run_id)
-    if verdict is None:
-        return {"status": "not_validated", "reason": "not_in_cascade_pool"}, None
-    if verdict.passed:
-        status = "provisional_pass" if verdict.provisional else "pass"
-        return {
-            "status": status,
-            "rejected_at": None,
-            "detail": verdict.detail,
-            "cascade_composite": verdict.cascade_composite,
-            "provisional": verdict.provisional,
-            "cpcv_pass_rate": verdict.cpcv_pass_rate,
-            "survivor_rank": verdict.survivor_rank,
-        }, verdict.cpcv_pass_rate
-    return {
-        "status": "fail",
-        "rejected_at": verdict.rejected_at,
-        "detail": verdict.detail,
-        "cascade_composite": None,
-        "provisional": False,
-        "cpcv_pass_rate": verdict.cpcv_pass_rate,
-        "survivor_rank": None,
-    }, verdict.cpcv_pass_rate
-
-
-def _entry_payload(
-    rank: int,
-    candidate: Top100Candidate,
-    *,
-    family_id: str,
-    family_members: Sequence[str],
-    reasons: Mapping[str, str] | None,
-    margin_roi: Mapping[str, object] | None,
-    join: CascadeJoin | None = None,
-    join_state: str = CASCADE_STATE_NO_REPORT,
-) -> dict[str, object]:
-    """Project one ranked candidate onto the binding entry shape (B5)."""
-    row = candidate.row
-    cascade, cpcv_rate = _cascade_payload(row.run_id, join=join, state=join_state)
-    return {
-        "rank": rank,
-        "run_id": row.run_id,
-        "mask_hex": f"{row.mask_bits:0{_MASK_HEX_WIDTH}x}",
-        "conditions": list(matched_condition_names(row.mask_bits)),
-        "instrument": row.instrument,
-        "tf": row.tf,
-        "direction": row.direction,
-        "arm": {"sl_paisa": candidate.sl_paisa, "tp_paisa": candidate.tp_paisa},
-        "metrics": _metrics_payload(row, candidate.agg, cpcv_pass_rate=cpcv_rate),
-        "regime": _regime_payload(candidate.agg),
-        "vix_band": _vix_band_payload(candidate.agg),
-        "family_id": family_id,
-        "family_members": list(family_members),
-        "reasons": None if reasons is None else dict(reasons),
-        "margin_roi": None if margin_roi is None else dict(margin_roi),
-        "equity_ref": {"tuple": candidate.tuple_ref, "sidecar": "equity"},
-        "cascade": cascade,
-    }
+    return cast(
+        "tuple[dict[str, object], float | None]",
+        require_cascade_rust().top100_cascade_payload(run_id, join, state),
+    )
 
 
 # ── Builder ──────────────────────────────────────────────────────────────────
@@ -699,133 +575,30 @@ def build_top100(
     Top100Error
         On a duplicate candidate ``run_id`` (one identity → one result).
     """
-    seen: set[str] = set()
-    for candidate in candidates:
-        if candidate.row.run_id in seen:
-            raise Top100Error(f"build_top100: duplicate candidate run_id {candidate.row.run_id!r}")
-        seen.add(candidate.row.run_id)
-    resolved = resolve_preset(preset)
-
-    # ── Cascade sweep_id gate (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) ──
-    # The cascade dir is ONE-per-results-root and overwritten per sweep, so a
-    # threaded join must prove it was judged for THIS grid before a single
-    # entry is stamped: a mismatched sweep_id drops the whole join loudly.
-    if cascade_join is None:
-        join_state = CASCADE_STATE_NO_REPORT
-        join_for_entries: CascadeJoin | None = None
-    elif cascade_join.sweep_id != run_id:
-        _LOG.warning(
-            "top100.cascade_sweep_id_mismatch",
-            run_id=run_id,
-            report_sweep_id=cascade_join.sweep_id,
-            note="stale cascade report — entries stay not_validated",
-        )
-        join_state = CASCADE_STATE_SWEEP_ID_MISMATCH
-        join_for_entries = None
-    else:
-        join_state = CASCADE_STATE_JOINED
-        join_for_entries = cascade_join
-
-    passers = [c for c in candidates if passes_hard_gates(c.row, c.agg)]
-
-    # Family collapse (R34): one representative per family among the PASSERS.
-    # The partition's representative (fewest mask bits, run_id ASC) is used
-    # when it passed the gates itself; otherwise the same law is re-applied
-    # over the family's gate-passing members (a family whose nominal
-    # representative was gated out still ships its simplest passing member).
-    by_family: dict[str, list[Top100Candidate]] = {}
-    for candidate in passers:
-        family_id = families.family_by_run_id.get(candidate.row.run_id, candidate.row.run_id)
-        by_family.setdefault(family_id, []).append(candidate)
-    representatives: list[Top100Candidate] = []
-    members_of: dict[str, tuple[str, ...]] = {}
-    for family_id, members in by_family.items():
-        chosen = min(
-            members,
-            key=lambda c: (
-                0 if c.row.run_id == family_id else 1,
-                c.row.mask_bits.bit_count(),
-                c.row.run_id,
-            ),
-        )
-        listed = families.members_by_family.get(
-            family_id, tuple(sorted(c.row.run_id for c in members))
-        )
-        representatives.append(chosen)
-        members_of[chosen.row.run_id] = listed
-    families_collapsed = len(passers) - len(representatives)
-
-    ranked = rank_candidates(representatives, preset=resolved)[:TOP100_LIMIT]
-    entries: list[Mapping[str, object]] = []
-    for position, candidate in enumerate(ranked, start=1):
-        run = candidate.row.run_id
-        entries.append(
-            _entry_payload(
-                position,
-                candidate,
-                family_id=families.family_by_run_id.get(run, run),
-                family_members=members_of[run],
-                reasons=(
-                    None if reason_provider is None else reason_provider(candidate.row.mask_bits)
-                ),
-                margin_roi=(
-                    None if margin_roi_provider is None else margin_roi_provider(candidate)
-                ),
-                join=join_for_entries,
-                join_state=join_state,
-            )
-        )
-
-    source: dict[str, object] = {
-        "data_snapshot_hashes": sorted(set(data_snapshot_hashes)),
-        "stores": counts.stores,
-        "pool": len(candidates),
-        "gate_passers": len(passers),
-        "excluded_no_aggs": counts.excluded_no_aggs,
-        "zero_trade_excluded": counts.zero_trade_excluded,
-        "parity_excluded": counts.parity_excluded,
-        "families_collapsed": families_collapsed,
-        "reasons_wired": reason_provider is not None,
-        "margin_roi_wired": margin_roi_provider is not None,
-    }
-    # Root cascade-join meta — writer-ALWAYS-emitted, reader-OPTIONAL. Under
-    # a mismatch the report's sweep_id is NAMED (the diagnosable half) while
-    # the counts stay honest null (a stale report's totals must never read
-    # as this grid's); under no_report everything is null.
-    if join_state == CASCADE_STATE_JOINED and join_for_entries is not None:
-        cascade_meta: dict[str, object] = {
-            "state": join_state,
-            "sweep_id": join_for_entries.sweep_id,
-            "n_input": join_for_entries.n_input,
-            "n_survived": join_for_entries.n_survived,
-        }
-    else:
-        cascade_meta = {
-            "state": join_state,
-            "sweep_id": None if cascade_join is None else cascade_join.sweep_id,
-            "n_input": None,
-            "n_survived": None,
-        }
-    artifact = Top100Artifact(
-        schema_version=TOP100_SCHEMA_VERSION,
-        run_id=run_id,
-        preset=resolved,
-        source=source,
-        baselines=dict(baselines),
-        entries=tuple(entries),
-        cascade_join=cascade_meta,
+    return cast(
+        Top100Artifact,
+        require_cascade_rust().top100_build(
+            candidates,
+            run_id,
+            preset,
+            families,
+            counts,
+            data_snapshot_hashes,
+            baselines,
+            reason_provider,
+            margin_roi_provider,
+            cascade_join,
+            resolve_preset,
+            rank_candidates,
+            matched_condition_names,
+            Top100Error,
+            Top100Artifact,
+            _LOG,
+            _GATES,
+            TOP100_LIMIT,
+            TOP100_SCHEMA_VERSION,
+        ),
     )
-    _LOG.info(
-        "top100.built",
-        run_id=run_id,
-        preset=resolved,
-        pool=len(candidates),
-        gate_passers=len(passers),
-        families_collapsed=families_collapsed,
-        entries=len(entries),
-        cascade_join_state=join_state,
-    )
-    return artifact
 
 
 # ── Writer + validating reader ───────────────────────────────────────────────
@@ -893,32 +666,19 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
     def _invalid(reason: str) -> None:
         _LOG.warning("top100.load_invalid", runs_dir=str(runs_dir), run_id=run_id, reason=reason)
 
+    rs = require_cascade_rust()
     target_dir = runs_dir / run_id
     try:
         stamp_raw = (target_dir / TOP100_STAMP_FILENAME).read_bytes()
     except OSError:
         _invalid("stamp_unreadable")
         return None
-    try:
-        stamp = json.loads(stamp_raw)
-    except ValueError:
-        _invalid("stamp_not_json")
-        return None
-    if not isinstance(stamp, dict) or set(stamp.keys()) != _STAMP_KEYS:
-        _invalid("stamp_bad_shape")
-        return None
-    if stamp["stage"] != TOP100_STAGE:
-        _invalid("stamp_wrong_stage")
-        return None
-    if stamp["run_id"] != run_id:
-        _invalid("stamp_wrong_run_id")
-        return None
-    content_hash = stamp["content_hash"]
-    if not isinstance(content_hash, str) or len(content_hash) != _SHA256_HEX_LEN:
-        _invalid("stamp_bad_content_hash")
-        return None
-    if not isinstance(stamp["produced_at_utc"], str):
-        _invalid("stamp_bad_produced_at")
+    reason, content_hash = cast(
+        "tuple[str | None, str | None]",
+        rs.top100_load_stamp(stamp_raw, run_id, _STAMP_KEYS, TOP100_STAGE),
+    )
+    if reason is not None:
+        _invalid(reason)
         return None
 
     try:
@@ -926,61 +686,23 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
     except OSError:
         _invalid("artifact_unreadable")
         return None
-    if hashlib.sha256(raw).hexdigest() != content_hash:
-        _invalid("artifact_hash_mismatch")
+    reason, pieces = cast(
+        "tuple[str | None, tuple[object, ...] | None]",
+        rs.top100_load_artifact(
+            raw, content_hash, run_id, TOP100_SCHEMA_VERSION, ENTRY_REQUIRED_KEYS
+        ),
+    )
+    if reason is not None:
+        _invalid(reason)
         return None
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        _invalid("artifact_not_json")
-        return None
-    if not isinstance(payload, dict):
-        _invalid("artifact_not_object")
-        return None
-    if payload.get("schema_version") != TOP100_SCHEMA_VERSION:
-        _invalid("schema_version_mismatch")
-        return None
-    if payload.get("run_id") != run_id:
-        _invalid("artifact_wrong_run_id")
-        return None
-    preset = payload.get("preset")
-    if not isinstance(preset, str) or not preset:
-        _invalid("bad_preset")
-        return None
-    source = payload.get("source")
-    if not isinstance(source, dict):
-        _invalid("bad_source")
-        return None
-    baselines = payload.get("baselines")
-    if not isinstance(baselines, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in baselines.items()
-    ):
-        _invalid("bad_baselines")
-        return None
-    entries_raw = payload.get("entries")
-    if not isinstance(entries_raw, list):
-        _invalid("bad_entries")
-        return None
-    entries: list[Mapping[str, object]] = []
-    for position, item in enumerate(entries_raw, start=1):
-        if not isinstance(item, dict) or not ENTRY_REQUIRED_KEYS.issubset(item.keys()):
-            _invalid("bad_entry_shape")
-            return None
-        if item["rank"] != position:
-            _invalid("bad_entry_rank_order")
-            return None
-        entries.append(item)
-    # ADDITIVE root meta (DEC-RESULTS-CASCADE-VERDICT-JOIN-001): presence-
-    # tolerant — a pre-change artifact simply lacks the key (None, not
-    # re-emitted on a round-trip); a non-object value is dropped, never a
-    # reject (the entries + stamp already proved integrity above).
-    cascade_join_raw = payload.get("cascade_join")
+    # The crate returns EXACTLY one non-None arm — pieces is set here.
+    preset, source, baselines, entries, cascade_join_raw = cast("_LoadPieces", pieces)
     return Top100Artifact(
         schema_version=TOP100_SCHEMA_VERSION,
         run_id=run_id,
         preset=preset,
         source=source,
-        baselines={str(key): str(value) for key, value in baselines.items()},
+        baselines=baselines,
         entries=tuple(entries),
-        cascade_join=cascade_join_raw if isinstance(cascade_join_raw, dict) else None,
+        cascade_join=cascade_join_raw,
     )

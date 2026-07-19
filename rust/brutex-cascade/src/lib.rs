@@ -37,6 +37,7 @@ pub mod decimal;
 pub mod ist;
 pub mod minute_path;
 pub mod pyjson;
+pub mod top100_artifact;
 
 use cascade_join::{GroupNode, Leaf, LeafR, ReportNode, RootView, VerdictNode};
 
@@ -494,6 +495,141 @@ fn max_drawdown_return_units(returns: Vec<f64>) -> f64 {
     cascade_wire::max_drawdown_return_units(&returns)
 }
 
+// ───────────────────────────── top100_artifact (slice 2b) ────────────────
+
+/// `top100_artifact._dumps` — the surrogate-tolerant `json.dumps(sort_keys,
+/// compact, ensure_ascii, allow_nan=False)` byte twin (NO trailing newline —
+/// the shim appends it).
+#[pyfunction]
+fn top100_dumps(payload: &Bound<'_, PyAny>) -> PyResult<String> {
+    pyjson::dumps_sorted_surrogatepass(payload)
+}
+
+/// `passes_hard_gates(row, agg)` — the recomputed 5-gate law; the gate
+/// constants are threaded from the shim (cross-pinned there).
+#[pyfunction]
+fn top100_passes_hard_gates(
+    row: &Bound<'_, PyAny>,
+    agg: &Bound<'_, PyAny>,
+    gates: (i64, f64, f64, f64, f64, i64),
+) -> PyResult<bool> {
+    top100_artifact::passes_hard_gates(row, agg, &top100_artifact::Gates::from_tuple(gates))
+}
+
+/// `_loads_object` — parse one agg JSON column; raw `JSONDecodeError`
+/// escapes, a non-object raises the passed `Top100Error` class.
+#[pyfunction]
+fn top100_loads_object<'py>(
+    py: Python<'py>,
+    rendered: &Bound<'py, PyAny>,
+    error_cls: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let json_loads = py.import("json")?.getattr("loads")?;
+    top100_artifact::loads_object(&json_loads, rendered, error_cls)
+}
+
+/// `_cascade_payload` — one entry's cascade object + its joined CPCV rate
+/// object (`None` when unknown).
+#[pyfunction]
+fn top100_cascade_payload<'py>(
+    py: Python<'py>,
+    run_id: &Bound<'py, PyAny>,
+    join: Option<&Bound<'py, PyAny>>,
+    state: &str,
+) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyAny>)> {
+    top100_artifact::cascade_payload(py, run_id, join, state)
+}
+
+/// `build_top100` — the whole run-end pass (module docs in
+/// `top100_artifact.rs`); consumed laws arrive as data.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn top100_build<'py>(
+    py: Python<'py>,
+    candidates: &Bound<'py, PyAny>,
+    run_id: &Bound<'py, PyAny>,
+    preset: &Bound<'py, PyAny>,
+    families: &Bound<'py, PyAny>,
+    counts: &Bound<'py, PyAny>,
+    data_snapshot_hashes: &Bound<'py, PyAny>,
+    baselines: &Bound<'py, PyAny>,
+    reason_provider: Option<&Bound<'py, PyAny>>,
+    margin_roi_provider: Option<&Bound<'py, PyAny>>,
+    cascade_join: Option<&Bound<'py, PyAny>>,
+    resolve_preset_fn: Bound<'py, PyAny>,
+    rank_fn: Bound<'py, PyAny>,
+    cond_names_fn: Bound<'py, PyAny>,
+    error_cls: Bound<'py, PyAny>,
+    artifact_cls: Bound<'py, PyAny>,
+    logger: Bound<'py, PyAny>,
+    gates: (i64, f64, f64, f64, f64, i64),
+    limit: usize,
+    schema_version: i64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let ctx = top100_artifact::BuildCtx {
+        resolve_preset_fn,
+        rank_fn,
+        cond_names_fn,
+        error_cls,
+        artifact_cls,
+        logger,
+        gates: top100_artifact::Gates::from_tuple(gates),
+        limit,
+        schema_version,
+    };
+    top100_artifact::build_top100(
+        py,
+        candidates,
+        run_id,
+        preset,
+        families,
+        counts,
+        data_snapshot_hashes,
+        baselines,
+        reason_provider,
+        margin_roi_provider,
+        cascade_join,
+        &ctx,
+    )
+}
+
+/// The stamp half of the `load_top100` ladder →
+/// `(reason | None, content_hash | None)`.
+#[pyfunction]
+fn top100_load_stamp<'py>(
+    py: Python<'py>,
+    stamp_raw: &Bound<'py, PyAny>,
+    run_id: &Bound<'py, PyAny>,
+    stamp_keys: &Bound<'py, PyAny>,
+    stage_token: &str,
+) -> PyResult<(Option<&'static str>, Option<Bound<'py, PyAny>>)> {
+    top100_artifact::load_stamp(py, stamp_raw, run_id, stamp_keys, stage_token)
+}
+
+/// The artifact half of the ladder → `(reason | None, (preset, source,
+/// baselines, entries, cascade_join) | None)`.
+#[pyfunction]
+fn top100_load_artifact<'py>(
+    py: Python<'py>,
+    raw: &Bound<'py, PyAny>,
+    content_hash: &Bound<'py, PyAny>,
+    run_id: &Bound<'py, PyAny>,
+    schema_version: i64,
+    entry_required_keys: &Bound<'py, PyAny>,
+) -> PyResult<(
+    Option<&'static str>,
+    Option<Bound<'py, pyo3::types::PyTuple>>,
+)> {
+    top100_artifact::load_artifact(
+        py,
+        raw,
+        content_hash,
+        run_id,
+        schema_version,
+        entry_required_keys,
+    )
+}
+
 // ───────────────────────────── cascade_join ─────────────────────────────
 
 /// Classify one Python value into the law's [`Leaf`] model.
@@ -730,6 +866,13 @@ fn _brutex_cascade(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(finite_or_zero, m)?)?;
     m.add_function(wrap_pyfunction!(per_bar_returns, m)?)?;
     m.add_function(wrap_pyfunction!(max_drawdown_return_units, m)?)?;
+    m.add_function(wrap_pyfunction!(top100_dumps, m)?)?;
+    m.add_function(wrap_pyfunction!(top100_passes_hard_gates, m)?)?;
+    m.add_function(wrap_pyfunction!(top100_loads_object, m)?)?;
+    m.add_function(wrap_pyfunction!(top100_cascade_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(top100_build, m)?)?;
+    m.add_function(wrap_pyfunction!(top100_load_stamp, m)?)?;
+    m.add_function(wrap_pyfunction!(top100_load_artifact, m)?)?;
     // The crate's hardcoded walker exit-reason vocabulary, exposed so the
     // Python drift pin can assert set AND order equality against
     // `trade_sim.EXIT_REASONS` (DEC-RUST-CASCADE-RESULTS-001 round-2 MINOR:
