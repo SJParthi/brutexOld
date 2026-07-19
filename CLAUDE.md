@@ -25,7 +25,10 @@ MIGRATION.md #1974–#1976 — the W2 metrics-depth lane on
 `loss_rate` first-class + the per-mask exit-reason counters (u64 AND u128
 kernels) feeding `sl_hit_rate`; the Kelly / half-Kelly-log-growth pair +
 the binomial-null Door-5 re-derivation (`max(10, k99)` — the fixed 10
-becomes the FLOOR; alpha 0.01 [NEEDS OPERATOR RULING]) + the opt-in
+becomes the FLOOR; alpha 0.01 = the conservative documented default
+per the coordinator ruling of 2026-07-19, calibration a documented
+operator follow-up — the Door-5 delta LOOSENING-only regardless) + the
+opt-in
 `max_sl_hit_rate` ranking Door 6 (ACTIVE-only in the tuple-digest
 identity); the 24-month trailing recency pass + the exponential-decay
 composite behind the GLOBAL `bars[-1].timestamp` anchor, with the
@@ -3037,7 +3040,10 @@ hostile-review pass._
   never a fabricated 0) + the BINOMIAL-NULL Door-5 re-derivation (NEW leaf
   `brutex/ranking/streaks.py`: threshold `max(10, k99)` — the historical
   fixed 10 becomes the FLOOR — UNION the WLR ≥ 3.0 exemption; `alpha =
-  0.01` is [NEEDS OPERATOR RULING]; the exact O(n·k) DP is the TEST-ONLY
+  0.01` ships as the conservative documented default per the coordinator
+  ruling of 2026-07-19 (stricter than the conventional 0.05 — the safe
+  direction; calibration is a documented follow-up the operator can rule
+  anytime; the Door-5 delta stays LOOSENING-only regardless); the exact O(n·k) DP is the TEST-ONLY
   oracle, the closed form measured NEVER-tighter-than-exact on the oracle
   grid) + the `max_sl_hit_rate` knob ENFORCED as the opt-in ranking
   **Door 6** (ONE shared verdict body under `passes_gates` +
@@ -8845,7 +8851,9 @@ hostile-review pass._
   first-class + the per-mask exit-reason counters (u64 AND u128 kernels)
   feeding `sl_hit_rate`; the Kelly / half-Kelly-log-growth pair + the
   binomial-null Door-5 re-derivation (`max(10, k99)` floor law; alpha
-  [NEEDS OPERATOR RULING]) + the opt-in `max_sl_hit_rate` ranking Door 6
+  0.01 = the coordinator-ruled conservative default of 2026-07-19,
+  calibration an operator follow-up — LOOSENING-only regardless) + the
+  opt-in `max_sl_hit_rate` ranking Door 6
   (ACTIVE-only in the tuple-digest identity — the default digest
   byte-stable); the 24-month trailing recency pass + the decay composite
   behind the GLOBAL `bars[-1].timestamp` anchor, with the `RecencyFolds`

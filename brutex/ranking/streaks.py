@@ -36,9 +36,12 @@ __all__ = ["STREAK_DOOR_ALPHA", "max_loss_streak_quantile"]
 
 #: The Door-5 quantile level: the null probability below which a loss-run
 #: length is judged "not luck" (``P(max run >= k) < alpha`` ⇒ reject-worthy).
-#: 0.01 is the lane's PROPOSED level — the design map marks the exact level
-#: [NEEDS OPERATOR RULING] (recorded in DEC-METRICS-KELLY-GROWTH-001); a
-#: ruling changes this ONE constant.
+#: 0.01 ships as the CONSERVATIVE DOCUMENTED DEFAULT per the coordinator
+#: ruling of 2026-07-19 (stricter than the conventional 0.05 — the safe
+#: direction; recorded in DEC-METRICS-KELLY-GROWTH-001). Calibration is a
+#: documented follow-up the operator can rule anytime — a change is this
+#: ONE constant; the Door-5 delta remains LOOSENING-ONLY vs the fixed 10
+#: regardless of alpha.
 STREAK_DOOR_ALPHA: Final[float] = 0.01
 
 
