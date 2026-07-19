@@ -753,6 +753,21 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "stRegimeWonder",
             "stCascade",
             "stCascadeDeep",
+            # DEC-RESILIENCE-STREAKS-001 (club-O re-port onto the refold):
+            # the losing-streak resilience hero panel — both copies.
+            "stResilienceSection",
+            "stResWorstStreak",
+            "stResWorstStreakSub",
+            "stResCost",
+            "stResCostSub",
+            "stResUnderwater",
+            "stResUnderwaterBadge",
+            "stResWorstMonth",
+            "stResWorstMonthSub",
+            "stResWinSpread",
+            "stResGuide",
+            "stResLossesIn",
+            "stResLocate",
         ),
         "explains": (
             "instrument",
@@ -776,6 +791,12 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "by_trend",
             "one_regime_wonder",
             "cascade_status",
+            # DEC-RESILIENCE-STREAKS-001 hover-explain hooks.
+            "worst_streak_pnl",
+            "longest_underwater",
+            "worst_loss_month",
+            "win_rate_year_spread",
+            "resilience_guide",
         ),
         "strings": (
             "Edge — gross signal P&amp;L",
@@ -783,9 +804,15 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "source: none",
             "awaiting real run artifact — trades appear once the run's results-depth sidecars land",
             "family drill-down (R34) is a named later PR",
+            # DEC-RESILIENCE-STREAKS-001: the honest signal-only caveat + the
+            # distinct-runs labels (by-COUNT vs by-₹) on BOTH copies.
+            "gross of brokerage &amp; taxes · per-unit (no sizing)",
+            "Worst cold streak",
+            "Worst streak (by ₹)",
         ),
         "killed": (
             "Edge — net P&amp;L",
+            "That streak cost",  # the anaphoric conflation header (MINOR-1)
             "works when VIX between",
             "minute-path equity lands with P3",
         ),
@@ -1699,7 +1726,15 @@ global.window = {
     exitMixText: function () { return "—"; },
     worst5DaysText: function () { return "—"; },
     trendSplitText: function () { return "—"; },
-    regimeWonderText: function () { return "—"; }
+    regimeWonderText: function () { return "—"; },
+    // DEC-RESILIENCE-STREAKS-001 (club-O re-port): the resilience builders
+    // are part of the real BXOneclick surface loadRow now consumes.
+    resilienceCells: function () {
+      return { worstStreak: "—", worstStreakSub: "", cost: "—", costSub: "",
+               underwater: "—", underwaterBadge: "", badgeLevel: "na",
+               worstMonth: "—", worstMonthSub: "", winSpread: "—", guide: "—" };
+    },
+    resilienceSelfLocate: function () { return { symbol: "·", text: "n/a", level: "na" }; }
   },
   location: { search: "" }
 };
@@ -2005,7 +2040,14 @@ global.window = {
     exitMixText: function () { return "—"; },
     worst5DaysText: function () { return "—"; },
     trendSplitText: function () { return "—"; },
-    regimeWonderText: function () { return "—"; }
+    regimeWonderText: function () { return "—"; },
+    // DEC-RESILIENCE-STREAKS-001 (club-O re-port): loadRow consumes these.
+    resilienceCells: function () {
+      return { worstStreak: "—", worstStreakSub: "", cost: "—", costSub: "",
+               underwater: "—", underwaterBadge: "", badgeLevel: "na",
+               worstMonth: "—", worstMonthSub: "", winSpread: "—", guide: "—" };
+    },
+    resilienceSelfLocate: function () { return { symbol: "·", text: "n/a", level: "na" }; }
   },
   location: { search: "" }
 };

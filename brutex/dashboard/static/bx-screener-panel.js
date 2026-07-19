@@ -43,8 +43,9 @@
  * @param {object} row - a top-100 artifact row.
  * @param {object} col - a BXScreener.COLUMNS entry ({key, type, money…}).
  * @param {{fieldValue: function, vixBandCellText: function,
- *   money: function}} deps - injected formatters (node goldens are
- *   formatter-explicit; the browser wires the shared builders).
+ *   winRateSpreadText: function, money: function}} deps - injected
+ *   formatters (node goldens are formatter-explicit; the browser wires the
+ *   shared builders).
  * @returns {string} the rendered cell text — full precision for metrics,
  *   honest '—' for absent values (never a fabricated figure).
  */
@@ -57,6 +58,14 @@ function bxScreenerCellText(row, col, deps) {
     /* [W3-R4]: the ONE shared compact band cell — a null-lo/hi writer band
        reads "not stamped" (R31 honest NULL), never "null–null". */
     return deps.vixBandCellText(v);
+  }
+  if (col.key === 'resilience.win_rate_year_spread') {
+    /* DEC-RESILIENCE-STREAKS-001 (re-ported at the club-O merge-forward from
+       screener.html's pre-refold inline fmtCell): the ONE shared
+       win-rate-spread law (broker-grade percentage points at 2dp) — the
+       SAME string the /strategy panel renders, never a raw IEEE fraction
+       ("0.15000000000000002"); null → "—". */
+    return deps.winRateSpreadText(v);
   }
   if (v === null || v === undefined) {
     return '—';
@@ -182,6 +191,9 @@ function bxHarvestFilterOptions(rows) {
       fieldValue: window.BXScreener.fieldValue,
       vixBandCellText: function (v) {
         return window.BXOneclick.vixBandCellText(v);
+      },
+      winRateSpreadText: function (v) {
+        return window.BXOneclick.winRateSpreadText(v);
       },
       money: money
     });
