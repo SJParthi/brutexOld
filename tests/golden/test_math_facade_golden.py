@@ -50,6 +50,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u128s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
+        "metrics_fold_trades",
         "popcount_bytes",
         "stats_cpcv_pass_count",
         "sweep_drawdown_stats",

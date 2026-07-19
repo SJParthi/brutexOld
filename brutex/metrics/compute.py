@@ -42,7 +42,10 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    from brutex.metrics.compute_rust import FoldWire
 
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
 from brutex.metrics.pbo import pbo_probability
@@ -905,6 +908,119 @@ def combine_metrics_from_folds(
     )
 
 
+def _resolve_folds(trades: Sequence[ClosedTrade], start_equity_paisa: int) -> TradeFolds:
+    """Serve the FOLD half from the flag-gated Rust kernel or the Python arm.
+
+    The ONE dispatch chokepoint of DEC-METRICS-RUST-COMPUTE-FOLD-001: with
+    ``BRUTEX_METRICS_RUST_FOLD`` OFF (the default) this is exactly the
+    verbatim :func:`_fold_trades` call the pre-seam composition made —
+    byte-identical by construction (the never-routes bomb-kernel spy pins
+    it). With the flag ON, :func:`brutex.metrics.compute_rust.
+    fold_wire_via_kernel` serves a bit-identical plain-data wire
+    (:func:`_folds_from_wire` builds the :class:`TradeFolds` HERE — the
+    seam leaf imports nothing from this module)
+    (burn-in self-checked, autorevert-latched) and ANY kernel fault —
+    missing/stale wheel, kernel raise, structurally invalid result, the
+    autorevert latch — degrades fail-closed to the SAME Python arm
+    (``MemoryError`` re-raises raw). The COMBINE tail is Python on both
+    arms, so the split's bit-parity is the fold's alone (the seam module
+    docstring carries the exactness argument).
+    """
+    # LAZY import (CodeQL py/cyclic-import — the #1533 lake_revision
+    # precedent): the seam leaf imports NOTHING from this module in any
+    # form (the plain-data FoldWire boundary + the injected oracle below),
+    # so this single lazy edge is cycle-free by construction. Function-
+    # local resolution is a sys.modules dict hit after the first call —
+    # the same per-call order as the env read the seam already performs.
+    from brutex.metrics import compute_rust
+
+    if not compute_rust.metrics_rust_fold_enabled():
+        return _fold_trades(trades, start_equity_paisa)
+    wire = compute_rust.fold_wire_via_kernel(
+        trades,
+        start_equity_paisa,
+        # The burn-in oracle, INJECTED (dependency inversion — the leaf
+        # never imports this module): the Python fold's wire projection
+        # for exactly these arguments.
+        oracle_wire=lambda: _fold_wire(_fold_trades(trades, start_equity_paisa)),
+    )
+    if wire is None:
+        return _fold_trades(trades, start_equity_paisa)
+    return _folds_from_wire(wire)
+
+
+def _fold_wire(folds: TradeFolds) -> FoldWire:
+    """Project a :class:`TradeFolds` onto the seam's plain-data wire shape.
+
+    The pure inverse pair of :func:`_folds_from_wire` (round-trip pinned by
+    the pair suite). ``downside_sum_sq`` is float-normalised here: the
+    Python fold legitimately holds the int ``0`` on an empty downside
+    (``sum([])``) where the kernel wire carries ``+0.0``; the two are
+    combine-equivalent (``0 / n == 0.0 / n == +0.0``, pinned by the golden
+    suite's ``scratch_only`` corpus case) and ``float(0)`` is ``+0.0``, so
+    the projection equates exactly that pair and nothing else.
+    """
+    moments = folds.moments
+    return (
+        (
+            folds.n_trades,
+            folds.winners,
+            folds.losers,
+            folds.max_holding_bars,
+            folds.largest_loss_paisa,
+            folds.max_consecutive_losses,
+            folds.max_consecutive_wins,
+        ),
+        (
+            folds.net_pnl_paisa,
+            folds.gross_profit_paisa,
+            folds.gross_loss_abs_paisa,
+            folds.sum_mfe_paisa,
+            folds.sum_mae_paisa,
+            folds.sum_holding_bars,
+        ),
+        (moments.n, moments.mean, moments.m2, moments.m3, moments.m4),
+        (float(folds.downside_sum_sq), folds.p95, folds.p5),
+    )
+
+
+def _folds_from_wire(wire: FoldWire) -> TradeFolds:
+    """Build the :class:`TradeFolds` a seam-served wire denotes.
+
+    THIS module owns the ``TradeFolds`` construction (the plain-data
+    boundary of DEC-METRICS-RUST-COMPUTE-FOLD-001 — the seam leaf speaks
+    only tuples and imports nothing from here). Values pass through
+    UNCHANGED — bit-identity is the seam's burn-in + the golden suites'
+    proof, never a re-derivation here.
+    """
+    counts, sums, moments_wire, floats = wire
+    return TradeFolds(
+        n_trades=counts[0],
+        net_pnl_paisa=sums[0],
+        gross_profit_paisa=sums[1],
+        gross_loss_abs_paisa=sums[2],
+        winners=counts[1],
+        losers=counts[2],
+        sum_mfe_paisa=sums[3],
+        sum_mae_paisa=sums[4],
+        sum_holding_bars=sums[5],
+        max_holding_bars=counts[3],
+        largest_loss_paisa=counts[4],
+        max_consecutive_losses=counts[5],
+        max_consecutive_wins=counts[6],
+        moments=Moments(
+            n=moments_wire[0],
+            mean=moments_wire[1],
+            m2=moments_wire[2],
+            m3=moments_wire[3],
+            m4=moments_wire[4],
+        ),
+        downside_sum_sq=floats[0],
+        p95=floats[1],
+        p5=floats[2],
+    )
+
+
 def _compute_metrics_impl(
     trades: Sequence[ClosedTrade],
     total_bars: int,
@@ -923,7 +1039,11 @@ def _compute_metrics_impl(
     sweep-core conversion) expressed as the pure composition
     ``combine_metrics_from_folds(_fold_trades(...))`` over the SAME
     expressions, still a pure parameterisation with no behaviour change
-    (the golden + byte-parity suites pin it). Callers validate their own
+    (the golden + byte-parity suites pin it) — the fold half served
+    through the :func:`_resolve_folds` dispatch since
+    DEC-METRICS-RUST-COMPUTE-FOLD-001 (flag OFF ⇒ the verbatim
+    ``_fold_trades`` call; flag ON ⇒ the bit-identical Rust fold with a
+    fail-closed degrade to the same arm). Callers validate their own
     boundary; this body assumes ``total_bars >= 1`` and a valid scalar
     set. The zero-trade row stays this composition root's own arm
     (:func:`_empty_metrics`), mirroring the sweep core's ``zero_trade``
@@ -932,7 +1052,7 @@ def _compute_metrics_impl(
     if not trades:
         return _empty_metrics(drawdown)
     return combine_metrics_from_folds(
-        _fold_trades(trades, start_equity_paisa),
+        _resolve_folds(trades, start_equity_paisa),
         total_bars=total_bars,
         benchmark_return_pct=benchmark_return_pct,
         start_equity_paisa=start_equity_paisa,

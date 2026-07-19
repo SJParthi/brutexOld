@@ -79,6 +79,11 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+/// DEC-METRICS-RUST-COMPUTE-FOLD-001: the metrics-FOLD kernel — the Rust
+/// mirror of `brutex.metrics.compute._fold_trades` (the Slice-0 fold layer;
+/// the libm-carrying combine tail deliberately stays in Python).
+pub mod metrics_fold;
+
 /// DEC-METRICS-RUST-STATS-001 (slice 6): Stage-3/4 statistics kernels — the
 /// sequential/integer heavy loops of the Stage-3/4 statistical filters
 /// (CPCV fold pass-count in PR-1; later PRs append inside the same module).
@@ -162,6 +167,7 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(metrics_fold::metrics_fold_trades, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     // ---- stats module (slice 6, DEC-METRICS-RUST-STATS-001): Stage-3/4
     // statistics kernels. Additive registration only; existing registrations

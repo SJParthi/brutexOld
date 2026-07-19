@@ -480,6 +480,20 @@ lake/schema/scope/vocab/rate change. Named follow-up:
 DEC-DAILY-WINDOW-BADTICK-001 (bad-tick on the window reader). This header
 carries the pointer, never the story — the full record lives in the §1
 Active-branch blurb + MIGRATION.md #1897.)
+Earlier: 2026-07-16 (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902
+(a coordinator-granted released S1 spare, verified free on live main) — the Rust mirror of compute.py's
+Slice-0 FOLD layer (`fno_math.metrics_fold_trades` + the seam
+`brutex/metrics/compute_rust.py`) behind the NEW default-OFF
+`BRUTEX_METRICS_RUST_FOLD`; the fold-in-Rust / combine-in-Python split (the
+combine tail carries libm `pow` — the MUST-STAY-PYTHON class), the returns
+column stays Python-computed (CPython correctly-rounded int/int), the
+downside Σr² mirrors CPython 3.12+'s Neumaier-compensated `sum()`
+(burn-in-caught 1-ulp class), 16-sample burn-in + autorevert per
+#1531/#1532; flag OFF (default) byte-identical, flag ON bit-identical —
+the #1685 golden + differential suites and the frozen run-identity goldens
+executed GREEN on BOTH arms. Ships INERT. The per-item record lives in the
+§1 Active-branch blurb + the MIGRATION.md entry — this header carries the
+pointer, never the story. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
 Earlier: 2026-07-15 (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900,
 branch `claude/staged-sequencer-seams` — the STAGED SEQUENCER SEAMS
 (dual-vendor orchestration WS-B, per the frozen ADR-0021 design contract +
@@ -5246,6 +5260,51 @@ hostile-review pass._
   hostile review verdict is SHIP with its two honesty NITs folded
   (transitive-consumer disclosure + the pre-existing null-price TypeError
   limit — both recorded in MIGRATION.md #1897).)
+  Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
+  (**DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
+  coordinator-granted released S1 spare, verified free on live main** — the
+  Rust mirror of `compute.py`'s Slice-0
+  FOLD layer: NEW `rust/fno-math/src/metrics_fold.rs`
+  (`fold_trades_checked` pure `Result` core + the `metrics_fold_trades`
+  pyfunction over five parallel per-trade columns; i128 integer sums →
+  exact Python ints; the Welford/Pébay recurrence transcribed line-by-line;
+  the p95/p5 percentile mirror) + the NEW seam leaf
+  `brutex/metrics/compute_rust.py` behind the default-OFF Pattern-A
+  `BRUTEX_METRICS_RUST_FOLD` (inline `_TRUTHY`/`_FALSY` mirror-pinned — the
+  `feed_rust` LEAF discipline; a metrics→engine import edge would close a
+  cycle) and ONE `compute.py` dispatch chokepoint (`_resolve_folds`; flag
+  OFF = the verbatim `_fold_trades` call, never-routes bomb-spy-pinned).
+  THE SPLIT (recorded honestly): fold-in-Rust / combine-in-Python — the
+  combine tail carries libm `pow` (CAGR `**`, skewness `math.pow`), the
+  NOT-correctly-rounded-portable MUST-STAY-PYTHON class `metrics.rs`
+  documents, so the shipped split holds bit-identity BY CONSTRUCTION; the
+  returns column stays PYTHON-computed at the seam (CPython's
+  correctly-rounded big-int `int/int` — no exactness envelope needed).
+  BURN-IN-CAUGHT FINDING: the first flag-ON corpus run autoreverted on
+  `dense_1500` — CPython 3.12+'s builtin `sum()` is NEUMAIER-COMPENSATED
+  for floats (gh-100425), so the kernel's downside Σr² now mirrors
+  `builtin_sum`'s float fast path exactly (Rust exact-bits pin + seam pin;
+  the oracle value shipped throughout — no wrong number ever served).
+  Burn-in 16-sample bit-compare + autorevert latch (#1531/#1532 pattern);
+  greeks-batch fault taxonomy (MemoryError raw; any other kernel fault →
+  warn-once → oracle; refuse-poison wire gate). PROOF executed BOTH arms:
+  the 52-test #1685 byte-parity golden + the C23 differential (56 passed
+  each arm), the non-vacuous flag-ON corpus pin (engagement spy, every
+  case burn-in cross-checked, zero autoreverts), the hypothesis dual-arm
+  property (150 examples), the frozen `_GOLDEN_CONTENT_HASH`/
+  `_GOLDEN_RUN_ID` run-identity goldens byte-identical flag-OFF AND
+  flag-ON; cargo test 586 green (7 new), fmt/clippy `-D warnings` clean;
+  `compute_rust.py` 100.00% line+branch standalone (NEW ci.yml numpy-safe
+  stanza), `compute.py` 100.00% under its stem suite; ruff/ruff-format
+  clean, `mypy --strict` clean, `pyright brutex tests` 0 errors; SIX
+  hand-applied seam mutants verified killed (ledgered — the mutmut pair
+  list deliberately not extended, the greeks-batch cheaper-honest-option
+  precedent). HONEST: both arms O(n·log n) per fold; ships INERT — a
+  default flip is its own later DEC; measured 6.08× fold-only on the
+  dense_1500 case (sandbox micro-bench, NOT an SLA — the combine tail +
+  `_drawdown_stats` are outside this seam). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
+  identity untouched.)
   Earlier: `claude/staged-sequencer-seams` (**DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900** —
   the STAGED SEQUENCER SEAMS, WS-B of the dual-vendor orchestration track.
   AUTHORITY recorded honestly: per the frozen ADR-0021 design contract
@@ -11756,6 +11815,21 @@ hostile-review pass._
   goldens pinned UNMODIFIED; named follow-up DEC-DAILY-WINDOW-BADTICK-001;
   ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; matches §1's
   Active branch line — see §1 + MIGRATION.md #1897 for the full blurb)
+  Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
+  (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
+  coordinator-granted released S1 spare, verified free on live main — the
+  Rust mirror of `compute.py`'s Slice-0
+  FOLD layer (`fno_math.metrics_fold_trades` + the seam
+  `brutex/metrics/compute_rust.py`) behind the NEW default-OFF Pattern-A
+  `BRUTEX_METRICS_RUST_FOLD`; fold-in-Rust / combine-in-Python (the combine
+  tail carries libm `pow` — MUST-STAY-PYTHON), the returns column stays
+  Python-computed, the downside Σr² mirrors CPython 3.12+'s
+  Neumaier-compensated `sum()` (burn-in-caught), 16-sample burn-in +
+  autorevert; flag OFF (default) byte-identical, flag ON bit-identical —
+  the #1685 golden + differential suites and the frozen run-identity
+  goldens executed GREEN on BOTH arms; ships INERT; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 + the
+  MIGRATION.md entry for the full blurb)
   Earlier: `claude/staged-sequencer-seams`
   (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900 — the staged sequencer
   seams, dual-vendor orchestration WS-B per the frozen ADR-0021 design
