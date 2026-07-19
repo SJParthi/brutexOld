@@ -157,3 +157,22 @@ def resume_decision(
     next_index: int,
     total_combos: int,
 ) -> tuple[str, int]: ...
+
+# ── slice 5 — the verify/apriori family ─────────────────────────────
+RECOUNT_VERDICT_TOKENS: list[str]
+
+def recount_verdict(
+    vix_attributable: bool,
+    is_grid_tuple: bool,
+    context_match: bool,
+    cell_evidence: bool,
+    grid_corrupt_leaderboard: bool,
+) -> str: ...
+def apriori_join_prune(
+    frontier: list[tuple[int, ...]] | list[list[int]],
+    drop_conflicts: bool,
+    conflict_masks: list[int] | tuple[int, ...],
+    n_bars: int,
+    limit: int,
+    stride: int,
+) -> tuple[list[list[int]], int | None]: ...

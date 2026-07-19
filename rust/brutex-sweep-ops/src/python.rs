@@ -17,6 +17,7 @@ use crate::artifacts;
 use crate::audit_chain;
 use crate::leaves;
 use crate::ops;
+use crate::verify;
 
 // ───────────────────────── slice 1 — leaves ─────────────────────────
 
@@ -382,6 +383,76 @@ fn resume_decision(
     ops::resume_decision(exists, sweep_id_matches, next_index, total_combos)
 }
 
+// ───────────────────── slice 5 — verify/apriori ─────────────────────
+
+/// `sweep_verify.compare_recount`'s post-byte-diff classification tail
+/// (see [`verify::recount_verdict`]). Total — booleans in, a token out;
+/// the finding code/severity/detail BYTES and the corrupt-leaderboard
+/// side effect stay Python, keyed off the token.
+#[pyfunction]
+fn recount_verdict(
+    vix_attributable: bool,
+    is_grid_tuple: bool,
+    context_match: bool,
+    cell_evidence: bool,
+    grid_corrupt_leaderboard: bool,
+) -> &'static str {
+    verify::recount_verdict(
+        vix_attributable,
+        is_grid_tuple,
+        context_match,
+        cell_evidence,
+        grid_corrupt_leaderboard,
+    )
+}
+
+/// `sweep_apriori._join_and_prune`'s level fold with the strided budget
+/// trip returned as a VALUE (see [`verify::apriori_join_prune`]) — a trip
+/// is a semantic outcome, never an FFI error the facade would degrade
+/// away; Python raises its own `SweepAprioriBudgetError` bytes from the
+/// returned count. Malformed frontier shapes raise `ValueError` (the
+/// facade gates them — a belt, never a live path).
+#[pyfunction]
+fn apriori_join_prune(
+    frontier: Vec<Vec<u16>>,
+    drop_conflicts: bool,
+    conflict_masks: Vec<u64>,
+    n_bars: u64,
+    limit: u64,
+    stride: u64,
+) -> PyResult<(Vec<Vec<u16>>, Option<u64>)> {
+    // u16 at the FFI face (a pyo3 `Vec<u8>` output would render as Python
+    // `bytes`, not `list[int]`); range-gate BEFORE the u8 narrowing so an
+    // out-of-range bit can never truncate silently.
+    let mut frontier_u8: Vec<Vec<u8>> = Vec::with_capacity(frontier.len());
+    for tuple in &frontier {
+        let mut row: Vec<u8> = Vec::with_capacity(tuple.len());
+        for &bit in tuple {
+            if bit >= 64 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "frontier bit {bit} out of range [0, 64)"
+                )));
+            }
+            row.push(bit as u8);
+        }
+        frontier_u8.push(row);
+    }
+    let (candidates, tripped) = verify::apriori_join_prune(
+        &frontier_u8,
+        drop_conflicts,
+        &conflict_masks,
+        n_bars,
+        limit,
+        stride,
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let out: Vec<Vec<u16>> = candidates
+        .into_iter()
+        .map(|candidate| candidate.into_iter().map(u16::from).collect())
+        .collect();
+    Ok((out, tripped))
+}
+
 // ──────────────────────── module registration ────────────────────────
 
 #[pymodule]
@@ -418,7 +489,11 @@ fn _brutex_sweep_ops(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(heal_mismatch_decision, m)?)?;
     m.add_function(wrap_pyfunction!(schedule_next_fire, m)?)?;
     m.add_function(wrap_pyfunction!(resume_decision, m)?)?;
-    // slice 5..6 registration blocks append below this line, one fenced
+    // slice 5 — verify/apriori
+    m.add("RECOUNT_VERDICT_TOKENS", verify::RECOUNT_VERDICT_TOKENS)?;
+    m.add_function(wrap_pyfunction!(recount_verdict, m)?)?;
+    m.add_function(wrap_pyfunction!(apriori_join_prune, m)?)?;
+    // slice 6 registration blocks append below this line, one fenced
     // block per slice (see the module docstring's registration law).
     Ok(())
 }
