@@ -87,7 +87,7 @@ shape?) before this commit landed; its verdict:
 | F2 | The expired-options writer renders via `atomic_write_via(dest, df.write_parquet)` — polars with ALL DEFAULTS (no compression args), so its byte target is additionally sensitive to encoder-default churn across polars 1.x. | `brutex/data/option_parquet_writer.py:947` (in `_atomic_write_parquet`) |
 | F3 | The window-ledger store writes `pq.write_table(table, tmp)` (pyarrow, all defaults) at BOTH sites; pyarrow's parquet encoder is Arrow **C++** with NO Rust build, and the module's own docstring disclaims byte parity — the `to_rows` row-level fixed point is the contract: "Parquet *file bytes* may differ across writers via embedded library metadata; the ROW CONTENT is the reproducible contract, and every test asserts the row fixed point, not the byte stream." | `brutex/data/window_ledger_store.py:795,927` (both `pq.write_table` call sites — the symbol is the anchor); docstring at `brutex/data/window_ledger_store.py:16-18` |
 | F4 | The engine pins are RANGES with NO lockfile: `polars>=1.0,<2.0`, `duckdb>=1.0,<2.0`, `pyarrow>=16,<25`; no `*.lock` / requirements / constraints file exists in the repo root. The lockstep the byte gate needs does NOT exist yet on the Python side. | `pyproject.toml:48-50` |
-| F5 | One frozen cross-language byte oracle already exists in the slice: the golden pins `render_shard`'s exact byte string (`_EXPECTED_BARS_SHARD`); the shard JSON law is stdlib compact sorted-key `json.dumps` with no floats in the payload. | `tests/golden/test_lake_stats_manifest_golden.py:66` (`render_shard`); `brutex/data/lake_stats_manifest.py:781` (`json.dumps` render) and `brutex/data/lake_stats_manifest.py:483` (the sha256 shard-path token) |
+| F5 | One frozen cross-language byte oracle already exists in the slice: the golden pins `render_shard`'s exact byte string (`_EXPECTED_BARS_SHARD`); the shard JSON law is stdlib compact sorted-key `json.dumps` with no floats in the payload. | `tests/golden/test_lake_stats_manifest_golden.py:66` (`render_shard`); `brutex/data/lake_stats_manifest.py:838` (`json.dumps` render) and `brutex/data/lake_stats_manifest.py:540` (the sha256 shard-path token) |
 | F6 | `brutex/feed/resampler.py` is production-DEAD and AST-drift-pinned: `tests/unit/test_feed_no_epoch_resampler_in_production.py` proves no production module imports it (DEC-SUSPICION-SWEEP-FIXES-001 G3, MIGRATION.md #1492). It serves as a stdlib-pure Python test ORACLE — the mandate's own oracle carve-out. | test file present at this HEAD |
 | F7 | Every parquet byte pin in the slice today is a same-process, same-engine-version A/B against the LIVE installed engine; there are no frozen on-disk parquet SHA fixtures. The roadmap's A/B gates extend this architecture across the language boundary (Rust-path bytes vs Python-path bytes in the SAME environment) rather than freezing bytes across engine versions. | panel inventory §4 + designs, judge-confirmed |
 
@@ -222,7 +222,7 @@ byte-identical lake, 124/124 SHA match). The conversion's expected deltas:
 |---|---|---|---|
 | bars/options writers | zstd encode (already Rust) + fsync; the Python hotspot vectorized at 1.78× (#1023) | ~0 | MEASURED (hotspot); MODELED (residue) |
 | prebuild / materialize | ~18 % Python-glue / ~14 % polars-native / ~68 % parquet-write+IO; real lever was write batching | ~0 | MEASURED (P10 kernel-track handoff profile; not a repo artifact) |
-| window ledger (record model) | once-per-pull `prune_superseded` scan measured 0.48 s over a 1.2M-row ledger — in-docstring at `brutex/data/window_ledger.py:1154` | ~0 (once-per-pull) | MEASURED |
+| window ledger (record model) | once-per-pull `prune_superseded` scan measured 0.48 s over a 1.2M-row ledger — in-docstring at `brutex/data/window_ledger.py:1197` | ~0 (once-per-pull) | MEASURED |
 | window ledger (store) | saves are parquet-encode + fsync: ~3.94 s @ 841k rows (`_FLUSH_DUTY_FACTOR` rationale comment + constant, `brutex/data/window_ledger_store.py:1635-1641`); forensic 12.96 s `save_slow` over 68k rows (the in-body forensic comment, `brutex/data/window_ledger_store.py:881`) | ~0 (not Python-bound) | MEASURED |
 | stats manifest | statx/`os.walk` syscall-bound; per-write fast path is ONE Python `os.stat` — a PyO3 crossing there is a likely net LOSS (mitigated: that probe stays Python) | ~0 to negative | MODELED |
 | heal / invariants scan | anomaly-gated; clean files pay vectorized min/max only | ~0 | MODELED |
@@ -236,8 +236,8 @@ byte-identical lake, 124/124 SHA match). The conversion's expected deltas:
 | 1 | `brutex/data/parquet_writer.py` | **PR-1** (render seam) → PR-3 (merge/dedup) → PR-4 (locks) | A/B byte gate vs the live Python render + build-time byte probe + burn-in/autorevert; `raw_hash` as per-write witness |
 | 2 | `brutex/data/option_parquet_writer.py` | **PR-2** | Same, plus a defaults-mode probe (F2); heal-rail regression suites kept verbatim on the facade |
 | 3 | `brutex/data/window_ledger_store.py` | **LAST-MILE** (named escalation point) | Polars-native route first; else escalate with the priced `DEC-LAKE-EXACT-PIN-001` (§3) |
-| 4 | `brutex/data/lake_stats_manifest.py` | Wave C (first of the wave — the safest port) | The frozen `render_shard` golden (F5) as the cross-language byte pin in cargo test AND pytest; isoformat formatter pinned both arms |
-| 5 | `brutex/data/partition.py` | Wave C (internal crate helper, never standalone) | Path-string equality over the 44-case behavioral suite; interval vocabulary single-sourced by inversion |
+| 4 | `brutex/data/lake_stats_manifest.py` | Wave C (first of the wave — the safest port) — **SHIPPED (render seam only) 2026-07-16, DEC-LAKE-RUST-STATS-MANIFEST-001 / MIGRATION.md #1914**: `render_shard` behind the default-OFF `BRUTEX_LAKE_RUST_STATS_MANIFEST` facade; flock + atomic write + loader/validator DELIBERATELY stay Python (locks = PR-4 territory — the recorded narrowing) | The frozen `render_shard` golden (F5) as the cross-language byte pin in cargo test AND pytest; isoformat formatter pinned both arms (delivered by construction — Python pre-formats, both arms consume the identical `.isoformat()` strings) |
+| 5 | `brutex/data/partition.py` | Wave C (internal crate helper, never standalone) — **rider SHIPPED 2026-07-16 (#1914)**: crate-internal `option_partition_stem`/`validate_year_month` twins, cargo + pytest grid-pinned; Python `partition.py` byte-UNCHANGED; the interval-vocabulary inversion clause stays with the FULL port (not delivered) | Path-string equality over the 44-case behavioral suite; interval vocabulary single-sourced by inversion |
 | 6 | `brutex/data/window_ledger.py` | Wave C | Pyclass single-source (Python demoted to tests/fakes oracle — the #1548 pattern); CPython-isoformat-exact merge keys golden-pinned; hypothesis differential suites |
 | 7 | `brutex/data/lake_heal.py` | Wave D (after the writers it delegates to) | Policy over Rust-backed writer seams; exception-class isolation semantics differentially driven over the pinned suites (§7 hazard 3) |
 | 8 | `brutex/data/lake_invariants.py` | Wave D (last convertible — highest verdict-flip risk) | Full ~170-fixture poison-corpus differential (Python vs Rust classification identical) BEFORE any flip; `engine_clean` verdict parity is the gate |
@@ -295,6 +295,26 @@ byte-identical lake, 124/124 SHA match). The conversion's expected deltas:
    deliberately NOT wired into run identity) and BOTH sit downstream of
    writer output — which is why the burn-in gate ships the ORACLE value on
    any mismatch and autoreverts.
+5. **FACADE NO-CYCLE LAW (appended 2026-07-17, caught on PR #1628 /
+   DEC-DATA-RUST-PURELAW-001).** GOAL: the facade↔module import graph is
+   ACYCLIC, mechanically pinned (an AST leaf-import test and/or
+   fresh-interpreter import-order pins). TWO compliant shapes: **(a)**
+   facade→module one-directional — any back-reference from the module is a
+   type-import under `if TYPE_CHECKING:` only; **(b)** module→facade — the
+   module imports the facade at module scope and the facade is a PURE
+   INJECTION-ONLY LEAF that imports its routed module NOWHERE (not even
+   under `TYPE_CHECKING` — that shape still trips CodeQL's module-level
+   cyclic-import query): the module passes its oracle callables/constructor
+   at call-time and any back-typing goes through a local structural
+   Protocol, AST-pinned so the import can never return. Reference
+   implementations: shape (b) = the `brutex/data/fno_symbol_rust.py` seam
+   post-fix (`SymbolParts` structural Protocol + the injected
+   `python_law`/`strike_law`/`build_parts` triple + the fresh-interpreter
+   import-order pins and AST source pin in
+   `tests/unit/test_fno_symbol_rust.py`); shape (b)-style precedent = the
+   T35 brutex-core facades. Rationale: a module-scope import cycle passes
+   local tests (import order happens to be favourable under pytest) but
+   trips CodeQL and breaks import-order robustness in fresh interpreters.
 
 ## 8. Consequences
 
@@ -365,3 +385,80 @@ allocation failure aborts/panics on BOTH the wheel and the crate — the
 seam neither narrows nor widens that envelope. FLIP PRECONDITION: byte
 identity is enforced only by the NON-REQUIRED parity lane — the default-ON
 flip DEC must make it required or cite a fresh green run.
+
+## 10. PR-2 shipped surface (2026-07-11 — appended when PR-2 landed on its branch; steward-assigned its own ledger row `DEC-RUST-DATALAKE-IO-SLICE8-PR2-001`, MIGRATION.md #1771)
+
+The §3 PR-2 gate set is IMPLEMENTED on the stacked PR-2 branch (full record:
+MIGRATION.md #1771 — DEC-RUST-DATALAKE-IO-SLICE8-PR2-001, the PR-2 row under
+this roadmap DEC): the option
+writer's ALL-DEFAULTS render seam — the ENTIRE `option_parquet_writer.py`
+diff confined to `_atomic_write_parquet`'s body + one new module-level
+oracle helper `_defaults_python_render` (flag-OFF is the LITERAL legacy
+`atomic_write_via(dest, df.write_parquet)`, mechanism-verbatim,
+never-routes spy-pinned; `lake_heal.py` + `atomic_io.py` ship ZERO diff) —
+routed through the SAME `lake_rust_render` facade under a NEW render-PROFILE
+registry (`PROFILE_BARS` default = PR-1 back-compat;
+`PROFILE_OPTIONS_DEFAULTS` = the zero-kwarg `df.write_parquet(path)` byte
+shape: statistics min/max/null_count ON + distinct OFF, `Zstd(None)`,
+`row_group_size=None` → the streaming sink's 122,880-row split). ONE flag,
+ONE shared latch (fail-closed across BOTH profiles), per-PROFILE 16-render
+burn-in budgets, profile-prefixed shape tokens with a 64-entry seen-set cap
+(the honest correction of PR-1's "two writer shapes" bound — the heal path
+re-renders arbitrary stored schemas; saturation degrades to compare-always),
+`_CRATE_API` grown to 4 all-or-nothing (a stale PR-1 crate latches BOTH
+surfaces — atomic pin), `ipc_handoff_bytes` hoisted COMMON. Crate side: ONE
+shared parameterized render core (`render_parquet_with_options_impl` — the
+pre-refactor bars tests run UNMODIFIED as the frozen-behavior gate) + the
+thin `render_parquet_defaults_from_ipc` pyfunction over the factored FFI
+shell, with the defaults-mapping / 122,880-split / `dyn_sink_equals_
+file_sink_defaults` (the P2 standing pin — judge-probed PASS 7/7 pre-design)
+cargo pins. Gates EXECUTED: the 12-case options corpus (6 probe-origin
+cases — the probe's seventh, the 130k mid-boundary multi-RG case, is
+superseded by the exact-boundary pair, its multi-RG coverage kept by the
+retained 300k case — + 6 new: all-null-nullables / single-side / the exact
+122,880 + 122,881 boundary pair / long-string truncation sentinel / NaN+inf
+heal shape; real-writer provenance) — 12/12 sha256 + raw-bytes MATCH through the REAL seam
+steady-state, with the per-profile vacuous-green guard + the three
+whole-path ON/OFF layers (write · heal_partition · merge_partition_frame ·
+the end-to-end `heal_findings` batch twin) + statistics diagnostic pins;
+the P1 standing pin (BytesIO ≡ path target — judge-probed 7/7, now pinned
+crate-free in main CI); rails regressions R1–R14. EMPIRICAL CORRECTION
+recorded: the probe report's "`binary_statistics_truncate_length=None` =
+untruncated" reading is WRONG at the stats layer — the pinned rev resolves
+it to a 64-byte truncate with max-increment (wheel and crate share it —
+parity unaffected; the o11 sentinel pins the OBSERVED policy as data).
+Deviations from §3's sketch: none new (the IPC handoff + burn-in-as-probe
+deviations carry over from PR-1). Locks + error mapping still did not move
+(PR-3/PR-4 territory); PR-3..PR-4 and the waves remain future work under
+the same apparatus. Payoff ≈ 0 banner holds — the options render is
+heal-/option-pull-driven O(month-file) glue; no speed claim.
+
+## 11. PR-4 shipped surface (2026-07-16 — appended when PR-4 landed; DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912)
+
+The §3 PR-4 gate set is IMPLEMENTED (full record: MIGRATION.md #1912):
+`rust/brutex-lake/src/locks.rs` ships `lock_try_exclusive` /
+`lock_release` / `atomic_commit_replace` behind the NEW default-OFF
+`brutex/data/lake_rust_locks.py` facade (`BRUTEX_LAKE_RUST_LOCKS`), with
+the §"PR-4 — locks / atomic-replace" laws held exactly: the
+`.locks/<sha256(dest)>.lock` path derivation stays Python-owned (the
+crate receives ONLY the fd — the unit-pinned byte-identical contract
+cannot drift through Rust), tmp→fsync→`os.replace` atomicity is the
+order-exact `commit_replace_impl` twin, the `LakeWriteHalt` /
+`PartitionLockTimeout` mapping stays entirely on the Python facade (the
+crate raises real `OSError(errno)` / `RuntimeError`-on-panic only), and
+in-process lock acquisition REMAINS on the Python facade
+(`BoundedLockRegistry` byte-untouched — the registry lock stays OUTER).
+Deviations from the roadmap sketch, recorded in the DEC: (a) the routing
+is attempt/commit-GRAINED, not whole-acquire — a Rust-side retry loop
+would drop the per-retry watchdog liveness beats
+(DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15); (b) temp-file creation stays
+`tempfile.mkstemp` on both arms (the `.brutex-write-` prefix +
+mkstemp-ENOSPC guard laws hold byte-identically); (c) no byte burn-in /
+no version guard on this facade — locks are polars-free and have no
+rendered bytes; the parity contract is BEHAVIORAL (the executed
+mixed-arm mutual-exclusion + two-subprocess belts + errno-parity
+suites stand in). One new direct dep: `libc = "0.2"` (flock only —
+already transitive in the committed `Cargo.lock`; rustix stays reserved
+for Wave C per §3). Flag OFF (the default) is byte- and
+call-graph-identical, bomb-spy-pinned; the default-ON flip needs its own
+DEC.

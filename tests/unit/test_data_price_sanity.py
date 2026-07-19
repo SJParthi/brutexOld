@@ -28,6 +28,16 @@ from brutex.data.price_sanity import (
 from hypothesis import given
 from hypothesis import strategies as st
 
+#: One price cell for the scalar==vector parity pin: None, a bounded finite
+#: float, OR an explicit non-finite special (hypothesis refuses
+#: ``allow_nan=True`` beside min/max bounds, so the specials are sampled
+#: explicitly — DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 widened the space).
+_PRICE_CELL = st.one_of(
+    st.none(),
+    st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False),
+    st.sampled_from([float("nan"), float("inf"), float("-inf")]),
+)
+
 
 class TestPriceRowInsaneScalar:
     """The scalar :func:`price_row_insane` — the twin of :func:`price_violation_expr`."""
@@ -64,14 +74,25 @@ class TestPriceRowInsaneScalar:
     def test_nan_price_is_insane_in_each_field(self, field: int) -> None:
         """The scalar NaN arm (round-2 refuter): a NaN price in ANY field is insane.
 
-        DELIBERATE scalar-vs-vector asymmetry — the vectorized
-        ``price_violation_expr`` is NaN-blind (every NaN comparison is False),
-        but the engine's CandleBar constructor raises decimal.InvalidOperation
-        on NaN, so without this arm the dashboard would SERVE what the engine
-        REFUSES.
+        Historically a DELIBERATE scalar-vs-vector asymmetry (the vectorized
+        ``price_violation_expr`` was NaN-blind in HIGH); since
+        DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 the vectorized twin carries the
+        mirrored per-column ``~is_finite`` arm, so this pin now guards a
+        BOTH-planes invariant (see ``test_scalar_equals_vector_row_wise``).
         """
         row: list[float] = [100.0, 101.0, 99.0, 100.5]
         row[field] = float("nan")
+        assert price_row_insane(*row) is True
+
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf")], ids=["+inf", "-inf"])
+    def test_infinite_price_is_insane_in_each_field(self, field: int, value: float) -> None:
+        """DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 (fails-before for ``+inf``
+        HIGH): a ``+inf`` HIGH passed EVERY scalar check — ``inf`` compares
+        fine, so ordering + positivity held vacuously and the row read SANE.
+        The widened ``isnan`` → ``not isfinite`` arm flags any ``±inf``."""
+        row: list[float] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = value
         assert price_row_insane(*row) is True
 
     @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
@@ -94,18 +115,14 @@ class TestPriceRowInsaneScalar:
         row[field] = True
         assert price_row_insane(*row) is True  # type: ignore[arg-type]
 
-    # NaN is DELIBERATELY excluded from this parity pin's input space
-    # (allow_nan=False): the scalar is STRICTER on NaN by design (see
-    # price_row_insane's deliberate-asymmetry note) — outcome-parity holds
-    # because the engine refuses NaN downstream at CandleBar construction.
+    # CONSCIOUSLY WIDENED input space (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001):
+    # NaN/±inf were historically excluded (allow_nan=False/allow_infinity=False)
+    # because the scalar was STRICTER on NaN by design; both planes now carry
+    # the non-finite arm, so scalar == vector holds over the FULL float plane
+    # and the parity pin covers it.
     @given(
         rows=st.lists(
-            st.tuples(
-                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
-                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
-                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
-                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
-            ),
+            st.tuples(_PRICE_CELL, _PRICE_CELL, _PRICE_CELL, _PRICE_CELL),
             min_size=1,
             max_size=25,
         )
@@ -176,6 +193,30 @@ class TestCountPriceViolations:
     ) -> None:
         assert count_price_violations(_frame([_CLEAN, row])) == 1
 
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    @pytest.mark.parametrize(
+        "value", [float("inf"), float("-inf"), float("nan")], ids=["+inf", "-inf", "nan"]
+    )
+    def test_nonfinite_price_counts_in_each_field(self, field: int, value: float) -> None:
+        """DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 — FAILS-BEFORE for
+        ``high ∈ {+inf, NaN}``: the pre-fix vectorized mask counted 0 there
+        (``high >= low`` holds vacuously for ``+inf``; polars' total float
+        ordering places NaN above everything, so no ordering/positivity arm
+        ever tripped) — the assurance session executed-repro'd the miss
+        laundering a derived 5-minute bucket ``high = inf``. Every other
+        column/value pair already tripped an ordering or ``<= 0`` arm; this
+        pins ALL twelve pairs so the guardrail can never narrow."""
+        row: list[float] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = value
+        assert count_price_violations(_frame([_CLEAN, (row[0], row[1], row[2], row[3])])) == 1
+
+    def test_nonfinite_mask_is_never_null(self) -> None:
+        """The non-finite arm keeps the no-null mask law intact."""
+        frame = _frame([(100.0, float("nan"), 99.0, 100.5), _CLEAN])
+        mask = frame.select(price_violation_expr().alias("bad")).get_column("bad")
+        assert mask.null_count() == 0
+        assert mask.to_list() == [True, False]
+
     def test_multiple_bad_rows_all_counted(self) -> None:
         frame = _frame([_CLEAN, (-1.0, -1.0, -1.0, -1.0), (100.0, 1.0, 50.0, 60.0)])
         assert count_price_violations(frame) == 2
@@ -209,6 +250,15 @@ class TestValidateFramePriceSanity:
         # ZoneInfo-tz datetime, so pin the digits, not the stdlib repr).
         assert "2024, 1, 2, 3, 46" in message
 
+    @pytest.mark.parametrize("value", [float("inf"), float("nan")], ids=["+inf", "nan"])
+    def test_nonfinite_high_frame_raises(self, value: float) -> None:
+        """FAILS-BEFORE (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): a frame whose
+        only defect is ``high ∈ {+inf, NaN}`` returned ``None`` (a MISS) —
+        the prebuild read boundary then served it to the resamplers."""
+        frame = _frame([_CLEAN, (100.0, value, 99.0, 100.5)])
+        with pytest.raises(ResampleInputError, match="1 price-insane"):
+            validate_frame_price_sanity(frame, context="NSE/INDEX/NIFTY/1minute")
+
     def test_corrupt_frame_without_context_keeps_bare_message(self) -> None:
         with pytest.raises(ResampleInputError) as excinfo:
             validate_frame_price_sanity(_frame([(0.0, 0.0, 0.0, 0.0)]))
@@ -226,3 +276,132 @@ class TestValidateFramePriceSanity:
         with pytest.raises(ResampleInputError) as excinfo:
             validate_frame_price_sanity(frame, ts_column="timestamp")
         assert "2024, 1, 2, 3, 45" in str(excinfo.value)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# validate_frame_ts_datetime_range — the read-boundary TIMESTAMP-range gate
+# (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001)
+# ────────────────────────────────────────────────────────────────────────
+
+from brutex.data.price_sanity import (  # noqa: E402 — grouped with its test class
+    validate_frame_ts_datetime_range,
+)
+
+#: ~year 148108 as microseconds since epoch — within i64, far past
+#: ``datetime.max``; the executed repro's poison value.
+_POISON_US = 2**62
+
+_EPOCH = datetime(1970, 1, 1)
+
+
+def _offset_us(instant: datetime) -> int:
+    """Independent exact epoch-offset oracle (integer timedelta arithmetic)."""
+    delta = instant - _EPOCH
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def _ts_frame(physical: list[int | None], *, unit: str = "us", tz: str | None = "UTC"):
+    """A minimal frame whose ``ts_utc`` holds the given raw physical values."""
+    return pl.DataFrame({"ts_utc": physical}).with_columns(
+        pl.col("ts_utc").cast(pl.Datetime(time_unit=unit, time_zone=tz))  # type: ignore[arg-type]
+    )
+
+
+class TestValidateFrameTsDatetimeRange:
+    def test_clean_frame_passes(self) -> None:
+        frame = _ts_frame([_offset_us(datetime(2026, 7, 10, 3, 45))])
+        assert validate_frame_ts_datetime_range(frame) is None
+
+    def test_out_of_range_positive_raises_naming_context_and_value(self) -> None:
+        """FAILS-BEFORE: no gate existed — the 2**62-us stamp panicked the
+        Rust→Python conversion downstream (pyo3 PanicException, a
+        BaseException) past every ``except Exception`` per-symbol quarantine."""
+        frame = _ts_frame([_offset_us(datetime(2026, 7, 10)), _POISON_US])
+        with pytest.raises(ResampleInputError) as excinfo:
+            validate_frame_ts_datetime_range(frame, context="NSE/INDEX/NIFTY/1minute")
+        message = str(excinfo.value)
+        assert "NSE/INDEX/NIFTY/1minute" in message  # names the symbol
+        assert "1 timestamp(s)" in message  # counts the offenders
+        assert str(_POISON_US) in message  # names the offending physical value
+        assert "DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001" in message
+
+    def test_out_of_range_negative_raises(self) -> None:
+        below_min = _offset_us(datetime.min) - 1
+        frame = _ts_frame([below_min, _offset_us(datetime(2026, 7, 10))])
+        with pytest.raises(ResampleInputError, match="outside the\\s+representable"):
+            validate_frame_ts_datetime_range(frame)
+
+    def test_boundary_max_and_min_datetimes_pass(self) -> None:
+        """Boundary-EXACT: stored ``datetime.max`` / ``datetime.min`` convert
+        cleanly, so the gate passes them (and one-past each side raises)."""
+        frame = _ts_frame([_offset_us(datetime.min), _offset_us(datetime.max)])
+        assert validate_frame_ts_datetime_range(frame) is None
+        with pytest.raises(ResampleInputError):
+            validate_frame_ts_datetime_range(_ts_frame([_offset_us(datetime.max) + 1]))
+        with pytest.raises(ResampleInputError):
+            validate_frame_ts_datetime_range(_ts_frame([_offset_us(datetime.min) - 1]))
+
+    def test_gate_probe_never_panics(self) -> None:
+        """The probe itself works on raw i64 physicals — the poisoned frame
+        raises the TYPED error, never a PanicException (the very class the
+        gate exists to stop)."""
+        frame = _ts_frame([_POISON_US])
+        with pytest.raises(ResampleInputError):
+            validate_frame_ts_datetime_range(frame)
+
+    def test_ms_unit_bounds_are_exact(self) -> None:
+        max_ms = _offset_us(datetime.max) // 1_000
+        assert validate_frame_ts_datetime_range(_ts_frame([max_ms], unit="ms")) is None
+        with pytest.raises(ResampleInputError, match="'ms'"):
+            validate_frame_ts_datetime_range(_ts_frame([max_ms + 1], unit="ms"))
+
+    def test_ns_unit_is_vacuously_representable(self) -> None:
+        """Every storable i64 ns value is inside the Python datetime range —
+        the check is vacuously true there (documented)."""
+        frame = _ts_frame([2**62, -(2**62)], unit="ns")
+        assert validate_frame_ts_datetime_range(frame) is None
+
+    def test_naive_datetime_column_is_gated_too(self) -> None:
+        with pytest.raises(ResampleInputError):
+            validate_frame_ts_datetime_range(_ts_frame([_POISON_US], tz=None))
+
+    def test_empty_frame_returns(self) -> None:
+        assert validate_frame_ts_datetime_range(_ts_frame([])) is None
+
+    def test_absent_ts_column_returns(self) -> None:
+        frame = pl.DataFrame({"other": [1]})
+        assert validate_frame_ts_datetime_range(frame) is None
+
+    def test_non_datetime_dtype_returns(self) -> None:
+        """An out-of-band non-Datetime ts column (no lake writer produces one)
+        is left to downstream typed handling — never a raise here."""
+        frame = pl.DataFrame({"ts_utc": [2**62]})
+        assert validate_frame_ts_datetime_range(frame) is None
+
+    def test_all_null_ts_returns(self) -> None:
+        """All-null timestamps are the resampler null guard's class."""
+        assert validate_frame_ts_datetime_range(_ts_frame([None, None])) is None
+
+    def test_bounds_constants_match_independent_oracle(self) -> None:
+        from brutex.data.price_sanity import (
+            _TS_UNIT_BOUNDS,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        low_us, high_us = _TS_UNIT_BOUNDS["us"]
+        assert low_us == _offset_us(datetime.min)
+        assert high_us == _offset_us(datetime.max)
+        assert _TS_UNIT_BOUNDS["ms"] == (low_us // 1_000, high_us // 1_000)
+        assert _TS_UNIT_BOUNDS["ns"] == (low_us * 1_000, high_us * 1_000)
+        # datetime.min is a whole day, so its floor-to-ms is EXACT.
+        assert low_us % 1_000 == 0
+
+    def test_mixed_offenders_counted(self) -> None:
+        frame = _ts_frame(
+            [
+                _offset_us(datetime.min) - 5,
+                _offset_us(datetime(2026, 7, 10)),
+                _POISON_US,
+            ]
+        )
+        with pytest.raises(ResampleInputError, match="2 timestamp"):
+            validate_frame_ts_datetime_range(frame)

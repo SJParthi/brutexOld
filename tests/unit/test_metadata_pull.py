@@ -33,6 +33,7 @@ from brutex.dashboard import metadata_pull as mp
 from brutex.dashboard.metadata_pull import (
     GROWW_METADATA_HISTORY_FLOOR,
     MetadataClientFactory,
+    MetadataPullReport,
     pull_expiries_contracts,
 )
 from brutex.data.coverage_ledger import (
@@ -2405,3 +2406,39 @@ def test_metadata_pool_pace_beat_reaches_the_runs_keyed_channel(tmp_path: Path) 
     assert report.expiries_persisted == 1
     assert len(beats) >= 2  # one per vendor call — expiries + contracts, all delivered
     assert drop_records == []  # a healthy metadata pull emits ZERO foreign-drop WARNs
+
+
+class TestMetadataReportOkProperty:
+    """``MetadataPullReport.ok`` — the StageOutcome home of the metadata-gate
+    predicate (DEC-STAGED-SEQUENCER-SEAMS-001; ``pipeline_pull.metadata_phase_ok``
+    delegates here)."""
+
+    @staticmethod
+    def _report(
+        *,
+        expiry_failures: int = 0,
+        contract_failures: int = 0,
+        store_write_deferrals: int = 0,
+    ) -> MetadataPullReport:
+        return MetadataPullReport(
+            dry_run=False,
+            years=(2024,),
+            underlyings=("NIFTY",),
+            expiry_cells=1,
+            cells_skipped=0,
+            expiry_failures=expiry_failures,
+            expiries_persisted=1,
+            contract_jobs=1,
+            contract_failures=contract_failures,
+            contracts_persisted=1,
+            note="ok",
+            store_write_deferrals=store_write_deferrals,
+        )
+
+    def test_clean_report_ok_true(self) -> None:
+        assert self._report().ok is True
+
+    def test_each_failure_arm_flips_ok_false(self) -> None:
+        assert self._report(expiry_failures=1).ok is False
+        assert self._report(contract_failures=1).ok is False
+        assert self._report(store_write_deferrals=1).ok is False

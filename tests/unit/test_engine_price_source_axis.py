@@ -105,6 +105,32 @@ def _trending_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
     return bars
 
 
+def _drift_bars(n_days: int = 45, per_day: int = 120) -> list[CandleBar]:
+    """The rankable-under-the-one-law drift (DEC-FILL-WORST-CASE-ONLY-001).
+
+    The house recipe-(a) fixture (the ``test_engine_sweep_run`` twin): the
+    same zig-zag shape as :func:`_trending_bars` but with every 5th day
+    drifting DOWN, ridden with EOD-only exits (``sl/tp = None``) — under the
+    one worst-case fill law a tight SL/TP over these wide-range synthetic
+    bars always fills at the adverse extreme and loses, while the EOD-only
+    walk banks the up-days and the down days keep ``profit_factor`` finite so
+    the rank gates can pass. 45 days clears MIN_TRADES=30 at ~one session-gap
+    trade per day per mask.
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        down_day = d % 5 == 4
+        for m in range(per_day):
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
+            bars.append(_bar(d, m, price, close))
+            price = close
+    return bars
+
+
 def _spike_bars(n_days: int = 8, per_day: int = 120) -> list[CandleBar]:
     """Close flat at 100, high spiked to 130 — so HLC3 ≫ close and OPEN/LOW ≪ HLC3.
 
@@ -303,9 +329,14 @@ class TestReductionBitIdentity:
 
 
 class TestOverride1DefaultOmit:
-    # The captured pre-change default run_id (fixed provenance). Impossible to
-    # reproduce under unconditional emit (which would add the two keys → new hash).
-    _DEFAULT_TRADE_RUN_ID = "b264fd0b6af6fd2b43448db0952baaf793e90330a6dbcbabe4b48ae2ac2521f3"
+    # The captured default-cell run_id (fixed provenance). Impossible to
+    # reproduce under unconditional PRICE-SOURCE emit (which would add the two
+    # keys → new hash). RE-LOCKED once under DEC-FILL-WORST-CASE-ONLY-001:
+    # the params now carry the unconditional "fill_mode": "worst_case" key
+    # (the one-law identity re-key), so the pre-flip capture b264fd0b… moved
+    # to this value; the default-omit law under test (no price-source keys at
+    # the default cell) is unchanged and still pinned by the key-set tests.
+    _DEFAULT_TRADE_RUN_ID = "92b8ef5a3501a9e7a8787b2493e1e9f2ad077da6bd267cffd9fd7f1059611558"
 
     def _default_trade_params(self) -> dict[str, object]:
         return canonical_trade_params(
@@ -321,7 +352,9 @@ class TestOverride1DefaultOmit:
         params = self._default_trade_params()
         assert "vwap_source" not in params
         assert "ema_source" not in params
-        # Byte-identical key set to the pre-axis 6-key layout.
+        # The pre-axis key layout + the UNCONDITIONAL fill_mode key
+        # (DEC-FILL-WORST-CASE-ONLY-001 — emitted always, orthogonal to the
+        # price-source default-omit law under test here).
         assert set(params) == {
             "sl_paisa",
             "tp_paisa",
@@ -329,6 +362,7 @@ class TestOverride1DefaultOmit:
             "proximity_bps",
             "fib_anchor",
             "start_equity_paisa",
+            "fill_mode",
         }
 
     def test_default_trade_params_explicit_default_sources_omit_too(self) -> None:
@@ -730,8 +764,16 @@ class TestCascadeSerializationRoundTrip:
 class TestSweepIntegrationDistinctPerCell:
     def test_ofat_grid_yields_distinct_stores_and_run_ids(self, tmp_path: Path) -> None:
         pytest.importorskip("polars")
-        bars = _trending_bars()
-        grid = _grid(price_source_cells=list(_OFAT_CELLS))
+        # Recipe-(a) drift + EOD-only exits: rankable under the one worst-case
+        # fill law (DEC-FILL-WORST-CASE-ONLY-001) — the original tight-SL/TP
+        # all-up fixture yielded zero ranked survivors once fills price at the
+        # adverse extreme (see _drift_bars).
+        bars = _drift_bars()
+        grid = _grid(
+            price_source_cells=list(_OFAT_CELLS),
+            stop_losses=[None],
+            take_profits=[None],
+        )
 
         results_root = tmp_path / "results"
         with AuditWriter.open(tmp_path / "grid.jsonl") as audit:

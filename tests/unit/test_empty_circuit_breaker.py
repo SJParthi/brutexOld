@@ -965,3 +965,28 @@ class TestBreakerCanary:
 
         assert resolve_empty_breaker(health_probe=_probe).health_probe is _probe
         assert resolve_empty_breaker().health_probe is None
+
+
+class TestResolveFractionEnvPromotion:
+    """DEC-ALLFILTERED-MASS-BREAKER-001: `_resolve_fraction` promoted to the PUBLIC
+    `resolve_fraction_env` (ONE fraction-parsing source shared with the mass
+    all-filtered breaker's resolver), the private alias kept for internal callers."""
+
+    def test_public_name_parses_and_fails_safe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.adapters.empty_circuit_breaker import resolve_fraction_env
+
+        monkeypatch.setenv("X_FRACTION_TEST", "0.25")
+        assert resolve_fraction_env("X_FRACTION_TEST", 0.8) == 0.25
+        monkeypatch.setenv("X_FRACTION_TEST", "2.0")  # outside (0, 1] → default
+        assert resolve_fraction_env("X_FRACTION_TEST", 0.8) == 0.8
+        monkeypatch.setenv("X_FRACTION_TEST", "junk")
+        assert resolve_fraction_env("X_FRACTION_TEST", 0.8) == 0.8
+        monkeypatch.delenv("X_FRACTION_TEST", raising=False)
+        assert resolve_fraction_env("X_FRACTION_TEST", 0.8) == 0.8
+
+    def test_private_alias_is_the_same_object(self) -> None:
+        from brutex.adapters import empty_circuit_breaker as mod
+
+        alias = mod._resolve_fraction  # pyright: ignore[reportPrivateUsage] — alias pin
+        assert alias is mod.resolve_fraction_env
+        assert "resolve_fraction_env" in mod.__all__

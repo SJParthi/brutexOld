@@ -265,6 +265,153 @@ def test_latest_movers_date_none_on_corrupt_lake(tmp_path: Path) -> None:
     assert latest_movers_date(tmp_path) is None
 
 
+# ── latest_movers_date: the 1-MINUTE source of truth (DEC-MOVERS-DAILY-FRESHNESS-001) ──
+
+
+def test_latest_movers_date_moves_with_1m_append_without_reprebuild(tmp_path: Path) -> None:
+    """FAILS-BEFORE: the pre-fix read scanned ONLY the derived ``1day``
+    partitions, so a post-prebuild 1-minute append (a CLI pull, a crashed
+    prebuild) froze the default movers date at the last prebuilt day. The date
+    now resolves from the 1-minute base too — the newer 1-minute day WINS."""
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_day_bar(date(2024, 6, 12), "20000")],
+    )
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    assert latest_movers_date(tmp_path) == "2024-06-13"
+
+
+def test_latest_movers_date_1minute_only_lake_resolves(tmp_path: Path) -> None:
+    # FAILS-BEFORE: a never-prebuilt (CLI-only) lake has NO 1day partitions —
+    # the pre-fix read returned None and the default poll fell to an empty
+    # "today"; the 1-minute source now answers.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="RELIANCE",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 6, 14), 9, 15, "1300")],
+    )
+    assert latest_movers_date(tmp_path) == "2024-06-14"
+
+
+def test_latest_movers_date_is_max_of_both_sources(tmp_path: Path) -> None:
+    # The "latest AVAILABLE day" honesty: an (out-of-band) 1day bar LATER than
+    # the 1-minute max still wins — MAX over both sources, never a narrowing.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_day_bar(date(2024, 6, 17), "20200")],
+    )
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    assert latest_movers_date(tmp_path) == "2024-06-17"
+
+
+def test_latest_movers_date_1m_reads_only_the_latest_month(tmp_path: Path) -> None:
+    # Month-prune law: the max (year, month) partition holds the max instant,
+    # so only ITS files are bound — an older month never changes the answer.
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 5, 20), 9, 15, "19900")],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    # An OLDER month in the second-enumerated segment (CASH) — the max-month
+    # fold must keep the INDEX June key (the not-newer enumeration arm).
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="RELIANCE",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 5, 21), 9, 15, "1290")],
+    )
+    assert latest_movers_date(tmp_path) == "2024-06-13"
+
+
+def test_latest_movers_date_ist_date_crossing_utc_month_edge(tmp_path: Path) -> None:
+    # A bar late on the UTC month's last day belongs to the NEXT IST month's
+    # 1st (IST = UTC+05:30) — the max-UTC-month read still answers the true
+    # max IST date (IST date is monotone in the instant).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        # 2024-06-30 19:00 UTC = 2024-07-01 00:30 IST — filed under 2024/06.
+        bars=[
+            CandleBar(
+                timestamp=datetime(2024, 6, 30, 19, 0, tzinfo=UTC),
+                open=Decimal("20100"),
+                high=Decimal("20100"),
+                low=Decimal("20100"),
+                close=Decimal("20100"),
+                volume=100,
+                open_interest=None,
+            )
+        ],
+    )
+    assert latest_movers_date(tmp_path) == "2024-07-01"
+
+
+def test_latest_movers_date_corrupt_1minute_falls_back_to_1day(tmp_path: Path) -> None:
+    # Each source is guarded independently: a corrupt 1-minute month file
+    # degrades THAT source to None (one WARN) — the healthy 1day still answers.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_day_bar(date(2024, 6, 12), "20000")],
+    )
+    corrupt = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "06.parquet"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"garbage, not parquet")
+    assert latest_movers_date(tmp_path) == "2024-06-12"
+
+
+def test_latest_movers_date_non_canonical_1m_month_name_skipped(tmp_path: Path) -> None:
+    # Only the writer's canonical zero-padded `<yyyy>/<mm>.parquet` stem parses
+    # (the #1558 round-5/8 law) — a junk `2024/6.parquet` / `٢٠٢٤` name is
+    # skipped, never crashed on (and never binds a glob that misses itself).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    junk = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2025" / "6.parquet"
+    junk.parent.mkdir(parents=True)
+    junk.write_bytes(b"non-canonical stem, ignored by the month enumeration")
+    assert latest_movers_date(tmp_path) == "2024-06-13"
+
+
 def test_warm_counts_only_non_empty_jobs() -> None:
     # 3 jobs: spot warmed 5, futures warmed 0 (empty), options warmed 2 → 2 non-empty.
     result = warm_movers_snapshots([lambda: 5, lambda: 0, lambda: 2])

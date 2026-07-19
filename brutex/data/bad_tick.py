@@ -62,6 +62,8 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.data.session import ist_offset_duration
+
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from datetime import date
 
@@ -339,7 +341,7 @@ def screen_frame_bad_ticks(
 
     if frame.height == 0:
         return frame
-    ist_date = (pl.col(ts_column) + pl.duration(hours=5, minutes=30)).dt.date()
+    ist_date = (pl.col(ts_column) + ist_offset_duration()).dt.date()
     prev = pl.col("close").shift(1).over(ist_date)
     candidate = (pl.col("close") >= prev * max_ratio) | (pl.col("close") * max_ratio <= prev)
     if not bool(frame.select(candidate.fill_null(value=False).any()).item()):

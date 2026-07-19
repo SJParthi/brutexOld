@@ -136,8 +136,11 @@ def read_day_month_frame(base: Path, day: date_cls) -> pl.DataFrame | None:
     # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): every /movers session/day
     # reader flows through here — a poisoned-era duplicated month file would
     # otherwise double-count session volume/turnover. Keep-FIRST, warned.
+    # glob=False: *path* is ONE concrete month file (DEC-SPOT-DERIVE-TS-RANGE-
+    # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying symbol
+    # dir otherwise glob-reads the SIBLINGS' bars into this symbol's day view.
     frame, _dropped = dedup_bars_frame(
-        pl.read_parquet(path.as_posix()), source=f"lake_day:{path.as_posix()}"
+        pl.read_parquet(path.as_posix(), glob=False), source=f"lake_day:{path.as_posix()}"
     )
     return frame
 
