@@ -33,6 +33,11 @@ Two kernel classes (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1796):
   invariants are pinned below so the classification cannot silently rot: a
   future module-top import of an optional kernel FAILS here and forces its
   promotion into the required class (where the build-path guards then fire).
+  A facade-LESS variant exists for a kernel shipped deliberately INERT
+  (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — no Python facade
+  until the flip PR): its facade slot is ``None``, legal ONLY with a
+  DEC-cited reason in ``INERT_FACADELESS_REASONS``; the CI-lane pin and the
+  never-module-top-imported inverse pin stay LIVE for it.
 """
 
 from __future__ import annotations
@@ -124,7 +129,17 @@ KERNELS = _discover_maturin_kernels()
 # OPTIONAL kernels: {import_name: (guarded_facade_relpath, ci_lane_relpath)}.
 # Registration REQUIRES a documented reason — an unregistered new crate that
 # nothing imports still fails test_kernel_is_imported_by_brutex loudly.
-OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
+#
+# FACADE-LESS INERT variant: the facade slot may be ``None`` ONLY for a
+# kernel that ships deliberately INERT (consumed by NOTHING — no Python
+# facade exists yet because the flip PR has not landed), and ONLY when
+# ``INERT_FACADELESS_REASONS`` carries a documented reason CITING the
+# licensing DEC id (enforced by
+# test_facadeless_optional_kernel_cites_a_dec — a None facade with no
+# DEC-cited reason FAILS). The CI-lane pin + the never-module-top-imported
+# inverse pin stay LIVE for such kernels, so "INERT" holds mechanically
+# until the flip PR consciously re-points the registration at a real facade.
+OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
     # DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796 PR-1 / ADR-0020):
     # brutex_lake is the default-OFF lake render crate. It is consumed ONLY
     # through the import-guarded facade brutex/data/lake_rust_render.py
@@ -190,9 +205,9 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
-    # THE UNIFIED OPS CRATE — DEC-BACKUP-RUST-OPS-001 (MIGRATION.md #1962) +
-    # DEC-CROSSVERIFY-RUST-CORE-001 (#1963) + DEC-NIGHTLY-RUST-CORE-001
-    # (#1964): brutex_ops is the ONE default-OFF ops decision-kernel crate
+    # THE UNIFIED OPS CRATE — DEC-BACKUP-RUST-OPS-001 (MIGRATION.md #1969) +
+    # DEC-CROSSVERIFY-RUST-CORE-001 (#1970) + DEC-NIGHTLY-RUST-CORE-001
+    # (#1971): brutex_ops is the ONE default-OFF ops decision-kernel crate
     # (backup deadman verdict + template renders + restic parse/argv laws;
     # cross-verify CSV byte assembly + canonical identity/S3-key law; the
     # nightly chain/report/schedule pure decision laws). It is consumed ONLY
@@ -213,6 +228,39 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/backup/backup_rust.py",
         ".github/workflows/ops-rust-parity.yml",
     ),
+    # DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): brutex_calendar is
+    # the calendar-leaf pure-law crate (classify_month_drift /
+    # validate_settle_evidence / parse_observed_sidecar), shipped INERT —
+    # consumed by NOTHING: it has NO Python facade yet (deliberate; the
+    # facade lands with the flip PR — the default-ON BRUTEX_CALENDAR_RUST
+    # facade flip + oracle deletion are a LATER PR). The facade slot is
+    # therefore None, licensed ONLY by the DEC-cited reason in
+    # INERT_FACADELESS_REASONS below. It is deliberately NOT a turnkey
+    # build prerequisite: in NO cargo workspace, built ONLY by its own CI
+    # lane (the `rust-brutex-calendar` job in .github/workflows/ci.yml).
+    # THE FLIP PR MUST UPDATE THIS REGISTRATION: re-point the facade slot
+    # at the real guarded facade (`importlib.import_module("brutex_calendar")`
+    # inside its guard) and delete the INERT_FACADELESS_REASONS entry. A
+    # module-top `import brutex_calendar` anywhere in brutex/ would make a
+    # clean clone crash-prone — the inverse pin below forbids exactly that.
+    "brutex_calendar": (
+        None,
+        ".github/workflows/ci.yml",
+    ),
+}
+
+# Facade-less INERT optional kernels: {import_name: reason}. A ``None``
+# facade slot in OPTIONAL_KERNELS is legal ONLY with a reason here that
+# cites the licensing DEC id (the enforcement lives in
+# test_facadeless_optional_kernel_cites_a_dec + the registry-consistency
+# pin). The flip PR that lands a kernel's real facade must DELETE its
+# entry here and re-point the OPTIONAL_KERNELS facade slot.
+INERT_FACADELESS_REASONS: dict[str, str] = {
+    "brutex_calendar": (
+        "DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): PR-1 ships the "
+        "crate INERT — consumed by NOTHING; the guarded Python facade lands "
+        "with the flip PR, which must re-point OPTIONAL_KERNELS at it."
+    ),
 }
 
 REQUIRED_KERNELS = {
@@ -226,6 +274,7 @@ def test_known_kernels_are_discovered() -> None:
     assert "trading_core" in REQUIRED_KERNELS, KERNELS
     assert "brutex_lake" in KERNELS, KERNELS
     assert "brutex_core" in KERNELS, KERNELS
+    assert "brutex_calendar" in KERNELS, KERNELS
 
 
 @pytest.mark.parametrize("import_name", sorted(REQUIRED_KERNELS))
@@ -269,10 +318,16 @@ def test_optional_kernel_never_module_top_imported(import_name: str) -> None:
 
 @pytest.mark.parametrize(
     ("import_name", "facade_relpath"),
-    sorted((name, spec[0]) for name, spec in OPTIONAL_KERNELS.items()),
+    sorted((name, spec[0]) for name, spec in OPTIONAL_KERNELS.items() if spec[0] is not None),
 )
 def test_optional_kernel_consumed_via_guarded_facade(import_name: str, facade_relpath: str) -> None:
-    """The registered facade really guard-imports the optional kernel."""
+    """The registered facade really guard-imports the optional kernel.
+
+    Facade-less INERT kernels (facade slot ``None``) are exempt HERE only —
+    they are instead pinned by test_facadeless_optional_kernel_cites_a_dec
+    (DEC-cited reason required) + the registry-consistency pin, and keep the
+    CI-lane + never-module-top-imported pins LIVE.
+    """
     facade = REPO_ROOT / facade_relpath
     assert facade.is_file(), f"guarded facade {facade_relpath} does not exist"
     source = facade.read_text(encoding="utf-8")
@@ -280,6 +335,44 @@ def test_optional_kernel_consumed_via_guarded_facade(import_name: str, facade_re
         f"{facade_relpath} no longer guard-imports {import_name} via "
         f'importlib.import_module("{import_name}") — the optional kernel is '
         "unconsumed (dead crate) or the guard moved; update OPTIONAL_KERNELS."
+    )
+
+
+def test_facadeless_registry_is_consistent() -> None:
+    """INERT_FACADELESS_REASONS ⟺ the None-facade OPTIONAL_KERNELS entries.
+
+    Both directions: a None facade WITHOUT a reason entry FAILS (the
+    enforcement the facade-less variant demands), and a stale reason entry
+    for a kernel that has since gained a real facade (or left
+    OPTIONAL_KERNELS) FAILS — the flip PR must delete the reason when it
+    re-points the registration (DEC-RUST-CALENDAR-LEAVES-001 precedent).
+    """
+    facadeless = sorted(name for name, spec in OPTIONAL_KERNELS.items() if spec[0] is None)
+    assert facadeless == sorted(INERT_FACADELESS_REASONS), (
+        "facade-less OPTIONAL_KERNELS entries and INERT_FACADELESS_REASONS "
+        f"disagree: None-facade={facadeless} vs reasons="
+        f"{sorted(INERT_FACADELESS_REASONS)} — a None facade is legal ONLY "
+        "with a DEC-cited reason, and a reason may not outlive its "
+        "facade-less registration."
+    )
+
+
+@pytest.mark.parametrize("import_name", sorted(INERT_FACADELESS_REASONS))
+def test_facadeless_optional_kernel_cites_a_dec(import_name: str) -> None:
+    """A facade-less INERT kernel's reason must CITE a DEC id.
+
+    Per DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): the crate ships
+    INERT — the guarded facade lands with the flip PR. Until then the ONLY
+    licence for a None facade slot is a documented reason naming the DEC
+    that shipped the crate INERT; an undocumented None facade fails the
+    registry-consistency pin above, and a reason WITHOUT a DEC citation
+    fails here.
+    """
+    reason = INERT_FACADELESS_REASONS[import_name]
+    assert re.search(r"\bDEC-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d{3}\b", reason), (
+        f"INERT_FACADELESS_REASONS[{import_name!r}] does not cite a DEC id "
+        f"(DEC-…-NNN) — an INERT facade-less registration must name the "
+        f"decision that licensed it. Reason: {reason!r}"
     )
 
 
