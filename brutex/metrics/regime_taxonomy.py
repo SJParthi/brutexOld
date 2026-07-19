@@ -27,7 +27,8 @@ This leaf instead CONSUMES the classifier's OUTPUT vocabulary
 (:func:`trend_stratum_from_lens_token` maps the ``TrendRegime`` value
 tokens ``"up"``/``"down"``/``"sideways"`` + the combo-aggregates
 ``"unknown"`` bucket) — §11 satisfied by consumption, not duplication.
-ZERO files outside this module + its test file are touched.
+ZERO source/engine files outside this module + its test file are touched
+(docs/MIGRATION.md is the customary union-file exception).
 
 Structural-era shape precedent
 ------------------------------
