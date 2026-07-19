@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 from brutex.data import lake_heal
 from brutex.data.catalog import Catalog
-from brutex.data.errors import LakeWriteHalt, WriterError
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.lake_heal import (
     ATTEMPT_RELPATH,
     AUDIT_HEAL_BATCH,
@@ -75,7 +75,6 @@ from brutex.data.models import CandleBar, OptionBar
 from brutex.data.option_parquet_writer import (
     OptionParquetWriter,
     OptionSeriesCoordinate,
-    OptionWriterError,
 )
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.partition import build_partition_path
@@ -89,19 +88,9 @@ pytest.importorskip("duckdb")
 
 
 @pytest.fixture(autouse=True)
-def _python_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin this suite to the EXPLICIT flag-OFF (Python oracle) arm.
-
-    Conscious W-5 reconciliation (recorded in the Wave-D lane scratchpad):
-    since the ``BRUTEX_LAKE_WAVED_RUST`` default flipped ON, an unset env
-    routes the heal through the crate core — but THIS suite is the verbatim
-    PYTHON core's verification (the live degrade oracle every out-of-envelope
-    shape still serves; its 100% ci-gate coverage is the oracle's gate), so
-    it runs under the operator kill switch. The crate arm's gates are the
-    heal differential (``tests/integration/test_waved_heal_differential.py``,
-    default-ON) + the seam suite's explicit flag-ON tests.
-    """
-    monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the ONE (Rust) heal/scan arm — W-6a deleted the Python cores."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
 
 
 _NOW = datetime(2024, 7, 1, 0, 0, 0, tzinfo=UTC)
@@ -985,37 +974,26 @@ class TestForeignRowReassignment:
         assert report.healed == 0
         assert report.skipped == 2
 
-    def test_reassign_probe_abstain_does_not_count_audit_or_touch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A ``changed=False`` heal_partition (probe abstain) on the removal
-        step is a SKIP — no quarantine counter, no ``LAKE_HEAL_REASSIGN``
-        audit line, no recall touch (mirrors ``_heal_dup``'s guard) — and the
-        finding stays LIVE for the next scan (convergent re-try). Fails
-        before the ``result.changed`` guard was added to ``_heal_foreign``.
+    def test_reassign_stale_finding_skips_without_audit_or_touch(self, tmp_path: Path) -> None:
+        """A STALE finding (the foreign rows already gone by heal time) is a
+        SKIP — no quarantine counter, no ``LAKE_HEAL_REASSIGN`` audit line,
+        no recall touch — and the next scan is clean (convergence). W-6a:
+        planted as a REAL post-scan re-write (the deleted Python
+        ``heal_partition`` probe-abstain monkeypatch cannot reach the native
+        heal; the changed=False skip LAW is the same observable).
         """
-        from brutex.data.parquet_writer import PartitionHealResult
+        import pyarrow.parquet as pq
 
         lake = tmp_path / "lake"
         _may, june = self._seed_reassign_lake(lake)
         scan = scan_lake_invariants(lake)
         (finding,) = scan.findings
         assert isinstance(finding, ForeignMonthRows)
+        # Re-write June WITHOUT the foreign rows AFTER the scan — stale finding.
+        import polars as pl
 
-        def _abstain(self: ParquetWriter, dest: Path, **_kw: Any) -> PartitionHealResult:
-            # The footer-probe-failure path: byte-untouched abstain (#1067 pin).
-            return PartitionHealResult(
-                path=dest,
-                changed=False,
-                kept=0,
-                dropped_duplicates=0,
-                dropped_removed=0,
-                raw_hash_before="0" * 64,
-                raw_hash_after="0" * 64,
-                write=None,
-            )
-
-        monkeypatch.setattr(ParquetWriter, "heal_partition", _abstain)
+        june_df = pl.read_parquet(june, glob=False)
+        pq.write_table(june_df.filter(pl.col("timestamp").dt.month() == 6).to_arrow(), june)
         audit = _FakeAudit()
         with capture_logs() as logs:
             report = heal_findings(
@@ -1037,9 +1015,9 @@ class TestForeignRowReassignment:
         assert AUDIT_HEAL_REASSIGN not in audit.actions()
         assert _events(logs, "lake_heal.rows_reassigned") == []
         assert load_heal_stats(lake) == {}  # healed == 0 → no stats bump
-        # The source rows were NOT removed → the finding is re-detected live.
+        # The stale skip CONVERGED: the next scan finds nothing to heal.
         rescan = scan_lake_invariants(lake)
-        assert any(isinstance(f, ForeignMonthRows) and f.path == june for f in rescan.findings)
+        assert not any(isinstance(f, ForeignMonthRows) for f in rescan.findings)
 
 
 # ── legacy-key drift merge ─────────────────────────────────────────────────
@@ -1963,28 +1941,21 @@ class TestOptionForeignHeal:
         assert pl.read_parquet(quarantined)["close"].to_list() == [100.0, 111.0, 222.0]
         assert scan_lake_invariants(lake).findings == ()  # convergent — second sweep clean
 
-    def test_option_foreign_heal_changed_false_guard(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The defensive convergence guard: a changed=False removal is a SKIP —
-        not counted, not audited, no quarantine tally."""
-        from brutex.data.option_parquet_writer import OptionHealResult
+    def test_option_foreign_stale_finding_skips_unaudited(self, tmp_path: Path) -> None:
+        """The convergence-guard observable: a heal that CHANGES nothing is a
+        SKIP — not counted, not audited, no quarantine tally. W-6a: planted
+        as a REAL stale finding (the foreign rows re-written away post-scan)
+        instead of the deleted ``OptionHealResult`` changed=False monkeypatch.
+        """
+        import pyarrow.parquet as pq
 
         lake = tmp_path / "lake"
-        _poison_option_foreign(lake)
+        june, _july = _poison_option_foreign(lake)
         scan = scan_lake_invariants(lake)
+        import polars as pl
 
-        def _abstain(self: OptionParquetWriter, dest: Path, **_kw: Any) -> OptionHealResult:
-            return OptionHealResult(
-                path=dest,
-                changed=False,
-                kept=3,
-                dropped_duplicates=0,
-                quarantined_original=None,
-                dropped_removed=0,
-            )
-
-        monkeypatch.setattr(OptionParquetWriter, "heal_partition", _abstain)
+        june_df = pl.read_parquet(june, glob=False)
+        pq.write_table(june_df.filter(pl.col("timestamp").dt.month() == 6).to_arrow(), june)
         audit = _FakeAudit()
         with capture_logs() as logs:
             report = heal_findings(
@@ -2093,7 +2064,10 @@ class TestOptionForeignHeal:
         error_text = error["error"]
         assert isinstance(error_text, str)
         assert error_text.startswith(("'", '"'))  # repr shape, escapes visible
-        assert "corrupt existing partition" in error_text
+        # W-6a wording: the crate refuses the corrupt source at its gated
+        # consistent read ("source unreadable"), superseding the Python
+        # writer's "corrupt existing partition <dest>" interpolation.
+        assert "source unreadable" in error_text
         assert "\n" not in error_text
         assert "\x1b" not in error_text
 
@@ -2193,19 +2167,17 @@ class TestOptionForeignHeal:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Round-13 fold (refuter-confirmed MAJOR): a nested-dtype swap landing
-        AFTER the healer's gated consistent read — between the copy-forward
-        merge legs and ``heal_partition`` — is STILL the isolated refusal.
+        AFTER the heal's gated consistent read — between the copy-forward
+        merge leg and the keyed removal — is STILL the isolated refusal.
 
-        The round-12 gate covered only the FIRST read;
-        ``OptionParquetWriter.heal_partition`` RE-reads the source under its
-        own locks and hashed the re-read stored keys ungated, so a
-        ``List(Utf8)``-side swap in that second, WIDER window raised bare
-        ``TypeError: unhashable type`` — NOT in the per-finding isolation set
-        — aborting the WHOLE batch (no report/stats/alert, the later
-        same-batch dup unhealed; the round-3/round-5/round-12
-        isolation-escape class). The swap is injected via a
-        ``merge_partition_frame`` spy that rewrites the SOURCE before
-        delegating — exactly the mid-heal window."""
+        W-6a: the swap is injected through the ONE live re-entry point the
+        native heal keeps — the ``on_event`` replay channel (the §F2
+        "on_event-driven swap point"): the July merge leg's
+        ``option_stats_record`` event fires between the merge and the June
+        removal re-read, and the wrapped handler performs the REAL
+        filesystem swap there. The crate's mid-batch envelope re-check
+        refuses the swapped source as ONE counted isolated error and the
+        LATER same-batch dup still heals."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -2222,16 +2194,23 @@ class TestOptionForeignHeal:
                 ),
             }
         )
-        real_merge = OptionParquetWriter.merge_partition_frame
         swapped: list[bytes] = []
+        real_factory = lake_heal._rust_heal_on_event
 
-        def _swap_then_merge(self: OptionParquetWriter, dest: Path, frame: Any) -> int:
-            if not swapped:  # swap the SOURCE after the gated consistent read
-                pq.write_table(nested, june)
-                swapped.append(june.read_bytes())
-            return real_merge(self, dest, frame)
+        def _swapping_factory(state: Any) -> Any:
+            handle = real_factory(state)
 
-        monkeypatch.setattr(OptionParquetWriter, "merge_partition_frame", _swap_then_merge)
+            def wrapped(kind: str, payload: dict[str, Any]) -> None:
+                if not swapped and kind == "option_stats_record":
+                    # The mid-heal window: after the July copy-forward merge,
+                    # before the June removal re-read.
+                    pq.write_table(nested, june)
+                    swapped.append(june.read_bytes())
+                handle(kind, payload)
+
+            return wrapped
+
+        monkeypatch.setattr(lake_heal, "_rust_heal_on_event", _swapping_factory)
         reports: list[HealReport] = []
         with capture_logs() as logs:
             report = heal_findings(
@@ -2243,12 +2222,13 @@ class TestOptionForeignHeal:
                 on_report=reports.append,
                 now=_now,
             )
-        assert swapped  # the spy really fired inside the foreign heal
+        assert swapped  # the swap really fired inside the foreign heal
         assert report.errors == 1  # pre-fix: bare TypeError aborted the batch HERE
         assert report.healed == 1  # the CALL-series dup — a LATER finding — still heals
         assert reports == [report]  # the alert seam still fires post-batch
         (error,) = _events(logs, "lake_heal.partition_error")
         assert error["finding"] == "OptionForeignMonthRows"
+        assert "outside the envelope" in str(error["error"])
         assert june.read_bytes() == swapped[0]  # the swapped source refused byte-untouched
         assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
 
@@ -2356,67 +2336,31 @@ class TestOptionForeignHeal:
         assert reports == [report]  # the alert seam still fires post-batch
         (error,) = _events(logs, "lake_heal.partition_error")
         assert error["finding"] == "OptionForeignMonthRows"
-        assert "out of datetime range" in str(error["error"])
+        # W-6a wording: the crate's native out-of-range verdict.
+        assert "datetime range" in str(error["error"])
         assert june.read_bytes() == swapped  # refused byte-untouched
         assert july.read_bytes() == july_before  # nothing merged/imported home
         assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
 
-    @pytest.mark.parametrize("exc_kind", ["overflow", "panic"])
-    def test_residual_conversion_fault_isolated_batch_continues(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_kind: str
-    ) -> None:
-        """Pins BOTH ``datetime_out_of_range_escape_errors`` members of
-        ``_PER_FINDING_HEAL_ERRORS`` (round-18 defense in depth): a residual
-        conversion fault raised PAST the gate — ``OverflowError`` AND the
-        BaseException ``PanicException`` — is ONE counted isolated error; the
-        later same-batch finding still heals and the alert seam fires.
-        Dropping either member from the tuple fails its arm."""
-        import polars as pl
-
-        lake = tmp_path / "lake"
-        _poison_option_lake(lake)  # a healable dup in the CALL series (heals LATER)
-        june, _july = _poison_option_foreign(lake, partition_key="NSE_FNO|13|WEEK|0|ATM|PUT")
-        scan = scan_lake_invariants(lake)
-        assert len(scan.findings) == 2
-        exc: BaseException = (
-            OverflowError("date value out of range")
-            if exc_kind == "overflow"
-            else pl.exceptions.PanicException("residual conversion panic")
-        )
-
-        def _boom(*_args: Any, **_kwargs: Any) -> Any:
-            raise exc
-
-        monkeypatch.setattr(lake_heal, "_option_foreign_frame", _boom)
-        reports: list[HealReport] = []
-        with capture_logs() as logs:
-            report = heal_findings(
-                scan.findings,
-                lake_root=lake,
-                files_scanned=scan.option_files_scanned,
-                mode="auto",
-                recall=False,
-                on_report=reports.append,
-                now=_now,
-            )
-        assert report.errors == 1  # pre-fix: the fault aborted the whole batch
-        assert report.healed == 1  # the CALL-series dup — a LATER finding — still heals
-        assert reports == [report]
-        (error,) = _events(logs, "lake_heal.partition_error")
-        assert error["finding"] == "OptionForeignMonthRows"
-        assert june.exists()  # the flagged source is untouched by the faulted heal
-
     def test_lake_write_halt_propagates_from_option_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # W-6a: a crate-side disk-full crosses the FFI as a REAL
+        # OSError(ENOSPC); `_rust_heal_route`'s lake_write_guard maps it to
+        # LakeWriteHalt exactly as the writers' own guards did — injected at
+        # the facade seam (the native merge cannot be monkeypatched).
+        import errno
+
+        from brutex.data import lake_rust_waved as lrw
+
         lake = tmp_path / "lake"
         _poison_option_foreign(lake)
         scan = scan_lake_invariants(lake)
 
-        def _halt(self: OptionParquetWriter, dest: Path, frame: Any) -> int:
-            raise LakeWriteHalt("disk_full")
+        def _enospc(**_kwargs: Any) -> dict[str, Any]:
+            raise OSError(errno.ENOSPC, "No space left on device")
 
-        monkeypatch.setattr(OptionParquetWriter, "merge_partition_frame", _halt)
+        monkeypatch.setattr(lrw, "heal_batch_via_rust", _enospc)
         with pytest.raises(LakeWriteHalt):
             heal_findings(
                 scan.findings,
@@ -2671,7 +2615,12 @@ class TestOptionSymlinkContainment:
         assert _tree_state(outside) == outside_before  # outside tree byte-untouched
         errors = _events(logs, "lake_heal.partition_error")
         assert len(errors) == 2
-        assert all("outside the options tree" in str(e["error"]) for e in errors)
+        # W-6a wording: the foreign leg refuses at the crate's series-dir
+        # symlink preflight; the dup leg at the containment rail — BOTH the
+        # swapped dir refused, nothing mutated.
+        texts = sorted(str(e["error"]) for e in errors)
+        assert any("outside the options tree" in t for t in texts)
+        assert any("series dir is a symlink" in t for t in texts)
 
     def test_symlinked_source_file_read_refused_never_imports_outside_rows(
         self, tmp_path: Path
@@ -2729,7 +2678,8 @@ class TestOptionSymlinkContainment:
         assert not (lake / ".quarantine").exists()
         errors = _events(logs, "lake_heal.partition_error")
         assert len(errors) == 1
-        assert "outside the options tree" in str(errors[0]["error"])
+        # W-6a wording: the crate refuses the linked source at its preflight.
+        assert "source is a symlink" in str(errors[0]["error"])
 
     def test_in_lake_symlink_swap_refused_no_cross_series_contamination(
         self, tmp_path: Path
@@ -2800,7 +2750,8 @@ class TestOptionSymlinkContainment:
         assert not (lake / ".quarantine").exists()
         errors = _events(logs, "lake_heal.partition_error")
         assert len(errors) == 1
-        assert "symlink inside the options tree" in str(errors[0]["error"])
+        # W-6a wording: the crate refuses the linked source at its preflight.
+        assert "source is a symlink" in str(errors[0]["error"])
 
     def test_symlink_loop_reassignment_target_isolated_not_batch_abort(
         self, tmp_path: Path
@@ -3174,23 +3125,21 @@ class TestBatchOrderAndIdempotence:
     def test_lake_write_halt_propagates_out_of_batch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Disk-full mid-batch: the halt propagates untouched; the EARLIER
-        heal is durable; the LATER finding's file is untouched."""
+        # W-6a: the crate's real OSError(ENOSPC) maps to LakeWriteHalt via
+        # `_rust_heal_route`'s lake_write_guard and propagates out of
+        # heal_findings untouched — injected at the facade seam.
+        import errno
+
+        from brutex.data import lake_rust_waved as lrw
+
         lake = tmp_path / "lake"
-        bank = _dest(lake, symbol="BANKNIFTY")
-        nifty = _dest(lake, symbol="NIFTY")
-        _poison(bank, [(_ts(0), 200.0, 10), (_ts(0), 999.0, 11)])
-        _poison(nifty, [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
-        nifty_before = nifty.read_bytes()
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
         scan = scan_lake_invariants(lake)
-        real_heal = ParquetWriter.heal_partition
 
-        def _halting_heal(self: ParquetWriter, dest: Path, **kwargs: Any) -> Any:
-            if dest == nifty:
-                raise LakeWriteHalt("disk_full")
-            return real_heal(self, dest, **kwargs)
+        def _enospc(**_kwargs: Any) -> dict[str, Any]:
+            raise OSError(errno.ENOSPC, "No space left on device")
 
-        monkeypatch.setattr(ParquetWriter, "heal_partition", _halting_heal)
+        monkeypatch.setattr(lrw, "heal_batch_via_rust", _enospc)
         with pytest.raises(LakeWriteHalt):
             heal_findings(
                 scan.findings,
@@ -3200,9 +3149,6 @@ class TestBatchOrderAndIdempotence:
                 recall=False,
                 now=_now,
             )
-        # BANKNIFTY (healed FIRST — path order) is durable; NIFTY untouched.
-        assert _stored_frame(bank)["timestamp"].to_list() == [_ts(0)]
-        assert nifty.read_bytes() == nifty_before
 
     def test_per_finding_error_isolated(self, tmp_path: Path) -> None:
         """One unreadable partition errors; the remaining finding still heals."""
@@ -3245,6 +3191,26 @@ class TestBatchOrderAndIdempotence:
 
 
 # ── derived-data recall ────────────────────────────────────────────────────
+
+
+def _poison_option_naive_ts(lake: Path) -> tuple[Path, Path]:
+    """The NEVER-CONVERGING real shape: a naive-ts June source vs an aware canonical.
+
+    W-6a: the crate refuses the naive-vs-aware merge as the documented
+    per-finding ISOLATED error on EVERY sweep (the round-18 honest envelope —
+    a tz cast would EDIT stored values against the row-moving-only law), so
+    this is the real persistent-``errors`` lake the sentinel/backoff tests
+    drive now that the Python-side ``heal_partition`` fault monkeypatches
+    cannot reach the native heal.
+    """
+    import pyarrow.parquet as pq
+
+    june, july = _poison_option_foreign(lake)
+    import polars as pl
+
+    df = pl.read_parquet(june, glob=False)
+    pq.write_table(df.with_columns(pl.col("timestamp").dt.replace_time_zone(None)).to_arrow(), june)
+    return june, july
 
 
 def _replant_with_dup(dest: Path) -> None:
@@ -4065,69 +4031,6 @@ class TestLakeContentToken:
         assert len(token) == 64
         assert token == lake_content_token(lake)  # deterministic over identical content
 
-    def test_racing_deletion_mid_walk_skipped_deterministically(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Round-11 fold: a file deleted between the glob and its stat (the
-        race twin of the dangling symlink) is skipped LOUDLY, and the token
-        equals the one an actually-absent file yields (deterministic)."""
-        import os
-
-        lake = tmp_path / "lake"
-        _write_spot(lake, [_bar(_ts(0))])
-        _write_spot(lake, [_bar(_ts(0, month=7, day=1))])
-        june = _dest(lake)
-        real_lstat = Path.lstat
-
-        def _racing_lstat(self: Path) -> os.stat_result:
-            if self == june:
-                raise FileNotFoundError(2, "raced away", str(self))
-            return real_lstat(self)
-
-        monkeypatch.setattr(Path, "lstat", _racing_lstat)
-        with capture_logs() as logs:
-            skipped_token = lake_content_token(lake)  # pre-fix: raises
-        (skip,) = _events(logs, "lake_heal.token_stat_skipped")
-        assert skip["path"] == repr(str(june))
-        # Round-17: error= joins the escaped-payload convention (repr()'d) —
-        # belt-and-braces here, since CPython's OSError.__str__ already
-        # repr()s its filename component.
-        assert skip["error"] == repr(str(FileNotFoundError(2, "raced away", str(june))))
-        monkeypatch.undo()
-        june.unlink()
-        assert lake_content_token(lake) == skipped_token
-
-    def test_racing_dir_deletion_mid_walk_skipped_deterministically(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """DEC-LAKE-INVARIANTS-PREINDEX-001: a directory raced away between
-        its parent's listing and its own ``iterdir`` is skipped LOUDLY
-        (``lake_heal.token_walk_skipped`` — the old ``rglob`` suppressed the
-        same race silently), and the token equals the one the dir's genuine
-        absence yields (deterministic)."""
-        import shutil
-
-        lake = tmp_path / "lake"
-        _write_spot(lake, [_bar(_ts(0))])
-        _write_spot(lake, [_bar(_ts(0))], symbol="BANKNIFTY")
-        victim = lake / "bars" / "NSE" / "INDEX" / "BANKNIFTY"
-        real_iterdir = Path.iterdir
-
-        def _racing_iterdir(self: Path) -> Any:
-            if self == victim:
-                raise FileNotFoundError(2, "raced away", str(self))
-            return real_iterdir(self)
-
-        monkeypatch.setattr(Path, "iterdir", _racing_iterdir)
-        with capture_logs() as logs:
-            skipped_token = lake_content_token(lake)
-        (skip,) = _events(logs, "lake_heal.token_walk_skipped")
-        assert skip["path"] == repr(str(victim))
-        assert skip["log_level"] == "warning"
-        monkeypatch.undo()
-        shutil.rmtree(victim)
-        assert lake_content_token(lake) == skipped_token
-
     def test_walk_selection_mirrors_rglob(self, tmp_path: Path) -> None:
         """The streaming walk keeps the old ``rglob("*.parquet")`` SELECTION
         (empirically pinned on the pinned 3.12 pathlib): a symlinked DIR is
@@ -4421,14 +4324,12 @@ class TestSentinelStampGate:
     def test_errored_sweep_skips_sentinel(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # W-6a: the persistent-error lake is the REAL never-converging
+        # naive-ts option shape (the crate refuses the naive-vs-aware merge
+        # as an isolated error on every sweep).
         monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
         lake = tmp_path / "lake"
-        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
-
-        def _boom(self: ParquetWriter, dest: Path, **_kw: Any) -> Any:
-            raise WriterError("simulated per-finding heal failure")
-
-        monkeypatch.setattr(ParquetWriter, "heal_partition", _boom)
+        _poison_option_naive_ts(lake)
         with capture_logs() as logs:
             result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
         assert result.ran is True
@@ -4441,26 +4342,28 @@ class TestSentinelStampGate:
     def test_partially_healed_sweep_skips_sentinel(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A probe-abstain leaves ``healed < findings`` → no stamp (re-attempt)."""
-        from brutex.data.parquet_writer import PartitionHealResult
+        """A skip leaves ``healed < findings`` → no stamp (re-attempt).
+
+        W-6a: the skip outcome is injected at the FACADE seam (a real skip
+        needs a post-scan mutation the atomic sweep cannot orchestrate; the
+        sentinel LAW under test is the report fold, not the heal itself)."""
+        from brutex.data import lake_rust_waved as lrw
 
         monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
         lake = tmp_path / "lake"
         _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
 
-        def _abstain(self: ParquetWriter, dest: Path, **_kw: Any) -> PartitionHealResult:
-            return PartitionHealResult(
-                path=dest,
-                changed=False,
-                kept=0,
-                dropped_duplicates=0,
-                dropped_removed=0,
-                raw_hash_before="0" * 64,
-                raw_hash_after="0" * 64,
-                write=None,
-            )
+        def _skip_outcome(**_kwargs: Any) -> dict[str, Any]:
+            return {
+                "healed": 0,
+                "skipped": 1,
+                "errors": 0,
+                "quarantined_files": 0,
+                "actions": [],
+                "touched_minute": [],
+            }
 
-        monkeypatch.setattr(ParquetWriter, "heal_partition", _abstain)
+        monkeypatch.setattr(lrw, "heal_batch_via_rust", _skip_outcome)
         with capture_logs() as logs:
             result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
         assert result.ran is True
@@ -4476,15 +4379,12 @@ class TestSentinelStampGate:
     ) -> None:
         """G9(b): an ERRORED options batch must NOT stamp the sentinel — the
         next boot re-attempts instead of token-matching past live poison
-        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001). W-6a: the persistent error is
+        the REAL never-converging naive-ts shape (isolated crate refusal on
+        every sweep — no monkeypatch)."""
         monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
         lake = tmp_path / "lake"
-        _poison_option_foreign(lake)
-
-        def _boom(self: OptionParquetWriter, dest: Path) -> Any:
-            raise OptionWriterError("simulated corrupt option source")
-
-        monkeypatch.setattr(OptionParquetWriter, "read_partition_frame", _boom)
+        _poison_option_naive_ts(lake)
         with capture_logs() as logs:
             result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
         assert result.ran is True
@@ -4673,15 +4573,11 @@ class TestAttemptRecordBackoff:
         """The reviewer's repro end-to-end: an operator flipping auto →
         observe to DIAGNOSE a ``heal_errors`` lake must get a real (observe)
         re-run — pre-fix the transient arm ignored the flip and backoff-
-        skipped the diagnosis for up to 24 h. The flip BACK re-runs too."""
+        skipped the diagnosis for up to 24 h. The flip BACK re-runs too.
+        W-6a: driven by the REAL never-converging naive-ts shape."""
         monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
         lake = tmp_path / "lake"
-        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
-
-        def _boom(self: ParquetWriter, dest: Path, **_kw: Any) -> Any:
-            raise WriterError("simulated per-finding heal failure")
-
-        monkeypatch.setattr(ParquetWriter, "heal_partition", _boom)
+        _poison_option_naive_ts(lake)
         first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
         assert first.ran is True
         assert first.report is not None
@@ -5258,44 +5154,50 @@ class TestResidualBranches:
         assert report.recall is None
         assert not (lake / "bars" / "NSE" / "CASH" / "NSE-M&M").exists()
 
-    def test_sync_catalog_defensive_unchanged_result_is_a_noop(self, tmp_path: Path) -> None:
-        """Whitebox: a changed=False result reaches neither the delete nor the
-        upsert arm (defensive — the healers return before calling this)."""
-        from brutex.data.parquet_writer import PartitionHealResult
+    def test_unknown_replay_event_kind_refuses_loudly(self, tmp_path: Path) -> None:
+        """The refuse-poison arm: a foreign crate must never silently drop a
+        side effect — an unknown replay kind is a loud WriterError."""
+        from brutex.data.errors import WriterError
+        from brutex.data.parquet_writer import ParquetWriter
 
+        state = lake_heal._BatchState(
+            lake_root=tmp_path,
+            quarantine_root=tmp_path / ".quarantine" / "x",
+            audit=None,
+            catalog=None,
+            writer=ParquetWriter(lake_root=tmp_path),
+            option_writer=OptionParquetWriter(lake_root=tmp_path),
+        )
+        handle = lake_heal._rust_heal_on_event(state)
+        with pytest.raises(WriterError, match="unknown waved heal replay event kind"):
+            handle("bogus_future_kind", {})
+
+    def test_replay_token_skip_warns_with_the_repr_law(self) -> None:
+        """The content-token walk-skip replay channel — one WARN per skip,
+        path + error repr()'d (the #907 log-injection law)."""
+        with capture_logs() as logs:
+            lake_heal._replay_token_skip(
+                "lake_heal.token_stat_skipped", "/lake/evil\nname.parquet", "raced away"
+            )
+        (warn,) = _events(logs, "lake_heal.token_stat_skipped")
+        assert warn["log_level"] == "warning"
+        assert warn["path"] == repr("/lake/evil\nname.parquet")
+        assert warn["error"] == repr("raced away")
+
+    def test_option_stats_replay_skips_when_manifest_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The option_stats_record replay arm honors the ONE stats-manifest
+        kill switch — disabled ⇒ no bounded re-read, no shard write."""
+        monkeypatch.setenv("BRUTEX_LAKE_STATS_MANIFEST", "off")
         lake = tmp_path / "lake"
-        with Catalog.open(lake / "catalog.duckdb") as catalog:
-            state = lake_heal._BatchState(
-                lake_root=lake,
-                quarantine_root=lake / ".quarantine" / _QUARANTINE_TS,
-                audit=None,
-                catalog=catalog,
-                writer=ParquetWriter(lake_root=lake),
-                option_writer=OptionParquetWriter(lake_root=lake),
-            )
-            lake_heal._sync_catalog_after_heal(
-                state,
-                exchange="NSE",
-                segment="INDEX",
-                symbol="NIFTY",
-                interval="1minute",
-                year=2024,
-                month=6,
-                result=PartitionHealResult(
-                    path=lake / "x.parquet",
-                    changed=False,
-                    kept=1,
-                    dropped_duplicates=0,
-                    dropped_removed=0,
-                    raw_hash_before="a" * 64,
-                    raw_hash_after="a" * 64,
-                    write=None,
-                ),
-            )
-            assert catalog.count() == 0
-
-    def test_prune_empty_dirs_missing_root_is_a_noop(self, tmp_path: Path) -> None:
-        lake_heal._prune_empty_dirs(tmp_path / "does-not-exist")  # no raise
+        _poison_option_lake(lake)
+        scan = scan_lake_invariants(lake)
+        report = heal_findings(
+            scan.findings, lake_root=lake, files_scanned=scan.files_scanned, now=_now
+        )
+        assert report.healed == 1
+        assert not (lake / ".manifest" / "stats").exists()
 
     def test_first_day_after_december_rolls_the_year(self) -> None:
         assert lake_heal._first_day_after(2024, 12) == date(2025, 1, 1)

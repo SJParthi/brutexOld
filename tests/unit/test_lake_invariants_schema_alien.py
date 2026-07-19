@@ -38,21 +38,9 @@ from brutex.data.partition import build_partition_path
 
 
 @pytest.fixture(autouse=True)
-def _python_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin this suite to the EXPLICIT flag-OFF (Python oracle) arm.
-
-    Conscious W-5 reconciliation (recorded in the Wave-D lane scratchpad):
-    since the ``BRUTEX_LAKE_WAVED_RUST`` default flipped ON, an unset env
-    routes ``scan_lake_invariants`` through the crate — but THIS suite is
-    the verbatim PYTHON scanner's verification (the live oracle the burn-in
-    + every degrade serve; its white-box read-count spies / injected faults
-    / log-text pins are Python-arm implementation contracts the engaged
-    crate deliberately does not share — deviation D-20), so it runs under
-    the operator kill switch. The crate arm's gates are the scan
-    differential (``tests/integration/test_waved_scan_differential.py``,
-    27/27 engaged) + the waved seam suite's explicit flag-ON tests.
-    """
-    monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the ONE (Rust) scan arm — W-6a deleted the Python scan core."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
 
 
 def _ts(minute: int) -> datetime:
@@ -187,28 +175,31 @@ class TestScannerEmission:
         # influenceable series dir name (the round-8/17 log-injection folds).
         assert events[0]["partition"] == repr("options/SERIES-A/2024-06.parquet")
 
-    def test_transient_read_failure_with_sane_schema_stays_scan_skip(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_transient_read_failure_with_sane_schema_stays_scan_skip(self, tmp_path: Path) -> None:
         # The read fails but the footer says the schema is CANONICAL (a data-page
-        # fault / transient I/O) → NOT the alien class: plain scan_skip, NO
-        # finding — a transient fault must never route data into quarantine.
+        # fault) → NOT the alien class: plain scan_skip, NO finding — a transient
+        # fault must never route data into quarantine. W-6a: planted as a REAL
+        # on-disk fault (a corrupted data page with the footer intact) instead of
+        # the deleted `_read_key_columns` monkeypatch.
         dest = _dest(tmp_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
+        n = 2000
         pl.DataFrame(
             {
-                "timestamp": pl.Series([_ts(1)], dtype=pl.Datetime("us", "UTC")),
-                "open": [100.0],
-                "high": [100.0],
-                "low": [100.0],
-                "close": [100.0],
+                "timestamp": pl.Series(
+                    [_ts(minute % 60) for minute in range(n)], dtype=pl.Datetime("us", "UTC")
+                ),
+                "open": [100.0] * n,
+                "high": [100.0] * n,
+                "low": [100.0] * n,
+                "close": [100.0] * n,
             }
-        ).write_parquet(dest)
-
-        def _boom(path: Path, columns: object) -> pl.DataFrame:
-            raise pl.exceptions.ComputeError("transient data-page fault")
-
-        monkeypatch.setattr(li, "_read_key_columns", _boom)
+        ).write_parquet(dest, compression="zstd")
+        data = bytearray(dest.read_bytes())
+        start = len(data) // 3  # a data page — the footer at the tail stays intact
+        data[start : start + 64] = b"\x00" * 64
+        dest.write_bytes(bytes(data))
+        assert "timestamp" in pl.read_parquet_schema(dest)  # footer canonical
         with capture_logs() as logs:
             report = scan_lake_invariants(tmp_path)
         assert report.findings == ()

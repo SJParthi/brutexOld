@@ -25,7 +25,6 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 import pytest
 from structlog.testing import capture_logs
@@ -34,7 +33,6 @@ pytest.importorskip("duckdb")
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
-import polars as pl
 from brutex.data.catalog import Catalog
 from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 from brutex.data.lake_invariants import (
@@ -171,27 +169,26 @@ class TestCheckInvariantsOff:
 
 class TestFreeClaim:
     def test_no_extra_read_calls(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The piggyback classifies the column reconcile ALREADY reads: the
-        # pl.read_parquet call count is IDENTICAL with the check on and off.
-        # EXPLICIT flag-OFF since the W-5 default flip — this pins the
-        # PYTHON oracle's read shape (the engaged crate reads natively, so
-        # the pl.read_parquet spy would count zero); the crate arm's
-        # read-count law is pinned by the reconcile differential.
-        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+        # The piggyback classifies the column the reconcile ALREADY reads:
+        # the per-file facade scan count is IDENTICAL with the check on and
+        # off (W-6a: the read runs inside the crate — ONE native scan per
+        # file either way; the pl.read_parquet spy would count zero).
+        import brutex.data.catalog_reconcile as cr
+
         _write(tmp_path, [_bar(_ts(1))])
         _plant_raw(_dest(tmp_path, month=7), [_ts(2), _ts(3, month=7), _ts(3, month=7)])
         calls: list[str] = []
-        real = pl.read_parquet
+        real = cr.reconcile_file_via_rust
 
-        def spy(source: Any, **kwargs: Any) -> Any:
-            calls.append(str(source))
-            return real(source, **kwargs)
+        def _spy(*, path: str, coords: object) -> object:
+            calls.append(path)
+            return real(path=path, coords=coords)
 
-        monkeypatch.setattr(pl, "read_parquet", spy)
+        monkeypatch.setattr(cr, "reconcile_file_via_rust", _spy)
         with Catalog.open(tmp_path / "catalog.duckdb") as cat:
             reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
             with_check = len(calls)
             calls.clear()
             reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat, check_invariants=False)
             without_check = len(calls)
-        assert with_check == without_check == 2  # one read per file, either way
+        assert with_check == without_check == 2  # one native scan per file, either way

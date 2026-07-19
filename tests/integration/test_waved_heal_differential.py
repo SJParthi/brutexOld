@@ -1,36 +1,33 @@
-"""Wave-D W-2 heal differential — flag-ON ≡ flag-OFF over the poison corpus.
+"""W-6a ENDGAME heal gate — Rust-arm determinism + frozen expectations.
 
-The real-wheel parity gate for the ``BRUTEX_LAKE_WAVED_RUST`` HEAL seam
-(Wave-D design §E): heal has NO in-process burn-in (it MUTATES — the §B2
-recorded asymmetry), so THIS suite is its verification. For every
-heal-relevant poison-corpus case — plus the observe-mode and mass-rail
-policy arms — TWIN fresh lakes are built by the SAME
-:mod:`tests.fakes.poison_corpus` builder, scanned by the SAME scanner, and
-healed by ``heal_findings`` flag-OFF (the verbatim Python core) vs flag-ON
-in the post-burn-in steady state (``reset_lake_rust_waved_for_tests(remaining=0)``).
-The comparison is FOUR-strength:
+THE FLIP LANDED (DEC-RUST-LAKE-WAVED-001 / Wave-D design §E): the Python
+per-finding heal core is DELETED, so the pre-endgame flag-ON≡flag-OFF
+twin-lake differential has no Python arm left to run. This suite is the
+heal seam's real-wheel verification in the endgame shape:
 
-1. the normalized :class:`~brutex.data.lake_heal.HealReport` (counts, mode,
-   rails, actions incl. ``raw_hash_before/after``, recall);
-2. the FULL ``relpath → sha256`` tree map — every file under the lake root
-   INCLUDING ``.quarantine/`` (byte-identical mutation + forensics);
-3. the audit-line sequence AND the captured structlog event sequence
-   (event names + levels + fields, paths normalized, timings dropped);
-4. a convergence RE-SCAN (the second sweep's finding-type multiset — equal
-   across arms; empty for the fully-healable classes).
+1. **Determinism** — TWIN fresh lakes per corpus case, healed through the
+   ONE Rust-backed ``heal_findings`` path, compared FOUR-strength: the
+   normalized :class:`~brutex.data.lake_heal.HealReport`, the FULL
+   ``relpath → sha256`` tree map (``.quarantine/`` included), the
+   audit-line + structlog event sequences, and the convergence RE-SCAN.
+2. **Frozen expectations** — the per-case ``(healed, skipped, errors,
+   refused_mass_heal, rescan-type multiset)`` table below was captured
+   while the W-2..W-5 Python-parity differential was still green (the
+   pre-delete parity record); the crate must keep matching it forever,
+   by name, per case.
+3. **The isolated-error posture** — the two formerly-degrading envelope
+   shapes (a beyond-2^53-paisa price; a 17-column Greeks-overlay dup)
+   are now PER-FINDING ISOLATED errors: counted, byte-untouched, the
+   batch CONTINUES, the finding stays loud on re-scan. (The overlay-dup
+   heal is a ruled functional narrowing recorded for W-6b.)
+4. **Shell-policy pins** — mass-rail refusal + observe mode short-circuit
+   BEFORE the seam; crash-safe leg ordering (copy-forward before
+   removal); catalog rotation/deletion; the content-token twin's
+   determinism + skip-event replay.
 
-Engagement is asserted anti-vacuously: the ENGAGED cases (W-2b closed the
-kind set; W-5 phase A closed the last two corpus-reachable degrade shapes —
-naive-ts source + symlink-loop dest, whose refusal VERDICTS the crate now
-owns byte-exactly) must run the crate core (no ``heal_degrade`` fallback
-event); an enveloped case would DEGRADE pre-mutation to the Python core
-(the crate preflight's ``{"degrade": ...}`` verdict — corpus-EMPTY since
-W-5) — either way the four-strength parity holds. A degrade-only pass
-over an engaged-set case FAILS loudly. The content-token twin is compared
-per case too (token string + skip-event replay parity).
-
-Skips cleanly when the installed wheel predates the Wave-D W-2 API (the
-lockstep law: crate and repo move together).
+Requires the built ``brutex_lake`` wheel — with the Python core deleted
+the wheel is a production PREREQUISITE; skips honestly when absent (the
+unit suites own the wheel-free typed-refusal story).
 """
 
 # pyright: reportPrivateUsage=none
@@ -42,15 +39,17 @@ import hashlib
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 _crate = pytest.importorskip("brutex_lake")
-if not callable(getattr(_crate, "waved_heal_batch", None)):
-    pytest.skip("installed brutex_lake wheel lacks the Wave-D W-2 API", allow_module_level=True)
+if not callable(getattr(_crate, "waved_endgame_witness", None)):
+    pytest.skip(
+        "installed brutex_lake wheel predates the W-6a endgame API", allow_module_level=True
+    )
 
 from brutex.data import lake_rust_waved as lrw  # noqa: E402
 from brutex.data.catalog import Catalog, CatalogEntry  # noqa: E402
@@ -68,75 +67,56 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-#: One fixed clock for BOTH arms — the quarantine stamp dir + the recall's
+#: One fixed clock for BOTH builds — the quarantine stamp dir + the recall's
 #: forming-session cutoff derive from it, so the twin lakes stay comparable.
 _FIXED_NOW = datetime(2026, 6, 15, 18, 30, tzinfo=UTC)
-
-#: Corpus cases whose batch the crate core must ENGAGE natively — since
-#: W-2b (deviation D-22) that is EVERY healable kind inside the byte-parity
-#: envelope: dup + alien (W-2) PLUS foreign / option-foreign / drift.
-#: Everything else with findings must DEGRADE pre-mutation (out-of-envelope
-#: shape) or never reach the seam (mass-rail refusal / empty batch).
-_ENGAGED_CASES = frozenset(
-    {
-        "bars_intra_file_dup",
-        "bars_schema_alien_missing_columns",
-        "option_intra_file_dup",
-        "option_non_canonical_stem",
-        "option_unicode_digit_filename",
-        "glob_metachar_series",
-        # These three plant an envelope-violating SIBLING the SCANNER skips
-        # (round-12/18 gates) beside a clean dup file — so the BATCH the
-        # healer receives is fully in-envelope and engages natively.
-        "option_nested_dtype_list_side",
-        "option_out_of_range_datetime",
-        "dangling_symlink_option_file",
-        # W-2b: the multi-file heal kinds now engage (D-22 closes the D-7
-        # flip blocker — foreign reassignment, option multi-month
-        # reassignment + canonical-sibling merge, legacy-key drift merge).
-        "bars_foreign_month_pure",
-        "bars_foreign_month_overlap",
-        "legacy_key_drift_sibling",
-        "legacy_key_drift_canonical_keys",
-        "option_foreign_month_pure",
-        "option_foreign_month_overlap",
-        "option_multi_month_overlap",
-        "option_null_side_foreign_key",
-        # W-5 phase A (D-23): the two formerly-degrading corpus shapes now
-        # ENGAGE — the crate OWNS the refusal verdict, reproducing the
-        # Python arm's isolated-error MESSAGE byte-exactly: the naive-ts
-        # bars source (the `_read_existing_bars` → `CandleBar` tz-aware
-        # `WriterError`; the executed Python arm REFUSES, it does not heal
-        # as-if-UTC — only the SCANNER routes as-if-UTC) and the
-        # symlink-loop reassignment dest (pathlib ≤3.12's
-        # `Symlink loop from '…'` wrapped by `_assert_options_containment`).
-        "bars_naive_timestamp_routing",
-        "symlink_loop_partition_file",
-    }
-)
-
-#: Cases the crate is CONSULTED on but must DEGRADE pre-mutation (the D-22
-#: read-only preflight probes). EMPTY since W-5 phase A (D-23) — every
-#: corpus-reachable heal shape engages; the remaining degrade classes
-#: (naive-ts DESTINATIONS / drifted-dir naive legacy files — the
-#: partial-mutation shapes, non-loop symlink dests, out-of-envelope frames,
-#: int()-ambiguous month tokens, non-UTF-8 components, the
-#: unknown-future-kind arm) are all corpus-UNREACHABLE, kept as the §B2
-#: pre-mutation degrade envelope and recorded for the W-6 delete decision.
-_CRATE_DEGRADE_CASES: frozenset[str] = frozenset()
-
-#: Cases whose batch never reaches the seam at all: the mass-heal rail
-#: refuses BEFORE the per-finding loop (shell policy — stays Python), so
-#: the crate is never consulted (no facade event).
-_NO_CONSULT_CASES = frozenset({"option_mass_poison_majority"})
 
 #: The volatile per-event timing keys dropped before the log comparison.
 _TIMING_SUFFIXES = ("_ms",)
 
+#: The FROZEN per-case heal verdict — ``(healed, skipped, errors,
+#: refused_mass_heal, sorted rescan finding-type tuple)`` — captured from
+#: the last green Python-parity differential run (the pre-delete record).
+#: A drift here is a CRATE regression: fix the crate, never this table.
+_FROZEN_HEAL: Final[Mapping[str, tuple[int, int, int, bool, tuple[str, ...]]]] = {
+    "bars_intra_file_dup": (1, 0, 0, False, ()),
+    "bars_foreign_month_pure": (1, 0, 0, False, ()),
+    "bars_foreign_month_overlap": (1, 0, 0, False, ()),
+    "legacy_key_drift_sibling": (1, 0, 0, False, ()),
+    "legacy_key_drift_canonical_keys": (1, 0, 0, False, ()),
+    # The naive-ts source: the crate OWNS the refusal verdict (isolated
+    # error each sweep — the never-converging documented envelope).
+    "bars_naive_timestamp_routing": (0, 0, 1, False, ("ForeignMonthRows",)),
+    "bars_zero_row_file": (0, 0, 0, False, ()),
+    "bars_schema_alien_missing_columns": (1, 0, 0, False, ()),
+    # Observe-only finding class — the healer filters it (never value-edits).
+    "bars_price_sanity_rows": (0, 0, 0, False, ("PriceSanityRows",)),
+    "bars_out_of_range_datetime": (0, 0, 0, False, ()),
+    "option_intra_file_dup": (1, 0, 0, False, ()),
+    "option_foreign_month_pure": (1, 0, 0, False, ()),
+    "option_foreign_month_overlap": (1, 0, 0, False, ()),
+    "option_multi_month_overlap": (1, 0, 0, False, ()),
+    "option_null_side_foreign_key": (1, 0, 0, False, ()),
+    "option_non_canonical_stem": (1, 0, 0, False, ()),
+    "option_unicode_digit_filename": (1, 0, 0, False, ()),
+    "glob_metachar_series": (3, 0, 0, False, ()),
+    "option_nested_dtype_list_side": (1, 0, 0, False, ()),
+    "option_nested_dtype_struct_side": (0, 0, 0, False, ()),
+    "option_out_of_range_datetime": (1, 0, 0, False, ()),
+    "option_mass_poison_majority": (0, 0, 0, True, ("OptionForeignMonthRows",) * 11),
+    "symlinked_series_dir": (0, 0, 0, False, ()),
+    "symlinked_options_root": (0, 0, 0, False, ()),
+    "symlinked_partition_file": (0, 0, 0, False, ()),
+    # The symlink-loop reassignment dest: the crate owns the containment
+    # refusal (isolated error, nothing mutated).
+    "symlink_loop_partition_file": (0, 0, 1, False, ("OptionForeignMonthRows",)),
+    "dangling_symlink_option_file": (1, 0, 0, False, ()),
+}
+
 
 @pytest.fixture(autouse=True)
-def _fresh_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Default every test to flag OFF + a fresh facade view."""
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The ONE Rust path: retired flag unset, module state reset each test."""
     monkeypatch.delenv(lrw.LAKE_WAVED_RUST_ENV, raising=False)
     lrw.reset_lake_rust_waved_for_tests()
     yield
@@ -160,7 +140,7 @@ def _tree_state(root: Path) -> dict[str, str]:
     Includes ``.quarantine/`` (the forensic before-images), the healed
     partitions, the recall's re-derived files, catalogs and sidecars alike —
     lstat'd symlinks are hashed by their TARGET when readable, skipped when
-    dangling (both arms build identical link shapes, so parity holds).
+    dangling (both builds plant identical link shapes, so parity holds).
     ``.locks/`` is EXCLUDED: the advisory flock sidecars are empty files
     whose NAMES are ``sha256(realpath(dest))`` — the twin lakes live under
     different roots, so the names can never match (mechanical, not data).
@@ -189,64 +169,42 @@ def _normalized_report(report: HealReport, lake: Path) -> dict[str, Any]:
     return _normalize(dataclasses.asdict(report), lake)
 
 
-def _normalized_logs(
-    logs: Sequence[Mapping[str, Any]], lake: Path
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """``(comparable events, facade-own events)`` — timings dropped, paths folded."""
-    comparable: list[dict[str, Any]] = []
-    facade: list[dict[str, Any]] = []
-    for event in logs:
-        name = str(event.get("event", ""))
-        if name.startswith("lake_rust_waved."):
-            facade.append(dict(event))
-            continue
-        cleaned = {
+def _normalized_logs(logs: Sequence[Mapping[str, Any]], lake: Path) -> list[dict[str, Any]]:
+    """The comparable event list — timings dropped, paths folded."""
+    return [
+        {
             key: _normalize(value, lake)
             for key, value in event.items()
             if not key.endswith(_TIMING_SUFFIXES)
         }
-        comparable.append(cleaned)
-    return comparable, facade
+        for event in logs
+    ]
 
 
 @dataclasses.dataclass
-class _ArmResult:
-    """One arm's full observable outcome (everything the differential pins)."""
+class _BuildResult:
+    """One fresh build's full observable outcome (everything the gate pins)."""
 
+    raw_report: HealReport
     report: dict[str, Any]
     tree: dict[str, str]
     audit: list[Any]
     logs: list[dict[str, Any]]
-    facade_events: list[dict[str, Any]]
     rescan_types: tuple[str, ...]
 
 
-def _run_arm(
+def _run_build(
     base: Path,
     case: PoisonCase,
     *,
-    flag_on: bool,
-    monkeypatch: pytest.MonkeyPatch,
+    label: str,
     mode: str | None = None,
-) -> _ArmResult:
-    """Build a FRESH lake for *case* and heal it under one flag arm."""
-    lake = base / ("rust" if flag_on else "python")
+) -> _BuildResult:
+    """Build a FRESH lake for *case* and heal it through the ONE Rust path."""
+    lake = base / label
     lake.mkdir()
     case.build(lake)
-    if flag_on:
-        monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
-        lrw.reset_lake_rust_waved_for_tests(remaining=0)
-    else:
-        monkeypatch.delenv(lrw.LAKE_WAVED_RUST_ENV, raising=False)
-        lrw.reset_lake_rust_waved_for_tests()
     report = scan_lake_invariants(lake, **case.scan_kwargs)
-    if flag_on:
-        # W-4 fold: the enumeration scan above now ALSO routes through the
-        # facade flag-ON (the scan seam), consuming the once-per-process
-        # ``lake_rust_waved.engaged`` INFO before the capture window opens.
-        # Re-arm the process view so the HEAL call's engagement witness
-        # (`_engaged`) keeps its teeth — the assertion set is unchanged.
-        lrw.reset_lake_rust_waved_for_tests(remaining=0)
     # The L3 denominator law (round 16-1): option files join the mass-rail
     # denominator — files_scanned = bars + options scanned.
     files_scanned = report.files_scanned + report.option_files_scanned
@@ -264,74 +222,60 @@ def _run_arm(
             **kwargs,
         )
     rescan = scan_lake_invariants(lake, **case.scan_kwargs)
-    comparable, facade = _normalized_logs(logs, lake)
-    return _ArmResult(
+    return _BuildResult(
+        raw_report=heal,
         report=_normalized_report(heal, lake),
         tree=_tree_state(lake),
         audit=_normalize(audit.lines, lake),
-        logs=comparable,
-        facade_events=facade,
+        logs=_normalized_logs(logs, lake),
         rescan_types=tuple(sorted(type(f).__name__ for f in rescan.findings)),
     )
 
 
-def _assert_arms_equal(python_arm: _ArmResult, rust_arm: _ArmResult) -> None:
-    assert rust_arm.report == python_arm.report
-    assert rust_arm.tree == python_arm.tree
-    assert rust_arm.audit == python_arm.audit
-    assert rust_arm.logs == python_arm.logs
-    assert rust_arm.rescan_types == python_arm.rescan_types
-    # NOTE: the content token is deliberately NOT compared across the twin
-    # lakes — it folds mtime_ns, which differs per build instant; the
-    # same-lake rust-vs-oracle token parity lives in
-    # TestContentTokenDifferential below.
+def _assert_builds_equal(build_a: _BuildResult, build_b: _BuildResult) -> None:
+    assert build_b.report == build_a.report
+    assert build_b.tree == build_a.tree
+    assert build_b.audit == build_a.audit
+    assert build_b.logs == build_a.logs
+    assert build_b.rescan_types == build_a.rescan_types
 
 
-def _degraded(arm: _ArmResult) -> bool:
-    return any(
-        event.get("event") == "lake_rust_waved.fallback" and event.get("reason") == "heal_degrade"
-        for event in arm.facade_events
+def _assert_frozen(case: PoisonCase, build: _BuildResult) -> None:
+    healed, skipped, errors, refused, rescan = _FROZEN_HEAL[case.name]
+    got = (
+        build.raw_report.healed,
+        build.raw_report.skipped,
+        build.raw_report.errors,
+        build.raw_report.refused_mass_heal,
+        build.rescan_types,
+    )
+    assert got == (healed, skipped, errors, refused, rescan), (
+        f"FROZEN-EXPECTATION drift [{case.name}]: got {got} — the crate no "
+        "longer matches the pre-delete Python-parity record; fix the CRATE, "
+        "never this table"
     )
 
 
-def _engaged(arm: _ArmResult) -> bool:
-    return any(event.get("event") == "lake_rust_waved.engaged" for event in arm.facade_events)
-
-
-class TestHealDifferential:
-    """Per-corpus-case twin-lake heal parity (the §E gate)."""
+class TestHealEndgame:
+    """Per-corpus-case determinism + the frozen pre-delete parity record."""
 
     @pytest.mark.parametrize("case", CORPUS, ids=lambda case: str(case.name))
-    def test_flag_on_equals_flag_off(
-        self, case: PoisonCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_deterministic_and_frozen(self, case: PoisonCase, tmp_path: Path) -> None:
         if case.requires == "symlink" and not supports_symlink(tmp_path):
             pytest.skip("filesystem does not support symlinks")
-        python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
-        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
-        _assert_arms_equal(python_arm, rust_arm)
-        # Anti-vacuous engagement census: the engaged set runs the crate
-        # core (crate consulted, no pre-mutation degrade — a degrade-only
-        # pass over an engaged case FAILS here); the enveloped set reaches
-        # the crate and MUST degrade; the mass-rail case never reaches the
-        # seam; every finding-less batch never reaches the seam either.
-        if case.name in _ENGAGED_CASES:
-            assert _engaged(rust_arm) and not _degraded(rust_arm), case.name
-        elif case.name in _CRATE_DEGRADE_CASES:
-            assert _engaged(rust_arm) and _degraded(rust_arm), case.name
-        else:
-            assert not rust_arm.facade_events, case.name
+        build_a = _run_build(tmp_path, case, label="a")
+        build_b = _run_build(tmp_path, case, label="b")
+        _assert_builds_equal(build_a, build_b)
+        _assert_frozen(case, build_b)
 
-    def test_corpus_expectation_census_is_total(self) -> None:
-        """Every corpus case with healable findings is classified exactly once."""
-        buckets = (_ENGAGED_CASES, _CRATE_DEGRADE_CASES, _NO_CONSULT_CASES)
-        for i, left in enumerate(buckets):
-            for right in buckets[i + 1 :]:
-                assert not (left & right)
-        names = {case.name for case in CORPUS}
-        for bucket in buckets:
-            assert bucket <= names
-        healable_kinds = {
+    def test_frozen_table_is_total(self) -> None:
+        """Every corpus case has EXACTLY one frozen expectation row."""
+        assert set(_FROZEN_HEAL) == {case.name for case in CORPUS}
+
+    def test_engaged_kind_lockstep_witness(self) -> None:
+        """The installed wheel's engaged-kind list covers ALL SIX healable
+        kinds (a stale pre-W-2b wheel fails here, never a silent narrowing)."""
+        assert set(_crate.waved_heal_engaged_kinds()) == {
             "IntraFileDup",
             "OptionIntraFileDup",
             "SchemaAlienFile",
@@ -339,86 +283,69 @@ class TestHealDifferential:
             "OptionForeignMonthRows",
             "LegacyKeyDrift",
         }
-        with_healable = {
-            case.name for case in CORPUS if case.expected_finding_types & healable_kinds
-        }
-        assert with_healable == _ENGAGED_CASES | _CRATE_DEGRADE_CASES | _NO_CONSULT_CASES
-        # The W-2b lockstep witness: the installed wheel's engaged-kind list
-        # covers ALL SIX healable kinds (a stale pre-W-2b wheel fails here,
-        # never silently degrades the multi-file kinds back to Python).
-        assert set(_crate.waved_heal_engaged_kinds()) == healable_kinds
 
-    def test_mass_rail_arm_refuses_identically(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The mass-heal rail refuses BEFORE the seam — parity + zero mutation."""
+    def test_mass_rail_refuses_before_the_seam(self, tmp_path: Path) -> None:
+        """The mass-heal rail refuses BEFORE the per-finding loop — zero
+        mutation, every finding still present on re-scan."""
         case = next(c for c in CORPUS if c.name == "option_mass_poison_majority")
-        python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
-        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
-        _assert_arms_equal(python_arm, rust_arm)
-        assert rust_arm.report["refused_mass_heal"] is True
-        assert rust_arm.report["healed"] == 0
-        assert not rust_arm.facade_events  # the rail returns before the seam
+        pre = tmp_path / "pre"
+        pre.mkdir()
+        case.build(pre)
+        before = _tree_state(pre)
+        build = _run_build(tmp_path, case, label="a")
+        assert build.raw_report.refused_mass_heal is True
+        assert build.raw_report.healed == 0
+        # Byte-untouched: the healed lake's tree equals an unhealed twin's.
+        assert build.tree == before
 
-    def test_observe_mode_arm_short_circuits_identically(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Observe mode short-circuits BEFORE the seam — parity + zero mutation."""
+    def test_observe_mode_short_circuits(self, tmp_path: Path) -> None:
+        """Observe mode short-circuits BEFORE the seam — zero mutation."""
         case = next(c for c in CORPUS if c.name == "bars_intra_file_dup")
-        python_arm = _run_arm(
-            tmp_path, case, flag_on=False, monkeypatch=monkeypatch, mode="observe"
-        )
-        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch, mode="observe")
-        _assert_arms_equal(python_arm, rust_arm)
-        assert rust_arm.report["mode"] == "observe"
-        assert rust_arm.report["healed"] == 0
-        assert rust_arm.report["quarantine_root"] is None
-        # Observe returns pre-seam for the HEAL; the token twin still engages.
-        assert not any(e.get("event") == "lake_rust_waved.fallback" for e in rust_arm.facade_events)
+        pre = tmp_path / "pre"
+        pre.mkdir()
+        case.build(pre)
+        before = _tree_state(pre)
+        build = _run_build(tmp_path, case, label="a", mode="observe")
+        assert build.raw_report.mode == "observe"
+        assert build.raw_report.healed == 0
+        assert build.raw_report.quarantine_root is None
+        assert build.tree == before
 
-    def test_engaged_dup_heal_convergence_and_forensics(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The engaged bars-dup arm: healed, byte-identical, second sweep clean."""
+    def test_engaged_dup_heal_convergence_and_forensics(self, tmp_path: Path) -> None:
+        """The bars-dup heal: healed, quarantined before-image, audit line,
+        second sweep clean — the frozen forensic contract."""
         case = next(c for c in CORPUS if c.name == "bars_intra_file_dup")
-        python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
-        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
-        _assert_arms_equal(python_arm, rust_arm)
-        assert rust_arm.report["healed"] == 1
-        assert rust_arm.rescan_types == ()
-        # The forensic before-image landed under .quarantine/ in BOTH trees.
-        assert any(rel.startswith(".quarantine/") for rel in rust_arm.tree)
-        # The audit chain carries the dedup line in both arms.
-        assert [line[0] for line in rust_arm.audit] == [line[0] for line in python_arm.audit]
-        assert "LAKE_HEAL_DEDUP" in [line[0] for line in rust_arm.audit]
+        build = _run_build(tmp_path, case, label="a")
+        assert build.raw_report.healed == 1
+        assert build.rescan_types == ()
+        # The forensic before-image landed under .quarantine/.
+        assert any(rel.startswith(".quarantine/") for rel in build.tree)
+        # The audit chain carries the dedup line.
+        assert "LAKE_HEAL_DEDUP" in [line[0] for line in build.audit]
 
 
-class TestCrateEnvelopeDegrade:
-    """The crate-preflight degrade arm — batches OUTSIDE the byte-parity
-    envelope must degrade PRE-MUTATION to the Python core with full parity.
+class TestEnvelopeIsolatedErrors:
+    """The W-6a isolation posture — batches OUTSIDE the crate's byte-parity
+    envelope are PER-FINDING ISOLATED errors: counted, byte-untouched, the
+    batch CONTINUES (there is no Python core to degrade to).
 
-    The corpus itself carries NO degrade case since W-5 phase A (D-23 —
-    ``_CRATE_DEGRADE_CASES`` is empty); the plants here build
-    IN-envelope-for-the-SCANNER files the CRATE still refuses to own: a
-    beyond-2^53-paisa price, a 17-column Greeks-overlay schema, and a MIXED
-    dup+foreign batch (since W-2b BOTH kinds engage natively — the mixed
-    test pins that the whole batch runs the crate core with parity).
+    The 17-column overlay-dup heal the deleted Python core performed is a
+    RULED functional narrowing — recorded as the W-6b crate-widening
+    residual; until then the finding stays LOUD every sweep, never silent.
     """
 
     @staticmethod
     def _build_big_price_dup(lake: Path) -> None:
         # A dup file whose prices exceed the 2dp snap envelope (1e17 rupees
-        # -> 1e19 paisa >= 2^53): the crate degrades, Python's Decimal path
-        # heals it exactly.
+        # -> 1e19 paisa >= 2^53).
         from tests.fakes.poison_corpus import _dest, _plant_raw, _ts
 
         _plant_raw(_dest(lake), [_ts(1), _ts(1), _ts(2)], price=1.0e17)
 
     @staticmethod
     def _build_overlay_dup(lake: Path) -> None:
-        # A 17-column Greeks-overlay F&O dup file: the schema is not the
-        # canonical 7-column bars shape, so the crate degrades and Python's
-        # overlay-preserving decode heals it (the overlay must round-trip).
+        # A 17-column Greeks-overlay F&O dup file: not the canonical
+        # 7-column bars shape.
         import pyarrow as pa
         import pyarrow.parquet as pq
         from brutex.data.models import GREEKS_OVERLAY_FIELDS
@@ -446,8 +373,8 @@ class TestCrateEnvelopeDegrade:
 
     @staticmethod
     def _build_mixed_batch(lake: Path) -> None:
-        # A dup file PLUS a foreign file in ONE batch: since W-2b both kinds
-        # are ported, the whole mixed batch engages the crate natively.
+        # A dup file PLUS a foreign file in ONE batch — both kinds engage
+        # natively; the whole batch runs the crate core.
         from tests.fakes.poison_corpus import _dest, _plant_raw, _ts
 
         _plant_raw(_dest(lake), [_ts(1), _ts(1), _ts(2)])
@@ -456,59 +383,43 @@ class TestCrateEnvelopeDegrade:
             [_ts(3), _ts(2, month=7, day=1)],
         )
 
-    def _case(self, name: str, build: Any, kinds: frozenset[str]) -> PoisonCase:
-        return PoisonCase(name, build, kinds)
-
-    def test_big_price_dup_degrades_with_parity(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("name", "builder", "envelope_token"),
+        [
+            ("big_price_dup", "_build_big_price_dup", "2dp snap envelope"),
+            ("overlay_dup", "_build_overlay_dup", "schema not canonical"),
+        ],
+    )
+    def test_envelope_shape_is_an_isolated_error(
+        self, tmp_path: Path, name: str, builder: str, envelope_token: str
     ) -> None:
-        case = self._case("big_price_dup", self._build_big_price_dup, frozenset({"IntraFileDup"}))
-        python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
-        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
-        _assert_arms_equal(python_arm, rust_arm)
-        assert _engaged(rust_arm) and _degraded(rust_arm)
-        assert rust_arm.report["healed"] == 1
-        assert rust_arm.rescan_types == ()
+        case = PoisonCase(name, getattr(self, builder), frozenset({"IntraFileDup"}))
+        pre = tmp_path / "pre"
+        pre.mkdir()
+        case.build(pre)
+        before = _tree_state(pre)
+        build_a = _run_build(tmp_path, case, label="a")
+        build_b = _run_build(tmp_path, case, label="b")
+        _assert_builds_equal(build_a, build_b)
+        assert build_b.raw_report.healed == 0
+        assert build_b.raw_report.errors == 1
+        # Byte-untouched + the finding persists loudly on re-scan.
+        assert build_b.tree == before
+        assert build_b.rescan_types == ("IntraFileDup",)
+        errs = [e for e in build_b.logs if e.get("event") == "lake_heal.partition_error"]
+        assert len(errs) == 1 and envelope_token in str(errs[0].get("error"))
 
-    def test_overlay_dup_degrades_with_parity(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        case = self._case("overlay_dup", self._build_overlay_dup, frozenset({"IntraFileDup"}))
-        python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
-        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
-        _assert_arms_equal(python_arm, rust_arm)
-        assert _engaged(rust_arm) and _degraded(rust_arm)
-        assert rust_arm.report["healed"] == 1
-        # The overlay survived the Python heal byte-identically in BOTH arms
-        # (tree equality above); the healed file still carries 17 columns.
-        import polars as pl
-
-        healed = next(
-            path
-            for rel, _ in rust_arm.tree.items()
-            if rel.startswith("bars/NSE/FNO") and not rel.startswith(".quarantine")
-            for path in [tmp_path / "rust" / rel]
-        )
-        assert len(pl.read_parquet(healed, glob=False).columns) == 17
-
-    def test_mixed_batch_engages_with_parity(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The W-2 shell-side short-circuit is DEAD (W-2b): a mixed
-        dup+foreign batch serializes whole and runs the crate core natively
-        — the contract this test previously pinned (no crate consult) is
-        consciously FLIPPED with the D-22 port."""
-        case = self._case(
+    def test_mixed_batch_heals_both_kinds(self, tmp_path: Path) -> None:
+        case = PoisonCase(
             "mixed_batch",
             self._build_mixed_batch,
             frozenset({"IntraFileDup", "ForeignMonthRows"}),
         )
-        python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
-        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
-        _assert_arms_equal(python_arm, rust_arm)
-        assert _engaged(rust_arm) and not _degraded(rust_arm)
-        assert rust_arm.report["healed"] == 2
-        assert rust_arm.rescan_types == ()
+        build_a = _run_build(tmp_path, case, label="a")
+        build_b = _run_build(tmp_path, case, label="b")
+        _assert_builds_equal(build_a, build_b)
+        assert build_b.raw_report.healed == 2
+        assert build_b.rescan_types == ()
 
 
 class TestCrashConvergence:
@@ -517,68 +428,44 @@ class TestCrashConvergence:
     re-appears, and the keep-first union converges idempotently.
     """
 
-    def test_copy_forward_precedes_source_removal(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_copy_forward_precedes_source_removal(self, tmp_path: Path) -> None:
         """Ordering pin: the destination-month write telemetry
         (``lake.partition.write`` — the copy-forward leg) is emitted BEFORE
-        the source's ``lake_heal.rows_reassigned`` (the removal leg) on BOTH
-        arms — the crate preserves the Python arm's crash-safe leg order.
-        """
+        the source's ``lake_heal.rows_reassigned`` (the removal leg) — the
+        crate preserves the crash-safe leg order."""
         case = next(c for c in CORPUS if c.name == "bars_foreign_month_pure")
-        python_arm = _run_arm(tmp_path, case, flag_on=False, monkeypatch=monkeypatch)
-        rust_arm = _run_arm(tmp_path, case, flag_on=True, monkeypatch=monkeypatch)
-        _assert_arms_equal(python_arm, rust_arm)
-        assert _engaged(rust_arm) and not _degraded(rust_arm)
-        for arm in (python_arm, rust_arm):
-            events = [str(event.get("event", "")) for event in arm.logs]
-            assert "lake.partition.write" in events
-            assert "lake_heal.rows_reassigned" in events
-            assert events.index("lake.partition.write") < events.index("lake_heal.rows_reassigned")
+        build = _run_build(tmp_path, case, label="a")
+        events = [str(event.get("event", "")) for event in build.logs]
+        assert "lake.partition.write" in events
+        assert "lake_heal.rows_reassigned" in events
+        assert events.index("lake.partition.write") < events.index("lake_heal.rows_reassigned")
 
-    def test_mid_crash_state_converges_keep_first(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_mid_crash_state_converges_keep_first(self, tmp_path: Path) -> None:
         """The overlap corpus shapes ARE the post-copy-forward pre-removal
         crash state (the foreign keys already live in their canonical home):
-        the finding re-appears on scan and the engaged heal CONVERGES — the
+        the finding re-appears on scan and the heal CONVERGES — the
         keep-first union never duplicates a key, the source is cleaned, the
-        second sweep is empty — byte-identically on both arms (bars +
-        options multi-month).
-        """
+        second sweep is empty (bars + options multi-month)."""
         for name in ("bars_foreign_month_overlap", "option_multi_month_overlap"):
             case = next(c for c in CORPUS if c.name == name)
             base = tmp_path / name
             base.mkdir()
-            python_arm = _run_arm(base, case, flag_on=False, monkeypatch=monkeypatch)
-            rust_arm = _run_arm(base, case, flag_on=True, monkeypatch=monkeypatch)
-            _assert_arms_equal(python_arm, rust_arm)
-            assert _engaged(rust_arm) and not _degraded(rust_arm), name
-            assert rust_arm.report["healed"] >= 1, name
-            assert rust_arm.rescan_types == (), name
+            build_a = _run_build(base, case, label="a")
+            build_b = _run_build(base, case, label="b")
+            _assert_builds_equal(build_a, build_b)
+            assert build_b.raw_report.healed >= 1, name
+            assert build_b.rescan_types == (), name
 
 
-class TestCatalogReplayParity:
-    """The catalog side-effect replay (Golden Rule #4) — rotated rows equal."""
+class TestCatalogReplay:
+    """The catalog side-effect replay (Golden Rule #4) — rotated rows frozen."""
 
     def _heal_with_catalog(
-        self,
-        base: Path,
-        case: PoisonCase,
-        *,
-        flag_on: bool,
-        monkeypatch: pytest.MonkeyPatch,
-        seed: bool,
-    ) -> tuple[dict[str, Any], dict[str, Any] | None, int]:
-        lake = base / ("rust" if flag_on else "python")
+        self, base: Path, case: PoisonCase, *, seed: bool
+    ) -> tuple[HealReport, dict[str, Any] | None, int]:
+        lake = base / "lake"
         lake.mkdir()
         case.build(lake)
-        if flag_on:
-            monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
-            lrw.reset_lake_rust_waved_for_tests(remaining=0)
-        else:
-            monkeypatch.delenv(lrw.LAKE_WAVED_RUST_ENV, raising=False)
-            lrw.reset_lake_rust_waved_for_tests()
         report = scan_lake_invariants(lake, **case.scan_kwargs)
         files_scanned = report.files_scanned + report.option_files_scanned
         with Catalog.open(lake / "catalog.duckdb") as catalog:
@@ -622,77 +509,57 @@ class TestCatalogReplayParity:
                 # sanctioned volatile column — dropped from the comparison.
                 row.pop("fetched_at")
             count = catalog.count()
-        return _normalized_report(heal, lake), row, count
+        return heal, row, count
 
-    def test_bars_dup_catalog_row_rotated_equally(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_bars_dup_catalog_row_rotated(self, tmp_path: Path) -> None:
         case = next(c for c in CORPUS if c.name == "bars_intra_file_dup")
-        py_report, py_row, py_count = self._heal_with_catalog(
-            tmp_path, case, flag_on=False, monkeypatch=monkeypatch, seed=False
-        )
-        rust_report, rust_row, rust_count = self._heal_with_catalog(
-            tmp_path, case, flag_on=True, monkeypatch=monkeypatch, seed=False
-        )
-        assert rust_report == py_report
-        assert rust_row == py_row
-        assert rust_row is not None  # the healed partition's rotated row
-        assert rust_row["raw_hash"] == py_report["actions"][0]["raw_hash_after"]
-        assert rust_count == py_count == 1
+        heal, row, count = self._heal_with_catalog(tmp_path, case, seed=False)
+        assert heal.healed == 1
+        assert row is not None  # the healed partition's rotated row
+        assert row["raw_hash"] == heal.actions[0].raw_hash_after
+        assert count == 1
 
-    def test_alien_catalog_row_deleted_equally(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_alien_catalog_row_deleted(self, tmp_path: Path) -> None:
         case = next(c for c in CORPUS if c.name == "bars_schema_alien_missing_columns")
-        py_report, py_row, py_count = self._heal_with_catalog(
-            tmp_path, case, flag_on=False, monkeypatch=monkeypatch, seed=True
-        )
-        rust_report, rust_row, rust_count = self._heal_with_catalog(
-            tmp_path, case, flag_on=True, monkeypatch=monkeypatch, seed=True
-        )
-        assert rust_report == py_report
-        assert rust_row is None
-        assert py_row is None
-        assert rust_count == py_count == 0
+        heal, row, count = self._heal_with_catalog(tmp_path, case, seed=True)
+        assert heal.healed == 1
+        assert row is None
+        assert count == 0
 
 
-class TestContentTokenDifferential:
-    """The §C-5 token twin — parity + skip-event replay on hostile trees."""
+class TestContentToken:
+    """The §C-5 token twin — determinism + content sensitivity + skip replay."""
 
-    def test_token_matches_oracle_on_every_corpus_case(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from brutex.data.lake_heal import _lake_content_token_python
+    def test_token_is_deterministic_and_content_sensitive(self, tmp_path: Path) -> None:
+        case = next(c for c in CORPUS if c.name == "bars_intra_file_dup")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        case.build(lake)
+        first = lake_content_token(lake)
+        second = lake_content_token(lake)
+        assert first == second and len(first) == 64
+        # A new file under the walked tree MOVES the token.
+        extra = lake / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "07.parquet"
+        extra.write_bytes(b"not-a-parquet")
+        assert lake_content_token(lake) != first
 
-        for case in CORPUS:
-            if case.requires == "symlink" and not supports_symlink(tmp_path):
-                continue
-            lake = tmp_path / f"tok-{case.name}"
-            lake.mkdir()
-            case.build(lake)
-            monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
-            lrw.reset_lake_rust_waved_for_tests(remaining=0)
-            assert lake_content_token(lake) == _lake_content_token_python(lake), case.name
-
-    def test_dangling_symlink_skip_events_replay_identically(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A dangling ``*.parquet`` symlink: token + WARN parity (lstat law)."""
+    def test_dangling_symlink_rides_the_lstat_law(self, tmp_path: Path) -> None:
+        """A dangling ``*.parquet`` symlink: the R11 lstat law — the link
+        contributes its OWN metadata deterministically (never followed,
+        never a skip event), and REMOVING it moves the token."""
         if not supports_symlink(tmp_path):
             pytest.skip("filesystem does not support symlinks")
-        from brutex.data.lake_heal import _lake_content_token_python
-
         case = next(c for c in CORPUS if c.name == "dangling_symlink_option_file")
         lake = tmp_path / "lake"
         lake.mkdir()
         case.build(lake)
-        with capture_logs() as off_logs:
-            off_token = _lake_content_token_python(lake)
-        monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
-        lrw.reset_lake_rust_waved_for_tests(remaining=0)
-        with capture_logs() as on_logs:
-            on_token = lake_content_token(lake)
-        assert on_token == off_token
-        skip_events = [e for e in off_logs if str(e["event"]).startswith("lake_heal.token_")]
-        on_skip_events = [e for e in on_logs if str(e["event"]).startswith("lake_heal.token_")]
-        assert on_skip_events == skip_events
+        with capture_logs() as logs:
+            token = lake_content_token(lake)
+        assert len(token) == 64
+        assert token == lake_content_token(lake)
+        # No raced-away entry here — the skip replay channel stays quiet
+        # (its emission sites are unit-pinned in test_lake_heal.py).
+        assert not [e for e in logs if str(e["event"]).startswith("lake_heal.token_")]
+        dangling = next(p for p in lake.rglob("*.parquet") if p.is_symlink() and not p.exists())
+        dangling.unlink()
+        assert lake_content_token(lake) != token

@@ -1,17 +1,18 @@
 """Unit suite for the Wave-D Rust heal seam in ``brutex.data.lake_heal``.
 
-DEC-RUST-LAKE-WAVED-001 §B2 (W-2): the seam pieces —
+DEC-RUST-LAKE-WAVED-001 §B2 (W-2 → W-6a ENDGAME): the seam pieces —
 ``_serialize_rust_findings`` (the D-10 plain-dict finding wire),
 ``_rust_heal_on_event`` (the ONE side-effect replay channel),
-``_rust_heal_route`` (the flag gate + outcome replay onto ``_BatchState``),
-the ``heal_findings`` loop bypass and the ``lake_content_token`` routing —
-tested with FAKE facade functions (monkeypatched at
+``_rust_heal_route`` (the outcome replay onto ``_BatchState``), the
+``heal_findings`` dispatch and the ``lake_content_token`` routing — tested
+with FAKE facade functions (monkeypatched at
 ``brutex.data.lake_rust_waved``, where the seam's call-time imports
-resolve), so the suite runs with NO wheel installed. The real-wheel parity
-gate is ``tests/integration/test_waved_heal_differential.py``.
+resolve), so the suite runs with NO wheel installed. The real-wheel gate is
+``tests/integration/test_waved_heal_differential.py``.
 
-Flag OFF (the default) is pinned NEVER-ROUTES with bombed facade functions —
-the byte-identity contract's structural half.
+W-6a: the Python heal core + the ``BRUTEX_LAKE_WAVED_RUST`` flag are GONE —
+the crate is the ONE arm, so the former flag-OFF never-routes pins are the
+retired-flag refusal pins now.
 """
 
 # pyright: reportPrivateUsage=none
@@ -24,11 +25,10 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from brutex.data import lake_heal, lake_rust_waved
-from brutex.data.errors import WriterError
+from brutex.data.errors import LakeRustWavedFlagRemovedError, WriterError
 from brutex.data.lake_heal import (
     HealAction,
     _BatchState,
-    _lake_content_token_python,
     _replay_token_skip,
     _rust_heal_epoch_us,
     _rust_heal_on_event,
@@ -55,14 +55,9 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    # EXPLICIT flag-OFF baseline since the W-5 default flip (unset now
-    # resolves ON): this suite was authored to pin the OFF arm + explicitly
-    # opted-in ON arms (each `setenv(..., "1")` per test), and the OFF-arm
-    # teeth (never-routes bomb spies, byte-identity) must stay pinned under
-    # the kill switch — the default-ON path is exercised by the waved
-    # differentials + the whole-suite default-ON battery.
-    monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "0")
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The ONE Rust path: retired flag unset, module state reset each test."""
+    monkeypatch.delenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, raising=False)
     lake_rust_waved.reset_lake_rust_waved_for_tests()
     yield
     lake_rust_waved.reset_lake_rust_waved_for_tests()
@@ -556,29 +551,23 @@ class TestRustHealEpochUs:
 
 
 class TestRustHealRoute:
-    def test_flag_off_returns_none_without_touching_the_facade(
+    def test_multi_file_batch_reaches_the_ffi(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _bomb(**kwargs: Any) -> dict[str, Any]:
-            raise AssertionError("the facade must not be called flag-OFF")
-
-        monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", _bomb)
-        assert _rust_heal_route((_dup(tmp_path / "06.parquet"),), _state(tmp_path)) is None
-
-    def test_multi_file_batch_reaches_the_ffi_since_w2b(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The W-2 shell-side short-circuit is DEAD (W-2b, deviation D-22):
-        a drift-only batch now serializes and reaches the facade, which owns
-        the engage-vs-degrade verdict via the crate's read-only preflight —
-        the contract this test previously pinned is consciously FLIPPED."""
-        monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "1")
+        """A drift-only batch serializes WHOLE and reaches the facade — the
+        crate owns every kind (W-2b, deviation D-22)."""
         calls: list[dict[str, Any]] = []
 
-        def _fake(**kwargs: Any) -> None:
-            # Returning None = the crate-preflight degrade verdict (zero
-            # mutation) — the shell must fall back to the Python core.
+        def _fake(**kwargs: Any) -> dict[str, Any]:
             calls.append(kwargs)
+            return {
+                "healed": 1,
+                "skipped": 0,
+                "errors": 0,
+                "quarantined_files": 0,
+                "actions": [],
+                "touched_minute": [],
+            }
 
         monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", _fake)
         drift = LegacyKeyDrift(
@@ -590,23 +579,15 @@ class TestRustHealRoute:
             intervals=("1minute",),
             files=1,
         )
-        assert _rust_heal_route((drift,), _state(tmp_path)) is None
+        assert _rust_heal_route((drift,), _state(tmp_path)) == (1, 0, 0)
         assert len(calls) == 1
         findings = calls[0]["findings"]
         assert findings[0]["kind"] == "LegacyKeyDrift"
         assert findings[0]["canonical"] == "M&M"
 
-    def test_facade_none_returns_none(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "1")
-        monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", lambda **kwargs: None)
-        assert _rust_heal_route((_dup(tmp_path / "06.parquet"),), _state(tmp_path)) is None
-
     def test_outcome_replays_onto_state(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "1")
         action = {
             "action": "LAKE_HEAL_DEDUP",
             "partition": "bars/NSE/INDEX/NIFTY/1minute/2024/06.parquet",
@@ -645,8 +626,6 @@ class TestRustHealRoute:
     def test_facade_exception_propagates_loud(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "1")
-
         def _boom(**kwargs: Any) -> dict[str, Any]:
             raise RuntimeError("post-mutation fault")
 
@@ -686,24 +665,21 @@ def _seed_dup_lake(tmp_path: Path) -> tuple[Path, IntraFileDup]:
 
 
 class TestHealFindingsWiring:
-    def test_flag_off_heals_with_bombed_facade(
+    def test_set_retired_flag_refuses_before_any_heal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The never-routes spy: flag OFF never touches the facade surface."""
-
-        def _bomb(**kwargs: Any) -> dict[str, Any]:
-            raise AssertionError("flag OFF must never route")
-
-        monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", _bomb)
-        monkeypatch.setattr(lake_rust_waved, "lake_content_token_via_rust", _bomb)
-        lake, finding = _seed_dup_lake(tmp_path)
-        report = heal_findings([finding], lake_root=lake, files_scanned=1, recall=False)
-        assert report.healed == 1
-
-    def test_flag_on_routed_outcome_bypasses_the_python_loop(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+        """The retired-flag law at the heal seam: ANY set value refuses
+        BEFORE mutation (the file stays byte-untouched)."""
         monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "1")
+        lake, finding = _seed_dup_lake(tmp_path)
+        before = finding.path.read_bytes()
+        with pytest.raises(LakeRustWavedFlagRemovedError, match="no longer flag-gated"):
+            heal_findings([finding], lake_root=lake, files_scanned=1, recall=False)
+        assert finding.path.read_bytes() == before
+
+    def test_routed_outcome_replays_onto_the_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         outcome = {
             "healed": 1,
             "skipped": 0,
@@ -713,45 +689,20 @@ class TestHealFindingsWiring:
             "touched_minute": [],
         }
         monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", lambda **kwargs: outcome)
-
-        def _loop_bomb(finding: Any, state: Any) -> bool:
-            raise AssertionError("the Python loop must not run on a routed batch")
-
-        monkeypatch.setattr(lake_heal, "_heal_one", _loop_bomb)
         lake, finding = _seed_dup_lake(tmp_path)
         report = heal_findings([finding], lake_root=lake, files_scanned=1, recall=False)
         assert (report.healed, report.skipped, report.errors) == (1, 0, 0)
         assert report.quarantine_root is not None  # quarantined_files=1 replayed
 
-    def test_flag_on_facade_none_runs_the_python_loop(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "1")
-        monkeypatch.setattr(lake_rust_waved, "heal_batch_via_rust", lambda **kwargs: None)
-        lake, finding = _seed_dup_lake(tmp_path)
-        report = heal_findings([finding], lake_root=lake, files_scanned=1, recall=False)
-        assert report.healed == 1  # the verbatim Python loop healed it
-
 
 class TestContentTokenRouting:
-    def test_flag_off_walks_python_with_bombed_facade(
+    def test_routes_through_the_facade(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _bomb(**kwargs: Any) -> str:
-            raise AssertionError("flag OFF must never route")
-
-        monkeypatch.setattr(lake_rust_waved, "lake_content_token_via_rust", _bomb)
-        lake, _ = _seed_dup_lake(tmp_path)
-        assert lake_content_token(lake) == _lake_content_token_python(lake)
-
-    def test_flag_on_routes_through_the_facade(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "1")
         captured: dict[str, Any] = {}
 
-        def _fake(*, lake_root: str, on_skip: Any, oracle: Any) -> str:
-            captured.update(lake_root=lake_root, on_skip=on_skip, oracle=oracle)
+        def _fake(*, lake_root: str, on_skip: Any) -> str:
+            captured.update(lake_root=lake_root, on_skip=on_skip)
             return "routed-token"
 
         monkeypatch.setattr(lake_rust_waved, "lake_content_token_via_rust", _fake)
@@ -759,8 +710,6 @@ class TestContentTokenRouting:
         assert lake_content_token(lake) == "routed-token"
         assert captured["lake_root"] == str(lake)
         assert captured["on_skip"] is _replay_token_skip
-        # The oracle closure is the verbatim Python walk over THIS lake.
-        assert captured["oracle"]() == _lake_content_token_python(lake)
 
     def test_replay_token_skip_applies_the_repr_law(self) -> None:
         with capture_logs() as logs:

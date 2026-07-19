@@ -1026,31 +1026,23 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     bucket HIGH/LOW or the ``1day`` anchor. Clean frames are returned
     object-identical (zero-copy); clean lakes stay byte-identical.
 
-    Wave-D seam (ADR-0020 §6, ``BRUTEX_LAKE_WAVED_RUST`` — DEFAULT OFF): when
-    the flag is ON, the COLLECT body (scan → rename/select/sort → the two
-    gates → the screen) routes through
-    :func:`brutex.data.lake_rust_waved.read_1m_via_rust` with the verbatim
-    Python body below as the LIVE parity oracle — every guard / degrade /
-    burn-in-mismatch path serves it, so read frames never depend on the wheel
-    being present or correct, and a genuine gate refusal keeps its exact
-    typed error + message bytes (the facade's degrade-to-oracle law). The
-    months / whole-tree / empty-partition SOURCE DECISION — with its pinned
-    raises — runs BEFORE the seam in ``_resolve_source``, shared verbatim by
-    both arms. Flag OFF (the default) never calls the facade routing
-    function and never imports the crate (spy-pinned).
+    Wave-D core (ADR-0020 §6, DEC-RUST-LAKE-WAVED-001 ENDGAME): the COLLECT
+    body (scan → rename/select/sort → the two gates → the screen) is OWNED
+    by the ``brutex_lake`` crate via
+    :func:`brutex.data.lake_rust_waved.read_1m_via_rust` — the Python
+    ``_collect`` oracle is DELETED. A crate-side refusal (a genuine gate
+    violation, a corrupt file, a crate panic) raises the SAME typed
+    quarantining :class:`~brutex.data.errors.ResampleInputError` with the
+    Rust-rendered reason (the ruled endgame semantics — message TEXT is the
+    crate's, the CLASS + isolation posture are unchanged). The months /
+    whole-tree / empty-partition SOURCE DECISION — with its pinned raises —
+    runs BEFORE the seam in ``_resolve_source``. An absent/stale wheel
+    raises the typed
+    :class:`~brutex.data.errors.LakeRustWavedUnavailableError` (the
+    REQUIRED-wheel law).
     """
-    import polars as pl
-
-    from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
-    from brutex.data.lake_rust_waved import lake_rust_waved_enabled, read_1m_via_rust
-    from brutex.data.price_sanity import (
-        validate_frame_price_sanity,
-        validate_frame_ts_datetime_range,
-    )
-
-    columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
-    if with_open_interest:
-        columns = (*columns, "open_interest")
+    from brutex.data.bad_tick import bad_tick_screen_enabled
+    from brutex.data.lake_rust_waved import read_1m_via_rust
 
     def _resolve_source() -> str | list[str]:
         base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
@@ -1088,67 +1080,23 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
             )
         return source
 
-    def _collect(source: str | list[str]) -> pl.DataFrame:
-        # Schema-tolerant tree read (DEC-GREEKS-ENGINE-PR2B-001): an enriched
-        # OPTION contract's month files may mix the raw 7-column and the
-        # Greeks-enriched 17-column shape (plan §15.3); only the base
-        # OHLCV(+OI) columns are selected below, which every shape carries —
-        # byte-identical for a uniform tree.
-        df = pl.scan_parquet(
-            source,
-            missing_columns="insert",
-            extra_columns="ignore",
-            # LITERAL month-file lists never glob (DEC-SPOT-DERIVE-TS-RANGE-
-            # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
-            # a symbol dir named `NSE-X[12]` beside real `NSE-X1`/`NSE-X2`
-            # siblings otherwise glob-reads the SIBLINGS' bars into this
-            # symbol. The whole-tree branch is deliberate `**` discovery and
-            # keeps glob; the writer additionally refuses to mint such dirs
-            # (partition._FORBIDDEN_SYMBOL_CHARS gains `[`/`]`).
-            glob=isinstance(source, str),
-        ).collect()
-        frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
-        context = f"{exchange}/{segment}/{symbol}/1minute"
-        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001: refuse an out-of-datetime-
-        # range stored timestamp FIRST (a 2**62-us stamp panics the Rust→Python
-        # conversion downstream — a BaseException past every except Exception;
-        # the price gate's own first-offender message indexes ts too). Raises
-        # the quarantining ResampleInputError.
-        validate_frame_ts_datetime_range(frame, ts_column="ts_utc", context=context)
-        # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
-        # frame to the resamplers (raises the quarantining ResampleInputError).
-        validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
-        # DEC-READ-GUARD-PARITY-001: drop x10/÷10 scaled 1m spikes (the engine
-        # read boundary's BadTickScreen, frame form) BEFORE any resampler — a
-        # self-consistent scaled bar passes price sanity and otherwise poisons
-        # the derived bucket HIGH/LOW + the 1day anchor. Runs AFTER the sanity
-        # gate (is_bad_tick assumes positivity). Default ON; the ONE
-        # BRUTEX_BAD_TICK_SCREEN kill switch flips both boundaries together.
-        if bad_tick_screen_enabled():
-            frame = screen_frame_bad_ticks(frame, ts_column="ts_utc", source=f"prebuild:{context}")
-        return frame
-
     def _read() -> pl.DataFrame:
         source = _resolve_source()
-        if lake_rust_waved_enabled():
-            # The Wave-D seam (ADR-0020 §6 — see the builder docstring): the
-            # collect body routes through the crate with `_collect` as the
-            # live parity oracle. The source decision above already ran (its
-            # raises are shared by both arms); the months arm passes the
-            # explicit file list, the whole-tree arm passes the partition
-            # dir (the crate walks exact paths — the glob=False law holds
-            # by construction).
-            base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
-            context = f"{exchange}/{segment}/{symbol}/1minute"
-            return read_1m_via_rust(
-                files=None if isinstance(source, str) else source,
-                tree_root=base.as_posix() if isinstance(source, str) else None,
-                with_open_interest=with_open_interest,
-                screen_enabled=bad_tick_screen_enabled(),
-                warn_source=f"prebuild:{context}",
-                oracle=lambda: _collect(source),
-            )
-        return _collect(source)
+        # The Wave-D core (see the builder docstring): the collect body is
+        # crate-owned. The source decision above already ran (its raises
+        # live there); the months arm passes the explicit file list, the
+        # whole-tree arm passes the partition dir (the crate walks exact
+        # paths — the glob=False law holds by construction).
+        base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
+        context = f"{exchange}/{segment}/{symbol}/1minute"
+        return read_1m_via_rust(
+            files=None if isinstance(source, str) else source,
+            tree_root=base.as_posix() if isinstance(source, str) else None,
+            with_open_interest=with_open_interest,
+            screen_enabled=bad_tick_screen_enabled(),
+            warn_source=f"prebuild:{context}",
+            context=context,
+        )
 
     return _read
 

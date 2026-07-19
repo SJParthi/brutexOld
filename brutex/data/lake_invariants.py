@@ -56,31 +56,25 @@ the dependency edges stay acyclic.
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
-from datetime import MAXYEAR, MINYEAR, UTC, datetime
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final
 
 import polars as pl
 import structlog
 
 from brutex.data.errors import (
-    PartitionError,
     datetime_out_of_range_errors,
-    parquet_read_skip_errors,
 )
 from brutex.data.lake_keys import spot_key_candidates
 from brutex.data.partition import (
     BAR_DIR_NAME,
     SPOT_PROBE_SEGMENTS,
-    build_partition_path,
-    option_partition_stem,
-    parse_partition_path,
     partition_for_timestamp,
 )
-from brutex.data.price_sanity import PRICE_SANITY_COLUMNS, count_price_violations
+from brutex.data.price_sanity import PRICE_SANITY_COLUMNS
 
 _LOG = structlog.get_logger("brutex.data.lake_invariants")
 
@@ -119,19 +113,11 @@ OPTIONS_SEGMENT: Final[str] = "OPTIONS"
 #: The ``bars/`` segments in census display order.
 _BAR_SEGMENTS: Final[tuple[str, ...]] = ("INDEX", "CASH", "FNO")
 
-#: The number of leading ``bars/``-relative path parts that form a
-#: ``(exchange, segment, symbol)`` coordinate (used by
-#: :func:`_engine_coord_from_path` on the path-parse-failure branch).
-_COORD_PART_COUNT: Final[int] = 3
-
 #: Human label for the engine-index verdict lines.
 _ENGINE_LABEL: Final[str] = "NIFTY/BANKNIFTY/SENSEX"
 
 #: Cap on offender names in :attr:`LakeCensus.engine_detail`.
 _ENGINE_DETAIL_CAP: Final[int] = 5
-
-#: December — the highest valid month in an options-tree ``YYYY-MM`` stem.
-_MAX_MONTH: Final[int] = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,10 +348,11 @@ def is_foreign_timestamp(home: tuple[int, int], ts: object) -> bool:
     killed four inline copies): a non-datetime (null) abstains — it carries no
     month to route (the bars null-abstain law); routing is
     :func:`utc_aware`-normalised so a hand-planted naive column routes
-    as-if-UTC instead of raising. Shared by the bars classifiers
-    (:func:`_count_foreign_rows` / :func:`_foreign_timestamps`), the options
-    key builder (:func:`_option_foreign_keys`) AND the healer's row mask
-    (``lake_heal._option_foreign_frame``).
+    as-if-UTC instead of raising. Shared by the bars/options classifiers
+    (:func:`_count_foreign_rows`, via :func:`classify_bar_keys` /
+    :func:`classify_option_keys`); the ``brutex_lake`` crate's scan core
+    mirrors this exact law (the W-6a Rust-only scan) and the frozen #1916
+    corpus pins the parity.
     """
     return isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
 
@@ -392,15 +379,6 @@ def _count_foreign_rows(home: tuple[int, int], timestamps: pl.Series) -> int:
     ):
         return 0
     return sum(1 for ts in timestamps.to_list() if is_foreign_timestamp(home, ts))
-
-
-def _foreign_timestamps(home: tuple[int, int], timestamps: pl.Series) -> set[datetime]:
-    """The UNIQUE (UTC-normalised) timestamps routed outside the *home* month.
-
-    Anomaly-only cost: called solely for files :func:`classify_bar_keys` already
-    flagged foreign, to drive the targeted canonical-sibling overlap read.
-    """
-    return {utc_aware(ts) for ts in timestamps.to_list() if is_foreign_timestamp(home, ts)}
 
 
 def classify_bar_keys(
@@ -615,296 +593,7 @@ def log_lake_finding(finding: LakeFinding) -> None:
         )
 
 
-def _read_key_columns(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-    """The ONE per-file read seam (spy tests count calls through this).
-
-    ``glob=False`` (hostile-review round-15 MAJOR fold): polars' default
-    ``glob=True`` treats the PATH as a glob, and an options series dir name
-    may legally carry glob metachars (``OptionParquetWriter._safe_segment``
-    rejects only ``/ \\ ..`` and maps ``|``) — a scan of ``options/A*S/…``
-    read the UNION of every sibling series matching the pattern, so the
-    classification described OTHER files' bytes: phantom dup/foreign findings
-    whose literal-read heal skips as stale (``healed != findings`` — the L3
-    sentinel never stamps), wrong census / ``/universe`` numbers, and the
-    targeted canonical-sibling overlap read rode the same seam (all
-    empirically reproduced; a BALANCED bracket set silently misreads — only
-    an UNBALANCED one raises, refuting the round-8 "gracefully scan-skipped"
-    note). Covers the ``bars/`` tree's hand-planted twin for free (the bars
-    writer itself already reads via ``BytesIO``).
-    """
-    return pl.read_parquet(path, columns=list(columns), glob=False)
-
-
-def _missing_columns_reason(path: Path, columns: Sequence[str]) -> str | None:
-    """Classify a failed column read: missing-column reason, or ``None`` = not that class.
-
-    Anomaly-only cost (DEC-ALIEN-SCHEMA-READ-HEAL-001): called ONLY after
-    :func:`_read_key_columns` already raised, it pays one
-    ``pl.read_parquet_schema`` footer probe to decide DETERMINISTICALLY —
-    message-string-free — whether the failure is the alien missing-column
-    class (→ a :class:`SchemaAlienFile` finding) or a genuinely unreadable
-    file (→ the caller keeps its plain ``scan_skip``). A file whose very
-    FOOTER is unreadable returns ``None`` (corrupt, not alien).
-    """
-    try:
-        schema = pl.read_parquet_schema(path)
-    except parquet_read_skip_errors():
-        return None
-    missing = [c for c in columns if c not in schema]
-    if missing:
-        return f"missing column(s): {', '.join(missing)}"
-    return None
-
-
-def _bar_dtype_alien_reason(schema: Mapping[str, pl.DataType]) -> str | None:
-    """The dtype-alien reason for one already-read bar frame's schema, or ``None`` = sane.
-
-    DEC-ALIEN-SCHEMA-READ-HEAL-001: a bar file whose ``timestamp`` is not a
-    Datetime — or whose OHLC column is non-numeric (``is_numeric()`` covers
-    int/float/Decimal on the pinned polars) — cannot be dup/foreign/price
-    classified (a Utf8 OHLC column previously DETONATED
-    ``count_price_violations`` with an uncaught ``ComputeError``, killing the
-    WHOLE scan — the latent crash this gate closes). Deterministic content
-    property → the caller emits a :class:`SchemaAlienFile` finding.
-    """
-    ts_dtype = schema["timestamp"]
-    if not isinstance(ts_dtype, pl.Datetime):
-        return f"timestamp dtype {ts_dtype} is not Datetime"
-    for column in PRICE_SANITY_COLUMNS:
-        dtype = schema[column]
-        if not dtype.is_numeric():
-            return f"column {column} dtype {dtype} is not numeric"
-    return None
-
-
-def _pause(per_file_pause: Callable[[], None] | None) -> None:
-    """Run the injected throttle callback, if any (the L3 gentleness seam)."""
-    if per_file_pause is not None:
-        per_file_pause()
-
-
-def _child_dirs(parent: Path, name_filter: str | None) -> list[Path]:
-    """Sorted child DIRECTORIES of *parent*, optionally narrowed to one name.
-
-    One level of the streaming ``bars/`` walk
-    (DEC-LAKE-INVARIANTS-PREINDEX-001). ``None`` widens like the old glob's
-    ``*`` (every child dir — pathlib ``*`` matches dot-names too, mirrored
-    here); a filter matches as the LITERAL directory name (coordinate filters
-    are the writer's own path-safe segment values, never glob patterns — the
-    old f-string glob interpolation behaved identically for every legal
-    coordinate). ``is_dir()`` follows a symlinked dir exactly as the old
-    fixed-depth glob's ``*`` components did (empirically pinned). A vanished
-    *parent* (or one raced away mid-``iterdir``) yields ``[]`` — the old
-    ``base.exists()`` guard generalised per level. A single CHILD whose
-    ``is_dir()`` stat faults (EACCES / EIO / ESTALE — the errnos 3.12
-    ``pathlib`` re-raises) is skipped ALONE under a per-child guard (review
-    fold, MINOR): pre-fix the one ``try`` wrapped the whole comprehension,
-    so one faulting sibling silently dropped the ENTIRE level — the old glob
-    dropped only the offending entry. Sorting ``Path`` objects sorts by path
-    COMPONENTS (3.12 ``PurePath.__lt__``), the same order
-    ``sorted(base.glob(...))`` yielded, so the walk preserves the old scan
-    order exactly.
-    """
-    try:
-        entries = list(parent.iterdir())
-    except OSError:
-        return []
-    children: list[Path] = []
-    for child in entries:
-        try:
-            if child.is_dir():
-                children.append(child)
-        except OSError:
-            continue  # one unstat-able child never drops its siblings
-    if name_filter is not None:
-        children = [child for child in children if child.name == name_filter]
-    return sorted(children)
-
-
-def _iter_series_candidates(
-    lake_root: Path,
-    *,
-    exchange: str | None,
-    segment: str | None,
-    symbol: str | None,
-    interval: str | None,
-) -> Iterator[list[Path]]:
-    """Stream each series' candidate ``<year>/<month>.parquet`` files, one series at a time.
-
-    The grouping key ``PartitionCoords.series`` IS the directory structure
-    (``bars/<exch>/<seg>/<sym>/<interval>/<yyyy>/<mm>.parquet``), so a
-    hierarchical sorted walk yields exactly the groups the old whole-tree
-    glob + dict pre-index built — WITHOUT ever materialising an O(files)
-    index (DEC-LAKE-INVARIANTS-PREINDEX-001: the old pre-index held
-    ~1.2 KB/file for the WHOLE read phase — ~3.1-3.5 GiB at the operator's
-    measured 2.36M-file lake, resident for the ≥32.8 h throttled L3 sweep).
-    Resident is now O(one interval dir). The ``*/*.parquet`` leaf glob keeps
-    the old fixed depth: an off-depth stray is never seen, a stray AT the
-    canonical depth still reaches the caller's parse (→ ``files_skipped``),
-    and the ``options/`` tree / lake-root-sibling ``.quarantine`` +
-    ``.locks`` dirs stay invisible exactly as before (the
-    ``catalog_reconcile._partition_files`` shape note carries over). Empty
-    candidate lists are not yielded (an interval dir with no
-    canonical-depth files was invisible to the old glob too).
-    """
-    base = lake_root / BAR_DIR_NAME
-    for exch_dir in _child_dirs(base, exchange):
-        for seg_dir in _child_dirs(exch_dir, segment):
-            for sym_dir in _child_dirs(seg_dir, symbol):
-                for interval_dir in _child_dirs(sym_dir, interval):
-                    candidates = sorted(interval_dir.glob("*/*.parquet"))
-                    if candidates:
-                        yield candidates
-
-
-def _engine_coord_from_path(path: Path, lake_root: Path) -> tuple[str, str, str] | None:
-    """The ``(exchange, segment, symbol)`` of a ``bars/`` file, read POSITIONALLY.
-
-    Used ONLY on the path-parse-failure branch, where ``parse_partition_path``
-    could not decode the file yet the census must still know whether the file
-    lives on an :data:`ENGINE_INDEX_COORDS` series (a corrupt engine PATH must
-    flip the engine verdict — DEC-AUDIT-CENSUS-HONESTY-001). The
-    :func:`_iter_series_candidates` walk's ``*/*.parquet`` leaf glob
-    guarantees the six-segment ``bars/exch/seg/sym/interval/yyyy/mm.parquet``
-    layout, so the first three parts under ``bars/`` are the coordinate; returns
-    ``None`` for any path that is not under ``bars/`` or is too shallow.
-    """
-    try:
-        parts = path.relative_to(lake_root / BAR_DIR_NAME).parts
-    except ValueError:
-        return None
-    if len(parts) < _COORD_PART_COUNT:
-        return None
-    return (parts[0], parts[1], parts[2])
-
-
-def _classify_overlap(
-    lake_root: Path,
-    coords: PartitionCoords,
-    foreign_ts: set[datetime],
-    per_file_pause: Callable[[], None] | None,
-    canonical_cache: dict[tuple[int, int], set[datetime] | None],
-) -> int | None:
-    """Split one file's foreign keys into the overlap-with-canonical count.
-
-    One targeted read per affected canonical month file per SERIES (memoised in
-    *canonical_cache*): ``overlap`` = |foreign ∩ canonical file's timestamps|.
-    A missing canonical file contributes 0 (pure misplacement); an UNREADABLE
-    canonical file leaves the finding honestly unclassified (``None``) after a
-    ``lake.invariant.scan_skip`` WARNING.
-    """
-    overlap = 0
-    unresolved = False
-    grouped: dict[tuple[int, int], set[datetime]] = {}
-    for ts in foreign_ts:
-        grouped.setdefault(partition_for_timestamp(ts), set()).add(ts)
-    for year, month in sorted(grouped):
-        if (year, month) not in canonical_cache:
-            canonical_cache[(year, month)] = _canonical_timestamps(
-                lake_root, coords, year, month, per_file_pause
-            )
-        stored = canonical_cache[(year, month)]
-        if stored is None:
-            unresolved = True
-            continue
-        overlap += len(grouped[(year, month)] & stored)
-    return None if unresolved else overlap
-
-
-def _canonical_timestamps(
-    lake_root: Path,
-    coords: PartitionCoords,
-    year: int,
-    month: int,
-    per_file_pause: Callable[[], None] | None,
-) -> set[datetime] | None:
-    """The canonical ``(year, month)`` sibling file's timestamp set.
-
-    ``set()`` for a missing / impossible canonical partition (pure
-    misplacement); ``None`` for an unreadable one (honest abstain).
-    """
-    try:
-        canonical = build_partition_path(
-            lake_root=lake_root,
-            exchange=coords.exchange,
-            segment=coords.segment,
-            symbol=coords.symbol,
-            interval=coords.interval,
-            year=year,
-            month=month,
-        )
-    except PartitionError:
-        return set()  # out-of-range coords — no canonical partition can exist
-    if not canonical.exists():
-        return set()
-    try:
-        frame = _read_key_columns(canonical, UNIQUE_KEY_BARS)
-    except parquet_read_skip_errors() as exc:
-        _LOG.warning("lake.invariant.scan_skip", path=str(canonical), error=str(exc))
-        _pause(per_file_pause)
-        return None
-    _pause(per_file_pause)
-    try:
-        return {
-            utc_aware(ts)
-            for ts in frame.get_column("timestamp").to_list()
-            if isinstance(ts, datetime)
-        }
-    except datetime_out_of_range_errors() as exc:
-        # Round-18 MAJOR fold (bars twin): an out-of-``datetime``-range stored
-        # value makes ``to_list()`` PANIC (``pyo3_runtime.PanicException``, a
-        # BaseException) — honest abstain like an unreadable sibling instead
-        # of crashing the whole scan; overlap stays ``None``.
-        _LOG.warning("lake.invariant.scan_skip", path=str(canonical), error=str(exc))
-        return None
-
-
 # ── options-tree classification (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001) ──────────
-
-
-def _option_file_month(path: Path) -> tuple[int, int] | None:
-    """The ``(year, month)`` an ``options/<series>/<YYYY>-<MM>.parquet`` name addresses.
-
-    ``None`` for an unparsable stem (non-numeric / missing separator / month
-    outside 1..12) — such a file keeps today's dup-only treatment and honestly
-    abstains from foreign classification (no home month to route against).
-
-    Hardened (hostile-review folds, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001):
-    ``str.isdigit`` accepts Unicode digit-PROPERTY characters ``int()``
-    rejects (``"²²".isdigit()`` is True but ``int("²²")`` raises), so the
-    ``int()`` calls are guarded — one crafted filename must abstain, never
-    crash the whole scan (the bars ``_file_month`` guard twin). Only the
-    CANONICAL zero-padded form the writer renders
-    (:func:`~brutex.data.partition.option_partition_stem` — the §11 COMMON
-    stem source, round-15 NIT fold)
-    parses: a non-canonical-but-parsable stem (``2024-6`` / a non-ASCII-digit
-    year) would claim the SAME month as its canonical twin file — two files
-    addressing one month is exactly the state the one-file-per-month
-    invariant forbids, so such a stem honestly abstains to dup-only instead
-    of masquerading as the month's home file. The year is additionally
-    bounded to ``datetime.MINYEAR..MAXYEAR`` (1..9999, round-13 NIT): a
-    5+-digit or year-0 stem zero-pad round-trips (``f"{12024:04d}" ==
-    "12024"``) yet no ``partition_for_timestamp`` output can ever route a
-    row there — the writer renders stems from datetime-derived months only,
-    so pre-bound such a stem falsified the "only the writer's canonical
-    stem parses" claim above; it now abstains to dup-only like any other
-    non-writer name.
-    """
-    stem, sep, month_text = path.stem.rpartition("-")
-    if not sep or not stem.isdigit() or not month_text.isdigit():
-        return None
-    try:
-        year = int(stem)
-        month = int(month_text)
-    except ValueError:
-        return None  # Unicode digit-property chars pass isdigit() but not int()
-    if not 1 <= month <= _MAX_MONTH:
-        return None
-    if not MINYEAR <= year <= MAXYEAR:
-        return None  # a 5+-digit / year-0 stem — no datetime month routes there
-    if path.stem != option_partition_stem(year, month):
-        return None  # non-canonical stem — the same-month twin-file blind spot
-    return year, month
 
 
 def option_key_dtype_error(frame: pl.DataFrame) -> str | None:
@@ -914,8 +603,8 @@ def option_key_dtype_error(frame: pl.DataFrame) -> str | None:
     (hostile-review round-12 fold, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): a
     hand-planted file whose ``side`` column carries a NESTED dtype
     (``List`` / ``Struct``) reads back as UNHASHABLE Python values, so every
-    key-set build — :func:`_option_foreign_keys`,
-    :func:`_canonical_option_keys`, the healer's removal-key ``frozenset`` —
+    key-set build — the crate scan's foreign-key builder (the W-6a Rust-only
+    scan mirrors this gate), the healer's removal-key ``frozenset`` —
     raises ``TypeError``, which is neither a ``parquet_read_skip_errors``
     member nor in the healer's per-finding isolation set: pre-fix ONE crafted
     file crashed the WHOLE scan (ALL healing inert — the L3 boot sweep, every
@@ -1010,114 +699,6 @@ def option_unclassifiable_message(path: Path, reason: str) -> str:
     return f"unclassifiable option partition {path}: {reason}"
 
 
-def _option_foreign_keys(
-    home: tuple[int, int], frame: pl.DataFrame
-) -> set[tuple[str | None, datetime]]:
-    """The UNIQUE raw ``(side, timestamp)`` keys routed outside the file's month.
-
-    Anomaly-only cost (called only for already-flagged files). Routing is
-    TIMESTAMP-ONLY (the one shared law): a null timestamp abstains (no month
-    to route — the bars null-abstain); ``side`` is key payload, carried RAW
-    (even a hand-planted null side rides verbatim) so the scanner's foreign
-    count and the healer's movable set can never diverge (liveness).
-    Timestamps are ``utc_aware``-ROUTED but stored RAW in the key (removal
-    matching is exact stored-value membership).
-    """
-    sides = frame.get_column("side").to_list()
-    stamps = frame.get_column("timestamp").to_list()
-    return {
-        (side, ts) for side, ts in zip(sides, stamps, strict=True) if is_foreign_timestamp(home, ts)
-    }
-
-
-def _canonical_option_keys(
-    series_dir: Path, year: int, month: int, per_file_pause: Callable[[], None] | None
-) -> set[tuple[str | None, datetime]] | None:
-    """The canonical sibling ``<series>/<YYYY>-<MM>.parquet``'s raw (side, ts) key set.
-
-    ``set()`` for a missing sibling (pure misplacement); ``None`` for an
-    unreadable one (honest abstain + one ``lake.invariant.scan_skip`` WARNING
-    + ``_pause``) — and for a SYMLINKED one (round-5 NIT fold: the main glob
-    loop skips a symlinked partition file loudly, but this targeted sibling
-    read followed one; a scan-time READ only — the writer's containment rail
-    still guards the heal — yet skipped for consistency, same loud
-    ``lake.invariant.symlink_skipped`` event, overlap honestly unclassified,
-    no ``_pause`` because no read is attempted). Reads via the ONE
-    :func:`_read_key_columns` seam (the
-    spy-count tests keep working). Simpler than the bars twin
-    :func:`_canonical_timestamps`: the sibling lives in the SAME directory —
-    no ``build_partition_path``, no ``PartitionError`` arm.
-    """
-    canonical = series_dir / f"{option_partition_stem(year, month)}.parquet"
-    if canonical.is_symlink():
-        # repr() — the path embeds the vendor-influenceable series dir name
-        # (round-8 log-injection fold; the #907 convention the option finding
-        # events already ride).
-        _LOG.warning("lake.invariant.symlink_skipped", path=repr(str(canonical)))
-        return None
-    if not canonical.exists():
-        return set()
-    try:
-        frame = _read_key_columns(canonical, UNIQUE_KEY_OPTIONS)
-    except parquet_read_skip_errors() as exc:
-        # repr() on the path — same round-8 log-injection fold as above. The
-        # error payload rides repr() too (round-17 fold): a polars read error
-        # MESSAGE embeds the RAW vendor-influenceable path (a polars-raised
-        # FileNotFoundError and the ColumnNotFoundError plan dump both
-        # interpolate it un-repr'd — empirically verified), so a newline/ESC
-        # series name forged log lines through the escaped ``path=`` field's
-        # own sibling — the identical channel round-16 closed at
-        # ``lake_heal.partition_error``. The bars scan_skip stays raw
-        # (catalogued coordinates), as do the path-free dtype-gate verdicts.
-        _LOG.warning("lake.invariant.scan_skip", path=repr(str(canonical)), error=repr(str(exc)))
-        _pause(per_file_pause)
-        return None
-    _pause(per_file_pause)
-    dtype_error = option_key_dtype_error(frame)
-    if dtype_error is not None:
-        # Round-12 fold: a nested-key-dtype canonical sibling would make the
-        # key-set build below raise TypeError (unhashable values) and crash
-        # the whole scan — honest abstain instead, like an unreadable sibling.
-        _LOG.warning("lake.invariant.scan_skip", path=repr(str(canonical)), error=dtype_error)
-        return None
-    sides = frame.get_column("side").to_list()
-    stamps = frame.get_column("timestamp").to_list()
-    return set(zip(sides, stamps, strict=True))
-
-
-def _classify_option_overlap(
-    series_dir: Path,
-    foreign_keys: set[tuple[str | None, datetime]],
-    per_file_pause: Callable[[], None] | None,
-    canonical_cache: dict[tuple[int, int], set[tuple[str | None, datetime]] | None],
-) -> int | None:
-    """Split one file's foreign keys into the overlap-with-canonical count.
-
-    Groups keys by ``partition_for_timestamp(utc_aware(ts))``; ONE targeted
-    2-key-column read per affected canonical month per SERIES (memoised in
-    *canonical_cache*); any ``None`` cache entry leaves the finding honestly
-    unclassified (``None``). Mirror of :func:`_classify_overlap` (bars).
-    Overlap membership compares RAW keys — canonical keys are read raw too,
-    so naive/aware columns compare like-for-like within one series.
-    """
-    overlap = 0
-    unresolved = False
-    grouped: dict[tuple[int, int], set[tuple[str | None, datetime]]] = {}
-    for side, ts in foreign_keys:
-        grouped.setdefault(partition_for_timestamp(utc_aware(ts)), set()).add((side, ts))
-    for year, month in sorted(grouped):
-        if (year, month) not in canonical_cache:
-            canonical_cache[(year, month)] = _canonical_option_keys(
-                series_dir, year, month, per_file_pause
-            )
-        stored = canonical_cache[(year, month)]
-        if stored is None:
-            unresolved = True
-            continue
-        overlap += len(grouped[(year, month)] & stored)
-    return None if unresolved else overlap
-
-
 def classify_option_keys(
     path: Path, series: str, home: tuple[int, int] | None, frame: pl.DataFrame
 ) -> tuple[OptionIntraFileDup | None, OptionForeignMonthRows | None]:
@@ -1191,14 +772,19 @@ def scan_lake_invariants(
 ) -> LakeScanReport:
     """The ONE bounded scanner over ``bars/`` (+ optionally ``options/``).
 
-    Wave-D seam (ADR-0020, DEC-RUST-LAKE-WAVED-001): when — and ONLY when —
-    ``BRUTEX_LAKE_WAVED_RUST`` is truthy, the scan routes through
-    :func:`brutex.data.lake_rust_waved.scan_lake_via_rust` with the verbatim
-    Python body below as the live parity oracle (degrade-to-oracle +
-    refuse-poison + burn-in — the facade's full W-1 doctrine). Flag OFF (the
-    default) never imports the routing function and is byte-identical
-    (spy-pinned). The ``detect_legacy_drift`` fold + all structlog output
-    stay Python on BOTH arms (Wave-D house laws i-ii).
+    Wave-D endgame (ADR-0020, DEC-RUST-LAKE-WAVED-001 W-6a): the scan is
+    Rust-ONLY — it routes unconditionally through
+    :func:`brutex.data.lake_rust_waved.scan_lake_via_rust` (the ``brutex_lake``
+    crate is a REQUIRED runtime dependency; an absent/stale wheel raises the
+    typed loud
+    :class:`~brutex.data.errors.LakeRustWavedUnavailableError`, and a SET
+    ``BRUTEX_LAKE_WAVED_RUST`` env — any value — refuses loudly per the
+    retired-flag law). The Python scan core was DELETED in W-6a; the frozen
+    #1916 poison-corpus expectations are the behavior pin. The
+    ``detect_legacy_drift`` fold + all structlog output stay Python (Wave-D
+    house laws i-ii). An out-of-envelope shape is a per-file/per-entry LOUD
+    counted ``lake.invariant.scan_skip`` — crate-owned isolation, never a
+    whole-scan abort.
 
     Cost honesty (Golden Rule #10): O(files-in-scope) TOTAL, per file
     O(footer + ONE key-column read) — the column read scales with the file's
@@ -1264,419 +850,20 @@ def scan_lake_invariants(
     LakeScanReport
         Findings + scan counters (``duration_s`` wall clock).
     """
-    from brutex.data.lake_rust_waved import lake_rust_waved_enabled
+    from brutex.data.lake_rust_waved import scan_lake_via_rust
 
-    def _python_arm() -> LakeScanReport:
-        return _scan_lake_invariants_python(
-            lake_root,
-            exchange=exchange,
-            segment=segment,
-            symbol=symbol,
-            interval=interval,
-            months=months,
-            include_options=include_options,
-            include_bars=include_bars,
-            canonical_keys=canonical_keys,
-            per_file_pause=per_file_pause,
-        )
-
-    if lake_rust_waved_enabled():
-        from brutex.data.lake_rust_waved import scan_lake_via_rust
-
-        return scan_lake_via_rust(
-            lake_root,
-            exchange=exchange,
-            segment=segment,
-            symbol=symbol,
-            interval=interval,
-            months=months,
-            include_options=include_options,
-            include_bars=include_bars,
-            canonical_keys=canonical_keys,
-            per_file_pause=per_file_pause,
-            oracle=_python_arm,
-        )
-    return _python_arm()
-
-
-def _scan_lake_invariants_python(
-    lake_root: Path,
-    *,
-    exchange: str | None = None,
-    segment: str | None = None,
-    symbol: str | None = None,
-    interval: str | None = None,
-    months: Collection[tuple[int, int]] | None = None,
-    include_options: bool = True,
-    include_bars: bool = True,
-    canonical_keys: Collection[str] | None = None,
-    per_file_pause: Callable[[], None] | None = None,
-) -> LakeScanReport:
-    """The verbatim Python scanner body — the Wave-D seam's live parity oracle.
-
-    Every law lives on the public :func:`scan_lake_invariants` docstring;
-    this twin exists so the flag-ON facade can re-run the EXACT Python arm
-    as its degrade/burn-in oracle (the ``read_1m`` seam precedent).
-    """
-    started = time.perf_counter()
-    month_scope = set(months) if months is not None else None
-    findings: list[LakeFinding] = []
-    files_scanned = 0
-    files_skipped = 0
-    engine_files = 0
-    engine_files_skipped = 0
-    first_skipped_by_kind: dict[str, str] = {}
-
-    def _note_first_skip(skipped: Path, *, parse: bool = False) -> None:
-        """Remember the FIRST skipped file (O(1) — used to NAME it in the CLI).
-
-        Two kinds, parse-priority: the pre-streaming scanner noted every
-        PATH-parse failure during its whole-tree pre-index pass — i.e. BEFORE
-        any read skip anywhere — so a parse skip anywhere in the tree beat a
-        read skip anywhere. The streaming walk interleaves the two in walk
-        order; keeping the first of EACH kind and preferring ``parse`` at
-        report build preserves the old ``first_skipped_path`` exactly
-        (DEC-LAKE-INVARIANTS-PREINDEX-001).
-        """
-        kind = "parse" if parse else "read"
-        first_skipped_by_kind.setdefault(kind, str(skipped))
-
-    series_scanned = 0
-    files_by_segment: dict[str, int] = {}
-    if include_bars:
-        symbol_dirs: dict[tuple[str, str], set[str]] = {}
-        for candidates in _iter_series_candidates(
-            lake_root, exchange=exchange, segment=segment, symbol=symbol, interval=interval
-        ):
-            entries: list[tuple[PartitionCoords, Path]] = []
-            for path in candidates:
-                try:
-                    parsed = parse_partition_path(path, lake_root=lake_root)
-                except PartitionError:
-                    files_skipped += 1
-                    _note_first_skip(path, parse=True)
-                    # DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review MAJOR): an
-                    # ENGINE-index file whose PATH fails to parse (a non-integer /
-                    # month-13 year dir under bars/NSE/INDEX/NIFTY/...) is STILL an
-                    # unreadable engine file — derive its (exchange, segment,
-                    # symbol) POSITIONALLY from the walk's leaf-glob tail
-                    # (`_iter_series_candidates` guarantees the six-segment
-                    # bars/exch/seg/sym/interval/yyyy/mm.parquet shape) so it flips
-                    # the engine verdict too. Without this the CLI/json
-                    # mis-attribute it as a reference-only skip ("ENGINE verified
-                    # CLEAN") while doctor — which scopes per-coord and counts ALL
-                    # skips — FAILs, so the two disagree.
-                    if _engine_coord_from_path(path, lake_root) in ENGINE_INDEX_COORDS:
-                        engine_files_skipped += 1
-                    continue
-                coords = PartitionCoords(
-                    exchange=cast(str, parsed["exchange"]),
-                    segment=cast(str, parsed["segment"]),
-                    symbol=cast(str, parsed["symbol"]),
-                    interval=cast(str, parsed["interval"]),
-                    year=cast(int, parsed["year"]),
-                    month=cast(int, parsed["month"]),
-                )
-                # Fed on every successful PARSE — including a month-scoped-out
-                # file — exactly as the old pre-index did (the legacy-drift fold
-                # must see a drifted symbol even when its only file is outside
-                # the L2 month scope).
-                symbol_dirs.setdefault((coords.exchange, coords.segment), set()).add(coords.symbol)
-                if month_scope is not None and (coords.year, coords.month) not in month_scope:
-                    continue  # the L2 scope bound — never read
-                entries.append((coords, path))
-            if not entries:
-                continue
-            # Numeric within-series order — byte-identical to the pre-streaming
-            # scanner (string-sorted year dirs would diverge for a non-4-digit
-            # year name; the parsed-int sort never cares).
-            entries.sort(key=lambda cp: (cp[0].year, cp[0].month))
-            scanned_in_series = 0
-            pending_overlap: list[tuple[int, PartitionCoords, set[datetime]]] = []
-            canonical_cache: dict[tuple[int, int], set[datetime] | None] = {}
-            for coords, path in entries:
-                try:
-                    frame = _read_key_columns(path, BAR_SCAN_COLUMNS)
-                except parquet_read_skip_errors() as exc:
-                    # DEC-ALIEN-SCHEMA-READ-HEAL-001: a readable file MISSING a
-                    # scan column is the deterministic alien-schema class — a
-                    # real finding (the healer quarantines it), never a bare
-                    # WARN the dashboard read side skips forever. Any other
-                    # failure stays the plain transient-tolerant scan_skip.
-                    alien_reason = _missing_columns_reason(path, BAR_SCAN_COLUMNS)
-                    if alien_reason is not None:
-                        alien = SchemaAlienFile(path=path, reason=alien_reason, coords=coords)
-                        log_lake_finding(alien)
-                        findings.append(alien)
-                    else:
-                        _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
-                    files_skipped += 1
-                    _note_first_skip(path)
-                    if (coords.exchange, coords.segment, coords.symbol) in ENGINE_INDEX_COORDS:
-                        # A skipped ENGINE-index file (unreadable / schema-drifted) is
-                        # NEVER classified — so it must flip the census verdict, else
-                        # "0 findings" reads silently green over engine corruption
-                        # (DEC-AUDIT-CENSUS-HONESTY-001).
-                        engine_files_skipped += 1
-                    _pause(per_file_pause)
-                    continue
-                _pause(per_file_pause)
-                dtype_reason = _bar_dtype_alien_reason(frame.schema)
-                if dtype_reason is not None:
-                    # Non-temporal timestamp / non-numeric OHLC: the dup/
-                    # foreign/price classification is meaningless (and a Utf8
-                    # OHLC column previously crashed the whole scan inside
-                    # count_price_violations) — emit the alien finding and skip.
-                    alien = SchemaAlienFile(path=path, reason=dtype_reason, coords=coords)
-                    log_lake_finding(alien)
-                    findings.append(alien)
-                    files_skipped += 1
-                    continue
-                timestamps = frame.get_column("timestamp")
-                try:
-                    # Round-18 MAJOR fold (the bars twin of the options gate):
-                    # a hand-planted Datetime column holding an out-of-
-                    # ``datetime``-range i64 value (e.g. ``2**62`` µs) makes
-                    # ``_count_foreign_rows``'s ``min()`` raise
-                    # ``OverflowError`` and ``_foreign_timestamps``'s
-                    # ``to_list()`` PANIC (``pyo3_runtime.PanicException``, a
-                    # BaseException) — pre-fix that ONE file crashed the WHOLE
-                    # scan from OUTSIDE the read try/except above. Classified
-                    # under the COMMON fault set → the file is skipped LOUDLY
-                    # + counted like an unreadable one (bars path stays raw —
-                    # catalogued coordinates, the established convention).
-                    dup, foreign = classify_bar_keys(coords, timestamps)
-                    foreign_ts: set[datetime] = (
-                        set()
-                        if foreign is None
-                        else _foreign_timestamps((coords.year, coords.month), timestamps)
-                    )
-                    # Price-sanity census (DEC-STORED-DATA-VALIDATION-001): rides
-                    # the SAME per-file read (BAR_SCAN_COLUMNS carries the OHLC
-                    # columns), one vectorized pass. OBSERVE-ONLY — the healer
-                    # never consumes it.
-                    bad_rows = count_price_violations(frame)
-                except datetime_out_of_range_errors() as exc:
-                    _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
-                    files_skipped += 1
-                    _note_first_skip(path)
-                    if (coords.exchange, coords.segment, coords.symbol) in ENGINE_INDEX_COORDS:
-                        # The out-of-range skip is the SAME never-classified class
-                        # (DEC-AUDIT-CENSUS-HONESTY-001) — flip the verdict here too.
-                        engine_files_skipped += 1
-                    continue
-                files_scanned += 1
-                scanned_in_series += 1
-                files_by_segment[coords.segment] = files_by_segment.get(coords.segment, 0) + 1
-                if (coords.exchange, coords.segment, coords.symbol) in ENGINE_INDEX_COORDS:
-                    engine_files += 1
-                if dup is not None:
-                    dup = replace(dup, path=path)
-                    log_lake_finding(dup)
-                    findings.append(dup)
-                if foreign is not None:
-                    foreign = replace(foreign, path=path)
-                    pending_overlap.append((len(findings), coords, foreign_ts))
-                    findings.append(foreign)
-                if bad_rows:
-                    price_finding = PriceSanityRows(path=path, coords=coords, bad_rows=bad_rows)
-                    log_lake_finding(price_finding)
-                    findings.append(price_finding)
-            if scanned_in_series:
-                series_scanned += 1
-            for idx, coords, foreign_ts in pending_overlap:
-                overlap = _classify_overlap(
-                    lake_root, coords, foreign_ts, per_file_pause, canonical_cache
-                )
-                updated = replace(cast(ForeignMonthRows, findings[idx]), overlap_rows=overlap)
-                log_lake_finding(updated)
-                findings[idx] = updated
-
-        for drift in detect_legacy_drift(
-            {key: sorted(names) for key, names in symbol_dirs.items()},
-            lake_root=lake_root,
-            canonical_keys=canonical_keys,
-        ):
-            log_lake_finding(drift)
-            findings.append(drift)
-
-    option_files_scanned = 0
-    option_files_skipped = 0
-    if include_options:
-        options_root = lake_root / OPTIONS_DIR_NAME
-        if options_root.is_symlink():
-            # Round-2 MAJOR fold (Vector 1): ``is_dir()`` FOLLOWS a symlinked
-            # ``options/`` root, and the series dirs inside its target are
-            # REAL dirs, so the per-series probe below never fires — the
-            # whole outside tree would be scanned and its findings handed to
-            # the healer. Skipped loudly, like a series-dir symlink.
-            _LOG.warning("lake.invariant.symlink_skipped", path=str(options_root))
-        elif options_root.is_dir():
-            # Any dir containing *.parquet is scanned — no regex gate, an
-            # unrecognized series dir is still checked (Golden Rule #1). A
-            # SYMLINKED series dir is skipped LOUDLY (hostile-review fold):
-            # the healer's primitives unlink/rmdir/create INSIDE a series
-            # dir; a SYMLINKED partition FILE is skipped loudly too (round-4
-            # fold — see the per-file probe below). HONEST (round-2): these
-            # scan-time probes are best-effort only — defeated by a symlinked
-            # options ROOT (guarded above) and by a path swapped to a symlink
-            # AFTER the scan (TOCTOU). The ENFORCEMENT lives at the writer's
-            # heal-side boundary: ``OptionParquetWriter._assert_options_containment``
-            # refuses any heal-side read/write/unlink whose RESOLVED path
-            # escapes ``<lake_root>/options/``, at heal time.
-            for series_dir in sorted(p for p in options_root.iterdir() if p.is_dir()):
-                if series_dir.is_symlink():
-                    # repr() — the SERIES component is a vendor-influenceable
-                    # dir name (``_safe_segment`` strips no control chars), so
-                    # every option-tree skip event's path rides repr() (the
-                    # round-8 log-injection fold, #907 convention). The
-                    # options-ROOT skip above stays raw: ``<lake_root>/options``
-                    # is the operator-configured root + a fixed literal, with
-                    # no vendor-derived component.
-                    _LOG.warning("lake.invariant.symlink_skipped", path=repr(str(series_dir)))
-                    continue
-                option_canonical_cache: dict[
-                    tuple[int, int], set[tuple[str | None, datetime]] | None
-                ] = {}
-                pending_option_overlap: list[tuple[int, set[tuple[str | None, datetime]]]] = []
-                for path in sorted(series_dir.glob("*.parquet")):
-                    home = _option_file_month(path)
-                    if month_scope is not None and (home is None or home not in month_scope):
-                        # The L2 scope bound — never read (bars precedent).
-                        # Checked BEFORE the symlink probe (round-5 NIT fold):
-                        # the bound is a pure filename parse, so an
-                        # out-of-scope symlinked file is silently
-                        # scope-skipped like any other out-of-scope file —
-                        # neither warned nor counted (the unbounded L3 sweep
-                        # still warns on it).
-                        continue
-                    if path.is_symlink():
-                        # Round-4 MINOR fold (refuter-confirmed): the root +
-                        # series-dir probes above never check the PARTITION
-                        # FILE itself — a symlinked <YYYY-MM>.parquet was
-                        # scanned, classified OptionForeignMonthRows, and
-                        # handed to the healer, whose consistent read followed
-                        # the link OUTSIDE the lake; the copy-forward leg then
-                        # IMPORTED the outside rows into an in-lake canonical
-                        # file (dest.parent is a REAL series dir, so the
-                        # write-leg containment passed) while the source
-                        # removal was refused — a permanently non-converging
-                        # finding. Never scanned ⇒ never healed; skipped
-                        # loudly like the dir probes (the writer's
-                        # read/mutation containment is the TOCTOU-safe rail).
-                        # repr() — the path embeds the vendor-influenceable
-                        # series dir name (round-8 log-injection fold).
-                        _LOG.warning("lake.invariant.symlink_skipped", path=repr(str(path)))
-                        option_files_skipped += 1
-                        _note_first_skip(path)
-                        continue
-                    try:
-                        frame = _read_key_columns(path, UNIQUE_KEY_OPTIONS)
-                    except parquet_read_skip_errors() as exc:
-                        # The options-tree twin of the bars-loop alien
-                        # classification (missing-column only — deterministic
-                        # schema property, DEC-ALIEN-SCHEMA-READ-HEAL-001).
-                        alien_reason = _missing_columns_reason(path, UNIQUE_KEY_OPTIONS)
-                        if alien_reason is not None:
-                            alien = SchemaAlienFile(
-                                path=path, reason=alien_reason, series=series_dir.name
-                            )
-                            log_lake_finding(alien)
-                            findings.append(alien)
-                        else:
-                            # repr() on the path — the round-8 log-injection
-                            # fold; repr() on the error too (round-17): the
-                            # polars read error message embeds the RAW vendor-
-                            # influenceable path (see `_canonical_option_keys`
-                            # — the same fold).
-                            _LOG.warning(
-                                "lake.invariant.scan_skip",
-                                path=repr(str(path)),
-                                error=repr(str(exc)),
-                            )
-                        option_files_skipped += 1
-                        _note_first_skip(path)
-                        _pause(per_file_pause)
-                        continue
-                    _pause(per_file_pause)
-                    dtype_error = option_key_dtype_error(frame)
-                    if dtype_error is not None:
-                        # Round-12 fold: a nested (List/Struct) key dtype reads
-                        # back unhashable Python values — classifying it would
-                        # TypeError-crash the WHOLE scan. Skipped loudly like
-                        # an unreadable file; repr() on the path (round-8
-                        # log-injection convention).
-                        _LOG.warning(
-                            "lake.invariant.scan_skip", path=repr(str(path)), error=dtype_error
-                        )
-                        option_files_skipped += 1
-                        _note_first_skip(path)
-                        continue
-                    try:
-                        # Round-18 residual guard: the gate's min/max probe
-                        # above already verdicts an out-of-``datetime``-range
-                        # column (months are contiguous — a convertible min +
-                        # max bounds every value), so this arm is defense in
-                        # depth for any RESIDUAL Python-conversion fault the
-                        # probe cannot foresee — isolated per FILE (loud skip,
-                        # counted) instead of aborting the whole scan (the
-                        # rounds-3/5/12/13 isolation-escape class).
-                        option_dup, option_foreign = classify_option_keys(
-                            path, series_dir.name, home, frame
-                        )
-                        option_keys: set[tuple[str | None, datetime]] = (
-                            set()
-                            if option_foreign is None
-                            else _option_foreign_keys(
-                                (option_foreign.year, option_foreign.month), frame
-                            )
-                        )
-                    except datetime_out_of_range_errors() as exc:
-                        # repr() on the path — the round-8 log-injection
-                        # convention; repr() on the error (round-17: a raised
-                        # message may embed the raw vendor path).
-                        _LOG.warning(
-                            "lake.invariant.scan_skip", path=repr(str(path)), error=repr(str(exc))
-                        )
-                        option_files_skipped += 1
-                        _note_first_skip(path)
-                        continue
-                    option_files_scanned += 1
-                    if option_dup is not None:
-                        log_lake_finding(option_dup)
-                        findings.append(option_dup)
-                    if option_foreign is not None:
-                        pending_option_overlap.append((len(findings), option_keys))
-                        findings.append(option_foreign)
-                for idx, keys in pending_option_overlap:
-                    found = cast(OptionForeignMonthRows, findings[idx])
-                    overlap = _classify_option_overlap(
-                        series_dir, keys, per_file_pause, option_canonical_cache
-                    )
-                    updated_option = replace(found, overlap_rows=overlap)
-                    log_lake_finding(updated_option)
-                    findings[idx] = updated_option
-
-    report = LakeScanReport(
-        findings=tuple(findings),
-        files_scanned=files_scanned,
-        files_skipped=files_skipped,
-        series_scanned=series_scanned,
-        option_files_scanned=option_files_scanned,
-        option_files_skipped=option_files_skipped,
-        duration_s=time.perf_counter() - started,
-        files_by_segment=tuple(sorted(files_by_segment.items())),
-        engine_files=engine_files,
-        engine_files_skipped=engine_files_skipped,
-        first_skipped_path=first_skipped_by_kind.get("parse", first_skipped_by_kind.get("read")),
+    return scan_lake_via_rust(
+        lake_root,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        interval=interval,
+        months=months,
+        include_options=include_options,
+        include_bars=include_bars,
+        canonical_keys=canonical_keys,
+        per_file_pause=per_file_pause,
     )
-    _LOG.info(
-        "lake.invariant.scan_complete",
-        files=report.files_scanned + report.option_files_scanned,
-        findings=len(report.findings),
-        duration_ms=round(report.duration_s * 1000.0, 3),
-    )
-    return report
 
 
 # ── census ───────────────────────────────────────────────────────────────────

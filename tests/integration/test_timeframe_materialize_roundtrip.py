@@ -755,7 +755,11 @@ def test_month_bounded_read_never_touches_other_months(tmp_path: Path) -> None:
 
     jan_1m = tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute" / "2021" / "01.parquet"
     jan_1m.write_bytes(b"not a parquet file")
-    with pytest.raises(pl.exceptions.PolarsError):  # the whole-tree scan trips on Jan
+    # W-6a: the native read surfaces the corrupt file as the typed
+    # quarantining ResampleInputError (the endgame read-isolation class).
+    from brutex.data.errors import ResampleInputError
+
+    with pytest.raises(ResampleInputError):  # the whole-tree scan trips on Jan
         materialize_lake_timeframes(
             lake_root=tmp_path,
             exchange=_EXCHANGE,

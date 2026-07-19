@@ -68,7 +68,6 @@ uncatalogued by design.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import math
 import os
@@ -107,11 +106,7 @@ from brutex.data.lake_invariants import (
     OptionIntraFileDup,
     PriceSanityRows,
     SchemaAlienFile,
-    is_foreign_timestamp,
-    option_key_dtype_error,
-    option_unclassifiable_message,
     scan_lake_invariants,
-    utc_aware,
 )
 from brutex.data.lake_manifest import invalidate_manifest, record_dataset
 from brutex.data.lake_stats_manifest import (
@@ -120,14 +115,12 @@ from brutex.data.lake_stats_manifest import (
     remove_dataset_stats,
     stats_manifest_enabled,
 )
-from brutex.data.models import CandleBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionWriterError
-from brutex.data.parquet_writer import ParquetWriter, PartitionHealResult, WriteResult
+from brutex.data.parquet_writer import ParquetWriter, WriteResult
 from brutex.data.partition import (
     BAR_DIR_NAME,
     PARTITION_PATH_COMPONENTS,
     option_partition_stem,
-    partition_for_timestamp,
 )
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.spot_daily_resample import (
@@ -145,8 +138,6 @@ from brutex.data.timeframe_materialize import (
 from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:  # pragma: no cover
-    import polars as pl
-
     from brutex.data.catalog_reconcile import ReconcileResult
 
 _LOG = structlog.get_logger("brutex.data.lake_heal")
@@ -469,6 +460,10 @@ class HealReport:
 #: refuses such a file FIRST at the consistent read + the writer's keyed
 #: re-read; this membership is the defense-in-depth rail so any residual
 #: conversion fault is ONE counted error, never a whole-batch abort.
+#: W-6a endgame: the per-finding Python loop that caught this set was
+#: DELETED — the crate's ``HealErr::Isolated`` arm (``waved/heal.rs``) is the
+#: live twin of exactly this membership; the constant stays as the documented
+#: isolation LAW the crate mirrors (drift-pinned by the heal suites).
 _PER_FINDING_HEAL_ERRORS: Final[tuple[type[BaseException], ...]] = (
     WriterError,
     OptionWriterError,
@@ -622,14 +617,6 @@ def _relpath(lake_root: Path, path: Path) -> str:
     return path.relative_to(lake_root).as_posix()
 
 
-def _file_month(file: Path) -> tuple[int, int] | None:
-    """The ``(year, month)`` a ``<yyyy>/<mm>.parquet`` file addresses, or ``None``."""
-    try:
-        return int(file.parent.name), int(file.stem)
-    except ValueError:
-        return None
-
-
 def _stats_dataset_coords(lake_root: Path, source: Path) -> tuple[str, dict[str, str]] | None:
     """Derive *source*'s stats-manifest ``(kind, key)`` from its on-disk path.
 
@@ -707,651 +694,6 @@ def _quarantine_move(state: _BatchState, source: Path) -> Path:
         payload={"quarantine": str(dest)},
     )
     return dest
-
-
-def _write_bars_grouped_by_month(
-    state: _BatchState,
-    *,
-    exchange: str,
-    segment: str,
-    symbol: str,
-    interval: str,
-    bars: Sequence[CandleBar],
-) -> tuple[set[tuple[int, int]], int, int]:
-    """Write *bars* home through the NORMAL write path, one UTC month per write.
-
-    The ONE shared grouping loop behind the reassignment (§3.2) and drift-merge
-    (§3.3) heals: groups by :func:`~brutex.data.partition.partition_for_timestamp`
-    (so a legacy file that ALSO carries foreign-month rows lands each row in its
-    canonical month), writes ``merge_mode="keep-first"`` (a canonical file's
-    EXISTING row always WINS — a value mismatch records a
-    :class:`~brutex.data.parquet_writer.BarConflict`; a missing row is added),
-    and upserts each :class:`~brutex.data.parquet_writer.WriteResult` into the
-    catalog when one is wired.
-
-    Returns
-    -------
-    tuple[set[tuple[int, int]], int, int]
-        ``(months written, rows actually added, keep-first conflicts)``.
-    """
-    groups: dict[tuple[int, int], list[CandleBar]] = {}
-    for bar in bars:
-        groups.setdefault(partition_for_timestamp(bar.timestamp), []).append(bar)
-    moved = 0
-    conflicts = 0
-    for key in sorted(groups):
-        result = state.writer.write(
-            exchange=exchange,
-            segment=segment,
-            symbol=symbol,
-            interval=interval,
-            bars=groups[key],
-            merge_mode="keep-first",
-        )
-        moved += result.bars_added
-        conflicts += len(result.conflicts)
-        if state.catalog is not None:
-            entry = state.writer.make_catalog_entry(
-                exchange=exchange, segment=segment, symbol=symbol, interval=interval, result=result
-            )
-            state.catalog.upsert(entry)
-    return set(groups), moved, conflicts
-
-
-def _sync_catalog_after_heal(
-    state: _BatchState,
-    *,
-    exchange: str,
-    segment: str,
-    symbol: str,
-    interval: str,
-    year: int,
-    month: int,
-    result: PartitionHealResult,
-) -> None:
-    """Rotate/delete the healed partition's catalog row (Golden Rule #4)."""
-    if state.catalog is None:
-        return
-    if result.raw_hash_after is None:
-        state.catalog.delete_partition(
-            exchange=exchange,
-            segment=segment,
-            symbol=symbol,
-            interval=interval,
-            year=year,
-            month=month,
-        )
-    elif result.write is not None:
-        entry = state.writer.make_catalog_entry(
-            exchange=exchange,
-            segment=segment,
-            symbol=symbol,
-            interval=interval,
-            result=result.write,
-        )
-        state.catalog.upsert(entry)
-
-
-def _heal_dup(finding: IntraFileDup, state: _BatchState) -> bool:
-    """Heal one intra-file duplicate finding; ``True`` iff the file changed."""
-    path = finding.path
-    if not path.exists():
-        return False  # consumed by an earlier drift merge / reassignment move
-    coords = finding.coords
-    result = state.writer.heal_partition(path, quarantine_to=state.quarantine_path(path))
-    if not result.changed:
-        return False  # already clean (healed earlier in this batch) or probe abstain
-    state.quarantined_files += 1
-    _LOG.warning(
-        "lake_heal.partition_healed",
-        partition=coords.relpath(),
-        kept=result.kept,
-        dropped=result.dropped_duplicates,
-    )
-    state.actions.append(
-        HealAction(
-            action=AUDIT_HEAL_DEDUP,
-            partition=coords.relpath(),
-            kept=result.kept,
-            dropped=result.dropped_duplicates,
-            moved=0,
-            conflicts=0,
-            raw_hash_before=result.raw_hash_before,
-            raw_hash_after=result.raw_hash_after,
-            quarantine_path=str(state.quarantine_path(path)),
-        )
-    )
-    _audit_append(
-        state.audit,
-        action=AUDIT_HEAL_DEDUP,
-        subject=coords.relpath(),
-        payload={
-            "kept": result.kept,
-            "dropped_duplicates": result.dropped_duplicates,
-            "dropped_removed": result.dropped_removed,
-            "raw_hash_before": result.raw_hash_before,
-            "raw_hash_after": result.raw_hash_after,
-            "quarantine_path": str(state.quarantine_path(path)),
-        },
-    )
-    _sync_catalog_after_heal(
-        state,
-        exchange=coords.exchange,
-        segment=coords.segment,
-        symbol=coords.symbol,
-        interval=coords.interval,
-        year=coords.year,
-        month=coords.month,
-        result=result,
-    )
-    if coords.interval == "1minute":
-        state.touch(coords.exchange, coords.segment, coords.symbol, {(coords.year, coords.month)})
-    return True
-
-
-def _heal_foreign(finding: ForeignMonthRows, state: _BatchState) -> bool:
-    """Reassign one file's foreign-month rows home; ``True`` iff rows moved.
-
-    Crash-safe order = copy-forward FIRST (keep-first into the canonical month
-    files), remove SECOND (:meth:`~brutex.data.parquet_writer.ParquetWriter.heal_partition`
-    with ``remove_timestamps``) — a crash between the two leaves the rows in
-    BOTH files, the finding re-appears on the next scan, and the keep-first
-    union makes the re-run converge (idempotent). Locks are taken per partition
-    SEQUENTIALLY (write canonical → release → heal source) — never two
-    partitions locked at once, so no deadlock. A wholly-foreign source file is
-    quarantine-MOVED (and its catalog row deleted).
-    """
-    coords = finding.coords
-    src = finding.path
-    if not src.exists():
-        return False  # consumed by an earlier drift merge
-    bars = state.writer.read_partition_bars(src)
-    home = (coords.year, coords.month)
-    foreign = {ts: bar for ts, bar in bars.items() if partition_for_timestamp(ts) != home}
-    if not foreign:
-        return False  # stale finding — already reassigned (a prior crashed run)
-    months, moved, conflicts = _write_bars_grouped_by_month(
-        state,
-        exchange=coords.exchange,
-        segment=coords.segment,
-        symbol=coords.symbol,
-        interval=coords.interval,
-        bars=list(foreign.values()),
-    )
-    result = state.writer.heal_partition(
-        src, remove_timestamps=frozenset(foreign), quarantine_to=state.quarantine_path(src)
-    )
-    if not result.changed:
-        # Probe abstain (the #1067 "never guess" pin — mirrors _heal_dup): the
-        # source rows were NOT removed, so do NOT count/audit/touch. The
-        # copy-forward above is keep-first idempotent, the finding stays live,
-        # and the next scan re-runs the reassignment (convergent re-try).
-        return False
-    state.quarantined_files += 1
-    _LOG.warning(
-        "lake_heal.rows_reassigned",
-        partition=coords.relpath(),
-        moved=len(foreign),
-        added=moved,
-        # option_partition_stem — the §11 COMMON YYYY-MM formatter (round-18
-        # NIT: the round-16 collapse covered the OPTION healer's months list
-        # only; these three bars sites kept inline copies of the identical
-        # f-string). Byte-identical output.
-        months=[option_partition_stem(y, m) for y, m in sorted(months)],
-        conflicts=conflicts,
-    )
-    state.actions.append(
-        HealAction(
-            action=AUDIT_HEAL_REASSIGN,
-            partition=coords.relpath(),
-            kept=result.kept,
-            dropped=result.dropped_duplicates + result.dropped_removed,
-            moved=len(foreign),
-            conflicts=conflicts,
-            raw_hash_before=result.raw_hash_before,
-            raw_hash_after=result.raw_hash_after,
-            quarantine_path=str(state.quarantine_path(src)),
-        )
-    )
-    _audit_append(
-        state.audit,
-        action=AUDIT_HEAL_REASSIGN,
-        subject=coords.relpath(),
-        payload={
-            "moved": len(foreign),
-            "added": moved,
-            "months": [option_partition_stem(y, m) for y, m in sorted(months)],
-            "conflicts": conflicts,
-            "kept": result.kept,
-            "dropped_duplicates": result.dropped_duplicates,
-            "raw_hash_before": result.raw_hash_before,
-            "raw_hash_after": result.raw_hash_after,
-            "quarantine_path": str(state.quarantine_path(src)),
-        },
-    )
-    _sync_catalog_after_heal(
-        state,
-        exchange=coords.exchange,
-        segment=coords.segment,
-        symbol=coords.symbol,
-        interval=coords.interval,
-        year=coords.year,
-        month=coords.month,
-        result=result,
-    )
-    if coords.interval == "1minute":
-        touched = set(months)
-        touched.add(home)
-        state.touch(coords.exchange, coords.segment, coords.symbol, touched)
-    return True
-
-
-def _interval_merge_order(interval_dir: Path) -> tuple[int, str]:
-    """Sort key: ``1minute`` first, then ``1day``, then the derived rest."""
-    name = interval_dir.name
-    if name in _MERGE_INTERVALS:
-        return (_MERGE_INTERVALS.index(name), name)
-    return (len(_MERGE_INTERVALS), name)
-
-
-def _heal_drift(finding: LegacyKeyDrift, state: _BatchState) -> bool:
-    """Merge one drifted legacy symbol dir into its canonical dir; ``True`` iff files moved.
-
-    ``1minute`` + ``1day`` files are MERGED keep-first into the canonical
-    symbol (the canonical dir's stored bars WIN — the #1139 law; rows are
-    grouped by UTC month so a legacy file that also carries foreign rows lands
-    each row home); every OTHER interval dir (derived intraday TFs) is
-    quarantine-MOVED without merging — merging derived keep-first data would
-    freeze whichever landed first; the recall rebuilds it from the merged
-    ``1minute`` instead. Legacy files are quarantine-copied then unlinked; the
-    emptied legacy dirs are pruned; the legacy catalog rows are deleted.
-    """
-    drifted_dir = finding.drifted_dir
-    if not drifted_dir.is_dir():
-        return False  # already merged (a prior run)
-    merged_rows = 0
-    conflicts_total = 0
-    files_moved = 0
-    per_interval: dict[str, int] = {}
-    canonical_minute_months: set[tuple[int, int]] = set()
-    for interval_dir in sorted(
-        (p for p in drifted_dir.iterdir() if p.is_dir()), key=_interval_merge_order
-    ):
-        interval = interval_dir.name
-        files = sorted(interval_dir.rglob("*.parquet"))
-        for file in files:
-            if interval in _MERGE_INTERVALS:
-                bars = state.writer.read_partition_bars(file)
-                if bars:
-                    months, moved, conflicts = _write_bars_grouped_by_month(
-                        state,
-                        exchange=finding.exchange,
-                        segment=finding.segment,
-                        symbol=finding.canonical_symbol,
-                        interval=interval,
-                        bars=sorted(bars.values(), key=lambda b: b.timestamp),
-                    )
-                    merged_rows += moved
-                    conflicts_total += conflicts
-                    if interval == "1minute":
-                        canonical_minute_months |= months
-            _quarantine_move(state, file)
-            files_moved += 1
-            per_interval[interval] = per_interval.get(interval, 0) + 1
-            coords_month = _file_month(file)
-            if state.catalog is not None and coords_month is not None:
-                state.catalog.delete_partition(
-                    exchange=finding.exchange,
-                    segment=finding.segment,
-                    symbol=finding.drifted_symbol,
-                    interval=interval,
-                    year=coords_month[0],
-                    month=coords_month[1],
-                )
-    _prune_empty_dirs(drifted_dir)
-    subject = f"{finding.exchange}/{finding.segment}/{finding.drifted_symbol}"
-    _LOG.warning(
-        "lake_heal.drift_merged",
-        drifted=repr(finding.drifted_symbol),
-        canonical=repr(finding.canonical_symbol),
-        exchange=finding.exchange,
-        segment=finding.segment,
-        files=files_moved,
-        rows=merged_rows,
-        conflicts=conflicts_total,
-    )
-    state.actions.append(
-        HealAction(
-            action=AUDIT_HEAL_DRIFT_MERGE,
-            partition=subject,
-            kept=0,
-            dropped=0,
-            moved=merged_rows,
-            conflicts=conflicts_total,
-            raw_hash_before=None,
-            raw_hash_after=None,
-            quarantine_path=str(state.quarantine_root),
-        )
-    )
-    _audit_append(
-        state.audit,
-        action=AUDIT_HEAL_DRIFT_MERGE,
-        subject=subject,
-        payload={
-            "canonical": finding.canonical_symbol,
-            "files_by_interval": per_interval,
-            "rows_merged": merged_rows,
-            "conflicts": conflicts_total,
-            "quarantine_root": str(state.quarantine_root),
-        },
-    )
-    if canonical_minute_months:
-        state.touch(
-            finding.exchange, finding.segment, finding.canonical_symbol, canonical_minute_months
-        )
-    return True
-
-
-def _heal_option_dup(finding: OptionIntraFileDup, state: _BatchState) -> bool:
-    """Heal one options-tree ``(side, timestamp)`` dup file; ``True`` iff changed."""
-    path = finding.path
-    if not path.exists():
-        return False
-    result = state.option_writer.heal_partition(path, quarantine_to=state.quarantine_path(path))
-    if not result.changed:
-        return False
-    state.quarantined_files += 1
-    partition = f"{OPTIONS_DIR_NAME}/{finding.series}/{path.name}"
-    _LOG.warning(
-        "lake_heal.partition_healed",
-        # The partition token embeds the RAW attacker-influenceable series dir
-        # name, so the LOG field rides via repr() (the #907 convention — a
-        # control-char/ANSI-escape series name can't inject into the rendered
-        # log line); the HealAction/audit copies stay raw (JSON-encoded,
-        # machine-structured — round-7 NIT).
-        partition=repr(partition),
-        kept=result.kept,
-        dropped=result.dropped_duplicates,
-    )
-    state.actions.append(
-        HealAction(
-            action=AUDIT_HEAL_DEDUP,
-            partition=partition,
-            kept=result.kept,
-            dropped=result.dropped_duplicates,
-            moved=0,
-            conflicts=0,
-            raw_hash_before=None,
-            raw_hash_after=None,
-            quarantine_path=str(state.quarantine_path(path)),
-        )
-    )
-    _audit_append(
-        state.audit,
-        action=AUDIT_HEAL_DEDUP,
-        subject=partition,
-        payload={
-            "tree": "options",
-            "kept": result.kept,
-            "dropped_duplicates": result.dropped_duplicates,
-            "quarantine_path": str(state.quarantine_path(path)),
-        },
-    )
-    return True  # no catalog (the options tree is not catalogued), no recall
-
-
-def _heal_schema_alien(finding: SchemaAlienFile, state: _BatchState) -> bool:
-    """Quarantine-MOVE one schema-alien file whole; ``True`` iff it moved.
-
-    DEC-ALIEN-SCHEMA-READ-HEAL-001 — the heal for the finding the scanner now
-    emits where it previously only WARN-skipped: a file whose SCHEMA is alien
-    to its tree (missing canonical column / non-temporal timestamp /
-    non-numeric OHLC). The file's rows are UNREADABLE under the canonical
-    schema, so the heal is the whole-file quarantine move through the ONE
-    :func:`_quarantine_move` chokepoint (copy → fsync-rename → unlink; the
-    dataset + stats manifests invalidated; audited
-    ``LAKE_HEAL_QUARANTINE_FILE``) — strictly file-quarantining, NEVER
-    value-editing (rewriting an alien schema would fabricate data, Golden
-    Rule #1; the bytes stay recoverable under ``.quarantine/``). A bars-tree
-    alien additionally drops its catalog partition row (Golden Rule #4) and,
-    on the ``1minute`` interval, marks its month for the derived-data recall
-    (the derived TFs may embed whatever a permissive earlier reader made of
-    it). The :class:`~brutex.data.lake_heal.HealAction` row carries honest
-    ZERO row counts — an alien file's row count is unknowable without
-    trusting the alien schema.
-    """
-    path = finding.path
-    if not path.exists():
-        return False  # consumed by an earlier heal / already moved — skip, re-found next scan
-    dest = _quarantine_move(state, path)
-    coords = finding.coords
-    if coords is not None:
-        if state.catalog is not None:
-            state.catalog.delete_partition(
-                exchange=coords.exchange,
-                segment=coords.segment,
-                symbol=coords.symbol,
-                interval=coords.interval,
-                year=coords.year,
-                month=coords.month,
-            )
-        if coords.interval == "1minute":
-            state.touch(
-                coords.exchange, coords.segment, coords.symbol, {(coords.year, coords.month)}
-            )
-        partition = coords.relpath()
-    else:
-        partition = f"{OPTIONS_DIR_NAME}/{finding.series}/{path.name}"
-    # The LOG copy of an options-arm partition rides repr() — it embeds the
-    # RAW vendor-influenceable series dir name (the round-8/17 log-injection
-    # folds; the HealAction/audit copies stay raw, JSON-encoded machine
-    # surfaces — the _heal_option_foreign convention). Bars partitions stay
-    # raw everywhere (catalogued coordinates).
-    _LOG.warning(
-        "lake_heal.alien_file_quarantined",
-        partition=partition if coords is not None else repr(partition),
-        reason=finding.reason,
-    )
-    state.actions.append(
-        HealAction(
-            action=AUDIT_HEAL_QUARANTINE_FILE,
-            partition=partition,
-            kept=0,
-            dropped=0,
-            moved=0,
-            conflicts=0,
-            raw_hash_before=None,
-            raw_hash_after=None,
-            quarantine_path=str(dest),
-        )
-    )
-    return True
-
-
-def _option_foreign_frame(home: tuple[int, int], frame: pl.DataFrame) -> pl.DataFrame:
-    """The keep-first-unique foreign-month rows of one raw options frame (all columns).
-
-    Keep-first ``(side, timestamp)`` dedup BEFORE the split (a physically
-    duplicated foreign key moves ONCE, first physical row wins — mirrors
-    ``read_partition_bars``'s collapse on the bars path), then a Python row
-    mask over the ONE shared routing predicate
-    (:func:`~brutex.data.lake_invariants.is_foreign_timestamp` — §11 COMMON).
-    A null timestamp abstains (kept home, never moved) — the bars null-abstain
-    twin. Side is NEVER consulted (the timestamp-only routing law,
-    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001). The mask Series is EXPLICITLY
-    ``pl.Boolean`` (round-3 fold): a source truncated to ZERO rows in the
-    scan→heal window yields ``mask == []`` and a bare ``pl.Series([])`` is
-    dtype ``Null`` — polars raises ``TypeError`` from ``filter``, which is
-    NOT in ``_PER_FINDING_HEAL_ERRORS`` and would abort the WHOLE batch; the
-    typed empty mask instead filters to an empty frame, so the stale finding
-    takes the documented ``foreign.height == 0`` skip.
-    """
-    import polars as pl
-
-    deduped = frame.unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
-    mask = [is_foreign_timestamp(home, ts) for ts in deduped.get_column("timestamp").to_list()]
-    return deduped.filter(pl.Series(mask, dtype=pl.Boolean))
-
-
-def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) -> bool:
-    """Reassign one options-tree file's foreign-month rows home; ``True`` iff rows moved.
-
-    The options twin of :func:`_heal_foreign` — SAME crash-safe order:
-    copy-forward FIRST (keep-first union into the canonical month siblings via
-    :meth:`~brutex.data.option_parquet_writer.OptionParquetWriter.merge_partition_frame`
-    — an existing canonical ``(side, ts)`` key WINS, the foreign copy is then
-    simply REMOVED; an absent key is added = REASSIGNED), remove SECOND
-    (:meth:`~brutex.data.option_parquet_writer.OptionParquetWriter.heal_partition`
-    with ``remove_keys`` built from the SAME consistent read's RAW stored
-    values). A crash between the two leaves the rows in BOTH files; the
-    finding re-appears next scan and the keep-first union converges
-    (idempotent). Locks are taken per partition SEQUENTIALLY (read source →
-    release; merge sibling → release; heal source) — never two partitions
-    locked at once, no deadlock. Routing is timestamp-only through
-    :func:`~brutex.data.lake_invariants.utc_aware` (a hand-planted naive
-    column routes as-if-UTC instead of crashing the batch —
-    ``PartitionError`` is NOT in ``_PER_FINDING_HEAL_ERRORS``); removal keys
-    are the RAW stored tuples. A wholly-foreign file is quarantine-MOVED by
-    the writer. The source consistent read AND both mutation legs run under
-    the writer's symlink-containment rail
-    (``OptionParquetWriter._assert_options_containment``, the round-2 TOCTOU
-    fold + the round-4 read fold): a series dir OR partition file swapped to
-    a symlink between scan and heal is REFUSED with
-    :class:`OptionWriterError` — a member of ``_PER_FINDING_HEAL_ERRORS``, so
-    the refusal is an isolated counted error, nothing outside the lake is
-    ever mutated, and (round-4) outside rows are never IMPORTED into an
-    in-lake canonical file through a followed source read. No catalog (the options
-    tree is uncatalogued), no ``state.touch`` (NOTHING derives from
-    ``options/`` — recall stays ``None``), ``conflicts=0`` honestly (option
-    vendor-drift detection is the writer's own deferred follow-up — no
-    ``BarConflict`` twin exists). STRICTLY row-removing/row-reassigning —
-    moved rows keep their stored column values verbatim.
-
-    HONEST envelope (round-18 NIT, deliberately not mechanised): a
-    hand-planted NAIVE-timestamp source whose reassignment target month
-    already holds a TZ-AWARE canonical sibling never converges — the
-    copy-forward concat refuses the dtype mismatch (a ``PolarsError`` →
-    isolated counted error, nothing mutated, no loss), so the finding
-    re-appears every sweep (a permanent per-boot re-attempt, loud each time).
-    Casting the naive group to the sibling's zone would EDIT stored values —
-    against this module's row-moving-only law — so the loud isolated refusal
-    is the accepted behaviour for that hand-planted shape.
-    """
-    src = finding.path
-    if not src.exists():
-        return False  # consumed earlier / vanished — skipped
-    frame = state.option_writer.read_partition_frame(src)  # OptionWriterError → isolated
-    dtype_error = option_key_dtype_error(frame)
-    if dtype_error is not None:
-        # Round-12 fold: a scan→heal swap to a nested-key-dtype (List/Struct)
-        # file must be the documented ISOLATED refusal — the removal-key
-        # ``frozenset`` below hashes raw side/timestamp values, so an ungated
-        # frame raised ``TypeError`` (NOT in ``_PER_FINDING_HEAL_ERRORS``) and
-        # aborted the WHOLE batch (the round-3/round-5 isolation-escape
-        # class). Same gate as the scanner (§11 COMMON). This gate covers the
-        # CONSISTENT read only; ``heal_partition`` RE-reads the source under
-        # its own locks AFTER the merge legs below, and runs the SAME gate on
-        # that re-read (round-13 fold — pre-fix a swap in that second, wider
-        # window still aborted the batch through the ungated re-read).
-        raise OptionWriterError(option_unclassifiable_message(src, dtype_error))
-    home = (finding.year, finding.month)
-    foreign = _option_foreign_frame(home, frame)  # keep-first unique foreign rows, all cols
-    if foreign.height == 0:
-        return False  # stale finding (a prior crashed run) — skipped
-    sides = foreign.get_column("side").to_list()
-    stamps = foreign.get_column("timestamp").to_list()
-    keys = frozenset(zip(sides, stamps, strict=True))  # RAW stored values
-    # ONE-pass dict-group of row indices by home month (the bars twin's
-    # `_write_bars_grouped_by_month` O(rows) shape — review round-2 NIT: the
-    # prior per-month boolean-mask rebuild was O(months × rows)).
-    rows_by_month: dict[tuple[int, int], list[int]] = {}
-    for idx, ts in enumerate(stamps):
-        rows_by_month.setdefault(partition_for_timestamp(utc_aware(ts)), []).append(idx)
-    added = 0
-    # ASCENDING month order — deterministic merge order + audit/log `months`
-    # list regardless of physical row order (round-4 NIT: pinned by a
-    # descending-fixture regression, not fixture-order luck).
-    target_months = sorted(rows_by_month)
-    for target in target_months:
-        group = foreign[rows_by_month[target]]
-        dest = src.parent / f"{option_partition_stem(*target)}.parquet"
-        added += state.option_writer.merge_partition_frame(dest, group)
-    result = state.option_writer.heal_partition(
-        src, remove_keys=keys, quarantine_to=state.quarantine_path(src)
-    )
-    if not result.changed:
-        return False  # defensive convergence guard (the _heal_foreign symmetry)
-    state.quarantined_files += 1
-    partition = f"{OPTIONS_DIR_NAME}/{finding.series}/{src.name}"
-    # option_partition_stem — the §11 COMMON stem source (round-16 NIT: this
-    # audit/log months list was a FIFTH f-string copy bypassing the round-15
-    # helper; byte-identical output, one formatter to drift).
-    months_str = [option_partition_stem(y, m) for y, m in target_months]
-    _LOG.warning(
-        "lake_heal.rows_reassigned",  # the SAME pinned event as bars
-        # repr() — the token embeds the RAW series dir name (round-7 NIT: the
-        # #907 log-injection guard covers the partition field too; the
-        # HealAction/audit copies stay raw, JSON-encoded machine surfaces).
-        partition=repr(partition),
-        series=repr(finding.series),  # RAW filesystem dir name — the #907 repr() convention
-        tree="options",
-        moved=len(keys),
-        added=added,
-        months=months_str,
-        conflicts=0,
-    )
-    state.actions.append(
-        HealAction(
-            action=AUDIT_HEAL_REASSIGN,
-            partition=partition,
-            kept=result.kept,
-            dropped=result.dropped_duplicates + result.dropped_removed,
-            moved=len(keys),
-            conflicts=0,
-            raw_hash_before=None,  # uncatalogued — the _heal_option_dup precedent
-            raw_hash_after=None,
-            quarantine_path=str(state.quarantine_path(src)),
-        )
-    )
-    _audit_append(
-        state.audit,
-        action=AUDIT_HEAL_REASSIGN,
-        subject=partition,
-        payload={
-            "tree": "options",  # the _heal_option_dup convention
-            "moved": len(keys),
-            "added": added,
-            "months": months_str,
-            "kept": result.kept,
-            "dropped_duplicates": result.dropped_duplicates,
-            "dropped_removed": result.dropped_removed,
-            "quarantine_path": str(state.quarantine_path(src)),
-        },
-    )
-    return True
-
-
-def _heal_one(finding: _HealableFinding, state: _BatchState) -> bool:
-    """Dispatch one finding to its heal algorithm; ``True`` iff it healed.
-
-    Typed over :data:`_HealableFinding` — a
-    :class:`~brutex.data.lake_invariants.PriceSanityRows` finding NEVER
-    reaches this dispatch (:func:`heal_findings` filters it up-front,
-    observe-only — DEC-STORED-DATA-VALIDATION-001), and the narrowed union
-    makes routing a non-healable type here a TYPE error, not a silent
-    mis-heal.
-    """
-    if isinstance(finding, LegacyKeyDrift):
-        return _heal_drift(finding, state)
-    if isinstance(finding, ForeignMonthRows):
-        return _heal_foreign(finding, state)
-    if isinstance(finding, IntraFileDup):
-        return _heal_dup(finding, state)
-    if isinstance(finding, OptionForeignMonthRows):
-        return _heal_option_foreign(finding, state)
-    if isinstance(finding, OptionIntraFileDup):
-        return _heal_option_dup(finding, state)
-    return _heal_schema_alien(finding, state)
 
 
 # ── the Wave-D Rust heal seam (DEC-RUST-LAKE-WAVED-001, design §B2) ──────────
@@ -1642,25 +984,27 @@ def _rust_heal_on_event(state: _BatchState) -> Callable[[str, dict[str, Any]], N
 
 def _rust_heal_route(
     ordered: tuple[_HealableFinding, ...], state: _BatchState
-) -> tuple[int, int, int] | None:
-    """Route the batch mutation core through the Wave-D crate (flag-ON only).
+) -> tuple[int, int, int]:
+    """Route the batch mutation core through the Wave-D crate (the ONE arm).
 
     Returns ``(healed, skipped, errors)`` with *state* mutated exactly as the
-    verbatim per-finding loop would (actions, quarantined-file count, the
-    touched-``1minute`` recall driver), or ``None`` = run the verbatim Python
-    loop (flag OFF / crate not ready / an out-of-envelope batch — ALL
-    zero-mutation states, certified by the crate's read-only preflight). The
-    §B2 asymmetry: NO burn-in, NO degrade around the engaged call — any
-    exception out of it is LOUD (mutation may have happened; the healer is
-    idempotent-convergent, so the posture is the documented Python re-run
-    next batch/boot). ``lake_write_guard`` wraps the call so the crate's
-    real ``OSError(ENOSPC)`` maps to ``LakeWriteHalt("disk_full")`` exactly
-    as the writers' own guards do on the Python arm.
+    retired per-finding Python loop did (actions, quarantined-file count, the
+    touched-``1minute`` recall driver). W-6a endgame
+    (DEC-RUST-LAKE-WAVED-001): the crate is the ONLY heal implementation —
+    an absent/stale wheel raises the typed loud
+    :class:`~brutex.data.errors.LakeRustWavedUnavailableError` (never a
+    silent no-heal), and an OUT-OF-ENVELOPE finding is a per-finding
+    ISOLATED crate-side refusal (counted in ``errors`` + logged through the
+    pinned ``lake_heal.partition_error`` replay — the batch continues; the
+    old whole-batch ``degrade`` state is retired). The §B2 asymmetry stands:
+    NO degrade around the engaged call — any exception out of it is LOUD
+    (mutation may have happened; the healer is idempotent-convergent, so the
+    posture is the documented re-run next batch/boot). ``lake_write_guard``
+    wraps the call so the crate's real ``OSError(ENOSPC)`` maps to
+    ``LakeWriteHalt("disk_full")`` exactly as the writers' own guards do.
     """
-    from brutex.data.lake_rust_waved import heal_batch_via_rust, lake_rust_waved_enabled
+    from brutex.data.lake_rust_waved import heal_batch_via_rust
 
-    if not lake_rust_waved_enabled():
-        return None
     serialized = _serialize_rust_findings(ordered)
     with lake_write_guard():
         outcome = heal_batch_via_rust(
@@ -1669,8 +1013,6 @@ def _rust_heal_route(
             findings=serialized,
             on_event=_rust_heal_on_event(state),
         )
-    if outcome is None:
-        return None
     for action in cast("list[dict[str, Any]]", outcome["actions"]):
         state.actions.append(HealAction(**action))
     state.quarantined_files += cast(int, outcome["quarantined_files"])
@@ -1687,20 +1029,6 @@ def _rust_heal_route(
         cast(int, outcome["skipped"]),
         cast(int, outcome["errors"]),
     )
-
-
-def _prune_empty_dirs(root: Path) -> None:
-    """Remove *root*'s now-empty subdirs bottom-up, then *root* itself if empty."""
-    if not root.is_dir():
-        return
-    subdirs = sorted(
-        (p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True
-    )
-    for path in subdirs:
-        with contextlib.suppress(OSError):
-            path.rmdir()
-    with contextlib.suppress(OSError):
-        root.rmdir()
 
 
 # ── derived-data recall ──────────────────────────────────────────────────────
@@ -2265,49 +1593,16 @@ def heal_findings(
             files_scanned=files_scanned,
             mode=resolved,
         )
-    # The Wave-D Rust seam (DEC-RUST-LAKE-WAVED-001 §B2): flag-ON, an
-    # engaged-set batch's MUTATION CORE runs in the crate with every side
-    # effect replayed through `_rust_heal_on_event`; `None` = every
-    # zero-mutation fallback state (flag OFF — the default, byte-identical —
-    # crate not ready, or a batch the crate's read-only preflight degrades),
-    # and the verbatim Python loop below runs exactly as today.
-    rust_counts = _rust_heal_route(ordered, state) if ordered else None
-    if rust_counts is not None:
-        healed, skipped, errors = rust_counts
-    else:
-        for finding in ordered:
-            # Liveness beat per healed finding
-            # (DEC-HEAL-SCAN-LIVENESS-BEATS-001): each heal is a
-            # quarantine-copy + partition rewrite — seconds on a big month
-            # file — and the batch runs on the beat-watched pull worker.
-            emit_progress_beat()
-            try:
-                did_heal = _heal_one(finding, state)
-            except LakeWriteHalt:
-                raise  # disk-full/OOM = pull-wide graceful stop, never swallowed
-            except _PER_FINDING_HEAL_ERRORS as exc:
-                errors += 1
-                _LOG.warning(
-                    "lake_heal.partition_error",
-                    finding=type(finding).__name__,
-                    partition=_finding_token(finding),
-                    # repr() — round-16 NIT: an OptionWriterError message
-                    # embeds the RAW vendor-derived options/<series>/ path
-                    # (containment refusals + the unclassifiable-partition
-                    # verdicts interpolate the dest), so the raw exception
-                    # text re-entered THIS attacker-triggerable site around
-                    # the round-9 token guard; a newline/ANSI series name
-                    # must not forge log lines here (#907). Other lake_heal
-                    # error= fields keep the repo-wide raw-exception-message
-                    # convention (operator-controlled or catalogued
-                    # subjects).
-                    error=repr(str(exc)),
-                )
-                continue
-            if did_heal:
-                healed += 1
-            else:
-                skipped += 1
+    # The Wave-D mutation core (DEC-RUST-LAKE-WAVED-001 §B2, W-6a endgame):
+    # the batch's MUTATION CORE runs in the `brutex_lake` crate — the ONLY
+    # heal implementation since the Python per-finding loop was deleted —
+    # with every side effect (log/audit/catalog/stats/manifest/beat)
+    # replayed through `_rust_heal_on_event`. Per-finding isolation
+    # (LakeWriteHalt propagation, the pinned `lake_heal.partition_error`
+    # WARN with its #907 repr law, the out-of-envelope isolated refusal) is
+    # CRATE-OWNED and replayed through the same pinned Python sinks.
+    if ordered:
+        healed, skipped, errors = _rust_heal_route(ordered, state)
     recall_report: RecallReport | None = None
     if recall and state.touched_minute:
         # Session-close-aware forming-session cutoff (DEC-DAILY-CUTOFF-
@@ -2548,81 +1843,25 @@ def lake_content_token(lake_root: Path) -> str:
     (``lake_heal.token_walk_skipped`` — the old ``rglob`` suppressed the
     same race silently), deterministically hashing the surviving entries.
 
-    Wave-D Rust seam (DEC-RUST-LAKE-WAVED-001 §C-5): flag-ON, the walk
-    routes through the crate twin with the full W-1 read-surface doctrine —
-    degrade-to-oracle, burn-in token compare, skip events replayed through
-    the SAME two pinned WARN sites via :func:`_replay_token_skip` (the
-    ``repr()`` law applied here, where the events are owned). Flag OFF (the
-    default) is byte-identical — the verbatim Python walk below.
+    Wave-D endgame (DEC-RUST-LAKE-WAVED-001 §C-5, W-6a): the walk is
+    Rust-ONLY — the crate twin owns it (the Python walk was deleted; the
+    frozen differential expectations are the behavior pin), with skip events
+    replayed through the SAME two pinned WARN sites via
+    :func:`_replay_token_skip` (the ``repr()`` law applied here, where the
+    events are owned). An absent/stale wheel raises the typed loud
+    :class:`~brutex.data.errors.LakeRustWavedUnavailableError`.
     """
-    from brutex.data.lake_rust_waved import lake_content_token_via_rust, lake_rust_waved_enabled
+    from brutex.data.lake_rust_waved import lake_content_token_via_rust
 
-    if lake_rust_waved_enabled():
-        return lake_content_token_via_rust(
-            lake_root=str(lake_root),
-            on_skip=_replay_token_skip,
-            oracle=lambda: _lake_content_token_python(lake_root),
-        )
-    return _lake_content_token_python(lake_root)
+    return lake_content_token_via_rust(
+        lake_root=str(lake_root),
+        on_skip=_replay_token_skip,
+    )
 
 
 def _replay_token_skip(event: str, path: str, error: str) -> None:
     """Replay one crate walk-skip through the pinned WARN sites (the repr law)."""
     _LOG.warning(event, path=repr(path), error=repr(error))
-
-
-def _lake_content_token_python(lake_root: Path) -> str:
-    """The verbatim Python content-token walk — the live Wave-D parity oracle."""
-    hasher = hashlib.sha256()
-    for tree in (BAR_DIR_NAME, OPTIONS_DIR_NAME):
-        base = lake_root / tree
-        if not base.is_dir():
-            continue
-        stack: list[Path] = [base]
-        while stack:
-            directory = stack.pop()
-            try:
-                children = sorted(directory.iterdir())
-            except OSError as exc:
-                _LOG.warning(
-                    "lake_heal.token_walk_skipped",
-                    path=repr(str(directory)),
-                    error=repr(str(exc)),
-                )
-                continue
-            subdirs: list[Path] = []
-            for path in children:
-                if path.name.endswith(".parquet"):
-                    try:
-                        stat = path.lstat()
-                    except OSError as exc:
-                        # Deleted between listing and stat — the same lake
-                        # content minus the vanished entry hashes identically
-                        # (deterministic skip). error= repr()'d for the
-                        # rounds-8/9/16/17 escaped-payload convention —
-                        # belt-and-braces here: CPython's OSError.__str__
-                        # already repr()s its filename (refuter-verified, so
-                        # THIS site was not a demonstrated forge channel), but
-                        # the message is vendor-path-derived like the options
-                        # scan_skip siblings round-17 escaped, so it joins the
-                        # convention.
-                        _LOG.warning(
-                            "lake_heal.token_stat_skipped",
-                            path=repr(str(path)),
-                            error=repr(str(exc)),
-                        )
-                        continue
-                    line = (
-                        f"{path.relative_to(lake_root).as_posix()}"
-                        f"|{stat.st_size}|{stat.st_mtime_ns}\n"
-                    )
-                    hasher.update(line.encode("utf-8"))
-                if path.is_dir() and not path.is_symlink():
-                    subdirs.append(path)
-            # LIFO stack + reversed sorted subdirs = depth-first in sorted
-            # order — deterministic for identical lake content.
-            stack.extend(reversed(subdirs))
-    return hasher.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

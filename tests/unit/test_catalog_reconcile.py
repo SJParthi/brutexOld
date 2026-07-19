@@ -214,13 +214,8 @@ class TestReconcile:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
             assert result == ReconcileResult(partitions_reconciled=0, bars_total=0, skipped=1)
 
-    @pytest.mark.parametrize("waved_flag", ["0", "1"])
-    def test_skips_zero_row_partition(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, waved_flag: str
-    ) -> None:
-        # BOTH arms explicitly (W-5): the "0" leg pins the PYTHON oracle's
-        # zero-row `return None` skip; the "1" leg the crate's `None` wire.
-        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", waved_flag)
+    def test_skips_zero_row_partition(self, tmp_path: Path) -> None:
+        # W-6a: the crate's zero-row `None` wire is the ONE skip arm.
         empty = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2021" / "01.parquet"
         empty.parent.mkdir(parents=True)
         pl.DataFrame({"timestamp": pl.Series([], dtype=pl.Datetime("us", "UTC"))}).write_parquet(
@@ -299,7 +294,8 @@ class TestReconcile:
         skips = [e for e in logs if e["event"] == "catalog.reconcile.parquet_skip"]
         assert len(skips) == 1
         assert "BANKNIFTY" in skips[0]["path"]
-        assert "out of range" in str(skips[0]["error"])
+        # W-6a wording: the crate's native out-of-range verdict.
+        assert "datetime range" in str(skips[0]["error"])
 
     def test_reconciled_partition_is_get_bars_readable(self, tmp_path: Path) -> None:
         # The whole point: after reconcile, get_bars (the sweep read path) returns bars.
@@ -324,57 +320,60 @@ class TestReconcile:
 
 
 class TestWavedSeam:
-    """The flag gate around the per-file scan body (DEC-RUST-LAKE-WAVED-001).
+    """The endgame seam around the per-file scan (DEC-RUST-LAKE-WAVED-001 W-6a).
 
-    Wheel-free by design: the flag-ON arm poisons ``sys.modules`` so the
-    facade's import guard latches and the ORACLE (the verbatim
-    ``_scan_file``) serves — proving the routed branch is
-    behaviour-identical without the crate; the real-wheel parity gate is
-    ``tests/integration/test_waved_reconcile_differential.py``.
+    The Python ``_scan_file`` core is DELETED: every per-file scan routes
+    through ``reconcile_file_via_rust`` unconditionally, a SET retired flag
+    refuses loudly, and an absent wheel is the typed loud refusal.
     """
 
-    def test_flag_off_never_calls_the_facade(
+    @pytest.mark.parametrize("raw", ["0", "1"])
+    def test_set_retired_flag_refuses_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        from brutex.data.errors import LakeRustWavedFlagRemovedError
+
+        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", raw)
+        _write_partition(tmp_path, n=3)
+        with _open(tmp_path) as cat, pytest.raises(LakeRustWavedFlagRemovedError):
+            reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+
+    def test_every_file_dispatches_through_the_facade(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The never-routes bomb spy: flag OFF must not touch the routing
-        # function at all. EXPLICIT "0" since the W-5 default flip (unset
-        # now resolves ON) — the OFF-arm teeth are unchanged.
+        # The positive dispatch pin (the retired bomb-spy's inversion).
         import brutex.data.catalog_reconcile as cr
 
-        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+        seen: list[str] = []
+        real = cr.reconcile_file_via_rust
 
-        def _bomb(**kwargs: object) -> object:
-            raise AssertionError("reconcile_file_via_rust must not run flag-OFF")
+        def _spy(*, path: str, coords: object) -> object:
+            seen.append(path)
+            return real(path=path, coords=coords)
 
-        monkeypatch.setattr(cr, "reconcile_file_via_rust", _bomb)
+        monkeypatch.setattr(cr, "reconcile_file_via_rust", _spy)
         _write_partition(tmp_path, n=3)
         with _open(tmp_path) as cat:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
         assert result.partitions_reconciled == 1
+        assert len(seen) == 1 and seen[0].endswith("01.parquet")
 
-    def test_flag_on_without_crate_serves_the_oracle_identically(
+    def test_absent_wheel_raises_the_typed_unavailable_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Flag ON + an absent wheel: the facade latches crate_unavailable and
-        # every per-file call serves the verbatim Python body — the result is
-        # byte-identical to the flag-OFF run over the same lake.
         import sys
 
         from brutex.data import lake_rust_waved as lrw
+        from brutex.data.errors import LakeRustWavedUnavailableError
 
         _write_partition(tmp_path, n=4)
-        with _open(tmp_path) as cat:
-            baseline = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
-        monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
-        monkeypatch.setitem(sys.modules, "brutex_lake", None)  # ImportError → latch
+        monkeypatch.setitem(sys.modules, "brutex_lake", None)  # ImportError shape
         lrw.reset_lake_rust_waved_for_tests()
         try:
-            with _open(tmp_path) as cat:
-                routed = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+            with _open(tmp_path) as cat, pytest.raises(LakeRustWavedUnavailableError):
+                reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
         finally:
             lrw.reset_lake_rust_waved_for_tests()
-        assert routed == baseline
-        assert routed.partitions_reconciled == 1 and routed.bars_total == 4
 
 
 # ────────────────────────────────────────────────────────────────────────

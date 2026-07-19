@@ -1,22 +1,27 @@
-"""Wave-D W-3 reconcile differential — flag-ON ≡ flag-OFF on real-writer lakes.
+"""W-6a ENDGAME reconcile gate — Rust-arm determinism + frozen expectations.
 
-The real-wheel parity gate for the ``BRUTEX_LAKE_WAVED_RUST`` reconcile seam
-(Wave-D design §E-4): lakes are built through the PRODUCTION writers
-(:class:`~brutex.data.parquet_writer.ParquetWriter` — plus raw pyarrow poison
-plants for the skip/finding arms), then the SAME
-``reconcile_catalog_from_lake`` runs flag-OFF (the Python oracle) into one
-catalog and flag-ON in the post-burn-in steady state
-(``reset_lake_rust_waved_for_tests(remaining=0)`` — the crate scan served
-raw, no oracle cushioning) into a TWIN catalog, and the results are compared
-at ``ReconcileResult`` strength (findings included), catalog-ROW strength
-(every ``CatalogEntry`` — the ``raw_hash`` sha256 exactness is the
-run-identity tooth, Golden Rule #4: it feeds the FR-CAT-004
-``data_snapshot_hash`` rollup, pinned here too), and LOG-EVENT strength (the
-``catalog.reconcile.parquet_skip`` + ``lake.invariant.*`` streams — the
-degrade-to-oracle law makes the skip payloads byte-identical).
+THE FLIP LANDED (DEC-RUST-LAKE-WAVED-001 / Wave-D design §E-4): the Python
+``_scan_file`` core is DELETED, so the pre-endgame flag-ON≡flag-OFF twin
+run has no Python arm left. This suite is the reconcile seam's real-wheel
+verification in the endgame shape: lakes are built through the PRODUCTION
+writers (:class:`~brutex.data.parquet_writer.ParquetWriter` — plus raw
+pyarrow poison plants for the skip/finding arms), reconciled through the
+ONE Rust-backed ``reconcile_catalog_from_lake``, and pinned at
 
-Skips cleanly when the installed wheel predates the Wave-D W-3 API (the
-lockstep law: crate and repo move together).
+* determinism — TWIN runs into TWIN catalogs → ``ReconcileResult``-equal,
+  catalog-ROW-equal (every ``CatalogEntry``), log-EVENT-equal;
+* FROZEN expectations — the reconciled/skipped/finding counts, the naive-ts
+  ``_as_utc`` spans and the legacy-drift event captured while the
+  Python-parity differential was green (the pre-delete record);
+* the ``raw_hash`` sha256 EXACTNESS tooth (Golden Rule #4: it feeds the
+  FR-CAT-004 ``data_snapshot_hash`` rollup — pinned against an independent
+  ``hashlib`` oracle);
+* the GAP-#9 per-file isolation law (one poison never kills the pass) and
+  the stat-cache warm-hit law (a warm pass never consults the crate).
+
+Requires the built ``brutex_lake`` wheel — a production PREREQUISITE since
+W-6a; skips honestly when absent (the unit suites own the wheel-free
+typed-refusal story).
 """
 
 # pyright: reportPrivateUsage=none
@@ -36,8 +41,10 @@ pytest.importorskip("duckdb")
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
 _crate = pytest.importorskip("brutex_lake")
-if not callable(getattr(_crate, "waved_reconcile_file", None)):
-    pytest.skip("installed brutex_lake wheel lacks the Wave-D W-3 API", allow_module_level=True)
+if not callable(getattr(_crate, "waved_endgame_witness", None)):
+    pytest.skip(
+        "installed brutex_lake wheel predates the W-6a endgame API", allow_module_level=True
+    )
 
 from brutex.data import lake_rust_waved as lrw  # noqa: E402
 from brutex.data.catalog import Catalog  # noqa: E402
@@ -45,6 +52,7 @@ from brutex.data.catalog_reconcile import (  # noqa: E402
     ReconcileResult,
     reconcile_catalog_from_lake,
 )
+from brutex.data.errors import LakeRustWavedFlagRemovedError  # noqa: E402
 from brutex.data.models import CandleBar  # noqa: E402
 from brutex.data.parquet_writer import ParquetWriter  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
@@ -52,8 +60,7 @@ from structlog.testing import capture_logs  # noqa: E402
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
-#: The compared log-event families (everything else — e.g. the facade's own
-#: ``lake_rust_waved.engaged`` INFO — is arm-specific observability).
+#: The compared log-event families (everything else is run-local telemetry).
 _COMPARED_EVENTS = frozenset(
     {
         "catalog.reconcile.parquet_skip",
@@ -66,8 +73,8 @@ _COMPARED_EVENTS = frozenset(
 
 
 @pytest.fixture(autouse=True)
-def _flag_off_and_fresh(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Default every test to flag OFF + a fresh facade view."""
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The ONE Rust path: retired flag unset, module state reset each test."""
     monkeypatch.delenv(lrw.LAKE_WAVED_RUST_ENV, raising=False)
     lrw.reset_lake_rust_waved_for_tests()
     yield
@@ -153,25 +160,8 @@ def _dest(lake: Path, symbol: str, *, year: int = 2024, month: int = 7) -> Path:
     )
 
 
-def _run_off(lake: Path, **kwargs: Any) -> tuple[ReconcileResult, Path, list[Any]]:
-    """Flag-OFF reconcile into its own catalog; return (result, catalog path, events)."""
-    cat_path = lake / "cat_off.duckdb"
-    with Catalog.open(cat_path) as cat, capture_logs() as logs:
-        result = reconcile_catalog_from_lake(lake_root=lake, catalog=cat, **kwargs)
-    return result, cat_path, _compared(logs)
-
-
-def _run_on(
-    lake: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    remaining: int = 0,
-    cat_name: str = "cat_on.duckdb",
-    **kwargs: Any,
-) -> tuple[ReconcileResult, Path, list[Any]]:
-    """Flag-ON reconcile (default: post-burn-in steady state) into a twin catalog."""
-    monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
-    lrw.reset_lake_rust_waved_for_tests(remaining=remaining)
+def _run(lake: Path, *, cat_name: str, **kwargs: Any) -> tuple[ReconcileResult, Path, list[Any]]:
+    """One reconcile through the ONE Rust path into its own catalog."""
     cat_path = lake / cat_name
     with Catalog.open(cat_path) as cat, capture_logs() as logs:
         result = reconcile_catalog_from_lake(lake_root=lake, catalog=cat, **kwargs)
@@ -209,10 +199,8 @@ def _rows(cat_path: Path, series: Sequence[tuple[str, str, str]]) -> list[Any]:
     return rows
 
 
-class TestCleanLakeParity:
-    def test_twin_catalog_rows_and_snapshot_hash_equal(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+class TestCleanLakeEndgame:
+    def test_twin_runs_deterministic_and_frozen(self, tmp_path: Path) -> None:
         # Multi-symbol, multi-month, cross-exchange — the real-writer shape.
         _write_partition(tmp_path, symbol="NIFTY", month=1)
         _write_partition(tmp_path, symbol="NIFTY", month=2, n=3)
@@ -223,42 +211,40 @@ class TestCleanLakeParity:
             ("NSE", "INDEX", "BANKNIFTY"),
             ("BSE", "INDEX", "SENSEX"),
         ]
-        off, cat_off, off_events = _run_off(tmp_path)
-        on, cat_on, on_events = _run_on(tmp_path, monkeypatch)
-        assert on == off
-        assert off == ReconcileResult(partitions_reconciled=4, bars_total=14, skipped=0)
-        assert _rows(cat_on, series) == _rows(cat_off, series)
-        assert on_events == off_events == []
-        assert not lrw.rust_waved_disabled()
+        run_a, cat_a, events_a = _run(tmp_path, cat_name="cat_a.duckdb")
+        run_b, cat_b, events_b = _run(tmp_path, cat_name="cat_b.duckdb")
+        assert run_a == run_b
+        # FROZEN: the pre-delete parity record's exact result.
+        assert run_a == ReconcileResult(partitions_reconciled=4, bars_total=14, skipped=0)
+        assert _rows(cat_a, series) == _rows(cat_b, series)
+        assert events_a == events_b == []
         # The FR-CAT-004 rollup — the run-identity consumer of raw_hash.
         window = {
             "start": datetime(2020, 1, 1, tzinfo=UTC),
             "end": datetime(2022, 1, 1, tzinfo=UTC),
         }
-        with Catalog.open(cat_off) as a, Catalog.open(cat_on) as b:
-            hash_off = a.data_snapshot_hash(
+        with Catalog.open(cat_a) as a, Catalog.open(cat_b) as b:
+            hash_a = a.data_snapshot_hash(
                 exchange="NSE",
                 segment="INDEX",
                 symbols=["NIFTY", "BANKNIFTY"],
                 interval="1minute",
                 **window,
             )
-            hash_on = b.data_snapshot_hash(
+            hash_b = b.data_snapshot_hash(
                 exchange="NSE",
                 segment="INDEX",
                 symbols=["NIFTY", "BANKNIFTY"],
                 interval="1minute",
                 **window,
             )
-        assert hash_on == hash_off
+        assert hash_a == hash_b
 
-    def test_flag_on_raw_hash_is_sha256_of_file_bytes(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The independent sha256 oracle on the ROUTED arm (Golden Rule #4).
+    def test_raw_hash_is_sha256_of_file_bytes(self, tmp_path: Path) -> None:
+        # The independent sha256 oracle (Golden Rule #4).
         path = _write_partition(tmp_path, n=3)
-        _, cat_on, _ = _run_on(tmp_path, monkeypatch)
-        with Catalog.open(cat_on) as cat:
+        _, cat_path, _ = _run(tmp_path, cat_name="cat.duckdb")
+        with Catalog.open(cat_path) as cat:
             entry = cat.get(
                 exchange="NSE",
                 segment="INDEX",
@@ -273,14 +259,13 @@ class TestCleanLakeParity:
     def test_crate_is_genuinely_engaged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Anti-vacuous: the steady-state ON arm must actually consult the
-        # crate once per readable file (a silently-latched seam would make
-        # every parity assertion vacuous).
+        # Anti-vacuous: the pass must actually consult the crate once per
+        # readable file (a silently-inert seam would make every frozen
+        # assertion vacuous).
         _write_partition(tmp_path, symbol="NIFTY")
         _write_partition(tmp_path, symbol="BANKNIFTY")
         calls: list[tuple[Any, Any]] = []
-        crate = _live_crate()  # the module the facade will resolve (not the
-        # collection-time binding — a sibling suite may have re-imported it)
+        crate = _live_crate()
         real = crate.waved_reconcile_file
 
         def _spy(path: str, home: Any) -> Any:
@@ -288,16 +273,25 @@ class TestCleanLakeParity:
             return real(path, home)
 
         monkeypatch.setattr(crate, "waved_reconcile_file", _spy)
-        on, _, _ = _run_on(tmp_path, monkeypatch)
-        assert on.partitions_reconciled == 2
+        result, _, _ = _run(tmp_path, cat_name="cat.duckdb")
+        assert result.partitions_reconciled == 2
         assert len(calls) == 2
         assert all(home is not None for _, home in calls)  # check_invariants=True default
 
-
-class TestPoisonParity:
-    def test_findings_skips_and_events_equal_on_a_poisoned_lake(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("raw", ["0", "1", "junk"])
+    def test_set_retired_flag_refuses_before_any_reconcile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: str
     ) -> None:
+        """The retired-flag law at the reconcile seam: ANY set value refuses."""
+        _write_partition(tmp_path, n=2)
+        monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, raw)
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:  # noqa: SIM117
+            with pytest.raises(LakeRustWavedFlagRemovedError, match="no longer flag-gated"):
+                reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+
+
+class TestPoisonEndgame:
+    def test_poisoned_lake_frozen_verdict_and_determinism(self, tmp_path: Path) -> None:
         # One GOOD partition + the poison shapes: a dup+foreign plant, a
         # corrupt garbage file, an out-of-datetime-range stamp, a zero-row
         # file, an unparseable exchange dir, a metachar (bracket) symbol dir.
@@ -323,42 +317,35 @@ class TestPoisonParity:
             tmp_path / "bars" / "NSE" / "INDEX" / "NIF[12]" / "1minute" / "2021" / "01.parquet"
         )
         _plant_raw(bracket, [june])
-        off, cat_off, off_events = _run_off(tmp_path)
-        on, cat_on, on_events = _run_on(tmp_path, monkeypatch)
-        assert on == off
-        # good + dup/foreign plant reconcile; corrupt + OOR + zero-row +
-        # bad-exchange + bracket dir are the five skips.
-        assert off.partitions_reconciled == 2
-        assert off.skipped == 5
-        assert len(off.findings) == 2
-        assert on_events == off_events
-        skip_events = [e for e in on_events if e["event"] == "catalog.reconcile.parquet_skip"]
+        run_a, cat_a, events_a = _run(tmp_path, cat_name="cat_a.duckdb")
+        run_b, cat_b, events_b = _run(tmp_path, cat_name="cat_b.duckdb")
+        assert run_a == run_b
+        # FROZEN: good + dup/foreign plant reconcile; corrupt + OOR +
+        # zero-row + bad-exchange + bracket dir are the five GAP-#9 skips.
+        assert run_a.partitions_reconciled == 2
+        assert run_a.skipped == 5
+        assert len(run_a.findings) == 2
+        assert events_a == events_b
+        skip_events = [e for e in events_a if e["event"] == "catalog.reconcile.parquet_skip"]
         assert {Path(str(e["path"])).parts[-4] for e in skip_events} == {"CORRUPT", "OORANGE"}
         oor_event = next(e for e in skip_events if "OORANGE" in str(e["path"]))
-        assert "out of range" in str(oor_event["error"])
+        assert "outside the representable datetime range" in str(oor_event["error"])
         series = [("NSE", "INDEX", "NIFTY"), ("NSE", "INDEX", "BANKNIFTY")]
-        assert _rows(cat_on, series) == _rows(cat_off, series)
-        assert not lrw.rust_waved_disabled()
+        assert _rows(cat_a, series) == _rows(cat_b, series)
 
-    def test_per_file_isolation_one_poison_never_kills_the_pass(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_per_file_isolation_one_poison_never_kills_the_pass(self, tmp_path: Path) -> None:
         _write_partition(tmp_path, symbol="NIFTY", n=6)
         corrupt = _dest(tmp_path, "AAACORRUPT")  # sorts FIRST — poison before good
         corrupt.parent.mkdir(parents=True)
         corrupt.write_bytes(b"garbage")
-        off, _, _ = _run_off(tmp_path)
-        on, cat_on, _ = _run_on(tmp_path, monkeypatch)
-        assert on == off
-        assert on.partitions_reconciled == 1 and on.skipped == 1
-        with Catalog.open(cat_on) as cat:
+        result, cat_path, _ = _run(tmp_path, cat_name="cat.duckdb")
+        assert result.partitions_reconciled == 1 and result.skipped == 1
+        with Catalog.open(cat_path) as cat:
             assert cat.count() == 1
 
-    def test_naive_and_non_utc_tz_columns_parity(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_naive_and_non_utc_tz_columns_frozen_spans(self, tmp_path: Path) -> None:
         # A NAIVE hand-plant (defensive _as_utc arm) + an aware NON-UTC tz
-        # plant: first/last spans must land identically in both catalogs.
+        # plant: the first/last spans are the frozen _as_utc law.
         naive = _dest(tmp_path, "NAIVE", year=2024, month=6)
         _plant_raw(
             naive,
@@ -371,73 +358,50 @@ class TestPoisonParity:
             [datetime(2024, 6, 3, 4, 2, tzinfo=UTC)],
             ts_type=pa.timestamp("us", tz="Asia/Kolkata"),
         )
-        off, cat_off, _ = _run_off(tmp_path)
-        on, cat_on, _ = _run_on(tmp_path, monkeypatch)
-        assert on == off
-        assert on.partitions_reconciled == 2
+        run_a, cat_a, _ = _run(tmp_path, cat_name="cat_a.duckdb")
+        run_b, cat_b, _ = _run(tmp_path, cat_name="cat_b.duckdb")
+        assert run_a == run_b
+        assert run_a.partitions_reconciled == 2
         series = [("NSE", "INDEX", "NAIVE"), ("NSE", "INDEX", "ISTTZ")]
-        rows_on = _rows(cat_on, series)
-        assert rows_on == _rows(cat_off, series)
-        naive_row = next(r for r in rows_on if r.symbol == "NAIVE")
-        # The naive wall time stamped UTC — the _as_utc law, both arms.
+        rows_a = _rows(cat_a, series)
+        assert rows_a == _rows(cat_b, series)
+        naive_row = next(r for r in rows_a if r.symbol == "NAIVE")
+        # FROZEN: the naive wall time stamped UTC — the _as_utc law.
         assert naive_row.first_ts == datetime(2024, 6, 3, 9, 15, tzinfo=UTC)
         assert naive_row.last_ts == datetime(2024, 6, 4, 9, 15, tzinfo=UTC)
-        assert not lrw.rust_waved_disabled()
+        ist_row = next(r for r in rows_a if r.symbol == "ISTTZ")
+        # FROZEN: an aware non-UTC stamp folds to the same INSTANT in UTC.
+        assert ist_row.first_ts == datetime(2024, 6, 3, 4, 2, tzinfo=UTC)
 
-    def test_legacy_drift_parity(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_legacy_drift_frozen_event(self, tmp_path: Path) -> None:
         _write_partition(tmp_path, segment="CASH", symbol="M&M")
         _write_partition(tmp_path, segment="CASH", symbol="NSE-M&M")
-        off, _, off_events = _run_off(tmp_path)
-        on, _, on_events = _run_on(tmp_path, monkeypatch)
-        assert on == off
-        assert on_events == off_events
-        assert [e["event"] for e in on_events] == ["lake.invariant.legacy_key_drift"]
+        run_a, _, events_a = _run(tmp_path, cat_name="cat_a.duckdb")
+        run_b, _, events_b = _run(tmp_path, cat_name="cat_b.duckdb")
+        assert run_a == run_b
+        assert events_a == events_b
+        assert [e["event"] for e in events_a] == ["lake.invariant.legacy_key_drift"]
 
-    def test_check_invariants_false_parity(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_check_invariants_false_classifies_nothing(self, tmp_path: Path) -> None:
         _write_partition(tmp_path, symbol="NIFTY")
         june = datetime(2024, 6, 3, 4, 2, tzinfo=UTC)
         _plant_raw(_dest(tmp_path, "BANKNIFTY"), [june, june])  # a dup, unclassified
-        off, _, off_events = _run_off(tmp_path, check_invariants=False)
-        on, _, on_events = _run_on(tmp_path, monkeypatch, check_invariants=False)
-        assert on == off
-        assert on.findings == ()
-        assert on_events == off_events == []
+        result, _, events = _run(tmp_path, cat_name="cat.duckdb", check_invariants=False)
+        assert result.findings == ()
+        assert events == []
+        assert result.partitions_reconciled == 2
 
 
-class TestBurnInAndCache:
-    def test_burn_in_arm_matches_and_never_autoreverts(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A FRESH burn-in (full budget) over a poisoned lake: every engaged
-        # file compares crate-vs-oracle — any real divergence would latch;
-        # the seam must come out clean AND parity must hold.
-        _write_partition(tmp_path, symbol="NIFTY", n=4)
-        june = datetime(2024, 6, 3, 4, 2, tzinfo=UTC)
-        july = datetime(2024, 7, 3, 4, 3, tzinfo=UTC)
-        _plant_raw(_dest(tmp_path, "BANKNIFTY"), [june, july, july])
-        off, _, _ = _run_off(tmp_path)
-        on, _, _ = _run_on(tmp_path, monkeypatch, remaining=lrw.BURN_IN_SAMPLES)
-        assert on == off
-        assert not lrw.rust_waved_disabled()
-
-    def test_stat_cache_warm_hits_parity_and_skip_the_crate(
+class TestStatCache:
+    def test_stat_cache_warm_hits_skip_the_crate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The stat-cache branch stays Python: a warm second pass skips the
-        # per-file body entirely — in BOTH arms — so the ON arm's crate is
-        # never consulted on a warm hit.
+        # per-file body entirely — the crate is never consulted on a warm hit.
         _write_partition(tmp_path, symbol="NIFTY")
         _write_partition(tmp_path, symbol="BANKNIFTY")
-        cat_off = tmp_path / "cat_off.duckdb"
-        with Catalog.open(cat_off) as cat:
-            reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat, stat_cache=True)
-            off_warm = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat, stat_cache=True)
-        monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
-        lrw.reset_lake_rust_waved_for_tests(remaining=0)
-        cat_on = tmp_path / "cat_on.duckdb"
-        with Catalog.open(cat_on) as cat:
+        cat_path = tmp_path / "cat.duckdb"
+        with Catalog.open(cat_path) as cat:
             reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat, stat_cache=True)
             calls: list[str] = []
             crate = _live_crate()
@@ -448,21 +412,6 @@ class TestBurnInAndCache:
                 return real(path, home)
 
             monkeypatch.setattr(crate, "waved_reconcile_file", _spy)
-            on_warm = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat, stat_cache=True)
-        assert on_warm == off_warm
-        assert on_warm.stat_cache_hits == 2
+            warm = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat, stat_cache=True)
+        assert warm.stat_cache_hits == 2
         assert calls == []  # warm hits never reach the seam
-
-    def test_flag_off_run_in_this_suite_never_touches_the_crate(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The never-routes bomb spy at the CRATE boundary (the unit suite
-        # pins the facade boundary; this pins the real-wheel one).
-        _write_partition(tmp_path, n=3)
-
-        def _bomb(path: str, home: Any) -> Any:
-            raise AssertionError("the crate must never be consulted flag-OFF")
-
-        monkeypatch.setattr(_live_crate(), "waved_reconcile_file", _bomb)
-        off, _, _ = _run_off(tmp_path)
-        assert off.partitions_reconciled == 1

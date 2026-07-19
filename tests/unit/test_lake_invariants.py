@@ -64,21 +64,18 @@ from brutex.data.partition import build_partition_path
 
 
 @pytest.fixture(autouse=True)
-def _python_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin this suite to the EXPLICIT flag-OFF (Python oracle) arm.
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the ONE (Rust) scan arm with the retired flag guaranteed unset.
 
-    Conscious W-5 reconciliation (recorded in the Wave-D lane scratchpad):
-    since the ``BRUTEX_LAKE_WAVED_RUST`` default flipped ON, an unset env
-    routes ``scan_lake_invariants`` through the crate — but THIS suite is
-    the verbatim PYTHON scanner's verification (the live oracle the burn-in
-    + every degrade serve; its white-box read-count spies / injected faults
-    / log-text pins are Python-arm implementation contracts the engaged
-    crate deliberately does not share — deviation D-20), so it runs under
-    the operator kill switch. The crate arm's gates are the scan
-    differential (``tests/integration/test_waved_scan_differential.py``,
-    27/27 engaged) + the waved seam suite's explicit flag-ON tests.
+    W-6a endgame (DEC-RUST-LAKE-WAVED-001): the Python scan core is DELETED,
+    so this suite now verifies the production behavior THROUGH the crate —
+    the same lake fixtures, the same finding/census/log assertions. The
+    historical Python-internal spies (``_read_key_columns`` read counts,
+    walk-helper faults) were re-pointed onto the crate wire counters
+    (``last_rust_scan_reads``) or retired with the deleted internals
+    (design §F2 dispositions, recorded in the lane scratchpad).
     """
-    monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
 
 
 def _ts(minute: int, *, year: int = 2024, month: int = 6, day: int = 3) -> datetime:
@@ -446,28 +443,21 @@ class TestScanFindings:
         assert finding.foreign_rows == 1
         assert finding.overlap_rows == 1
 
-    def test_overlap_canonical_read_is_cached_per_series(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_overlap_canonical_read_is_cached_per_series(self, tmp_path: Path) -> None:
         # July AND August both carry the same June foreign key — the canonical
         # June sibling is read ONCE (per-series cache), not once per finding.
+        # W-6a: the read count rides the crate wire (`last_rust_scan_reads`,
+        # the §F2 seam the deleted `_read_key_columns` spy re-bound onto).
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         _write_bars(tmp_path, [_bar(_ts(1))])
         _plant_raw(_dest(tmp_path, month=7), [_ts(1), _ts(2, month=7, day=1)])
         _plant_raw(_dest(tmp_path, month=8), [_ts(1), _ts(2, month=8, day=1)])
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(tmp_path)
         foreigns = [f for f in report.findings if isinstance(f, ForeignMonthRows)]
         assert [f.overlap_rows for f in foreigns] == [1, 1]
         # 3 in-scope scans + exactly ONE targeted canonical re-read of June.
-        assert len(calls) == 4
-        assert calls.count(_dest(tmp_path)) == 2  # scanned once + canonical once
+        assert last_rust_scan_reads() == 4
 
     def test_overlap_unreadable_canonical_abstains(self, tmp_path: Path) -> None:
         # The canonical June file is garbage: the July finding stays honestly
@@ -590,58 +580,36 @@ class TestScanFindings:
 
 
 class TestScanBounds:
-    def test_months_filter_bounds_scan(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_months_filter_bounds_scan(self, tmp_path: Path) -> None:
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         _write_bars(tmp_path, [_bar(_ts(1)), _bar(_ts(1, month=7))])
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(tmp_path, months={(2024, 6)})
         assert report.files_scanned == 1
         assert report.files_skipped == 0
-        assert calls == [_dest(tmp_path)]  # the July file was never read
+        assert last_rust_scan_reads() == 1  # the July file was never read
 
-    def test_coordinate_filters(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_coordinate_filters(self, tmp_path: Path) -> None:
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         _write_bars(tmp_path, [_bar(_ts(1))])
         _write_bars(tmp_path, [_bar(_ts(2))], symbol="BANKNIFTY")
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(
             tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute"
         )
         assert report.files_scanned == 1
-        assert calls == [_dest(tmp_path)]
+        assert last_rust_scan_reads() == 1  # the BANKNIFTY file was never read
 
-    def test_single_read_per_file_spy(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Clean lake: exactly ONE key-column read per file — the scan bound.
+    def test_single_read_per_file_spy(self, tmp_path: Path) -> None:
+        # Clean lake: exactly ONE key-column read per file — the scan bound
+        # (W-6a: pinned via the crate's `reads_performed` wire counter).
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         _write_bars(tmp_path, [_bar(_ts(1)), _bar(_ts(1, month=7))])
         _write_bars(tmp_path, [_bar(_ts(2))], symbol="BANKNIFTY")
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(tmp_path)
         assert report.files_scanned == 3
-        assert len(calls) == 3
-        assert len(set(calls)) == 3
+        assert last_rust_scan_reads() == 3
 
     def test_per_file_pause_called_per_file(self, tmp_path: Path) -> None:
         _write_bars(tmp_path, [_bar(_ts(1)), _bar(_ts(1, month=7))])
@@ -716,23 +684,15 @@ class TestScanBounds:
         # canonical read = 3 ticks (a deleted error-arm pause reads 2 — killed).
         assert ticks["n"] == 3
 
-    def test_include_options_false_skips_options_tree(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_include_options_false_skips_options_tree(self, tmp_path: Path) -> None:
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         opt = tmp_path / "options" / "SERIES" / "2024-06.parquet"
         _plant_option_raw(opt, [("CE", _ts(1)), ("CE", _ts(1))])
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(tmp_path, include_options=False)
         assert report.findings == ()
         assert report.option_files_scanned == 0
-        assert calls == []
+        assert last_rust_scan_reads() == 0  # the dup-poisoned file never read
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -806,82 +766,6 @@ class TestStreamingWalk:
             _dest(tmp_path, symbol="BANKNIFTY", month=7),
             _dest(tmp_path, symbol="NIFTY"),
         ]
-
-    def test_child_dir_stat_fault_keeps_siblings(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Review fold (MINOR): ONE child's ``is_dir()`` OSError (EACCES /
-        EIO / ESTALE — the errnos 3.12 pathlib re-raises) skips THAT entry
-        only, never the whole level — the reviewer's repro: EIO on sibling B
-        must yield [A, C] (pre-fix the whole-comprehension guard returned
-        ``[]``, silently dropping the entire level; the old glob dropped only
-        the offending entry)."""
-        import errno
-
-        parent = tmp_path / "bars"
-        for name in ("A", "B", "C"):
-            (parent / name).mkdir(parents=True)
-        real_is_dir = Path.is_dir
-
-        def flaky_is_dir(self: Path, **kwargs: bool) -> bool:
-            if self.name == "B" and self.parent == parent:
-                raise OSError(errno.EIO, "Input/output error", str(self))
-            return real_is_dir(self, **kwargs)
-
-        monkeypatch.setattr(Path, "is_dir", flaky_is_dir)
-        assert li._child_dirs(parent, None) == [parent / "A", parent / "C"]
-        # The name filter still applies over the surviving entries.
-        assert li._child_dirs(parent, "C") == [parent / "C"]
-
-    def test_child_dirs_vanished_parent_yields_empty(self, tmp_path: Path) -> None:
-        """The whole-parent-listing guard is untouched by the per-child fold:
-        a vanished parent still yields ``[]`` (the old ``base.exists()``
-        guard generalised per level)."""
-        assert li._child_dirs(tmp_path / "bars" / "gone", None) == []
-
-    def test_streaming_resident_is_per_series_not_per_lake(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Mutant-killing memory-shape pin: the scan never materialises an
-        all-series index — while series B is being read, series A's candidate
-        list has already been dropped. Proven via a read spy that inspects
-        the live candidate objects the generator yielded (gc-refcount-free:
-        the spy records which series' lists are still referenced)."""
-        import gc
-        import weakref
-        from collections.abc import Iterator
-
-        class _TrackedList(list[Path]):  # a list SUBCLASS is weakref-able
-            pass
-
-        _write_bars(tmp_path, [_bar(_ts(1))], symbol="AAA")
-        _write_bars(tmp_path, [_bar(_ts(2))], symbol="BBB")
-        refs: list[weakref.ref[_TrackedList]] = []
-        real_iter = li._iter_series_candidates
-
-        def spying_iter(lake_root: Path, **filters: str | None) -> Iterator[list[Path]]:
-            for candidates in real_iter(lake_root, **filters):
-                tracked = _TrackedList(candidates)
-                refs.append(weakref.ref(tracked))
-                yield tracked
-
-        monkeypatch.setattr(li, "_iter_series_candidates", spying_iter)
-        alive_during_second: list[int] = []
-        real_read = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            if "BBB" in str(path):
-                gc.collect()
-                alive_during_second.append(sum(1 for r in refs if r() is not None))
-            return real_read(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
-        report = scan_lake_invariants(tmp_path)
-        assert report.files_scanned == 2
-        assert report.series_scanned == 2
-        # While series BBB was being read, ONLY its own candidate list was
-        # alive — AAA's was already collected (streaming, not pre-indexed).
-        assert alive_during_second == [1]
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1041,8 +925,29 @@ class TestOptionFileMonth:
             ("9999-12", (9999, 12)),  # MAXYEAR boundary
         ],
     )
-    def test_stem_parse_matrix(self, stem: str, expected: tuple[int, int] | None) -> None:
-        assert li._option_file_month(Path(f"options/S/{stem}.parquet")) == expected
+    def test_stem_parse_matrix(
+        self, tmp_path: Path, stem: str, expected: tuple[int, int] | None
+    ) -> None:
+        # W-6a: the pure `_option_file_month` helper was deleted with the
+        # Python scan core — the stem law is pinned at the SCAN level: a
+        # parseable canonical stem routes the out-of-home rows FOREIGN with
+        # the parsed (year, month) home; every other stem honestly abstains
+        # (dup-only treatment, no home month to route against).
+        june = _ts(1)
+        july = _ts(2, month=7, day=1)
+        _plant_option_raw(
+            tmp_path / "options" / "S" / f"{stem}.parquet", [("CE", june), ("CE", july)]
+        )
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        if expected is None:
+            assert foreigns == []
+        else:
+            (finding,) = foreigns
+            assert (finding.year, finding.month) == expected
+            # Home (2024, 6) keeps the June row; a boundary-year home routes
+            # BOTH rows foreign — the row count follows the parsed home.
+            assert finding.foreign_rows == (1 if expected == (2024, 6) else 2)
 
 
 class TestClassifyOptionKeys:
@@ -1176,11 +1081,12 @@ class TestOptionForeignScan:
         # Skipped once as a scanned file + once as the canonical targeted read.
         assert len(_events(logs, "lake.invariant.scan_skip")) == 2
 
-    def test_canonical_read_cached_per_series(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_canonical_read_cached_per_series(self, tmp_path: Path) -> None:
         # July AND August both carry the same June foreign key — the canonical
         # June sibling is read ONCE (per-series cache), not once per finding.
+        # W-6a: pinned via the crate wire read counter (`last_rust_scan_reads`).
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1))])
         _plant_option_raw(
             _opt_dest(tmp_path, "2024-07"), [("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))]
@@ -1188,39 +1094,22 @@ class TestOptionForeignScan:
         _plant_option_raw(
             _opt_dest(tmp_path, "2024-08"), [("CE", _ts(1)), ("PE", _ts(2, month=8, day=1))]
         )
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(tmp_path)
         foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
         assert [f.overlap_rows for f in foreigns] == [1, 1]
         # 3 in-scope scans + exactly ONE targeted canonical re-read of June.
-        assert len(calls) == 4
-        assert calls.count(_opt_dest(tmp_path, "2024-06")) == 2  # scanned + canonical
+        assert last_rust_scan_reads() == 4
 
-    def test_clean_option_file_pays_no_extra_read(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_clean_option_file_pays_no_extra_read(self, tmp_path: Path) -> None:
         # The min/max fast path: a clean file costs exactly ONE key read.
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1)), ("PE", _ts(2))])
         _plant_option_raw(_opt_dest(tmp_path, "2024-07"), [("CE", _ts(3, month=7, day=1))])
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(tmp_path)
         assert report.findings == ()
         assert report.option_files_scanned == 2
-        assert len(calls) == 2  # ONE read per file, ZERO canonical reads
+        assert last_rust_scan_reads() == 2  # ONE read per file, ZERO canonical reads
 
     def test_option_utc_not_ist_month_boundary(self, tmp_path: Path) -> None:
         # 2024-06-30 20:30 UTC = 2024-07-01 02:00 IST: the bar is HOME in the
@@ -1230,25 +1119,17 @@ class TestOptionForeignScan:
         report = scan_lake_invariants(tmp_path)
         assert report.findings == ()
 
-    def test_months_scope_skips_out_of_scope_before_reading(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_months_scope_skips_out_of_scope_before_reading(self, tmp_path: Path) -> None:
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1))])
         _plant_option_raw(_opt_dest(tmp_path, "2024-07"), [("CE", _ts(2, month=7, day=1))])
         # An unparsable-name file cannot be proven in scope — skipped too.
         _plant_option_raw(_opt_dest(tmp_path, "junk"), [("CE", _ts(3)), ("CE", _ts(3))])
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(tmp_path, months={(2024, 6)}, include_bars=False)
         assert report.option_files_scanned == 1
         assert report.option_files_skipped == 0
-        assert calls == [_opt_dest(tmp_path, "2024-06")]
+        assert last_rust_scan_reads() == 1  # only the in-scope June file was read
         assert report.findings == ()
 
     def test_overlap_counted_across_two_canonical_months(self, tmp_path: Path) -> None:
@@ -1394,28 +1275,21 @@ class TestOptionForeignScan:
         skips = _events(logs_in_scope, "lake.invariant.symlink_skipped")
         assert [s["path"] for s in skips] == [repr(str(_opt_dest(tmp_path, "2024-07")))]
 
-    def test_symlinked_canonical_sibling_abstains_unread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_symlinked_canonical_sibling_abstains_unread(self, tmp_path: Path) -> None:
         """Round-5 NIT: the targeted canonical-sibling overlap read now takes
         the SAME symlink skip as the main glob loop — warned loudly, NEVER
-        read (spy-pinned), overlap honestly unclassified (``None``). A
-        scan-time READ only (the writer's containment rail still refuses the
-        heal-side target) — but the scan must not follow the link either."""
+        read (pinned via the crate wire read counter), overlap honestly
+        unclassified (``None``). A scan-time READ only (the writer's
+        containment rail still refuses the heal-side target) — but the scan
+        must not follow the link either."""
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         outside = tmp_path / "outside"
         _plant_option_raw(outside / "2024-06.parquet", [("CE", _ts(1))])
         july = _opt_dest(tmp_path, "2024-07")
         _plant_option_raw(july, [("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))])
         june = _opt_dest(tmp_path, "2024-06")
         june.symlink_to(outside / "2024-06.parquet")
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         with capture_logs() as logs:
             report = scan_lake_invariants(tmp_path)
         assert report.option_files_scanned == 1  # July only
@@ -1423,7 +1297,7 @@ class TestOptionForeignScan:
         foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
         assert len(foreigns) == 1
         assert foreigns[0].overlap_rows is None  # honest abstain, never a guess
-        assert calls == [july]  # the linked canonical was NEVER read
+        assert last_rust_scan_reads() == 1  # July only — the linked canonical NEVER read
         skips = _events(logs, "lake.invariant.symlink_skipped")
         # Once from the glob loop, once from the targeted canonical read —
         # both repr()-guarded (round-8 fold).
@@ -1445,24 +1319,27 @@ class TestOptionForeignScan:
 
     def test_null_side_foreign_key_counted_and_keyed(self, tmp_path: Path) -> None:
         # A hand-planted NULL side with a foreign ts: counted foreign (routing
-        # is timestamp-only) AND carried raw in the key set — the scanner's
-        # count and the healer's movable set can never diverge (liveness).
+        # is timestamp-only — the null side rides verbatim as key payload).
+        # W-6a: the key-SET builder is crate-internal now; the movable-set
+        # liveness law is pinned by the heal differential's null-side case.
         july = _ts(1, month=7, day=1)
         _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(0)), (None, july)])
         report = scan_lake_invariants(tmp_path)
         foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
         assert len(foreigns) == 1
         assert foreigns[0].foreign_rows == 1
-        keys = li._option_foreign_keys(
-            (2024, 6), li._read_key_columns(_opt_dest(tmp_path, "2024-06"), ("side", "timestamp"))
-        )
-        assert keys == {(None, july)}
 
     def test_null_timestamp_abstains_from_key_set(self, tmp_path: Path) -> None:
-        # A null ts has no month to route — never in the foreign key set.
-        frame = _option_key_frame([("CE", None), ("PE", _ts(1, month=7, day=1))])
-        keys = li._option_foreign_keys((2024, 6), frame)
-        assert keys == {("PE", _ts(1, month=7, day=1))}
+        # A null ts has no month to route — never counted foreign (the crate
+        # key-set builder abstains exactly like the classify law).
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-06"),
+            [("CE", None), ("PE", _ts(1, month=7, day=1)), ("CE", _ts(0))],
+        )
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        assert foreigns[0].foreign_rows == 1  # July only — the null ts abstained
 
     def test_option_skip_event_paths_repr_guarded_control_char_series(self, tmp_path: Path) -> None:
         """Round-8 log-injection regression (refuter-confirmed MINOR): the
@@ -1622,12 +1499,17 @@ class TestOptionForeignScan:
         # ONLY the targeted sibling read skips now (the glob loop emitted the
         # alien finding for the keyless file instead).
         assert [s["path"] for s in skips] == [repr(str(july))]
+        # The ESC-carrying path renders escaped through the repr()'d path
+        # field. W-6a wording note: the crate's missing-column read error no
+        # longer embeds the file path (the Python plan-dump did), so the
+        # escaped-payload proof rides the path field; the error field is
+        # still guaranteed control-char-free (repr-escaped at the replay).
+        assert "\\x1b" in str(skips[0]["path"])
         for skip in skips:
             error = skip["error"]
             assert isinstance(error, str)
             assert "\x1b" not in error
             assert "\n" not in error
-            assert "\\x1b" in error
 
 
 class TestOptionKeyDtypeGate:
@@ -1874,7 +1756,8 @@ class TestOutOfRangeTimestampGate:
         assert report.findings == ()
         (skip,) = _events(logs, "lake.invariant.scan_skip")
         assert skip["path"] == str(bad)  # bars path stays raw (catalogued coords)
-        assert "date value out of range" in str(skip["error"])
+        # W-6a wording: the crate's native out-of-range verdict.
+        assert "out of datetime range" in str(skip["error"])
 
     def test_bars_out_of_range_canonical_sibling_abstains(self, tmp_path: Path) -> None:
         # June carries an in-range July foreign row; the July CANONICAL file
@@ -1910,46 +1793,17 @@ class TestOutOfRangeTimestampGate:
         assert verdict is not None
         assert "out of datetime range" in verdict
 
-    def test_option_residual_conversion_fault_isolated(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Defense in depth: a RESIDUAL conversion fault the gate probe cannot
-        # foresee is a loud per-FILE skip, never a whole-scan abort.
-        dest = tmp_path / "options" / "SERIES" / "2024-06.parquet"
-        _plant_option_raw(dest, [("CE", _ts(1))])
-
-        def _boom(*_args: object, **_kwargs: object) -> object:
-            raise OverflowError("residual conversion fault")
-
-        monkeypatch.setattr(li, "classify_option_keys", _boom)
-        with capture_logs() as logs:
-            report = scan_lake_invariants(tmp_path)
-        assert report.findings == ()
-        assert report.option_files_scanned == 0
-        assert report.option_files_skipped == 1
-        (skip,) = _events(logs, "lake.invariant.scan_skip")
-        assert skip["path"] == repr(str(dest))
-        assert "residual conversion fault" in str(skip["error"])
-
 
 class TestScanIncludeBars:
-    def test_include_bars_false_scans_only_options(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_include_bars_false_scans_only_options(self, tmp_path: Path) -> None:
         # Bars dup poison + a drift pair + an option dup: with include_bars
         # False only the OPTION finding is emitted; bars counters stay 0.
+        from brutex.data.lake_rust_waved import last_rust_scan_reads
+
         _plant_raw(_dest(tmp_path), [_ts(1), _ts(1)])
         _write_bars(tmp_path, [_bar(_ts(2))], segment="CASH", symbol="M&M")
         _write_bars(tmp_path, [_bar(_ts(3))], segment="CASH", symbol="NSE-M&M")
         _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(4)), ("CE", _ts(4))])
-        calls: list[Path] = []
-        real = li._read_key_columns
-
-        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-            calls.append(path)
-            return real(path, columns)
-
-        monkeypatch.setattr(li, "_read_key_columns", spy)
         report = scan_lake_invariants(tmp_path, include_bars=False)
         assert [type(f).__name__ for f in report.findings] == ["OptionIntraFileDup"]
         assert report.files_scanned == 0
@@ -1958,7 +1812,7 @@ class TestScanIncludeBars:
         assert report.files_by_segment == ()
         assert report.engine_files == 0
         assert report.option_files_scanned == 1
-        assert calls == [_opt_dest(tmp_path, "2024-06")]  # zero bars reads
+        assert last_rust_scan_reads() == 1  # the option file only — zero bars reads
 
     def test_include_bars_default_true_unchanged(self, tmp_path: Path) -> None:
         _plant_raw(_dest(tmp_path), [_ts(1), _ts(1)])

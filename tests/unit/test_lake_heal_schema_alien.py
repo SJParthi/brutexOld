@@ -35,19 +35,9 @@ from brutex.data.partition import build_partition_path
 
 
 @pytest.fixture(autouse=True)
-def _python_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin this suite to the EXPLICIT flag-OFF (Python oracle) arm.
-
-    Conscious W-5 reconciliation (recorded in the Wave-D lane scratchpad):
-    since the ``BRUTEX_LAKE_WAVED_RUST`` default flipped ON, an unset env
-    routes the heal through the crate core — but THIS suite is the verbatim
-    PYTHON core's verification (the live degrade oracle every out-of-envelope
-    shape still serves; its 100% ci-gate coverage is the oracle's gate), so
-    it runs under the operator kill switch. The crate arm's gates are the
-    heal differential (``tests/integration/test_waved_heal_differential.py``,
-    default-ON) + the seam suite's explicit flag-ON tests.
-    """
-    monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the ONE (Rust) heal/scan arm — W-6a deleted the Python cores."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
 
 
 def _now() -> datetime:
@@ -113,9 +103,10 @@ class TestSchemaAlienHeal:
         assert "missing column(s)" in events[0]["reason"]
 
     def test_bars_alien_drops_catalog_row_and_marks_recall(self, tmp_path: Path) -> None:
+        # W-6a: driven through the public heal_findings chokepoint — the
+        # per-finding Python heal was deleted; the observables are the healed
+        # count, the quarantine-move, the catalog delete and the recall fire.
         lake = tmp_path / "lake"
-        # A REAL catalogued partition first, then overwrite its bytes with the
-        # alien frame (path + catalog row exist; content is alien).
         writer = ParquetWriter(lake_root=lake)
         result = writer.write(
             exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=[_bar(_ts(1))]
@@ -134,18 +125,19 @@ class TestSchemaAlienHeal:
                     result=result,
                 )
             )
-            state = lake_heal._BatchState(
+            report = lake_heal.heal_findings(
+                (finding,),
                 lake_root=lake,
-                quarantine_root=lake / ".quarantine" / "t",
-                audit=None,
+                files_scanned=scan.files_scanned,
+                mode="auto",
                 catalog=catalog,
-                writer=writer,
-                option_writer=lake_heal.OptionParquetWriter(lake_root=lake),
+                recall=True,
+                now=_now,
             )
-            assert lake_heal._heal_schema_alien(finding, state) is True
+            assert report.healed == 1 and report.errors == 0
             assert not alien.exists()
             # Catalog row dropped (Golden Rule #4) + the 1-minute month marked
-            # for the derived recall.
+            # for the derived recall (the recall genuinely ran).
             row = catalog.get(
                 exchange="NSE",
                 segment="INDEX",
@@ -155,24 +147,27 @@ class TestSchemaAlienHeal:
                 month=6,
             )
         assert row is None
-        assert state.touched_minute == {("NSE", "INDEX", "NIFTY"): {(2024, 6)}}
+        assert report.recall is not None
 
     def test_non_minute_alien_never_marks_recall(self, tmp_path: Path) -> None:
+        # W-6a: through the public chokepoint — a non-1minute alien heals
+        # (quarantine-move) but never marks the derived recall.
         lake = tmp_path / "lake"
         alien = _dest(lake, interval="1day")
         _plant_alien(alien)
         scan = scan_lake_invariants(lake)
-        state = lake_heal._BatchState(
-            lake_root=lake,
-            quarantine_root=lake / ".quarantine" / "t",
-            audit=None,
-            catalog=None,
-            writer=ParquetWriter(lake_root=lake),
-            option_writer=lake_heal.OptionParquetWriter(lake_root=lake),
-        )
         finding = next(f for f in scan.findings if isinstance(f, SchemaAlienFile))
-        assert lake_heal._heal_schema_alien(finding, state) is True
-        assert state.touched_minute == {}
+        report = lake_heal.heal_findings(
+            (finding,),
+            lake_root=lake,
+            files_scanned=scan.files_scanned,
+            mode="auto",
+            recall=True,
+            now=_now,
+        )
+        assert report.healed == 1 and report.errors == 0
+        assert not alien.exists()
+        assert report.recall is None  # no 1minute touch → no recall
 
     def test_options_tree_alien_quarantined(self, tmp_path: Path) -> None:
         lake = tmp_path / "lake"

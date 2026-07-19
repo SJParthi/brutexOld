@@ -143,7 +143,7 @@ class TestHealScanBeats:
         # EXPLICIT flag-OFF since the W-5 default flip: the exact beat COUNT
         # pins the PYTHON scanner's per-file beat wiring; the engaged crate
         # arm's beat replay is pinned by the waved scan differential.
-        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
         lake_root = tmp_path / "lake"
         lake_root.mkdir()
         _write_engine_bar(lake_root)
@@ -308,7 +308,7 @@ class TestKeyedChannelRouting:
         # COUNT pins the PYTHON scanner's beat wiring (the crate arm's beat
         # replay rides the SAME keyed channel but with its own cadence —
         # pinned by the waved differentials).
-        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
         lake_root = tmp_path / "lake"
         lake_root.mkdir()
         _write_engine_bar(lake_root)

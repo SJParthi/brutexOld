@@ -1,147 +1,70 @@
-"""Flag-gated Rust Wave-D seam — the ADR-0020 heal/scan/read conversion facade.
+"""The Rust Wave-D seam — the REQUIRED heal/scan/read/reconcile crate facade.
 
 The ONE shared facade for the Wave-D lake conversion
-(`timeframe_materialize` → `lake_heal` → `catalog_reconcile` →
-`lake_invariants`, in the ruled runbook order). While
-``BRUTEX_LAKE_WAVED_RUST`` resolves ON (DEFAULT since the W-5 flip —
-:data:`LAKE_WAVED_RUST_DEFAULT`; ``0`` is the per-process operator kill
-switch), the converted surfaces route through the ``brutex_lake`` crate's
-``waved_*`` pyfunctions (``rust/brutex-lake/src/waved/``); this module owns
-the flag, the fail-closed guard layers, the process-local latches, and the
-per-surface burn-in cells. ONE facade for all four modules (the Wave-D design §D): the
-four surfaces flip as one wave with one crate surface, so a shared latch is
-the atomic-pin doctrine — any guard trip is evidence the INSTALL is broken,
-the Python oracle serves, and (payoff ≈ 0 — uniformity, not speed)
-over-disabling costs nothing. Section-for-section the
-``lake_rust_resample.py`` mirror (itself the PR-1 ``lake_rust_render.py``
-template); the degrade/panic-belt catch sets are IMPORTED from
-``lake_rust_render`` (its public ``degrade_errors``/``panic_belt_errors``
-re-exports — §11 COMMON, never a fourth copy).
+(``timeframe_materialize`` → ``lake_heal`` → ``catalog_reconcile`` →
+``lake_invariants``, in the ruled runbook order). Since the
+DEC-RUST-LAKE-WAVED-001 ENDGAME (W-6a) the ``brutex_lake`` crate's
+``waved_*`` pyfunctions are the ONLY implementation of the four converted
+surfaces — the Python cores (the read collect body, the per-finding heal
+algorithms, the per-file reconcile scan, the whole-lake invariant scan, the
+content-token walk) are DELETED, so this module's job is no longer
+flag-routing/burn-in/degrade-to-oracle but the fail-LOUD preconditions +
+the wire validation + the Python-side replays (Wave-D house laws i-iii:
+structlog, injected seams and exception TYPES stay Python).
 
-## W-1 (this slice): the ``timeframe_materialize`` read surface
+## The endgame posture (Wave-D design §D, binding)
 
-:func:`read_1m_via_rust` routes the ``make_lake_read_1m._read`` body —
-collect + rename/select/sort + ts-datetime-range gate + price-sanity gate +
-bad-tick screen — through ``brutex_lake.waved_read_1m_ipc``. The SOURCE
-DECISION (months / whole-tree / empty-partition, with the pinned
-``NoStored1mBarsError`` + months-arm ``ValueError`` raises) stays in the
-caller BEFORE this seam, so both arms raise byte-identically by
-construction. Gate verdicts keep exact parity through the DEGRADE-TO-ORACLE
-law: a crate-side refusal (a ts-range / price-sanity violation, a corrupt
-file, …) re-runs the live Python oracle, which either raises the verbatim
-typed error (``ResampleInputError`` with today's message bytes) or succeeds
-— the oracle's verdict always wins. Bad-tick WARNs stay Python: the crate
-returns per-session warn COORDINATES which this facade replays through the
-ONE :func:`brutex.data.bad_tick.emit_bad_tick_warn` seam (the
-``rust/brutex-feed`` ``scan_bars`` precedent) — and ONLY when the oracle did
-not run (a burn-in call's oracle emits its own WARNs, so events are never
-double-emitted).
+1. The burn-in / oracle / degrade machinery is REMOVED (there is no oracle
+   to compare against or fall back to).
+2. The guards are FAIL-LOUD preconditions: an absent wheel, a wheel missing
+   any :data:`_CRATE_API` callable (a pre-endgame install — the
+   ``waved_endgame_witness`` name is the lockstep tooth), or a polars
+   version drift raises the typed
+   :class:`~brutex.data.errors.LakeRustWavedUnavailableError` naming the
+   rebuild runbook — never silent, never a fabricated verdict
+   (``brutex_lake`` is a REQUIRED wheel for the lake heal/scan surface,
+   the ``fno_math``-for-engine precedent).
+3. The flag is RETIRED: a SET ``$BRUTEX_LAKE_WAVED_RUST`` (any non-empty
+   value, ``1``/``0`` included) refuses loudly via
+   :func:`require_waved_env_unset` (the ``$BRUTEX_FILL_MODE`` retirement
+   precedent, DEC-FILL-WORST-CASE-ONLY-001).
+4. Run-time fault posture per surface mirrors each module's documented
+   isolation law (the ruled endgame semantics — out-of-envelope shapes are
+   ISOLATED, never process-killing, never silent):
 
-## W-2 (this slice): the ``lake_heal`` mutation core + content token
+   * **read** (:func:`read_1m_via_rust`): ANY crate-call failure — a
+     genuine gate violation (ts-range / price-sanity), a corrupt file, a
+     crate panic — raises the typed quarantining
+     :class:`~brutex.data.errors.ResampleInputError` (already in the
+     prebuild's per-symbol quarantine set), message = the Rust rendering;
+   * **heal** (:func:`heal_batch_via_rust`): the crate owns per-finding
+     isolation (an out-of-envelope finding is a counted isolated error and
+     the batch CONTINUES — the W-6a crate law); a crate-side disk-full
+     crosses as a real ``OSError(ENOSPC)`` for the caller's
+     ``lake_write_guard``; anything else out of the engaged call is LOUD
+     (mutation may have happened — the idempotent-convergence posture);
+   * **reconcile** (:func:`reconcile_file_via_rust`): ANY crate-call
+     failure raises ``ValueError`` naming the file — a member of the
+     caller's GAP-#9 skip set (``datetime_out_of_range_errors``), so the
+     verdict is the pinned per-file ``catalog.reconcile.parquet_skip``;
+   * **scan** (:func:`scan_lake_via_rust`): the crate converts every
+     judged-unjudgeable shape into a LOUD counted
+     ``lake.invariant.scan_skip`` on its own path; only the
+     structurally-unreachable defensive belt still raises (propagated
+     raw); a raising injected ``per_file_pause`` re-raises VERBATIM via
+     the :class:`_PauseEscape` parking wrap;
+   * **token** (:func:`lake_content_token_via_rust`): walk-skip events
+     replay through the caller's pinned WARN sites; a crate failure
+     propagates raw (the startup sweep's own guard set owns the
+     never-crash-boot law).
 
-:func:`heal_batch_via_rust` routes ``heal_findings``' per-finding mutation
-loop through ``brutex_lake.waved_heal_batch``. The POLICY SHELL (observe
-mode, mass rail, quarantine-symlink refusal, stamp/serial minting, the
-PriceSanityRows filter, ordering, the recall, the report/stats/alert tail)
-stays in ``lake_heal.py`` BEFORE/AFTER this seam; the crate streams every
-log/audit/catalog/stats/manifest side effect through ONE ``on_event``
-callback the shell replays (house laws i-iii). NO burn-in and NO
-degrade-around-the-call (heal MUTATES — the §B2 asymmetry): the crate's own
-read-only preflight is the sanctioned degrade arm (``{"degrade": reason}``
-certifies zero mutation → the shell runs the verbatim Python core), any
-exception out of the engaged call is LOUD, and the pre-flip verification is
-the offline heal differential
-(``tests/integration/test_waved_heal_differential.py``).
-:func:`lake_content_token_via_rust` routes the read-only sentinel walk with
-the full W-1 doctrine (degrade-to-oracle + burn-in token compare).
+5. A mis-shaped crate RETURN (refuse-poison — a foreign/stale install the
+   name guard somehow missed) raises ``RuntimeError`` naming the remedy:
+   with no oracle, guessing at a poisoned wire would fabricate verdicts.
 
-## W-3 (this slice): the ``catalog_reconcile`` per-file scan
-
-:func:`reconcile_file_via_rust` routes the per-file read/hash/classify body
-of ``reconcile_catalog_from_lake`` — the ``timestamp``-column read + row
-count + physical min/max span + the ``sha256(file bytes)`` ``raw_hash``
-(**run-identity-adjacent**, Golden Rule #4: it feeds the FR-CAT-004 catalog
-rollup → ``data_snapshot_hash``) + the L1 ``classify_bar_keys`` dup/foreign
-counts — through ``brutex_lake.waved_reconcile_file``. The LOOP (glob
-enumeration, ``parse_partition_path``, the stat-cache branch,
-``CatalogEntry`` build + upsert, the drift fold, all logging) stays in
-``catalog_reconcile.py``. Read-only, so the full W-1 fail-closed doctrine
-applies — degrade-to-oracle (a crate refusal re-runs the verbatim Python
-body, which raises the REAL skip-class exception with today's message
-bytes, so the GAP-#9 ``catalog.reconcile.parquet_skip`` verdict stays
-byte-identical by construction), refuse-poison shapes, and the per-surface
-burn-in whose tuple compare makes the sha256 hex the tooth. The
-``IntraFileDup`` / ``ForeignMonthRows`` finding OBJECTS are reconstructed
-facade-side from the crate counts (dataclasses stay Python), value-equal to
-``classify_bar_keys``' output by the frozen-dataclass equality the burn-in
-compares.
-
-## W-4 (this slice): the ``lake_invariants`` whole-lake scan
-
-:func:`scan_lake_via_rust` routes the WHOLE ``scan_lake_invariants`` body —
-the streamed bars-tree walk + per-file read/classify (dup / foreign+overlap
-/ price-sanity / alien-schema), the options-tree walk (symlink probes, key
-gate, dup / foreign / memoised-sibling overlap), every skip verdict and the
-counters — through ``brutex_lake.waved_scan_lake``. STAYS PYTHON (house
-laws i-ii): structlog (the crate returns an ORDERED event stream with
-per-site ``repr()`` flags this facade replays through the
-``lake_invariants`` logger + ``log_lake_finding``), the
-``detect_legacy_drift`` fold (needs the ``lake_keys`` ladder — run
-facade-side over the crate-enumerated symbol dirs and SPLICED at the
-crate's insert point), the injected ``per_file_pause`` callback (ticked by
-the crate through the FFI after every read attempt — the L3 throttle law),
-and the frozen finding dataclasses (rebuilt from the wire records).
-Read-only, so the full W-1 doctrine applies — degrade-to-oracle,
-refuse-poison wire validation, and the per-surface burn-in comparing the
-reports ORDER-EXACT with the wall clock popped (burn-in serves the ORACLE
-report so the replayed event stream never double-logs). The wire also
-carries the design-§F2 ``reads_performed`` counter
-(:func:`last_rust_scan_reads`) — the hook the delete-time read-count spy
-pins rebind onto. A raising pause callback re-raises VERBATIM via the
-``_PauseEscape`` parking wrap, never folded into the degrade set.
-
-## The flag — ``BRUTEX_LAKE_WAVED_RUST`` (DEFAULT ON since W-5)
-
-A truthy literal (``1/true/yes/on``) → ON; a falsy literal
-(``0/false/no/off``) → OFF — the explicit operator KILL SWITCH, honoured
-regardless of the default; unset or whitespace-empty →
-:data:`LAKE_WAVED_RUST_DEFAULT` (``True`` since the W-5 flip — the
-one-constant revert lever, the ``SWEEP_RUST_METRICS_DEFAULT`` /
-DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 shape); any OTHER value → OFF with
-one loud ``lake_rust_waved.fallback`` WARN (reason ``flag_unrecognised``)
-per process — the fail-safe is OFF: under a default-ON seam a typo'd kill
-switch (``flase``, ``0ff``) must still KILL, never be silently ignored
-(the precedent's exact kill-switch semantics). The truthy/falsy vocabulary
-is a LOCAL twin of the render/resample facades' (equality-pinned in the
-unit suite) — NOT an import from the engine copy, because the engine
-package hard-imports the ``fno_math`` wheel and a lake read must never
-require it.
-
-## The fail-closed layers (every failure serves the Python oracle)
-
-1. **Import/API guard** — an absent wheel or a module missing any
-   :data:`_CRATE_API` callable latches ``crate_unavailable`` (the crate and
-   the repo move together — a conversion-step-N wheel lacking a step-N+1
-   function is a stale install, ALL-OR-NOTHING).
-2. **Version guard** — the crate's ``pinned_polars_version()`` must equal
-   the installed ``polars.__version__`` (ADR-0020 §7 hazard 1); the waved
-   surfaces are polars-bearing, so the guard is kept (unlike the polars-free
-   window-ledger laws).
-3. **Burn-in self-check** — per SURFACE: the first :data:`BURN_IN_SAMPLES`
-   engaged calls (plus every previously-unseen shape token) run BOTH
-   engines and compare at DTYPE-EXACT frame strength; ANY difference ships
-   the ORACLE result and autoreverts the whole waved seam for the process
-   (``lake_rust_waved.autoreverted`` at ERROR — the shared-latch doctrine).
-   The W-2 ``heal`` surface has NO burn-in (heal MUTATES — the Wave-D
-   design §B2 recorded asymmetry; its pre-flip verification is the offline
-   heal differential).
-
-Flag OFF (the default) is BYTE-IDENTICAL to today — the seam is never
-called and the crate is never imported (bomb-spy-pinned); no module here
-imports polars at module scope. Process-local latch state is the documented
-no-global-mutable-state exception (the ``lake_rust_render`` shape);
-:func:`reset_lake_rust_waved_for_tests` restores a fresh process view —
-test isolation only, never called from production paths.
+The per-process :data:`_LAST_SCAN_READS` slot (the §F2 read-count witness)
+is the one piece of process-local state;
+:func:`reset_lake_rust_waved_for_tests` clears it (tests only).
 """
 
 from __future__ import annotations
@@ -159,7 +82,11 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
-from brutex.data.lake_rust_render import degrade_errors, panic_belt_errors
+from brutex.data.errors import (
+    LakeRustWavedFlagRemovedError,
+    LakeRustWavedUnavailableError,
+    ResampleInputError,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable
@@ -176,93 +103,23 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     )
 
     #: The per-file reconcile scan wire ``(row_count, first_ts, last_ts,
-    #: raw_hash, findings)`` — the W-3 seam's shared oracle/crate shape
-    #: (``None`` = a zero-row file, the caller's counted skip).
+    #: raw_hash, findings)`` — the W-3 seam's wire shape (``None`` = a
+    #: zero-row file, the caller's counted skip).
     WavedFileScan = tuple[int, object, object, str, tuple["IntraFileDup | ForeignMonthRows", ...]]
 
 _LOG = structlog.get_logger("brutex.data.lake_rust_waved")
 
-#: The env flag over :data:`LAKE_WAVED_RUST_DEFAULT` (honesty banner:
-#: payoff ≈ 0 — uniformity, not speed).
+#: The RETIRED env flag (DEC-RUST-LAKE-WAVED-001 endgame): a SET value —
+#: any non-empty spelling — refuses loudly via
+#: :func:`require_waved_env_unset`; the name survives only so the refusal
+#: can cite the exact variable.
 LAKE_WAVED_RUST_ENV: Final[str] = "BRUTEX_LAKE_WAVED_RUST"
 
-#: The ONE default-arm constant (the W-5 flip lever — the
-#: ``SWEEP_RUST_METRICS_DEFAULT`` / DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001
-#: precedent): what :func:`lake_rust_waved_enabled` returns when the env
-#: flag is unset or whitespace-empty. ``True`` = the Wave-D crate cores
-#: serve by default — licensed by the FULL flag-ON parity battery (the
-#: four differentials over the poison corpus with loud-fail engagement
-#: censuses, the frozen goldens fixtures-byte-untouched, and the whole
-#: lane suite default-ON), every surface still burn-in self-checked with
-#: the shared-latch autorevert, and killable per process with
-#: ``BRUTEX_LAKE_WAVED_RUST=0`` (the ``_FALSY`` operator kill switch).
-#: Revert = this ONE constant.
-LAKE_WAVED_RUST_DEFAULT: Final[bool] = True
-
-#: The W-1 surface token (the per-surface burn-in cell + event key).
-SURFACE_READ_1M: Final[str] = "read_1m"
-
-#: The W-2 read-only surface token (the ``lake_content_token`` walk twin).
-SURFACE_CONTENT_TOKEN: Final[str] = "content_token"  # noqa: S105 — a surface NAME, not a secret
-
-#: The W-3 surface token (the ``catalog_reconcile`` per-file scan).
-SURFACE_RECONCILE_FILE: Final[str] = "reconcile_file"
-
-#: The W-4 surface token (the ``lake_invariants`` whole-lake scan).
-SURFACE_SCAN: Final[str] = "scan_lake"
-
-#: Engaged calls compared against the Python oracle per process PER surface
-#: (the burn-in self-check) — 16, the render/resample/#1531 precedent.
-BURN_IN_SAMPLES: Final[int] = 16
-
-#: Truthy env literals — the LOCAL twin of the render/resample facades'
-#: vocabulary (equality-pinned in the unit suite; module docstring).
-_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
-
-#: Falsy env literals — the explicit kill-switch vocabulary.
-_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
-
-#: The latch: the disable reason once the waved seam is off for this
-#: process, else ``None`` (the documented no-global-mutable-state exception).
-_DISABLED_REASON: Final[list[str | None]] = [None]
-
-#: Per-surface burn-in samples still to run this process. The W-2 HEAL
-#: surface is DELIBERATELY absent — heal MUTATES, so an in-process
-#: double-run comparator is impossible (the Wave-D design §B2 recorded
-#: asymmetry); its pre-flip verification is the offline heal differential.
-_BURN_IN_REMAINING: Final[dict[str, int]] = {
-    SURFACE_READ_1M: BURN_IN_SAMPLES,
-    SURFACE_CONTENT_TOKEN: BURN_IN_SAMPLES,
-    SURFACE_RECONCILE_FILE: BURN_IN_SAMPLES,
-    SURFACE_SCAN: BURN_IN_SAMPLES,
-}
-
-#: Per-surface shape tokens already compared this process (the shape gate).
-#: Bounded by construction: read_1m sees at most the four-token
-#: (with_oi x screen) grid — see :func:`read_1m_via_rust`'s token; the
-#: content-token surface is single-shape (its set stays empty — the entry
-#: exists so the reset seam's per-surface loop stays uniform).
-_BURN_IN_SHAPES_SEEN: Final[dict[str, set[str]]] = {
-    SURFACE_READ_1M: set(),
-    SURFACE_CONTENT_TOKEN: set(),
-    SURFACE_RECONCILE_FILE: set(),
-    SURFACE_SCAN: set(),
-}
-
-#: Whether each surface's shape gate is armed (the resample-facade shape:
-#: the test reset seam disarms it with a zeroed budget so ``remaining=0``
-#: keeps meaning "steady state — crate results, no oracle in the path").
-_BURN_IN_SHAPE_GATE: Final[dict[str, bool]] = {
-    SURFACE_READ_1M: True,
-    SURFACE_CONTENT_TOKEN: True,
-    SURFACE_RECONCILE_FILE: True,
-    SURFACE_SCAN: True,
-}
-
 #: The crate API surface the import guard verifies — ALL-OR-NOTHING over
-#: every SHIPPED waved conversion step (W-2..W-4 append their names in
-#: their own PRs; a wheel missing ANY listed name is a stale/foreign
-#: install and latches ``crate_unavailable``).
+#: every shipped waved conversion step. ``waved_endgame_witness`` is the
+#: W-6a lockstep tooth: a pre-endgame wheel (whose heal batch could still
+#: return a whole-batch degrade this shell no longer has an oracle for)
+#: must latch :class:`LakeRustWavedUnavailableError`, never half-work.
 _CRATE_API: Final[tuple[str, ...]] = (
     "pinned_polars_version",
     "waved_read_1m_ipc",
@@ -272,16 +129,14 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "waved_lake_content_token",
     "waved_reconcile_file",
     "waved_scan_lake",
-    # W-2b: the multi-file heal engagement witness (drift + bars-foreign +
-    # option-foreign join the engaged set). A wheel lacking it predates the
-    # multi-file heal port and MUST latch crate_unavailable — its
-    # waved_heal_batch would degrade those kinds back to Python silently.
     "waved_heal_engaged_kinds",
+    "waved_endgame_witness",
 )
 
-#: Once-per-process-per-reason warn memo + per-surface engaged latches.
-#: LOG-VOLUME state ONLY: served frames never depend on it.
-_OBSERVABILITY_MEMO: Final[set[str]] = set()
+#: The rebuild remedy every unavailable-error names (the lockstep ritual).
+_REMEDY: Final[str] = (
+    "pip install rust/brutex-lake (see docs/runbooks/lake-rust-render-lockstep.md)"
+)
 
 #: The waved read result's tuple arity — ``(ipc_bytes, events_json)``.
 _READ_RESULT_ARITY: Final[int] = 2
@@ -293,207 +148,98 @@ _EVENT_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
-def env_flag_tristate(raw: str) -> bool | None:
-    """Classify *raw* against the flag vocabulary (local twin — module docs).
+def require_waved_env_unset(env: Mapping[str, str] | None = None) -> None:
+    """Refuse LOUDLY when the retired ``$BRUTEX_LAKE_WAVED_RUST`` flag is set.
 
-    ``True`` for a :data:`_TRUTHY` literal, ``False`` for a :data:`_FALSY`
-    literal, ``None`` for anything else (unset/empty AND unrecognised — the
-    caller owns the default + warn policy). Byte-identical semantics to the
-    render/resample facade copies, equality-pinned in the unit suite.
+    Fired by :func:`_require_crate` at every surface entry (exactly where
+    the retired resolver used to read the env), so a stale config refuses
+    before any lake work.
+
+    Parameters
+    ----------
+    env
+        The environment mapping to read (defaults to ``os.environ`` — the
+        injection seam keeps the guard pure for tests).
+
+    Raises
+    ------
+    LakeRustWavedFlagRemovedError
+        When the variable is present with ANY non-empty value — ``1`` and
+        ``0`` included: the seam is no longer flag-gated
+        (DEC-RUST-LAKE-WAVED-001 endgame), and honouring either spelling
+        would silently bless a stale config whose oracle/kill-switch
+        intent no longer exists. An UNSET or empty-string variable passes
+        (the ``VAR= cmd`` unset idiom — the ``$BRUTEX_FILL_MODE``
+        precedent's exact semantics).
     """
-    value = raw.strip().lower()
-    if value in _TRUTHY:
-        return True
-    if value in _FALSY:
-        return False
-    return None
-
-
-def lake_rust_waved_enabled() -> bool:
-    """Resolve the waved flag over :data:`LAKE_WAVED_RUST_DEFAULT`.
-
-    * a :data:`_TRUTHY` value → ``True``;
-    * a :data:`_FALSY` value → ``False`` — the explicit operator kill
-      switch, honoured regardless of the default;
-    * unset / whitespace-empty → :data:`LAKE_WAVED_RUST_DEFAULT` (the
-      one-constant flip lever — ``True`` since W-5);
-    * any OTHER non-empty value → ``False`` with one loud
-      ``lake_rust_waved.fallback`` WARN (reason ``flag_unrecognised``) per
-      process: the fail-safe is OFF — under a default-ON seam a typo'd
-      kill switch (``flase``, ``0ff``) must still KILL, never be silently
-      ignored (the ``sweep_rust_metrics_enabled`` precedent's exact
-      kill-switch semantics; the ``_FALSY`` vocabulary is the RECOGNISED
-      silent OFF, a garbage value's OFF is WARNED).
-
-    Read per call (one ``os.environ`` probe against a whole-partition read)
-    so parallel workers resolve their own inherited environment.
-    """
-    raw = os.environ.get(LAKE_WAVED_RUST_ENV, "")
-    verdict = env_flag_tristate(raw)
-    if verdict is not None:
-        return verdict
+    source = os.environ if env is None else env
+    raw = source.get(LAKE_WAVED_RUST_ENV, "")
     if raw.strip():
-        _warn_once("flag_unrecognised", value=raw)
-        return False
-    return LAKE_WAVED_RUST_DEFAULT
+        raise LakeRustWavedFlagRemovedError(
+            f"${LAKE_WAVED_RUST_ENV}={raw!r} is set, but the Wave-D lake seam is "
+            f"no longer flag-gated — the brutex_lake crate cores are the ONLY "
+            f"implementation (DEC-RUST-LAKE-WAVED-001 endgame). Unset the "
+            f"variable; the retired flag is refused for EVERY value, "
+            f"including '1' and '0'."
+        )
 
 
-def rust_waved_disabled() -> bool:
-    """``True`` iff a guard/autorevert latched the waved seam OFF this process."""
-    return _DISABLED_REASON[0] is not None
+def _require_crate() -> ModuleType:
+    """The fail-LOUD precondition chain: env unset → import → API → version.
 
-
-def reset_lake_rust_waved_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
-    """Reset the latch + every surface's burn-in cell + warn memo (tests ONLY).
-
-    ``remaining=0`` puts the process in the post-burn-in steady state —
-    every surface's count budget spent AND shape gate disarmed, so a served
-    result is the crate's with no oracle in the path (the parity/differential
-    suites depend on that: an armed shape gate would cushion a first-shape
-    divergence by shipping the oracle result). The default restores a
-    fresh-process view. Never called from production code paths (the
-    ``lake_rust_render`` reset-seam convention).
+    Returns the live ``brutex_lake`` module (resolved via
+    ``importlib.import_module`` at USE time — never a collection-time
+    binding, the ``_live_crate()`` law) or raises the typed
+    :class:`LakeRustWavedUnavailableError` naming the exact failure + the
+    rebuild remedy. ``MemoryError`` out of the metadata probe re-raises
+    raw (a global stop, never re-labelled).
     """
-    _DISABLED_REASON[0] = None
-    for surface in _BURN_IN_REMAINING:
-        _BURN_IN_REMAINING[surface] = remaining
-        _BURN_IN_SHAPES_SEEN[surface].clear()
-        _BURN_IN_SHAPE_GATE[surface] = remaining > 0
-    _OBSERVABILITY_MEMO.clear()
-    _LAST_SCAN_READS[0] = None
-
-
-def _warn_once(reason: str, **context: object) -> None:
-    """Log ``lake_rust_waved.fallback`` WARN once per process per *reason*.
-
-    The read seam runs once per symbol per prebuild (hundreds of symbols per
-    run), so a sticky reason would flood the logs; the first occurrence is
-    loud, repeats fall through silently (the Python oracle serves
-    regardless). The event name is a LITERAL with the reason as a field —
-    the render/resample grep-able convention.
-    """
-    if reason in _OBSERVABILITY_MEMO:
-        return
-    _OBSERVABILITY_MEMO.add(reason)
-    _LOG.warning("lake_rust_waved.fallback", reason=reason, **context)
-
-
-def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the waved seam OFF for the remainder of the process.
-
-    ``error=True`` logs ``lake_rust_waved.autoreverted`` at ERROR (the
-    burn-in autorevert — a genuine wrongness signal); guard latches log
-    ``lake_rust_waved.rust_path_disabled`` at WARN. ONE latch for every
-    waved surface (the shared-latch doctrine — module docstring); repeat
-    calls are no-ops.
-    """
-    if _DISABLED_REASON[0] is not None:
-        return
-    _DISABLED_REASON[0] = reason
-    if error:
-        _LOG.error("lake_rust_waved.autoreverted", reason=reason, **context)
-    else:
-        _LOG.warning("lake_rust_waved.rust_path_disabled", reason=reason, **context)
-
-
-def _resolve_crate() -> ModuleType | None:
-    """Import guard (layer 1): return ``brutex_lake``, or latch OFF + ``None``.
-
-    An absent wheel (``ImportError``) latches ``crate_unavailable`` with
-    ONE loud WARN naming the remedy — every latch serves the Python oracle
-    (fail-closed), so a crate-less install keeps working under the W-5
-    default-ON flag exactly as it did default-OFF. A
-    module that IMPORTS but lacks any :data:`_CRATE_API` callable (a name
-    collision / a pre-Wave-D wheel / a hand-broken install) latches the
-    SAME reason — the fail-closed contract is "never a new crash class", so
-    an ``AttributeError`` must never leave this seam.
-    """
+    require_waved_env_unset()
     try:
         crate = importlib.import_module("brutex_lake")
     except ImportError as exc:
-        _disable(
-            "crate_unavailable",
-            error_detail=repr(exc),
-            remedy="pip install rust/brutex-lake (see docs/runbooks/lake-rust-render-lockstep.md)",
-        )
-        return None
+        raise LakeRustWavedUnavailableError(
+            f"the REQUIRED brutex_lake crate wheel is not importable "
+            f"({exc!r}) — the Wave-D Python cores are deleted "
+            f"(DEC-RUST-LAKE-WAVED-001 endgame). Remedy: {_REMEDY}"
+        ) from exc
     for name in _CRATE_API:
         if not callable(getattr(crate, name, None)):
-            _disable(
-                "crate_unavailable",
-                error_detail=f"brutex_lake.{name} missing or not callable — foreign/stale install",
-                remedy="pip install rust/brutex-lake "
-                "(see docs/runbooks/lake-rust-render-lockstep.md)",
+            raise LakeRustWavedUnavailableError(
+                f"brutex_lake.{name} is missing or not callable — a "
+                f"foreign/stale (pre-endgame) install cannot serve the "
+                f"Wave-D surfaces (DEC-RUST-LAKE-WAVED-001). Remedy: {_REMEDY}"
             )
-            return None
-    return crate
-
-
-#: Sentinel for "the metadata call raised" — distinct from any value a
-#: foreign crate could RETURN (even ``None``, which flows on into the
-#: version guard's ``!=`` and fails closed there, loudly).
-_METADATA_ERROR: Final[object] = object()
-
-
-def _crate_metadata(crate: ModuleType, attr: str) -> object:
-    """Call a crate metadata pyfunction defensively; latch OFF on ANY raise.
-
-    A raising ``pinned_polars_version`` marks a foreign/stale install whose
-    results must not be trusted — latch ``crate_metadata_error`` and let
-    the caller serve the oracle (fail-closed, never a new crash class).
-    ``MemoryError`` re-raises bare (a global stop, never a fallback).
-    Returns the raw value un-typechecked: a non-str version simply fails
-    the ``!=`` version guard (fail-closed already).
-    """
     try:
-        return getattr(crate, attr)()
+        pinned = crate.pinned_polars_version()
     except MemoryError:
         raise
     except Exception as exc:
-        _disable("crate_metadata_error", metadata_call=attr, error_detail=repr(exc))
-        return _METADATA_ERROR
-
-
-def _crate_ready() -> ModuleType | None:
-    """Run guard layers 1+2 (import/API + polars version); ``None`` = serve the oracle."""
-    if rust_waved_disabled():
-        return None
-    crate = _resolve_crate()
-    if crate is None:
-        return None
-    pinned = _crate_metadata(crate, "pinned_polars_version")
-    if pinned is _METADATA_ERROR:
-        return None
+        raise LakeRustWavedUnavailableError(
+            f"brutex_lake.pinned_polars_version() raised ({exc!r}) — a "
+            f"foreign/stale install cannot be trusted. Remedy: {_REMEDY}"
+        ) from exc
     import polars as pl
 
     if pinned != pl.__version__:
-        # Layer 2 — the version guard (ADR-0020 §7 hazard 1): fail-closed,
-        # ONE loud WARN naming BOTH versions — the waved surfaces decode
-        # frames via the pinned polars, so a drifted wheel must never serve.
-        _disable(
-            "polars_version_mismatch",
-            installed_polars=pl.__version__,
-            crate_pinned_polars=pinned,
-            remedy="align the wheel and the crate's pinned polars rev, then re-run "
-            "the Wave-D differential (docs/runbooks/lake-rust-render-lockstep.md)",
+        # ADR-0020 §7 hazard 1: the waved surfaces decode frames via the
+        # pinned polars — a drifted wheel must never serve (the lockstep is
+        # LOAD-BEARING post-delete; risk register §G row 2).
+        raise LakeRustWavedUnavailableError(
+            f"installed polars {pl.__version__} != the crate's pinned "
+            f"{pinned!r} — the wheel/crate lockstep is broken "
+            f"(DEC-RUST-LAKE-WAVED-001 endgame). Remedy: {_REMEDY}"
         )
-        return None
-    if "__engaged__" not in _OBSERVABILITY_MEMO:
-        _OBSERVABILITY_MEMO.add("__engaged__")
-        _LOG.info("lake_rust_waved.engaged", crate_pinned_polars=pinned)
     return crate
 
 
-def _frames_equal_dtype_exact(left: pl.DataFrame, right: pl.DataFrame) -> bool:
-    """Frame equality at DTYPE-EXACT strength — the burn-in comparator.
-
-    ``DataFrame.equals`` is dtype-INSENSITIVE (the #1795b documented
-    semantics), so the schema (column names, ORDER, dtypes) is compared
-    FIRST — the read frames feed the resamplers + parquet writers, where a
-    dtype pun WOULD change downstream bytes. The ``bool()`` wrap keeps the
-    return typed under a polars-stub-free checker (the pre-commit mypy env).
-    """
-    return bool(left.schema == right.schema and left.equals(right))
+def _refuse_poison(surface: str, detail: str) -> RuntimeError:
+    """The refuse-poison error for a mis-shaped crate RETURN (loud, never guessed)."""
+    return RuntimeError(
+        f"brutex_lake {surface} returned a mis-shaped result ({detail}) — "
+        f"refuse-poison: with the Python cores deleted there is no oracle to "
+        f"serve, and guessing would fabricate verdicts. Remedy: {_REMEDY}"
+    )
 
 
 def _parse_bad_tick_events(events_json: str) -> list[dict[str, object]]:
@@ -501,8 +247,8 @@ def _parse_bad_tick_events(events_json: str) -> list[dict[str, object]]:
 
     Raises ``ValueError`` on ANY junk shape (non-JSON, a non-list root, a
     non-dict item, wrong keys, a non-str session, a bool-punned/non-int
-    ``skipped``, a non-float ratio/close) — the caller treats that as
-    refuse-poison and serves the oracle. Empty list for ``"[]"``.
+    ``skipped``, a non-float ratio/close) — the caller converts that into
+    the refuse-poison ``RuntimeError``. Empty list for ``"[]"``.
     """
     try:
         payload = json.loads(events_json)
@@ -532,10 +278,9 @@ def _replay_bad_tick_events(events: list[dict[str, object]], *, warn_source: str
 
     ``emit_bad_tick_warn`` is the SINGLE ``feed.bad_tick_skipped`` emission
     point (CLAUDE.md §11 COMMON — the ``rust/brutex-feed`` replay
-    precedent), so event name + field names can never fork between the two
-    arms; the ratio is the EVENT's own (the crate wire carries it), so the
-    two sides can never silently disagree about the threshold. Lazy import:
-    this leaf stays polars-free + bad_tick-free at module scope.
+    precedent), so event name + field names can never fork; the ratio is
+    the EVENT's own (the crate wire carries it). Lazy import: this leaf
+    stays polars-free + bad_tick-free at module scope.
     """
     from brutex.data.bad_tick import emit_bad_tick_warn
 
@@ -557,54 +302,39 @@ def read_1m_via_rust(
     with_open_interest: bool,
     screen_enabled: bool,
     warn_source: str | None,
-    oracle: Callable[[], pl.DataFrame],
+    context: str,
 ) -> pl.DataFrame:
-    """The routed 1-minute read — called by ``make_lake_read_1m`` ONLY flag-ON.
+    """The 1-minute read core — called by ``make_lake_read_1m`` (the ONE arm).
 
-    Runs the fail-closed layers (module docstring) and returns the read
-    frame. EVERY path returns a valid frame or raises exactly what the
-    Python oracle raises: a latched / guarded / degraded call returns
-    ``oracle()`` (the verbatim pre-seam collect body — which re-raises the
-    typed gate errors with today's message bytes when the input is genuinely
-    corrupt), a burn-in mismatch returns the ORACLE frame, and only a
-    guard-clean, burn-in-clean call returns the crate's frame with its
-    bad-tick WARN events replayed. The months / whole-tree / empty-partition
-    SOURCE DECISION already ran in the caller (its raises are shared by both
-    arms — the seam's contract), so exactly one of *files* / *tree_root* is
-    non-``None``.
+    The months / whole-tree / empty-partition SOURCE DECISION already ran
+    in the caller (its pinned raises live there), so exactly one of *files*
+    / *tree_root* is non-``None``. The crate runs collect →
+    rename/select/sort → the ts-datetime-range gate → the price-sanity
+    gate → the bad-tick screen and returns the frame + the per-session
+    bad-tick warn coordinates, replayed here through the ONE
+    ``emit_bad_tick_warn`` seam.
 
-    Parameters
-    ----------
-    files
-        The months arm: the explicit existing month-file paths (the Python
-        ``month_partition_files`` output), or ``None`` for the whole-tree arm.
-    tree_root
-        The whole-tree arm: the symbol's ``1minute`` partition dir (the
-        crate walks it — exact paths, never a glob), or ``None``.
-    with_open_interest
-        Select ``open_interest`` alongside OHLCV (the F&O prebuild path).
-    screen_enabled
-        The caller-resolved ``bad_tick_screen_enabled()`` verdict (ONE kill
-        switch for both arms).
-    warn_source
-        The ``feed.bad_tick_skipped`` WARN source (the prebuild passes
-        ``"prebuild:{exchange}/{segment}/{symbol}/1minute"``).
-    oracle
-        The verbatim Python read body — the live parity oracle every
-        degrade path serves.
+    Raises
+    ------
+    ResampleInputError
+        ANY crate-call failure — a genuine gate violation, a corrupt or
+        vanished file, a crate panic — with the Rust-rendered reason
+        naming *context* (the ruled endgame semantics: the typed
+        quarantining raise; the class is already in the prebuild's
+        per-symbol quarantine set, so one poisoned symbol never aborts the
+        run).
+    RuntimeError
+        A mis-shaped crate return (refuse-poison).
+    LakeRustWavedUnavailableError, LakeRustWavedFlagRemovedError
+        The precondition chain (module docstring).
     """
+    crate = _require_crate()
     if (files is None) == (tree_root is None):
-        # Defensive seam-contract check: exactly one source arm. Refuse the
-        # crate call loudly and serve the oracle (never a crash class).
-        _warn_once(
-            "invalid_seam_args",
-            files_given=files is not None,
-            tree_root_given=tree_root is not None,
+        raise _refuse_poison(
+            "read_1m seam",
+            f"exactly one of files/tree_root must be given "
+            f"(files={files is not None}, tree_root={tree_root is not None})",
         )
-        return oracle()
-    crate = _crate_ready()
-    if crate is None:
-        return oracle()
     import polars as pl
 
     try:
@@ -614,85 +344,46 @@ def read_1m_via_rust(
             with_open_interest,
             screen_enabled,
         )
-    except degrade_errors() as exc:
-        # The degrade-to-oracle law (module docstring): a crate refusal —
-        # including a GENUINE gate violation — re-runs the oracle, which
-        # reproduces the exact typed error (ResampleInputError et al.) or
-        # succeeds; the oracle's verdict always wins.
-        _warn_once("read_error", error_detail=repr(exc))
-        return oracle()
     except (KeyboardInterrupt, SystemExit, MemoryError):
         # The escape set (the errors.py doctrine): operator interrupt /
-        # interpreter shutdown / OOM stay global — never a fallback. Sits
-        # ABOVE the panic belt so its `Exception` member never swallows an OOM.
+        # interpreter shutdown / OOM stay global — never re-labelled.
         raise
-    except panic_belt_errors() as exc:
-        # The panic belt over the crate's own catch_unwind (the render
-        # facade's doctrine verbatim).
-        _disable("crate_panic", error_detail=repr(exc))
-        return oracle()
+    except _panic_belt_errors() as exc:
+        # The ruled endgame semantics — the typed quarantining raise:
+        # every crate failure class (gate refusal, corrupt file, panic)
+        # isolates the SYMBOL at the caller's quarantine boundary.
+        raise ResampleInputError(
+            f"1minute read for {context} refused by the native lake core: {exc}"
+        ) from exc
     if (
         not isinstance(result, tuple)
         or len(result) != _READ_RESULT_ARITY
         or not isinstance(result[0], bytes)
         or not isinstance(result[1], str)
     ):
-        # Refuse-poison gate: a mis-shaped return is a crate BUG — never
-        # decoded, served loudly from the oracle. Structurally unreachable
-        # through the real crate; guards a stale/foreign install.
-        _warn_once("read_result_refused", result_type=type(result).__name__)
-        return oracle()
+        raise _refuse_poison("waved_read_1m_ipc", f"result type {type(result).__name__}")
     ipc_bytes, events_json = result
-    decode_errors: tuple[type[Exception], ...] = (*degrade_errors(), OSError)
+    # OSError joins the DECODE leg only (polars surfaces a truncated
+    # in-memory IPC payload as an OSError). Named tuple expression — mypy
+    # --strict rejects a starred-unpack tuple DISPLAY in an except clause.
+    decode_errors: tuple[type[BaseException], ...] = (*_panic_belt_errors(), OSError)
     try:
         rust_df = pl.read_ipc(io.BytesIO(ipc_bytes))
     except decode_errors as exc:
-        # OSError joins the DECODE leg only (the resample-facade probe:
-        # polars surfaces a truncated in-memory IPC payload as an OSError).
-        _warn_once("result_decode_error", error_detail=repr(exc))
-        return oracle()
+        raise _refuse_poison("waved_read_1m_ipc", f"undecodable IPC payload: {exc!r}") from exc
     try:
         events = _parse_bad_tick_events(events_json)
     except ValueError as exc:
-        # A poisoned events channel refuses the WHOLE result (the frame may
-        # be equally untrustworthy) — the oracle serves + emits its own WARNs.
-        _warn_once("events_refused", error_detail=repr(exc))
-        return oracle()
-    shape_token = f"oi={with_open_interest}|screen={screen_enabled}"
-    shape_unseen = (
-        _BURN_IN_SHAPE_GATE[SURFACE_READ_1M]
-        and shape_token not in _BURN_IN_SHAPES_SEEN[SURFACE_READ_1M]
-    )
-    if _BURN_IN_REMAINING[SURFACE_READ_1M] > 0 or shape_unseen:
-        # Layer 3 — the per-surface burn-in self-check: both engines read;
-        # ANY dtype-exact frame difference ships the ORACLE frame and
-        # autoreverts the whole waved seam. The oracle emits its OWN
-        # bad-tick WARNs here, so the crate events are deliberately NOT
-        # replayed on any burn-in path (never a double warn); an oracle
-        # RAISE propagates — production-identical on a corrupt lake.
-        oracle_df = oracle()
-        if not _frames_equal_dtype_exact(rust_df, oracle_df):
-            _disable(
-                "burn_in_frame_mismatch",
-                error=True,
-                surface=SURFACE_READ_1M,
-                rust_shape=str(rust_df.shape),
-                python_shape=str(oracle_df.shape),
-                shape_token=shape_token,
-            )
-            return oracle_df
-        _BURN_IN_SHAPES_SEEN[SURFACE_READ_1M].add(shape_token)
-        if _BURN_IN_REMAINING[SURFACE_READ_1M] > 0:
-            _BURN_IN_REMAINING[SURFACE_READ_1M] -= 1
-            if _BURN_IN_REMAINING[SURFACE_READ_1M] == 0:
-                _LOG.info(
-                    "lake_rust_waved.burn_in_complete",
-                    surface=SURFACE_READ_1M,
-                    samples=BURN_IN_SAMPLES,
-                )
-        return rust_df
+        raise _refuse_poison("waved_read_1m_ipc", f"poisoned events channel: {exc}") from exc
     _replay_bad_tick_events(events, warn_source=warn_source)
     return rust_df
+
+
+def _panic_belt_errors() -> tuple[type[BaseException], ...]:
+    """The FFI catch set — ``lake_rust_render``'s panic belt (one import)."""
+    from brutex.data.lake_rust_render import panic_belt_errors
+
+    return panic_belt_errors()
 
 
 #: The heal outcome dict's exact key set (the crate wire contract — see
@@ -714,75 +405,45 @@ def heal_batch_via_rust(
     quarantine_root: str,
     findings: list[dict[str, object]],
     on_event: Callable[[str, dict[str, object]], None],
-) -> dict[str, object] | None:
-    """The routed heal-batch mutation core — called by ``heal_findings`` ONLY flag-ON.
+) -> dict[str, object]:
+    """The heal-batch mutation core — called by ``heal_findings`` (the ONE arm).
 
-    The Wave-D design §B2 asymmetry, verbatim: heal MUTATES, so this surface
-    has NO burn-in and NO degrade-to-oracle around the call — the crate's own
-    read-only PREFLIGHT is the sanctioned degrade arm (a ``{"degrade":
-    reason}`` verdict certifies ZERO bytes were touched → return ``None`` and
-    the caller runs the verbatim Python core), while ANY exception out of the
-    engaged call is LOUD (it may be post-mutation; the posture is the
-    documented idempotent Python re-run — the healer converges, an
-    already-healed file reads ``changed=False`` next batch). A crate-side
-    disk-full crosses as a real ``OSError(ENOSPC)`` for the caller's
-    ``lake_write_guard`` → ``LakeWriteHalt`` mapping; a crate panic crosses
-    as the FFI boundary's ``RuntimeError``.
-
-    Parameters
-    ----------
-    lake_root, quarantine_root
-        The batch roots, pre-derived by the Python policy shell (stamp +
-        serial + the symlink refusal already ran there).
-    findings
-        The ORDERED healable findings as plain dicts (the shell serializes
-        the dataclasses — deviation D-10).
-    on_event
-        The ONE replay channel ``(kind, payload) -> None`` — beats, logs,
-        audit lines, catalog/stats/manifest side effects (Wave-D house laws
-        i-iii: structlog + injected seams stay Python). A raising callback
-        propagates out of the crate verbatim.
-
-    Returns
-    -------
-    dict | None
-        The batch outcome (``healed``/``skipped``/``errors``/
-        ``quarantined_files``/``actions``/``touched_minute``), or ``None`` =
-        run the Python core (guard latch / crate-absent / preflight degrade —
-        all ZERO-mutation states).
+    The crate owns per-finding isolation since W-6a: an out-of-envelope
+    finding is a counted isolated error (its ``lake_heal.partition_error``
+    log replayed through *on_event*) and the batch CONTINUES — there is no
+    whole-batch degrade and no Python fallback. Any exception out of the
+    call is LOUD (mutation may have happened; the healer is
+    idempotent-convergent, so the posture is the documented re-run next
+    batch/boot). A crate-side disk-full crosses as a real
+    ``OSError(ENOSPC)`` for the caller's ``lake_write_guard`` →
+    ``LakeWriteHalt`` mapping; a crate panic crosses as the FFI boundary's
+    ``RuntimeError``.
 
     Raises
     ------
     RuntimeError
-        A crate panic, or a mis-shaped outcome dict from a foreign install
-        (refuse-poison — loud, never guessed at: mutation may have happened).
+        A crate panic, a mis-shaped outcome dict, or a stale-wheel
+        ``{"degrade"}`` verdict (refuse-poison — loud, never guessed at:
+        mutation may have happened).
     OSError
         The crate's disk-full class (``ENOSPC``/``EDQUOT``) — the caller
         maps it via ``lake_write_guard``.
+    LakeRustWavedUnavailableError, LakeRustWavedFlagRemovedError
+        The precondition chain (module docstring).
     """
-    crate = _crate_ready()
-    if crate is None:
-        return None
+    crate = _require_crate()
     outcome = crate.waved_heal_batch(lake_root, quarantine_root, findings, on_event)
     if not isinstance(outcome, dict):
-        raise RuntimeError(
-            f"waved_heal_batch returned {type(outcome).__name__} — refuse-poison "
-            "(foreign/stale brutex_lake install; re-install the crate wheel)"
+        raise _refuse_poison("waved_heal_batch", f"outcome type {type(outcome).__name__}")
+    if "degrade" in outcome:
+        # A pre-endgame wheel's whole-batch degrade — structurally
+        # unreachable behind the waved_endgame_witness API guard; refuse
+        # loudly rather than guess (there is no Python core to run).
+        raise _refuse_poison(
+            "waved_heal_batch", f"stale whole-batch degrade verdict {outcome.get('degrade')!r}"
         )
-    degrade = outcome.get("degrade")
-    if degrade is not None:
-        # The crate's read-only preflight refused the batch BEFORE touching a
-        # byte (a file/destination outside the byte-parity envelope, or — as
-        # defense in depth — a foreign future finding kind; since W-2b all
-        # six healable kinds are ported) — the sanctioned pre-mutation
-        # degrade arm (§B2).
-        _warn_once("heal_degrade", degrade_reason=str(degrade))
-        return None
     if set(outcome) != _HEAL_OUTCOME_KEYS:
-        raise RuntimeError(
-            "waved_heal_batch outcome keys refused — refuse-poison "
-            "(foreign/stale brutex_lake install; re-install the crate wheel)"
-        )
+        raise _refuse_poison("waved_heal_batch", "outcome keys refused")
     return outcome
 
 
@@ -790,87 +451,35 @@ def lake_content_token_via_rust(
     *,
     lake_root: str,
     on_skip: Callable[[str, str, str], None],
-    oracle: Callable[[], str],
 ) -> str:
-    """The routed content-token walk — called by ``lake_content_token`` ONLY flag-ON.
+    """The content-token walk — called by ``lake_content_token`` (the ONE arm).
 
-    Read-only, so the full W-1 fail-closed doctrine applies: guard latches /
-    crate refusals / refuse-poison shapes serve ``oracle()`` (the verbatim
-    Python walk, which emits its OWN skip WARNs), and the first
-    :data:`BURN_IN_SAMPLES` engaged calls run BOTH walks — a token mismatch
-    ships the ORACLE token and autoreverts the whole waved seam. Walk-skip
-    events (a raced-away entry/dir) cross as ``{"event", "path", "error"}``
-    dicts and are replayed through *on_skip* — ONLY when the oracle did not
-    run (never a double WARN), and the caller owns the pinned
-    ``lake_heal.token_*_skipped`` emission sites (house law i: structlog
-    stays with the module that owns the event).
-
-    HONEST envelope: the token is stat-derived (``mtime_ns``), so a
-    concurrent writer moving files BETWEEN the two burn-in walks can produce
-    a false mismatch → a spurious (safe, loud) autorevert — the same
-    disclosed race class as the W-1 read burn-in.
+    Walk-skip events (a raced-away entry/dir) cross as
+    ``{"event", "path", "error"}`` dicts and are replayed through
+    *on_skip* — the caller owns the pinned ``lake_heal.token_*_skipped``
+    emission sites (house law i). A crate failure propagates RAW (the
+    startup sweep's ``_SWEEP_GUARD_ERRORS`` own the never-crash-boot law);
+    a mis-shaped return raises the refuse-poison ``RuntimeError``.
     """
-    crate = _crate_ready()
-    if crate is None:
-        return oracle()
-    try:
-        result = crate.waved_lake_content_token(lake_root)
-    except degrade_errors() as exc:
-        _warn_once("token_error", error_detail=repr(exc))
-        return oracle()
-    except (KeyboardInterrupt, SystemExit, MemoryError):
-        # The escape set (the errors.py doctrine) — never a fallback.
-        raise
-    except panic_belt_errors() as exc:
-        _disable("crate_panic", error_detail=repr(exc))
-        return oracle()
+    crate = _require_crate()
+    result = crate.waved_lake_content_token(lake_root)
     if (
         not isinstance(result, tuple)
         or len(result) != _TOKEN_RESULT_ARITY
         or not isinstance(result[0], str)
         or not isinstance(result[1], list)
     ):
-        # Refuse-poison gate: a mis-shaped return is a crate BUG — served
-        # loudly from the oracle (structurally unreachable through the real
-        # crate; guards a stale/foreign install).
-        _warn_once("token_result_refused", result_type=type(result).__name__)
-        return oracle()
+        raise _refuse_poison("waved_lake_content_token", f"result type {type(result).__name__}")
     token: str = result[0]
-    raw_skips = result[1]
     skips: list[tuple[str, str, str]] = []
-    for item in raw_skips:
+    for item in result[1]:
         if (
             not isinstance(item, dict)
             or set(item) != _TOKEN_SKIP_KEYS
             or not all(isinstance(item[key], str) for key in _TOKEN_SKIP_KEYS)
         ):
-            # A poisoned skip channel refuses the WHOLE result (the token may
-            # be equally untrustworthy) — the oracle serves + warns itself.
-            _warn_once("token_events_refused")
-            return oracle()
+            raise _refuse_poison("waved_lake_content_token", "poisoned skip channel")
         skips.append((str(item["event"]), str(item["path"]), str(item["error"])))
-    if _BURN_IN_REMAINING[SURFACE_CONTENT_TOKEN] > 0:
-        # Layer 3 — the burn-in self-check (single-shape surface: the count
-        # budget alone; the oracle walk emits its OWN skip WARNs here, so the
-        # crate events are deliberately NOT replayed on any burn-in path).
-        oracle_token = oracle()
-        if token != oracle_token:
-            _disable(
-                "burn_in_token_mismatch",
-                error=True,
-                surface=SURFACE_CONTENT_TOKEN,
-                rust_token=token,
-                python_token=oracle_token,
-            )
-            return oracle_token
-        _BURN_IN_REMAINING[SURFACE_CONTENT_TOKEN] -= 1
-        if _BURN_IN_REMAINING[SURFACE_CONTENT_TOKEN] == 0:
-            _LOG.info(
-                "lake_rust_waved.burn_in_complete",
-                surface=SURFACE_CONTENT_TOKEN,
-                samples=BURN_IN_SAMPLES,
-            )
-        return token
     for event, path, error in skips:
         on_skip(event, path, error)
     return token
@@ -904,13 +513,13 @@ def _reconcile_findings(
 ) -> tuple[IntraFileDup | ForeignMonthRows, ...]:
     """Rebuild the L1 finding objects from the crate's classify counts.
 
-    Value-equal to ``classify_bar_keys``' output by construction: the same
-    lake-relative ``coords.relpath()`` path stamp, the same coords object,
-    the same dup-then-foreign order, ``overlap_rows=None`` (the free L1 path
-    never reads the canonical sibling) — pinned by the burn-in's
-    frozen-dataclass tuple compare and the twin-catalog differential. Lazy
-    import: the finding dataclasses live in ``lake_invariants`` (which
-    imports polars); this leaf stays polars-free at module scope.
+    Value-equal to the historical ``classify_bar_keys`` output by
+    construction: the same lake-relative ``coords.relpath()`` path stamp,
+    the same coords object, the same dup-then-foreign order,
+    ``overlap_rows=None`` (the free L1 path never reads the canonical
+    sibling) — pinned by the twin-catalog differential. Lazy import: the
+    finding dataclasses live in ``lake_invariants`` (which imports
+    polars); this leaf stays polars-free at module scope.
     """
     from brutex.data.lake_invariants import ForeignMonthRows, IntraFileDup
 
@@ -938,9 +547,9 @@ def _reconcile_scan_from_result(
 
     Raises ``ValueError`` on ANY junk shape (a non-tuple/None root, wrong
     arity, bool-punned/non-int counts, a law-violating count relation, a
-    non-64-char hash, an out-of-``datetime``-range span) — the caller treats
-    that as refuse-poison and serves the oracle. ``None`` (the crate's
-    zero-row verdict) passes through as ``None``.
+    non-64-char hash, an out-of-``datetime``-range span) — the caller
+    converts that into the refuse-poison ``RuntimeError``. ``None`` (the
+    crate's zero-row verdict) passes through as ``None``.
     """
     if result is None:
         return None
@@ -985,122 +594,62 @@ def reconcile_file_via_rust(
     *,
     path: str,
     coords: PartitionCoords | None,
-    oracle: Callable[[], WavedFileScan | None],
 ) -> WavedFileScan | None:
-    """The routed per-file reconcile scan — called by ``reconcile_catalog_from_lake`` ONLY flag-ON.
+    """The per-file reconcile scan — called by ``reconcile_catalog_from_lake``.
 
-    Read-only, so the full W-1 fail-closed doctrine applies (module
-    docstring): guard latches / crate refusals / refuse-poison shapes serve
-    ``oracle()`` — the verbatim Python read/hash/classify body, which either
-    returns the scan tuple or raises the REAL skip-class exception
-    (``PolarsError`` / ``OverflowError`` / ``OSError`` …) the caller's
-    GAP-#9 guard maps to the pinned ``catalog.reconcile.parquet_skip``
-    verdict with today's message bytes (the degrade-to-oracle law) — and the
-    first :data:`BURN_IN_SAMPLES` engaged calls (plus each unseen
-    ``classify=`` shape) run BOTH arms, autoreverting the whole waved seam
-    on ANY tuple difference (the ``raw_hash`` sha256 equality is the
-    run-identity tooth — Golden Rule #4).
+    Returns ``(row_count, first_ts, last_ts, raw_hash, findings)`` or
+    ``None`` for a zero-row file (the caller's counted skip). The
+    ``raw_hash`` sha256 is run-identity-adjacent (Golden Rule #4 — it
+    feeds the FR-CAT-004 catalog rollup → ``data_snapshot_hash``).
 
-    Parameters
-    ----------
-    path
-        The partition file's concrete path (the caller's walked file — the
-        crate reads it verbatim, never a glob pattern).
-    coords
-        The file's already-parsed :class:`PartitionCoords` when the L1
-        classify piggyback is on (``check_invariants=True``), else ``None``
-        — the crate then skips the dup/foreign counts and the scan carries
-        no findings (both arms agree by construction).
-    oracle
-        The verbatim Python per-file body — the live parity oracle every
-        degrade path serves.
-
-    Returns
-    -------
-    WavedFileScan | None
-        ``(row_count, first_ts, last_ts, raw_hash, findings)``, or ``None``
-        for a zero-row file (the caller's counted skip).
+    Raises
+    ------
+    ValueError
+        ANY crate-call failure — a corrupt file, an out-of-envelope
+        timestamp shape (the D-15 ms/ns class), a crate panic — naming the
+        file (the ruled endgame semantics: ``ValueError`` is a member of
+        the caller's GAP-#9 skip set via ``datetime_out_of_range_errors``,
+        so ONE poisoned file is a loud counted
+        ``catalog.reconcile.parquet_skip``, never a crashed reconcile).
+    RuntimeError
+        A mis-shaped crate return (refuse-poison — a structurally broken
+        wheel must crash the reconcile LOUDLY rather than skip the whole
+        lake into an empty catalog).
+    LakeRustWavedUnavailableError, LakeRustWavedFlagRemovedError
+        The precondition chain (module docstring).
     """
-    crate = _crate_ready()
-    if crate is None:
-        return oracle()
+    crate = _require_crate()
     classify_home = None if coords is None else (coords.year, coords.month)
     try:
         result = crate.waved_reconcile_file(path, classify_home)
-    except degrade_errors() as exc:
-        # The degrade-to-oracle law: a crate refusal — including a GENUINE
-        # skip-class file (corrupt bytes, an out-of-range stamp) — re-runs
-        # the oracle, which raises the real exception with today's message
-        # bytes or succeeds; the oracle's verdict always wins.
-        _warn_once("reconcile_error", error_detail=repr(exc))
-        return oracle()
     except (KeyboardInterrupt, SystemExit, MemoryError):
-        # The escape set (the errors.py doctrine) — never a fallback.
         raise
-    except panic_belt_errors() as exc:
-        _disable("crate_panic", error_detail=repr(exc))
-        return oracle()
+    except _panic_belt_errors() as exc:
+        raise ValueError(f"native reconcile scan refused {path}: {exc}") from exc
     try:
-        scan = _reconcile_scan_from_result(result, coords)
+        return _reconcile_scan_from_result(result, coords)
     except ValueError as exc:
-        # Refuse-poison gate: a mis-shaped wire is a crate BUG — served
-        # loudly from the oracle (structurally unreachable through the real
-        # crate; guards a stale/foreign install).
-        _warn_once("reconcile_result_refused", error_detail=repr(exc))
-        return oracle()
-    shape_token = f"classify={coords is not None}"
-    shape_unseen = (
-        _BURN_IN_SHAPE_GATE[SURFACE_RECONCILE_FILE]
-        and shape_token not in _BURN_IN_SHAPES_SEEN[SURFACE_RECONCILE_FILE]
-    )
-    if _BURN_IN_REMAINING[SURFACE_RECONCILE_FILE] > 0 or shape_unseen:
-        # Layer 3 — the burn-in self-check: both arms scan; ANY tuple
-        # difference (counts, span datetimes, the sha256 hex, the finding
-        # objects) ships the ORACLE scan and autoreverts the whole waved
-        # seam. An oracle RAISE propagates — production-identical on a file
-        # the Python arm refuses.
-        oracle_scan = oracle()
-        if scan != oracle_scan:
-            _disable(
-                "burn_in_reconcile_mismatch",
-                error=True,
-                surface=SURFACE_RECONCILE_FILE,
-                shape_token=shape_token,
-                file_path=path,
-            )
-            return oracle_scan
-        _BURN_IN_SHAPES_SEEN[SURFACE_RECONCILE_FILE].add(shape_token)
-        if _BURN_IN_REMAINING[SURFACE_RECONCILE_FILE] > 0:
-            _BURN_IN_REMAINING[SURFACE_RECONCILE_FILE] -= 1
-            if _BURN_IN_REMAINING[SURFACE_RECONCILE_FILE] == 0:
-                _LOG.info(
-                    "lake_rust_waved.burn_in_complete",
-                    surface=SURFACE_RECONCILE_FILE,
-                    samples=BURN_IN_SAMPLES,
-                )
-        return scan
-    return scan
+        raise _refuse_poison("waved_reconcile_file", str(exc)) from exc
 
 
 # ────────────────────────────────────────────────────────────────────────
-# W-4 — the ``lake_invariants`` whole-lake scan surface
+# The ``lake_invariants`` whole-lake scan surface
 # ────────────────────────────────────────────────────────────────────────
 
-#: The most recent engaged Rust scan's ``_read_key_columns``-equivalent
-#: read-attempt count (the Wave-D design §F2 wire counter — the hook the
-#: delete-time read-count spy pins rebind onto). ``None`` until an engaged
-#: scan serves; reset by :func:`reset_lake_rust_waved_for_tests`.
+#: The most recent Rust scan's ``reads_performed`` wire counter (the
+#: Wave-D design §F2 read-count witness — the seam the deleted
+#: ``_read_key_columns`` spy pins re-bound onto). ``None`` until a scan
+#: serves; reset by :func:`reset_lake_rust_waved_for_tests`.
 _LAST_SCAN_READS: Final[list[int | None]] = [None]
 
 #: The logger the scan-event replay writes through — the SAME structlog
-#: name as ``lake_invariants._LOG``, so a flag-ON replayed WARN is
-#: indistinguishable from the Python arm's at the sink (house law i:
-#: structlog stays Python — the crate returns event COORDINATES only).
+#: name as ``lake_invariants._LOG``, so a replayed WARN is
+#: indistinguishable from the historical Python arm's at the sink (house
+#: law i: structlog stays Python — the crate returns event COORDINATES).
 _LI_LOG = structlog.get_logger("brutex.data.lake_invariants")
 
 #: The two scan log-event names the crate may replay (refuse-poison
-#: vocabulary — any other token is a mis-shaped wire, served from the
-#: oracle).
+#: vocabulary — any other token is a mis-shaped wire).
 _SCAN_LOG_EVENTS: Final[frozenset[str]] = frozenset(
     {"lake.invariant.scan_skip", "lake.invariant.symlink_skipped"}
 )
@@ -1115,16 +664,18 @@ _SCAN_SYMBOL_DIRS_ARITY: Final[int] = 3
 _SCAN_EVENT_KINDS: Final[frozenset[str]] = frozenset({"log", "finding", "drift"})
 
 
+def reset_lake_rust_waved_for_tests() -> None:
+    """Reset the per-process scan-reads witness (tests ONLY)."""
+    _LAST_SCAN_READS[0] = None
+
+
 class _PauseEscape(BaseException):
     """Marker for a raising ``per_file_pause`` callback crossing the seam.
 
     The facade wraps the injected pause callback so ITS OWN exception —
     whatever class, ``KeyboardInterrupt`` included (hence the
     ``BaseException`` base) — is parked and re-raised VERBATIM by
-    :func:`scan_lake_via_rust`, never mistaken for a crate degrade (a pause
-    raising ``ValueError`` would otherwise fold into ``degrade_errors()``
-    and re-run the whole oracle scan, doubling the callback's side effects
-    before the exception finally propagated).
+    :func:`scan_lake_via_rust`, never re-labelled.
     """
 
 
@@ -1176,11 +727,8 @@ def _scan_overlap(rec: Mapping[str, object]) -> int | None:
 def _scan_finding_from_wire(rec: object) -> LakeFinding:
     """Rebuild ONE frozen finding dataclass from its crate wire record.
 
-    Value-equal to the Python scanner's object by construction (same path
-    string, same coords/series/counts, same ``overlap_rows`` including the
-    honest ``None`` abstain) — pinned by the burn-in's normalized-report
-    compare and the poison-corpus differential. Raises ``ValueError`` on
-    ANY junk shape (refuse-poison — the caller serves the oracle).
+    Raises ``ValueError`` on ANY junk shape (refuse-poison — the caller
+    converts it into the loud ``RuntimeError``).
     """
     from brutex.data import lake_invariants as li
 
@@ -1283,11 +831,11 @@ def _scan_report_from_wire(
     Runs the Python :func:`~brutex.data.lake_invariants.detect_legacy_drift`
     fold (STAYS Python — it needs the ``lake_keys`` ladder + the instrument
     vocabulary) over the crate's enumerated ``symbol_dirs`` and splices its
-    findings at the crate's ``drift_insert_at`` — exactly the Python
-    scanner's position (after the bars tree, before the options tree). The
-    report's ``duration_s`` is a placeholder 0.0 — the caller stamps the
-    real wall clock at serve time (the burn-in compare pops it either way).
-    Raises ``ValueError`` on ANY junk wire shape (refuse-poison).
+    findings at the crate's ``drift_insert_at`` — the scanner's canonical
+    position (after the bars tree, before the options tree). The report's
+    ``duration_s`` is a placeholder 0.0 — the caller stamps the real wall
+    clock at serve time. Raises ``ValueError`` on ANY junk wire shape
+    (refuse-poison).
     """
     from brutex.data import lake_invariants as li
 
@@ -1352,7 +900,7 @@ def _scan_report_from_wire(
     drift: tuple[LakeFinding, ...] = ()
     if include_bars:
         # The crate's symbol names arrive sorted (BTreeSet) — the exact
-        # ``{key: sorted(names)}`` shape the Python scanner feeds the fold.
+        # ``{key: sorted(names)}`` shape the scanner feeds the fold.
         drift = tuple(
             li.detect_legacy_drift(symbol_dirs, lake_root=lake_root, canonical_keys=canonical_keys)
         )
@@ -1376,23 +924,6 @@ def _scan_report_from_wire(
     return report, events, drift_at, len(drift), counters["reads_performed"]
 
 
-def _scan_reports_equal(left: LakeScanReport, right: LakeScanReport) -> bool:
-    """Order-exact report equality with the wall clock popped.
-
-    STRONGER than the poison-corpus harness's normalized verdict (which
-    sorts findings and folds the lake root): both arms scanned the SAME
-    lake, so paths compare raw, and the findings ORDER is part of the law
-    (the event replay indexes into it). The census is a pure function of
-    the report, so report equality implies census equality — comparing it
-    here would add cost with zero discrimination power.
-    """
-    left_raw = dataclasses.asdict(left)
-    right_raw = dataclasses.asdict(right)
-    left_raw.pop("duration_s")
-    right_raw.pop("duration_s")
-    return left_raw == right_raw
-
-
 def _replay_scan_events(
     events: tuple[Mapping[str, object], ...],
     findings: tuple[LakeFinding, ...],
@@ -1406,15 +937,10 @@ def _replay_scan_events(
     logger name as ``lake_invariants._LOG`` with the crate's per-site
     ``repr()`` flags (the #907/#1594 log-injection law); finding events
     replay :func:`~brutex.data.lake_invariants.log_lake_finding` at the
-    exact Python log position (dup/price/alien at classification, foreign
-    at overlap resolution); the drift marker logs the spliced drift
-    findings in order. A crate finding index at/after ``drift_at`` shifts
-    past the spliced drift block.
-
-    HONEST (recorded deviation): a skip event's ``error`` text is the
-    RUST-side exception rendering — same event name, same path, same count,
-    different message bytes than the Python arm's (the harness's "log TEXT
-    is deliberately NOT compared" law; readiness doc §3).
+    exact canonical log position (dup/price/alien at classification,
+    foreign at overlap resolution); the drift marker logs the spliced
+    drift findings in order. A crate finding index at/after ``drift_at``
+    shifts past the spliced drift block.
     """
     from brutex.data.lake_invariants import log_lake_finding
 
@@ -1439,12 +965,11 @@ def _replay_scan_events(
 
 
 def last_rust_scan_reads() -> int | None:
-    """The engaged Rust scan's most recent read-attempt count (§F2 seam).
+    """The Rust scan's most recent read-attempt count (the §F2 seam).
 
-    ``None`` until an engaged scan serves in this process. The Wave-D
-    delete step rebinds the ``_read_key_columns`` read-count spy pins onto
-    this counter once the Python core is gone (design §F2 — the wire
-    carries it NOW so the pins survive the delete).
+    ``None`` until a scan serves in this process — the wire counter the
+    historical ``_read_key_columns`` read-count spy pins re-bound onto at
+    the Wave-D delete (design §F2).
     """
     return _LAST_SCAN_READS[0]
 
@@ -1461,32 +986,22 @@ def scan_lake_via_rust(
     include_bars: bool,
     canonical_keys: Collection[str] | None,
     per_file_pause: Callable[[], None] | None,
-    oracle: Callable[[], LakeScanReport],
 ) -> LakeScanReport:
-    """The routed whole-lake invariant scan — called by ``scan_lake_invariants`` ONLY flag-ON.
+    """The whole-lake invariant scan — called by ``scan_lake_invariants``.
 
-    Read-only, so the full W-1 fail-closed doctrine applies (module
-    docstring): guard latches / crate refusals / refuse-poison wire shapes
-    serve ``oracle()`` — the verbatim Python scanner. The crate returns the
-    findings + counters + an ORDERED event stream; this facade rebuilds the
-    frozen dataclasses, runs the Python ``detect_legacy_drift`` fold over
-    the crate-enumerated symbol dirs (the fold STAYS Python — house law
-    ii), splices its findings at the crate's insert point, and replays the
-    log/finding events through the Python sinks (house law i). The first
-    :data:`BURN_IN_SAMPLES` engaged calls (plus each unseen shape token)
-    run BOTH arms and compare the reports order-exact (wall clock popped);
-    ANY difference ships the ORACLE report and autoreverts the whole waved
-    seam. Burn-in calls SERVE the oracle report (its logs already fired —
-    replaying the crate stream too would double-log) and tick the injected
-    pause callback in BOTH arms (the read_1m double-run property,
-    documented).
-
-    A raising *per_file_pause* re-raises VERBATIM (class + message) via the
-    :class:`_PauseEscape` parking wrap — never folded into the degrade set.
+    The crate returns the findings + counters + an ORDERED event stream;
+    this facade rebuilds the frozen dataclasses, runs the Python
+    ``detect_legacy_drift`` fold over the crate-enumerated symbol dirs
+    (house law ii), splices its findings at the crate's insert point, and
+    replays the log/finding events through the Python sinks (house law i).
+    Isolation is CRATE-OWNED (the W-6a law): an unjudgeable shape is a
+    loud counted ``lake.invariant.scan_skip`` inside the report, so a
+    crate-call raise here is the structurally-unreachable defensive belt —
+    propagated RAW. A raising *per_file_pause* re-raises VERBATIM (class +
+    message) via the :class:`_PauseEscape` parking wrap. A mis-shaped wire
+    raises the refuse-poison ``RuntimeError``.
     """
-    crate = _crate_ready()
-    if crate is None:
-        return oracle()
+    crate = _require_crate()
     from brutex.data import lake_invariants as li
     from brutex.data import partition as partition_mod
 
@@ -1529,58 +1044,15 @@ def scan_lake_via_rust(
     except _PauseEscape as marker:
         if pause_error:
             raise pause_error[0] from None
-        raise RuntimeError("scan pause escape without a captured exception") from marker
-    except degrade_errors() as exc:
-        # The degrade-to-oracle law: a crate refusal (an int()-ambiguous dir
-        # name, an unmappable dtype, a non-UTF-8 path …) re-runs the oracle,
-        # whose verdict — findings, skips, or a raise — always wins.
-        _warn_once("scan_error", error_detail=repr(exc))
-        return oracle()
-    except (KeyboardInterrupt, SystemExit, MemoryError):
-        # The escape set (the errors.py doctrine) — never a fallback.
-        raise
-    except panic_belt_errors() as exc:
-        _disable("crate_panic", error_detail=repr(exc))
-        return oracle()
+        raise _refuse_poison("waved_scan_lake", "pause escape without a captured exception") from (
+            marker
+        )
     try:
         report, events, drift_at, drift_len, reads = _scan_report_from_wire(
             wire, lake_root=lake_root, canonical_keys=canonical_keys, include_bars=include_bars
         )
     except ValueError as exc:
-        # Refuse-poison gate: a mis-shaped wire is a crate BUG — served
-        # loudly from the oracle.
-        _warn_once("scan_result_refused", error_detail=repr(exc))
-        return oracle()
-    shape_token = f"bars={include_bars}/options={include_options}/scoped={months is not None}"
-    shape_unseen = (
-        _BURN_IN_SHAPE_GATE[SURFACE_SCAN] and shape_token not in _BURN_IN_SHAPES_SEEN[SURFACE_SCAN]
-    )
-    if _BURN_IN_REMAINING[SURFACE_SCAN] > 0 or shape_unseen:
-        # Layer 3 — the burn-in self-check. The ORACLE report is served
-        # either way: its logs fired naturally inside oracle(), so the
-        # crate event stream is deliberately NOT replayed on a burn-in call
-        # (no double-log); the engaged replay path is exercised by the
-        # steady-state differential with the burn-in disarmed.
-        oracle_report = oracle()
-        if not _scan_reports_equal(report, oracle_report):
-            _disable(
-                "burn_in_scan_mismatch",
-                error=True,
-                surface=SURFACE_SCAN,
-                shape_token=shape_token,
-                lake=str(lake_root),
-            )
-            return oracle_report
-        _BURN_IN_SHAPES_SEEN[SURFACE_SCAN].add(shape_token)
-        if _BURN_IN_REMAINING[SURFACE_SCAN] > 0:
-            _BURN_IN_REMAINING[SURFACE_SCAN] -= 1
-            if _BURN_IN_REMAINING[SURFACE_SCAN] == 0:
-                _LOG.info(
-                    "lake_rust_waved.burn_in_complete",
-                    surface=SURFACE_SCAN,
-                    samples=BURN_IN_SAMPLES,
-                )
-        return oracle_report
+        raise _refuse_poison("waved_scan_lake", str(exc)) from exc
     _LAST_SCAN_READS[0] = reads
     report = dataclasses.replace(report, duration_s=time.perf_counter() - started)
     _replay_scan_events(events, report.findings, drift_at=drift_at, drift_len=drift_len)
@@ -1594,21 +1066,13 @@ def scan_lake_via_rust(
 
 
 __all__ = [
-    "BURN_IN_SAMPLES",
-    "LAKE_WAVED_RUST_DEFAULT",
     "LAKE_WAVED_RUST_ENV",
-    "SURFACE_CONTENT_TOKEN",
-    "SURFACE_READ_1M",
-    "SURFACE_RECONCILE_FILE",
-    "SURFACE_SCAN",
-    "env_flag_tristate",
     "heal_batch_via_rust",
     "lake_content_token_via_rust",
-    "lake_rust_waved_enabled",
     "last_rust_scan_reads",
     "read_1m_via_rust",
     "reconcile_file_via_rust",
+    "require_waved_env_unset",
     "reset_lake_rust_waved_for_tests",
-    "rust_waved_disabled",
     "scan_lake_via_rust",
 ]
