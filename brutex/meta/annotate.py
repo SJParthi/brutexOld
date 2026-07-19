@@ -191,6 +191,8 @@ def _sidecar_paths(trades_path: Path) -> SidecarPaths:
         aggs=base / f"{stem}.aggs.parquet",
         equity=base / f"{stem}.equity.parquet",
         stamp=base / f"{stem}.stamp.json",
+        resilience=base / f"{stem}.resilience.parquet",
+        resilience_stamp=base / f"{stem}.resilience.stamp.json",
     )
 
 

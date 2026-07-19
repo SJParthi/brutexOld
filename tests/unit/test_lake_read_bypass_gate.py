@@ -109,6 +109,12 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "writes (aggs join + twin entry-ts sets) — engine artifacts, not "
         "lake bars (DEC-SWEEP-RESULTS-DEPTH-001)"
     ),
+    "brutex/engine/resilience_streaks.py": (
+        "reads its OWN stamp-validated <stem>.resilience.parquet sidecar (+ the "
+        "run_id-keyed trades sidecar for the adoption backfill) — run_id-keyed "
+        "engine artifacts under sweep_runs/, not lake bars; dedup identity does "
+        "not apply (DEC-SWEEP-RESULTS-DEPTH-001, losing-streak resilience)"
+    ),
     "brutex/dashboard/oneclick_artifacts.py": (
         "display-zone read of the results-depth EQUITY sidecar "
         "(<stem>.equity.parquet under sweep_runs/, run_id-keyed — the "
@@ -145,6 +151,29 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     ),
     "brutex/cli.py": (
         "wired: _LakeOptionBarSource._row_at keep-first + WARN via log_read_duplicates"
+    ),
+    "brutex/acceptance/independent.py": (
+        "the ONE AST-FENCED independent movers-truth oracle "
+        "(DEC-OPERATOR-ACCEPTANCE-VERIFY-001, the DEC-SURFACE-TRIAL-001 "
+        "precedent): every compared /movers cell is re-derived from the RAW "
+        "month parquet with glob=False + hand-rolled math (keep-first dedup "
+        "re-stated as a LAW, hand IST/bucket-anchor/%CHNG). Routing it through "
+        "lake_read would import a production seam and DEFEAT the independence "
+        "guarantee the fence (test_acceptance_independent_fence.py — no "
+        "brutex.* callable import) exists to enforce"
+    ),
+    "brutex/acceptance/sampling.py": (
+        "wired: month_bounded_read feeds the raw glob=False read (metachar-named "
+        "dir literal, #1594-R15) into dedup_bars_frame IMMEDIATELY, exactly as "
+        "the tf_autoderive.read_lake_bars_frame all-months arm does"
+    ),
+    "brutex/acceptance/selftest.py": (
+        "poison-twin builder — surgical read-modify-write on the SYNTHETIC "
+        "self-test twin lake (written with the real production writers) to "
+        "inject duplicate / foreign-month / x10 / pre-open / value poisons the "
+        "checks must DETECT; a dedup-gated read would strip the very duplicate "
+        "row it plants (the teeth-before-trust smoke), never a real-lake read "
+        "(DEC-OPERATOR-ACCEPTANCE-VERIFY-001)"
     ),
 }
 

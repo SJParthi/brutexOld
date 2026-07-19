@@ -32,6 +32,7 @@ Exclusion proofs kept honest (nothing weakened by the fix):
 from __future__ import annotations
 
 import time
+import warnings
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -45,6 +46,19 @@ pytest.importorskip("polars")
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 pytest.importorskip("lmdb")
+
+# The one-click launch runs under the INSTITUTIONAL default ``stage3_enable=True``
+# (the R5 flip — ``build_sweep_kwargs``), so the REAL sweep job imports ``cma``
+# inside ``cmd_sweep_all``'s ``ensure_stage3_runtime`` fail-fast. Pre-import it
+# HERE with its matplotlib-less import-time UserWarning suppressed: the repo's
+# ``filterwarnings = ["error"]`` would otherwise escalate that third-party
+# warning into an exception inside the job THREAD (recorded as ``state=error``
+# with the warning text as ``detail`` — never seen in production, where warnings
+# are not errors). The ``test_engine_vix_stamper_wiring.py`` precedent; a build
+# without the ``optimize`` extra honestly skips this REAL-path suite.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    pytest.importorskip("cma", reason="stage3_enable=True needs the [optimize] extra")
 
 from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
 from brutex.dashboard.app import DashboardState, build_app
