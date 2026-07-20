@@ -127,6 +127,41 @@ def test_serve_keepawake_requested_but_unavailable_prints_truthful_banner(
     assert "ENABLED — this process holds the host awake" not in out
 
 
+def test_cmd_dashboard_never_leaks_lake_heal_sweep_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The conftest ``_lake_heal_sweep_daemon_belt`` pin (PR #1666 shard-2 flake).
+
+    Pre-belt, every real ``cmd_dashboard`` call here spawned an un-joined
+    ``brutex-lake-heal-sweep`` daemon (``cli._start_lake_heal_sweep`` →
+    ``StartupSweeper``) that outlived its test and leaked
+    ``lake_heal.sweep_complete`` structlog lines onto the CURRENT
+    ``sys.stdout`` — contaminating a later test's doctest stdout capture (CI
+    jobs 88186693408 + 88192989598, twice consecutively; reproduced locally:
+    the thread was still alive 10 s after this module's tests finished).
+    Fails-before: without the belt this assertion races the daemon's lifetime
+    and the leak class stands.
+    """
+    pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("duckdb", reason="the instrument store needs duckdb")
+    import threading
+
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes)
+    monkeypatch.setenv("BRUTEX_SERVER_HEARTBEAT", "0")
+    monkeypatch.delenv("BRUTEX_SERVE_KEEP_AWAKE", raising=False)
+
+    rc = cli.cmd_dashboard(tmp_path, "127.0.0.1", 9099)
+
+    assert rc == cli.EXIT_OK
+    leaked = [t.name for t in threading.enumerate() if t.name == "brutex-lake-heal-sweep"]
+    assert not leaked, (
+        f"un-joined lake-heal sweep daemon(s) leaked from cmd_dashboard: {leaked} — "
+        f"the conftest _lake_heal_sweep_daemon_belt regressed (PR #1666 shard-2 class)"
+    )
+
+
 def test_serve_keepawake_off_branch_logs_honest_banner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
