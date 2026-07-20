@@ -229,6 +229,7 @@ class TestConstruction:
         sim = ResidentTradeSim(decision, [0] * len(decision), tf_minutes=3, exec_bars_1m=exec_bars)
         assert sim.n_bars == len(decision) == 5
         assert sim.n_exec_bars == len(exec_bars) == 15
+        assert sim.exec_bars == tuple(exec_bars)
 
     def test_out_of_coverage_weekday_bar_refuses_loud_at_construction(self) -> None:
         # Calendar-correctness pack: a bar dated on a weekday OUTSIDE the
