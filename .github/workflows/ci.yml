@@ -347,7 +347,10 @@ jobs:
     name: Unit test shard ${{ matrix.shard }} (coverage data)
     runs-on: ubuntu-24.04
     needs: build-wheels
-    timeout-minutes: 75
+    # 75 → 90 (TRAIN A, red-team mandate): the diff-scoped coverage gate
+    # wall-kills at 75 on a ~35-PR integration diff; W2's on-record raise
+    # (living in #1699 as a cherry of the same edit) authorizes 90.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
