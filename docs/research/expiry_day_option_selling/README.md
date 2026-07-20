@@ -14,13 +14,22 @@ NSE end-of-day derivatives bhavcopy files — with every stop-loss fill
 The per-day spread between the two brackets is the measured
 **naive-vs-honest gap** — the number the tail-study doc needs.
 
+Modeling disclosure: BOTH brackets enter at the day OPEN — the
+pessimistic bracket applies the adverse extreme to the **exit only** —
+so the pessimistic tail is a **floor** on the true adverse tail
+(consistent with honest limit 2 below).
+
 ## What it runs
 
 - **Expiry-day discovery** per ISO week, 2019-02-01 → today by default:
   candidate weekday Thursday (Tuesday from 2025-09-01 — see honest
-  limits), holiday-shifted by walking BACK up to 3 weekdays until a
-  bhavcopy actually contains NIFTY options expiring that day. Weeks with
-  none found are counted `no_expiry_found`, never fabricated.
+  limits), holiday-shifted by walking BACK up to 3 weekdays, then (if
+  still not found) probing up to 2 weekdays FORWARD of the candidate,
+  until a bhavcopy actually contains NIFTY options expiring that day.
+  Weeks with none found are counted `no_expiry_found`, never
+  fabricated; a boundary-week walk-back that lands on the PRIOR week's
+  expiry is deduped (`duplicate_expiry_skipped`) — each expiry date is
+  processed exactly once.
 - **Chain extraction**: the nearest-expiry NIFTY index FUTURE's OPEN is
   the spot proxy (the index itself is not in the derivatives bhavcopy);
   all NIFTY CE/PE rows expiring that day, sanity-screened
@@ -62,9 +71,14 @@ The per-day spread between the two brackets is the measured
    `brutex/costs/constants.py:45,73,77,150`).
 5. **SENSEX excluded** pending a BSE bhavcopy probe.
 6. **Weekly-expiry regime boundary** (Thursday → Tuesday) is encoded as
-   2025-09-01 with an UNVERIFIED-exact-date comment; the walk-back
-   discovery self-heals a boundary error of a few weeks (a wrong
-   candidate weekday finds no expiring options and walks/logs honestly).
+   2025-09-01 with an UNVERIFIED-exact-date comment. Self-healing is
+   direction-split and honest: the backward walk covers only a
+   too-LATE boundary constant (true expiry earlier in the week), and
+   the 2-weekday FORWARD probe covers a slightly too-EARLY constant
+   (true expiry later in the week); an error beyond both windows is NOT
+   self-healed — it surfaces as a `no_expiry_found` cluster in
+   `counters.json` (the observability signal to re-derive the
+   constant), never a fabricated expiry.
 
 ## Run commands (operator box, open egress)
 
@@ -96,7 +110,7 @@ fully offline. These are public archives — keep it to ~1 file/sec.
 |---|---|
 | `per_day_results.csv` | one row per (expiry_date, variant, sl_pct, bracket): entry premia, per-leg trigger hits, exits, P&L points, P&L ₹/lot, spot-proxy open/close/day-move-% (+ cost columns under `--costs`) |
 | `summary.md` | tail-first GitHub-markdown tables (below) |
-| `counters.json` | honest bookkeeping: weeks scanned, expiry days found, `no_expiry_found` weeks, dropped rows, variant skips, cost-refused days |
+| `counters.json` | honest bookkeeping: weeks scanned, expiry days found, `no_expiry_found` weeks, `duplicate_expiry_skipped`, `fetch_failed` (non-404 failures — day skipped, retried next run), `corrupt_cache` (bad cached zips dropped + re-fetched), dropped rows, variant skips, cost-refused days |
 
 Every summary table carries the footer: *fills bracketed per
 DEC-FILL-WORST-CASE-ONLY-001 decision-bar law; daily-bar resolution;
@@ -120,14 +134,17 @@ gross of costs (see README)*.
 python -m pytest docs/research/expiry_day_option_selling/tests_offline.py
 ```
 
-29 tests: both format parsers over byte-realistic synthetic zips (built
+39 tests: both format parsers over byte-realistic synthetic zips (built
 at test runtime — no binary fixtures committed), hand-derived golden
 scenarios (quiet day, SL-hit trigger-vs-high fills, 5× gap-day
-multiple), holiday walk-back discovery, sanity-screen counting, cost
-refusal + exact pricing, cache round-trips proving the network layer is
-never touched (a raising fetcher is injected). The suite deliberately
-lives OUTSIDE `tests/` and is NOT wired into ci.yml, so the repo's
-coverage/mutation gates are untouched.
+multiple), holiday walk-back + forward-probe discovery, cross-week
+duplicate-expiry dedupe, sanity-screen + unknown-option-side counting,
+cost refusal + exact pricing, cache round-trips proving the network
+layer is never touched (a raising fetcher is injected), corrupt-cache
+self-heal, non-404 fetch-failure resilience, atomic cache writes, and
+the https-only guard. The suite deliberately lives OUTSIDE `tests/` and
+is NOT wired into ci.yml, so the repo's coverage/mutation gates are
+untouched.
 
 ## Posture
 

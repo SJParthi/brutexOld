@@ -118,7 +118,7 @@ marked). Full detail in the feasibility dossier; consolidated here.
 | Intraday SL/TP walker | EXISTS for SPOT only (fixed levels, forced 15:20) — engine is spot-only by decree | `brutex/engine/trade_sim.py:151-152,320-339`; `brutex/universe.py:388,427,574` (DEC-ENGINE-SPOT-ONLY-001 #1790) |
 | Margin / SPAN model | **REFUSAL-ONLY, zero verified rows** | `brutex/engine/margin_history.py:10-27`; `docs/track2/TRACK2_RISK_MGMT.md` §2.3 forbids hardcoded constants |
 | Expiry calendar (DOW rules 2020-2026) | EXISTS but does NOT resolve holiday-shifted expiries ("downstream responsibility") | `brutex/options/expiry_calendar.py` (:28-30); `registry.duckdb` absent locally |
-| Overfitting cascade + gates | EXISTS (see §8) | `brutex/metrics/cascade.py:537` et al. |
+| Overfitting cascade + gates | EXISTS (see §8) | `brutex/metrics/cascade.py:552` et al. |
 
 ### 3.3 The gap list (build/pull/probe)
 
@@ -263,6 +263,10 @@ losses. Honest residual list:
    are disproportionately the bad ones.
 6. **Freeze-quantity chunking / exchange throttles** on large multi-lot exits —
    not modeled anywhere.
+7. **Entry-side optimism (harness modeling disclosure)** — the harness's
+   pessimistic bracket applies the adverse extreme to the EXIT only; entry is
+   at the day OPEN for both brackets, so the measured pessimistic tail is a
+   floor (consistent with the traded-price-extremes floor above).
 
 ---
 
@@ -293,6 +297,9 @@ Implemented in [`bhavcopy_tail_study.py`](./bhavcopy_tail_study.py)
   the naive assumption) vs *pessimistic* (fills at the day bar's HIGH — the
   daily-bar analogue of the repo's `max(level, high)` clamp, §4.1). The
   per-day spread between the brackets IS the measured naive-vs-honest gap.
+  Modeling disclosure: the adverse extreme applies to the EXIT only — entry
+  is at the day OPEN under BOTH brackets — so the pessimistic tail is a
+  floor (§4.4 item 7).
 - **Per-lot ₹ columns** via the dated NIFTY lot table, repo-sourced from
   `brutex/options/lot_size_history.py:58-64`: **75 → 50 (29-Jul-2021) →
   25 (26-Apr-2024) → 75 (20-Nov-2024) → 65 (Jan-2026)**; the pre-2021 span is
@@ -551,7 +558,7 @@ falsify:
 ## 8. Overfitting-gate mapping (what the shipped machinery catches — and what it structurally cannot)
 
 How a "made massive money for a few months" result meets the repo's cascade
-(`brutex/metrics/cascade.py`, `run_stage4_cascade` at `:537`; order: hard gates
+(`brutex/metrics/cascade.py`, `run_stage4_cascade` at `:552`; order: hard gates
 → DSR → CPCV → Reality-Check/SPA → PBO → Romano-Wolf → WFO → Lockbox →
 Monte-Carlo, `:604-831`):
 
