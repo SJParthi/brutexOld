@@ -1044,3 +1044,37 @@ class TestComputeBarServedIvBranch:
         prov = unpack_greeks_provenance(bar.greeks_provenance_id or 0)
         assert prov.status == STATUS_NO_SOLUTION
         assert bar.iv is None
+
+    def test_screened_out_no_spot_returns_null_bar_without_solve(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A screen-decided bar (spot=None → NO_SPOT) returns the null bar directly.
+
+        Pins the ``not isinstance(screened, _PendingSolve)`` early return of
+        ``_compute_bar`` — neither the solver nor the kernel is ever touched.
+        """
+        from brutex.data import greeks_enrich as ge
+
+        monkeypatch.setattr(ge, "compute_greeks", lambda **_kw: pytest.fail("kernel touched"))
+        monkeypatch.setattr(ge, "_solve_one", lambda _p: pytest.fail("solver touched"))
+        bar = compute_bar_overlay(
+            ts=datetime(2024, 6, 3, 4, 30, tzinfo=UTC),
+            open_=Decimal("120.50"),
+            high=Decimal("120.50"),
+            low=Decimal("120.50"),
+            close=Decimal("120.50"),
+            volume=100,
+            oi=50,
+            spot=None,
+            rate=_RATE.rate_on(date(2024, 6, 3)),
+            t_years=0.05,
+            strike_f=24700.0,
+            is_call=True,
+            style_flag=STYLE_EUROPEAN_EXACT,
+            source_id=RATE_SOURCE_ID_FIXED,
+            served_iv=None,
+        )
+        prov = unpack_greeks_provenance(bar.greeks_provenance_id or 0)
+        assert prov.status == STATUS_NO_SPOT
+        assert bar.iv is None
+        assert bar.spot_at_bar is None
