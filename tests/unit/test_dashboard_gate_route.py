@@ -357,14 +357,18 @@ class TestGateComposesWithPresetAndFilters:
     ) -> None:
         """The served set is exactly (gate coordinate ∩ filters), preset-ranked."""
         lake_root = store.path.parent
-        # Gated config: two NIFTY/5m rows (dd 0.09 vs 0.01 — preset order is the
-        # REVERSE of the sharpe order), plus one wrong-instrument and one
+        # Gated config: two NIFTY/5m rows in DIFFERENT 0.5-wide DD bands
+        # (dd 0.9 → band 1 vs 0.01 → band 0 under the woven #2062
+        # DD-band-quantized min_dd_first law — re-derived at the #1467 fold:
+        # the member's 0.09-vs-0.01 fixture landed both rows in band 0, where
+        # the composite/run_id tiebreak decides), so the preset order is the
+        # REVERSE of the sharpe order; plus one wrong-instrument and one
         # wrong-tf row that the filters must drop.
         _write_sweeps(
             lake_root,
             "g.parquet",
             [
-                _row(1, gate_provenance=_TOKEN, sharpe=0.9, max_dd_pct=0.09),
+                _row(1, gate_provenance=_TOKEN, sharpe=0.9, max_dd_pct=0.9),
                 _row(2, gate_provenance=_TOKEN, sharpe=0.5, max_dd_pct=0.01),
                 _row(3, gate_provenance=_TOKEN, sharpe=0.8, instrument="BANKNIFTY"),
                 _row(4, gate_provenance=_TOKEN, sharpe=0.7, tf="15m"),
