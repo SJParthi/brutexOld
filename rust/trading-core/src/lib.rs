@@ -14,9 +14,10 @@
 //! in DEC-NIFTY-BOS-CHOCH-001 (the stateful look-ahead-clean
 //! [`MarketStructureState`] resolves the four booleans the evaluator reads);
 //! bits 60..=63 (Central Pivot Range) are implemented off the same prev-day
-//! pivot anchor. Bits 52..=53 (VWAP) are TOMBSTONED (`implemented=false`,
-//! positions held forever — the VWAP/volume wipe) and bits 64..=65
-//! (Supertrend) are declared LAYOUT-ONLY awaiting their math.
+//! pivot anchor; bits 64..=65 (Supertrend) are implemented off the stateful
+//! ×2-scaled-integer [`SupertrendState`] line (ATR-10 Wilder, factor 3, hl2).
+//! Bits 52..=53 (VWAP) are TOMBSTONED (`implemented=false`,
+//! positions held forever — the VWAP/volume wipe).
 //!
 //! The pure-Rust core ([`evaluate_atoms`] + the [`indicators`]) is dependency-free
 //! and is proven identical to the Python source against the language-neutral
@@ -56,6 +57,10 @@ pub use indicators::metadata::{
 };
 pub use indicators::pivots::{
     CprLevels, NARROW_CPR_WIDTH_BPS, PivotLevels, compute_cpr_levels, compute_pivot_levels,
+};
+pub use indicators::supertrend::{
+    SUPERTREND_ATR_PERIOD, SUPERTREND_DIR_DOWN, SUPERTREND_DIR_UP, SUPERTREND_FACTOR,
+    SupertrendState, compute_supertrend,
 };
 pub use spec::{Direction, SPEC_SCHEMA_VERSION, Signal, StrategySpec, evaluate};
 

@@ -230,9 +230,10 @@ class StrategyDefinition:
         the brute-force sweep searches masks WITHIN. ``frozenset()`` means "any
         implemented condition" — the full vocabulary is the candidate set. Every
         named condition must itself be IMPLEMENTED: a RETIRED tombstone (the
-        VWAP bits 52/53) or a declared-only LAYOUT bit (the SuperTrend bits
-        64/65) is refused at construction, keeping :attr:`candidate_mask` a
-        true subset of ``IMPLEMENTED_MASK``.
+        VWAP bits 52/53) or a declared-only LAYOUT bit (none on today's layout
+        — the SuperTrend bits 64/65 left that class at the vocab-66
+        implemented-flip, crate 0.5.0) is refused at construction, keeping
+        :attr:`candidate_mask` a true subset of ``IMPLEMENTED_MASK``.
     description
         Optional human-readable one-liner.
     """

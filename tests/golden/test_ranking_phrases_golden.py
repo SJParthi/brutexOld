@@ -21,11 +21,14 @@ import hashlib
 from brutex.ranking.phrases import PHRASE_TABLE, reason_for_mask
 
 #: Locked golden digest of the canonical ``bit|name|plain`` serialization.
-# DELIBERATE RE-LOCK (the 60→66 vocab reshape): 6 new rows (CPR 60-63 +
-# the declared-only SuperTrend 64-65) + the two VWAP rows reworded to the
-# honest RETIRED prose (bit positions unchanged). Old digest:
+# DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip, crate 0.5.0): the two
+# SuperTrend rows (64/65) drop the "declared — math not yet active" prose
+# for the live up/down-trend-hold wording (bit positions unchanged). Old
+# digests: the 60→66 reshape:
+# 221e39fef632f95cb3b5b4c206970c0f837249471adda8ecf9e4012139a45883;
+# pre-reshape:
 # 92f9df06fa5b2b5aa7401505e664630ad22b56b2f53e982b611bc4a766346e79.
-_GOLDEN_TABLE_SHA256 = "221e39fef632f95cb3b5b4c206970c0f837249471adda8ecf9e4012139a45883"
+_GOLDEN_TABLE_SHA256 = "b4d8249ad59ef0f02d0355f5250ceb03bb8d58ee9f6cbdcbe549bfd27258b746"
 
 
 def test_phrase_table_digest_locked() -> None:

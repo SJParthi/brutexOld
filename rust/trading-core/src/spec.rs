@@ -308,6 +308,7 @@ mod tests {
             day_low_paisa: 990_000,
             open_of_day_paisa: 1_000_000,
             market_structure: MarketStructureSignal::default(),
+            supertrend_x2_paisa: None,
         }
     }
 
@@ -360,12 +361,15 @@ mod tests {
         let reserved = 1u128 << 66;
         let err = StrategySpec::new(reserved, Direction::Long, proximity(), 1, 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
-        // Bit 64 (Supertrend) is DECLARED but layout-only — equally refused.
-        let declared_only = 1u128 << 64;
-        assert!(StrategySpec::new(declared_only, Direction::Long, proximity(), 1, 0).is_err());
-        // Bit 52 (VWAP) is TOMBSTONED — refused too (the wipe).
+        // Bits 52/53 (VWAP) are TOMBSTONED — refused too (the wipe).
         let tombstone = 1u128 << 52;
         assert!(StrategySpec::new(tombstone, Direction::Long, proximity(), 1, 0).is_err());
+        let tombstone_53 = 1u128 << 53;
+        assert!(StrategySpec::new(tombstone_53, Direction::Long, proximity(), 1, 0).is_err());
+        // Bit 64 (Supertrend) is IMPLEMENTED since the vocab-66 flip — a mask
+        // requiring it is ACCEPTED (the reverse pin of the old layout-only refusal).
+        let supertrend = 1u128 << 64;
+        assert!(StrategySpec::new(supertrend, Direction::Long, proximity(), 1, 0).is_ok());
     }
 
     #[test]

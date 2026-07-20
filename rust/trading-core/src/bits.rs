@@ -152,9 +152,9 @@ pub const BIT_INSIDE_CPR: u32 = 62;
 /// narrow-CPR day: (TC - BC) is at or under 30 bps of the pivot P (trending-day setup)
 pub const BIT_NARROW_CPR_DAY: u32 = 63;
 // Supertrend
-/// declared, not yet implemented: close strictly above the Supertrend line (math lands in a later PR)  (LAYOUT ONLY — implemented=false, math lands in a later PR)
+/// close strictly above the Supertrend line (ATR-10 Wilder, factor 3, hl2 source)
 pub const BIT_CLOSE_ABOVE_SUPERTREND: u32 = 64;
-/// declared, not yet implemented: close strictly below the Supertrend line (math lands in a later PR)  (LAYOUT ONLY — implemented=false, math lands in a later PR)
+/// close strictly below the Supertrend line (ATR-10 Wilder, factor 3, hl2 source)
 pub const BIT_CLOSE_BELOW_SUPERTREND: u32 = 65;
 
 /// The number of atomic conditions (dense bits 0..=TOTAL-1).
@@ -170,9 +170,7 @@ pub const MASK_WIDTH: u32 = 128;
 /// position forever and never get math (the grow-only law).
 /// RETIRED: bit 52 `BIT_CLOSE_ABOVE_VWAP`.
 /// RETIRED: bit 53 `BIT_CLOSE_BELOW_VWAP`.
-/// LAYOUT-ONLY: bit 64 `BIT_CLOSE_ABOVE_SUPERTREND`.
-/// LAYOUT-ONLY: bit 65 `BIT_CLOSE_BELOW_SUPERTREND`.
-pub const IMPLEMENTED_MASK: u128 = 18433233274827440127;
+pub const IMPLEMENTED_MASK: u128 = 73773465495956094975;
 
 #[cfg(test)]
 mod tests {

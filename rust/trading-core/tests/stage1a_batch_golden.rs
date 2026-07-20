@@ -30,6 +30,9 @@ struct Columns {
     day_index: Vec<u32>,
     ema20_paisa: Vec<Option<i64>>,
     ema200_paisa: Vec<Option<i64>>,
+    /// The SuperTrend ×2-line column (fixture schema v3 — the vocab-66
+    /// implemented-flip; `None` over each roll segment's 9-bar warm-up).
+    supertrend_x2_paisa: Vec<Option<i64>>,
 }
 
 #[derive(Deserialize)]
@@ -73,7 +76,7 @@ fn load_fixture() -> Fixture {
         .join("stage1a_batch_golden.json");
     let text = fs::read_to_string(&path).expect("fixture readable");
     let fixture: Fixture = serde_json::from_str(&text).expect("fixture parses");
-    assert_eq!(fixture.schema, "stage1a-batch-golden-v2");
+    assert_eq!(fixture.schema, "stage1a-batch-golden-v3");
     fixture
 }
 
@@ -92,6 +95,7 @@ fn inputs<'a>(f: &'a Fixture) -> Stage1aBatchInputs<'a> {
         day_fib_levels: &f.day_tables.day_fib_levels,
         day_has_pivot: &f.day_tables.day_has_pivot,
         day_has_fib: &f.day_tables.day_has_fib,
+        supertrend_x2_paisa: Some(&f.columns.supertrend_x2_paisa),
         pivot_bps: f.config.pivot_bps,
         pdh_pdl_bps: f.config.pdh_pdl_bps,
         fib_bps: f.config.fib_bps,
@@ -182,6 +186,7 @@ fn golden_prefix_replay_is_suffix_independent() {
             day_index: &f.columns.day_index[..k],
             ema20_paisa: &f.columns.ema20_paisa[..k],
             ema200_paisa: &f.columns.ema200_paisa[..k],
+            supertrend_x2_paisa: Some(&f.columns.supertrend_x2_paisa[..k]),
             day_pivot_levels: &f.day_tables.day_pivot_levels[..PIVOT_ROW_LEN * n_days],
             day_fib_levels: &f.day_tables.day_fib_levels[..FIB_ROW_LEN * n_days],
             day_has_pivot: &f.day_tables.day_has_pivot[..n_days],
@@ -310,6 +315,10 @@ proptest! {
             day_fib_levels: &day_fibs,
             day_has_pivot: &day_has_pivot,
             day_has_fib: &day_has_fib,
+            // The proptest fuzzes the REQUIRED columns; the optional ST
+            // column stays absent here (its per-bar drive is pinned by the
+            // in-crate unit tests + the fixture replay above).
+            supertrend_x2_paisa: None,
             pivot_bps: spec.bps.0,
             pdh_pdl_bps: spec.bps.1,
             fib_bps: spec.bps.2,

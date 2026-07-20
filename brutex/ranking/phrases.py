@@ -205,20 +205,17 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
         "narrow_cpr_day",
         "the day's Central Pivot Range was narrow (a tight coil, often before a big move)",
     ),
-    # ── Supertrend (bits 64-65) — declared layout-only (implemented=false):
-    # the math lands in a later PR, so these bits never fire today. The
-    # phrases exist because the table must cover every declared bit.
+    # ── Supertrend (bits 64-65) — IMPLEMENTED since the vocab-66 SuperTrend
+    # flip (crate 0.5.0): ATR-10 Wilder, factor 3, hl2 source (Pine parity).
     PhraseEntry(
         64,
         "close_above_supertrend",
-        "the candle closed above the SuperTrend line (declared condition — math "
-        "not yet active, never fires on current runs)",
+        "the candle closed above the SuperTrend line (an up-trend hold)",
     ),
     PhraseEntry(
         65,
         "close_below_supertrend",
-        "the candle closed below the SuperTrend line (declared condition — math "
-        "not yet active, never fires on current runs)",
+        "the candle closed below the SuperTrend line (a down-trend hold)",
     ),
 )
 

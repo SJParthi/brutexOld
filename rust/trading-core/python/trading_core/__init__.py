@@ -44,6 +44,13 @@ wheel is built by maturin and installed in every CI job that imports
   former ``VwapState`` twin was DELETED with the bits 52-53 tombstone (the
   VWAP/volume wipe — the spot-only engine has no traded volume); the 0.4.0
   shim REFUSES a stale wheel that still exposes it (see below).
+* ``SupertrendState`` — the stateful SuperTrend (ATR-10 Wilder, factor 3, hl2)
+  line in the exact ×2-scaled integer-paisa domain (bits 64-65 — the vocab-66
+  PR-B implemented-flip). ``update(high, low, close)`` returns the value the
+  evaluate ABIs' appended ``supertrend_x2_paisa`` argument expects (``None``
+  during the 9-bar warm-up). The 0.5.0 shim REFUSES a stale wheel missing it
+  (the symbol joins ``_EXPECTED_COMPILED_SYMBOLS`` below — the
+  version-SENSITIVE presence handshake for this reshape).
 * ``NARROW_CPR_WIDTH_BPS`` — the Central Pivot Range narrow-day threshold
   (bits 60-63; the ONE named constant, cross-pinnable from Python tests).
 * ``stage1a_bar_bits_batch`` — the batch Stage-1A bar-bits kernel
@@ -110,6 +117,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "NARROW_CPR_WIDTH_BPS",
     "PIVOT_LEVELS_LEN",
     "SPEC_SCHEMA_VERSION",
+    "SupertrendState",
     "TOTAL_CONDITIONS",
     "__version__",
     "compute_ema",
@@ -162,6 +170,10 @@ def _assert_compiled_surface(
 _compiled = importlib.import_module("._trading_core", __name__)
 _assert_compiled_surface(_compiled)
 
+# Version-SENSITIVE staleness teeth (the 0.5.0 SuperTrend flip): a pre-0.5.0
+# wheel misses the ``SupertrendState`` symbol, so ``_assert_compiled_surface``
+# above already refuses it with the actionable rebuild message — the ADDITION
+# side of this reshape needs no extra check beyond the surface list.
 # Version-SENSITIVE staleness teeth (the 0.4.0 vocabulary reshape):
 # ``_assert_compiled_surface`` above already refuses a stale 0.3.x wheel on
 # its missing ``NARROW_CPR_WIDTH_BPS`` symbol, so this check is defensive
@@ -194,6 +206,7 @@ from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     SPEC_SCHEMA_VERSION,
     TOTAL_CONDITIONS,
     MarketStructureState,
+    SupertrendState,
     __version__,
     compute_ema,
     compute_fib_levels,
@@ -245,6 +258,7 @@ __all__ = [
     "SPEC_SCHEMA_VERSION",
     "TOTAL_CONDITIONS",
     "MarketStructureState",
+    "SupertrendState",
     "__version__",
     "compute_ema",
     "compute_fib_levels",

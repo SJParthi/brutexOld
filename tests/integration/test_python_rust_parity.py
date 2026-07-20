@@ -120,6 +120,7 @@ def _with_levels(case: dict[str, Any], pivot_levels: list[int], fib_levels: list
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
+        case["supertrend_x2_paisa"],
     )
     return result
 
@@ -175,6 +176,7 @@ class TestProductionPathParity:
                 case["market_structure"]["bos_bearish"],
                 case["market_structure"]["choch_bullish"],
                 case["market_structure"]["choch_bearish"],
+                case["supertrend_x2_paisa"],
             )
             if with_levels != from_raw:
                 mismatches.append(

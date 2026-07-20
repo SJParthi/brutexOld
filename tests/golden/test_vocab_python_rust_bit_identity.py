@@ -123,6 +123,7 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
+        case["supertrend_x2_paisa"],
     )
     return result
 
@@ -156,6 +157,7 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
+        case["supertrend_x2_paisa"],
     )
     return result
 

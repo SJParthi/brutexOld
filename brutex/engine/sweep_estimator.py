@@ -64,7 +64,7 @@ PROVISIONAL_BASIS: Final[str] = "provisional"
 #: The number of IMPLEMENTED (sweepable) conditions — the estimator's default
 #: vocabulary size. A one-click launch always passes ``conditions=None``,
 #: which the engine resolves to ``default_condition_bits()`` == every
-#: IMPLEMENTED bit — 62 on the 66-declared layout
+#: IMPLEMENTED bit — 64 on the 66-declared layout
 #: (DEC-VOCAB-66-RESHAPE-IMPL-001): tombstoned/layout-only bits are NEVER
 #: swept, so sizing ``C(n, k)`` off the declared width would overstate every
 #: trial/ETA/byte projection. ``IMPLEMENTED_MASK`` is the one source of

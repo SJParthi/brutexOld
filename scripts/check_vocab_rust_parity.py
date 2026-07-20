@@ -66,6 +66,7 @@ def main() -> int:
             c["market_structure"]["bos_bearish"],
             c["market_structure"]["choch_bullish"],
             c["market_structure"]["choch_bearish"],
+            c["supertrend_x2_paisa"],
         )
         expected = int(c["expected_mask"], 16)
         if got != expected:

@@ -18,7 +18,22 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804 —
+_Last updated: 2026-07-17 (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #1807 —
+the SuperTrend conditions go LIVE on bits 64/65: the vocab-66 layout's reserved
+pair flips implemented (ATR-10/factor-3 Pine-v6-parity integer state in the
+shared trading-core crate; ×2-scaled paisa, 9 warm-up Nones, strict-inequality
+flip, NO session resets, D11 roll reset), ONE appended `supertrend_x2_paisa`
+Option<i64> on all four FFI faces (ABI-ADDITIVE), the (64,65) conflict pair,
+crate/wheel 0.4.0 → 0.5.0 (the SECOND indicator_version re-key — one deploy
+window with #1804's, no production sweep between), active vocabulary 62 → 64
+of 66 declared (default grid C(62,k)→C(64,k), k=5: 6,471,002→7,624,512); warm
+production bar_bits genuinely exceed u64 (the u128 regime is LIVE — retirement
+pins + the capability-gated ≥64 Rust-first dispatch pin for the enum-kernel
+lane); Apriori-ON over a 64/65-carrying pool refuses gracefully per tuple (the
+documented interim law). ENGINE surface UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+this header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1807.)
+Earlier: 2026-07-15 (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804 —
 the condition vocabulary reshapes 60 → 66 declared / 62 ACTIVE, implementing the
 `DEC-VOCAB-VWAP-VOLUME-WIPE-001` wipe ruling (decision PR in flight): the dead
 session-VWAP bits 52/53 are TOMBSTONED (positions held forever, math deleted
@@ -3932,7 +3947,73 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/vocab-66-reshape`
+- **Active branch:** `claude/vocab66-supertrend-flip` (**DEC-SUPERTREND-CONDITIONS-001,
+  MIGRATION.md #1807** — the SuperTrend implemented-flip, the "later stacked PR"
+  DEC-SUPERTREND-LAYOUT-001 (#1806) reserved bits 64/65 for (stacked on PR #1574's
+  head 696bf036a; the PR opens after #1574 lands): `close_above_supertrend` (64) /
+  `close_below_supertrend` (65) go LIVE — NEW
+  `rust/trading-core/src/indicators/supertrend.rs` (`SupertrendState` + batch
+  `compute_supertrend`, streaming ≡ batch pinned; ATR_PERIOD=10, FACTOR=3) at
+  locked TV/Pine-v6 parity in 100% ×2-SCALED integer paisa (hl2×2 = H+L exact;
+  TR1 = H−L; ATR = SMA-10 seed then Wilder, TRUNCATING division; Pine ratchet +
+  close[1] escape; direction seed +1=DOWN, the Pine −1=UP/+1=DOWN inversion
+  pinned; flip vs the CURRENT final band, STRICT inequality; EXACTLY 9 warm-up
+  Nones; NO session/day resets — TV continuous-series law,
+  day-boundary-persistence-pinned — while the D11 contract-roll TOTAL reset
+  recreates the state; i128 internals total over all i64, out-of-i64 line =
+  honest None; the last-ULP TV float-rendering divergence disclosed — the
+  integer law is the authority). ONE appended `supertrend_x2_paisa: Option<i64>`
+  on ALL FOUR FFI faces with a pyo3 default None (ABI-ADDITIVE — from_raw
+  22→23, with_levels 21→22, spec 23→24, batch 22→23 with an
+  `Option<Vec<Option<i64>>>` column; old callers byte-unchanged); bits fire
+  close×2 vs st×2 STRICT both ways, equality/None ⇒ both clear ⇒ the (64,65)
+  CONFLICT pair (29→30); NOT anchor-dependent (warm-up None is the clearing
+  contract). IMPLEMENTED_MASK → 0x3ffcfffffffffffff (66 declared / 64
+  implemented — the 52/53 tombstones stay clear); crate/wheel 0.4.0 → 0.5.0
+  (lockstep-pinned; `SupertrendState` joins the wheel handshake +
+  EXPECTED_BUILD.json) = the SECOND indicator_version re-key — ONE deploy
+  window with #1804's 0.4.0 (no production sweep between; a pre-flip
+  cascade/results root refuses by design via the #1804 REPL-01 vocabulary
+  identity gate). Engine wiring: stage1a.py owns the state (push-per-bar, no
+  day reset, roll recreate; collect_batch_inputs computes the column per roll
+  segment), rust_stage1a/evaluator thread it; every declared surface lit
+  (phrases/decoder/CLI/templates — the phase-2b sweep retired every stale
+  "62 active"/"declared-only 64/65" claim). U64 FAST-PATH RETIREMENT: one ST
+  bit fires on every warm non-equality bar ⇒ production bar_bits > u64 from
+  bar 9 (frozen pins in NEW tests/unit/test_vocab66_wide_dispatch_pin.py;
+  ResidentTradeSim serves the real ST window via ResidentSweepSimU128 from
+  construction). HONEST interim laws (Golden Rule #10): the ≥64 Stage-2 COUNT
+  routes to the bit-exact two-limb numpy reference until the
+  `claude/rust-u128-enum-kernel` lane lands `fno_math.ResidentBarsU128` — the
+  dispatch pin is CAPABILITY-GATED on the kernel's presence (today's numpy law
+  pinned engaged + bit-exact; the Rust-first zero-numpy arm arms automatically
+  at the lane's landing — merge hard-gate (a); combo_mask.py deliberately
+  byte-untouched, the lane owns it); Apriori-ON over a 64/65-carrying pool
+  (incl. the DEFAULT pool) refuses gracefully per tuple
+  (SweepAprioriUnsupportedError → TUPLE_FAILED, driver-pinned; the u128
+  frontier is the named follow-up). Goldens: vocab v3→v4 (the two-pass stream
+  law — historical 400-case RNG stream untouched, ST draws appended; 0 input
+  drift, 0 low-64 mask drift; fires 160/162 of 400), migration companion v3
+  minted pre-regen, truth table 22×64, BANKNIFTY-week + futures_roll re-locks
+  hand-audited (the pre-roll mask moved EXACTLY 2^64; first post-roll mask
+  byte-unchanged = the D11 proof), stage1a_batch v3 with the ST column, the
+  sweep-run golden PROVEN unmoved (fixed "ind-v1" literal + gain-only bits —
+  suite passed unmodified). Mutation re-measured (714 in-scope trading-core
+  mutants, 2026-07-17; supertrend.rs 91 in the indicators carve-out; keep 7
+  shards, ≥16 min margin); the vocab-66 bench kit
+  (tests/bench/test_vocab66_wide_grid.py — wide-count throughput with the
+  engaged path printed, the 66-bit sweep-shaped grid, the u64-vs-u128
+  same-window ratio, the C(60/62/64,k) growth table: k≤8 aggregate ×1.3017 vs
+  62 / ×1.7097 vs the 33B-era 60) wired into bench-m4pro.yml — the §8 SLA
+  re-derivation happens FROM that run's printed numbers. TickVault: the FFI
+  arg is additive on the four PYTHON pyfn faces (pyo3-defaulted); a native
+  `IndicatorSnapshot` struct literal must add the one `supertrend_x2_paisa`
+  field (trivial — `None` clears 64/65); zero live impact at 0% adoption
+  (attested); pin >= 0.5.0 at adoption. ENGINE surface
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/rate change; the
+  vocabulary ACTIVATION is the consciously-ledgered subject — see §1's chain +
+  MIGRATION.md #1807 for the full record.)
+  Earlier: `claude/vocab-66-reshape`
   (**DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804** — the 60→66 vocabulary
   reshape implementing `DEC-VOCAB-VWAP-VOLUME-WIPE-001` (decision PR in
   flight): TOTAL_CONDITIONS 60→66, 62 ACTIVE — the dead session-VWAP bits 52/53
@@ -11870,7 +11951,21 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/vocab-66-reshape`
+- **Active feature branch:** `claude/vocab66-supertrend-flip`
+  (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #1807 — the SuperTrend
+  implemented-flip: bits 64/65 LIVE (ATR-10/factor-3 Pine-parity ×2-paisa
+  integer state, 9 warm-up Nones, strict flip, no session resets, D11 roll
+  reset), ONE appended defaulted `supertrend_x2_paisa` arg on all four FFI
+  faces (ABI-additive), the (64,65) conflict pair, trading-core 0.4.0 → 0.5.0
+  (the SECOND indicator_version re-key — one deploy window with #1804's),
+  active vocabulary 62 → 64 of 66; warm bar_bits > u64 (u128 regime LIVE —
+  retirement pins + the capability-gated ≥64 dispatch pin; combo_mask.py
+  untouched, the enum-kernel lane owns it); Apriori ≥64 tuples refuse
+  gracefully (documented interim law); goldens regenerated under the
+  frozen-stream law, the sweep-run golden proven unmoved; stacked on PR
+  #1574's head — matches §1's Active branch line — see §1 + MIGRATION.md
+  #1807 for the full blurb)
+  Earlier: `claude/vocab-66-reshape`
   (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804 — the 66-declared /
   62-active vocabulary reshape: VWAP bits 52/53 tombstoned + CPR bits 60-63
   live (NARROW_CPR_WIDTH_BPS=30 supersedes 50) + SuperTrend 64/65 layout-only;

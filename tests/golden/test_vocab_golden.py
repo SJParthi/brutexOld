@@ -13,13 +13,15 @@ The fixture is language-neutral (raw int64-paisa inputs). Since
 DEC-VOCAB-U128-CODEGEN-001 the mask is a **u128** serialised as a hex STRING
 (``expected_mask``) so a bit >= 53 keeps full precision across JSON doubles, and
 the "both ways" coverage gate is partitioned over the IMPLEMENTED bits only —
-the NON-implemented bits (the RETIRED VWAP tombstones 52/53 + the declared-only
-SuperTrend bits 64/65, ``implemented=false``) are proven inert by
-:func:`test_layout_only_bits_are_always_clear`. Version 3 is the 60→66 reshape
-(``vwap_paisa`` survives as an INERT RNG-burn record — no longer an evaluator
-input; the frozen-input migration invariant lives in
-``test_vocab_golden_migration.py``); the fixture bytes are SHA-pinned + proven
-byte-identical to a fresh generation (GOLD-06).
+the NON-implemented bits (the RETIRED VWAP tombstones 52/53 + every reserved
+bit >= 66) are proven inert by
+:func:`test_layout_only_bits_are_always_clear`. Version 4 is the vocab-66
+SuperTrend implemented-flip (crate 0.5.0 — bits 64/65 live, the
+``supertrend_x2_paisa`` draw appended strictly after the whole historical
+stream); version 3 was the 60→66 reshape (``vwap_paisa`` survives as an INERT
+RNG-burn record — no longer an evaluator input). The frozen-input migration
+invariants live in ``test_vocab_golden_migration.py``; the fixture bytes are
+SHA-pinned + proven byte-identical to a fresh generation (GOLD-06).
 """
 
 from __future__ import annotations
@@ -61,7 +63,9 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
     fib = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
     ms = case["market_structure"]
     # NOTE: the case's ``vwap_paisa`` field is deliberately NOT consumed —
-    # it is the inert RNG-burn record of the retired bits-52/53 draw.
+    # it is the inert RNG-burn record of the retired bits-52/53 draw. The
+    # ``supertrend_x2_paisa`` field IS consumed (bits 64/65 went live at the
+    # vocab-66 SuperTrend flip, fixture version 4).
     snapshot = IndicatorSnapshot(
         timestamp_ist=ts,
         open_paisa=case["open_paisa"],
@@ -81,6 +85,7 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
             choch_bullish=ms["choch_bullish"],
             choch_bearish=ms["choch_bearish"],
         ),
+        supertrend_x2_paisa=case["supertrend_x2_paisa"],
     )
     proximity = ProximityParams(
         pivot_proximity_bps=case["proximity"]["pivot_bps"],
@@ -125,9 +130,9 @@ def test_fixture_exercises_all_implemented_bits_both_ways() -> None:
 def test_layout_only_bits_are_always_clear() -> None:
     """Every non-implemented / reserved bit must be 0 in EVERY golden case.
 
-    The reshape guarantee: the RETIRED VWAP tombstones (52/53), the
-    declared-only SuperTrend bits (64/65) and every reserved bit >= 66 are
-    NEVER set by the evaluator.
+    The reshape guarantee: the RETIRED VWAP tombstones (52/53) and every
+    reserved bit >= 66 are NEVER set by the evaluator (the SuperTrend bits
+    64/65 left this set at the vocab-66 implemented-flip, crate 0.5.0).
     """
     for case in _CASES:
         mask = _expected(case)
@@ -138,7 +143,7 @@ def test_layout_only_bits_are_always_clear() -> None:
 
 def test_fixture_metadata_is_consistent() -> None:
     """Guard the fixture header against silent corruption / regeneration drift."""
-    assert _DATA["version"] == 3
+    assert _DATA["version"] == 4
     assert _DATA["total_conditions"] == TOTAL_CONDITIONS
     assert int(_DATA["implemented_mask"], 16) == IMPLEMENTED_MASK
     assert int(_DATA["full_mask"], 16) == (1 << TOTAL_CONDITIONS) - 1
@@ -155,7 +160,7 @@ def test_fixture_metadata_is_consistent() -> None:
 #: SHA-256 of the frozen fixture bytes (GOLD-06 — the README "SHA-256
 #: manifest" drift guard). Regenerate with
 #: ``python scripts/gen_vocab_golden_vectors.py`` then update this.
-_EXPECTED_SHA256 = "0f0f5f85b29941beff20ec71a7e4942bce681d80e3c8f3c313e28da2445057a0"
+_EXPECTED_SHA256 = "fcc4acaad86f5511dd0dbfe83ac880ade771a2364e1e40630b55e001c1e6adc0"
 
 
 def test_fixture_sha256_matches_pinned_manifest() -> None:

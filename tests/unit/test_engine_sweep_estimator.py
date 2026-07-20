@@ -24,17 +24,17 @@ from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
 
 def test_swept_conditions_is_the_implemented_count() -> None:
-    """The estimator sizes ``C(n, k)`` off the IMPLEMENTED count (62 on the
-    66-declared layout) — ``conditions=None`` resolves to
-    ``default_condition_bits()`` == every implemented bit, so the declared
-    width would overstate every projection
+    """The estimator sizes ``C(n, k)`` off the IMPLEMENTED count (64 on the
+    66-declared layout since the SuperTrend implemented-flip, crate 0.5.0) —
+    ``conditions=None`` resolves to ``default_condition_bits()`` == every
+    implemented bit, so the declared width would overstate every projection
     (DEC-VOCAB-66-RESHAPE-IMPL-001 merge reconcile)."""
-    assert SWEPT_CONDITIONS == IMPLEMENTED_MASK.bit_count() == 62
+    assert SWEPT_CONDITIONS == IMPLEMENTED_MASK.bit_count() == 64
 
 
 def test_count_true_trials_matches_hand_computed_combinatorics() -> None:
-    # C(62,1) + C(62,2) = 62 + 1891 = 1953 (the IMPLEMENTED 62-bit set).
-    assert count_true_trials([1, 2], other_axes_product=1) == 1953
+    # C(64,1) + C(64,2) = 64 + 2016 = 2080 (the IMPLEMENTED 64-bit set).
+    assert count_true_trials([1, 2], other_axes_product=1) == 2080
 
 
 def test_count_true_trials_scales_with_other_axes() -> None:

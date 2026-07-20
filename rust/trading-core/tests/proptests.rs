@@ -10,8 +10,8 @@
 //! that fails when that operator is perturbed):
 //!
 //! 1. **Universal invariants** — hold for ALL bounded inputs: determinism,
-//!    non-implemented bits (the tombstoned VWAP 52-53, the declared-only
-//!    Supertrend 64-65 and the reserved headroom >= 66) always clear,
+//!    non-implemented bits (the tombstoned VWAP 52-53 and the reserved
+//!    headroom >= 66) always clear,
 //!    mutually-exclusive bit pairs, at most one time-of-day bucket, the CPR
 //!    partition, the pivot/fib level ladders are monotonic.
 //! 2. **Independent oracle parity** — a deliberately separate re-implementation
@@ -47,11 +47,10 @@ const MIDDAY_END: u32 = 13 * 3600;
 const AFTERNOON_END: u32 = 15 * 3600;
 
 /// All IMPLEMENTED condition bits set — the union the evaluator can ever
-/// produce: bits 0..=51 and 54..=63 (incl. the R5-S5/BOS/CHoCH/CPR groups).
-/// Bits 52-53 are the TOMBSTONED VWAP positions and bits 64-65 the
-/// declared-only Supertrend layout — both outside IMPLEMENTED_MASK, so the
-/// `non_implemented_bits_are_always_clear` property pins them (and the >= 66
-/// headroom) permanently clear.
+/// produce: bits 0..=51 and 54..=65 (incl. the R5-S5/BOS/CHoCH/CPR/Supertrend
+/// groups). Bits 52-53 are the TOMBSTONED VWAP positions — outside
+/// IMPLEMENTED_MASK, so the `non_implemented_bits_are_always_clear` property
+/// pins them (and the >= 66 headroom) permanently clear.
 const FULL_MASK: u128 = bits::IMPLEMENTED_MASK;
 
 // ───────────────────────────── strategies ──────────────────────────────────
@@ -228,6 +227,9 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 // by the `MarketStructureState` unit + property tests; here the
                 // evaluator's job is only to copy each flag onto its bit).
                 arb_market_structure(),
+                // The resolved SuperTrend ×2 line (Group 14) — boundary-aware
+                // around this candle's close (see `arb_supertrend`).
+                arb_supertrend(close),
             )
         })
         .prop_map(
@@ -242,6 +244,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 proximity,
                 prior,
                 market_structure,
+                supertrend_x2_paisa,
             )| {
                 let (open, high, low, close) = candle;
                 let (day_high, day_low) = day;
@@ -260,10 +263,27 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                     day_low_paisa: day_low,
                     open_of_day_paisa: open_of_day,
                     market_structure,
+                    supertrend_x2_paisa,
                 };
                 (snapshot, proximity, prior)
             },
         )
+}
+
+/// Strategy: a resolved SuperTrend line (×2-scaled paisa) around the bar's
+/// close so the two STRICT Group-14 comparisons see their equality boundary
+/// both ways, plus `None` (warm-up / unwired) and a uniform in-domain value.
+/// The streaming derivation of the line is owned + proven by
+/// `SupertrendState`'s own unit/property suite; the evaluator's job here is
+/// only the exact `close·2` vs line compare.
+fn arb_supertrend(close: i64) -> impl Strategy<Value = Option<i64>> {
+    prop_oneof![
+        Just(None),
+        Just(Some(close * 2)),     // the exact equality edge (both bits clear)
+        Just(Some(close * 2 - 1)), // half a paisa below ⇒ above-bit fires
+        Just(Some(close * 2 + 1)), // half a paisa above ⇒ below-bit fires
+        (1i64..=4 * MAX_PAISA).prop_map(Some),
+    ]
 }
 
 /// Strategy: an arbitrary `MarketStructureSignal` (each of the four resolved
@@ -520,6 +540,19 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         m |= 1u128 << bits::BIT_CHOCH_BEARISH;
     }
 
+    // Group 14: Supertrend (bits 64-65) — independent re-derivation of the
+    // strict ×2-domain compare (`None` ⇒ neither bit; equality ⇒ neither).
+    if let Some(st) = s.supertrend_x2_paisa {
+        let close_x2 = i128::from(c) * 2;
+        let st = i128::from(st);
+        if close_x2 > st {
+            m |= 1u128 << bits::BIT_CLOSE_ABOVE_SUPERTREND;
+        }
+        if close_x2 < st {
+            m |= 1u128 << bits::BIT_CLOSE_BELOW_SUPERTREND;
+        }
+    }
+
     // Group 13: Central Pivot Range (bits 60-63) — an independent re-derivation
     // of the Ochoa/PivotBoss formulas (BC = round-half-even midpoint of the raw
     // prev-day H/L; TC = 2·P − BC on the rounded pivot P; canonical tc >= bc).
@@ -570,8 +603,7 @@ proptest! {
     }
 
     /// Every bit outside IMPLEMENTED_MASK must always be clear: the TOMBSTONED
-    /// VWAP bits 52-53, the declared-only Supertrend bits 64-65 AND the
-    /// reserved u128 headroom (>= 66).
+    /// VWAP bits 52-53 AND the reserved u128 headroom (>= 66).
     #[test]
     fn non_implemented_bits_are_always_clear((s, p, prior) in arb_scenario()) {
         let mask = evaluate_atoms(&s, &p, &prior);
@@ -601,6 +633,10 @@ proptest! {
         prop_assert_eq!(pair(bits::BIT_CLOSE_IN_UPPER_THIRD, bits::BIT_CLOSE_IN_LOWER_THIRD), 0);
         prop_assert_eq!(pair(bits::BIT_GAP_UP_DAY, bits::BIT_GAP_DOWN_DAY), 0);
         prop_assert_eq!(pair(bits::BIT_INSIDE_DAY, bits::BIT_OUTSIDE_DAY), 0);
+        prop_assert_eq!(
+            pair(bits::BIT_CLOSE_ABOVE_SUPERTREND, bits::BIT_CLOSE_BELOW_SUPERTREND),
+            0
+        );
         prop_assert_eq!(pair(bits::BIT_ABOVE_CPR_TC, bits::BIT_BELOW_CPR_BC), 0);
         prop_assert_eq!(pair(bits::BIT_ABOVE_CPR_TC, bits::BIT_INSIDE_CPR), 0);
         prop_assert_eq!(pair(bits::BIT_BELOW_CPR_BC, bits::BIT_INSIDE_CPR), 0);
@@ -766,6 +802,7 @@ fn every_implemented_bit_is_individually_reachable() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 10,
@@ -1366,9 +1403,28 @@ fn every_implemented_bit_is_individually_reachable() {
         &no_prior,
     );
 
+    // Group 14: Supertrend (bits 64-65). close_x2 = 2_100_000; a line one
+    // half-paisa unit below fires ABOVE, one above fires BELOW — strict, exact.
+    check(
+        bits::BIT_CLOSE_ABOVE_SUPERTREND,
+        IndicatorSnapshot {
+            supertrend_x2_paisa: Some(2_099_999),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_SUPERTREND,
+        IndicatorSnapshot {
+            supertrend_x2_paisa: Some(2_100_001),
+            ..base
+        },
+        &no_prior,
+    );
+
     assert_eq!(
         seen, FULL_MASK,
-        "not all implemented bits (incl. R5-S5/BOS/CHoCH/CPR) were exercised"
+        "not all implemented bits (incl. R5-S5/BOS/CHoCH/CPR/Supertrend) were exercised"
     );
 }
 
@@ -1403,6 +1459,7 @@ fn tombstoned_vwap_bits_never_fire() {
             day_low_paisa: close,
             open_of_day_paisa: close,
             market_structure: MarketStructureSignal::default(),
+            supertrend_x2_paisa: None,
         };
         let m = evaluate_atoms(&s, &prox, &no_prior);
         assert_eq!(
@@ -1446,6 +1503,7 @@ fn cpr_equality_boundaries_are_pinned() {
             day_low_paisa: close,
             open_of_day_paisa: close,
             market_structure: MarketStructureSignal::default(),
+            supertrend_x2_paisa: None,
         };
         evaluate_atoms(&s, &prox, &no_prior)
     };
@@ -1494,6 +1552,7 @@ fn cpr_equality_boundaries_are_pinned() {
         day_low_paisa: 1_000_000,
         open_of_day_paisa: 1_000_000,
         market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
     };
     let m_tie = evaluate_atoms(&s_tie, &prox, &no_prior);
     assert_eq!(
@@ -1548,6 +1607,7 @@ fn equality_boundaries_keep_strict_bits_clear() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
@@ -1778,6 +1838,81 @@ fn equality_boundaries_keep_strict_bits_clear() {
     );
 }
 
+// ─────────────── Supertrend deterministic pins (bits 64-65) ─────────────────
+
+/// The newly-IMPLEMENTED Supertrend bits genuinely FIRE both ways — the
+/// deterministic companion of the reachability battery (a flipped comparison,
+/// a dropped `mask |=`, or an accidental un-implement makes a case fail) —
+/// and the strict-equality / absent-line edges keep BOTH bits clear.
+#[test]
+fn supertrend_bits_fire_both_ways_and_equality_clears_both() {
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let base = IndicatorSnapshot {
+        tod_seconds: 0,
+        open_paisa: 1_050_000,
+        high_paisa: 1_050_000,
+        low_paisa: 1_050_000,
+        close_paisa: 1_050_000, // close_x2 = 2_100_000
+        ema20_paisa: None,
+        ema200_paisa: None,
+        pivots,
+        fib,
+        day_high_paisa: 1_050_000,
+        day_low_paisa: 1_050_000,
+        open_of_day_paisa: 1_050_000,
+        market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
+    };
+    let prox = ProximityParams {
+        pivot_proximity_bps: 0,
+        pdh_pdl_proximity_bps: 0,
+        fib_proximity_bps: 0,
+    };
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+    let st_bits = |st: Option<i64>| {
+        let m = evaluate_atoms(
+            &IndicatorSnapshot {
+                supertrend_x2_paisa: st,
+                ..base
+            },
+            &prox,
+            &no_prior,
+        );
+        (
+            (m >> bits::BIT_CLOSE_ABOVE_SUPERTREND) & 1,
+            (m >> bits::BIT_CLOSE_BELOW_SUPERTREND) & 1,
+        )
+    };
+    // Fires both ways (the implemented-flip teeth): one ×2 unit (half a
+    // paisa) either side of the close flips exactly one bit on.
+    assert_eq!(
+        st_bits(Some(2_099_999)),
+        (1, 0),
+        "line below close ⇒ ABOVE fires"
+    );
+    assert_eq!(
+        st_bits(Some(2_100_001)),
+        (0, 1),
+        "line above close ⇒ BELOW fires"
+    );
+    // STRICT equality edge: close_x2 == line ⇒ NEITHER bit (the `>`↔`>=` /
+    // `<`↔`<=` mutant killers for the Group-14 comparisons).
+    assert_eq!(
+        st_bits(Some(2_100_000)),
+        (0, 0),
+        "equality sets neither bit"
+    );
+    // Absent line (warm-up / unwired) ⇒ neither bit.
+    assert_eq!(st_bits(None), (0, 0), "None sets neither bit");
+    // Far-domain sanity: the compare is exact ×2 (no truncation): a line at
+    // 2_099_998 (one full paisa below) also reads ABOVE.
+    assert_eq!(st_bits(Some(2_099_998)), (1, 0));
+}
+
 // ──────────────── degenerate-input guards (zero-range / zero pdc) ────────────
 
 /// The Group-5/7/9 `total_range > 0` / `day_range > 0` / `pdc > 0` guards are
@@ -1804,6 +1939,7 @@ fn degenerate_bars_fire_no_shape_or_gap_bits() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,

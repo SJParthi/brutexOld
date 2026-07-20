@@ -589,22 +589,26 @@ applies_to_1day = true
 implemented = true
 
 # ─────────────────────── Group 14: Supertrend (bits 64-65) ──────────────────────
-# LAYOUT-ONLY declaration: the names + positions are claimed now; the Supertrend
-# (ATR-band trailing stop) math ships ZERO code in this PR — the evaluator emits
-# 0 for both bits. The `implemented = true` flip is a later stacked PR
-# hard-gated on u128 mask dispatch + an M4-Pro throughput measurement.
+# IMPLEMENTED (the PR-B flip): the ATR-band trailing stop — TradingView Pine v6
+# ta.supertrend(3, 10) parity, hl2 source, computed by the stateful
+# `indicators::supertrend::SupertrendState` in exact x2-scaled integer paisa
+# (half-paisa resolution, no floats) and threaded into the evaluator as the
+# appended `supertrend_x2_paisa` FFI argument. Both bits are STRICT compares of
+# close x2 vs the line (equality / warm-up None = neither fires), so the pair is
+# mutually exclusive — registered as a conflict pair in
+# brutex/vocabulary/conflicts.py.
 [[condition]]
 bit = 64
 name = "close_above_supertrend"
 group = "Supertrend"
-description = "declared, not yet implemented: close strictly above the Supertrend line (math lands in a later PR)"
+description = "close strictly above the Supertrend line (ATR-10 Wilder, factor 3, hl2 source)"
 applies_to_1day = true
-implemented = false
+implemented = true
 
 [[condition]]
 bit = 65
 name = "close_below_supertrend"
 group = "Supertrend"
-description = "declared, not yet implemented: close strictly below the Supertrend line (math lands in a later PR)"
+description = "close strictly below the Supertrend line (ATR-10 Wilder, factor 3, hl2 source)"
 applies_to_1day = true
-implemented = false
+implemented = true

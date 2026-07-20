@@ -1,6 +1,6 @@
 {
-  "bits_clear_somewhere": "0000000000000000ffcfffffffffffff",
-  "bits_set_somewhere": "0000000000000000ffcfffffffffffff",
+  "bits_clear_somewhere": "0000000000000003ffcfffffffffffff",
+  "bits_set_somewhere": "0000000000000003ffcfffffffffffff",
   "bits_stray_nonimplemented": "00000000000000000000000000000000",
   "cases": [
     {
@@ -9,7 +9,7 @@
       "day_low_paisa": 3412800,
       "ema200_paisa": 3421951,
       "ema20_paisa": 3434721,
-      "expected_mask": "0000000000000000960210148000a01a",
+      "expected_mask": "0000000000000001960210148000a01a",
       "high_paisa": 3426127,
       "id": 0,
       "low_paisa": 3412800,
@@ -37,6 +37,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6797790,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3450049
     },
@@ -46,7 +47,7 @@
       "day_low_paisa": 3450541,
       "ema200_paisa": 3425114,
       "ema20_paisa": 3426260,
-      "expected_mask": "00000000000000002005100c4080c015",
+      "expected_mask": "00000000000000022005100c4080c015",
       "high_paisa": 3454220,
       "id": 1,
       "low_paisa": 3450541,
@@ -70,6 +71,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6961265,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3427380
     },
@@ -107,6 +109,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3975774,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2010843
     },
@@ -116,7 +119,7 @@
       "day_low_paisa": 2460422,
       "ema200_paisa": 2551856,
       "ema20_paisa": 2599990,
-      "expected_mask": "0000000000000000430a10154000c055",
+      "expected_mask": "0000000000000001430a10154000c055",
       "high_paisa": 2610441,
       "id": 3,
       "low_paisa": 2603377,
@@ -140,6 +143,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5213692,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2581452
     },
@@ -177,6 +181,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 4353541
     },
@@ -210,6 +215,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 4001764
     },
@@ -219,7 +225,7 @@
       "day_low_paisa": 2193112,
       "ema200_paisa": 2170315,
       "ema20_paisa": 2189821,
-      "expected_mask": "00000000000000002402884090014015",
+      "expected_mask": "00000000000000022402884090014015",
       "high_paisa": 2199782,
       "id": 6,
       "low_paisa": 2193112,
@@ -247,6 +253,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4400408,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2228549
     },
@@ -256,7 +263,7 @@
       "day_low_paisa": 1693384,
       "ema200_paisa": 1682182,
       "ema20_paisa": 1692023,
-      "expected_mask": "00000000000000002801453040014015",
+      "expected_mask": "00000000000000022801453040014015",
       "high_paisa": 1707786,
       "id": 7,
       "low_paisa": 1693384,
@@ -284,6 +291,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 3465071,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 1682880
     },
@@ -321,6 +329,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3319310
     },
@@ -330,7 +339,7 @@
       "day_low_paisa": 2774513,
       "ema200_paisa": 2844549,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000002001849442054008",
+      "expected_mask": "00000000000000022001849442054008",
       "high_paisa": 2787401,
       "id": 9,
       "low_paisa": 2774513,
@@ -358,6 +367,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5622063,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": null
     },
@@ -367,7 +377,7 @@
       "day_low_paisa": 1752132,
       "ema200_paisa": 2403841,
       "ema20_paisa": 2403642,
-      "expected_mask": "0000000000000000104824144000a02a",
+      "expected_mask": "0000000000000001104824144000a02a",
       "high_paisa": 2383844,
       "id": 10,
       "low_paisa": 2372911,
@@ -395,6 +405,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4738977,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2358694
     },
@@ -404,7 +415,7 @@
       "day_low_paisa": 4224236,
       "ema200_paisa": 4253696,
       "ema20_paisa": 4250380,
-      "expected_mask": "000000000000000094008454400aa0aa",
+      "expected_mask": "000000000000000194008454400aa0aa",
       "high_paisa": 4234688,
       "id": 11,
       "low_paisa": 4224236,
@@ -432,6 +443,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8435689,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4270030
     },
@@ -441,7 +453,7 @@
       "day_low_paisa": 3313937,
       "ema200_paisa": 3306218,
       "ema20_paisa": 3314232,
-      "expected_mask": "0000000000000000110204904000a015",
+      "expected_mask": "0000000000000001110204904000a015",
       "high_paisa": 3326969,
       "id": 12,
       "low_paisa": 3313937,
@@ -469,6 +481,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6607022,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3349969
     },
@@ -478,7 +491,7 @@
       "day_low_paisa": 3565999,
       "ema200_paisa": 3558141,
       "ema20_paisa": 3599365,
-      "expected_mask": "0000000000000000400408208080c056",
+      "expected_mask": "0000000000000002400408208080c056",
       "high_paisa": 3578527,
       "id": 13,
       "low_paisa": 3565999,
@@ -506,6 +519,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7200917,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3582790
     },
@@ -515,7 +529,7 @@
       "day_low_paisa": 3288958,
       "ema200_paisa": 3322526,
       "ema20_paisa": 3282463,
-      "expected_mask": "00000000000000002104100c4040c029",
+      "expected_mask": "00000000000000012104100c4040c029",
       "high_paisa": 3302192,
       "id": 14,
       "low_paisa": 3288958,
@@ -543,6 +557,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6587283,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3291314
     },
@@ -552,7 +567,7 @@
       "day_low_paisa": 2239553,
       "ema200_paisa": 2222791,
       "ema20_paisa": 2222503,
-      "expected_mask": "0000000000000000900540404020c025",
+      "expected_mask": "0000000000000002900540404020c025",
       "high_paisa": 2247170,
       "id": 15,
       "low_paisa": 2239553,
@@ -580,6 +595,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4514824,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2253918
     },
@@ -617,6 +633,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3963308,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": null
     },
@@ -626,7 +643,7 @@
       "day_low_paisa": 3045259,
       "ema200_paisa": 3046180,
       "ema20_paisa": 3045314,
-      "expected_mask": "000000000000000040054a028020c02a",
+      "expected_mask": "000000000000000240054a028020c02a",
       "high_paisa": 3056257,
       "id": 17,
       "low_paisa": 3045259,
@@ -654,6 +671,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6131368,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3079531
     },
@@ -663,7 +681,7 @@
       "day_low_paisa": 2211017,
       "ema200_paisa": 2152992,
       "ema20_paisa": 2201396,
-      "expected_mask": "000000000000000024040a008000c015",
+      "expected_mask": "000000000000000124040a008000c015",
       "high_paisa": 2225197,
       "id": 18,
       "low_paisa": 2211017,
@@ -687,6 +705,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4406632,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2188921
     },
@@ -696,7 +715,7 @@
       "day_low_paisa": 4142094,
       "ema200_paisa": 4094280,
       "ema20_paisa": 4135247,
-      "expected_mask": "00000000000000002108082440015015",
+      "expected_mask": "00000000000000022108082440015015",
       "high_paisa": 4157733,
       "id": 19,
       "low_paisa": 4142094,
@@ -724,6 +743,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8377746,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 4153391
     },
@@ -761,6 +781,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 2455378,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 1253384
     },
@@ -798,6 +819,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2679164
     },
@@ -807,7 +829,7 @@
       "day_low_paisa": 3983834,
       "ema200_paisa": 4010204,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000a00a280080014008",
+      "expected_mask": "0000000000000002a00a280080014008",
       "high_paisa": 3995661,
       "id": 22,
       "low_paisa": 3983834,
@@ -835,6 +857,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7992972,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3987481
     },
@@ -844,7 +867,7 @@
       "day_low_paisa": 4555932,
       "ema200_paisa": null,
       "ema20_paisa": 4567958,
-      "expected_mask": "0000000000000000120185904000a002",
+      "expected_mask": "0000000000000002120185904000a002",
       "high_paisa": 4566140,
       "id": 23,
       "low_paisa": 4555932,
@@ -872,6 +895,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 9165120,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4533571
     },
@@ -909,6 +933,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 4401352
     },
@@ -918,7 +943,7 @@
       "day_low_paisa": 2478517,
       "ema200_paisa": 2506062,
       "ema20_paisa": 2507727,
-      "expected_mask": "0000000000000000120615204000c01a",
+      "expected_mask": "0000000000000002120615204000c01a",
       "high_paisa": 2489117,
       "id": 25,
       "low_paisa": 2478517,
@@ -946,6 +971,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5004387,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": null
     },
@@ -955,7 +981,7 @@
       "day_low_paisa": 4256443,
       "ema200_paisa": 4342382,
       "ema20_paisa": 4319826,
-      "expected_mask": "0000000000000000a409482c4100c02a",
+      "expected_mask": "0000000000000001a409482c4100c02a",
       "high_paisa": 4299329,
       "id": 26,
       "low_paisa": 4291761,
@@ -983,6 +1009,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8528625,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4318184
     },
@@ -992,7 +1019,7 @@
       "day_low_paisa": 2975786,
       "ema200_paisa": null,
       "ema20_paisa": 3413129,
-      "expected_mask": "0000000000000000100805904000a001",
+      "expected_mask": "0000000000000002100805904000a001",
       "high_paisa": 3431601,
       "id": 27,
       "low_paisa": 3421983,
@@ -1020,6 +1047,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6882492,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 3460426
     },
@@ -1057,6 +1085,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2258916
     },
@@ -1094,6 +1123,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7043394,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3523998
     },
@@ -1103,7 +1133,7 @@
       "day_low_paisa": 3610834,
       "ema200_paisa": 3617074,
       "ema20_paisa": 3626052,
-      "expected_mask": "00000000000000001202800d4400a01a",
+      "expected_mask": "00000000000000011202800d4400a01a",
       "high_paisa": 3624651,
       "id": 30,
       "low_paisa": 3610834,
@@ -1127,6 +1157,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7233744,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3604515
     },
@@ -1136,7 +1167,7 @@
       "day_low_paisa": 1881130,
       "ema200_paisa": 1878878,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000210504444080c004",
+      "expected_mask": "0000000000000001210504444080c004",
       "high_paisa": 1892699,
       "id": 31,
       "low_paisa": 1881130,
@@ -1164,6 +1195,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3717230,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -1173,7 +1205,7 @@
       "day_low_paisa": 1719572,
       "ema200_paisa": 1689891,
       "ema20_paisa": 1704344,
-      "expected_mask": "00000000000000001e014a408000a015",
+      "expected_mask": "00000000000000011e014a408000a015",
       "high_paisa": 1729900,
       "id": 32,
       "low_paisa": 1719572,
@@ -1201,6 +1233,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3388090,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 1743854
     },
@@ -1238,6 +1271,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3889298,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 1943328
     },
@@ -1247,7 +1281,7 @@
       "day_low_paisa": 3596948,
       "ema200_paisa": 3589375,
       "ema20_paisa": 3607094,
-      "expected_mask": "00000000000000001a05808d8010c016",
+      "expected_mask": "00000000000000021a05808d8010c016",
       "high_paisa": 3609812,
       "id": 34,
       "low_paisa": 3596948,
@@ -1275,6 +1309,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7215564,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3633756
     },
@@ -1284,7 +1319,7 @@
       "day_low_paisa": 3640195,
       "ema200_paisa": 3632167,
       "ema20_paisa": 3627368,
-      "expected_mask": "0000000000000000ab02103484014025",
+      "expected_mask": "0000000000000001ab02103484014025",
       "high_paisa": 3654639,
       "id": 35,
       "low_paisa": 3640195,
@@ -1312,6 +1347,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7219801,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": null
     },
@@ -1321,7 +1357,7 @@
       "day_low_paisa": 2809728,
       "ema200_paisa": 2869461,
       "ema20_paisa": 2790046,
-      "expected_mask": "0000000000000000100210448800a029",
+      "expected_mask": "0000000000000001100210448800a029",
       "high_paisa": 2828283,
       "id": 36,
       "low_paisa": 2809728,
@@ -1349,6 +1385,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5631502,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2844982
     },
@@ -1358,7 +1395,7 @@
       "day_low_paisa": 1923271,
       "ema200_paisa": 1964100,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000c0060a288000c448",
+      "expected_mask": "0000000000000002c0060a288000c448",
       "high_paisa": 1928308,
       "id": 37,
       "low_paisa": 1923271,
@@ -1386,6 +1423,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3882826,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 1943110
     },
@@ -1395,7 +1433,7 @@
       "day_low_paisa": 2990931,
       "ema200_paisa": 3233089,
       "ema20_paisa": 3241379,
-      "expected_mask": "0000000000000000410a20248020c015",
+      "expected_mask": "0000000000000002410a20248020c015",
       "high_paisa": 3268982,
       "id": 38,
       "low_paisa": 3262220,
@@ -1423,6 +1461,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6534351,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3289520
     },
@@ -1432,7 +1471,7 @@
       "day_low_paisa": 1962785,
       "ema200_paisa": 1992291,
       "ema20_paisa": 1979557,
-      "expected_mask": "0000000000000000210604144000c42a",
+      "expected_mask": "0000000000000001210604144000c42a",
       "high_paisa": 1967600,
       "id": 39,
       "low_paisa": 1962785,
@@ -1460,6 +1499,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3880475,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 1948210
     },
@@ -1469,7 +1509,7 @@
       "day_low_paisa": 2051628,
       "ema200_paisa": 2085120,
       "ema20_paisa": 2040914,
-      "expected_mask": "00000000000000004b0515404080c069",
+      "expected_mask": "00000000000000024b0515404080c069",
       "high_paisa": 2054972,
       "id": 40,
       "low_paisa": 2051628,
@@ -1497,6 +1537,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4162256,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2042050
     },
@@ -1506,7 +1547,7 @@
       "day_low_paisa": 2112786,
       "ema200_paisa": 2245004,
       "ema20_paisa": 2321411,
-      "expected_mask": "00000000000000001208848c8010c016",
+      "expected_mask": "00000000000000011208848c8010c016",
       "high_paisa": 2302482,
       "id": 41,
       "low_paisa": 2289219,
@@ -1534,6 +1575,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4557212,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2300126
     },
@@ -1571,6 +1613,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3850161
     },
@@ -1580,7 +1623,7 @@
       "day_low_paisa": 1497295,
       "ema200_paisa": 1517889,
       "ema20_paisa": 1508934,
-      "expected_mask": "00000000000000002c0200148401442a",
+      "expected_mask": "00000000000000012c0200148401442a",
       "high_paisa": 1510191,
       "id": 43,
       "low_paisa": 1497295,
@@ -1608,6 +1651,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 2999149,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 1496588
     },
@@ -1617,7 +1661,7 @@
       "day_low_paisa": 3034734,
       "ema200_paisa": 2983374,
       "ema20_paisa": 3022348,
-      "expected_mask": "00000000000000002800204080014015",
+      "expected_mask": "00000000000000022800204080014015",
       "high_paisa": 3043335,
       "id": 44,
       "low_paisa": 3034734,
@@ -1645,6 +1689,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6120188,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3016316
     },
@@ -1654,7 +1699,7 @@
       "day_low_paisa": 2366844,
       "ema200_paisa": 2403526,
       "ema20_paisa": 2390664,
-      "expected_mask": "00000000000000002c0024004001402a",
+      "expected_mask": "00000000000000022c0024004001402a",
       "high_paisa": 2380674,
       "id": 45,
       "low_paisa": 2366844,
@@ -1682,6 +1727,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4787602,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2408304
     },
@@ -1691,7 +1737,7 @@
       "day_low_paisa": 4411297,
       "ema200_paisa": 4414926,
       "ema20_paisa": 4400408,
-      "expected_mask": "0000000000000000900140148800a025",
+      "expected_mask": "0000000000000001900140148800a025",
       "high_paisa": 4422670,
       "id": 46,
       "low_paisa": 4411297,
@@ -1715,6 +1761,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8755637,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4395330
     },
@@ -1724,7 +1771,7 @@
       "day_low_paisa": 4145673,
       "ema200_paisa": 4103752,
       "ema20_paisa": 4174191,
-      "expected_mask": "000000000000000020018a0280014016",
+      "expected_mask": "000000000000000120018a0280014016",
       "high_paisa": 4154452,
       "id": 47,
       "low_paisa": 4145673,
@@ -1748,6 +1795,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8262705,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4163155
     },
@@ -1757,7 +1805,7 @@
       "day_low_paisa": 4559834,
       "ema200_paisa": 4625175,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000110204044800a008",
+      "expected_mask": "0000000000000001110204044800a008",
       "high_paisa": 4572662,
       "id": 48,
       "low_paisa": 4559834,
@@ -1785,6 +1833,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 9134556,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -1794,7 +1843,7 @@
       "day_low_paisa": 3596801,
       "ema200_paisa": 3554186,
       "ema20_paisa": 3601645,
-      "expected_mask": "00000000000000002808184d80015016",
+      "expected_mask": "00000000000000012808184d80015016",
       "high_paisa": 3608574,
       "id": 49,
       "low_paisa": 3596801,
@@ -1822,6 +1871,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7164249,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3563046
     },
@@ -1831,7 +1881,7 @@
       "day_low_paisa": 2902751,
       "ema200_paisa": 2966090,
       "ema20_paisa": 2902904,
-      "expected_mask": "0000000000000000100610158010c029",
+      "expected_mask": "0000000000000001100610158010c029",
       "high_paisa": 2912900,
       "id": 50,
       "low_paisa": 2902751,
@@ -1859,6 +1909,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5752234,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2880016
     },
@@ -1868,7 +1919,7 @@
       "day_low_paisa": 2765889,
       "ema200_paisa": 2818162,
       "ema20_paisa": 2767137,
-      "expected_mask": "00000000000000002800053440014029",
+      "expected_mask": "00000000000000012800053440014029",
       "high_paisa": 2779750,
       "id": 51,
       "low_paisa": 2765889,
@@ -1896,6 +1947,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5484649,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2758432
     },
@@ -1905,7 +1957,7 @@
       "day_low_paisa": 2793274,
       "ema200_paisa": 2796310,
       "ema20_paisa": 2838670,
-      "expected_mask": "0000000000000000480a402c8080c056",
+      "expected_mask": "0000000000000001480a402c8080c056",
       "high_paisa": 2832606,
       "id": 52,
       "low_paisa": 2826198,
@@ -1933,6 +1985,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5605252,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2794293
     },
@@ -1942,7 +1995,7 @@
       "day_low_paisa": 1913623,
       "ema200_paisa": 2308193,
       "ema20_paisa": 2244698,
-      "expected_mask": "0000000000000000180944004000a029",
+      "expected_mask": "0000000000000001180944004000a029",
       "high_paisa": 2275843,
       "id": 53,
       "low_paisa": 2271178,
@@ -1966,6 +2019,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4479407,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2281195
     },
@@ -1975,7 +2029,7 @@
       "day_low_paisa": 4156113,
       "ema200_paisa": 4207259,
       "ema20_paisa": 4143373,
-      "expected_mask": "000000000000000010011400400aa029",
+      "expected_mask": "000000000000000110011400400aa029",
       "high_paisa": 4170487,
       "id": 54,
       "low_paisa": 4156113,
@@ -2003,6 +2057,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8309375,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 4126902
     },
@@ -2012,7 +2067,7 @@
       "day_low_paisa": 4596338,
       "ema200_paisa": 4546206,
       "ema20_paisa": 4571237,
-      "expected_mask": "0000000000000000130418008000c095",
+      "expected_mask": "0000000000000001130418008000c095",
       "high_paisa": 4605463,
       "id": 55,
       "low_paisa": 4596338,
@@ -2036,6 +2091,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 9130265,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 4630809
     },
@@ -2045,7 +2101,7 @@
       "day_low_paisa": 4066388,
       "ema200_paisa": 4114350,
       "ema20_paisa": 4067015,
-      "expected_mask": "00000000000000002a0440208000c029",
+      "expected_mask": "00000000000000022a0440208000c029",
       "high_paisa": 4077055,
       "id": 56,
       "low_paisa": 4066388,
@@ -2073,6 +2129,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8165880,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 4064367
     },
@@ -2082,7 +2139,7 @@
       "day_low_paisa": 4946015,
       "ema200_paisa": 4900825,
       "ema20_paisa": 4955416,
-      "expected_mask": "0000000000000000140120844400a015",
+      "expected_mask": "0000000000000001140120844400a015",
       "high_paisa": 4964190,
       "id": 57,
       "low_paisa": 4946015,
@@ -2110,6 +2167,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 9904202,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4966114
     },
@@ -2119,7 +2177,7 @@
       "day_low_paisa": 4634714,
       "ema200_paisa": 4677497,
       "ema20_paisa": 4621895,
-      "expected_mask": "000000000000000010022a028000a029",
+      "expected_mask": "000000000000000210022a028000a029",
       "high_paisa": 4642727,
       "id": 58,
       "low_paisa": 4634714,
@@ -2147,6 +2205,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 9347302,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4625272
     },
@@ -2184,6 +2243,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3067248
     },
@@ -2193,7 +2253,7 @@
       "day_low_paisa": 2796715,
       "ema200_paisa": 2819556,
       "ema20_paisa": null,
-      "expected_mask": "000000000000000010028a808800a008",
+      "expected_mask": "000000000000000110028a808800a008",
       "high_paisa": 2806531,
       "id": 60,
       "low_paisa": 2796715,
@@ -2221,6 +2281,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5544001,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2788571
     },
@@ -2254,6 +2315,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3478922
     },
@@ -2263,7 +2325,7 @@
       "day_low_paisa": 2523208,
       "ema200_paisa": 2513135,
       "ema20_paisa": 2516542,
-      "expected_mask": "0000000000000000140110408000a115",
+      "expected_mask": "0000000000000001140110408000a115",
       "high_paisa": 2532426,
       "id": 62,
       "low_paisa": 2523208,
@@ -2291,6 +2353,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4989261,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2511948
     },
@@ -2300,7 +2363,7 @@
       "day_low_paisa": 4915082,
       "ema200_paisa": 4893696,
       "ema20_paisa": 4896352,
-      "expected_mask": "0000000000000000904140208000a015",
+      "expected_mask": "0000000000000001904140208000a015",
       "high_paisa": 4928777,
       "id": 63,
       "low_paisa": 4915082,
@@ -2328,6 +2391,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 9799818,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 4938041
     },
@@ -2337,7 +2401,7 @@
       "day_low_paisa": 4351390,
       "ema200_paisa": 4422031,
       "ema20_paisa": 4333956,
-      "expected_mask": "0000000000000000100424144020c029",
+      "expected_mask": "0000000000000002100424144020c029",
       "high_paisa": 4362235,
       "id": 64,
       "low_paisa": 4351390,
@@ -2361,6 +2425,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8781210,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4335927
     },
@@ -2370,7 +2435,7 @@
       "day_low_paisa": 1457613,
       "ema200_paisa": 1450224,
       "ema20_paisa": 1484118,
-      "expected_mask": "0000000000000000a4028a0080014016",
+      "expected_mask": "0000000000000001a4028a0080014016",
       "high_paisa": 1470471,
       "id": 65,
       "low_paisa": 1457613,
@@ -2398,6 +2463,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 2892157,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 1427614
     },
@@ -2407,7 +2473,7 @@
       "day_low_paisa": 1710879,
       "ema200_paisa": 1691528,
       "ema20_paisa": 1710954,
-      "expected_mask": "00000000000000004204100d8060c015",
+      "expected_mask": "00000000000000014204100d8060c015",
       "high_paisa": 1721803,
       "id": 66,
       "low_paisa": 1710879,
@@ -2435,6 +2501,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3382695,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 1753527
     },
@@ -2444,7 +2511,7 @@
       "day_low_paisa": 3997612,
       "ema200_paisa": 4063185,
       "ema20_paisa": 3974289,
-      "expected_mask": "0000000000000000440680108080c029",
+      "expected_mask": "0000000000000001440680108080c029",
       "high_paisa": 4007560,
       "id": 67,
       "low_paisa": 3997612,
@@ -2472,6 +2539,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7978162,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": null
     },
@@ -2481,7 +2549,7 @@
       "day_low_paisa": 2205058,
       "ema200_paisa": 2169772,
       "ema20_paisa": 2234130,
-      "expected_mask": "00000000000000002602288280014816",
+      "expected_mask": "00000000000000022602288280014816",
       "high_paisa": 2207075,
       "id": 68,
       "low_paisa": 2205058,
@@ -2509,6 +2577,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4475174,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2228869
     },
@@ -2546,6 +2615,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4272508
     },
@@ -2555,7 +2625,7 @@
       "day_low_paisa": 2073936,
       "ema200_paisa": 2348818,
       "ema20_paisa": 2362133,
-      "expected_mask": "0000000000000000120904104000c015",
+      "expected_mask": "0000000000000001120904104000c015",
       "high_paisa": 2369284,
       "id": 70,
       "low_paisa": 2356578,
@@ -2583,6 +2653,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4734147,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2381427
     },
@@ -2592,7 +2663,7 @@
       "day_low_paisa": 2105843,
       "ema200_paisa": 2084478,
       "ema20_paisa": 2139727,
-      "expected_mask": "0000000000000000440545404080c016",
+      "expected_mask": "0000000000000002440545404080c016",
       "high_paisa": 2111761,
       "id": 71,
       "low_paisa": 2105843,
@@ -2620,6 +2691,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4255477,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2079596
     },
@@ -2629,7 +2701,7 @@
       "day_low_paisa": 1828062,
       "ema200_paisa": 1910527,
       "ema20_paisa": 1917493,
-      "expected_mask": "0000000000000000240928844000c01a",
+      "expected_mask": "0000000000000001240928844000c01a",
       "high_paisa": 1895907,
       "id": 72,
       "low_paisa": 1877947,
@@ -2657,6 +2729,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3699576,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1872160
     },
@@ -2666,7 +2739,7 @@
       "day_low_paisa": 3482419,
       "ema200_paisa": 3468801,
       "ema20_paisa": 3481200,
-      "expected_mask": "00000000000000002c00101480015015",
+      "expected_mask": "00000000000000022c00101480015015",
       "high_paisa": 3490500,
       "id": 73,
       "low_paisa": 3482419,
@@ -2694,6 +2767,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7022323,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3480931
     },
@@ -2703,7 +2777,7 @@
       "day_low_paisa": 2924916,
       "ema200_paisa": 2984320,
       "ema20_paisa": 2925814,
-      "expected_mask": "00000000000000002000858240014029",
+      "expected_mask": "00000000000000022000858240014029",
       "high_paisa": 2931646,
       "id": 74,
       "low_paisa": 2924916,
@@ -2731,6 +2805,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5902821,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2952598
     },
@@ -2764,6 +2839,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3324903
     },
@@ -2773,7 +2849,7 @@
       "day_low_paisa": 4944005,
       "ema200_paisa": 4948793,
       "ema20_paisa": 4962144,
-      "expected_mask": "00000000000000001b4185024000a016",
+      "expected_mask": "00000000000000021b4185024000a016",
       "high_paisa": 4956017,
       "id": 76,
       "low_paisa": 4944005,
@@ -2801,6 +2877,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 9989287,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4958729
     },
@@ -2810,7 +2887,7 @@
       "day_low_paisa": 3656011,
       "ema200_paisa": 3617889,
       "ema20_paisa": 3647220,
-      "expected_mask": "00000000000000002982451040014015",
+      "expected_mask": "00000000000000022982451040014015",
       "high_paisa": 3667356,
       "id": 77,
       "low_paisa": 3656011,
@@ -2838,6 +2915,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7391619,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3684142
     },
@@ -2847,7 +2925,7 @@
       "day_low_paisa": 1463973,
       "ema200_paisa": 1515159,
       "ema20_paisa": 1488723,
-      "expected_mask": "00000000000000002202084d4001402a",
+      "expected_mask": "00000000000000012202084d4001402a",
       "high_paisa": 1474513,
       "id": 78,
       "low_paisa": 1463973,
@@ -2875,6 +2953,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 2882673,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 1427968
     },
@@ -2884,7 +2963,7 @@
       "day_low_paisa": 2294228,
       "ema200_paisa": 2320661,
       "ema20_paisa": 2291354,
-      "expected_mask": "000000000000000010054a288010c029",
+      "expected_mask": "000000000000000110054a288010c029",
       "high_paisa": 2306064,
       "id": 79,
       "low_paisa": 2294228,
@@ -2912,6 +2991,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4513346,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2327799
     },
@@ -2949,6 +3029,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7141908,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": null
     },
@@ -2958,7 +3039,7 @@
       "day_low_paisa": 1406849,
       "ema200_paisa": 1441838,
       "ema20_paisa": 1396690,
-      "expected_mask": "00000000000000002801103488014829",
+      "expected_mask": "00000000000000022801103488014829",
       "high_paisa": 1419527,
       "id": 81,
       "low_paisa": 1406849,
@@ -2986,6 +3067,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 2839393,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 1447072
     },
@@ -2995,7 +3077,7 @@
       "day_low_paisa": 2485550,
       "ema200_paisa": 2441745,
       "ema20_paisa": 2498752,
-      "expected_mask": "0000000000000000920525004000c016",
+      "expected_mask": "0000000000000002920525004000c016",
       "high_paisa": 2496891,
       "id": 82,
       "low_paisa": 2485550,
@@ -3023,6 +3105,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5058937,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": null
     },
@@ -3032,7 +3115,7 @@
       "day_low_paisa": 2503513,
       "ema200_paisa": 2478440,
       "ema20_paisa": 2505638,
-      "expected_mask": "0000000000000000140445944020c015",
+      "expected_mask": "0000000000000002140445944020c015",
       "high_paisa": 2508716,
       "id": 83,
       "low_paisa": 2503513,
@@ -3060,6 +3143,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5034206,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2473705
     },
@@ -3093,6 +3177,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4917150,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2432723
     },
@@ -3130,6 +3215,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -3139,7 +3225,7 @@
       "day_low_paisa": 3356346,
       "ema200_paisa": 3321698,
       "ema20_paisa": 3353147,
-      "expected_mask": "00000000000000002100805540015015",
+      "expected_mask": "00000000000000022100805540015015",
       "high_paisa": 3366287,
       "id": 86,
       "low_paisa": 3356346,
@@ -3167,6 +3253,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6731535,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3360616
     },
@@ -3204,6 +3291,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3786439
     },
@@ -3213,7 +3301,7 @@
       "day_low_paisa": 2235525,
       "ema200_paisa": 2334938,
       "ema20_paisa": 2291383,
-      "expected_mask": "0000000000000000a10a18208100c02a",
+      "expected_mask": "0000000000000001a10a18208100c02a",
       "high_paisa": 2290425,
       "id": 88,
       "low_paisa": 2278926,
@@ -3241,6 +3329,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4512817,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2264441
     },
@@ -3250,7 +3339,7 @@
       "day_low_paisa": 2599076,
       "ema200_paisa": 2630154,
       "ema20_paisa": 2604560,
-      "expected_mask": "000000000000000023050a008000c02a",
+      "expected_mask": "000000000000000123050a008000c02a",
       "high_paisa": 2612116,
       "id": 89,
       "low_paisa": 2599076,
@@ -3274,6 +3363,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5141889,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2572046
     },
@@ -3283,7 +3373,7 @@
       "day_low_paisa": 2724664,
       "ema200_paisa": 2731955,
       "ema20_paisa": 2720196,
-      "expected_mask": "0000000000000000100644904000c029",
+      "expected_mask": "0000000000000001100644904000c029",
       "high_paisa": 2726916,
       "id": 90,
       "low_paisa": 2724664,
@@ -3311,6 +3401,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5427775,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2766729
     },
@@ -3320,7 +3411,7 @@
       "day_low_paisa": 4346153,
       "ema200_paisa": 4290327,
       "ema20_paisa": null,
-      "expected_mask": "000000000000000010018400400ac004",
+      "expected_mask": "000000000000000110018400400ac004",
       "high_paisa": 4351561,
       "id": 91,
       "low_paisa": 4346153,
@@ -3348,6 +3439,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8697043,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4342469
     },
@@ -3357,7 +3449,7 @@
       "day_low_paisa": 3046752,
       "ema200_paisa": 3025672,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000110120448000a004",
+      "expected_mask": "0000000000000001110120448000a004",
       "high_paisa": 3056904,
       "id": 92,
       "low_paisa": 3046752,
@@ -3385,6 +3477,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6040745,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3022873
     },
@@ -3394,7 +3487,7 @@
       "day_low_paisa": 1436404,
       "ema200_paisa": 1389105,
       "ema20_paisa": 1454358,
-      "expected_mask": "00000000000000002401040040014016",
+      "expected_mask": "00000000000000012401040040014016",
       "high_paisa": 1443562,
       "id": 93,
       "low_paisa": 1436404,
@@ -3422,6 +3515,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 2817999,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 1459847
     },
@@ -3431,7 +3525,7 @@
       "day_low_paisa": 2111752,
       "ema200_paisa": 2173756,
       "ema20_paisa": 2115093,
-      "expected_mask": "0000000000000000220110048801482a",
+      "expected_mask": "0000000000000002220110048801482a",
       "high_paisa": 2120637,
       "id": 94,
       "low_paisa": 2111752,
@@ -3455,6 +3549,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4290421,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2119198
     },
@@ -3464,7 +3559,7 @@
       "day_low_paisa": 4087487,
       "ema200_paisa": null,
       "ema20_paisa": 4101037,
-      "expected_mask": "0000000000000000920415304012c4c2",
+      "expected_mask": "0000000000000001920415304012c4c2",
       "high_paisa": 4096038,
       "id": 95,
       "low_paisa": 4087487,
@@ -3492,6 +3587,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8154848,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 4110057
     },
@@ -3501,7 +3597,7 @@
       "day_low_paisa": 3779127,
       "ema200_paisa": 3833897,
       "ema20_paisa": 3755697,
-      "expected_mask": "0000000000000000a301484090015029",
+      "expected_mask": "0000000000000002a301484090015029",
       "high_paisa": 3793337,
       "id": 96,
       "low_paisa": 3779127,
@@ -3529,6 +3625,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7640837,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3779287
     },
@@ -3566,6 +3663,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5225380,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2618877
     },
@@ -3575,7 +3673,7 @@
       "day_low_paisa": 4524115,
       "ema200_paisa": 4467002,
       "ema20_paisa": 4546593,
-      "expected_mask": "000000000000000041060a0880f0c056",
+      "expected_mask": "000000000000000141060a0880f0c056",
       "high_paisa": 4530232,
       "id": 98,
       "low_paisa": 4524115,
@@ -3599,6 +3697,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 9020393,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -3636,6 +3735,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2315278
     },
@@ -3645,7 +3745,7 @@
       "day_low_paisa": 4081679,
       "ema200_paisa": 4137460,
       "ema20_paisa": 4082819,
-      "expected_mask": "0000000000000000400520208080c029",
+      "expected_mask": "0000000000000001400520208080c029",
       "high_paisa": 4096502,
       "id": 100,
       "low_paisa": 4081679,
@@ -3673,6 +3773,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8132495,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4122546
     },
@@ -3682,7 +3783,7 @@
       "day_low_paisa": 1816820,
       "ema200_paisa": 1833317,
       "ema20_paisa": 1846107,
-      "expected_mask": "0000000000000000220180484205401a",
+      "expected_mask": "0000000000000001220180484205401a",
       "high_paisa": 1827675,
       "id": 101,
       "low_paisa": 1816820,
@@ -3710,6 +3811,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 3585265,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 1829731
     },
@@ -3719,7 +3821,7 @@
       "day_low_paisa": 3135674,
       "ema200_paisa": 3093824,
       "ema20_paisa": 3132809,
-      "expected_mask": "0000000000000000900245404000a015",
+      "expected_mask": "0000000000000001900245404000a015",
       "high_paisa": 3148996,
       "id": 102,
       "low_paisa": 3135674,
@@ -3747,6 +3849,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6252958,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3129028
     },
@@ -3756,7 +3859,7 @@
       "day_low_paisa": 2536543,
       "ema200_paisa": 2606485,
       "ema20_paisa": 2625337,
-      "expected_mask": "0000000000000000400910804080c055",
+      "expected_mask": "0000000000000001400910804080c055",
       "high_paisa": 2633416,
       "id": 103,
       "low_paisa": 2628571,
@@ -3784,6 +3887,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5247621,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2665706
     },
@@ -3793,7 +3897,7 @@
       "day_low_paisa": 3851815,
       "ema200_paisa": 3810467,
       "ema20_paisa": 3835988,
-      "expected_mask": "0000000000000000970244948008a095",
+      "expected_mask": "0000000000000002970244948008a095",
       "high_paisa": 3862110,
       "id": 104,
       "low_paisa": 3851815,
@@ -3821,6 +3925,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7740813,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3845817
     },
@@ -3830,7 +3935,7 @@
       "day_low_paisa": 3350063,
       "ema200_paisa": 3408033,
       "ema20_paisa": 3383873,
-      "expected_mask": "0000000000000000120200444800a02a",
+      "expected_mask": "0000000000000002120200444800a02a",
       "high_paisa": 3363841,
       "id": 105,
       "low_paisa": 3350063,
@@ -3858,6 +3963,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6727919,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3323824
     },
@@ -3867,7 +3973,7 @@
       "day_low_paisa": 4394689,
       "ema200_paisa": 4356397,
       "ema20_paisa": 4421235,
-      "expected_mask": "0000000000000000130600108010c016",
+      "expected_mask": "0000000000000002130600108010c016",
       "high_paisa": 4403946,
       "id": 106,
       "low_paisa": 4394689,
@@ -3895,6 +4001,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8866104,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -3904,7 +4011,7 @@
       "day_low_paisa": 1610815,
       "ema200_paisa": 1602561,
       "ema20_paisa": 1596829,
-      "expected_mask": "00000000000000002680101480014025",
+      "expected_mask": "00000000000000022680101480014025",
       "high_paisa": 1622064,
       "id": 107,
       "low_paisa": 1610815,
@@ -3932,6 +4039,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3278840,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 1577607
     },
@@ -3941,7 +4049,7 @@
       "day_low_paisa": 3909171,
       "ema200_paisa": 3952740,
       "ema20_paisa": 3938116,
-      "expected_mask": "0000000000000000114045344000a02a",
+      "expected_mask": "0000000000000002114045344000a02a",
       "high_paisa": 3916413,
       "id": 108,
       "low_paisa": 3909171,
@@ -3969,6 +4077,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7908252,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3923280
     },
@@ -4002,6 +4111,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7191572,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": null
     },
@@ -4011,7 +4121,7 @@
       "day_low_paisa": 2240766,
       "ema200_paisa": 2235272,
       "ema20_paisa": 2245693,
-      "expected_mask": "0000000000000000180115944000a115",
+      "expected_mask": "0000000000000002180115944000a115",
       "high_paisa": 2251174,
       "id": 110,
       "low_paisa": 2240766,
@@ -4039,6 +4149,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4562221,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2215195
     },
@@ -4048,7 +4159,7 @@
       "day_low_paisa": 2384522,
       "ema200_paisa": 2405774,
       "ema20_paisa": 2376354,
-      "expected_mask": "0000000000000000a00600848000c029",
+      "expected_mask": "0000000000000002a00600848000c029",
       "high_paisa": 2398452,
       "id": 111,
       "low_paisa": 2384522,
@@ -4076,6 +4187,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4826501,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2409741
     },
@@ -4085,7 +4197,7 @@
       "day_low_paisa": 3712838,
       "ema200_paisa": 3851825,
       "ema20_paisa": 3860301,
-      "expected_mask": "0000000000000000280928004000c01a",
+      "expected_mask": "0000000000000001280928004000c01a",
       "high_paisa": 3836007,
       "id": 112,
       "low_paisa": 3827095,
@@ -4113,6 +4225,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7658944,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3798058
     },
@@ -4122,7 +4235,7 @@
       "day_low_paisa": 2665614,
       "ema200_paisa": 2660811,
       "ema20_paisa": null,
-      "expected_mask": "000000000000000040061a008080c044",
+      "expected_mask": "000000000000000240061a008080c044",
       "high_paisa": 2669888,
       "id": 113,
       "low_paisa": 2665614,
@@ -4146,6 +4259,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5334401,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": null
     },
@@ -4183,6 +4297,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2843504
     },
@@ -4220,6 +4335,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2904112
     },
@@ -4229,7 +4345,7 @@
       "day_low_paisa": 3449992,
       "ema200_paisa": 3472367,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000110545824040c008",
+      "expected_mask": "0000000000000002110545824040c008",
       "high_paisa": 3465461,
       "id": 116,
       "low_paisa": 3449992,
@@ -4257,6 +4373,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6965030,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3487443
     },
@@ -4294,6 +4411,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8714188,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4326813
     },
@@ -4303,7 +4421,7 @@
       "day_low_paisa": 4372344,
       "ema200_paisa": 4353178,
       "ema20_paisa": 4380323,
-      "expected_mask": "0000000000000000900145144000a015",
+      "expected_mask": "0000000000000002900145144000a015",
       "high_paisa": 4381020,
       "id": 118,
       "low_paisa": 4372344,
@@ -4331,6 +4449,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8792551,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 4412175
     },
@@ -4340,7 +4459,7 @@
       "day_low_paisa": 4351713,
       "ema200_paisa": 4361970,
       "ema20_paisa": 4356029,
-      "expected_mask": "00000000000000004a0645224060c06a",
+      "expected_mask": "00000000000000014a0645224060c06a",
       "high_paisa": 4355122,
       "id": 119,
       "low_paisa": 4351713,
@@ -4368,6 +4487,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8643917,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4350939
     },
@@ -4405,6 +4525,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8381086,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4156480
     },
@@ -4414,7 +4535,7 @@
       "day_low_paisa": 2255937,
       "ema200_paisa": 2315364,
       "ema20_paisa": 2298401,
-      "expected_mask": "0000000000000000aa0a483581e0c46a",
+      "expected_mask": "0000000000000002aa0a483581e0c46a",
       "high_paisa": 2274027,
       "id": 121,
       "low_paisa": 2264691,
@@ -4442,6 +4563,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4565022,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2277128
     },
@@ -4451,7 +4573,7 @@
       "day_low_paisa": 2545407,
       "ema200_paisa": 2505754,
       "ema20_paisa": 2520629,
-      "expected_mask": "0000000000000000150218848000a215",
+      "expected_mask": "0000000000000002150218848000a215",
       "high_paisa": 2554568,
       "id": 122,
       "low_paisa": 2545407,
@@ -4479,6 +4601,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5148785,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2563619
     },
@@ -4488,7 +4611,7 @@
       "day_low_paisa": 1984923,
       "ema200_paisa": 2110965,
       "ema20_paisa": 2159928,
-      "expected_mask": "0000000000000000100804008800a015",
+      "expected_mask": "0000000000000001100804008800a015",
       "high_paisa": 2168737,
       "id": 123,
       "low_paisa": 2158506,
@@ -4512,6 +4635,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4290628,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2167048
     },
@@ -4521,7 +4645,7 @@
       "day_low_paisa": 4156829,
       "ema200_paisa": 4112747,
       "ema20_paisa": 4189522,
-      "expected_mask": "0000000000000000440415104020c016",
+      "expected_mask": "0000000000000001440415104020c016",
       "high_paisa": 4162101,
       "id": 124,
       "low_paisa": 4156829,
@@ -4549,6 +4673,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8252753,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 4172194
     },
@@ -4558,7 +4683,7 @@
       "day_low_paisa": 3673335,
       "ema200_paisa": null,
       "ema20_paisa": 3656305,
-      "expected_mask": "00000000000000001b0120048000a001",
+      "expected_mask": "00000000000000011b0120048000a001",
       "high_paisa": 3684920,
       "id": 125,
       "low_paisa": 3673335,
@@ -4586,6 +4711,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7319556,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3645409
     },
@@ -4623,6 +4749,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7296366,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3642950
     },
@@ -4632,7 +4759,7 @@
       "day_low_paisa": 1830801,
       "ema200_paisa": 1828439,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000002801054040014004",
+      "expected_mask": "00000000000000022801054040014004",
       "high_paisa": 1840365,
       "id": 127,
       "low_paisa": 1830801,
@@ -4660,6 +4787,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3745702,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": null
     },
@@ -4669,7 +4797,7 @@
       "day_low_paisa": 2483223,
       "ema200_paisa": 2449258,
       "ema20_paisa": 2465253,
-      "expected_mask": "0000000000000000c0061a008000c055",
+      "expected_mask": "0000000000000001c0061a008000c055",
       "high_paisa": 2500859,
       "id": 128,
       "low_paisa": 2483223,
@@ -4697,6 +4825,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4939320,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2476171
     },
@@ -4706,7 +4835,7 @@
       "day_low_paisa": 3263180,
       "ema200_paisa": 3229320,
       "ema20_paisa": 3241587,
-      "expected_mask": "0000000000000000140220048800a015",
+      "expected_mask": "0000000000000002140220048800a015",
       "high_paisa": 3271083,
       "id": 129,
       "low_paisa": 3263180,
@@ -4734,6 +4863,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6586172,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3267401
     },
@@ -4771,6 +4901,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4991620,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2512415
     },
@@ -4780,7 +4911,7 @@
       "day_low_paisa": 3919445,
       "ema200_paisa": 3880659,
       "ema20_paisa": 3932955,
-      "expected_mask": "000000000000000012010a428400a016",
+      "expected_mask": "000000000000000112010a428400a016",
       "high_paisa": 3923126,
       "id": 131,
       "low_paisa": 3919445,
@@ -4808,6 +4939,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7837310,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3906233
     },
@@ -4845,6 +4977,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4786628,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2363155
     },
@@ -4854,7 +4987,7 @@
       "day_low_paisa": 3693548,
       "ema200_paisa": 3703526,
       "ema20_paisa": 3707859,
-      "expected_mask": "00000000000000009900404d4008a09a",
+      "expected_mask": "00000000000000029900404d4008a09a",
       "high_paisa": 3705249,
       "id": 133,
       "low_paisa": 3693548,
@@ -4882,6 +5015,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7458442,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3722887
     },
@@ -4891,7 +5025,7 @@
       "day_low_paisa": 4393081,
       "ema200_paisa": 4402674,
       "ema20_paisa": 4410633,
-      "expected_mask": "0000000000000000110404144010c09a",
+      "expected_mask": "0000000000000002110404144010c09a",
       "high_paisa": 4399450,
       "id": 134,
       "low_paisa": 4393081,
@@ -4915,6 +5049,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8811852,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": null
     },
@@ -4924,7 +5059,7 @@
       "day_low_paisa": 2813269,
       "ema200_paisa": 2981376,
       "ema20_paisa": 2927017,
-      "expected_mask": "0000000000000000450a28058000c069",
+      "expected_mask": "0000000000000002450a28058000c069",
       "high_paisa": 2947623,
       "id": 135,
       "low_paisa": 2942160,
@@ -4948,6 +5083,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5931814,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2918319
     },
@@ -4957,7 +5093,7 @@
       "day_low_paisa": 3042380,
       "ema200_paisa": 3058379,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000980000354000a008",
+      "expected_mask": "0000000000000002980000354000a008",
       "high_paisa": 3049786,
       "id": 136,
       "low_paisa": 3042380,
@@ -4985,6 +5121,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6143258,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3077544
     },
@@ -4994,7 +5131,7 @@
       "day_low_paisa": 1804437,
       "ema200_paisa": 1852243,
       "ema20_paisa": 1781664,
-      "expected_mask": "0000000000000000220614004000c429",
+      "expected_mask": "0000000000000001220614004000c429",
       "high_paisa": 1808107,
       "id": 137,
       "low_paisa": 1804437,
@@ -5022,6 +5159,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3587431,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 1800332
     },
@@ -5031,7 +5169,7 @@
       "day_low_paisa": 1560851,
       "ema200_paisa": 1507812,
       "ema20_paisa": 1543181,
-      "expected_mask": "00000000000000002002484c42054015",
+      "expected_mask": "00000000000000012002484c42054015",
       "high_paisa": 1564494,
       "id": 138,
       "low_paisa": 1560851,
@@ -5059,6 +5197,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3100170,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 1581702
     },
@@ -5068,7 +5207,7 @@
       "day_low_paisa": 2011604,
       "ema200_paisa": 2053496,
       "ema20_paisa": 2037673,
-      "expected_mask": "0000000000000000230200444000c02a",
+      "expected_mask": "0000000000000001230200444000c02a",
       "high_paisa": 2029399,
       "id": 139,
       "low_paisa": 2011604,
@@ -5096,6 +5235,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3994219,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2048410
     },
@@ -5105,7 +5245,7 @@
       "day_low_paisa": 3889666,
       "ema200_paisa": 3934306,
       "ema20_paisa": 3922009,
-      "expected_mask": "0000000000000000200205104001402a",
+      "expected_mask": "0000000000000002200205104001402a",
       "high_paisa": 3899774,
       "id": 140,
       "low_paisa": 3889666,
@@ -5133,6 +5273,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7837573,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3876701
     },
@@ -5142,7 +5283,7 @@
       "day_low_paisa": 1769748,
       "ema200_paisa": 1718895,
       "ema20_paisa": 1769195,
-      "expected_mask": "000000000000000011021a808000a015",
+      "expected_mask": "000000000000000111021a808000a015",
       "high_paisa": 1783513,
       "id": 141,
       "low_paisa": 1769748,
@@ -5170,6 +5311,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 3520365,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 1794947
     },
@@ -5179,7 +5321,7 @@
       "day_low_paisa": 3304606,
       "ema200_paisa": 3286272,
       "ema20_paisa": 3305160,
-      "expected_mask": "00000000000000001a024880800aa015",
+      "expected_mask": "00000000000000021a024880800aa015",
       "high_paisa": 3313449,
       "id": 142,
       "low_paisa": 3304606,
@@ -5207,6 +5349,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6618460,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3275581
     },
@@ -5216,7 +5359,7 @@
       "day_low_paisa": 2598909,
       "ema200_paisa": null,
       "ema20_paisa": 2581737,
-      "expected_mask": "0000000000000000100005004000a201",
+      "expected_mask": "0000000000000001100005004000a201",
       "high_paisa": 2606896,
       "id": 143,
       "low_paisa": 2598909,
@@ -5244,6 +5387,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5140651,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2597199
     },
@@ -5253,7 +5397,7 @@
       "day_low_paisa": 2933555,
       "ema200_paisa": 2966394,
       "ema20_paisa": 2960110,
-      "expected_mask": "0000000000000000200104204205402a",
+      "expected_mask": "0000000000000001200104204205402a",
       "high_paisa": 2940170,
       "id": 144,
       "low_paisa": 2933555,
@@ -5281,6 +5425,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5864101,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2934001
     },
@@ -5318,6 +5463,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2338757
     },
@@ -5351,6 +5497,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3424439
     },
@@ -5388,6 +5535,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 3527924
     },
@@ -5397,7 +5545,7 @@
       "day_low_paisa": 3202591,
       "ema200_paisa": null,
       "ema20_paisa": 3215904,
-      "expected_mask": "00000000000000002a89180c40014002",
+      "expected_mask": "00000000000000022a89180c40014002",
       "high_paisa": 3213868,
       "id": 148,
       "low_paisa": 3202591,
@@ -5421,6 +5569,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6454568,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3177231
     },
@@ -5430,7 +5579,7 @@
       "day_low_paisa": 1862304,
       "ema200_paisa": 1831463,
       "ema20_paisa": 1868163,
-      "expected_mask": "00000000000000001006084d4000c016",
+      "expected_mask": "00000000000000011006084d4000c016",
       "high_paisa": 1870928,
       "id": 149,
       "low_paisa": 1862304,
@@ -5458,6 +5607,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 3656159,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -5467,7 +5617,7 @@
       "day_low_paisa": 3367851,
       "ema200_paisa": 3327912,
       "ema20_paisa": null,
-      "expected_mask": "000000000000000023050a228000c004",
+      "expected_mask": "000000000000000123050a228000c004",
       "high_paisa": 3380556,
       "id": 150,
       "low_paisa": 3367851,
@@ -5495,6 +5645,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6730758,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 3361589
     },
@@ -5504,7 +5655,7 @@
       "day_low_paisa": 1555125,
       "ema200_paisa": 1976141,
       "ema20_paisa": 1946282,
-      "expected_mask": "0000000000000000110a040d800ac029",
+      "expected_mask": "0000000000000001110a040d800ac029",
       "high_paisa": 1963983,
       "id": 151,
       "low_paisa": 1957572,
@@ -5532,6 +5683,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 3865548,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 1987904
     },
@@ -5569,6 +5721,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2353970
     },
@@ -5578,7 +5731,7 @@
       "day_low_paisa": 1741897,
       "ema200_paisa": 1790789,
       "ema20_paisa": 1736517,
-      "expected_mask": "0000000000000000260005144000c029",
+      "expected_mask": "0000000000000002260005144000c029",
       "high_paisa": 1749761,
       "id": 153,
       "low_paisa": 1741897,
@@ -5606,6 +5759,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3569143,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 1741894
     },
@@ -5643,6 +5797,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 1761937
     },
@@ -5680,6 +5835,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2302189
     },
@@ -5689,7 +5845,7 @@
       "day_low_paisa": 3402419,
       "ema200_paisa": 3908666,
       "ema20_paisa": 3874368,
-      "expected_mask": "0000000000000000120a14404800a029",
+      "expected_mask": "0000000000000002120a14404800a029",
       "high_paisa": 3877103,
       "id": 156,
       "low_paisa": 3867374,
@@ -5717,6 +5873,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7756497,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3834744
     },
@@ -5726,7 +5883,7 @@
       "day_low_paisa": 4293572,
       "ema200_paisa": 4327457,
       "ema20_paisa": 4326368,
-      "expected_mask": "0000000000000000110184144000a22a",
+      "expected_mask": "0000000000000001110184144000a22a",
       "high_paisa": 4303789,
       "id": 157,
       "low_paisa": 4293572,
@@ -5750,6 +5907,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8539358,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4336216
     },
@@ -5759,7 +5917,7 @@
       "day_low_paisa": 2999188,
       "ema200_paisa": 3009604,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000002102152040014004",
+      "expected_mask": "00000000000000012102152040014004",
       "high_paisa": 3011151,
       "id": 158,
       "low_paisa": 2999188,
@@ -5787,6 +5945,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6013058,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3039415
     },
@@ -5796,7 +5955,7 @@
       "day_low_paisa": 2296505,
       "ema200_paisa": 2336161,
       "ema20_paisa": 2303800,
-      "expected_mask": "0000000000000000110540158010c02a",
+      "expected_mask": "0000000000000002110540158010c02a",
       "high_paisa": 2306043,
       "id": 159,
       "low_paisa": 2296505,
@@ -5820,6 +5979,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4671618,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2284813
     },
@@ -5829,7 +5989,7 @@
       "day_low_paisa": 2689813,
       "ema200_paisa": 2713441,
       "ema20_paisa": 2749542,
-      "expected_mask": "0000000000000000a709080082054416",
+      "expected_mask": "0000000000000002a709080082054416",
       "high_paisa": 2738712,
       "id": 160,
       "low_paisa": 2730564,
@@ -5857,6 +6017,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5511203,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2755260
     },
@@ -5866,7 +6027,7 @@
       "day_low_paisa": 4413940,
       "ema200_paisa": 4655439,
       "ema20_paisa": 4646111,
-      "expected_mask": "00000000000000001c0905204400a125",
+      "expected_mask": "00000000000000011c0905204400a125",
       "high_paisa": 4667096,
       "id": 161,
       "low_paisa": 4658936,
@@ -5894,6 +6055,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 9310973,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 4666974
     },
@@ -5903,7 +6065,7 @@
       "day_low_paisa": 3053337,
       "ema200_paisa": 3034717,
       "ema20_paisa": 3040170,
-      "expected_mask": "0000000000000000a00515904000c015",
+      "expected_mask": "0000000000000002a00515904000c015",
       "high_paisa": 3064375,
       "id": 162,
       "low_paisa": 3053337,
@@ -5931,6 +6093,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6144555,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": null
     },
@@ -5940,7 +6103,7 @@
       "day_low_paisa": 2031963,
       "ema200_paisa": 2059960,
       "ema20_paisa": 2057791,
-      "expected_mask": "000000000000000021010a808401402a",
+      "expected_mask": "000000000000000221010a808401402a",
       "high_paisa": 2039699,
       "id": 163,
       "low_paisa": 2031963,
@@ -5968,6 +6131,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4132945,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2047756
     },
@@ -5977,7 +6141,7 @@
       "day_low_paisa": 5666642,
       "ema200_paisa": 5637792,
       "ema20_paisa": 5659506,
-      "expected_mask": "0000000000000000114008048000a015",
+      "expected_mask": "0000000000000002114008048000a015",
       "high_paisa": 5681791,
       "id": 164,
       "low_paisa": 5666642,
@@ -6005,6 +6169,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 11401756,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 5676410
     },
@@ -6014,7 +6179,7 @@
       "day_low_paisa": 3025136,
       "ema200_paisa": 3058296,
       "ema20_paisa": 3007363,
-      "expected_mask": "0000000000000000a9011a2098014829",
+      "expected_mask": "0000000000000002a9011a2098014829",
       "high_paisa": 3038304,
       "id": 165,
       "low_paisa": 3025136,
@@ -6042,6 +6207,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6110074,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3063284
     },
@@ -6051,7 +6217,7 @@
       "day_low_paisa": 2831568,
       "ema200_paisa": 2994046,
       "ema20_paisa": 2995749,
-      "expected_mask": "0000000000000000120a44204000c095",
+      "expected_mask": "0000000000000001120a44204000c095",
       "high_paisa": 3018294,
       "id": 166,
       "low_paisa": 3005716,
@@ -6079,6 +6245,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6019027,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3042950
     },
@@ -6088,7 +6255,7 @@
       "day_low_paisa": 3420066,
       "ema200_paisa": 3370341,
       "ema20_paisa": 3413154,
-      "expected_mask": "00000000000000002201108440014815",
+      "expected_mask": "00000000000000022201108440014815",
       "high_paisa": 3432003,
       "id": 167,
       "low_paisa": 3420066,
@@ -6116,6 +6283,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6899744,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3422466
     },
@@ -6125,7 +6293,7 @@
       "day_low_paisa": 3683986,
       "ema200_paisa": 3813173,
       "ema20_paisa": 3800328,
-      "expected_mask": "00000000000000001d0844448000a225",
+      "expected_mask": "00000000000000021d0844448000a225",
       "high_paisa": 3836799,
       "id": 168,
       "low_paisa": 3823499,
@@ -6153,6 +6321,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7664151,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3827795
     },
@@ -6162,7 +6331,7 @@
       "day_low_paisa": 2609054,
       "ema200_paisa": 2580082,
       "ema20_paisa": 2622797,
-      "expected_mask": "00000000000000001001400d4800a016",
+      "expected_mask": "00000000000000021001400d4800a016",
       "high_paisa": 2618634,
       "id": 169,
       "low_paisa": 2609054,
@@ -6186,6 +6355,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5253360,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2648132
     },
@@ -6195,7 +6365,7 @@
       "day_low_paisa": 3308114,
       "ema200_paisa": 4087947,
       "ema20_paisa": 4100618,
-      "expected_mask": "0000000000000000104984044000a015",
+      "expected_mask": "0000000000000001104984044000a015",
       "high_paisa": 4128063,
       "id": 170,
       "low_paisa": 4112086,
@@ -6223,6 +6393,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8175168,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4148829
     },
@@ -6232,7 +6403,7 @@
       "day_low_paisa": 3555288,
       "ema200_paisa": 3542785,
       "ema20_paisa": 3542462,
-      "expected_mask": "0000000000000000900014045000a225",
+      "expected_mask": "0000000000000002900014045000a225",
       "high_paisa": 3570580,
       "id": 171,
       "low_paisa": 3555288,
@@ -6256,6 +6427,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7201539,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3596629
     },
@@ -6265,7 +6437,7 @@
       "day_low_paisa": 3665418,
       "ema200_paisa": 3653590,
       "ema20_paisa": 3698412,
-      "expected_mask": "00000000000000001202888c8000a016",
+      "expected_mask": "00000000000000021202888c8000a016",
       "high_paisa": 3676148,
       "id": 172,
       "low_paisa": 3665418,
@@ -6293,6 +6465,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7354554,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": null
     },
@@ -6330,6 +6503,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 3630802,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": null
     },
@@ -6339,7 +6513,7 @@
       "day_low_paisa": 3279282,
       "ema200_paisa": 3701352,
       "ema20_paisa": 3687234,
-      "expected_mask": "0000000000000000180915004000a02a",
+      "expected_mask": "0000000000000001180915004000a02a",
       "high_paisa": 3677447,
       "id": 174,
       "low_paisa": 3661117,
@@ -6367,6 +6541,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7328322,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3685858
     },
@@ -6376,7 +6551,7 @@
       "day_low_paisa": 3482076,
       "ema200_paisa": 3443998,
       "ema20_paisa": 3487226,
-      "expected_mask": "0000000000000000150148008000a016",
+      "expected_mask": "0000000000000001150148008000a016",
       "high_paisa": 3497590,
       "id": 175,
       "low_paisa": 3482076,
@@ -6404,6 +6579,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6942196,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3493263
     },
@@ -6437,6 +6613,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 1738515
     },
@@ -6446,7 +6623,7 @@
       "day_low_paisa": 3736233,
       "ema200_paisa": 3720928,
       "ema20_paisa": 3723889,
-      "expected_mask": "00000000000000002d02851440014015",
+      "expected_mask": "00000000000000012d02851440014015",
       "high_paisa": 3744878,
       "id": 177,
       "low_paisa": 3736233,
@@ -6470,6 +6647,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7414783,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3730729
     },
@@ -6479,7 +6657,7 @@
       "day_low_paisa": 4325481,
       "ema200_paisa": 4330748,
       "ema20_paisa": 4328207,
-      "expected_mask": "00000000000000004806050040c0c065",
+      "expected_mask": "00000000000000024806050040c0c065",
       "high_paisa": 4332718,
       "id": 178,
       "low_paisa": 4325481,
@@ -6507,6 +6685,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8691519,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4328377
     },
@@ -6544,6 +6723,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 4004720
     },
@@ -6553,7 +6733,7 @@
       "day_low_paisa": 4432645,
       "ema200_paisa": 4388271,
       "ema20_paisa": 4418791,
-      "expected_mask": "0000000000000000420414044080c055",
+      "expected_mask": "0000000000000001420414044080c055",
       "high_paisa": 4446822,
       "id": 180,
       "low_paisa": 4432645,
@@ -6581,6 +6761,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8808073,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 4460519
     },
@@ -6618,6 +6799,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2710118
     },
@@ -6627,7 +6809,7 @@
       "day_low_paisa": 4446648,
       "ema200_paisa": 4493402,
       "ema20_paisa": 4428795,
-      "expected_mask": "0000000000000000970000044000a029",
+      "expected_mask": "0000000000000002970000044000a029",
       "high_paisa": 4462255,
       "id": 182,
       "low_paisa": 4446648,
@@ -6655,6 +6837,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8919390,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4478208
     },
@@ -6664,7 +6847,7 @@
       "day_low_paisa": 1855811,
       "ema200_paisa": null,
       "ema20_paisa": 1874560,
-      "expected_mask": "000000000000000029014a0d80015002",
+      "expected_mask": "000000000000000229014a0d80015002",
       "high_paisa": 1858888,
       "id": 183,
       "low_paisa": 1855811,
@@ -6692,6 +6875,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3776792,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 1868984
     },
@@ -6701,7 +6885,7 @@
       "day_low_paisa": 4204923,
       "ema200_paisa": 4306836,
       "ema20_paisa": 4359586,
-      "expected_mask": "0000000000000000910924048000a016",
+      "expected_mask": "0000000000000002910924048000a016",
       "high_paisa": 4338614,
       "id": 184,
       "low_paisa": 4330747,
@@ -6725,6 +6909,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8705940,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4348520
     },
@@ -6734,7 +6919,7 @@
       "day_low_paisa": 2275907,
       "ema200_paisa": 2231827,
       "ema20_paisa": 2258420,
-      "expected_mask": "000000000000000010012a0d8000a015",
+      "expected_mask": "000000000000000110012a0d8000a015",
       "high_paisa": 2282519,
       "id": 185,
       "low_paisa": 2275907,
@@ -6762,6 +6947,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4475138,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2261965
     },
@@ -6771,7 +6957,7 @@
       "day_low_paisa": 2654273,
       "ema200_paisa": 2777956,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000200988048100c008",
+      "expected_mask": "0000000000000002200988048100c008",
       "high_paisa": 2738251,
       "id": 186,
       "low_paisa": 2722194,
@@ -6795,6 +6981,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5471216,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2715305
     },
@@ -6804,7 +6991,7 @@
       "day_low_paisa": 3502178,
       "ema200_paisa": 3489840,
       "ema20_paisa": 3491245,
-      "expected_mask": "0000000000000000200645104100c015",
+      "expected_mask": "0000000000000001200645104100c015",
       "high_paisa": 3511408,
       "id": 187,
       "low_paisa": 3502178,
@@ -6832,6 +7019,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6971150,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3514950
     },
@@ -6841,7 +7029,7 @@
       "day_low_paisa": 2881132,
       "ema200_paisa": null,
       "ema20_paisa": 2864291,
-      "expected_mask": "000000000000000010021a088000a001",
+      "expected_mask": "000000000000000210021a088000a001",
       "high_paisa": 2893842,
       "id": 188,
       "low_paisa": 2881132,
@@ -6869,6 +7057,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5801640,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2882737
     },
@@ -6878,7 +7067,7 @@
       "day_low_paisa": 950424,
       "ema200_paisa": 945586,
       "ema20_paisa": 986407,
-      "expected_mask": "00000000000000002182043040014016",
+      "expected_mask": "00000000000000012182043040014016",
       "high_paisa": 960890,
       "id": 189,
       "low_paisa": 950424,
@@ -6906,6 +7095,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 1858633,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -6915,7 +7105,7 @@
       "day_low_paisa": 1614359,
       "ema200_paisa": 1635694,
       "ema20_paisa": 1609330,
-      "expected_mask": "0000000000000000220118208204c029",
+      "expected_mask": "0000000000000002220118208204c029",
       "high_paisa": 1623584,
       "id": 190,
       "low_paisa": 1614359,
@@ -6943,6 +7133,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3292990,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 1632069
     },
@@ -6980,6 +7171,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 9394526,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4680579
     },
@@ -6989,7 +7181,7 @@
       "day_low_paisa": 2513753,
       "ema200_paisa": 2484486,
       "ema20_paisa": 2522244,
-      "expected_mask": "0000000000000000100140808800a016",
+      "expected_mask": "0000000000000001100140808800a016",
       "high_paisa": 2520140,
       "id": 192,
       "low_paisa": 2513753,
@@ -7017,6 +7209,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5007695,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2521267
     },
@@ -7026,7 +7219,7 @@
       "day_low_paisa": 4273744,
       "ema200_paisa": 4255051,
       "ema20_paisa": 4283871,
-      "expected_mask": "0000000000000000a002401080014016",
+      "expected_mask": "0000000000000001a002401080014016",
       "high_paisa": 4283677,
       "id": 193,
       "low_paisa": 4273744,
@@ -7054,6 +7247,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8544698,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": null
     },
@@ -7063,7 +7257,7 @@
       "day_low_paisa": 4797558,
       "ema200_paisa": 4785226,
       "ema20_paisa": 4786736,
-      "expected_mask": "0000000000000000900110044400a015",
+      "expected_mask": "0000000000000001900110044400a015",
       "high_paisa": 4813418,
       "id": 194,
       "low_paisa": 4797558,
@@ -7091,6 +7285,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 9573480,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 4833599
     },
@@ -7100,7 +7295,7 @@
       "day_low_paisa": 4081733,
       "ema200_paisa": 4126988,
       "ema20_paisa": 4068482,
-      "expected_mask": "00000000000000002202850040014829",
+      "expected_mask": "00000000000000022202850040014829",
       "high_paisa": 4094901,
       "id": 195,
       "low_paisa": 4081733,
@@ -7128,6 +7323,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8222416,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4071332
     },
@@ -7137,7 +7333,7 @@
       "day_low_paisa": 2159549,
       "ema200_paisa": 2150891,
       "ema20_paisa": 2149765,
-      "expected_mask": "00000000000000009b0545904000c025",
+      "expected_mask": "00000000000000029b0545904000c025",
       "high_paisa": 2176530,
       "id": 196,
       "low_paisa": 2159549,
@@ -7165,6 +7361,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4381329,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2179745
     },
@@ -7174,7 +7371,7 @@
       "day_low_paisa": 3244003,
       "ema200_paisa": null,
       "ema20_paisa": 3269688,
-      "expected_mask": "00000000000000009e0200244800a102",
+      "expected_mask": "00000000000000029e0200244800a102",
       "high_paisa": 3262349,
       "id": 197,
       "low_paisa": 3244003,
@@ -7202,6 +7399,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6586015,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3293421
     },
@@ -7211,7 +7409,7 @@
       "day_low_paisa": 2379762,
       "ema200_paisa": 2407012,
       "ema20_paisa": 2382405,
-      "expected_mask": "00000000000000002001204c42054029",
+      "expected_mask": "00000000000000012001204c42054029",
       "high_paisa": 2385604,
       "id": 198,
       "low_paisa": 2379762,
@@ -7239,6 +7437,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4737885,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2344161
     },
@@ -7248,7 +7447,7 @@
       "day_low_paisa": 3548026,
       "ema200_paisa": 4011191,
       "ema20_paisa": 4017960,
-      "expected_mask": "0000000000000000980884088000a015",
+      "expected_mask": "0000000000000002980884088000a015",
       "high_paisa": 4060354,
       "id": 199,
       "low_paisa": 4046466,
@@ -7272,6 +7471,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8114072,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4049657
     },
@@ -7281,7 +7481,7 @@
       "day_low_paisa": 4563821,
       "ema200_paisa": 4628721,
       "ema20_paisa": 4577042,
-      "expected_mask": "000000000000000099004054400ac0aa",
+      "expected_mask": "000000000000000299004054400ac0aa",
       "high_paisa": 4573690,
       "id": 200,
       "low_paisa": 4563821,
@@ -7309,6 +7509,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 9184557,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4590230
     },
@@ -7318,7 +7519,7 @@
       "day_low_paisa": 4551422,
       "ema200_paisa": 4496705,
       "ema20_paisa": null,
-      "expected_mask": "000000000000000099011a82800ac084",
+      "expected_mask": "000000000000000299011a82800ac084",
       "high_paisa": 4556244,
       "id": 201,
       "low_paisa": 4551422,
@@ -7346,6 +7547,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 9110614,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 4551864
     },
@@ -7355,7 +7557,7 @@
       "day_low_paisa": 1657676,
       "ema200_paisa": 1622585,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000002301149480014004",
+      "expected_mask": "00000000000000012301149480014004",
       "high_paisa": 1665151,
       "id": 202,
       "low_paisa": 1657676,
@@ -7383,6 +7585,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3318633,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 1702644
     },
@@ -7392,7 +7595,7 @@
       "day_low_paisa": 4455272,
       "ema200_paisa": 4407497,
       "ema20_paisa": 4437235,
-      "expected_mask": "000000000000000019421a228000a015",
+      "expected_mask": "000000000000000219421a228000a015",
       "high_paisa": 4465978,
       "id": 203,
       "low_paisa": 4455272,
@@ -7420,6 +7623,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8963663,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": null
     },
@@ -7429,7 +7633,7 @@
       "day_low_paisa": 2000780,
       "ema200_paisa": 2007535,
       "ema20_paisa": 2027634,
-      "expected_mask": "00000000000000002000051040014016",
+      "expected_mask": "00000000000000022000051040014016",
       "high_paisa": 2013868,
       "id": 204,
       "low_paisa": 2000780,
@@ -7457,6 +7661,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4060184,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 1991957
     },
@@ -7466,7 +7671,7 @@
       "day_low_paisa": 4364128,
       "ema200_paisa": 4328061,
       "ema20_paisa": 4376912,
-      "expected_mask": "0000000000000000180500004020c016",
+      "expected_mask": "0000000000000001180500004020c016",
       "high_paisa": 4376571,
       "id": 205,
       "low_paisa": 4364128,
@@ -7490,6 +7695,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8722952,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4360269
     },
@@ -7499,7 +7705,7 @@
       "day_low_paisa": 2704099,
       "ema200_paisa": null,
       "ema20_paisa": 2718541,
-      "expected_mask": "00000000000000002002480c80015002",
+      "expected_mask": "00000000000000012002480c80015002",
       "high_paisa": 2713797,
       "id": 206,
       "low_paisa": 2704099,
@@ -7527,6 +7733,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5360162,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2727812
     },
@@ -7536,7 +7743,7 @@
       "day_low_paisa": 2937777,
       "ema200_paisa": 3129972,
       "ema20_paisa": 3076749,
-      "expected_mask": "0000000000000000110944088000c029",
+      "expected_mask": "0000000000000002110944088000c029",
       "high_paisa": 3103548,
       "id": 207,
       "low_paisa": 3085903,
@@ -7564,6 +7771,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6191948,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3093236
     },
@@ -7601,6 +7809,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2992425
     },
@@ -7610,7 +7819,7 @@
       "day_low_paisa": 2217354,
       "ema200_paisa": null,
       "ema20_paisa": 2254501,
-      "expected_mask": "0000000000000000210125004004c002",
+      "expected_mask": "0000000000000002210125004004c002",
       "high_paisa": 2234748,
       "id": 209,
       "low_paisa": 2217354,
@@ -7638,6 +7847,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4524070,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2214243
     },
@@ -7647,7 +7857,7 @@
       "day_low_paisa": 4733941,
       "ema200_paisa": 4724507,
       "ema20_paisa": 4707787,
-      "expected_mask": "00000000000000001c0018208000a225",
+      "expected_mask": "00000000000000021c0018208000a225",
       "high_paisa": 4738505,
       "id": 210,
       "low_paisa": 4733941,
@@ -7675,6 +7885,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 9471771,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": null
     },
@@ -7712,6 +7923,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8180528,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 4065076
     },
@@ -7721,7 +7933,7 @@
       "day_low_paisa": 3878620,
       "ema200_paisa": 4418097,
       "ema20_paisa": 4375544,
-      "expected_mask": "0000000000000000140805344800a02a",
+      "expected_mask": "0000000000000002140805344800a02a",
       "high_paisa": 4372754,
       "id": 212,
       "low_paisa": 4363904,
@@ -7749,6 +7961,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8807189,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": null
     },
@@ -7758,7 +7971,7 @@
       "day_low_paisa": 4214022,
       "ema200_paisa": 4248704,
       "ema20_paisa": 4197997,
-      "expected_mask": "000000000000000020081a0284014029",
+      "expected_mask": "000000000000000220081a0284014029",
       "high_paisa": 4222069,
       "id": 213,
       "low_paisa": 4214022,
@@ -7782,6 +7995,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8493067,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 4197439
     },
@@ -7791,7 +8005,7 @@
       "day_low_paisa": 2319709,
       "ema200_paisa": 2357427,
       "ema20_paisa": 2311955,
-      "expected_mask": "000000000000000041064a8d8100c029",
+      "expected_mask": "000000000000000241064a8d8100c029",
       "high_paisa": 2331676,
       "id": 214,
       "low_paisa": 2319709,
@@ -7819,6 +8033,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4718307,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2284787
     },
@@ -7856,6 +8071,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2058361
     },
@@ -7865,7 +8081,7 @@
       "day_low_paisa": 3106257,
       "ema200_paisa": 3130486,
       "ema20_paisa": 3115307,
-      "expected_mask": "000000000000000090018a428000c02a",
+      "expected_mask": "000000000000000190018a428000c02a",
       "high_paisa": 3115794,
       "id": 216,
       "low_paisa": 3106257,
@@ -7893,6 +8109,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6138036,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3106782
     },
@@ -7902,7 +8119,7 @@
       "day_low_paisa": 3805073,
       "ema200_paisa": 3818921,
       "ema20_paisa": 3810273,
-      "expected_mask": "0000000000000000a802205490015029",
+      "expected_mask": "0000000000000002a802205490015029",
       "high_paisa": 3815151,
       "id": 217,
       "low_paisa": 3805073,
@@ -7930,6 +8147,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7685378,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3827332
     },
@@ -7939,7 +8157,7 @@
       "day_low_paisa": 2884601,
       "ema200_paisa": 2920116,
       "ema20_paisa": 2873501,
-      "expected_mask": "00000000000000002001404480014029",
+      "expected_mask": "00000000000000012001404480014029",
       "high_paisa": 2900823,
       "id": 218,
       "low_paisa": 2884601,
@@ -7967,6 +8185,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5783831,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2874335
     },
@@ -7976,7 +8195,7 @@
       "day_low_paisa": 4511761,
       "ema200_paisa": 4494358,
       "ema20_paisa": 4500641,
-      "expected_mask": "0000000000000000a005008c4100c015",
+      "expected_mask": "0000000000000001a005008c4100c015",
       "high_paisa": 4520447,
       "id": 219,
       "low_paisa": 4511761,
@@ -8004,6 +8223,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8973289,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4518047
     },
@@ -8041,6 +8261,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2029182
     },
@@ -8050,7 +8271,7 @@
       "day_low_paisa": 3058312,
       "ema200_paisa": 3103833,
       "ema20_paisa": 3081628,
-      "expected_mask": "0000000000000000a00a1a428001402a",
+      "expected_mask": "0000000000000001a00a1a428001402a",
       "high_paisa": 3063665,
       "id": 221,
       "low_paisa": 3058312,
@@ -8078,6 +8299,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6066169,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3067906
     },
@@ -8087,7 +8309,7 @@
       "day_low_paisa": 2559091,
       "ema200_paisa": 2540027,
       "ema20_paisa": 2540287,
-      "expected_mask": "000000000000000090021020400aa095",
+      "expected_mask": "000000000000000190021020400aa095",
       "high_paisa": 2572856,
       "id": 222,
       "low_paisa": 2559091,
@@ -8115,6 +8337,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5078044,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2597797
     },
@@ -8124,7 +8347,7 @@
       "day_low_paisa": 3412502,
       "ema200_paisa": 3409362,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000180545904020c004",
+      "expected_mask": "0000000000000001180545904020c004",
       "high_paisa": 3427861,
       "id": 223,
       "low_paisa": 3412502,
@@ -8152,6 +8375,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6831404,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3436861
     },
@@ -8161,7 +8385,7 @@
       "day_low_paisa": 3742444,
       "ema200_paisa": 3698863,
       "ema20_paisa": 3767476,
-      "expected_mask": "00000000000000002181209580014016",
+      "expected_mask": "00000000000000012181209580014016",
       "high_paisa": 3753806,
       "id": 224,
       "low_paisa": 3742444,
@@ -8189,6 +8413,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7448484,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3718237
     },
@@ -8198,7 +8423,7 @@
       "day_low_paisa": 2033793,
       "ema200_paisa": 2091248,
       "ema20_paisa": 2037552,
-      "expected_mask": "00000000000000001006004d4000c0a9",
+      "expected_mask": "00000000000000021006004d4000c0a9",
       "high_paisa": 2047651,
       "id": 225,
       "low_paisa": 2033793,
@@ -8226,6 +8451,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4155430,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2042122
     },
@@ -8235,7 +8461,7 @@
       "day_low_paisa": 2710456,
       "ema200_paisa": 2733687,
       "ema20_paisa": 2702399,
-      "expected_mask": "0000000000000000210414044204c429",
+      "expected_mask": "0000000000000002210414044204c429",
       "high_paisa": 2719986,
       "id": 226,
       "low_paisa": 2710456,
@@ -8263,6 +8489,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5464841,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": null
     },
@@ -8272,7 +8499,7 @@
       "day_low_paisa": 2053910,
       "ema200_paisa": 2068057,
       "ema20_paisa": 2043410,
-      "expected_mask": "0000000000000000250610444100c029",
+      "expected_mask": "0000000000000001250610444100c029",
       "high_paisa": 2067715,
       "id": 227,
       "low_paisa": 2053910,
@@ -8300,6 +8527,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4050614,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2074129
     },
@@ -8309,7 +8537,7 @@
       "day_low_paisa": 3021589,
       "ema200_paisa": 3157830,
       "ema20_paisa": 3143007,
-      "expected_mask": "00000000000000004f0810154080c02a",
+      "expected_mask": "00000000000000014f0810154080c02a",
       "high_paisa": 3130268,
       "id": 228,
       "low_paisa": 3115191,
@@ -8333,6 +8561,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6220786,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3146243
     },
@@ -8342,7 +8571,7 @@
       "day_low_paisa": 4903558,
       "ema200_paisa": null,
       "ema20_paisa": 4897651,
-      "expected_mask": "000000000000000014024a488800a101",
+      "expected_mask": "000000000000000114024a488800a101",
       "high_paisa": 4916191,
       "id": 229,
       "low_paisa": 4903558,
@@ -8370,6 +8599,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 9728499,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4886736
     },
@@ -8379,7 +8609,7 @@
       "day_low_paisa": 3264300,
       "ema200_paisa": 3244729,
       "ema20_paisa": 3269307,
-      "expected_mask": "0000000000000000150200048800a015",
+      "expected_mask": "0000000000000002150200048800a015",
       "high_paisa": 3278349,
       "id": 230,
       "low_paisa": 3264300,
@@ -8407,6 +8637,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6564589,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3258835
     },
@@ -8416,7 +8647,7 @@
       "day_low_paisa": 3623472,
       "ema200_paisa": 3714191,
       "ema20_paisa": 3679667,
-      "expected_mask": "0000000000000000a40a08848205442a",
+      "expected_mask": "0000000000000002a40a08848205442a",
       "high_paisa": 3671905,
       "id": 231,
       "low_paisa": 3656558,
@@ -8444,6 +8675,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7397866,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3696712
     },
@@ -8453,7 +8685,7 @@
       "day_low_paisa": 2084559,
       "ema200_paisa": 2089529,
       "ema20_paisa": 2111301,
-      "expected_mask": "000000000000000024052a488000c01a",
+      "expected_mask": "000000000000000124052a488000c01a",
       "high_paisa": 2099960,
       "id": 232,
       "low_paisa": 2084559,
@@ -8481,6 +8713,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4135931,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2114342
     },
@@ -8490,7 +8723,7 @@
       "day_low_paisa": 3867793,
       "ema200_paisa": 3924072,
       "ema20_paisa": 3887687,
-      "expected_mask": "0000000000000000990185004000a02a",
+      "expected_mask": "0000000000000001990185004000a02a",
       "high_paisa": 3873852,
       "id": 233,
       "low_paisa": 3867793,
@@ -8518,6 +8751,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7742644,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3913042
     },
@@ -8527,7 +8761,7 @@
       "day_low_paisa": 2440329,
       "ema200_paisa": 2468802,
       "ema20_paisa": 2457875,
-      "expected_mask": "0000000000000000200a08008100c02a",
+      "expected_mask": "0000000000000002200a08008100c02a",
       "high_paisa": 2464676,
       "id": 234,
       "low_paisa": 2449444,
@@ -8551,6 +8785,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4969041,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2409573
     },
@@ -8560,7 +8795,7 @@
       "day_low_paisa": 2941568,
       "ema200_paisa": 2891592,
       "ema20_paisa": 2930909,
-      "expected_mask": "000000000000000020011a8098015015",
+      "expected_mask": "000000000000000120011a8098015015",
       "high_paisa": 2955285,
       "id": 235,
       "low_paisa": 2941568,
@@ -8588,6 +8823,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5864955,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2976168
     },
@@ -8597,7 +8833,7 @@
       "day_low_paisa": 4518072,
       "ema200_paisa": null,
       "ema20_paisa": 4496134,
-      "expected_mask": "000000000000000040044a408080c041",
+      "expected_mask": "000000000000000140044a408080c041",
       "high_paisa": 4527442,
       "id": 236,
       "low_paisa": 4518072,
@@ -8625,6 +8861,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 9016360,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 4550158
     },
@@ -8634,7 +8871,7 @@
       "day_low_paisa": 3775077,
       "ema200_paisa": 3781889,
       "ema20_paisa": 3767121,
-      "expected_mask": "00000000000000001000202c4000a029",
+      "expected_mask": "00000000000000021000202c4000a029",
       "high_paisa": 3786082,
       "id": 237,
       "low_paisa": 3775077,
@@ -8662,6 +8899,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7614010,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3802143
     },
@@ -8671,7 +8909,7 @@
       "day_low_paisa": 2482177,
       "ema200_paisa": 2450348,
       "ema20_paisa": 2470537,
-      "expected_mask": "0000000000000000230505104100c015",
+      "expected_mask": "0000000000000002230505104100c015",
       "high_paisa": 2492816,
       "id": 238,
       "low_paisa": 2482177,
@@ -8699,6 +8937,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5021185,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2529557
     },
@@ -8708,7 +8947,7 @@
       "day_low_paisa": 4189488,
       "ema200_paisa": 4243855,
       "ema20_paisa": 4220393,
-      "expected_mask": "0000000000000000930105024000a02a",
+      "expected_mask": "0000000000000002930105024000a02a",
       "high_paisa": 4204319,
       "id": 239,
       "low_paisa": 4189488,
@@ -8732,6 +8971,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8437302,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4217904
     },
@@ -8741,7 +8981,7 @@
       "day_low_paisa": 2266831,
       "ema200_paisa": 2496476,
       "ema20_paisa": 2470549,
-      "expected_mask": "0000000000000000100944048010c029",
+      "expected_mask": "0000000000000001100944048010c029",
       "high_paisa": 2498808,
       "id": 240,
       "low_paisa": 2485518,
@@ -8765,6 +9005,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4950601,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2483998
     },
@@ -8774,7 +9015,7 @@
       "day_low_paisa": 3107284,
       "ema200_paisa": 3826685,
       "ema20_paisa": 3814309,
-      "expected_mask": "00000000000000001c0905024000a22a",
+      "expected_mask": "00000000000000011c0905024000a22a",
       "high_paisa": 3791783,
       "id": 241,
       "low_paisa": 3781806,
@@ -8802,6 +9043,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7524521,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3798582
     },
@@ -8811,7 +9053,7 @@
       "day_low_paisa": 1621779,
       "ema200_paisa": 1713879,
       "ema20_paisa": 1699851,
-      "expected_mask": "0000000000000000990a20504000c02a",
+      "expected_mask": "0000000000000002990a20504000c02a",
       "high_paisa": 1685157,
       "id": 242,
       "low_paisa": 1669305,
@@ -8839,6 +9081,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 3378891,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1716868
     },
@@ -8848,7 +9091,7 @@
       "day_low_paisa": 3461946,
       "ema200_paisa": 3514729,
       "ema20_paisa": 3499898,
-      "expected_mask": "0000000000000000190110244000a22a",
+      "expected_mask": "0000000000000001190110244000a22a",
       "high_paisa": 3478194,
       "id": 243,
       "low_paisa": 3461946,
@@ -8876,6 +9119,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6928425,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3458101
     },
@@ -8885,7 +9129,7 @@
       "day_low_paisa": 4057393,
       "ema200_paisa": 4064782,
       "ema20_paisa": 4082822,
-      "expected_mask": "00000000000000002402454040014016",
+      "expected_mask": "00000000000000012402454040014016",
       "high_paisa": 4072780,
       "id": 244,
       "low_paisa": 4057393,
@@ -8913,6 +9157,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8075224,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4045704
     },
@@ -8922,7 +9167,7 @@
       "day_low_paisa": 4380408,
       "ema200_paisa": null,
       "ema20_paisa": 4400231,
-      "expected_mask": "00000000000000002702280480014802",
+      "expected_mask": "00000000000000022702280480014802",
       "high_paisa": 4387127,
       "id": 245,
       "low_paisa": 4380408,
@@ -8950,6 +9195,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8779336,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4388852
     },
@@ -8959,7 +9205,7 @@
       "day_low_paisa": 1569747,
       "ema200_paisa": 1552222,
       "ema20_paisa": 1586761,
-      "expected_mask": "000000000000000010061a408000c016",
+      "expected_mask": "000000000000000210061a408000c016",
       "high_paisa": 1579438,
       "id": 246,
       "low_paisa": 1569747,
@@ -8987,6 +9233,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 3143169,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 1587216
     },
@@ -9024,6 +9271,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1613882
     },
@@ -9033,7 +9281,7 @@
       "day_low_paisa": 2502489,
       "ema200_paisa": null,
       "ema20_paisa": 2501830,
-      "expected_mask": "00000000000000001a018800800aa001",
+      "expected_mask": "00000000000000011a018800800aa001",
       "high_paisa": 2508647,
       "id": 248,
       "low_paisa": 2502489,
@@ -9057,6 +9305,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4990378,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2488946
     },
@@ -9066,7 +9315,7 @@
       "day_low_paisa": 3082990,
       "ema200_paisa": 3126132,
       "ema20_paisa": 3065676,
-      "expected_mask": "00000000000000002002401440014029",
+      "expected_mask": "00000000000000022002401440014029",
       "high_paisa": 3098553,
       "id": 249,
       "low_paisa": 3082990,
@@ -9094,6 +9343,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6194251,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": null
     },
@@ -9103,7 +9353,7 @@
       "day_low_paisa": 2963816,
       "ema200_paisa": 2939562,
       "ema20_paisa": 2949707,
-      "expected_mask": "0000000000000000a101000842054415",
+      "expected_mask": "0000000000000001a101000842054415",
       "high_paisa": 2971803,
       "id": 250,
       "low_paisa": 2963816,
@@ -9131,6 +9381,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5909773,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2955296
     },
@@ -9168,6 +9419,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 4791097
     },
@@ -9205,6 +9457,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2720557
     },
@@ -9214,7 +9467,7 @@
       "day_low_paisa": 1686343,
       "ema200_paisa": 1672461,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000a801084d48014804",
+      "expected_mask": "0000000000000001a801084d48014804",
       "high_paisa": 1693266,
       "id": 253,
       "low_paisa": 1686343,
@@ -9242,6 +9495,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3340863,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 1657309
     },
@@ -9251,7 +9505,7 @@
       "day_low_paisa": 1453980,
       "ema200_paisa": 1449684,
       "ema20_paisa": 1434341,
-      "expected_mask": "00000000000000002901051040014025",
+      "expected_mask": "00000000000000012901051040014025",
       "high_paisa": 1459848,
       "id": 254,
       "low_paisa": 1453980,
@@ -9279,6 +9533,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 2891866,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 1424865
     },
@@ -9288,7 +9543,7 @@
       "day_low_paisa": 3823665,
       "ema200_paisa": 3883701,
       "ema20_paisa": 3802909,
-      "expected_mask": "0000000000000000100644144010c0a9",
+      "expected_mask": "0000000000000002100644144010c0a9",
       "high_paisa": 3833720,
       "id": 255,
       "low_paisa": 3823665,
@@ -9316,6 +9571,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7690633,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3849497
     },
@@ -9325,7 +9581,7 @@
       "day_low_paisa": 4046368,
       "ema200_paisa": 4081749,
       "ema20_paisa": 4044908,
-      "expected_mask": "0000000000000000110025025000a029",
+      "expected_mask": "0000000000000001110025025000a029",
       "high_paisa": 4051440,
       "id": 256,
       "low_paisa": 4046368,
@@ -9353,6 +9609,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8094783,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4069109
     },
@@ -9362,7 +9619,7 @@
       "day_low_paisa": 4308017,
       "ema200_paisa": 4360880,
       "ema20_paisa": 4292791,
-      "expected_mask": "0000000000000000950040848000a3a9",
+      "expected_mask": "0000000000000001950040848000a3a9",
       "high_paisa": 4320535,
       "id": 257,
       "low_paisa": 4308017,
@@ -9390,6 +9647,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8611201,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 4290737
     },
@@ -9399,7 +9657,7 @@
       "day_low_paisa": 2639645,
       "ema200_paisa": 2664749,
       "ema20_paisa": 2641491,
-      "expected_mask": "0000000000000000480648008040c029",
+      "expected_mask": "0000000000000002480648008040c029",
       "high_paisa": 2651828,
       "id": 258,
       "low_paisa": 2639645,
@@ -9427,6 +9685,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5313584,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2677341
     },
@@ -9436,7 +9695,7 @@
       "day_low_paisa": 3809377,
       "ema200_paisa": null,
       "ema20_paisa": 3825301,
-      "expected_mask": "00000000000000002a0415944000c002",
+      "expected_mask": "00000000000000022a0415944000c002",
       "high_paisa": 3821349,
       "id": 259,
       "low_paisa": 3809377,
@@ -9464,6 +9723,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7705453,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3823324
     },
@@ -9473,7 +9733,7 @@
       "day_low_paisa": 3867519,
       "ema200_paisa": 3915759,
       "ema20_paisa": 3882993,
-      "expected_mask": "00000000000000002609482d8001402a",
+      "expected_mask": "00000000000000022609482d8001402a",
       "high_paisa": 3879495,
       "id": 260,
       "low_paisa": 3867519,
@@ -9501,6 +9761,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7791562,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3894723
     },
@@ -9510,7 +9771,7 @@
       "day_low_paisa": 3503930,
       "ema200_paisa": 3475229,
       "ema20_paisa": 3528392,
-      "expected_mask": "0000000000000000a000004480014016",
+      "expected_mask": "0000000000000001a000004480014016",
       "high_paisa": 3519394,
       "id": 261,
       "low_paisa": 3503930,
@@ -9538,6 +9799,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7004241,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3506247
     },
@@ -9571,6 +9833,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8236890,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4084397
     },
@@ -9580,7 +9843,7 @@
       "day_low_paisa": 3144675,
       "ema200_paisa": 3427935,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000001d0920004000c008",
+      "expected_mask": "00000000000000011d0920004000c008",
       "high_paisa": 3415743,
       "id": 263,
       "low_paisa": 3409632,
@@ -9604,6 +9867,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6796566,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3455103
     },
@@ -9637,6 +9901,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3696816,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 1812250
     },
@@ -9674,6 +9939,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5166792,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2610262
     },
@@ -9683,7 +9949,7 @@
       "day_low_paisa": 3675905,
       "ema200_paisa": 3699451,
       "ema20_paisa": 3652628,
-      "expected_mask": "000000000000000090012a02800ac0a9",
+      "expected_mask": "000000000000000190012a02800ac0a9",
       "high_paisa": 3682946,
       "id": 266,
       "low_paisa": 3675905,
@@ -9707,6 +9973,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7301045,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3663639
     },
@@ -9716,7 +9983,7 @@
       "day_low_paisa": 4284735,
       "ema200_paisa": null,
       "ema20_paisa": 4283781,
-      "expected_mask": "000000000000000024010a0880014001",
+      "expected_mask": "000000000000000124010a0880014001",
       "high_paisa": 4299725,
       "id": 267,
       "low_paisa": 4284735,
@@ -9740,6 +10007,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8512499,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -9749,7 +10017,7 @@
       "day_low_paisa": 1279287,
       "ema200_paisa": null,
       "ema20_paisa": 1277121,
-      "expected_mask": "000000000000000020010a0080014001",
+      "expected_mask": "000000000000000120010a0080014001",
       "high_paisa": 1291526,
       "id": 268,
       "low_paisa": 1279287,
@@ -9777,6 +10045,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 2545876,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -9786,7 +10055,7 @@
       "day_low_paisa": 2469711,
       "ema200_paisa": 2487463,
       "ema20_paisa": 2445106,
-      "expected_mask": "000000000000000093010a0084f8c0a9",
+      "expected_mask": "000000000000000293010a0084f8c0a9",
       "high_paisa": 2482517,
       "id": 269,
       "low_paisa": 2469711,
@@ -9814,6 +10083,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4992106,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2429985
     },
@@ -9823,7 +10093,7 @@
       "day_low_paisa": 2755649,
       "ema200_paisa": 2778918,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000a002450040014008",
+      "expected_mask": "0000000000000001a002450040014008",
       "high_paisa": 2770470,
       "id": 270,
       "low_paisa": 2755649,
@@ -9847,6 +10117,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5516482,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2744876
     },
@@ -9856,7 +10127,7 @@
       "day_low_paisa": 2918627,
       "ema200_paisa": 2966869,
       "ema20_paisa": 2923310,
-      "expected_mask": "0000000000000000940185804000a229",
+      "expected_mask": "0000000000000002940185804000a229",
       "high_paisa": 2929033,
       "id": 271,
       "low_paisa": 2918627,
@@ -9884,6 +10155,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5923960,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2958233
     },
@@ -9893,7 +10165,7 @@
       "day_low_paisa": 2521776,
       "ema200_paisa": 2564615,
       "ema20_paisa": 2507888,
-      "expected_mask": "00000000000000001100084c4800a129",
+      "expected_mask": "00000000000000021100084c4800a129",
       "high_paisa": 2530549,
       "id": 272,
       "low_paisa": 2521776,
@@ -9921,6 +10193,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5118063,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2493812
     },
@@ -9958,6 +10231,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2661060
     },
@@ -9967,7 +10241,7 @@
       "day_low_paisa": 2503100,
       "ema200_paisa": 2486180,
       "ema20_paisa": 2515689,
-      "expected_mask": "0000000000000000400544804100c016",
+      "expected_mask": "0000000000000001400544804100c016",
       "high_paisa": 2511915,
       "id": 274,
       "low_paisa": 2503100,
@@ -9995,6 +10269,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4999195,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2526851
     },
@@ -10028,6 +10303,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 4405826
     },
@@ -10037,7 +10313,7 @@
       "day_low_paisa": 3326010,
       "ema200_paisa": 3299463,
       "ema20_paisa": 3363208,
-      "expected_mask": "00000000000000002402053444014416",
+      "expected_mask": "00000000000000022402053444014416",
       "high_paisa": 3338736,
       "id": 276,
       "low_paisa": 3326010,
@@ -10065,6 +10341,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6706716,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3308490
     },
@@ -10074,7 +10351,7 @@
       "day_low_paisa": 1924323,
       "ema200_paisa": 1896034,
       "ema20_paisa": 1936430,
-      "expected_mask": "0000000000000000110120808000a116",
+      "expected_mask": "0000000000000002110120808000a116",
       "high_paisa": 1934878,
       "id": 277,
       "low_paisa": 1924323,
@@ -10102,6 +10379,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 3877945,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1897809
     },
@@ -10111,7 +10389,7 @@
       "day_low_paisa": 2121798,
       "ema200_paisa": null,
       "ema20_paisa": 2129659,
-      "expected_mask": "00000000000000009002082d8400a002",
+      "expected_mask": "00000000000000019002082d8400a002",
       "high_paisa": 2131028,
       "id": 278,
       "low_paisa": 2121798,
@@ -10139,6 +10417,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4245847,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2127882
     },
@@ -10148,7 +10427,7 @@
       "day_low_paisa": 1559931,
       "ema200_paisa": 1708598,
       "ema20_paisa": 1777951,
-      "expected_mask": "0000000000000000920a85144000a016",
+      "expected_mask": "0000000000000001920a85144000a016",
       "high_paisa": 1752484,
       "id": 279,
       "low_paisa": 1743303,
@@ -10172,6 +10451,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3429085,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": null
     },
@@ -10181,7 +10461,7 @@
       "day_low_paisa": 2799506,
       "ema200_paisa": 2771993,
       "ema20_paisa": 2816706,
-      "expected_mask": "000000000000000022000a0c80014416",
+      "expected_mask": "000000000000000222000a0c80014416",
       "high_paisa": 2810603,
       "id": 280,
       "low_paisa": 2799506,
@@ -10205,6 +10485,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5630830,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": null
     },
@@ -10242,6 +10523,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 1926474
     },
@@ -10251,7 +10533,7 @@
       "day_low_paisa": 3488554,
       "ema200_paisa": 3465921,
       "ema20_paisa": 3486678,
-      "expected_mask": "000000000000000012068a2d8000c095",
+      "expected_mask": "000000000000000212068a2d8000c095",
       "high_paisa": 3490023,
       "id": 282,
       "low_paisa": 3488554,
@@ -10279,6 +10561,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7033791,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3486081
     },
@@ -10288,7 +10571,7 @@
       "day_low_paisa": 3941571,
       "ema200_paisa": 3918449,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000001002002c4800a104",
+      "expected_mask": "00000000000000011002002c4800a104",
       "high_paisa": 3945851,
       "id": 283,
       "low_paisa": 3941571,
@@ -10316,6 +10599,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7859558,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 3952646
     },
@@ -10325,7 +10609,7 @@
       "day_low_paisa": 4567886,
       "ema200_paisa": 4631381,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000009606400c4020c008",
+      "expected_mask": "00000000000000029606400c4020c008",
       "high_paisa": 4579329,
       "id": 284,
       "low_paisa": 4567886,
@@ -10353,6 +10637,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 9222685,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4572974
     },
@@ -10362,7 +10647,7 @@
       "day_low_paisa": 3480702,
       "ema200_paisa": 3461138,
       "ema20_paisa": 3463389,
-      "expected_mask": "0000000000000000114288048000a015",
+      "expected_mask": "0000000000000002114288048000a015",
       "high_paisa": 3491370,
       "id": 285,
       "low_paisa": 3480702,
@@ -10386,6 +10671,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7032310,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3464090
     },
@@ -10419,6 +10705,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2300913
     },
@@ -10428,7 +10715,7 @@
       "day_low_paisa": 2968332,
       "ema200_paisa": 2934493,
       "ema20_paisa": 2968439,
-      "expected_mask": "00000000000000002901180880014415",
+      "expected_mask": "00000000000000012901180880014415",
       "high_paisa": 2979384,
       "id": 287,
       "low_paisa": 2968332,
@@ -10456,6 +10743,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5876072,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3000372
     },
@@ -10465,7 +10753,7 @@
       "day_low_paisa": 2937959,
       "ema200_paisa": 3211766,
       "ema20_paisa": 3201863,
-      "expected_mask": "00000000000000001a4a44044000a029",
+      "expected_mask": "00000000000000011a4a44044000a029",
       "high_paisa": 3215606,
       "id": 288,
       "low_paisa": 3205886,
@@ -10493,6 +10781,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6391567,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3233904
     },
@@ -10502,7 +10791,7 @@
       "day_low_paisa": 4402374,
       "ema200_paisa": 4577790,
       "ema20_paisa": 4559880,
-      "expected_mask": "0000000000000000210810944080c069",
+      "expected_mask": "0000000000000001210810944080c069",
       "high_paisa": 4564130,
       "id": 289,
       "low_paisa": 4556833,
@@ -10530,6 +10819,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 9112822,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 4592295
     },
@@ -10539,7 +10829,7 @@
       "day_low_paisa": 3049124,
       "ema200_paisa": 3110013,
       "ema20_paisa": 3064490,
-      "expected_mask": "0000000000000000a202104d4304c42a",
+      "expected_mask": "0000000000000002a202104d4304c42a",
       "high_paisa": 3060442,
       "id": 290,
       "low_paisa": 3049124,
@@ -10567,6 +10857,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6149853,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3025235
     },
@@ -10576,7 +10867,7 @@
       "day_low_paisa": 2657335,
       "ema200_paisa": 2652897,
       "ema20_paisa": 2653217,
-      "expected_mask": "000000000000000029062a408000c415",
+      "expected_mask": "000000000000000229062a408000c415",
       "high_paisa": 2669623,
       "id": 291,
       "low_paisa": 2657335,
@@ -10604,6 +10895,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5316367,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": null
     },
@@ -10613,7 +10905,7 @@
       "day_low_paisa": 2739826,
       "ema200_paisa": 2776181,
       "ema20_paisa": 2742903,
-      "expected_mask": "000000000000000020054a488000c02a",
+      "expected_mask": "000000000000000220054a488000c02a",
       "high_paisa": 2754767,
       "id": 292,
       "low_paisa": 2739826,
@@ -10641,6 +10933,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5532813,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2761888
     },
@@ -10650,7 +10943,7 @@
       "day_low_paisa": 2462494,
       "ema200_paisa": 2646117,
       "ema20_paisa": 2657209,
-      "expected_mask": "0000000000000000180844804000c016",
+      "expected_mask": "0000000000000002180844804000c016",
       "high_paisa": 2648327,
       "id": 293,
       "low_paisa": 2646366,
@@ -10678,6 +10971,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5352899,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2665249
     },
@@ -10687,7 +10981,7 @@
       "day_low_paisa": 4451946,
       "ema200_paisa": 4425835,
       "ema20_paisa": 4479611,
-      "expected_mask": "00000000000000004b05208c4080c056",
+      "expected_mask": "00000000000000014b05208c4080c056",
       "high_paisa": 4465461,
       "id": 294,
       "low_paisa": 4451946,
@@ -10715,6 +11009,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8887990,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 4488896
     },
@@ -10748,6 +11043,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7205060,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 3577506
     },
@@ -10785,6 +11081,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2869437
     },
@@ -10794,7 +11091,7 @@
       "day_low_paisa": 2528829,
       "ema200_paisa": 2583629,
       "ema20_paisa": 2542486,
-      "expected_mask": "0000000000000000200284044001402a",
+      "expected_mask": "0000000000000002200284044001402a",
       "high_paisa": 2539602,
       "id": 297,
       "low_paisa": 2528829,
@@ -10818,6 +11115,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5105074,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2514918
     },
@@ -10827,7 +11125,7 @@
       "day_low_paisa": 3707311,
       "ema200_paisa": 3670820,
       "ema20_paisa": 3696580,
-      "expected_mask": "0000000000000000a000248440014015",
+      "expected_mask": "0000000000000002a000248440014015",
       "high_paisa": 3722606,
       "id": 298,
       "low_paisa": 3707311,
@@ -10855,6 +11153,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7472431,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3747028
     },
@@ -10864,7 +11163,7 @@
       "day_low_paisa": 4165375,
       "ema200_paisa": 4380770,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000009209442d400ac088",
+      "expected_mask": "00000000000000029209442d400ac088",
       "high_paisa": 4347726,
       "id": 299,
       "low_paisa": 4332008,
@@ -10892,6 +11191,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8738295,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4306391
     },
@@ -10901,7 +11201,7 @@
       "day_low_paisa": 2490569,
       "ema200_paisa": null,
       "ema20_paisa": 2529698,
-      "expected_mask": "00000000000000002202059448014002",
+      "expected_mask": "00000000000000022202059448014002",
       "high_paisa": 2503749,
       "id": 300,
       "low_paisa": 2490569,
@@ -10929,6 +11229,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5064669,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2499925
     },
@@ -10966,6 +11267,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -10999,6 +11301,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": null
     },
@@ -11008,7 +11311,7 @@
       "day_low_paisa": 2797108,
       "ema200_paisa": 2828148,
       "ema20_paisa": 2806576,
-      "expected_mask": "0000000000000000270625504000c429",
+      "expected_mask": "0000000000000002270625504000c429",
       "high_paisa": 2808137,
       "id": 303,
       "low_paisa": 2797108,
@@ -11036,6 +11339,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5656728,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": null
     },
@@ -11073,6 +11377,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 1395143
     },
@@ -11082,7 +11387,7 @@
       "day_low_paisa": 2858419,
       "ema200_paisa": 2903605,
       "ema20_paisa": 2873057,
-      "expected_mask": "0000000000000000a90615404000c029",
+      "expected_mask": "0000000000000002a90615404000c029",
       "high_paisa": 2875707,
       "id": 305,
       "low_paisa": 2858419,
@@ -11110,6 +11415,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5768367,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2902987
     },
@@ -11119,7 +11425,7 @@
       "day_low_paisa": 4192500,
       "ema200_paisa": 4212700,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000a40204004204c008",
+      "expected_mask": "0000000000000002a40204004204c008",
       "high_paisa": 4200108,
       "id": 306,
       "low_paisa": 4192500,
@@ -11143,6 +11449,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8430756,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4191431
     },
@@ -11152,7 +11459,7 @@
       "day_low_paisa": 2924422,
       "ema200_paisa": 2931555,
       "ema20_paisa": 2941189,
-      "expected_mask": "000000000000000010011a488000a01a",
+      "expected_mask": "000000000000000110011a488000a01a",
       "high_paisa": 2934317,
       "id": 307,
       "low_paisa": 2924422,
@@ -11180,6 +11487,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5846419,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2954934
     },
@@ -11217,6 +11525,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3133375
     },
@@ -11226,7 +11535,7 @@
       "day_low_paisa": 2014876,
       "ema200_paisa": 2072660,
       "ema20_paisa": 2028828,
-      "expected_mask": "0000000000000000a10600054080c02a",
+      "expected_mask": "0000000000000002a10600054080c02a",
       "high_paisa": 2028757,
       "id": 309,
       "low_paisa": 2014876,
@@ -11254,6 +11563,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4074427,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2035532
     },
@@ -11263,7 +11573,7 @@
       "day_low_paisa": 2279277,
       "ema200_paisa": 2331417,
       "ema20_paisa": 2302557,
-      "expected_mask": "00000000000000002c800a80a001402a",
+      "expected_mask": "00000000000000012c800a80a001402a",
       "high_paisa": 2292242,
       "id": 310,
       "low_paisa": 2279277,
@@ -11291,6 +11601,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4542340,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2298328
     },
@@ -11300,7 +11611,7 @@
       "day_low_paisa": 3740371,
       "ema200_paisa": 3705559,
       "ema20_paisa": 3774251,
-      "expected_mask": "0000000000000000c90420808040c056",
+      "expected_mask": "0000000000000002c90420808040c056",
       "high_paisa": 3753192,
       "id": 311,
       "low_paisa": 3740371,
@@ -11328,6 +11639,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7558401,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": null
     },
@@ -11337,7 +11649,7 @@
       "day_low_paisa": 4088554,
       "ema200_paisa": 4432069,
       "ema20_paisa": 4376384,
-      "expected_mask": "0000000000000000110a45944000a229",
+      "expected_mask": "0000000000000001110a45944000a229",
       "high_paisa": 4404733,
       "id": 312,
       "low_paisa": 4392243,
@@ -11365,6 +11677,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8736170,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4379067
     },
@@ -11374,7 +11687,7 @@
       "day_low_paisa": 2425049,
       "ema200_paisa": 2433267,
       "ema20_paisa": 2431989,
-      "expected_mask": "00000000000000002182000440014025",
+      "expected_mask": "00000000000000012182000440014025",
       "high_paisa": 2441027,
       "id": 313,
       "low_paisa": 2425049,
@@ -11402,6 +11715,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4868179,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2435575
     },
@@ -11439,6 +11753,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5975288,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2953770
     },
@@ -11448,7 +11763,7 @@
       "day_low_paisa": 1892863,
       "ema200_paisa": 1841760,
       "ema20_paisa": 1919515,
-      "expected_mask": "00000000000000004006102c4020c016",
+      "expected_mask": "00000000000000024006102c4020c016",
       "high_paisa": 1901248,
       "id": 315,
       "low_paisa": 1892863,
@@ -11476,6 +11791,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3813298,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": null
     },
@@ -11485,7 +11801,7 @@
       "day_low_paisa": 4193117,
       "ema200_paisa": 4188363,
       "ema20_paisa": 4191616,
-      "expected_mask": "000000000000000025040a008100c015",
+      "expected_mask": "000000000000000225040a008100c015",
       "high_paisa": 4203306,
       "id": 316,
       "low_paisa": 4193117,
@@ -11513,6 +11829,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8438522,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": null
     },
@@ -11522,7 +11839,7 @@
       "day_low_paisa": 3110900,
       "ema200_paisa": 3089948,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000180140008000a004",
+      "expected_mask": "0000000000000002180140008000a004",
       "high_paisa": 3124668,
       "id": 317,
       "low_paisa": 3110900,
@@ -11550,6 +11867,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 6236171,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3086991
     },
@@ -11559,7 +11877,7 @@
       "day_low_paisa": 3993042,
       "ema200_paisa": 4053715,
       "ema20_paisa": 4025187,
-      "expected_mask": "0000000000000000280640044100c02a",
+      "expected_mask": "0000000000000002280640044100c02a",
       "high_paisa": 4008779,
       "id": 318,
       "low_paisa": 3993042,
@@ -11583,6 +11901,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8042210,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3994461
     },
@@ -11592,7 +11911,7 @@
       "day_low_paisa": 2855668,
       "ema200_paisa": 2850911,
       "ema20_paisa": 2851383,
-      "expected_mask": "0000000000000000100244804000a015",
+      "expected_mask": "0000000000000001100244804000a015",
       "high_paisa": 2868811,
       "id": 319,
       "low_paisa": 2855668,
@@ -11620,6 +11939,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5680445,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2854117
     },
@@ -11629,7 +11949,7 @@
       "day_low_paisa": 4067547,
       "ema200_paisa": null,
       "ema20_paisa": 4111512,
-      "expected_mask": "00000000000000002408083040014402",
+      "expected_mask": "00000000000000012408083040014402",
       "high_paisa": 4082561,
       "id": 320,
       "low_paisa": 4067547,
@@ -11657,6 +11977,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8153818,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4054797
     },
@@ -11666,7 +11987,7 @@
       "day_low_paisa": 3022027,
       "ema200_paisa": 3005698,
       "ema20_paisa": 3048987,
-      "expected_mask": "0000000000000000920014345000a216",
+      "expected_mask": "0000000000000001920014345000a216",
       "high_paisa": 3029118,
       "id": 321,
       "low_paisa": 3022027,
@@ -11694,6 +12015,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6015625,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": null
     },
@@ -11703,7 +12025,7 @@
       "day_low_paisa": 2362199,
       "ema200_paisa": 2371732,
       "ema20_paisa": 2365250,
-      "expected_mask": "0000000000000000c10540404040c069",
+      "expected_mask": "0000000000000002c10540404040c069",
       "high_paisa": 2369547,
       "id": 322,
       "low_paisa": 2362199,
@@ -11731,6 +12053,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4748426,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2388979
     },
@@ -11740,7 +12063,7 @@
       "day_low_paisa": 3965318,
       "ema200_paisa": 4023062,
       "ema20_paisa": 3940528,
-      "expected_mask": "00000000000000002589880080014029",
+      "expected_mask": "00000000000000012589880080014029",
       "high_paisa": 3967712,
       "id": 323,
       "low_paisa": 3965318,
@@ -11768,6 +12091,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7915427,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4005205
     },
@@ -11777,7 +12101,7 @@
       "day_low_paisa": 2092794,
       "ema200_paisa": 2044687,
       "ema20_paisa": 2063687,
-      "expected_mask": "000000000000000010028a808000a015",
+      "expected_mask": "000000000000000110028a808000a015",
       "high_paisa": 2098536,
       "id": 324,
       "low_paisa": 2092794,
@@ -11805,6 +12129,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4106809,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2111527
     },
@@ -11842,6 +12167,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7021792,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 3495592
     },
@@ -11851,7 +12177,7 @@
       "day_low_paisa": 3467092,
       "ema200_paisa": 3452864,
       "ema20_paisa": 3478369,
-      "expected_mask": "00000000000000001a0480848000c016",
+      "expected_mask": "00000000000000011a0480848000c016",
       "high_paisa": 3477013,
       "id": 326,
       "low_paisa": 3467092,
@@ -11879,6 +12205,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 6910443,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 3438663
     },
@@ -11888,7 +12215,7 @@
       "day_low_paisa": 2143166,
       "ema200_paisa": 2115683,
       "ema20_paisa": 2132045,
-      "expected_mask": "0000000000000000104204158000a015",
+      "expected_mask": "0000000000000001104204158000a015",
       "high_paisa": 2152810,
       "id": 327,
       "low_paisa": 2143166,
@@ -11912,6 +12239,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4243714,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2162269
     },
@@ -11921,7 +12249,7 @@
       "day_low_paisa": 2646807,
       "ema200_paisa": 2681586,
       "ema20_paisa": 2655477,
-      "expected_mask": "0000000000000000100244148000a02a",
+      "expected_mask": "0000000000000001100244148000a02a",
       "high_paisa": 2655107,
       "id": 328,
       "low_paisa": 2646807,
@@ -11949,6 +12277,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5284086,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2627188
     },
@@ -11958,7 +12287,7 @@
       "day_low_paisa": 1419477,
       "ema200_paisa": 1365260,
       "ema20_paisa": 1420824,
-      "expected_mask": "0000000000000000280a289540015015",
+      "expected_mask": "0000000000000002280a289540015015",
       "high_paisa": 1423514,
       "id": 329,
       "low_paisa": 1419477,
@@ -11986,6 +12315,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 2909618,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1452834
     },
@@ -11995,7 +12325,7 @@
       "day_low_paisa": 2688561,
       "ema200_paisa": 2661132,
       "ema20_paisa": 2690017,
-      "expected_mask": "0000000000000000200500044000c015",
+      "expected_mask": "0000000000000002200500044000c015",
       "high_paisa": 2701991,
       "id": 330,
       "low_paisa": 2688561,
@@ -12019,6 +12349,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5392061,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2711850
     },
@@ -12028,7 +12359,7 @@
       "day_low_paisa": 4033282,
       "ema200_paisa": 4056368,
       "ema20_paisa": 4016217,
-      "expected_mask": "0000000000000000110110244400a029",
+      "expected_mask": "0000000000000002110110244400a029",
       "high_paisa": 4039328,
       "id": 331,
       "low_paisa": 4033282,
@@ -12056,6 +12387,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8091810,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 4008587
     },
@@ -12065,7 +12397,7 @@
       "day_low_paisa": 1612914,
       "ema200_paisa": null,
       "ema20_paisa": 1597242,
-      "expected_mask": "0000000000000000a10120948204c401",
+      "expected_mask": "0000000000000001a10120948204c401",
       "high_paisa": 1617089,
       "id": 332,
       "low_paisa": 1612914,
@@ -12093,6 +12425,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 3203082,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1608886
     },
@@ -12102,7 +12435,7 @@
       "day_low_paisa": 4054201,
       "ema200_paisa": 4014524,
       "ema20_paisa": 4057211,
-      "expected_mask": "00000000000000009c0185004000a015",
+      "expected_mask": "00000000000000029c0185004000a015",
       "high_paisa": 4067405,
       "id": 333,
       "low_paisa": 4054201,
@@ -12130,6 +12463,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 8166563,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4087887
     },
@@ -12139,7 +12473,7 @@
       "day_low_paisa": 3885943,
       "ema200_paisa": 3930929,
       "ema20_paisa": 3865038,
-      "expected_mask": "00000000000000002d01080d8204c029",
+      "expected_mask": "00000000000000022d01080d8204c029",
       "high_paisa": 3892904,
       "id": 334,
       "low_paisa": 3885943,
@@ -12163,6 +12497,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7854929,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 3864315
     },
@@ -12172,7 +12507,7 @@
       "day_low_paisa": 2459688,
       "ema200_paisa": 2509417,
       "ema20_paisa": 2492580,
-      "expected_mask": "0000000000000000210110248001402a",
+      "expected_mask": "0000000000000002210110248001402a",
       "high_paisa": 2476194,
       "id": 335,
       "low_paisa": 2459688,
@@ -12200,6 +12535,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4996867,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2501198
     },
@@ -12209,7 +12545,7 @@
       "day_low_paisa": 1143006,
       "ema200_paisa": 1103777,
       "ema20_paisa": 1160877,
-      "expected_mask": "00000000000000002401451040014016",
+      "expected_mask": "00000000000000022401451040014016",
       "high_paisa": 1156451,
       "id": 336,
       "low_paisa": 1143006,
@@ -12237,6 +12573,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 2327441,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 1129359
     },
@@ -12246,7 +12583,7 @@
       "day_low_paisa": 2676354,
       "ema200_paisa": null,
       "ema20_paisa": 2661772,
-      "expected_mask": "000000000000000020804a0c80014001",
+      "expected_mask": "000000000000000120804a0c80014001",
       "high_paisa": 2684115,
       "id": 337,
       "low_paisa": 2676354,
@@ -12274,6 +12611,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5313241,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": null
     },
@@ -12283,7 +12621,7 @@
       "day_low_paisa": 2371566,
       "ema200_paisa": 2363071,
       "ema20_paisa": 2344885,
-      "expected_mask": "000000000000000022010a8880014025",
+      "expected_mask": "000000000000000222010a8880014025",
       "high_paisa": 2382935,
       "id": 338,
       "low_paisa": 2371566,
@@ -12311,6 +12649,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4803513,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2391365
     },
@@ -12320,7 +12659,7 @@
       "day_low_paisa": 3281054,
       "ema200_paisa": 3255111,
       "ema20_paisa": 3281294,
-      "expected_mask": "0000000000000000110040408400a015",
+      "expected_mask": "0000000000000001110040408400a015",
       "high_paisa": 3291439,
       "id": 339,
       "low_paisa": 3281054,
@@ -12348,6 +12687,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 6531290,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3250461
     },
@@ -12381,6 +12721,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 5557172,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2799327
     },
@@ -12390,7 +12731,7 @@
       "day_low_paisa": 3837161,
       "ema200_paisa": null,
       "ema20_paisa": null,
-      "expected_mask": "000000000000000028014a0c80015000",
+      "expected_mask": "000000000000000128014a0c80015000",
       "high_paisa": 3847503,
       "id": 341,
       "low_paisa": 3837161,
@@ -12418,6 +12759,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7638004,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 3813624
     },
@@ -12455,6 +12797,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3411233
     },
@@ -12464,7 +12807,7 @@
       "day_low_paisa": 5320162,
       "ema200_paisa": 5327044,
       "ema20_paisa": 5335287,
-      "expected_mask": "0000000000000000100225004000a216",
+      "expected_mask": "0000000000000002100225004000a216",
       "high_paisa": 5329055,
       "id": 343,
       "low_paisa": 5320162,
@@ -12492,6 +12835,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 10733930,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 5333785
     },
@@ -12501,7 +12845,7 @@
       "day_low_paisa": 1808850,
       "ema200_paisa": 1762756,
       "ema20_paisa": 1823835,
-      "expected_mask": "000000000000000015022a488000a016",
+      "expected_mask": "000000000000000115022a488000a016",
       "high_paisa": 1820147,
       "id": 344,
       "low_paisa": 1808850,
@@ -12529,6 +12873,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3542843,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1821188
     },
@@ -12562,6 +12907,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 4365886
     },
@@ -12599,6 +12945,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3931471
     },
@@ -12608,7 +12955,7 @@
       "day_low_paisa": 1823629,
       "ema200_paisa": 1792302,
       "ema20_paisa": 1823681,
-      "expected_mask": "0000000000000000130645904000c015",
+      "expected_mask": "0000000000000001130645904000c015",
       "high_paisa": 1840314,
       "id": 347,
       "low_paisa": 1823629,
@@ -12636,6 +12983,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 3628764,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 1857880
     },
@@ -12673,6 +13021,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2168321
     },
@@ -12682,7 +13031,7 @@
       "day_low_paisa": 2589977,
       "ema200_paisa": 2713147,
       "ema20_paisa": 2670005,
-      "expected_mask": "0000000000000000170a04008408a02a",
+      "expected_mask": "0000000000000002170a04008408a02a",
       "high_paisa": 2671296,
       "id": 349,
       "low_paisa": 2661328,
@@ -12706,6 +13055,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5387914,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2642783
     },
@@ -12715,7 +13065,7 @@
       "day_low_paisa": 4365108,
       "ema200_paisa": 4332119,
       "ema20_paisa": 4351079,
-      "expected_mask": "000000000000000011051500400ac015",
+      "expected_mask": "000000000000000111051500400ac015",
       "high_paisa": 4380513,
       "id": 350,
       "low_paisa": 4365108,
@@ -12739,6 +13089,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8721425,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 4354688
     },
@@ -12748,7 +13099,7 @@
       "day_low_paisa": 2162667,
       "ema200_paisa": 2108347,
       "ema20_paisa": 2152433,
-      "expected_mask": "00000000000000004a064a428000c055",
+      "expected_mask": "00000000000000024a064a428000c055",
       "high_paisa": 2172776,
       "id": 351,
       "low_paisa": 2162667,
@@ -12776,6 +13127,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4343876,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2161335
     },
@@ -12785,7 +13137,7 @@
       "day_low_paisa": 2543564,
       "ema200_paisa": 2588753,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000200415954100c008",
+      "expected_mask": "0000000000000002200415954100c008",
       "high_paisa": 2547383,
       "id": 352,
       "low_paisa": 2543564,
@@ -12813,6 +13165,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5105103,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 2538635
     },
@@ -12822,7 +13175,7 @@
       "day_low_paisa": 4118145,
       "ema200_paisa": 4189152,
       "ema20_paisa": 4120782,
-      "expected_mask": "0000000000000000980015144000a029",
+      "expected_mask": "0000000000000001980015144000a029",
       "high_paisa": 4131655,
       "id": 353,
       "low_paisa": 4118145,
@@ -12846,6 +13199,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 8187015,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 4165505
     },
@@ -12883,6 +13237,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3802735
     },
@@ -12892,7 +13247,7 @@
       "day_low_paisa": 4038824,
       "ema200_paisa": 4072258,
       "ema20_paisa": 4012704,
-      "expected_mask": "000000000000000020020a4084014429",
+      "expected_mask": "000000000000000220020a4084014429",
       "high_paisa": 4051619,
       "id": 355,
       "low_paisa": 4038824,
@@ -12920,6 +13275,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8099982,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": null
     },
@@ -12929,7 +13285,7 @@
       "day_low_paisa": 1619737,
       "ema200_paisa": 1636129,
       "ema20_paisa": 1615895,
-      "expected_mask": "0000000000000000220225424204c029",
+      "expected_mask": "0000000000000001220225424204c029",
       "high_paisa": 1626951,
       "id": 356,
       "low_paisa": 1619737,
@@ -12957,6 +13313,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3175022,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1588299
     },
@@ -12966,7 +13323,7 @@
       "day_low_paisa": 1696294,
       "ema200_paisa": 1678647,
       "ema20_paisa": 1723403,
-      "expected_mask": "0000000000000000480425004000c016",
+      "expected_mask": "0000000000000001480425004000c016",
       "high_paisa": 1705153,
       "id": 357,
       "low_paisa": 1696294,
@@ -12994,6 +13351,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3388693,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1691826
     },
@@ -13003,7 +13361,7 @@
       "day_low_paisa": 4202494,
       "ema200_paisa": null,
       "ema20_paisa": 4191634,
-      "expected_mask": "0000000000000000900640008010c001",
+      "expected_mask": "0000000000000001900640008010c001",
       "high_paisa": 4211158,
       "id": 358,
       "low_paisa": 4202494,
@@ -13031,6 +13389,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8391345,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": null
     },
@@ -13040,7 +13399,7 @@
       "day_low_paisa": 3192346,
       "ema200_paisa": 3239285,
       "ema20_paisa": 3211304,
-      "expected_mask": "00000000000000002c0610108004c42a",
+      "expected_mask": "00000000000000022c0610108004c42a",
       "high_paisa": 3204370,
       "id": 359,
       "low_paisa": 3192346,
@@ -13064,6 +13423,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6431970,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3168225
     },
@@ -13073,7 +13433,7 @@
       "day_low_paisa": 3551144,
       "ema200_paisa": 3498859,
       "ema20_paisa": 3535403,
-      "expected_mask": "0000000000000000a201080490015015",
+      "expected_mask": "0000000000000002a201080490015015",
       "high_paisa": 3560678,
       "id": 360,
       "low_paisa": 3551144,
@@ -13101,6 +13461,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7181097,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3524444
     },
@@ -13110,7 +13471,7 @@
       "day_low_paisa": 2235640,
       "ema200_paisa": null,
       "ema20_paisa": 2230126,
-      "expected_mask": "0000000000000000100505804000c001",
+      "expected_mask": "0000000000000002100505804000c001",
       "high_paisa": 2251849,
       "id": 361,
       "low_paisa": 2235640,
@@ -13138,6 +13499,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4514791,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2238405
     },
@@ -13147,7 +13509,7 @@
       "day_low_paisa": 2357717,
       "ema200_paisa": 2581132,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000140a80408020c008",
+      "expected_mask": "0000000000000001140a80408020c008",
       "high_paisa": 2575878,
       "id": 362,
       "low_paisa": 2570571,
@@ -13175,6 +13537,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 5073484,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2602900
     },
@@ -13184,7 +13547,7 @@
       "day_low_paisa": 3616962,
       "ema200_paisa": 3661264,
       "ema20_paisa": 3612286,
-      "expected_mask": "00000000000000002082080d80014029",
+      "expected_mask": "00000000000000012082080d80014029",
       "high_paisa": 3628288,
       "id": 363,
       "low_paisa": 3616962,
@@ -13208,6 +13571,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7233216,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 3644742
     },
@@ -13217,7 +13581,7 @@
       "day_low_paisa": 3603312,
       "ema200_paisa": 3582684,
       "ema20_paisa": null,
-      "expected_mask": "0000000000000000100214005000a004",
+      "expected_mask": "0000000000000002100214005000a004",
       "high_paisa": 3607153,
       "id": 364,
       "low_paisa": 3603312,
@@ -13241,6 +13605,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 7259391,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 3620440
     },
@@ -13250,7 +13615,7 @@
       "day_low_paisa": 4756896,
       "ema200_paisa": 4811043,
       "ema20_paisa": 4793115,
-      "expected_mask": "0000000000000000104140054000a02a",
+      "expected_mask": "0000000000000002104140054000a02a",
       "high_paisa": 4769878,
       "id": 365,
       "low_paisa": 4756896,
@@ -13274,6 +13639,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 9593576,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 4760104
     },
@@ -13311,6 +13677,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2218790
     },
@@ -13320,7 +13687,7 @@
       "day_low_paisa": 1583407,
       "ema200_paisa": 2149645,
       "ema20_paisa": 2095789,
-      "expected_mask": "0000000000000000140a05004000a02a",
+      "expected_mask": "0000000000000001140a05004000a02a",
       "high_paisa": 2091016,
       "id": 367,
       "low_paisa": 2073807,
@@ -13348,6 +13715,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4115681,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2077694
     },
@@ -13357,7 +13725,7 @@
       "day_low_paisa": 2270854,
       "ema200_paisa": 2267639,
       "ema20_paisa": 2284015,
-      "expected_mask": "00000000000000002101400040014416",
+      "expected_mask": "00000000000000012101400040014416",
       "high_paisa": 2280533,
       "id": 368,
       "low_paisa": 2270854,
@@ -13385,6 +13753,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4475673,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2248846
     },
@@ -13422,6 +13791,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 4306711
     },
@@ -13431,7 +13801,7 @@
       "day_low_paisa": 2290447,
       "ema200_paisa": 2855475,
       "ema20_paisa": 2857516,
-      "expected_mask": "00000000000000001049840c6000a01a",
+      "expected_mask": "00000000000000021049840c6000a01a",
       "high_paisa": 2851525,
       "id": 370,
       "low_paisa": 2840180,
@@ -13455,6 +13825,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5743568,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2879596
     },
@@ -13492,6 +13863,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": null
     },
@@ -13501,7 +13873,7 @@
       "day_low_paisa": 2333555,
       "ema200_paisa": 2330037,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000002a0a184248014004",
+      "expected_mask": "00000000000000012a0a184248014004",
       "high_paisa": 2341276,
       "id": 372,
       "low_paisa": 2333555,
@@ -13529,6 +13901,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4654916,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": null
     },
@@ -13566,6 +13939,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2816626
     },
@@ -13575,7 +13949,7 @@
       "day_low_paisa": 2225482,
       "ema200_paisa": 2275250,
       "ema20_paisa": 2285800,
-      "expected_mask": "0000000000000000460920044080c015",
+      "expected_mask": "0000000000000001460920044080c015",
       "high_paisa": 2302929,
       "id": 374,
       "low_paisa": 2287833,
@@ -13603,6 +13977,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4593613,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 2264026
     },
@@ -13612,7 +13987,7 @@
       "day_low_paisa": 3840080,
       "ema200_paisa": 3816160,
       "ema20_paisa": 3829528,
-      "expected_mask": "0000000000000000130144104000a215",
+      "expected_mask": "0000000000000002130144104000a215",
       "high_paisa": 3844823,
       "id": 375,
       "low_paisa": 3840080,
@@ -13636,6 +14011,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7753814,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 3841227
     },
@@ -13645,7 +14021,7 @@
       "day_low_paisa": 2772672,
       "ema200_paisa": null,
       "ema20_paisa": 2782802,
-      "expected_mask": "0000000000000000900240048400a002",
+      "expected_mask": "0000000000000002900240048400a002",
       "high_paisa": 2779115,
       "id": 376,
       "low_paisa": 2772672,
@@ -13673,6 +14049,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 5624720,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2774443
     },
@@ -13682,7 +14059,7 @@
       "day_low_paisa": 1937820,
       "ema200_paisa": 1972542,
       "ema20_paisa": 1932295,
-      "expected_mask": "0000000000000000910245804000a029",
+      "expected_mask": "0000000000000002910245804000a029",
       "high_paisa": 1949915,
       "id": 377,
       "low_paisa": 1937820,
@@ -13710,6 +14087,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3902604,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 1972268
     },
@@ -13719,7 +14097,7 @@
       "day_low_paisa": 2448241,
       "ema200_paisa": 2455370,
       "ema20_paisa": 2462402,
-      "expected_mask": "0000000000000000440610848080c01a",
+      "expected_mask": "0000000000000001440610848080c01a",
       "high_paisa": 2451317,
       "id": 378,
       "low_paisa": 2448241,
@@ -13747,6 +14125,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4876015,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2473472
     },
@@ -13756,7 +14135,7 @@
       "day_low_paisa": 2540407,
       "ema200_paisa": 2530785,
       "ema20_paisa": null,
-      "expected_mask": "000000000000000092004a228008a084",
+      "expected_mask": "000000000000000192004a228008a084",
       "high_paisa": 2550168,
       "id": 379,
       "low_paisa": 2540407,
@@ -13784,6 +14163,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 5055637,
       "timestamp_ist": "2024-01-02T12:30:00+05:30",
       "vwap_paisa": 2522749
     },
@@ -13793,7 +14173,7 @@
       "day_low_paisa": 4398536,
       "ema200_paisa": 4350300,
       "ema20_paisa": 4390126,
-      "expected_mask": "0000000000000000c40608408040c055",
+      "expected_mask": "0000000000000002c40608408040c055",
       "high_paisa": 4401459,
       "id": 380,
       "low_paisa": 4398536,
@@ -13821,6 +14201,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8808995,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4425413
     },
@@ -13830,7 +14211,7 @@
       "day_low_paisa": 2159837,
       "ema200_paisa": 2133718,
       "ema20_paisa": 2192934,
-      "expected_mask": "0000000000000000940000148000a116",
+      "expected_mask": "0000000000000001940000148000a116",
       "high_paisa": 2172869,
       "id": 381,
       "low_paisa": 2159837,
@@ -13858,6 +14239,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4267736,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 2205773
     },
@@ -13867,7 +14249,7 @@
       "day_low_paisa": 3646636,
       "ema200_paisa": 3649125,
       "ema20_paisa": 3717177,
-      "expected_mask": "0000000000000000280918084100c416",
+      "expected_mask": "0000000000000001280918084100c416",
       "high_paisa": 3702221,
       "id": 382,
       "low_paisa": 3691299,
@@ -13891,6 +14273,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 7337053,
       "timestamp_ist": "2024-01-02T09:45:00+05:30",
       "vwap_paisa": 3680746
     },
@@ -13900,7 +14283,7 @@
       "day_low_paisa": 2426401,
       "ema200_paisa": 2461093,
       "ema20_paisa": null,
-      "expected_mask": "00000000000000002002459040014008",
+      "expected_mask": "00000000000000022002459040014008",
       "high_paisa": 2444041,
       "id": 383,
       "low_paisa": 2426401,
@@ -13928,6 +14311,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 4903739,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2479073
     },
@@ -13937,7 +14321,7 @@
       "day_low_paisa": 4406289,
       "ema200_paisa": 4398220,
       "ema20_paisa": 4428882,
-      "expected_mask": "0000000000000000180045104000a016",
+      "expected_mask": "0000000000000001180045104000a016",
       "high_paisa": 4415353,
       "id": 384,
       "low_paisa": 4406289,
@@ -13961,6 +14345,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 8795849,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 4378067
     },
@@ -13998,6 +14383,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 3182984,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 1625972
     },
@@ -14007,7 +14393,7 @@
       "day_low_paisa": 1987075,
       "ema200_paisa": 1956017,
       "ema20_paisa": 1967953,
-      "expected_mask": "0000000000000000120285204800a015",
+      "expected_mask": "0000000000000002120285204800a015",
       "high_paisa": 1989904,
       "id": 386,
       "low_paisa": 1987075,
@@ -14035,6 +14421,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4038381,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2022551
     },
@@ -14044,7 +14431,7 @@
       "day_low_paisa": 3309612,
       "ema200_paisa": 3373986,
       "ema20_paisa": 3300921,
-      "expected_mask": "000000000000000020810434a0014029",
+      "expected_mask": "000000000000000120810434a0014029",
       "high_paisa": 3318475,
       "id": 387,
       "low_paisa": 3309612,
@@ -14072,6 +14459,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 6596719,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 3354652
     },
@@ -14081,7 +14469,7 @@
       "day_low_paisa": 4023545,
       "ema200_paisa": 4044934,
       "ema20_paisa": 4008462,
-      "expected_mask": "00000000000000002201800d40015029",
+      "expected_mask": "00000000000000022201800d40015029",
       "high_paisa": 4031768,
       "id": 388,
       "low_paisa": 4023545,
@@ -14105,6 +14493,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8088966,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4038988
     },
@@ -14114,7 +14503,7 @@
       "day_low_paisa": 1622035,
       "ema200_paisa": 1585439,
       "ema20_paisa": 1635290,
-      "expected_mask": "00000000000000002102441440014816",
+      "expected_mask": "00000000000000022102441440014816",
       "high_paisa": 1636004,
       "id": 389,
       "low_paisa": 1622035,
@@ -14138,6 +14527,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 3271075,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 1611160
     },
@@ -14175,6 +14565,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T11:30:00+05:30",
       "vwap_paisa": 2351383
     },
@@ -14184,7 +14575,7 @@
       "day_low_paisa": 1683394,
       "ema200_paisa": 1655896,
       "ema20_paisa": 1680306,
-      "expected_mask": "000000000000000021810a2d80014015",
+      "expected_mask": "000000000000000221810a2d80014015",
       "high_paisa": 1688060,
       "id": 391,
       "low_paisa": 1683394,
@@ -14212,6 +14603,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 3373420,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 1706246
     },
@@ -14249,6 +14641,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": null,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 1890356
     },
@@ -14258,7 +14651,7 @@
       "day_low_paisa": 2199229,
       "ema200_paisa": 2145361,
       "ema20_paisa": 2177434,
-      "expected_mask": "0000000000000000290a084240014015",
+      "expected_mask": "0000000000000001290a084240014015",
       "high_paisa": 2205214,
       "id": 393,
       "low_paisa": 2199229,
@@ -14286,6 +14679,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 10
       },
+      "supertrend_x2_paisa": 4351386,
       "timestamp_ist": "2024-01-02T15:15:00+05:30",
       "vwap_paisa": 2213940
     },
@@ -14323,6 +14717,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 7239482,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": 3641266
     },
@@ -14360,6 +14755,7 @@
         "pdh_pdl_bps": 5,
         "pivot_bps": 25
       },
+      "supertrend_x2_paisa": 4361626,
       "timestamp_ist": "2024-01-02T09:16:00+05:30",
       "vwap_paisa": 2153543
     },
@@ -14369,7 +14765,7 @@
       "day_low_paisa": 3529991,
       "ema200_paisa": 3574562,
       "ema20_paisa": 3511302,
-      "expected_mask": "0000000000000000130524204030c0a9",
+      "expected_mask": "0000000000000002130524204030c0a9",
       "high_paisa": 3542116,
       "id": 396,
       "low_paisa": 3529991,
@@ -14397,6 +14793,7 @@
         "pdh_pdl_bps": 10,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 7090738,
       "timestamp_ist": "2024-01-02T10:30:00+05:30",
       "vwap_paisa": null
     },
@@ -14406,7 +14803,7 @@
       "day_low_paisa": 2309685,
       "ema200_paisa": 2322646,
       "ema20_paisa": 2314970,
-      "expected_mask": "0000000000000000110285804000a025",
+      "expected_mask": "0000000000000002110285804000a025",
       "high_paisa": 2324056,
       "id": 397,
       "low_paisa": 2309685,
@@ -14434,6 +14831,7 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 5
       },
+      "supertrend_x2_paisa": 4658677,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 2289512
     },
@@ -14443,7 +14841,7 @@
       "day_low_paisa": 4277204,
       "ema200_paisa": 4254013,
       "ema20_paisa": 4298610,
-      "expected_mask": "0000000000000000420508408000c056",
+      "expected_mask": "0000000000000001420508408000c056",
       "high_paisa": 4292052,
       "id": 398,
       "low_paisa": 4277204,
@@ -14471,6 +14869,7 @@
         "pdh_pdl_bps": 50,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8496155,
       "timestamp_ist": "2024-01-02T09:00:00+05:30",
       "vwap_paisa": 4279694
     },
@@ -14480,7 +14879,7 @@
       "day_low_paisa": 4249705,
       "ema200_paisa": 4276983,
       "ema20_paisa": 4252194,
-      "expected_mask": "00000000000000004804802c4060c069",
+      "expected_mask": "00000000000000014804802c4060c069",
       "high_paisa": 4258403,
       "id": 399,
       "low_paisa": 4249705,
@@ -14508,15 +14907,16 @@
         "pdh_pdl_bps": 25,
         "pivot_bps": 50
       },
+      "supertrend_x2_paisa": 8477999,
       "timestamp_ist": "2024-01-02T14:30:00+05:30",
       "vwap_paisa": 4217966
     }
   ],
   "full_mask": "0000000000000003ffffffffffffffff",
   "generated_from": "brutex.vocabulary.evaluator.evaluate_atoms",
-  "implemented_mask": "0000000000000000ffcfffffffffffff",
+  "implemented_mask": "0000000000000003ffcfffffffffffff",
   "n_cases": 400,
   "seed": 20260603,
   "total_conditions": 66,
-  "version": 3
+  "version": 4
 }

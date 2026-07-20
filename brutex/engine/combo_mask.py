@@ -77,10 +77,10 @@ invention).
 :func:`dispatch_kernel_kind` classifier let a test (or PR-B's vocab-66 CI
 pin) verify a >=64-bit grid is genuinely Rust-kernel-served WITHOUT
 monkeypatching — the #1549 ``rust_active`` observable shape, widened to name
-WHICH kernel serves (the 66-condition layout's live bits 0-63 — incl. bit 63
-narrow_cpr_day — still fit u64; only the declared-only SuperTrend bits 64/65,
-which never fire today, span past u64, so the >=64-bit paths are exercised by
-the tests).
+WHICH kernel serves (since the vocab-66 SuperTrend implemented-flip,
+DEC-SUPERTREND-CONDITIONS-001, the LIVE bits 64/65 fire on every warm
+non-equality bar, so warm production bar_bits genuinely span past u64 and the
+>=64-bit paths are the PRODUCTION regime, not a test-only exercise).
 
 ## Combo iteration
 
@@ -559,10 +559,11 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     # Width dispatch (DEC-ENUM-KERNEL-U128-001): the u64-native kernel would
     # silently truncate a bit >= 64, so any wide mask OR bar routes the WHOLE
     # call to the u128 twin kernel — never the numpy oracle (LOUD-FAIL law).
-    # Today's 66-condition layout's LIVE bits (0-63, incl. bit 63
-    # narrow_cpr_day) fit u64, so the u64 path is the norm; the >=64-bit
-    # branch serves the declared-only SuperTrend bits 64/65 (which need the
-    # second limb but never fire today) and any future growth.
+    # Since the vocab-66 SuperTrend implemented-flip
+    # (DEC-SUPERTREND-CONDITIONS-001) the LIVE bits 64/65 fire on every warm
+    # non-equality bar, so warm production bar_bits exceed u64 and the
+    # >=64-bit branch is the PRODUCTION norm; the u64 path still serves
+    # cold/narrow windows and u64-fit batches.
     if _any_wide(masks) or _any_wide(bar_bits):
         wide_kernel = getattr(fno_math, "count_supermasks_u128s", None)
         if wide_kernel is None:

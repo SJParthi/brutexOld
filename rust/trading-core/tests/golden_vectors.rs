@@ -65,6 +65,9 @@ struct Case {
     proximity: Proximity,
     prior: Prior,
     market_structure: MarketStructure,
+    /// The SuperTrend line in the ×2-scaled paisa domain (fixture version 4 —
+    /// the vocab-66 implemented-flip; `None` = warm-up, bits 64/65 clear).
+    supertrend_x2_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -129,6 +132,9 @@ fn eval_case(c: &Case) -> u128 {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
+        // Fixture version 4 (the vocab-66 SuperTrend implemented-flip)
+        // carries the appended ST input per case — threaded verbatim.
+        supertrend_x2_paisa: c.supertrend_x2_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
@@ -173,12 +179,12 @@ fn rust_reproduces_every_golden_vector() {
 
 #[test]
 fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
-    // The both-ways gate is partitioned over the IMPLEMENTED bits — 0..=51
-    // and 54..=63 (R5-S5 since PR-2, BOS/CHoCH since DEC-NIFTY-BOS-CHOCH-001,
-    // CPR 60-63 since the 66-bit reshape; the VWAP pair 52-53 is TOMBSTONED).
-    // The separate `layout_only_bits_are_always_clear` test below proves the
-    // non-implemented bits (52-53 tombstone, 64-65 declared-only Supertrend,
-    // >= 66 reserved headroom) stay provably inert.
+    // The both-ways gate spans the FULL IMPLEMENTED_MASK — 0..=51 and
+    // 54..=65 (R5-S5 since PR-2, BOS/CHoCH since DEC-NIFTY-BOS-CHOCH-001,
+    // CPR 60-63 since the 66-bit reshape, SuperTrend 64-65 since the
+    // vocab-66 implemented-flip's version-4 fixture regen — the interim
+    // FIXTURE_COVERABLE scope-down is retired; the VWAP pair 52-53 stays
+    // TOMBSTONED outside the mask).
     let fixture = load_fixture();
     let mut set_any: u128 = 0;
     let mut clear_any: u128 = 0;
@@ -199,9 +205,10 @@ fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
 
 #[test]
 fn layout_only_bits_are_always_clear() {
-    // Every bit OUTSIDE IMPLEMENTED_MASK — the tombstoned VWAP pair (52-53),
-    // the declared-only Supertrend pair (64-65) and the reserved u128 headroom
-    // (bits 66..127) — must be 0 in EVERY evaluated case.
+    // Every bit OUTSIDE IMPLEMENTED_MASK — the tombstoned VWAP pair (52-53)
+    // and the reserved u128 headroom (bits 66..127) — must be 0 in EVERY
+    // evaluated case. (The Supertrend pair 64-65 left this set at the PR-B
+    // implemented-flip.)
     let fixture = load_fixture();
     let full: u128 = (1u128 << TOTAL_CONDITIONS) - 1;
     let layout_only = full & !IMPLEMENTED_MASK;

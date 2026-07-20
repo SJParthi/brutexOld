@@ -2,7 +2,7 @@
 
 DEC-PHASE2-TRUTH-TABLE-001 (Phase 2, ``docs/TRACK1_PHASE_PLAN.md`` corpus #7 —
 "condition truth table / per-condition determinism (G9)"; the table now
-spans the 66-declared / 62-active layout — rows exist only for IMPLEMENTED
+spans the 66-declared / 64-active layout — rows exist only for IMPLEMENTED
 bits).
 
 ``tests/golden/condition_truth_table.csv`` is the flat, human-auditable
@@ -49,12 +49,13 @@ _VECTORS_PATH = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 
 #: SHA-256 of the frozen truth table (the README "SHA-256 manifest" drift guard).
 #: Regenerate with ``python scripts/gen_condition_truth_table.py`` then update this.
-# DELIBERATE RE-LOCK (the 60→66 vocab reshape): the table now projects the
-# 62 IMPLEMENTED bits per selected case (22 cases × 62 = 1364 rows); the
-# tombstoned VWAP bits (52/53) + the declared-only SuperTrend bits (64/65)
-# carry no row. Old digest:
-# e2d89a4e5e1afd6b8c547378349ab0d45f2ff311f097b3040cff13152fbc3c33.
-_EXPECTED_SHA256 = "ea1671b986d5a95dfd304432d8d0e8c6c90c261c59e68c1264067728973df126"
+# DELIBERATE RE-LOCK (the vocab-66 SuperTrend implemented-flip, crate
+# 0.5.0): the table now projects the 64 IMPLEMENTED bits per selected case
+# (22 cases × 64 = 1408 rows over the version-4 fixture); only the
+# tombstoned VWAP bits (52/53) carry no row. Old digest (the 60→66 reshape's
+# 22 × 62 table):
+# ea1671b986d5a95dfd304432d8d0e8c6c90c261c59e68c1264067728973df126.
+_EXPECTED_SHA256 = "c044cb2cee17d5be14bf5589312ce3ffc7a034e3247670d0baeea31dc6cb5dcc"
 
 
 def _read_rows() -> list[dict[str, str]]:

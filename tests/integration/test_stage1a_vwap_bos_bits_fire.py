@@ -204,6 +204,69 @@ def test_cpr_position_bits_fire_on_anchor_warm_day_through_real_push() -> None:
     assert all((m & _VWAP_TOMBSTONE_MASK) == 0 for m in masks), "a tombstone bit fired"
 
 
+def test_supertrend_bits_fire_both_ways_and_persist_across_the_day_boundary() -> None:
+    """Group 14 (bits 64/65) FIRES through the REAL ``push`` path — the
+    anti-illusion twin for the vocab-66 SuperTrend flip (crate 0.5.0).
+
+    A 2-day feed of range-2 bars (101/99/100 → TR = 200 paisa every bar, so
+    the ATR-10 seed lands at bar 9 with the DOWN-seeded upper band
+    ``hl2×2 + 3·ATR×2 = 20_000 + 1_200 = 21_200`` above ``close×2 = 20_100``):
+
+    * bars 0-8 — the 9-bar warm-up: NEITHER ST bit fires;
+    * bar 9 (still day 1) — the line warms on the upper band ⇒ bit 65;
+    * bar 10 — the FIRST bar of day 2 — bit 65 fires IMMEDIATELY: the state
+      deliberately persists across the IST-day rollover (the locked
+      TV-parity no-session-reset law — a session reset would restart the
+      9-bar warm-up and clear both bits here, which this pins against);
+    * the day-2 breakout tail (closes far above the ratcheted band) flips
+      the trend ⇒ bit 64 fires (both directions genuinely reachable).
+    """
+    st_mask = (1 << B.BIT_CLOSE_ABOVE_SUPERTREND) | (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
+    day1 = [_bar(m, 101, 99, 100, day=2) for m in range(10)]
+    day2_flat = [_bar(m, 101, 99, 100, day=3) for m in range(4)]
+    day2_break = [_bar(4 + k, 118 + k, 114 + k, 117 + k, day=3) for k in range(4)]
+    masks = _run(day1 + day2_flat + day2_break)
+
+    # (a) warm-up: bars 0-8 carry NO ST bit.
+    assert all(m & st_mask == 0 for m in masks[:9]), "an ST bit fired during warm-up"
+    # (b) bar 9: the seeded line sits on the upper band above the close → bit 65.
+    assert masks[9] & (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
+    # (c) the day boundary does NOT reset the state: day 2's FIRST bar (index
+    #     10) still fires bit 65 (a session reset would clear it for 9 bars).
+    assert masks[10] & (1 << B.BIT_CLOSE_BELOW_SUPERTREND), (
+        "the SuperTrend state reset at the IST-day boundary — the no-session-reset "
+        "TV-parity law is broken"
+    )
+    # (d) the breakout tail flips the trend → bit 64 fires somewhere.
+    assert any(m & (1 << B.BIT_CLOSE_ABOVE_SUPERTREND) for m in masks[14:]), (
+        "the breakout never fired close_above_supertrend"
+    )
+    # (e) mutual exclusion on every bar (the (64,65) conflict pair).
+    assert all(m & st_mask != st_mask for m in masks)
+
+
+def test_supertrend_state_resets_at_the_contract_roll() -> None:
+    """The D11 TOTAL hard reset covers the ST state: post-roll bars restart
+    the 9-bar warm-up (no ST bit), exactly like every other stateful member
+    (the roll-golden fixture pins the same law over the full 78-mask matrix).
+    """
+    st_mask = (1 << B.BIT_CLOSE_ABOVE_SUPERTREND) | (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
+    day1 = [_bar(m, 101, 99, 100, day=2) for m in range(10)]
+    day2 = [_bar(m, 101, 99, 100, day=3) for m in range(10)]
+    # Roll boundary between the two IST days: day 2 (2024-01-02) belongs to
+    # the first contract, day 3 (2024-01-03) to the next.
+    schedule = (datetime(2024, 1, 2).date().toordinal(), datetime(2024, 1, 3).date().toordinal())
+    builder = Stage1AMatrixBuilder(roll_schedule=schedule)
+    masks = [builder.push(b) for b in day1 + day2]
+    # Pre-roll: warm at bar 9 (bit 65 — the flat-range shape above).
+    assert masks[9] & st_mask
+    # Post-roll: the fresh state re-runs its warm-up — bars 10-18 clear…
+    assert all(m & st_mask == 0 for m in masks[10:19]), "no D11 reset of the ST state"
+    # …and bar 19 (post-roll bar 9) re-fires (a reset is a restart, never a
+    # permanent silence).
+    assert masks[19] & st_mask
+
+
 # ────────────────────────────────────────────────────────────────────────
 # NEGATIVE — proves the bits are real logic, not always-on
 # ────────────────────────────────────────────────────────────────────────

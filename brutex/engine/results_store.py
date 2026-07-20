@@ -155,7 +155,8 @@ _INT64_MAX: Final[int] = 2**63 - 1
 #: value in a signed ``Int64`` via :func:`_to_signed_i64` / :func:`_from_signed_i64`).
 #: A mask is rejected ONLY if it sets a bit ``>= TOTAL_CONDITIONS`` (an
 #: undeclared/reserved bit) — a DECLARED-but-unimplemented bit (a RETIRED
-#: tombstone like VWAP 52/53, or a layout-only bit like SuperTrend 64/65) is
+#: tombstone like VWAP 52/53; no layout-only bit exists on today's manifest —
+#: SuperTrend 64/65 went LIVE with DEC-SUPERTREND-CONDITIONS-001) is
 #: ADMITTED here (``mask_bits & ~IMPLEMENTED_MASK`` is NOT refused at this
 #: layer; that refusal lives in ``strategies.spec.StrategySpec``), so
 #: ``condition_names`` decodes to a defined name for every set bit. (Was

@@ -165,8 +165,9 @@ DEFAULT_START: Final[str] = "2020-01-01"
 _DIRECTIONS: Final[frozenset[str]] = frozenset({"BUY", "SELL"})
 #: Max conditions-per-combo K — the route sweeps the DEFAULT condition set
 #: (``default_condition_bits()`` = every IMPLEMENTED bit), so ``k`` is bounded
-#: by the IMPLEMENTED count (62 on the 66-condition layout), not the declared
-#: layout width: a ``k`` above it can never form a combo (``C(62, 63) = 0`` —
+#: by the IMPLEMENTED count (64 on the 66-condition layout —
+#: DEC-SUPERTREND-CONDITIONS-001), not the declared
+#: layout width: a ``k`` above it can never form a combo (``C(64, 65) = 0`` —
 #: an empty-grid illusion, G-RETROT-08). ``IMPLEMENTED_MASK`` is the one
 #: source of truth, so vocab growth moves this bound automatically
 #: (DEC-VOCAB-U128-CODEGEN-001).
@@ -340,13 +341,14 @@ def _validate_k_against_max_combos(k_tokens: Sequence[str]) -> None:
     ok, engine construction says no" failure mode round 11 fixed for SL/TP
     also applies to ``k``: ``build_sweep_kwargs`` always passes
     ``conditions=None`` (the IMPLEMENTED condition set —
-    ``default_condition_bits()``, :data:`_MAX_K` = 62 bits on the
-    66-declared layout, NEVER the declared width) and ``max_combos=None``
+    ``default_condition_bits()``, :data:`_MAX_K` = 64 bits on the
+    66-declared layout since the SuperTrend implemented-flip, NEVER the
+    declared width) and ``max_combos=None``
     (→ the engine's
     :data:`~brutex.engine.sweep_driver.DEFAULT_MAX_COMBOS` = 100,000), so
     :meth:`~brutex.engine.sweep_orchestrator.SweepGridConfig.__post_init__`
     rejects any ``k`` whose ``C(_MAX_K, k)`` mask count exceeds
-    that cap — e.g. ``k=4`` alone enumerates ``C(62,4) = 557,845`` masks.
+    that cap — e.g. ``k=4`` alone enumerates ``C(64,4) = 635,376`` masks.
     ``_normalise_k`` only checked ``k`` was in the raw ``[1, _MAX_K]`` RANGE,
     never against this cap, so a single-tuple launch (too small for the
     SLA wall-clock guard to ever catch) could preflight `ok: true` — the
@@ -663,7 +665,7 @@ def build_sweep_kwargs(
     A pure 1:1 mapping (the request is already validated). The non-swept knobs
     are pinned to the INSTITUTIONAL dashboard defaults (R5, gap-hunt BLOCKER
     #1): ``conditions=None`` (the full IMPLEMENTED condition vocabulary —
-    ``default_condition_bits()``, 62 bits on the 66-declared layout), ``options_sim=False`` (signal-only —
+    ``default_condition_bits()``, 64 bits on the 66-declared layout), ``options_sim=False`` (signal-only —
     options are R12, parked), ``overfit_gate=True`` + ``stage3_enable=True``
     (the 5 hard gates → composite ranking → Stage-3 CMA-ES refinement chain
     ON by default — EXCEPT when either SL/TP leg carries a ``none`` cell

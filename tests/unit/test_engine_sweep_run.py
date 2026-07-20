@@ -2915,30 +2915,40 @@ class TestU128EnvelopeThroughSweep:
     ) -> None:
         # Bit 1 FIRES on `_trending_bars` AND its mask passes the ranking
         # gates under the one worst-case law (bit 0's all-winner pool reads
-        # profit_factor=None → gate-rejected), bits 64/65 never fire — the
-        # wide masks now PROMOTE the batch to the u128 kernel (no call
-        # fallback), and the byte-equality below compares stores with REAL
-        # trade rows, never two degenerate zero-trade stores (the
-        # vacuous-equality trap).
+        # profit_factor=None → gate-rejected, DEC-FILL-WORST-CASE-ONLY-001),
+        # and — since the vocab-66 SuperTrend implemented-flip (crate 0.5.0)
+        # — the LIVE bits 64/65 fire too (the up-trend stream warms the
+        # ATR-10 state at bar 9), so the resident bar_bits are ALREADY
+        # u128-wide: the sim builds the u128 sibling kernel at CONSTRUCTION
+        # (`_rust_is_wide`), the per-call PROMOTION arm is structurally
+        # bypassed (zero `wide_kernel_promoted` events here — that arm keeps
+        # its dedicated coverage in test_engine_rust_trade_sim.py over
+        # hand-built u64-resident windows), and the byte-equality below
+        # compares stores with REAL trade rows, never two degenerate
+        # zero-trade stores (the vacuous-equality trap).
         bars = _trending_bars()
         cfg = _make_config(condition_bits=[1, 64, 65], k=1, min_hits=0)
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
-        # NOT a fallback any more: the wide sibling kernel was promoted once.
+        # Never a fallback: the wide masks ride the construction-wide kernel.
         fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
         assert fallbacks == []
         promotions = [e for e in logs if e["event"] == "rust_trade_sim.wide_kernel_promoted"]
-        assert len(promotions) == 1
+        assert promotions == []  # wide from construction — nothing to promote
         # The sweep-level path signal reads RUST for the wide-mask tuple.
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is True
-        # Non-vacuous: the ranking gate drops the two zero-trade u128-bit
-        # masks, so EXACTLY the firing mask 0b10 persists — the byte-equality
-        # below compares stores carrying a real trade-bearing row, never two
-        # empty/degenerate stores. Its trades are pinned via the independent
+        # Non-vacuous: all THREE masks fire real trades on the trending
+        # stream, and TWO persist — bit 1 (pf ≈ 2.75) and bit 65 (28W/9L,
+        # pf ≈ 2.85) pass the gates, while bit 64's pool is ALL-WINNER under
+        # the worst-case fill law (36W/0L → profit_factor=None →
+        # gate-rejected, the same DEC-FILL-WORST-CASE-ONLY-001 class that
+        # rejects bit 0's pool). The byte-equality below compares stores
+        # carrying real trade-bearing rows, never two empty/degenerate
+        # stores. Mask 0b10's trades are pinned via the independent
         # metrics oracle.
         assert wired.evaluated == 3
-        assert wired.persisted == 1
+        assert wired.persisted == 2
         direct = metrics_for_mask(
             bars,
             build_bar_bits(bars),
@@ -2952,7 +2962,7 @@ class TestU128EnvelopeThroughSweep:
         assert direct.total_trades > 0
         monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
         fallback = _run_sweep(tmp_path, "f", bars, cfg)
-        assert wired.persisted == fallback.persisted == 1
+        assert wired.persisted == fallback.persisted == 2
         assert wired.store_content_hash == fallback.store_content_hash
         assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
 

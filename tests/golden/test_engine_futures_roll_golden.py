@@ -51,11 +51,22 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "futures_roll_golden.json"
 
 #: SHA-256 of the frozen fixture file bytes (regenerate via ``--update``).
-# DELIBERATE RE-LOCK (the 60→66 reshape + the 3-day warm-day extension —
-# G-COMBIN-03): old digest
-# 1210f918e909090190ffde9231879dbb3111aa539077cdbc6113c9e4baa458f4 (v1,
-# 52 masks, both days anchor-cold, VWAP bits still live).
-_EXPECTED_SHA256 = "e4accd47db6fde1c478ec0b3924812fb9168e8a233d148f483751100cb2e0621"
+# DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip, crate 0.5.0): the 26-bar
+# day script warms the ATR-10 state at bar 9 of each roll SEGMENT, so the ST
+# bits (64/65) now fire pre-roll AND restart their 9-bar warm-up post-roll —
+# the D11 reset proof (hand-audited 2026-07-17 with an independent
+# ``trading_core.SupertrendState`` walk over the stitched paisa columns: the
+# last pre-roll bar's line(×2) = 20_239 < close×2 = 31_000 ⇒ bit 64 joins
+# `_EXPECTED_LAST_PRE_ROLL_MASK` (the delta below is exactly 2**64), the
+# first post-roll bar's fresh state returns None ⇒
+# `_EXPECTED_FIRST_POST_ROLL_MASK` is BYTE-UNCHANGED, and the first
+# post-roll ST bit fires at segment-bar 9 = matrix bar 61; bit 64 fires on
+# 14 and bit 65 on 46 of the 78 masks). Old digests:
+# 60→66 reshape + 3-day extension (G-COMBIN-03):
+# e4accd47db6fde1c478ec0b3924812fb9168e8a233d148f483751100cb2e0621;
+# v1 (52 masks, VWAP bits live):
+# 1210f918e909090190ffde9231879dbb3111aa539077cdbc6113c9e4baa458f4.
+_EXPECTED_SHA256 = "4da440f6425d8d1a89856c16da6a21e687c4cffb818153ee804ff6c0ce312b7e"
 
 #: The pre-roll contract's TWO IST days (day 2 = the vendor June-2025
 #: monthly expiry — owned by the EXPIRING contract per the ``>=`` law; day 1
@@ -124,7 +135,9 @@ _CPR_POSITION_MASK = (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_BELOW_CPR_BC) | (1 
 
 #: LITERAL boundary masks — the last pre-roll bar (index 25) and the first
 #: post-roll bar (index 26). Re-pin via ``--update``.
-_EXPECTED_LAST_PRE_ROLL_MASK = 1225564335183544321
+# The vocab-66 flip added EXACTLY bit 64 here (old literal
+# 1225564335183544321 + 2**64 — the hand-audit above).
+_EXPECTED_LAST_PRE_ROLL_MASK = 19672308408893095937
 _EXPECTED_FIRST_POST_ROLL_MASK = 21474836480
 
 

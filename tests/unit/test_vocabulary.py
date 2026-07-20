@@ -1,8 +1,9 @@
 """Per-bit unit tests for `brutex.vocabulary.evaluator`.
 
-Tests every ACTIVE atomic condition in isolation (62 active of the
-66-declared layout — the RETIRED VWAP tombstones 52/53 and the declared-only
-SuperTrend bits 64/65 are pinned inert instead):
+Tests every ACTIVE atomic condition in isolation (64 active of the
+66-declared layout — the RETIRED VWAP tombstones 52/53 are pinned inert
+instead; the SuperTrend bits 64/65 are IMPLEMENTED since the vocab-66
+flip, crate 0.5.0 — see ``TestGroup14_SupertrendHandBattery``):
 - the manifest's indicator groups (``bits.GROUP_RANGES``)
 - Each bit verified to fire / not-fire on hand-built scenarios
 - Look-ahead invariant
@@ -480,8 +481,9 @@ class TestConflicts:
         # 24 original − 2 buggy (bullish/bearish-doji, removed in
         # DEC-STAGE1B-CONFLICT-FIX-001) + 4 verified candle conflicts +
         # 3 CPR partition pairs (the 60→66 reshape — bits 60/61/62 are an
-        # exact partition, evaluator.rs:422-431) = 29.
-        assert len(CONFLICT_PAIRS) == 29
+        # exact partition) + 1 SuperTrend strict-inequality pair (64, 65)
+        # (the vocab-66 implemented-flip, crate 0.5.0) = 30.
+        assert len(CONFLICT_PAIRS) == 30
 
     def test_cpr_partition_pairs_present(self) -> None:
         # The three CPR position bits are pairwise mutually exclusive.
@@ -892,12 +894,12 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
     # The tombstoned VWAP pair sits outside BOTH masks (never 1day-enabled).
     assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_ABOVE_VWAP) == 0
     assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_BELOW_VWAP) == 0
-    # The ONLY 1day-applicable bits the evaluator does not implement are the
-    # two declared-only Supertrend positions (their AND-mask membership is
-    # inert until the math lands — the evaluator never sets them).
-    assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == (
-        (1 << B.BIT_CLOSE_ABOVE_SUPERTREND) | (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
-    )
+    # Every 1day-applicable bit is IMPLEMENTED since the vocab-66 SuperTrend
+    # flip (crate 0.5.0) put bits 64/65 — 1day-applicable from declaration —
+    # into IMPLEMENTED_MASK: the applicable∖implemented residue is empty.
+    assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == 0
+    assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_ABOVE_SUPERTREND)
+    assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1192,6 +1194,90 @@ class TestGroup13_CPRHandBattery:
             nibble = _cpr_nibble(**self._BASE, close=close)
             position = nibble & (_ABOVE | _BELOW | _INSIDE)
             assert bin(position).count("1") == 1
+
+
+def _st_bits(*, close: int, supertrend_x2: int | None) -> int:
+    """Evaluate one bar against a hand-set SuperTrend ×2 line; return bits 64-65."""
+    ts = datetime(2026, 5, 13, 10, 30, tzinfo=IST)
+    snap = IndicatorSnapshot(
+        timestamp_ist=ts,
+        open_paisa=close,
+        high_paisa=close,
+        low_paisa=close,
+        close_paisa=close,
+        ema20_paisa=None,
+        ema200_paisa=None,
+        pivots=_pivots_with_literals(p=1_000_000, pdh=1_040_000, pdl=940_000, pdc=1_020_000),
+        fib=compute_fib_levels(ts.date(), 1_040_000, 940_000),
+        day_high_paisa=close,
+        day_low_paisa=close,
+        open_of_day_paisa=close,
+        supertrend_x2_paisa=supertrend_x2,
+    )
+    mask = evaluate_atoms(snap, _default_proximity(), _empty_history())
+    return (mask >> 64) & 0b11
+
+
+_ST_ABOVE = 0b01  # bit 64
+_ST_BELOW = 0b10  # bit 65
+
+
+class TestGroup14_SupertrendHandBattery:
+    """Hand-computed SuperTrend position cases (the vocab-66 implemented-flip).
+
+    The evaluator's Group-14 law is a PURE strict comparison in the ×2-scaled
+    paisa domain: ``close×2 > line`` → bit 64, ``close×2 < line`` → bit 65,
+    equality or a ``None`` line → both clear. The line's own derivation
+    (ATR-10 Wilder / bands / flip) lives in ``trading_core.SupertrendState``
+    and is pinned by its Rust unit suite + the engine goldens; this battery
+    pins the COMPARISON boundary exactly.
+    """
+
+    def test_close_above_by_half_paisa_fires_above(self) -> None:
+        """close = 10_000 paisa (close×2 = 20_000) vs line 19_999 (odd —
+        a genuine half-paisa line only the ×2 domain can express) → above."""
+        assert _st_bits(close=10_000, supertrend_x2=19_999) == _ST_ABOVE
+
+    def test_close_below_by_half_paisa_fires_below(self) -> None:
+        """close×2 = 20_000 vs line 20_001 → below (strict <)."""
+        assert _st_bits(close=10_000, supertrend_x2=20_001) == _ST_BELOW
+
+    def test_exact_equality_clears_both(self) -> None:
+        """close×2 == line exactly → NEITHER bit (strict inequalities)."""
+        assert _st_bits(close=10_000, supertrend_x2=20_000) == 0
+
+    def test_none_line_clears_both(self) -> None:
+        """A warm-up ``None`` line → NEITHER bit (the 9-bar warm-up law)."""
+        assert _st_bits(close=10_000, supertrend_x2=None) == 0
+
+    def test_mutual_exclusion_by_construction(self) -> None:
+        """One strict comparison can never set both bits — the (64, 65)
+        conflict pair's justification, probed across the boundary."""
+        for line in (19_998, 19_999, 20_000, 20_001, 20_002):
+            bits = _st_bits(close=10_000, supertrend_x2=line)
+            assert bits != (_ST_ABOVE | _ST_BELOW)
+
+    def test_omitted_field_defaults_to_none_and_clears_both(self) -> None:
+        """A snapshot built WITHOUT the field (every pre-flip caller) keeps
+        bits 64/65 clear — the defaulted-None ABI-additivity contract."""
+        ts = datetime(2026, 5, 13, 10, 30, tzinfo=IST)
+        snap = IndicatorSnapshot(
+            timestamp_ist=ts,
+            open_paisa=10_000,
+            high_paisa=10_000,
+            low_paisa=10_000,
+            close_paisa=10_000,
+            ema20_paisa=None,
+            ema200_paisa=None,
+            pivots=_pivots_with_literals(p=1_000_000, pdh=1_040_000, pdl=940_000, pdc=1_020_000),
+            fib=compute_fib_levels(ts.date(), 1_040_000, 940_000),
+            day_high_paisa=10_000,
+            day_low_paisa=10_000,
+            open_of_day_paisa=10_000,
+        )
+        assert snap.supertrend_x2_paisa is None
+        mask = evaluate_atoms(snap, _default_proximity(), _empty_history())
+        assert (mask >> 64) & 0b11 == 0
 
 
 def test_narrow_cpr_width_bps_cross_pin() -> None:

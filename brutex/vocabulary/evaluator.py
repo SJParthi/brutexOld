@@ -3,9 +3,9 @@
 Takes an `IndicatorSnapshot` (all per-bar indicator values) plus proximity
 parameters and prior-bar history, and returns a u128 bitmask where bit `i` is set
 iff condition `i` is true. The vocabulary currently declares bits 0..65 (66
-conditions — 62 ACTIVE: the VWAP bits 52/53 are RETIRED tombstones and the
-SuperTrend bits 64/65 are declared layout-only, `implemented=false`), with
-headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
+conditions — 64 ACTIVE: the VWAP bits 52/53 are RETIRED tombstones; the
+SuperTrend bits 64/65 are IMPLEMENTED as of the vocab-66 SuperTrend flip,
+crate 0.5.0), with headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
 
 Per `docs/TRACK1_VOCABULARY.md` definitions. As of `DEC-SHARED-CORE-001`
 Phase 2b (`docs/MIGRATION.md` #441) the condition logic itself (52 then, 60,
@@ -83,6 +83,14 @@ class IndicatorSnapshot:
     # flags. Defaulted to an all-false signal so every pre-existing snapshot caller
     # keeps working unchanged (the Group-12 bits then simply do not fire).
     market_structure: MarketStructureSignal = field(default_factory=MarketStructureSignal)
+
+    # The SuperTrend line (Group 14, bits 64/65) in the ×2-SCALED paisa domain
+    # (line × 2 exactly — the hl2 source is a half-paisa quantity), produced by
+    # the shared Rust ``trading_core.SupertrendState`` (ATR-10 Wilder, factor 3,
+    # Pine-v6 parity). ``None`` = warm-up (the first 9 bars) / no state →
+    # bits 64/65 BOTH clear. Defaulted so every pre-existing snapshot caller
+    # keeps working unchanged (the Group-14 bits then simply do not fire).
+    supertrend_x2_paisa: int | None = None
 
 
 @dataclass(frozen=True)
@@ -204,7 +212,7 @@ def evaluate_atoms(
     proximity: ProximityParams,
     prior_history: PriorBarHistory,
 ) -> int:
-    """Evaluate the 62 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
+    """Evaluate the 64 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
 
     Marshals the pre-built indicator levels into the flat primitive ABI and
     delegates to `trading_core.evaluate_with_levels`. The pivot/fib levels are
@@ -220,12 +228,14 @@ def evaluate_atoms(
         prior_history: Rolling N-bar bullish/bearish flags for Group 6.
 
     Returns:
-        u128 bitmask over the 66-bit layout. The 62 IMPLEMENTED bits (0-51,
-        54-63) are set per condition (PR-2 added pivot R5/S5 bits 54-55;
+        u128 bitmask over the 66-bit layout. The 64 IMPLEMENTED bits (0-51,
+        54-65) are set per condition (PR-2 added pivot R5/S5 bits 54-55;
         DEC-NIFTY-BOS-CHOCH-001 added the BOS/CHoCH bits 56-59, resolved from
         ``snapshot.market_structure``; the CPR bits 60-63 are computed in-core
-        from the snapshot's pivot levels). The RETIRED VWAP tombstones (52/53)
-        and the declared-only SuperTrend bits (64/65) are never set.
+        from the snapshot's pivot levels; the SuperTrend bits 64/65 compare
+        ``close × 2`` against ``snapshot.supertrend_x2_paisa`` strictly —
+        equality or a ``None`` line leaves both clear). The RETIRED VWAP
+        tombstones (52/53) are never set.
 
     O(1) per bar: one cache-resident Rust call, no allocations beyond the two
     small fixed-length level lists, no I/O.
@@ -266,5 +276,6 @@ def evaluate_atoms(
         snapshot.market_structure.bos_bearish,
         snapshot.market_structure.choch_bullish,
         snapshot.market_structure.choch_bearish,
+        snapshot.supertrend_x2_paisa,
     )
     return mask

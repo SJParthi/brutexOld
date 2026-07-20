@@ -1,9 +1,10 @@
 """Stage-1A bitset-matrix builder — the adapter that drives ``evaluate_atoms``.
 
 Per ``docs/TRACK1_BACKTEST_SPEC.md`` the brute-force funnel's first stage
-precomputes, for one ``(instrument, interval)``, the 62 ACTIVE atomic
-conditions (of the 66-bit layout — the VWAP bits 52/53 are RETIRED tombstones,
-the SuperTrend bits 64/65 declared layout-only) on **every** bar so the
+precomputes, for one ``(instrument, interval)``, the 64 ACTIVE atomic
+conditions (of the 66-bit layout — the VWAP bits 52/53 are RETIRED tombstones;
+the SuperTrend bits 64/65 are IMPLEMENTED since the vocab-66 SuperTrend flip,
+crate 0.5.0) on **every** bar so the
 downstream supermask kernel
 (:func:`brutex.engine.combo_mask.count_supermasks`) can count mask hits over a
 resident ``u64[N]`` bitset (u64-limb: bits 0..63 fit u64 today; the u128 mask
@@ -29,6 +30,14 @@ representation and the evaluator's snapshot contract:
   :func:`_price_to_paisa` seam.
 * **Running day extremes** (:class:`brutex.indicators.day_extremes.DayExtremesState`),
   reset at each new IST trading day.
+* **SuperTrend** (Group 14, bits 64/65) causal running state — the shared Rust
+  ``trading_core.SupertrendState`` (ATR-10 Wilder, factor 3, hl2 source, Pine-v6
+  parity), fed the bar's high/low/close paisa and threaded into the snapshot as
+  the ×2-scaled line (``None`` over the 9-bar warm-up). NO session/day reset —
+  the state persists across IST days exactly like EMA20/200 (the locked
+  TradingView-parity law: SuperTrend is a continuous series, never
+  session-anchored); it joins the D11 contract-roll TOTAL hard reset like every
+  other stateful member.
 * **open-of-day** captured at each IST day's first bar.
 * **Daily anchors** — pivots / Fib / PDH-PDL computed from the **prior** IST
   trading day's OHLC and broadcast across that day's intraday bars (recomputed
@@ -627,6 +636,13 @@ class Stage1AMatrixBuilder:
         # the spot-only engine has no traded volume). The market-structure
         # state is continuous (look-ahead-clean, non-repainting).
         self._structure = trading_core.MarketStructureState()
+        # SuperTrend (Group 14, bits 64/65) — the shared Rust state (ATR-10
+        # Wilder, factor 3, hl2, Pine-v6 parity; the vocab-66 SuperTrend flip,
+        # crate 0.5.0). NO session/day reset — persists across IST days like
+        # EMA20/200 (the locked TradingView-parity law: a continuous series,
+        # never session-anchored); recreated ONLY at the D11 contract-roll
+        # TOTAL hard reset (:meth:`_roll_to_new_contract`).
+        self._supertrend = trading_core.SupertrendState()
         self._current_day: date | None = None
         # OHLC of the IST day currently being walked (None before the 1st bar).
         self._today_ohlc: _DayOHLC | None = None
@@ -692,7 +708,10 @@ class Stage1AMatrixBuilder:
         warm flags) and, after the walk, the EMA columns via
         per-roll-segment :func:`~brutex.indicators.ema.compute_ema` (the SAME
         Rust ``EmaState`` recurrence the streaming shell drives — batch ≡
-        streaming bit-for-bit) snapped through the SAME :func:`_ema_to_paisa`.
+        streaming bit-for-bit) snapped through the SAME :func:`_ema_to_paisa`,
+        plus the SuperTrend ×2-line column via a fresh per-roll-segment
+        ``trading_core.SupertrendState`` over the high/low/close paisa columns
+        (the SAME Rust state :meth:`push` steps — no day reset, D11-segmented).
 
         Must be called ONCE on a FRESH builder (like :meth:`build` — the walk
         consumes the roll cursor / day state). A bar beyond the roll schedule
@@ -829,14 +848,30 @@ class Stage1AMatrixBuilder:
         # states in push(), so each segment restarts the warm-up — the batch
         # `compute_ema` drives the SAME Rust `EmaState` core the streaming
         # shell steps ("bit-identical to a streaming update() loop", ema.rs).
+        # The SuperTrend column rides the SAME per-segment law (push()
+        # recreates `SupertrendState` ONLY at the D11 contract reset — never
+        # at an IST-day boundary), driving a fresh Rust state over the
+        # segment's high/low/close paisa columns: streaming ≡ batch
+        # bit-for-bit by construction (the same state, the same inputs).
         ema20_col: list[int | None] = []
         ema200_col: list[int | None] = []
+        supertrend_col: list[int | None] = []
         starts = [0, *reset_indices]
         ends = [*reset_indices, len(open_col)]
         for seg_start, seg_end in zip(starts, ends, strict=True):
             segment = closes_f64[seg_start:seg_end]
             ema20_col.extend(_ema_to_paisa(v) for v in compute_ema(segment, _EMA_FAST_PERIOD))
             ema200_col.extend(_ema_to_paisa(v) for v in compute_ema(segment, _EMA_SLOW_PERIOD))
+            supertrend_state = trading_core.SupertrendState()
+            supertrend_col.extend(
+                supertrend_state.update(seg_high, seg_low, seg_close)
+                for seg_high, seg_low, seg_close in zip(
+                    high_col[seg_start:seg_end],
+                    low_col[seg_start:seg_end],
+                    close_col[seg_start:seg_end],
+                    strict=True,
+                )
+            )
 
         return Stage1ABatchInputs(
             open_paisa=open_col,
@@ -848,6 +883,7 @@ class Stage1AMatrixBuilder:
             day_index=day_index_col,
             ema20_paisa=ema20_col,
             ema200_paisa=ema200_col,
+            supertrend_x2_paisa=supertrend_col,
             day_pivot_levels=day_pivot_levels,
             day_fib_levels=day_fib_levels,
             day_has_pivot=day_has_pivot,
@@ -881,12 +917,14 @@ class Stage1AMatrixBuilder:
         Returns
         -------
         int
-            The u128 condition mask (the 66-bit layout, 62 active bits) for
+            The u128 condition mask (the 66-bit layout, 64 active bits) for
             this bar — including the Group-12 BOS/CHoCH bits (56-59),
             populated from the running ``trading_core.MarketStructureState``
-            (DEC-STAGE1A-WIRE-VWAP-BOS-001), and the Group-13 CPR bits
-            (60-63), computed in-core from the prev-day pivot anchor. The
-            RETIRED VWAP tombstones (52/53) never fire.
+            (DEC-STAGE1A-WIRE-VWAP-BOS-001), the Group-13 CPR bits
+            (60-63), computed in-core from the prev-day pivot anchor, and the
+            Group-14 SuperTrend bits (64/65), populated from the running
+            ``trading_core.SupertrendState`` line. The RETIRED VWAP
+            tombstones (52/53) never fire.
         """
         ts_ist = bar.timestamp.astimezone(IST)
         bar_day = ts_ist.date()
@@ -962,6 +1000,16 @@ class Stage1AMatrixBuilder:
             choch_bearish=choch_bear,
         )
 
+        # ── Group 14: SuperTrend position (bits 64/65) ──
+        # The integer TR/Wilder-ATR/band-ratchet/flip law runs IN RUST
+        # (``trading_core.SupertrendState`` — the single source, shared with
+        # TickVault); this builder feeds the bar in and threads the ×2-scaled
+        # line into the snapshot (``None`` over the 9-bar warm-up ⇒ bits 64/65
+        # clear). NO session/day reset — the state deliberately persists across
+        # the IST-day rollover below, exactly like the EMA states (the locked
+        # TV-parity law); the D11 contract-roll reset recreates it. O(1)/bar.
+        supertrend_x2_paisa = self._supertrend.update(high_paisa, low_paisa, close_paisa)
+
         # Two INDEPENDENT warm flags (DEC-NIFTY-FIB-AXIS-001 R-2): the prev-day
         # pivot/PDH/day-type groups are warm once a prior day exists; the Group-4
         # Fib group is warm only when the SWEPT Fib anchor also resolved (a cold
@@ -989,6 +1037,7 @@ class Stage1AMatrixBuilder:
             day_low_paisa=day_low_paisa,
             open_of_day_paisa=today_ohlc.open_paisa,
             market_structure=market_structure,
+            supertrend_x2_paisa=supertrend_x2_paisa,
         )
 
         mask = evaluate_atoms(snapshot, self._proximity, self._prior_history)
@@ -1032,6 +1081,7 @@ class Stage1AMatrixBuilder:
         the basis gap, DEC-STAGE1A-ROLL-RESET-001).
         """
         self._structure = trading_core.MarketStructureState()  # no FFI reset() exists
+        self._supertrend = trading_core.SupertrendState()  # Group 14 joins the D11 total reset
         self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
         self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
         self._prior_history = PriorBarHistory(prior_n=self._prior_n)

@@ -61,10 +61,19 @@ the flag ON a ``>= 64`` bit raises
 :class:`brutex.engine.sweep_run.SweepAprioriUnsupportedError` — a
 :class:`~brutex.engine.sweep_run.SweepComboError` subclass, so the grid
 GRACEFULLY skips that tuple (TUPLE_FAILED) rather than crashing on a raw
-``ValueError`` if the flag is ever left ON over a future u128 vocabulary (unset
-the flag to use the byte-identical brute-force path, which has no bit-width
-limit). Today's ACTIVE vocabulary is 62 bits, all ``< 64``, so production is
-unaffected.
+``ValueError`` if the flag is ever left ON over a ``>= 64``-bit vocabulary
+(unset the flag to use the byte-identical brute-force path, which has no
+bit-width limit). Since the SuperTrend implemented-flip
+(DEC-SUPERTREND-CONDITIONS-001, crate 0.5.0) the ACTIVE vocabulary is 64 bits
+INCLUDING bits 64/65, so this guard is now the PRODUCTION story for
+Apriori-ON sweeps whose chosen bits include the SuperTrend pair — in
+particular the DEFAULT condition pool (all implemented bits) — each such
+tuple refuses gracefully (TUPLE_FAILED, counted, non-zero verdict, never a
+crash/corruption), and the remediation is either dropping bits 64/65 from
+the tuple's ``condition_bits`` or unsetting the flag. The u128 (two-limb)
+Apriori frontier is a NAMED follow-up (DEC-SUPERTREND-CONDITIONS-001 records
+the refusal as the accepted interim law); a ``< 64``-bit tuple over the same
+grid still prunes exactly as before.
 
 ## The deterministic mask·bar breaker (pure integer, MODELED limit)
 
@@ -84,7 +93,9 @@ env BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS default 1_159_200_000_000,
 MODELED/UNVERIFIED-on-M4 per Golden Rule #10) is evaluated on the WHOLE RAW
 per-level candidate count at the k==1 target level, every intermediate level
 2..k−1, and the final level k; for k≥2 the level-1 singleton count |C₁| =
-n_unique ≤ 62 is DELIBERATELY NOT budget-checked (trivially bounded, provably
+n_unique ≤ 62 (the ``< 64`` Apriori-admissible slice of the 64-bit active
+vocabulary — bits 64/65 refuse above before any level runs) is DELIBERATELY
+NOT budget-checked (trivially bounded, provably
 non-runaway). Each AUTHORITATIVE check runs the instant that level's raw
 candidate list is complete — the singleton set when ``k == 1`` IS the target
 level, the raw join output ``|C_j|`` at each intermediate level ``j in 2..k-1``
@@ -129,7 +140,8 @@ candidate-LIST memory below — it is a proxy that trips before a candidate set
 large enough to make the backtest infeasible is fully materialised (the
 incremental :data:`_BUDGET_CHECK_STRIDE` check compares the RUNNING count times
 ``n_bars``). The generator's own join CPU is bounded in practice only by
-``n = len(unique bits) <= 62`` (the active vocabulary width).
+``n = len(unique bits) <= 62`` (the ``< 64`` Apriori-admissible slice of the
+64-bit active vocabulary — a ``>= 64`` bit refuses before any join runs).
 
 ## The parity-completion caveat (Golden Rule #10)
 
@@ -176,7 +188,7 @@ the persisted store bytes.
 The sweep's up-front pre-flight refuses any ``k`` whose raw ``C(n_unique, k)``
 mask count exceeds ``max_combos``. That is correct for the brute-force path but
 with the DEFAULT cap would REFUSE a full-vocab ``k >= 4`` grid
-(``C(62, 4) = 557_845 > 100_000`` over the 62 active bits) BEFORE the Apriori
+(``C(64, 4) = 635_376 > 100_000`` over the 64 active bits) BEFORE the Apriori
 generator ever runs — even
 though, with the flag ON, the deterministic ``MAX_MASK_BARS`` breaker is the real
 guardrail on emitted work, not raw ``C(n, k)``. :func:`effective_max_combos`
@@ -299,8 +311,8 @@ def effective_max_combos(
     whose raw ``C(n_unique, k)`` mask count exceeds ``max_combos`` (the guards in
     ``SweepGridConfig.__post_init__`` + ``run_persisted_sweep``). That raw-count
     pre-flight is correct for the brute-force path, but with the DEFAULT cap it
-    would REFUSE a full-vocab ``k >= 4`` grid (``C(62, 4) = 557_845 > 100_000``
-    over the 62 active bits) BEFORE the Apriori generator ever runs — even
+    would REFUSE a full-vocab ``k >= 4`` grid (``C(64, 4) = 635_376 > 100_000``
+    over the 64 active bits) BEFORE the Apriori generator ever runs — even
     though, with Apriori ON, the
     deterministic ``MAX_MASK_BARS`` breaker (:func:`resolve_max_mask_bars`) is the
     real guardrail on emitted work, not raw ``C(n, k)``.
