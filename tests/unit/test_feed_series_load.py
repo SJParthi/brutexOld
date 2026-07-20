@@ -18,7 +18,7 @@ This file is the module's Layer-B/Layer-C covering set — it alone must hold
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -38,6 +38,9 @@ from brutex.data.sink import ParquetBarSink
 from brutex.feed import series_load
 from brutex.feed.replay import ReplayFeed
 from brutex.feed.series_load import load_sweep_slice
+from hypothesis import given
+from hypothesis import settings as hyp_settings
+from hypothesis import strategies as hyp_st
 from structlog.testing import capture_logs
 from structlog.typing import EventDict
 
@@ -964,3 +967,122 @@ class TestLoaderCutCursorAgreement:
             assert cursor_key == min(
                 ordinal for ordinal in res.roll_schedule if ordinal >= ist_day.toordinal()
             )
+
+
+class TestOwnershipCutKernelSeams:
+    """DEC-FEED-RUST-MATERIALIZE-002 — the wheel-backed cut/monotonicity seams."""
+
+    def test_out_of_envelope_bar_refuses_loudly(self) -> None:
+        # A planted pre-1970 stored timestamp leaves the fixed-IST envelope:
+        # the kernel ABSTAINS and the wrapper raises the typed refusal
+        # (never a silently wrong civil date).
+        from brutex.feed.series_load import _cut_owned_bars  # pyright: ignore[reportPrivateUsage]
+
+        bar = _bar(datetime(1960, 1, 2, 9, 15, tzinfo=IST), 100.0)
+        with pytest.raises(FuturesSeriesError, match="fixed-IST envelope"):
+            _cut_owned_bars(
+                [bar], own_start=date(1960, 1, 2), own_end=date(1960, 1, 2), contract=_JUN
+            )
+
+    def test_in_envelope_cut_matches_astimezone_law(self) -> None:
+        # The kernel cut == the verbatim astimezone(IST).date() comprehension
+        # over a boundary-straddling bar set (the deleted Python arm's law).
+        from brutex.feed.series_load import _cut_owned_bars  # pyright: ignore[reportPrivateUsage]
+
+        bars = [
+            _bar(_ist(2025, 6, 26, 15, 29), 101.0),  # owned day
+            _bar(datetime(2025, 6, 26, 23, 59, tzinfo=IST), 102.0),  # owned day, post-close
+            _bar(datetime(2025, 6, 27, 0, 0, tzinfo=IST), 103.0),  # next IST day — out
+            _bar(_ist(2025, 6, 25, 9, 15), 104.0),  # prior day — out
+        ]
+        cut = _cut_owned_bars(
+            bars, own_start=date(2025, 6, 26), own_end=date(2025, 6, 26), contract=_JUN
+        )
+        expected = [
+            b
+            for b in bars
+            if date(2025, 6, 26) <= b.timestamp.astimezone(IST).date() <= date(2025, 6, 26)
+        ]
+        assert cut == expected
+        assert [str(b.close) for b in cut] == ["101.0", "102.0"]
+
+    def test_boundary_break_verdicts(self) -> None:
+        from brutex.feed.series_load import _boundary_break  # pyright: ignore[reportPrivateUsage]
+
+        t = _ist(2025, 6, 26, 9, 15).astimezone(UTC)
+        assert _boundary_break(prev_last=t, first=t) is True  # equal — broken
+        assert _boundary_break(prev_last=t, first=t - timedelta(minutes=1)) is True
+        assert _boundary_break(prev_last=t, first=t + timedelta(microseconds=1)) is False
+
+
+class TestExpectedBarGeometryDifferential:
+    """The kernel geometry ≡ the deleted Python walk's geometric core.
+
+    A hypothesis cross-language differential (the frozen-oracle idiom): the
+    deleted ``_expected_bar_time_in_window`` per-day geometry, transcribed
+    verbatim to exact-µs integers in-test, versus the wheel's
+    ``expected_bar_instant`` over random windows × sessions × steps.
+    """
+
+    @staticmethod
+    def _frozen_geometry(
+        seg_start_us: int,
+        seg_end_us: int,
+        step_us: int,
+        now_us: int,
+        sessions: list[tuple[int, int, int]],
+    ) -> bool:
+        if seg_end_us < seg_start_us:
+            return False
+        for stamp_us, open_us, close_us in sessions:
+            if step_us == 0:
+                if seg_start_us <= stamp_us <= seg_end_us and (
+                    seg_end_us >= close_us or close_us <= now_us
+                ):
+                    return True
+            elif seg_end_us >= open_us and seg_start_us < close_us:
+                if seg_start_us <= open_us:
+                    first_label = open_us
+                else:
+                    first_label = open_us + -((open_us - seg_start_us) // step_us) * step_us
+                if first_label <= seg_end_us and first_label < close_us:
+                    return True
+        return False
+
+    @given(
+        seg_start_min=hyp_st.integers(min_value=0, max_value=5 * 1440),
+        seg_len_min=hyp_st.integers(min_value=-60, max_value=3 * 1440),
+        step_us=hyp_st.sampled_from([0, 60_000_000, 300_000_000, 14_400_000_000]),
+        now_day=hyp_st.integers(min_value=0, max_value=6),
+        session_days=hyp_st.lists(
+            hyp_st.integers(min_value=0, max_value=5), min_size=0, max_size=4, unique=True
+        ),
+    )
+    @hyp_settings(deadline=None)
+    def test_kernel_matches_frozen_geometry(
+        self,
+        seg_start_min: int,
+        seg_len_min: int,
+        step_us: int,
+        now_day: int,
+        session_days: list[int],
+    ) -> None:
+        import brutex_feed
+
+        base = 1_704_133_800_000_000  # midnight IST 2024-01-02, epoch µs
+        day_us = 86_400_000_000
+        min_us = 60_000_000
+        sessions = [
+            (
+                base + d * day_us,  # midnight-IST 1day stamp
+                base + d * day_us + (9 * 60 + 15) * min_us,  # 09:15 open
+                base + d * day_us + (15 * 60 + 30) * min_us,  # 15:30 close
+            )
+            for d in sorted(session_days)
+        ]
+        seg_start = base + seg_start_min * min_us
+        seg_end = seg_start + seg_len_min * min_us
+        now = base + now_day * day_us
+        assert brutex_feed.expected_bar_instant(
+            seg_start, seg_end, step_us, now, sessions
+        ) == self._frozen_geometry(seg_start, seg_end, step_us, now, sessions)

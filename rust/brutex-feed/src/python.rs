@@ -11,7 +11,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-use crate::scan;
+use crate::{lookahead, materialize, scan, series};
 
 /// Crate version baked at compile time (`CARGO_PKG_VERSION`).
 #[pyfunction]
@@ -75,6 +75,138 @@ fn scan_bars(
     Ok(outcome.map(|o| (o.kept_rows, o.warn_events, o.positivity_stop)))
 }
 
+// ── DEC-FEED-RUST-MATERIALIZE-002 — the wheel-REQUIRED extension surface ──
+// APPEND-ONLY (the concurrent-sibling merge law): new pyfunctions + the
+// BarrierCore pyclass register BELOW the frozen DEC-FEED-RUST-CORE-001
+// surface; nothing above this line moved.
+
+/// Strict scan (finiteness-first): returns
+/// `(kept_rows, warn_events, (row, field, kind) | None)` or `None`
+/// (ABSTAIN — a consulted timestamp left the fixed-IST envelope; the
+/// wheel-required Python seam raises a LOUD refusal, it no longer
+/// degrades). `kind` is 0 = non-positive / 1 = non-finite. A column-length
+/// mismatch raises `ValueError`.
+#[pyfunction]
+#[pyo3(signature = (ts_us, opens, highs, lows, closes, screen_enabled, max_ratio))]
+#[allow(clippy::type_complexity)]
+fn scan_bars_strict(
+    ts_us: Vec<i64>,
+    opens: Vec<f64>,
+    highs: Vec<f64>,
+    lows: Vec<f64>,
+    closes: Vec<f64>,
+    screen_enabled: bool,
+    max_ratio: f64,
+) -> PyResult<
+    Option<(
+        Vec<usize>,
+        Vec<(usize, usize, usize, usize, usize)>,
+        Option<(usize, usize, usize)>,
+    )>,
+> {
+    let outcome = materialize::scan_bars_strict(
+        &ts_us,
+        &opens,
+        &highs,
+        &lows,
+        &closes,
+        screen_enabled,
+        max_ratio,
+    )
+    .map_err(PyValueError::new_err)?;
+    Ok(outcome.map(|o| (o.kept_rows, o.warn_events, o.stop)))
+}
+
+/// `_expected_bar_time_in_window`'s geometric core: `step_us == 0` marks
+/// the derived-`1day` arm; `sessions` are `(stamp_us, open_us, close_us)`
+/// exact epoch-microsecond triples in chronological order. Pure verdict —
+/// the Python wrapper owns the calendar walk + both abstain arms.
+#[pyfunction]
+#[pyo3(signature = (seg_start_us, seg_end_us, step_us, now_us, sessions))]
+fn expected_bar_instant(
+    seg_start_us: i64,
+    seg_end_us: i64,
+    step_us: i64,
+    now_us: i64,
+    sessions: Vec<(i64, i64, i64)>,
+) -> bool {
+    series::expected_bar_instant(seg_start_us, seg_end_us, step_us, now_us, &sessions)
+}
+
+/// The exact IST-date ownership cut: kept indices ascending, or `None`
+/// (ABSTAIN — a timestamp left the fixed-IST envelope; the caller raises
+/// a loud refusal, never a silently wrong civil date).
+#[pyfunction]
+#[pyo3(signature = (ts_us, own_start_days, own_end_days))]
+fn ownership_cut(ts_us: Vec<i64>, own_start_days: i64, own_end_days: i64) -> Option<Vec<usize>> {
+    series::ownership_cut(&ts_us, own_start_days, own_end_days)
+}
+
+/// `True` iff stitching breaks the disjoint-ownership monotonicity law
+/// (`first <= prev_last` — the caller raises `FuturesSeriesError`).
+#[pyfunction]
+#[pyo3(signature = (prev_last_us, first_us))]
+fn boundary_monotonic_break(prev_last_us: i64, first_us: i64) -> bool {
+    series::boundary_monotonic_break(prev_last_us, first_us)
+}
+
+/// The P-06 barrier state machine — verdict codes out, exceptions built by
+/// the thin Python wrapper (`brutex/feed/lookahead.py::LookAheadBarrier`),
+/// so every pinned message byte + exception TYPE stays Python-owned.
+#[pyclass(name = "BarrierCore")]
+pub struct BarrierCore {
+    state: lookahead::BarrierState,
+}
+
+#[pymethods]
+impl BarrierCore {
+    #[new]
+    #[pyo3(signature = (record))]
+    fn new(record: bool) -> Self {
+        Self {
+            state: lookahead::BarrierState::new(record),
+        }
+    }
+
+    /// Current bar index `N` (`-1` before the first successful advance).
+    #[getter]
+    fn current_index(&self) -> i64 {
+        self.state.current_index()
+    }
+
+    /// Whether this barrier retains the touched-index trail.
+    #[getter]
+    fn records(&self) -> bool {
+        self.state.records()
+    }
+
+    /// Every permitted access index, in call order (empty in O(1) mode).
+    fn touched(&self) -> Vec<i64> {
+        self.state.touched().to_vec()
+    }
+
+    /// Largest permitted index touched, or `None` when nothing recorded.
+    fn max_touched(&self) -> Option<i64> {
+        self.state.max_touched()
+    }
+
+    /// Advance verdict: 0 = ok · 1 = negative · 2 = backwards.
+    fn advance_to(&mut self, index: i64) -> u8 {
+        self.state.advance_to(index)
+    }
+
+    /// Access verdict: 0 = ok · 1 = no-cursor · 2 = negative ·
+    /// 3 = look-ahead.
+    fn access(&mut self, index: i64) -> u8 {
+        self.state.access(index)
+    }
+
+    /// Restore the just-constructed form (cursor `-1`, empty trail).
+    fn reset(&mut self) {
+        self.state.reset();
+    }
+}
+
 #[pymodule]
 fn _brutex_feed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
@@ -86,5 +218,11 @@ fn _brutex_feed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SOURCE_DIGEST", crate::SOURCE_DIGEST)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(scan_bars, m)?)?;
+    // DEC-FEED-RUST-MATERIALIZE-002 (append-only registrations).
+    m.add_function(wrap_pyfunction!(scan_bars_strict, m)?)?;
+    m.add_function(wrap_pyfunction!(expected_bar_instant, m)?)?;
+    m.add_function(wrap_pyfunction!(ownership_cut, m)?)?;
+    m.add_function(wrap_pyfunction!(boundary_monotonic_break, m)?)?;
+    m.add_class::<BarrierCore>()?;
     Ok(())
 }
