@@ -850,6 +850,7 @@ class TestMaxSlHitRateKnob:
         class _FakeGrid:
             overfit = None
             max_sl_hit_rate: float | None = 0.5
+            cvar_gate = None
             stage3_enable = False
             stage3_top_k = 10_000
             stage3_max_fevals = 200
