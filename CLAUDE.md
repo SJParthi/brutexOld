@@ -18,7 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+_Last updated: 2026-07-20 (DEC-BADTICK-FAMILY-PORT-001 +
+DEC-BADTICK-HEAD-SEED-001 + DEC-BADTICK-HILO-SCREEN-001, MIGRATION.md
+#1978–#1980 (PROVISIONAL — renumber at the census weave), branch
+`claude/badtick-family-port` — the #1399 screen-family PORT: the bad-tick
+screen's first-bar-of-session exemption + first-bar baseline seed (the
+#1616 law) is REPLACED by the 3-bar session-HEAD MEDIAN vote (a corrupt
+head bar can no longer seat the baseline, collapse its whole session, and
+itself be kept — the executed R1 inversion; median-seeded post-head
+baseline; 2-bar unconfirmable-head kept+WARNed; strict-majority-dropped
+disclosure), and the screen gains the HIGH/LOW out-of-band arm (a sane
+close with a ×10 high/÷10 low now drops; reason precedence
+close→high→low pinned) — ONE whole-table decision plane
+`screen_mask` with typed 9-int events, ATOMIC Rust+Python
+(`rust/brutex-feed` 0.2.0 re-derived in lockstep; `validate_scan`
+re-derived + a real negative-anchor validation gap fixed), re-derived
+across the FOUR landed consumers (replay single materializer ·
+bar_screen `screen_table` · the #1811 frame trigger's three vectorized
+arms · acceptance sanity consolidated onto the common law). #1688
+recorded NOT-PORTED (superseded by main's #1897 raise law — the
+non-finite-ROBUST screen is the kept residual); the #1683 residuals
+CLOSED — the daily-window reader now screens
+(DEC-DAILY-WINDOW-BADTICK-001 CLOSED) + the ONE COMMON
+`resample_screen_applies` class gate at both factory seams. ENGINE
+semantics corrected on POISONED feeds ONLY — healthy feeds
+byte-identical (frozen goldens + fixtures EMPTY-DIFF);
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1978–#1980.)
+Earlier: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
 MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
 overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
 the overfit gate config the sweep RECORDED at launch (both grid launchers
@@ -3917,7 +3945,67 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-s2-results-v2`
+- **Active branch:** `claude/badtick-family-port`
+  (**DEC-BADTICK-FAMILY-PORT-001 + DEC-BADTICK-HEAD-SEED-001 +
+  DEC-BADTICK-HILO-SCREEN-001, MIGRATION.md #1978–#1980** — entry numbers
+  PROVISIONAL, renumber at the census weave per DEC-LEDGER-RENUMBER-001;
+  the sweeper event-3 lane — the #1399 screen-family PORT, a coordinated
+  RE-DERIVATION of PR #1399's members (branch `claude/data-edge-guard-fixes`
+  @ 75ebf994) onto current main 2bf9235c, never a raw cherry-pick; #1399
+  stays OPEN pending the coordinator's landing call. **(#1978 HEAD-SEED)**
+  the #1616 first-bar-of-session exemption + first-bar baseline seed is
+  REPLACED by the session-HEAD median-confirm law: the first
+  `HEAD_CONFIRM_BARS=3` finite-close bars vote against their MEDIAN close
+  (value-then-row tie rule, shared bit-exactly with the Rust kernel) — the
+  executed R1 inversion is dead (a ×10 head bar was KEPT while its session's
+  sane bars were all dropped as "spikes") and the R4 escape band is closed
+  (a corrupt within-ratio head pair no longer seats the baseline); the
+  post-head baseline seeds from the median VALUE unconditionally; a 2-bar
+  inconsistent head keeps BOTH + ONE `feed.bad_tick_head_unconfirmed` WARN;
+  strict-majority session drops disclose via
+  `feed.bad_tick_session_majority_dropped`; the streaming keep()/finish()
+  surface is retired for the whole-table
+  `screen_mask(ist_dates, closes, *, highs, lows, seed_prev_close)` decision
+  plane with typed 9-int events + split emission seams (`first_prev_close`
+  RENAMED `first_ref_close`; `SEED_REF_ROW=-1`); the corrupt-majority
+  trade-off (2-of-3 corrupt head outvotes the sane bar) is documented +
+  pinned. **(#1979 HI/LO)** kw-only highs/lows join the judgment — a
+  close-sane bar whose high is out-of-band above (or low below) the
+  reference DROPS with reason precedence close→high→low PINNED
+  (`skip_reasons` dict + `first_reason` additive on the ONE WARN); head
+  highs/lows judged vs the median (the median bar can drop against itself);
+  non-finite highs/lows judged natively by IEEE (NaN never trips, ±inf
+  drops) while non-finite closes are kept-unjudged + tally-excluded — the
+  asymmetry documented, unreachable at the #1897 raise-gated lake seams.
+  **(#1980 VEHICLE)** ATOMIC Rust+Python — `rust/brutex-feed` 0.2.0
+  (scan.rs re-derived in lockstep; cargo 46 green; `validate_scan`
+  re-derived to the 9-int contract, and the port FOUND+FIXED a real
+  validation gap: `prev_emit` init −1 → 0, a negative first anchor now
+  refuses); the FOUR landed consumers re-derived — replay.py's ONE
+  materializer (the R6a drain-law mutant kill preserved), bar_screen's
+  whole-table `screen_table` (TestAntiDivergenceOracle the forcing
+  function), the #1811 frame trigger's THREE vectorized arms (adjacent ·
+  head-median · non-finite; identity⇔no-skip pinned both directions),
+  acceptance sanity consolidated onto the common law; #1688
+  DEC-READ-BOUNDARY-FINITE-001 recorded NOT-PORTED (SUPERSEDED by main's
+  #1897 raise law — re-landing skip-and-count would weaken the boundary;
+  the non-finite-ROBUST screen is the kept residual); the #1683 residuals
+  CLOSED — `make_lake_read_1m_window` now screens (`window:` source;
+  DEC-DAILY-WINDOW-BADTICK-001 CLOSED) + the ONE COMMON
+  `resample_screen_applies` class gate (non-FNO/FUT True; CE/PE +
+  undecodable False) at BOTH factory seams; #1626 Muhurat already landed —
+  out of scope. GATES: 5 RED-first repros fail-before-captured → green;
+  coverage 100.00% line+branch on all SEVEN touched modules the ci.yml way
+  (bad_tick 182/64 · bar_screen 104/30 · feed_rust 122/64 · replay 163/58 ·
+  spot_daily_resample 247/68 · timeframe_materialize 183/60 · sanity
+  176/48); the frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` + bxsnap2
+  parity goldens pass UNMODIFIED, `tests/golden/fixtures/` EMPTY-DIFF incl.
+  `vocab_golden_vectors.json`; ruff/ruff-format clean; `mypy --strict`
+  clean (522 files); pyright 0 on touched files. ENGINE semantics corrected
+  on POISONED feeds ONLY — healthy feeds byte-identical;
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; no new
+  routes/env. The full record lives in MIGRATION.md #1978–#1980.)
+  Earlier: `integration/club-s2-results-v2`
   (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
   overfit-recount recovery channel, folded onto the CLUB S2 members
   (#1848–#1850) on this same branch. THE TRUE FAILURE MODE (stated
@@ -11759,7 +11847,29 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-s2-results-v2`
+- **Active feature branch:** `claude/badtick-family-port`
+  (DEC-BADTICK-FAMILY-PORT-001 + DEC-BADTICK-HEAD-SEED-001 +
+  DEC-BADTICK-HILO-SCREEN-001, MIGRATION.md #1978–#1980 — PROVISIONAL,
+  renumber at the census weave; the #1399 screen-family PORT re-derived
+  onto current main: the session-HEAD median-confirm law replaces the
+  #1616 first-bar-exempt seed (the R1 session-collapse inversion + the R4
+  escape band dead; 2-bar unconfirmable-head kept+WARNed;
+  strict-majority-dropped disclosure; whole-table `screen_mask` decision
+  plane with typed 9-int events; `first_prev_close` → `first_ref_close`)
+  + the HIGH/LOW out-of-band arm (reason precedence close→high→low
+  pinned; non-finite judged natively, asymmetry documented); ATOMIC
+  Rust+Python (`rust/brutex-feed` 0.2.0 lockstep; the negative-anchor
+  validate_scan gap found+fixed); the four landed consumers re-derived
+  (replay materializer · bar_screen `screen_table` · the #1811
+  three-arm frame trigger · acceptance sanity on the common law); #1688
+  NOT-PORTED (superseded by main's #1897 raise law); the #1683 residuals
+  closed — the window reader screens (DEC-DAILY-WINDOW-BADTICK-001
+  CLOSED) + the ONE COMMON `resample_screen_applies` gate at both
+  factory seams; ENGINE semantics corrected on POISONED feeds only —
+  healthy feeds byte-identical, goldens + fixtures EMPTY-DIFF;
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1978–#1980 for the full blurb)
+  Earlier: `integration/club-s2-results-v2`
   (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
   overfit-recount recovery channel: the recount recovers the RECORDED
   overfit gate config (mint on both launchers' START records; the tolerant
