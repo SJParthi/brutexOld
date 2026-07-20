@@ -18,7 +18,32 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #2054 —
+_Last updated: 2026-07-19 (DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #2055 — renumbered #1960 → #2055 at the 2026-07-20 train-b wave-2b fold (the woven tree carries DEC-SWEEP-1DAY-FRESHNESS-GATE-001 at #1960; census ceiling #2054),
+branch `claude/rust-stage3-refine` — the Stage-3 refinement / CMA-ES
+optimizer path converted to PURE RUST and flipped DEFAULT-ON with the
+Python optimizer math DELETED in the same lane (operator-authorized via
+the coordinator; the GREENFIELD ruling — no stored stage-3 backtests
+exist, so no pycma bit-match is owed): NEW dependency-free crate
+`rust/brutex-refine` (BIPOP-style restarted CMA-ES on an in-crate
+splitmix64/xoshiro256++ PRNG + hand-rolled Jacobi eigensolver · the paisa
+tick-grid axis with BYTE-identical Python error strings · the streaming
+bounded top-K selection core preserving the bounded-memory law) behind
+ONE ask/tell session FFI + the loud-refusal facade
+`brutex/engine/refine_rust.py` (`BRUTEX_REFINE_RUST`, default ON — falsy
+env or an absent wheel is a LOUD typed refusal naming the build step at
+CALL time; there is NO Python fallback and the dashboard still boots
+wheel-free); pycma + the `optimize` extra + the Renovate carve-out are
+DELETED (supersedes DEC-STAGE3-OPTIMIZE-EXTRA-001 #626); the
+refinement-run identity re-keys to v2 folding the baked crate-source
+digest (any crate edit re-keys automatically); the pycma budget
+OVERSHOOT (measured 121 evals on a 60-ask budget) is closed by the
+strict-budget law and the seed widens to ADR-0007's low 64 bits — both
+greenfield-sanctioned deltas; frozen Rust + Python goldens + proptest
+invariants are the correctness bar. ENGINE result UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #2055.)
+Earlier: 2026-07-18 (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #2054 —
 renumbered #1954 → #1957 → #1962 → #2054 (the 2026-07-19 merge-reconciles:
 main tip 4c11f7aaf — Club P took #1954/#1955/#1956; main tip ace41c7e0 —
 the club lap-8 lake-guards vehicle PR #1654 took #1957–#1961; the last hop
@@ -4116,7 +4141,108 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/optcost-tails-rust`
+- **Active branch:** `claude/rust-stage3-refine`
+  (**DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #2055** — renumbered #1960 → #2055 at the 2026-07-20 train-b wave-2b fold (#1960 held by DEC-SWEEP-1DAY-FRESHNESS-GATE-001) — the Stage-3
+  refinement / CMA-ES optimizer path converted to PURE RUST, flipped
+  DEFAULT-ON, with the Python optimizer math DELETED in the same lane.
+  AUTHORITY recorded honestly: operator-authorized via the coordinator
+  (never a direct-user approval in this session) with the explicit
+  GREENFIELD ruling — no deployment and no stored stage-3 backtests exist,
+  so NO pycma bit-match is owed; the bar is a CORRECT, deterministic
+  CMA-ES verified against a FROZEN captured golden of the new
+  implementation's own behavior + algebraic/property invariants, seeding
+  deterministic (Golden Rule #4). Supersedes DEC-STAGE3-OPTIMIZE-EXTRA-001
+  (#626 — the `optimize` extra, the `cma` exact pin and the Renovate
+  carve-out are DELETED) + the pycma arm of ADR-0007 condition 4.
+  CRATE DECISION (crates.io evidence 2026-07-18): the third-party `cmaes`
+  0.2.2 (2024-12-12, ~19 months stale, 5 versions, ~3.5k downloads; deps
+  nalgebra + rand + rand_chacha + rayon + statrs) REJECTED — heavy tree,
+  rayon threading risks determinism; a HAND-ROLLED dependency-free port
+  chosen (task-sanctioned). THE CRATE (`rust/brutex-refine`, the
+  brutex-feed template — pyo3 0.29 abi3-py312 optional `python` feature,
+  maturin mixed layout, build.rs source-digest stamp + parity test,
+  committed Cargo.lock, EXPECTED_BUILD.json handshake): rng.rs (splitmix64
+  seeding + xoshiro256++ + cached Box-Muller — determinism never depends
+  on an external crate version) · linalg.rs (cyclic-Jacobi symmetric
+  eigensolver) · cmaes.rs (the Hansen arXiv:1604.00772 parametrization,
+  rank-1 + rank-μ update, unit-box projection repair, the
+  truncated-final-generation-no-update law, StopReason vocabulary) ·
+  refine.rs (IPOP-lite restart schedule λ_k = min(λ0·2^k, max_fevals);
+  restart k seeds seed.wrapping_add(k); ALL max_restarts always run; the
+  STRICT per-restart budget; ask() returns GRID-SNAPPED (sl, tp) paisa
+  pairs — round-half-even ≡ CPython round(); a rejected tell leaves the
+  ask retryable) · grid.rs (validation/denormalize/normalize error strings
+  BYTE-identical to Python, parity-pinned) · select.rs (streaming bounded
+  top-K push→(kept, evicted_seq) — the DEC-SWEEP-STREAMING-RANK-002
+  bounded-memory law preserved end-to-end; BTreeMap byte order ≡ CPython
+  sorted() over ASCII run_ids) · python.rs (RefineSession/SelectSession +
+  three grid pyfunctions; plain ints/floats/strings/tuples ONLY across
+  the FFI; ValueError mapped BEFORE any panic — the #1919 lesson).
+  FACADE + DELETIONS: `brutex/engine/refine_rust.py`
+  (`BRUTEX_REFINE_RUST` default ON — unset/blank/truthy engage; falsy or
+  junk = a LOUD typed refusal, a fallback that does not exist is never
+  silently pretended; wheel-absent = `RefineRustUnavailableError` naming
+  `maturin develop --release` at CALL time, never import time — the
+  dashboard boots wheel-free, SUBPROCESS-PROVEN with
+  sys.modules-poisoning); stage3_refine.py drops pycma (refine_mask
+  drives the session in a done()/ask/tell loop; ALL bookkeeping —
+  cache/evals/best-key/audit — stays Python); stage3_grid.py keeps
+  __post_init__ validation PURE PYTHON (module-scope MODE_A axes are the
+  wheel-free-boot load-bearing case) and delegates
+  denormalize/normalize; stage3_select.py drops `_HeapEntry` for the
+  streaming SelectSession; stage3_wire/sweep_orchestrator map the
+  unavailability error to loud Stage3WireError/ValueError naming the DEC.
+  IDENTITY v2: refinement_run_id = blake3("stage3-refine-v2" ‖
+  mask_run_id ‖ budget ‖ seed ‖ optimizer=brutex-refine-<ver> ‖
+  build=<crate-source digest>) — any crate edit re-keys automatically;
+  seed_from_mask_run_id widens 32→64 bits (ADR-0007's original law); the
+  frozen run-identity golden consciously RE-LOCKED to v2
+  (greenfield-sanctioned; four fresh digests in-file). DISCLOSED DELTAS
+  (greenfield-sanctioned): the measured pycma budget OVERSHOOT (121
+  unique evals on a 60×2 budget) is CLOSED by the strict-budget law; the
+  seed widening above. GOLDENS/PROPERTIES: the frozen Rust trajectory
+  golden (120 asks, head/tail literals, FNV-1a full-sequence pin) + 5
+  proptest invariants + the Python frozen golden through the REAL
+  refine_mask (117 evals; regen seam BRUTEX_REGEN_STAGE3_GOLDEN=1; the
+  run_id deliberately re-derived — the source digest moves with any crate
+  edit) + crate/Python grid message byte-parity; every PRE-EXISTING grid
+  unit + property test passes UNMODIFIED; the select golden-equality
+  suite (vs the verbatim pre-#1294 reference) passes. WIRING: ci.yml
+  build-wheels 4→5 + the refine wheel at every stage3-running consumer
+  job + the NEW 19i1b2 per-module gate + the NEW `rust-brutex-refine`
+  crate job (ci-ok needs + result loop); mutation.yml mirrors the sibling
+  convention fully (path trigger · .cargo/mutants.toml scoping the six
+  pure cores with python.rs/lib.rs documented OUT · the single-shard
+  `rust-mutation-brutex-refine` job · verdict fan-in + issue step);
+  Makefile run-raw + bootstrap.sh gain the REQUIRED abort-on-failure
+  build; nightly `WHEEL_SET` gains brutex_refine required=True;
+  OPTIONAL_KERNELS registers it with the honest optional-FOR-BOOT-only
+  distinction. GATES (executed): cargo fmt/clippy(--locked -D
+  warnings)/test --release --locked 58 green; per-module 100.00%
+  line+branch — refine_rust 43/6 (20) · stage3_refine 94/18 (18) ·
+  stage3_grid 44/8 (46) · stage3_select 36/12 (28) · stage3_wire 218/64
+  (59) · box_update 711/274 (151); golden/property/caller battery 271
+  passed + 1 sanctioned skip; the 55-file workflow-pin battery 2925
+  passed; integration rehearsal + vix 23 passed; `mypy --strict brutex`
+  clean (496 files, zero issues); pyright 0 errors; ruff + ruff-format
+  clean. NAMED residuals: the in-session cargo-mutants evidence status +
+  the skipped fuzz lane (the brutex-strategies no-fuzz precedent) +
+  DEC-REFINE-RUST-DOCTOR-STAGE-001 (doctor wheel-freshness stage) + the
+  bugfix-reversion-check 2-wheel subset — all recorded in MIGRATION.md
+  #2055 (renumbered #1957 → #2055 at the 2026-07-19 main merge-forward
+  per DEC-LEDGER-RENUMBER-001). REVIEW ROUNDS: hostile-review round 1 SHIP (findings folded at
+  head — per-item record in MIGRATION.md #2055) + refuter round 2 CLEAN
+  (independent wheel rebuild; all nine claim families survived executed
+  refutation incl. cross-process seeded bit-identity, the 720-stream
+  OLD-vs-NEW select differential and the bit-for-bit digest
+  reproduction; one cosmetic NIT — the production-unreachable fail-loud
+  `_sharpe_of` NaN pass-through — named in #2055). ENGINE result
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX (stage-3 is a
+  between-stage refinement layer; the mask/bar hot loop receives ZERO
+  diffs; the frozen sweep-run goldens pass UNMODIFIED); F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes;
+  one new env var (`BRUTEX_REFINE_RUST`, default ON).)
+  Earlier: `claude/optcost-tails-rust`
   (**DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #2054** — renumbered
   #1954 → #1957 → #1962 → #2054 (the last hop at the 2026-07-20 train-b
   wave-2 fold — #1962 taken on main by DEC-RUST-CALENDAR-LEAVES-001, the
@@ -12619,7 +12745,31 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/optcost-tails-rust`
+- **Active feature branch:** `claude/rust-stage3-refine`
+  (DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #2055 — renumbered #1960 → #2055 at the 2026-07-20 train-b wave-2b fold — the Stage-3
+  refinement / CMA-ES optimizer path converted to PURE RUST and flipped
+  DEFAULT-ON with the Python optimizer math DELETED in the same lane
+  (operator-authorized via the coordinator; the GREENFIELD ruling — no
+  stored stage-3 backtests exist, so no pycma bit-match is owed): NEW
+  dependency-free crate `rust/brutex-refine` (BIPOP-style restarted
+  CMA-ES on an in-crate splitmix64/xoshiro256++ PRNG + hand-rolled Jacobi
+  eigensolver · the paisa tick-grid axis with byte-identical Python error
+  strings · the streaming bounded top-K selection core) behind one
+  ask/tell session FFI + the loud-refusal facade
+  `brutex/engine/refine_rust.py` (`BRUTEX_REFINE_RUST` default ON; falsy
+  env / absent wheel = a loud typed refusal at CALL time naming the build
+  step — NO Python fallback exists; the dashboard boots wheel-free,
+  subprocess-proven); pycma + the `optimize` extra + the Renovate
+  carve-out DELETED (supersedes DEC-STAGE3-OPTIMIZE-EXTRA-001); the
+  refinement-run identity re-keys to v2 with the baked crate-source
+  digest; the pycma budget overshoot closed + the seed widened to 64 bits
+  (greenfield-sanctioned, disclosed); frozen Rust + Python goldens +
+  proptest invariants are the correctness bar; ci.yml wheelhouse 4→5 +
+  the `rust-brutex-refine` crate job + the mutation.yml mirror + the
+  turnkey build steps + nightly WHEEL_SET wired; ENGINE result
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #2055 for the full blurb)
+  Earlier: `claude/optcost-tails-rust`
   (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #2054 — renumbered
   #1954 → #1957 → #1962 → #2054 (the last hop at the 2026-07-20 train-b
   wave-2 fold — #1962 taken on main by DEC-RUST-CALENDAR-LEAVES-001, the

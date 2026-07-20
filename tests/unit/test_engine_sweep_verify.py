@@ -2911,7 +2911,7 @@ class TestRecordedStage3FromAudit:
             audit.append(
                 action="STAGE_3_REFINE_START",
                 subject="s",
-                payload={"pycma_version": "3.4.0", "numpy_version": "2.1.0"},
+                payload={"optimizer_version": "3.4.0", "optimizer_build": "2.1.0"},
             )
         record = recorded_stage3_from_audit(path)
         assert record.knobs is not None

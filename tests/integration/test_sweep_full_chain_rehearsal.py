@@ -75,7 +75,7 @@ pytest.importorskip("polars")
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 pytest.importorskip("lmdb")
-pytest.importorskip("cma")
+pytest.importorskip("brutex_refine")
 
 #: D-6 traceability — test name → requirement/gap tokens (R38 rehearsal file).
 TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
@@ -154,7 +154,35 @@ _CI_K_SAMPLES = 8
 #: cafebabe/deadc0de/baddcafe/feedc0de/d15ea5e0/ba5eba11/5ca1ab1e/ca11ab1e/
 #: b01dface/f005ba11/0ddba11d/deadfa11/fee1dead x5 + 10 repeated-hex-word
 #: constants (transcript in the club-O PR body).
-_PINNED_CODE_COMMIT_SHA: Final[str] = "feedfacefeedfacefeedfacefeedfacefeedface"
+#:
+#: RE-MEASURED at the 2026-07-19 DEC-RUST-STAGE3-REFINE-001 (#1960)
+#: merge-forward: the stage-3 optimizer itself changed (pycma DELETED — the
+#: pure-Rust brutex-refine CMA-ES, a NEW deterministic trajectory + the
+#: 32→64-bit seed widening, both greenfield-sanctioned), so the pycma-tuned
+#: ``"feedface"*5`` pin drew a DSR-KILLED pool under the Rust trajectory
+#: (measured: pool 5 at the old shape, variance ~4.2 at fevals=8 — the
+#: Rust sampler's cells straddle the fixture's benign-SL band differently).
+#: The sha was re-searched per the house pattern (fixture UNTOUCHED this
+#: time — the club-O bars stand): ``"deadbeef"*5`` (the ORIGINAL #1798
+#: constant, restored) draws a 6-candidate pool (3 min-hits survivors + 3
+#: unique Rust-refined cells; variance 0.842 measured) with FIVE candidates
+#: through the DSR gate and the ENTIRE statistical cascade exercised —
+#: walk-forward, CPCV, PBO, SPA/reality-check, Romano-Wolf, lockbox AND the
+#: 1000-permutation Monte-Carlo leg (which genuinely KILLS one: 5 → 4 — a
+#: real MC filter event). Alternates measured law-passing under the Rust
+#: trajectory: abad1dea (DSR 3/7) + cafebabe (DSR 4/7); rejected only for
+#: weaker event coverage (no MC kill). At stage3_fevals=4 the pool COUNT is
+#: machine-stable BY CONSTRUCTION: 4 asks < λ0(=6) is a truncated FIRST
+#: generation — the sampled cells depend only on the in-crate PRNG seed +
+#: x0 + sigma0 (no tell feedback), and the crate's trajectory goldens are
+#: platform-reproduced (#1960), so the pycma-era cross-runner bimodality
+#: class does not apply to the CELL SET (Sharpe VALUES still flow through
+#: Python/libm — the law pin below stays the fleet-wide assertion).
+#: Measured first pass 129.0 s uninstrumented on the 4-vCPU sandbox
+#: (MC runs on 5 candidates — heavier than club-O's MC-on-1 ~20 s shape;
+#: ~2.3x margin to the 300 s strict budget, ~7x to the 900 s coverage
+#: allowance; Golden Rule #10).
+_PINNED_CODE_COMMIT_SHA: Final[str] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 
 def _trading_days(start: date, n: int) -> list[date]:
@@ -276,8 +304,12 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
     old 2/8 breadth minted ~22 unique refined (sl, tp) cells whose Sharpe
     dispersion alone held the DSR trial variance >= 2.5 over N=27 — the
     deflation benchmark sqrt(V)*E[max-z] sat above every candidate. 1/4
-    yields a 9-candidate pool (variance 0.788 measured) while stage-3 still
-    genuinely refines (cells_written > 0 — the sibling test's teeth).
+    yields a bounded pool while stage-3 still genuinely refines
+    (cells_written > 0 — the sibling test's teeth). Under pycma that read a
+    9-candidate pool (variance 0.788); under the Rust brutex-refine
+    trajectory (#1960 merge-forward re-measure, sha re-pinned to
+    ``"deadbeef"*5``) it reads a 6-candidate pool (variance 0.842) — see
+    the ``_PINNED_CODE_COMMIT_SHA`` re-measure note.
     """
     from brutex import cli
 
@@ -568,6 +600,23 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     # the pool is NOT DSR-killed and every leg receives + processes >= 1
     # candidate — which BOTH measured shapes satisfy while a DSR-KILLED
     # fast path (the #1798 rot) still fails loud.
+    #
+    # RUST STAGE-3 RE-MEASURE (2026-07-19, the DEC-RUST-STAGE3-REFINE-001
+    # #1960 merge-forward — the optimizer ITSELF changed: pycma deleted, the
+    # pure-Rust brutex-refine CMA-ES + the 64-bit seed widening, both
+    # greenfield-sanctioned): the pycma-tuned "feedface"*5 pin drew a
+    # DSR-killed pool under the Rust trajectory, so the sha was re-searched
+    # per the house pattern (fixture + breadth UNTOUCHED) and re-pinned to
+    # "deadbeef"*5 — see the _PINNED_CODE_COMMIT_SHA re-measure note. The
+    # measured Rust-era shape on this pin: pool 6 (3 min-hits survivors + 3
+    # unique refined cells; trial variance 0.842), DSR passes 5, every mid
+    # leg keeps 5, lockbox keeps 5, and the 1000-permutation MC leg
+    # genuinely KILLS one (5 → 4 — a real MC filter event). At fevals=4 the
+    # CELL SET is a truncated pre-tell first generation of the in-crate
+    # PRNG, so the pool COUNT (6) is machine-stable by construction (the
+    # pycma bimodality root — BLAS/SIMD-sensitive numpy trajectories — is
+    # gone from stage-3); Sharpe VALUES still flow through Python/libm, so
+    # the LAW-pin posture below stays.
     surv = report["groups"][0]["report"]["stage_survivors"]
     _msg = "the pinned seed's full-cascade coverage broke — re-derive consciously (#1798)"
     assert set(surv) == {
@@ -581,9 +630,10 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
         "lockbox",
         "monte_carlo",
     }, _msg
-    # The pool SIZE is trajectory-count-stable (3 min-hits survivors + 6
-    # unique refined cells — 9 in every measured env, both attractors).
-    assert surv["hard_gates"] == 9, _msg
+    # The pool SIZE is trajectory-count-stable (3 min-hits survivors + 3
+    # unique Rust-refined cells — a pre-tell first-generation cell set,
+    # machine-stable by construction; see the re-measure note above).
+    assert surv["hard_gates"] == 6, _msg
     dsr = surv["deflated_sharpe"]
     assert 1 <= dsr <= surv["hard_gates"], _msg  # NOT DSR-killed — the legs run
     for leg in ("walk_forward", "cpcv", "pbo", "reality_check_spa", "romano_wolf"):

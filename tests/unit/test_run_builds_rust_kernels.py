@@ -239,6 +239,25 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
         None,
         ".github/workflows/ci.yml",
     ),
+    # DEC-RUST-STAGE3-REFINE-001 (MIGRATION.md #2055): brutex_refine is the
+    # Stage-3 CMA-ES refinement kernel. Unlike the four default-OFF crates
+    # above it is DEFAULT-ON with NO Python fallback (the pycma oracle is
+    # deleted) — "optional" here means optional FOR BOOT only: it is NEVER
+    # module-top imported (the dashboard-boots-wheel-free law — Mode-A grid
+    # axes validate pure-Python) and is consumed ONLY through the typed-error
+    # facade brutex/engine/refine_rust.py
+    # (`importlib.import_module("brutex_refine")` inside `require_refine_rust`
+    # — an absent wheel raises the loud RefineRustUnavailableError naming the
+    # build step AT CALL TIME, never a silent degrade). It IS additionally in
+    # the turnkey build path (Makefile run-raw + bootstrap.sh step 6a2 —
+    # stage-3 sweeps need it at call time), which this class does not forbid:
+    # the OPTIONAL invariants pinned below are exactly
+    # never-module-top-imported + guarded-facade + own-CI-lane (the
+    # `rust-brutex-refine` job + the wheelhouse install steps in ci.yml).
+    "brutex_refine": (
+        "brutex/engine/refine_rust.py",
+        ".github/workflows/ci.yml",
+    ),
 }
 
 # Facade-less INERT optional kernels: {import_name: reason}. A ``None``

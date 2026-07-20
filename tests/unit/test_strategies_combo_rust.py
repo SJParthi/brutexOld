@@ -736,7 +736,8 @@ class TestMutationWorkflowWiring:
         )
         assert (
             "needs: [python-mutation, rust-mutation, rust-mutation-trading-core, "
-            "rust-mutation-brutex-feed, rust-mutation-brutex-strategies]" in text
+            "rust-mutation-brutex-feed, rust-mutation-brutex-strategies, "
+            "rust-mutation-brutex-refine]" in text
         ), "the mutation-verdict needs: list does not fan in the brutex-strategies job"
 
     def test_verdict_result_clauses_and_issue_step(self) -> None:

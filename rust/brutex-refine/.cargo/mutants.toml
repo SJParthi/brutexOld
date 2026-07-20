@@ -1,0 +1,43 @@
+# DEC-RUST-STAGE3-REFINE-001 — the ONE cargo-mutants scope for brutex-refine,
+# resolved by BOTH the CI job (.github/workflows/mutation.yml,
+# rust-mutation-brutex-refine) and any local `cargo mutants` run from this
+# crate dir (CLAUDE.md §2 Rule 11 COMMON; the trading-core toml precedent).
+#
+# Scope: the six pure cores of the Stage-3 refinement driver —
+#   src/rng.rs    — splitmix64 seeding + xoshiro256++ + the Box-Muller
+#                   normal source (the determinism root; ADR-0007 cond. 5).
+#   src/linalg.rs — the cyclic-Jacobi symmetric eigendecomposition the CMA-ES
+#                   covariance factorization rides.
+#   src/cmaes.rs  — the CMA-ES state machine (Hansen parametrization, ask/
+#                   tell, stop reasons, the truncated-final-generation law).
+#   src/refine.rs — the restart driver (IPOP-lite λ schedule, STRICT budget,
+#                   grid snap, the rejected-tell-leaves-ask-retryable law).
+#   src/grid.rs   — the paisa tick-grid axis (validate/denormalize/normalize
+#                   with the byte-pinned Python error strings).
+#   src/select.rs — the streaming bounded top-K selection core (the
+#                   worse-is-greater ordering + the finish sort law).
+# The in-crate unit matrix + `tests/refine_proptest.rs` invariants +
+# `tests/refine_golden.rs` frozen trajectory are the killing suite;
+# zero-survivor is the standard (DEC-MUTATION-RUNTIME-003).
+#
+# DELIBERATELY OUT (documented, not silent — Golden Rule #10; the
+# trading-core toml sets the disclosure standard):
+#   src/python.rs — the thin PyO3 session/tuple-mapping edge. cargo-mutants
+#                   27.1.0 does not resolve the `PyResult` alias and
+#                   fabricates only non-compiling replacements for
+#                   PyErr-constructing wrappers (the trading-core 229-UNVIABLE
+#                   measurement, restated by the feed twin); the edge is
+#                   exercised end-to-end by the Python wheel suites in ci.yml
+#                   (the refine_rust facade gate + the stage3 unit gates + the
+#                   frozen stage3 refinement golden driven through the REAL
+#                   `refine_mask` wrapper).
+#   src/lib.rs    — module re-exports + the baked SOURCE_DIGEST const only;
+#                   nothing behavioural for cargo-mutants to perturb.
+examine_globs = [
+  "src/rng.rs",
+  "src/linalg.rs",
+  "src/cmaes.rs",
+  "src/refine.rs",
+  "src/grid.rs",
+  "src/select.rs",
+]

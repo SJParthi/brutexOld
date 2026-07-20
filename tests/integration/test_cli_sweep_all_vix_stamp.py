@@ -435,7 +435,7 @@ def test_cmd_sweep_all_relaunch_after_vix_move_warns_and_exits_nonzero(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # cma emits a matplotlib UserWarning at import
-        pytest.importorskip("cma")
+        pytest.importorskip("brutex_refine")
 
     # The LONG fixture: the stage-3 train slice must be non-empty (the 15-day
     # default window sits entirely inside the 182-day lockbox → the pass
