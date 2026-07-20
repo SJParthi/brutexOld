@@ -527,6 +527,12 @@ jobs:
           else
             echo "(brutex.costs test files not present yet — gate inactive)"
           fi
+          # DEC-RESULTS-TOPK-ROLLUP-001: the results_rollup suites are NAMED
+          # onto the test_engine_*.py glob (test_engine_results_rollup.py +
+          # the per-driver hook suites), so the whole-package
+          # --cov=brutex.engine gate collects them via the glob itself —
+          # no static file-list addition needed (the mutation.yml mutmut
+          # pair is repointed at the renamed file in the same change).
           # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): the
           # whole-package --cov=brutex.engine gate must also run the
           # losing-streak resilience suites — brutex/engine/resilience_streaks.py
@@ -1458,9 +1464,13 @@ jobs:
           # recovery by run-id match, the audited refinement post-pass, the
           # refined-cell cascade specs + manifest record, and the F11 A/B
           # byte-identical-tree determinism oracle — needs the [optimize]
-          # extra installed in this job).
+          # extra installed in this job). The stem-matched Hook-A seam suite
+          # (test_engine_stage3_wire_rollup_hook.py, DEC-RESULTS-TOPK-ROLLUP-001)
+          # joins the stanza's file list — it carries the rollup_paths_hook
+          # fire-arm coverage the discovery gate's stem family already
+          # collects (the #1913/#1719 stanza-extension precedent).
           if compgen -G "tests/unit/test_engine_stage3_wire.py" > /dev/null; then
-            pytest --cov=brutex.engine.stage3_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_wire.py
+            pytest --cov=brutex.engine.stage3_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_wire.py tests/unit/test_engine_stage3_wire_rollup_hook.py
           else
             echo "(brutex.engine.stage3_wire test file not present yet — gate inactive)"
           fi
@@ -2765,6 +2775,23 @@ jobs:
             pytest --cov=brutex.engine.sweep_run_core --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_run_core.py
           else
             echo "(brutex.engine.sweep_run_core test file not present yet — gate inactive)"
+          fi
+          # DEC-RESULTS-TOPK-ROLLUP-001 (MIGRATION.md #1732): the persisted
+          # /results top-K rollup — the union-superset trim, the V1-V5 serve
+          # ladder, the fenced merge hook + the AuditCursor tail resume.
+          # 100% line+branch on results_rollup.py from its dedicated suite.
+          if compgen -G "tests/unit/test_engine_results_rollup.py" > /dev/null; then
+            pytest --cov=brutex.engine.results_rollup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_rollup.py
+          else
+            echo "(brutex.engine.results_rollup test file not present yet — gate inactive)"
+          fi
+          # The COMMON LogGate leaf (the PR #1436 CodeQL cycle fix) ships at
+          # 100% line+branch from its OWN dedicated import-verified suite
+          # (the coverage_gate_discovery NEW-module law — the CI-red fix round).
+          if compgen -G "tests/unit/test_observability_log_gate.py" > /dev/null; then
+            pytest --cov=brutex.observability.log_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_log_gate.py
+          else
+            echo "(brutex.observability.log_gate test file not present yet — gate inactive)"
           fi
           # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the pure /results temporal-drill
           # serve logic — run_id validation (hostile values disk-free 400),

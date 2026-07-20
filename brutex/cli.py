@@ -9401,6 +9401,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                                 "params": launch_params,
                             },
                         )
+                # ── /results rollup Hook A (DEC-RESULTS-TOPK-ROLLUP-001) ──
+                # ONE launch-scoped merge hook shared by the grid drivers (per
+                # completed tuple) + the Stage-3 pass (once per pass). Internally
+                # FENCED at BLOCKER-1 strength: any merge failure latches merging
+                # OFF for this launch + stamps conflict_suspect and NEVER raises
+                # into the grid; the run-end Hook B below restores exactness.
+                from brutex.engine.results_rollup import RollupMergeHook
+
+                rollup_hook = RollupMergeHook(sweeps_root=out_root, grid=grid)
                 dedup = plan_launch_dedup(grid, digest_path=True)
                 guards = SweepGuards(
                     audit=sup_audit,
@@ -9461,6 +9470,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         on_quarantine=core.record_worker_quarantine,
                         roll_schedule_by_instrument=roll_schedule_by_instrument,
                         reference_stamper=reference_stamper,
+                        rollup_hook=rollup_hook.merge_tuple,
                     )
                     # Fold reconcile (#1445 G3 exact-count law ⇄ the
                     # DEC-JOB-COOPERATIVE-CANCEL-001 file bridge): the parallel
@@ -9489,6 +9499,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         store_quarantine=core.store_quarantine,
                         roll_schedule_by_instrument=roll_schedule_by_instrument,
                         reference_stamper=reference_stamper,
+                        rollup_hook=rollup_hook.merge_tuple,
                     )
                 core.grid_done(result)
                 # ── COOPERATIVE cancel verdict (DEC-JOB-COOPERATIVE-CANCEL-001) ──
@@ -9547,6 +9558,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         # read); resolved lazily by the pass so a stage3-disabled
                         # grid pays nothing extra.
                         stamper_for=lambda: reference_stamper,
+                        # Hook A, stage-3 arm (DEC-RESULTS-TOPK-ROLLUP-001): one
+                        # fenced rollup merge per pass over the flushed cell stores.
+                        rollup_paths_hook=rollup_hook.merge_paths,
                     )
                 )
             # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
@@ -9836,6 +9850,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             import structlog
 
             deliver_summary_safe(on_summary, result, log=structlog.get_logger("brutex.sweep"))
+            # ── /results rollup Hook B (DEC-RESULTS-TOPK-ROLLUP-001) ──
+            # ONE full legacy-loader reconcile at run end — the exactness anchor:
+            # clears conflict_suspect, restores total_rows_exact + the legacy
+            # first-wins row content, and folds anything Hook A missed (a latched
+            # fence, Stage-3 cells, a pre-rollup history). O(stores × rows) ONCE
+            # per run (logged, never hidden). Fenced like the results-depth
+            # adapter above — a rollup failure NEVER fails the sweep.
+            _run_results_rollup_reconcile(out_root=out_root)
             # Orphan-sidecar sweep at NORMAL run end (fix round 4): a cancel request
             # arriving AFTER the last between-pass probe is unobservable by this run
             # (cooperative — a running pass is never interrupted); previously it
@@ -12612,6 +12634,61 @@ def _run_results_depth_adapter(
         )
     _print_resilience_lines(out_root=out_root, grid=grid, report=report)
     return True
+
+
+def _run_results_rollup_reconcile(
+    *,
+    out_root: Path,
+    rebuild: Callable[[Path], bool] | None = None,
+) -> bool:
+    """The fenced run-end ``/results`` rollup reconcile (DEC-RESULTS-TOPK-ROLLUP-001, Hook B).
+
+    ONE full fold through the legacy loader
+    (:func:`brutex.engine.results_rollup.rebuild_rollup` →
+    ``load_sweep_scan_tree`` verbatim) + a rollup write — the exactness
+    anchor after a launch's incremental Hook-A merges (restores
+    ``total_rows_exact`` / ``run_id_conflicts`` / the legacy first-wins row
+    content and clears ``conflict_suspect``, including after a latched
+    BLOCKER-1 fence).
+
+    The fence mirrors ``_run_results_depth_adapter``: a failure prints LOUD
+    on stderr + logs ``cli.results_rollup.failed`` and NEVER changes the
+    sweep's exit path (the rollup is a display artifact — /results falls
+    back to the byte-identical legacy scan + the serve-side Hook-C rebuild);
+    ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` always re-raise
+    raw. Returns ``True`` iff a rollup was written (``False`` covers both
+    the fenced failure and the honest zero-store skip).
+
+    ``rebuild`` is an injection seam for tests; ``None`` runs the real
+    :func:`brutex.engine.results_rollup.rebuild_rollup`.
+    """
+    import structlog
+
+    from brutex.engine.results_rollup import rebuild_rollup
+
+    runner = rebuild_rollup if rebuild is None else rebuild
+    try:
+        written = runner(out_root)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        print(
+            f"[brutex] WARNING: /results rollup reconcile FAILED "
+            f"({type(exc).__name__}: {exc}) — the sweep itself SUCCEEDED; /results serves "
+            "the legacy scan and rebuilds the rollup on its next poll (Hook C).",
+            file=sys.stderr,
+        )
+        structlog.get_logger("brutex.cli").error(
+            "cli.results_rollup.failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    print(
+        f"[brutex] results-rollup — "
+        f"{'reconciled (topk.parquet + stamp refreshed)' if written else 'skipped (no stores)'}"
+    )
+    return written
 
 
 # ════ END P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001) ════
