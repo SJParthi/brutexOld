@@ -49,6 +49,47 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-1",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1
+    },
+    "n_trades": 41,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-05T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-05T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 18.0,
@@ -114,6 +155,51 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-2",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1
+    },
+    "n_trades": 42,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      41
+     ],
+     "2025": [
+      1,
+      1
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-11T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-11T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -181,6 +267,52 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-3",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1
+    },
+    "n_trades": 43,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      2
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-14T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-14T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 19.0,
@@ -246,6 +378,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-4",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2
+    },
+    "n_trades": 44,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      3
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W03",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-20T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-20T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -313,6 +491,52 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-5",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2
+    },
+    "n_trades": 45,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      4
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-23T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-23T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 20.0,
@@ -378,6 +602,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-6",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 1
+    },
+    "n_trades": 46,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      5
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-29T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-29T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -445,6 +716,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-7",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2
+    },
+    "n_trades": 47,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      6
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-01T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-01T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 17.5,
@@ -510,6 +828,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-8",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2
+    },
+    "n_trades": 48,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      7
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-07T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-07T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -577,6 +942,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-9",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2
+    },
+    "n_trades": 49,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      8
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-10T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-10T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 18.5,
@@ -642,6 +1054,54 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-10",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 50,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      9
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-16T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-16T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -709,6 +1169,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-11",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 51,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      10
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-19T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-19T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 19.5,
@@ -774,6 +1282,55 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-12",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1
+    },
+    "n_trades": 52,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      11
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-25T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-25T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -841,6 +1398,55 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-13",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1
+    },
+    "n_trades": 53,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      12
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-02T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-02T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 20.5,
@@ -906,6 +1512,55 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-14",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 2,
+     "2025-04": 1
+    },
+    "n_trades": 54,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      13
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-05T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-05T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -973,6 +1628,55 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-15",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2,
+     "2025-04": 1
+    },
+    "n_trades": 55,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      41
+     ],
+     "2025": [
+      7,
+      14
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-11T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-11T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 18.0,
@@ -1038,6 +1742,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-16",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2,
+     "2025-05": 1
+    },
+    "n_trades": 56,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      15
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-14T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-14T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -1105,6 +1859,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-17",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1,
+     "2025-05": 2
+    },
+    "n_trades": 57,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      16
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W03",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-20T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-20T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 19.0,
@@ -1170,6 +1974,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-18",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 2,
+     "2025-04": 1,
+     "2025-05": 2
+    },
+    "n_trades": 58,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      17
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-23T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-23T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -1237,6 +2091,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-19",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2,
+     "2025-04": 1,
+     "2025-05": 2
+    },
+    "n_trades": 59,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      18
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-29T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-29T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 20.0,
@@ -1302,6 +2206,47 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-20",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 18,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 1
+    },
+    "n_trades": 40,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      40
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-01T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-01T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -1369,6 +2314,47 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-21",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2
+    },
+    "n_trades": 41,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-07T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-07T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 17.5,
@@ -1434,6 +2420,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-22",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1
+    },
+    "n_trades": 42,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      0,
+      1
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-10T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-10T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -1501,6 +2533,52 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-23",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1
+    },
+    "n_trades": 43,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      2
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-16T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-16T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 18.5,
@@ -1566,6 +2644,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-24",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1
+    },
+    "n_trades": 44,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      3
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-19T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-19T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -1633,6 +2757,52 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-25",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1
+    },
+    "n_trades": 45,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      4
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-25T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-25T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 19.5,
@@ -1698,6 +2868,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-26",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1
+    },
+    "n_trades": 46,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      5
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-02T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-02T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -1765,6 +2982,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-27",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1
+    },
+    "n_trades": 47,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      6
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-05T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-05T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 20.5,
@@ -1830,6 +3094,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-28",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2
+    },
+    "n_trades": 48,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      41
+     ],
+     "2025": [
+      4,
+      7
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-11T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-11T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -1897,6 +3208,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-29",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2
+    },
+    "n_trades": 49,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      8
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-14T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-14T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 18.0,
@@ -1962,6 +3320,54 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-30",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 50,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      9
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W03",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-20T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-20T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -2029,6 +3435,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-31",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 2
+    },
+    "n_trades": 51,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      10
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-23T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-23T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 19.0,
@@ -2094,6 +3548,54 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-32",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2
+    },
+    "n_trades": 52,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      11
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-29T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-29T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -2161,6 +3663,55 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-33",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1
+    },
+    "n_trades": 53,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      12
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-01T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-01T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 20.0,
@@ -2226,6 +3777,55 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-34",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2
+    },
+    "n_trades": 54,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      13
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-07T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-07T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -2293,6 +3893,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-35",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1,
+     "2025-05": 1
+    },
+    "n_trades": 55,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      14
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-10T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-10T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 17.5,
@@ -2358,6 +4008,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-36",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2,
+     "2025-04": 1,
+     "2025-05": 1
+    },
+    "n_trades": 56,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      15
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-16T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-16T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -2425,6 +4125,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-37",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2,
+     "2025-05": 1
+    },
+    "n_trades": 57,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      16
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-19T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-19T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 18.5,
@@ -2490,6 +4240,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-38",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2,
+     "2025-05": 1
+    },
+    "n_trades": 58,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      17
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-25T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-25T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -2557,6 +4357,57 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-39",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 28,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1,
+     "2025-05": 2,
+     "2025-06": 1
+    },
+    "n_trades": 59,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      18
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-02T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-02T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 19.5,
@@ -2622,6 +4473,47 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-40",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1
+    },
+    "n_trades": 40,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      40
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-05T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-05T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -2689,6 +4581,47 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-41",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1
+    },
+    "n_trades": 41,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      41
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-11T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-11T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 20.5,
@@ -2754,6 +4687,51 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-42",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2
+    },
+    "n_trades": 42,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      1
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-14T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-14T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -2821,6 +4799,52 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-43",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1
+    },
+    "n_trades": 43,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      2
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W03",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-20T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-20T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 18.0,
@@ -2886,6 +4910,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-44",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2
+    },
+    "n_trades": 44,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      3
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-23T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-23T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -2953,6 +5023,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-45",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 1
+    },
+    "n_trades": 45,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      4
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-29T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-29T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 19.0,
@@ -3018,6 +5135,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-46",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 1
+    },
+    "n_trades": 46,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      5
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-01T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-01T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -3085,6 +5249,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-47",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 1
+    },
+    "n_trades": 47,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      6
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-07T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-07T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 20.0,
@@ -3150,6 +5361,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-48",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2
+    },
+    "n_trades": 48,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      7
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-10T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-10T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -3217,6 +5475,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-49",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 49,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      8
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-16T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-16T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 17.5,
@@ -3282,6 +5588,54 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-50",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 50,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      9
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-19T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-19T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -3349,6 +5703,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-51",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 51,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      10
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-25T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-25T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 18.5,
@@ -3414,6 +5816,54 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-52",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 52,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      11
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-02T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-02T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -3481,6 +5931,55 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-53",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 2,
+     "2025-04": 1
+    },
+    "n_trades": 53,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      12
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-05T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-05T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 19.5,
@@ -3546,6 +6045,55 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-54",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2,
+     "2025-04": 1
+    },
+    "n_trades": 54,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      41
+     ],
+     "2025": [
+      6,
+      13
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-11T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-11T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -3613,6 +6161,55 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-55",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2
+    },
+    "n_trades": 55,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      14
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-14T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-14T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 20.5,
@@ -3678,6 +6275,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-56",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1,
+     "2025-05": 1
+    },
+    "n_trades": 56,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      15
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W03",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-20T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-20T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -3745,6 +6392,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-57",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 2,
+     "2025-04": 1,
+     "2025-05": 2
+    },
+    "n_trades": 57,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      16
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-23T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-23T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 18.0,
@@ -3810,6 +6507,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-58",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2,
+     "2025-04": 1,
+     "2025-05": 2
+    },
+    "n_trades": 58,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      17
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-29T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-29T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -3877,6 +6624,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-59",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2,
+     "2025-05": 2
+    },
+    "n_trades": 59,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      9,
+      18
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-01T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-01T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 19.0,
@@ -3942,6 +6739,47 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-60",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 18,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1
+    },
+    "n_trades": 40,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      40
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-07T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-07T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -4009,6 +6847,47 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-61",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1
+    },
+    "n_trades": 41,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-10T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-10T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 20.0,
@@ -4074,6 +6953,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-62",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1
+    },
+    "n_trades": 42,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      0,
+      1
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-16T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-16T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -4141,6 +7066,52 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-63",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1
+    },
+    "n_trades": 43,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      2
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-19T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-19T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 17.5,
@@ -4206,6 +7177,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-64",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1
+    },
+    "n_trades": 44,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      3
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-25T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-25T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -4273,6 +7290,52 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-65",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2
+    },
+    "n_trades": 45,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      4
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-02T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-02T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 18.5,
@@ -4338,6 +7401,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-66",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2
+    },
+    "n_trades": 46,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      5
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-05T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-05T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -4405,6 +7514,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-67",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2
+    },
+    "n_trades": 47,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      41
+     ],
+     "2025": [
+      3,
+      6
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-11T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-11T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 19.5,
@@ -4470,6 +7626,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-68",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2
+    },
+    "n_trades": 48,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      7
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-14T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-14T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -4537,6 +7740,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-69",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2
+    },
+    "n_trades": 49,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      8
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W03",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-20T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-20T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 20.5,
@@ -4602,6 +7852,54 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-70",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 1
+    },
+    "n_trades": 50,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      9
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-23T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-23T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -4669,6 +7967,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-71",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2
+    },
+    "n_trades": 51,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      10
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-29T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-29T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 18.0,
@@ -4734,6 +8080,55 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-72",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1
+    },
+    "n_trades": 52,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      11
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-01T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-01T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -4801,6 +8196,55 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-73",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1
+    },
+    "n_trades": 53,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      12
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-07T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-07T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 19.0,
@@ -4866,6 +8310,55 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-74",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1
+    },
+    "n_trades": 54,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      13
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-10T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-10T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -4933,6 +8426,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-75",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2,
+     "2025-04": 1,
+     "2025-05": 1
+    },
+    "n_trades": 55,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      14
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-16T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-16T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 20.0,
@@ -4998,6 +8541,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-76",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2,
+     "2025-05": 1
+    },
+    "n_trades": 56,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      15
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-19T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-19T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -5065,6 +8658,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-77",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2,
+     "2025-05": 1
+    },
+    "n_trades": 57,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      16
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-25T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-25T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 17.5,
@@ -5130,6 +8773,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-78",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1,
+     "2025-05": 2
+    },
+    "n_trades": 58,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      17
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-02T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-02T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -5197,6 +8890,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-79",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 2,
+     "2025-04": 1,
+     "2025-05": 2
+    },
+    "n_trades": 59,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      18
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-05T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-05T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 18.5,
@@ -5262,6 +9005,46 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-80",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 18,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 2
+    },
+    "n_trades": 40,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      40
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-11T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-11T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -5329,6 +9112,47 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-81",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2
+    },
+    "n_trades": 41,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-14T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-14T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 19.5,
@@ -5394,6 +9218,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-82",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1
+    },
+    "n_trades": 42,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      0,
+      1
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W03",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-20T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-20T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -5461,6 +9331,52 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-83",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1
+    },
+    "n_trades": 43,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      2
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-23T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-23T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 20.5,
@@ -5526,6 +9442,52 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-84",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 20,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1
+    },
+    "n_trades": 44,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      1,
+      3
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-29T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-29T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -5593,6 +9555,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-85",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 1
+    },
+    "n_trades": 45,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      4
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-01T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-01T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 18.0,
@@ -5658,6 +9667,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-86",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 21,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 1
+    },
+    "n_trades": 46,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      2,
+      5
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-07T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-07T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -5725,6 +9781,53 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-87",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1
+    },
+    "n_trades": 47,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      6
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-10T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-10T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 19.0,
@@ -5790,6 +9893,53 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-88",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 22,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 1,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2
+    },
+    "n_trades": 48,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      3,
+      7
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-16T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-16T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -5857,6 +10007,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-89",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 49,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      8
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-19T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-19T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 20.0,
@@ -5922,6 +10120,54 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-90",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 23,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 50,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      4,
+      9
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-25T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-25T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -5989,6 +10235,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-91",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1
+    },
+    "n_trades": 51,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      10
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-02T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-02T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 17.5,
@@ -6054,6 +10348,54 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-92",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 2
+    },
+    "n_trades": 52,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      5,
+      11
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-05T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-05T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -6121,6 +10463,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-93",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 24,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 2,
+     "2024-04": 1,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 2
+    },
+    "n_trades": 53,
+    "stats_live": true,
+    "still_underwater_at_end": false,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      41
+     ],
+     "2025": [
+      6,
+      12
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-11T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-11T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 18.5,
@@ -6186,6 +10576,55 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-94",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 1,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2
+    },
+    "n_trades": 54,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      13
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-14T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-14T09:15:00+00:00"
    },
    "tf": "5m",
    "vix_band": {
@@ -6253,6 +10692,56 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-95",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 25,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 1,
+     "2025-05": 1
+    },
+    "n_trades": 55,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      6,
+      14
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W03",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-01-20T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-01-20T09:15:00+00:00"
+   },
    "tf": "15m",
    "vix_band": {
     "hi": 19.5,
@@ -6318,6 +10807,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-96",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 26,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1,
+     "2025-01": 2,
+     "2025-02": 1,
+     "2025-03": 2,
+     "2025-04": 1,
+     "2025-05": 1
+    },
+    "n_trades": 56,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      7,
+      15
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-03-23T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-03-23T09:15:00+00:00"
    },
    "tf": "1h",
    "vix_band": {
@@ -6385,6 +10924,29 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-97",
+    "longest_underwater_days": null,
+    "longest_underwater_trades": null,
+    "losing_streak_count": null,
+    "losing_streak_p50": null,
+    "losing_streak_p95": null,
+    "losses_by_month": {},
+    "n_trades": 0,
+    "stats_live": false,
+    "still_underwater_at_end": null,
+    "win_rate_by_year": {},
+    "win_rate_year_spread": null,
+    "worst_loss_month": null,
+    "worst_loss_month_count": null,
+    "worst_loss_week": null,
+    "worst_loss_week_count": null,
+    "worst_streak_end": null,
+    "worst_streak_len": null,
+    "worst_streak_pnl_paisa": null,
+    "worst_streak_pnl_pct": null,
+    "worst_streak_start": null
+   },
    "tf": "5m",
    "vix_band": {
     "hi": 20.5,
@@ -6450,6 +11012,56 @@
     },
     "one_regime_wonder": false,
     "regime_wonder_axis": null
+   },
+   "resilience": {
+    "fingerprint": "fp-98",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 1,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 2,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 2,
+     "2024-11": 1,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2,
+     "2025-05": 2
+    },
+    "n_trades": 58,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      17
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-01T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-01T09:15:00+00:00"
    },
    "tf": "15m",
    "vix_band": {
@@ -6517,6 +11129,57 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-99",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 27,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 1,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 2,
+     "2024-08": 1,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 2,
+     "2025-01": 1,
+     "2025-02": 2,
+     "2025-03": 1,
+     "2025-04": 2,
+     "2025-05": 1,
+     "2025-06": 1
+    },
+    "n_trades": 59,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      19,
+      41
+     ],
+     "2025": [
+      8,
+      18
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-02",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W02",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-02-07T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-02-07T09:15:00+00:00"
+   },
    "tf": "1h",
    "vix_band": {
     "hi": 18.0,
@@ -6583,13 +11246,54 @@
     "one_regime_wonder": false,
     "regime_wonder_axis": null
    },
+   "resilience": {
+    "fingerprint": "fp-100",
+    "longest_underwater_days": 99,
+    "longest_underwater_trades": 11,
+    "losing_streak_count": 19,
+    "losing_streak_p50": 1,
+    "losing_streak_p95": 1,
+    "losses_by_month": {
+     "2024-01": 2,
+     "2024-02": 2,
+     "2024-03": 1,
+     "2024-04": 2,
+     "2024-05": 1,
+     "2024-06": 2,
+     "2024-07": 1,
+     "2024-08": 2,
+     "2024-09": 2,
+     "2024-10": 1,
+     "2024-11": 2,
+     "2024-12": 1
+    },
+    "n_trades": 40,
+    "stats_live": true,
+    "still_underwater_at_end": true,
+    "win_rate_by_year": {
+     "2024": [
+      18,
+      40
+     ]
+    },
+    "win_rate_year_spread": null,
+    "worst_loss_month": "2024-01",
+    "worst_loss_month_count": 2,
+    "worst_loss_week": "2024-W01",
+    "worst_loss_week_count": 1,
+    "worst_streak_end": "2024-04-10T09:15:00+00:00",
+    "worst_streak_len": 1,
+    "worst_streak_pnl_paisa": -3000,
+    "worst_streak_pnl_pct": -0.3,
+    "worst_streak_start": "2024-04-10T09:15:00+00:00"
+   },
    "tf": "5m",
    "vix_band": null
   }
  ],
  "preset": "min_dd_first",
  "run_id": "r-20260707-fixt01",
- "schema_version": 1,
+ "schema_version": 2,
  "source": {
   "data_snapshot_hashes": [
    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"

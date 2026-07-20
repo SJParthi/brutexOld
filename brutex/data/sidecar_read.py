@@ -23,11 +23,77 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG, filemode
+from typing import IO
 
 __all__ = [
+    "NotRegularFileError",
     "SidecarReadResult",
+    "open_regular_binary",
+    "read_regular_bytes",
     "read_sidecar_bytes",
 ]
+
+
+class NotRegularFileError(OSError):
+    """A read path resolved to a NON-regular inode (FIFO / device / socket / dir).
+
+    DEC-LAKE-READ-INODE-GUARD-001: raised by :func:`open_regular_binary` /
+    :func:`read_regular_bytes` when the ``S_ISREG`` check on the OPEN
+    descriptor fails. Deliberately an :class:`OSError` subclass so it folds
+    into every existing unreadable-file degrade set (the data layer's
+    ``parquet_read_skip_errors()`` carries ``OSError``; the route readers'
+    ``except OSError`` corrupt arms catch it too) — a planted FIFO reads as
+    ONE loud, counted skip / typed refusal, never a hang, never a silent pass.
+    """
+
+
+def open_regular_binary(path: Path | str) -> IO[bytes]:
+    """Open *path* for binary reading — regular-file-only, fd-validated, may raise.
+
+    DEC-LAKE-READ-INODE-GUARD-001: the fd-level guard the JSON sidecar loader
+    (:func:`read_sidecar_bytes`) has carried since #1614/#1779, exposed for
+    the LAKE parquet / route byte readers that need an OPEN FILE OBJECT (or an
+    unbounded read) instead of a capped bytes result. ``os.open(path,
+    O_RDONLY | O_NONBLOCK)`` — a plain ``open``/``read_bytes`` on a FIFO
+    blocks for a writer FOREVER (the open itself blocks) and a ``/dev/zero``
+    char-device symlink streams infinite zeros (its ``st_size`` reads 0, so a
+    size cap is NO defence) — then ``S_ISREG`` on ``os.fstat(fd)`` of the
+    SAME descriptor (never a pre-open ``stat()`` — that is a TOCTOU window:
+    the validated inode IS the one read). A non-regular inode raises
+    :class:`NotRegularFileError` (an ``OSError``); every other open fault
+    raises its ordinary ``OSError`` (``FileNotFoundError`` for absent paths
+    and dangling symlinks included). On success the returned reader OWNS the
+    descriptor (``os.fdopen`` — closed by the caller's ``with``/``close``);
+    ``O_NONBLOCK`` is inert for reads on a regular file (POSIX), so the
+    returned handle behaves exactly like ``open(path, "rb")``.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    owned = True
+    try:
+        st = os.fstat(fd)
+        if not S_ISREG(st.st_mode):
+            raise NotRegularFileError(f"not a regular file ({filemode(st.st_mode)}): {path}")
+        handle = os.fdopen(fd, "rb")
+        owned = False
+    finally:
+        if owned:
+            os.close(fd)
+    return handle
+
+
+def read_regular_bytes(path: Path | str) -> bytes:
+    """Read *path*'s full bytes — regular-file-only, fd-validated, may raise.
+
+    The whole-bytes convenience over :func:`open_regular_binary` for the lake
+    writers' read-modify-write legs + the catalog reconcile (which need the
+    complete file for sha256 / BytesIO parses). Same error contract: a
+    non-regular inode raises :class:`NotRegularFileError`; any other fault
+    raises its ordinary ``OSError``. Deliberately UNCAPPED — once ``S_ISREG``
+    passes, the inode cannot stream forever; callers with a size-cap contract
+    use :func:`read_sidecar_bytes` instead.
+    """
+    with open_regular_binary(path) as handle:
+        return handle.read()
 
 
 @dataclass(frozen=True, slots=True)

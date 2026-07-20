@@ -74,6 +74,7 @@
 <script defer src="/static/bx-ui.js"></script>
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
+<script defer src="/static/bx-format.js"></script>
 <script defer src="/static/bx-screener.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
 <script defer src="/static/bx-portal-state.js"></script>
@@ -125,6 +126,10 @@
       <input id="scMinWin" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scMinPf">Min PF</label>
       <input id="scMinPf" type="number" step="any" placeholder="any"></div>
+    <div class="ctl"><label for="scMinTrades">Min trades</label>
+      <input id="scMinTrades" type="number" step="1" placeholder="any"></div>
+    <div class="ctl"><label for="scMinDsr" title="floors the stored per-tuple DSR (tuple-N — an inflating under-count; DEC-RESULTS-TRUST-HONESTY-001)">Min DSR (tuple-N)</label>
+      <input id="scMinDsr" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scMaxDd">Max |DD| (paisa)</label>
       <input id="scMaxDd" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scVixLo">VIX band ≥</label>

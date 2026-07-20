@@ -37,14 +37,14 @@ SubscribeTopGainersLosers : Returns data of top N gainers and losers for request
 
 ```javascript
 function SubscribeTopGainersLosers()
-{	
-     var request = 	 
+{
+     var request =
 		{
 			MessageType: "SubscribeTopGainersLosers",
-			Exchange: "NFO",	
-			Series:"EQ",	
-			Count: 10,                     		
-		        //Unsubscribe: false                  
+			Exchange: "NFO",
+			Series:"EQ",
+			Count: 10,
+		        //Unsubscribe: false
 		};
      doSend(request);
 }
@@ -81,12 +81,12 @@ GetTopGainersLosers : Returns data of top N gainers and losers for requested und
 
 ```javascript
 function GetTopGainersLosers()
-{	
-     var request = 	 
+{
+     var request =
 		{
 			MessageType: "GetTopGainersLosers",
-			Exchange: "NFO",					
-			Count: 10                 
+			Exchange: "NFO",
+			Count: 10
 		};
      doSend(request);
 }
@@ -124,7 +124,7 @@ function GetTopGainersLosers()
 ```javascript
 function GetVolumeShockers()
 {
-var request = 	 
+var request =
 	{
 	MessageType: "GetVolumeShockers",
 	Exchange: "NSE",

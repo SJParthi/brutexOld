@@ -507,10 +507,10 @@ jobs:
             "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py:" \
             "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py:" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
-            "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/data/lake_rust_locks.py:tests/unit/test_lake_rust_locks.py:" \
             "brutex/data/lake_rust_stats.py:tests/unit/test_lake_rust_stats.py:" \
+            "brutex/data/frame_write_gate.py:tests/unit/test_frame_write_gate.py:" \
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/data/stat_deadline.py:tests/unit/test_stat_deadline.py:" \
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \
@@ -528,6 +528,10 @@ jobs:
             "brutex/nightly/box_update.py:tests/unit/test_nightly_box_update.py:" \
             "brutex/nightly/env_preflight.py:tests/unit/test_nightly_env_preflight.py:" \
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
+            "brutex/acceptance/model.py:tests/unit/test_acceptance_model.py:" \
+            "brutex/acceptance/sampling.py:tests/unit/test_acceptance_sampling.py:" \
+            "brutex/acceptance/independent.py:tests/unit/test_acceptance_independent.py:" \
+            "brutex/acceptance/report.py:tests/unit/test_acceptance_report.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \

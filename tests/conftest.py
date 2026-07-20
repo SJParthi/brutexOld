@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
+from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 from typing import Any
 
 import pytest
+import structlog
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
 from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
@@ -280,6 +283,74 @@ def _inert_sweep_logging_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _lake_heal_sweep_daemon_belt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No-op the dashboard-boot lake-heal sweep DAEMON launcher for every test.
+
+    The #1654-surfaced shard-2 doctest flake (PR #1666, CI jobs 88186693408 +
+    88192989598 — twice consecutively): tests that drive the REAL
+    ``cli.cmd_dashboard`` (six files stubbed the sibling launchers but not
+    this one — e.g. ``test_cli_serve_heartbeat_keepawake.py``) spawned a real
+    ``StartupSweeper`` daemon thread (``brutex-lake-heal-sweep``, via
+    ``cli._start_lake_heal_sweep``) that outlives its test un-joined. When it
+    later logs ``lake.invariant.scan_complete`` / ``lake_heal.sweep_complete``
+    via UNCONFIGURED structlog (default ``PrintLogger`` → the CURRENT
+    ``sys.stdout``), the lines land in whatever capture a LATER test has
+    installed — in shard 2 that was the ``combo_mask`` doctest's swapped-in
+    stdout buffer, turning ``bits_to_mask()``'s expected ``0`` into
+    ``<log line>\\n0``. #1654's test-file deletes reshuffled the round-robin
+    shard partition (``scripts/ci/shard_tests.py``) so the spawner and the
+    doctest gate first became shard neighbours there; the leak itself is
+    order-dependent, so this belt kills it suite-wide at the ONE spawn point
+    (Golden Rule #11 — instead of a seventh per-file stub copy).
+
+    The launcher body is ``# pragma: no cover`` glue; its WIRING tests
+    (``test_cli_run.py``) monkeypatch their own recorder/boom over this stub —
+    a test-level ``monkeypatch.setattr`` overrides the belt, exactly like the
+    AWS belt above. The sweeper's real behaviour stays covered by
+    ``test_lake_heal.py`` (``run_sync`` + the ``spawn`` seam) and
+    ``test_dashboard_lake_uniqueness.py``. Honest envelope: patched iff
+    ``brutex.cli`` is already imported at test setup (every current
+    ``cmd_dashboard`` caller imports it at module scope; the conditional keeps
+    the redteam python-only lane — which never imports cli — import-free, the
+    ``_isolate_run_forensics_mirror`` discipline).
+    """
+    cli_module = sys.modules.get("brutex.cli")
+    if cli_module is not None:
+        # No hasattr guard: a renamed launcher must fail LOUDLY here, not
+        # silently revive the daemon-leak class.
+        monkeypatch.setattr(cli_module, "_start_lake_heal_sweep", lambda *args, **kwargs: None)
+
+
+@pytest.fixture
+def _doctest_structlog_stderr() -> Iterator[None]:
+    """Route structlog's default sink to STDERR for a doctest-running test.
+
+    The doctest gates (``test_combo_mask_doctests.py`` +
+    ``test_all_brutex_doctests.py``) execute examples under
+    ``doctest.testmod``, which swaps ``sys.stdout`` for its capture buffer —
+    so ANY background thread logging via unconfigured structlog (default
+    ``PrintLogger`` writes to the current ``sys.stdout``) contaminates the
+    example's ``Got:`` output (the PR #1666 shard-2 flake; the
+    ``_lake_heal_sweep_daemon_belt`` above kills the known spawner, this
+    fixture makes the gates immune to the whole class). SINK-level only —
+    ``logger_factory`` → a ``PrintLoggerFactory`` bound to the ``sys.stderr``
+    OBJECT captured here (doctest never touches stderr); processors, levels
+    and event payloads are untouched (the #1630 sink-level posture), and the
+    prior configuration is snapshot/restored (the ``capture_logs`` idiom).
+    Honest envelope: a logger already CACHED under
+    ``cache_logger_on_first_use=True`` by an earlier explicit configure would
+    bypass the swap — no suite configuration does that (structlog's default
+    is uncached lazy proxies, re-resolved per call).
+    """
+    saved = structlog.get_config()
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(sys.stderr))
+    try:
+        yield
+    finally:
+        structlog.configure(**saved)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_groww_token_cache(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -323,6 +394,49 @@ def _isolate_run_forensics_mirror(
     # tests/unit/test_run_layout.py (a wheels-present suite).
     mirror = tmp_path_factory.mktemp("run-forensics-mirror")
     monkeypatch.setenv("BRUTEX_RUN_MIRROR_ROOT", str(mirror))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sweep_apriori_env() -> Iterator[None]:
+    """Snapshot-restore ``BRUTEX_SWEEP_APRIORI`` around every test so the
+    extinction default never leaks between tests in the one pytest process.
+
+    DEC-SWEEP-APRIORI-DEFAULT-001: the CLI sweep dispatch (``cmd_sweep_all`` /
+    the ``exploration`` ladder in ``brutex/cli.py``) writes
+    ``os.environ["BRUTEX_SWEEP_APRIORI"] = "1"`` with a RAW assignment (not
+    ``monkeypatch``) so spawn workers inherit the pruned path. In a real CLI
+    invocation the process exits and nothing leaks; but the suite drives that
+    dispatch IN-PROCESS, and the raw write is invisible to a test's own
+    ``monkeypatch`` teardown — so without this guard the flag leaks into every
+    later test in the same process and silently engages the Apriori frontier
+    (reproduced: the ``test_engine_sweep_run`` / ``test_engine_sweep_parallel`` /
+    ``test_engine_sweep_run_core`` census + the ``test_sweep_runcore_byte_identity``
+    goldens diverge — 12 order-dependent failures in the full-suite coverage
+    gate, all green in isolation). This is the harness twin of the dashboard's
+    own snapshot-restore law (``run_sweep_from_request``, ruling 5) applied at
+    the pytest boundary so EVERY in-process caller of the dispatch is covered,
+    and it never fights a test's deliberate ``monkeypatch.setenv`` of the same
+    var (autouse setup precedes the test's own ``monkeypatch``, so the snapshot
+    is the true pre-test value and both restore to it).
+
+    LITERAL env-var name (drift-pinned against
+    ``brutex.engine.sweep_apriori.SWEEP_APRIORI_ENV`` in
+    ``tests/unit/test_engine_sweep_apriori.py``), deliberately NOT an import:
+    this fixture is suite-wide autouse and the redteam nightly harness
+    (redteam-nightly.yml) runs a PYTHON-ONLY editable install with no Rust
+    wheels, so importing ``brutex.engine`` here would error the setup of every
+    redteam test — the same reason ``_isolate_run_forensics_mirror`` above uses
+    a literal.
+    """
+    env_name = "BRUTEX_SWEEP_APRIORI"
+    original = os.environ.get(env_name)
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop(env_name, None)
+        else:
+            os.environ[env_name] = original
 
 
 @pytest.fixture(autouse=True)

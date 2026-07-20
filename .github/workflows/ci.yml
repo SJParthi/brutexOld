@@ -527,13 +527,26 @@ jobs:
           else
             echo "(brutex.costs test files not present yet — gate inactive)"
           fi
+          # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): the
+          # whole-package --cov=brutex.engine gate must also run the
+          # losing-streak resilience suites — brutex/engine/resilience_streaks.py
+          # is stem-matched by tests/unit/test_resilience_streaks.py and the new
+          # brutex/engine/results_depth_pass.py adoption-backfill + resilience
+          # fence branches are covered by tests/unit/test_resilience_sidecar.py
+          # + the integration tests/integration/test_resilience_end_to_end.py,
+          # none of which the test_engine_*.py glob collects (the same
+          # static-list addition precedent as the costs/pull_jobs gates, PRs
+          # #1248/#1542, and the brutex.data.catalog integration-test gate).
           if compgen -G "tests/unit/test_engine_*.py" > /dev/null; then
             pytest \
               --cov=brutex.engine \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_engine_*.py
+              tests/unit/test_engine_*.py \
+              tests/unit/test_resilience_streaks.py \
+              tests/unit/test_resilience_sidecar.py \
+              tests/integration/test_resilience_end_to_end.py
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
@@ -1511,6 +1524,16 @@ jobs:
           else
             echo "(brutex.engine.trial_stats test file not present yet — gate inactive)"
           fi
+          # 19i1e · brutex.engine.period_stats — the per-period finalist-stats
+          # canonical JSON + key grammar + cross-sum validators + the finalist
+          # fold / segmented-dd walk (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001; ONE
+          # COMMON home consumed by sweep_run's projector, ResultRow
+          # construction/load validation, and the dashboard parse).
+          if compgen -G "tests/unit/test_engine_period_stats.py" > /dev/null; then
+            pytest --cov=brutex.engine.period_stats --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_period_stats.py
+          else
+            echo "(brutex.engine.period_stats test file not present yet — gate inactive)"
+          fi
           # 19i1c · brutex.engine.stage3_wire — Stage-3 launcher wiring
           # (DEC-STAGE3-WIRE-001; the train-slice helper, survivor-cell
           # recovery by run-id match, the audited refinement post-pass, the
@@ -1623,16 +1646,10 @@ jobs:
           # backfill ratchet — second batch of small-gap non-orchestrator
           # modules pushed to 100% via surgical tests + module-load
           # defensive-assertion pragmas. Lifts strict-100% gate count 45 → 49.
-          # 21a · brutex.data.parser (55 stmts, 14 branches, 15 tests)
-          #       Closes 92.75→100% via 3 surgical tests in
-          #       TestDecimalCoercion: Decimal-passthrough (line 145),
-          #       string-input parse (line 149), tz-aware ISO timestamp
-          #       skips IST-attach branch (82→84).
-          if compgen -G "tests/unit/test_data_parser.py" > /dev/null; then
-            pytest --cov=brutex.data.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_parser.py
-          else
-            echo "(brutex.data.parser test file not present yet — gate inactive)"
-          fi
+          # 21a · brutex.data.parser — gate REMOVED with the dead module
+          #       (DEC-DATA-PARSER-DEAD-DELETE-001, MIGRATION.md #1941;
+          #       zero production callers — only the data/__init__
+          #       re-export; git history retains the bytes).
           # 21b · brutex.data.timeframes (22 stmts post-pragma, 8 branches,
           #       34 tests). Closes 84.21→100% via 1 surgical test
           #       (`test_unsupported_tf_raises` covers line 140 ValueError)
@@ -1708,7 +1725,7 @@ jobs:
           #          integration-tested by
           #          tests/integration/test_timeframe_materialize_roundtrip.py.
           if compgen -G "tests/unit/test_timeframe_materialize.py" > /dev/null; then
-            pytest --cov=brutex.data.timeframe_materialize --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframe_materialize.py tests/unit/test_timeframe_materialize_segment.py tests/integration/test_timeframe_materialize_roundtrip.py tests/integration/test_timeframe_materialize_grounded_cutoff.py
+            pytest --cov=brutex.data.timeframe_materialize --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframe_materialize.py tests/unit/test_timeframe_materialize_segment.py tests/integration/test_timeframe_materialize_roundtrip.py tests/integration/test_timeframe_materialize_grounded_cutoff.py tests/integration/test_timeframe_materialize_daily_range.py
           else
             echo "(brutex.data.timeframe_materialize test file not present yet — gate inactive)"
           fi
@@ -1911,6 +1928,22 @@ jobs:
           else
             echo "(brutex.data.candle_fields test file not present yet — gate inactive)"
           fi
+          # DEC-AUDIT-ALERT-CLAMP-OBS-001: strict gate on the idle server
+          # heartbeat (pure observability daemon, no dashboard import — the
+          # spawn/clock/RSS-probe seams are injected, so it is standalone-gateable).
+          if compgen -G "tests/unit/test_server_heartbeat.py" > /dev/null; then
+            pytest --cov=brutex.observability.server_heartbeat --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_server_heartbeat.py
+          else
+            echo "(brutex.observability.server_heartbeat test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-KEEPAWAKE-001: strict gate on the macOS keep-awake guard
+          # (pure observability context manager, injected spawn/platform seams —
+          # standalone-gateable at 100% line+branch with no real caffeinate).
+          if compgen -G "tests/unit/test_power_keepawake.py" > /dev/null; then
+            pytest --cov=brutex.observability.power_keepawake --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_power_keepawake.py
+          else
+            echo "(brutex.observability.power_keepawake test file not present yet — gate inactive)"
+          fi
           # DEC-STORED-DATA-VALIDATION-001: the frame-level stored-OHLC price-sanity
           # checks (positivity + ordering) consumed by the prebuild 1-minute read
           # boundary + the lake invariant scanner. Pure polars expressions,
@@ -2028,6 +2061,22 @@ jobs:
           else
             echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
           fi
+          # DEC-SESSION-DENSITY-CENSUS-001: the WARN-only per-session bar-density
+          # census (pure classifier + guarded emitter, stdlib+structlog+calendars
+          # only). 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_session_density.py" > /dev/null; then
+            pytest --cov=brutex.data.session_density --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_session_density.py
+          else
+            echo "(brutex.data.session_density test file not present yet — gate inactive)"
+          fi
+          # DEC-LAKE-READ-INODE-GUARD-001: the COMMON two-defense gated file
+          # reader (fd-level S_ISREG gate + deadline-wrapped stall variants).
+          # Ships at 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_guarded_read.py" > /dev/null; then
+            pytest --cov=brutex.data.guarded_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_guarded_read.py
+          else
+            echo "(brutex.data.guarded_read test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.
@@ -2130,8 +2179,13 @@ jobs:
           else
             echo "(re-pull-until-clean property test file not present yet — gate inactive)"
           fi
+          # DEC-AUDIT-LAKE-REPLAY-ORACLE-001: option_dedup gained the L3
+          # candle_dedup_key (+ the shared _blake3_key core); its dedicated
+          # suite test_option_dedup_candle_key.py joins the module's static
+          # pairing (the PR #1090/#1096 lesson: a new test file for a gated
+          # module joins that module's static pairing).
           if compgen -G "tests/unit/test_option_dedup.py" > /dev/null; then
-            pytest --cov=brutex.data.option_dedup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_dedup.py
+            pytest --cov=brutex.data.option_dedup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_dedup.py tests/unit/test_option_dedup_candle_key.py
           else
             echo "(brutex.data.option_dedup test file not present yet — gate inactive)"
           fi
@@ -2139,6 +2193,25 @@ jobs:
             pytest --cov=brutex.data.lmdb_membership --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lmdb_membership.py
           else
             echo "(brutex.data.lmdb_membership test file not present yet — gate inactive)"
+          fi
+          # DEC-AUDIT-LAKE-REPLAY-ORACLE-001: the P-20/L3 replay-capture
+          # producer (env-gated BarSink wrapper buffering LAKE_APPEND_WRITTEN
+          # + L3 "add" records for the controller-thread drains) — NEW module
+          # -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_audit_capture_sink.py" > /dev/null; then
+            pytest --cov=brutex.data.audit_capture --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_audit_capture_sink.py
+          else
+            echo "(brutex.data.audit_capture test file not present yet — gate inactive)"
+          fi
+          # DEC-AUDIT-LAKE-REPLAY-ORACLE-001: the audit->Parquet replay engine
+          # + byte oracle (replay_lake_from_audit / check_capture_anchors /
+          # assert_lake_byte_equal) — NEW module -> its own strict 100%
+          # line+branch gate (orchestrator per-module gates are safe post
+          # DEC-ORCH-LAZY-BLOOM-001).
+          if compgen -G "tests/unit/test_lake_replay.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.lake_replay --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lake_replay.py
+          else
+            echo "(brutex.orchestrator.lake_replay test file not present yet — gate inactive)"
           fi
           # DEC-COVERAGE-INCREMENTAL-001: modules taken to 100% line+branch.
           # HISTORICAL NOTE (resolved): orchestrator modules originally could
@@ -2151,9 +2224,39 @@ jobs:
           # dedicated test file is now strict-gated above
           # (DEC-ORCH-STRICT-GATES-001, entry #613).
           if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py tests/unit/test_data_sink_vendor_surface.py
+            # DEC-PREBUILD-FRAME-WRITE-001: the append_frame sibling is covered
+            # by tests/unit/test_data_sink_frame.py, which MUST run alongside
+            # the base suite for the 100% gate to hold.
+            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py tests/unit/test_data_sink_vendor_surface.py tests/unit/test_data_sink_frame.py
           else
             echo "(brutex.data.sink test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001: the frame-direct derived-TF write's
+          # control leaf (tristate+shadow kill switch, burn-in budgets,
+          # autorevert latch, the CLOSED degrade taxonomy, FrameWriteStats).
+          # NEW leaf -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_frame_write_gate.py" > /dev/null; then
+            pytest --cov=brutex.data.frame_write_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_frame_write_gate.py
+          else
+            echo "(brutex.data.frame_write_gate test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001: the ONE env-flag vocabulary leaf
+          # (promoted from engine/sweep_lookahead so the wheel-free data layer
+          # can consume it). NEW leaf -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_config_env_flags.py" > /dev/null; then
+            pytest --cov=brutex.config.env_flags --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_config_env_flags.py
+          else
+            echo "(brutex.config.env_flags test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001 (review fold): the batched frame→bar
+          # converter leaf `brutex.data.frame_bars` (moved out of
+          # spot_daily_resample to break the sink↔spot_daily_resample CodeQL
+          # py/cyclic-import cycle). NEW leaf -> its own strict 100%
+          # line+branch gate.
+          if compgen -G "tests/unit/test_frame_bars.py" > /dev/null; then
+            pytest --cov=brutex.data.frame_bars --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_frame_bars.py
+          else
+            echo "(brutex.data.frame_bars test file not present yet — gate inactive)"
           fi
           # DEC-LAKE-FOOTPRINT-MEASURED-001 (MIGRATION.md #1253): the measured
           # lake-footprint multiplier + the pipeline prebuild's PRE-RUN disk
@@ -2325,6 +2428,11 @@ jobs:
           # tests/unit/test_pull_jobs_beat_channel.py (stem-matched for the
           # discovery gate), which MUST join this gate so its coverage of
           # those lines registers (without it the module reads 96.95%).
+          # DEC-SWEEP-JOB-LOCK-POSTURE-001 (#1770): the REAL-path one-click
+          # sweep regression (the unfaked route → cmd_sweep_all chain that
+          # exposed the sweep-kind job's pull-EX self-deadlock) is co-run in
+          # tests/integration/test_dashboard_sweep_run_real.py so the
+          # fixture-blindspot closer stays co-located with the module gate.
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
@@ -2334,7 +2442,8 @@ jobs:
               tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
-              tests/integration/test_dashboard_e2e.py
+              tests/integration/test_dashboard_e2e.py \
+              tests/integration/test_dashboard_sweep_run_real.py
           else
             echo "(brutex.dashboard.pull_jobs test file not present yet — gate inactive)"
           fi
@@ -2724,6 +2833,17 @@ jobs:
           else
             echo "(brutex.engine.sweep_run_core test file not present yet — gate inactive)"
           fi
+          # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the pure /results temporal-drill
+          # serve logic — run_id validation (hostile values disk-free 400),
+          # stored quarter/month payloads + the derived half-year roll-up, the
+          # sweep_runs invalidation token, the sidecar index over real
+          # writer-produced stamps, and the day/week IST/ISO-week fold. 100%
+          # line+branch on sweep_temporal_view.py.
+          if compgen -G "tests/unit/test_sweep_temporal_view.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.sweep_temporal_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sweep_temporal_view.py
+          else
+            echo "(brutex.dashboard.sweep_temporal_view test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated
           # unit suite (the package-wide brutex.engine gate above also runs
@@ -2775,10 +2895,49 @@ jobs:
           else
             echo "(brutex.engine.top100_artifact test file not present yet — gate inactive)"
           fi
+          # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): results_depth_pass.py
+          # gains an adoption-backfill + resilience-fence path whose lines
+          # (~492-528, 760-773) are exercised by the differently-stemmed
+          # tests/unit/test_resilience_sidecar.py +
+          # tests/integration/test_resilience_end_to_end.py — the
+          # test_engine_results_depth_pass.py stem file alone tops out at ~94.88%.
+          # This per-module gate therefore runs the CURATED multi-file suite (the
+          # same static-list multi-file precedent as brutex.pull_controller /
+          # brutex.data.catalog), and the auto-discovery gate below EXCLUDES this
+          # module (its 100% cannot be reached by a single stem-matched file).
           if compgen -G "tests/unit/test_engine_results_depth_pass.py" > /dev/null; then
-            pytest --cov=brutex.engine.results_depth_pass --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_depth_pass.py
+            pytest --cov=brutex.engine.results_depth_pass --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_engine_results_depth_pass.py \
+              tests/unit/test_resilience_sidecar.py \
+              tests/integration/test_resilience_end_to_end.py
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958): the
+          # brutex/acceptance/ package — the operator acceptance verifier —
+          # ships every module at 100% line+branch from the start (design
+          # §10; real-writer fixtures only, the #1631 lesson). The selftest
+          # gate runs its unit file together with the CI-mandatory full
+          # poison battery (tests/integration/test_acceptance_selftest.py);
+          # the checks-registry lines ride the run/movers/latency suites.
+          if compgen -G "tests/unit/test_acceptance_model.py" > /dev/null; then
+            pytest --cov=brutex.acceptance.model --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_model.py
+            pytest --cov=brutex.acceptance.sampling --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_sampling.py
+            pytest --cov=brutex.acceptance.context --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_context.py
+            pytest --cov=brutex.acceptance.independent --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_independent.py tests/unit/test_acceptance_independent_fence.py
+            pytest --cov=brutex.acceptance.report --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_report.py
+            pytest --cov=brutex.acceptance.selftest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_selftest.py tests/integration/test_acceptance_selftest.py
+            pytest --cov=brutex.acceptance.run --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_run.py
+            pytest --cov=brutex.acceptance.checks.unique --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_unique.py
+            pytest --cov=brutex.acceptance.checks.tf --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_tf.py
+            pytest --cov=brutex.acceptance.checks.pull --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_pull.py
+            pytest --cov=brutex.acceptance.checks.rate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_rate.py
+            pytest --cov=brutex.acceptance.checks.movers --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_movers.py
+            pytest --cov=brutex.acceptance.checks.sanity --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_sanity.py
+            pytest --cov=brutex.acceptance.checks.latency --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_checks_latency.py
+            pytest --cov=brutex.acceptance.checks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_acceptance_run.py tests/unit/test_acceptance_checks_unique.py tests/unit/test_acceptance_checks_tf.py tests/unit/test_acceptance_checks_pull.py tests/unit/test_acceptance_checks_rate.py tests/unit/test_acceptance_checks_movers.py tests/unit/test_acceptance_checks_sanity.py tests/unit/test_acceptance_checks_latency.py
+          else
+            echo "(brutex.acceptance test files not present yet — gate inactive)"
           fi
           # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (MIGRATION.md #1749): the ONE
           # pure cascade-report → display-join law (flattener/validator shared
@@ -2795,6 +2954,24 @@ jobs:
             pytest --cov=brutex.dashboard.composite_join --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_composite_join.py
           else
             echo "(brutex.dashboard.composite_join test file not present yet — gate inactive)"
+          fi
+          # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): the NEW
+          # brutex/engine/resilience_streaks.py (losing-streak fold + sidecar +
+          # annotation) is 1172 lines whose 100% line+branch is reached only by a
+          # CURATED multi-file suite — test_resilience_streaks.py alone is ~62.94%;
+          # the fold/annotation/backfill branches live in test_resilience_sidecar.py
+          # + the integration test_resilience_end_to_end.py (differently stemmed, so
+          # the auto-discovery gate below EXCLUDES this module — the pull_controller
+          # multi-file precedent). This dedicated static per-module gate asserts its
+          # independent 100% with that suite (it also rides the whole-package
+          # --cov=brutex.engine floor above).
+          if compgen -G "tests/unit/test_resilience_streaks.py" > /dev/null; then
+            pytest --cov=brutex.engine.resilience_streaks --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_resilience_streaks.py \
+              tests/unit/test_resilience_sidecar.py \
+              tests/integration/test_resilience_end_to_end.py
+          else
+            echo "(brutex.engine.resilience_streaks test file not present yet — gate inactive)"
           fi
 
   # ─────────────────────────────────────────────────────────────────
@@ -2892,7 +3069,13 @@ jobs:
   # The pre-shard job's timeout ratchet history (15→25→40→60→75→120→
   # 150→180 minutes — every raise a wall-kill with zero real failures)
   # is retired with the monolith; see git history at the pre-shard
-  # revision for the full per-raise evidence.
+  # revision for the full per-raise evidence. Club P's concurrent
+  # 75 -> 95 raise (2026-07-09, PR #1369 run 29051387891 — a 75:17
+  # wall-kill with every executed step green; sibling green run
+  # 29045280302 measured 74:56) and its MERGE-UNION-to-150 note
+  # (2026-07-11, PR #1369 origin/main fold) retire into this same
+  # history — recorded here because the monolith block they annotated
+  # is gone (same union rule, no gate weakened).
   #
   # FAIL-CLOSED LAW: `if: ${{ !cancelled() }}` + the explicit
   # upstream-result check as the FIRST step. Without it a red shard
@@ -3668,6 +3851,44 @@ jobs:
         run: cargo test --release --locked
       # Verify the optional PyO3 binding compiles standalone (the wheel
       # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python --locked
+
+  rust-brutex-calendar:
+    name: Rust (brutex-calendar build + clippy + test)
+    # DEC-RUST-CALENDAR-LEAVES-001: the calendar-leaf decision-law crate's
+    # own gate (the rust-brutex-strategies shape — the rust-brutex-feed
+    # steps plus `--locked`, because the crate commits its Cargo.lock so
+    # the lockstep is enforced here too). The crate ships INERT (consumed
+    # by nothing Python-side yet); the 317 Python-generated goldens + the
+    # source-digest parity pins run inside `cargo test`. The mutation.yml
+    # wiring is the named follow-up DEC-RUST-CALENDAR-MUTATION-WIRE-001.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-calendar
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-calendar -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --release --locked
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by maturin at flip time, not here).
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python --locked
 
@@ -4764,7 +4985,16 @@ jobs:
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
     needs: build-wheels
-    timeout-minutes: 20
+    # Sanctioned infra HEADROOM raise (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001
+    # reconcile-round-2 note, MIGRATION.md #1851): the S2 club's 45-file
+    # shipped-test baseline MEASURED 622.69 s wall (1 failed, 2374 passed) —
+    # over the script's prior 600 s per-run default, so the gate exited 2 on
+    # a baseline exit-124 timeout and could never reach a verdict; two full
+    # pytest runs (baseline + reverted) ≈ 1250 s, over the prior 20-min job
+    # budget once setup (checkout + pip + two Rust wheels, ~8-10 min) is
+    # added. 50 min holds 2 × the 1200 s per-run budget + setup. The check
+    # still runs the FULL reversion — no skip, no shipped-test narrowing.
+    timeout-minutes: 50
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -4797,6 +5027,12 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # Per-run pytest budget raised 600 s (script default) → 1200 s:
+          # the S2 club's shipped-test baseline measured 622.69 s wall —
+          # ~1.93× headroom for slower hosted runners; the two-run total
+          # (≈ 1250 s measured-shape) fits the 50-min job budget above.
+          # Sanctioned in MIGRATION.md #1851 (reconcile-round-2 note).
+          BUGFIX_REVERSION_TIMEOUT_S: "1200"
         run: python3 scripts/ci/validate_bugfix_reversion.py
 
   # ─────────────────────────────────────────────────────────────────
@@ -5016,6 +5252,9 @@ jobs:
       # DEC-STRATEGIES-RUST-COMBO-001: the combo decision-kernel crate
       # gate — the PR that introduces a crate must gate that crate.
       - rust-brutex-strategies
+      # DEC-RUST-CALENDAR-LEAVES-001: the calendar-leaf decision-law crate
+      # gate — the PR that introduces a crate must gate that crate.
+      - rust-brutex-calendar
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
@@ -5135,6 +5374,9 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  rust-brutex-feed:${{ needs.rust-brutex-feed.result }}"
+          echo "  rust-brutex-strategies:${{ needs.rust-brutex-strategies.result }}"
+          echo "  rust-brutex-calendar:${{ needs.rust-brutex-calendar.result }}"
           echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
@@ -5177,6 +5419,9 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutex-feed.result }}" \
+            "${{ needs.rust-brutex-strategies.result }}" \
+            "${{ needs.rust-brutex-calendar.result }}" \
             "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \

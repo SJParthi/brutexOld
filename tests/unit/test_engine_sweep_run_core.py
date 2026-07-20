@@ -1287,6 +1287,59 @@ def test_on_progress_publishes_ticks_and_beats(tmp_path: Path) -> None:
     assert terminal["run_id"] == run_id
 
 
+def test_launch_baseline_is_fresh_bridge_evidence_not_stale(tmp_path: Path) -> None:
+    """The G4 launch baseline survives the bridge decay gate (scoped-review round 2).
+
+    Fails-before (the SUSTAINED MAJOR): ``_reset_progress_at_launch`` wrote
+    ``wall_time_utc`` but NO ``wall_time`` (``PROGRESS_WALL_TIME_KEY``), and
+    ``progress_bridge_stale`` treats a ``running=True`` claim with a missing
+    stamp as DEAD evidence — so for the whole first-tuple window (HOURS on a
+    heavy k=5 tuple) the dashboard read idle, the v29 Stop button never
+    showed, and the cancel route's bridge arm refused. The REAL baseline is
+    driven through the REAL reader chain here.
+    """
+    from brutex.engine.sweep_supervisor import (
+        PROGRESS_WALL_TIME_KEY,
+        progress_bridge_stale,
+        read_progress,
+    )
+
+    progress_path = tmp_path / "progress" / "sweep-progress.json"
+    with _core(tmp_path, progress_path=progress_path) as (_c, _s):
+        parsed = read_progress(progress_path)
+        assert parsed["running"] is True
+        assert isinstance(parsed[PROGRESS_WALL_TIME_KEY], float)
+        assert progress_bridge_stale(parsed) is False
+
+
+def test_launch_baseline_stamps_both_walls_from_one_tick(tmp_path: Path) -> None:
+    """Both launch wall stamps come from ONE injected-clock tick (G3 discipline).
+
+    The scoped-review round-2 fix must NOT add a wall tick: the decay stamp
+    (``PROGRESS_WALL_TIME_KEY``) and the G4 liveness ``wall_time_utc`` share
+    the single ``self._wall()`` call the pre-fix baseline already made. The
+    injected clock returns strictly-distinct values, so stamp EQUALITY proves
+    one call fed both (a second call would differ).
+    """
+    from brutex.engine.sweep_supervisor import PROGRESS_WALL_TIME_KEY, progress_bridge_stale
+
+    progress_path = tmp_path / "progress" / "sweep-progress.json"
+    ticks: list[float] = []
+
+    def _wall() -> float:
+        ticks.append(1_000_000.0 + len(ticks))  # strictly distinct per call
+        return ticks[-1]
+
+    with _core(tmp_path, progress_path=progress_path, wall=_wall) as (_c, _s):
+        raw = json.loads(progress_path.read_text())
+        stamp = raw[PROGRESS_WALL_TIME_KEY]
+        assert stamp == raw["wall_time_utc"]  # one tick, both stamps
+        assert stamp in ticks
+        # The injected-clock stamp judged against an injected `now` just after
+        # it: fresh (the default-now variant is covered by the test above).
+        assert progress_bridge_stale(raw, now=lambda: stamp + 1.0) is False
+
+
 def test_on_progress_without_progress_path_still_ticks(tmp_path: Path) -> None:
     with _core(tmp_path) as (core, _s):
         core.on_progress(_snapshot(enumerated=1, evaluated=1))
@@ -1474,6 +1527,47 @@ def test_diffcheck_zero_checked_records_nothing(tmp_path: Path) -> None:
         core.diffcheck(bars=_BARS, bar_bits=[0] * len(_BARS), tuple_=tuple_, grid=grid)
         run_id = core.run_id
     assert not [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
+
+
+def test_r45_diffcheck_closure_forwards_the_executed_population(tmp_path: Path) -> None:
+    """Round 3 (MIGRATION.md #1752): the closure forwards ``mask_population=``
+    verbatim to the hook — an injected 1-mask population checks exactly 1
+    (the raw k=1 walk over the grid bits would offer 3)."""
+    from brutex.engine.stage1a import build_bar_bits
+
+    grid = _grid()
+    tuple_ = next(iter_sweep_tuples(grid))
+    bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
+    with _core(tmp_path, grid, diffcheck_k=4) as (core, _s):
+        assert core.diffcheck is not None
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[0b100])
+        run_id = core.run_id
+    ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
+    assert len(ok_rows) == 1
+    payload = cast("dict[str, Any]", ok_rows[0]["payload"])
+    assert payload["checked"] == 1  # the population, not the 3-mask raw walk
+    assert payload["mismatches"] == 0
+
+
+def test_r45_diffcheck_closure_empty_population_skips_and_spends_no_budget(
+    tmp_path: Path,
+) -> None:
+    """An EXTINCT population is a counted skip that consumes NO K budget —
+    the very next (legacy-population) call still has the full budget."""
+    from brutex.engine.stage1a import build_bar_bits
+
+    grid = _grid()
+    tuple_ = next(iter_sweep_tuples(grid))
+    bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
+    with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
+        assert core.diffcheck is not None
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[])
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        run_id = core.run_id
+    ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
+    assert len(ok_rows) == 1  # the skip recorded nothing; the second call ran
+    payload = cast("dict[str, Any]", ok_rows[0]["payload"])
+    assert payload["checked"] == 2  # the FULL budget survived the skip
 
 
 def test_on_tuple_without_inner_still_records(tmp_path: Path) -> None:
@@ -1772,8 +1866,10 @@ def test_r45_run_one_tuple_invokes_diffcheck_post_persist(tmp_path: Path) -> Non
         bar_bits: Sequence[int],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
+        mask_population: Sequence[int] | None = None,
     ) -> None:
         assert len(bar_bits) == len(bars)
+        assert mask_population is None  # legacy arm — the kwarg is never passed
         calls.append(len(bar_bits))
 
     grid = _grid()
@@ -1896,7 +1992,14 @@ def test_g03_parallel_driver_streams_progress(tmp_path: Path) -> None:
         sup.close()
         cache.close()
     assert summary.tuples_run == 2
-    assert seen == [1, 2]  # one tick per applied slot, in enumeration order
+    # one running tick per applied slot (enumeration order) and NO trailing
+    # finish duplicate — the #1445 G3 exact-count law (merge-fold reconcile,
+    # DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 ⇄ DEC-JOB-COOPERATIVE-CANCEL-001):
+    # cmd_sweep_all's parallel arm publishes the terminal done snapshot to the
+    # bridge itself after the driver returns (the tick shape is asserted
+    # precisely in test_engine_sweep_parallel_runcore.py::
+    # test_g3_writer_actor_ticks_on_progress_per_applied_tuple).
+    assert seen == [1, 2]
 
 
 def test_g06_cli_main_maps_refusals_to_clean_user_error(

@@ -282,6 +282,77 @@ def test_pull_pipeline_launch_runs_off_the_event_loop(
     )
 
 
+def test_pull_pipeline_pre_first_beat_window_reads_running_and_refuses_second_start(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The STRICT pre-first-beat launch window reads ``running`` — never idle.
+
+    Pins the launch-baseline liveness class found (and fixed) on the SWEEP
+    surface: a just-launched job's initial progress baseline omitted the
+    freshness stamp a downstream staleness gate keyed on, so between the
+    launch POST returning and the FIRST real progress beat the job read as
+    DEAD/idle (Stop invisible, cancel refused) — potentially for hours on a
+    heavy first unit. On the PULL surface the class is structurally ABSENT
+    by design: ``BackgroundPullJob.start`` stamps ``PullProgress.start()``
+    (``state=running``) SYNCHRONOUSLY under its lock before the launch
+    returns, and neither ``/pull-progress`` nor the frontend's
+    ``s.state === 'running'`` gate applies any wall-clock freshness
+    comparison (universe.html deliberately treats the snapshot's monotonic
+    ``updated_at`` as useless for staleness). This test drives the REAL
+    route pair — POST ``/pull-pipeline`` with the spot spine PARKED before
+    any window settles/beats, then GET ``/pull-progress`` — so the window
+    is exercised end-to-end, never via a hand-built snapshot. There is
+    deliberately NO pull cancel route; the only control surface in the
+    window is the single-flight refusal of a second start, asserted here.
+    """
+    _pin_creds_present(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _parked_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        # Park INSIDE the first phase, before any window settles or any
+        # progress beat fires — the strict pre-first-beat window by
+        # construction.
+        entered.set()
+        assert release.wait(timeout=30.0), "harness never released the parked worker"
+        return _fake_spot(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _parked_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+
+    try:
+        resp = client.post("/api/v1/universe/pull-pipeline")
+        assert resp.status_code == 200
+        assert resp.json()["started"] is True
+
+        # (a) The instant the POST returns — the worker thread may not even
+        # be scheduled yet; zero beats have fired. The progress route must
+        # already read running (state stamped synchronously in start()).
+        snap = client.get("/api/v1/universe/pull-progress").json()
+        assert snap["state"] == "running", snap
+        assert snap["running"] is True
+
+        # (b) Deeper into the window: the worker is provably parked inside
+        # the spot phase, still strictly before the first beat.
+        assert entered.wait(timeout=10.0), "worker never reached the spot spine"
+        snap = client.get("/api/v1/universe/pull-progress").json()
+        assert snap["state"] == "running", snap
+        assert snap["running"] is True
+        assert snap["stalled"] is False  # no false stall-suspect at launch
+
+        # (c) The single-flight refusal — the pull surface's only control
+        # gate — keys on the same synchronously-stamped state: a second
+        # launch inside the window is refused, never a phantom "idle".
+        second = client.post("/api/v1/universe/pull-pipeline").json()
+        assert second["started"] is False
+    finally:
+        release.set()
+
+    settled = _wait_for_job(client)
+    assert settled["state"] == "done"
+
+
 def test_pull_pipeline_unknown_selection_fails_closed_400(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
