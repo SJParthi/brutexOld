@@ -58,6 +58,7 @@ __all__ = [
     "stats_pbo_cscv",
     "stats_psr",
     "stats_wfo_pass_count",
+    "sweep_drawdown_stats",
 ]
 
 __version__: str
