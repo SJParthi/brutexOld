@@ -31,14 +31,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+from brutex.backup import backup_rust
 from brutex.backup.errors import BackupError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
+    from types import ModuleType
 
     from brutex.config.backup_env import BackupEnvConfig
 
@@ -72,6 +74,15 @@ _PASSTHROUGH_EXACT: Final[tuple[str, ...]] = ("HOME", "PATH", "TMPDIR")
 #: Child-env key PREFIXES passed through (S3/B2 credentials ride
 #: ``~/.brutex/.env`` → ``bootstrap_env()`` → the base env).
 _PASSTHROUGH_PREFIXES: Final[tuple[str, ...]] = ("AWS_", "B2_")
+
+#: ``brutex_ops`` decision-code vocabulary (DEC-BACKUP-RUST-OPS-001): 0 is
+#: always the ORACLE code (abstain / raise-shaped — the facade serves the
+#: Python oracle verbatim); the value codes are per-law.
+_CODE_ORACLE: Final[int] = 0
+_CODE_SNAPSHOTS_EMPTY: Final[int] = 1
+_CODE_SNAPSHOTS_OK: Final[int] = 2
+_CODE_SUMMARY_FOUND: Final[int] = 1
+_CODE_LS_TIME_STRING: Final[int] = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +160,7 @@ def _default_run(
     )
 
 
-def build_backup_argv(
+def _build_backup_argv_python(
     binary: str,
     paths: Sequence[Path],
     *,
@@ -168,6 +179,42 @@ def build_backup_argv(
         BACKUP_HOST,
         "--json",
     )
+
+
+def _str_tuple_thunk(result: object) -> Callable[[], tuple[str, ...]]:
+    """Refuse-poison thunk: a non-``list[str]`` crate result is refused."""
+
+    def _materialise() -> tuple[str, ...]:
+        if not isinstance(result, list) or not all(isinstance(a, str) for a in result):
+            raise TypeError(f"crate result is not a list of str: {result!r}")
+        return tuple(result)
+
+    return _materialise
+
+
+def build_backup_argv(
+    binary: str,
+    paths: Sequence[Path],
+    *,
+    excludes: Sequence[str],
+    tags: Sequence[str],
+) -> tuple[str, ...]:
+    """Build the exact ``restic backup`` argv (pure — shared with the dry-run log).
+
+    Under the default-OFF ``BRUTEX_BACKUP_RUST`` flag the build routes
+    through the ``brutex_ops`` twin (DEC-BACKUP-RUST-OPS-001); ``Path``
+    rendering (``str(p)``) stays Python-side — only strings cross the FFI.
+    """
+
+    def _oracle() -> tuple[str, ...]:
+        return _build_backup_argv_python(binary, paths, excludes=excludes, tags=tags)
+
+    def _compute(crate: ModuleType) -> object:
+        return _str_tuple_thunk(
+            crate.build_backup_argv(binary, [str(p) for p in paths], list(excludes), list(tags))
+        )
+
+    return backup_rust.route_law("build_backup_argv", oracle=_oracle, compute=_compute)
 
 
 class ResticRunner:
@@ -452,7 +499,7 @@ def _json_lines(stdout: str) -> Iterator[dict[str, object]]:
             yield parsed
 
 
-def parse_backup_summary_snapshot_id(stdout: str) -> str:
+def _parse_backup_summary_snapshot_id_python(stdout: str) -> str:
     """Extract the ``summary`` line's ``snapshot_id`` from ``backup --json`` output.
 
     Raises
@@ -467,6 +514,35 @@ def parse_backup_summary_snapshot_id(stdout: str) -> str:
             if isinstance(snapshot_id, str) and snapshot_id:
                 return snapshot_id
     raise BackupError("restic backup output carries no summary snapshot_id")
+
+
+def parse_backup_summary_snapshot_id(stdout: str) -> str:
+    """Extract the ``summary`` line's ``snapshot_id`` (see the ``_python`` oracle).
+
+    DEC-BACKUP-RUST-OPS-001: under the default-OFF ``BRUTEX_BACKUP_RUST``
+    flag the scan routes through the ``brutex_ops`` twin. Code 0 (abstain —
+    a line serde cannot parse — OR the no-summary raise arm) serves the
+    Python oracle VERBATIM, so the raised :class:`BackupError` message stays
+    byte-identical by construction.
+    """
+
+    def _oracle() -> str:
+        return _parse_backup_summary_snapshot_id_python(stdout)
+
+    def _compute(crate: ModuleType) -> object:
+        code, snapshot_id = cast(
+            "tuple[object, object]", crate.parse_backup_summary_snapshot_id(stdout)
+        )
+        if code == _CODE_ORACLE:
+            return backup_rust.USE_ORACLE
+        if code != _CODE_SUMMARY_FOUND or not isinstance(snapshot_id, str) or not snapshot_id:
+            raise TypeError(f"poisoned summary-id decision ({code!r}, {snapshot_id!r})")
+        found = snapshot_id
+        return lambda: found
+
+    return backup_rust.route_law(
+        "parse_backup_summary_snapshot_id", oracle=_oracle, compute=_compute
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,7 +576,7 @@ def _parse_snapshot_time(raw: object) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def parse_snapshots_latest(stdout: str) -> SnapshotInfo | None:
+def _parse_snapshots_latest_python(stdout: str) -> SnapshotInfo | None:
     """Parse ``restic snapshots --json --latest 1`` output.
 
     Returns
@@ -531,7 +607,49 @@ def parse_snapshots_latest(stdout: str) -> SnapshotInfo | None:
     return SnapshotInfo(snapshot_id=snapshot_id, time_utc=_parse_snapshot_time(last.get("time")))
 
 
-def parse_ls_file_paths(stdout: str) -> tuple[str, ...]:
+def parse_snapshots_latest(stdout: str) -> SnapshotInfo | None:
+    """Parse ``restic snapshots --json --latest 1`` output (see the ``_python`` oracle).
+
+    DEC-BACKUP-RUST-OPS-001: under the default-OFF ``BRUTEX_BACKUP_RUST``
+    flag the DECISION routes through the ``brutex_ops`` twin. Code 0 covers
+    every raise-shaped arm (each embeds a CPython repr / ``json`` error
+    text) AND every serde-dialect abstain — the Python oracle re-runs and
+    raises the exact bytes. On code 2 the RAW ``time`` string crosses back
+    and Python parses it via the oracle's own :func:`_parse_snapshot_time`,
+    so time-parse ``BackupError``\\ s are byte-identical by construction.
+    """
+
+    def _oracle() -> SnapshotInfo | None:
+        return _parse_snapshots_latest_python(stdout)
+
+    def _compute(crate: ModuleType) -> object:
+        code, snapshot_id, time_raw = cast(
+            "tuple[object, object, object]", crate.parse_snapshots_latest_decision(stdout)
+        )
+        if code == _CODE_ORACLE:
+            return backup_rust.USE_ORACLE
+        if code == _CODE_SNAPSHOTS_EMPTY:
+            return lambda: None
+        if (
+            code == _CODE_SNAPSHOTS_OK
+            and isinstance(snapshot_id, str)
+            and snapshot_id
+            and isinstance(time_raw, str)
+        ):
+            found_id, found_time = snapshot_id, time_raw
+
+            def _materialise() -> SnapshotInfo:
+                return SnapshotInfo(snapshot_id=found_id, time_utc=_parse_snapshot_time(found_time))
+
+            return _materialise
+        raise TypeError(
+            f"poisoned snapshots-latest decision ({code!r}, {snapshot_id!r}, {time_raw!r})"
+        )
+
+    return backup_rust.route_law("parse_snapshots_latest", oracle=_oracle, compute=_compute)
+
+
+def _parse_ls_file_paths_python(stdout: str) -> tuple[str, ...]:
     """Return the FILE node paths from ``restic ls --json`` output (dirs skipped)."""
     paths: list[str] = []
     for obj in _json_lines(stdout):
@@ -542,7 +660,27 @@ def parse_ls_file_paths(stdout: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def parse_ls_snapshot_time(stdout: str) -> datetime | None:
+def parse_ls_file_paths(stdout: str) -> tuple[str, ...]:
+    """Return the FILE node paths from ``restic ls --json`` output (dirs skipped).
+
+    DEC-BACKUP-RUST-OPS-001: under the default-OFF ``BRUTEX_BACKUP_RUST``
+    flag the scan routes through the ``brutex_ops`` twin (``None`` = the
+    serde-dialect abstain — the Python oracle serves verbatim).
+    """
+
+    def _oracle() -> tuple[str, ...]:
+        return _parse_ls_file_paths_python(stdout)
+
+    def _compute(crate: ModuleType) -> object:
+        result = crate.parse_ls_file_paths(stdout)
+        if result is None:
+            return backup_rust.USE_ORACLE
+        return _str_tuple_thunk(result)
+
+    return backup_rust.route_law("parse_ls_file_paths", oracle=_oracle, compute=_compute)
+
+
+def _parse_ls_snapshot_time_python(stdout: str) -> datetime | None:
     """Return the snapshot header's creation time from ``restic ls --json`` output.
 
     ``restic ls --json`` prints the snapshot's own struct as its first JSON
@@ -557,6 +695,44 @@ def parse_ls_snapshot_time(stdout: str) -> datetime | None:
             except BackupError:
                 return None
     return None
+
+
+def parse_ls_snapshot_time(stdout: str) -> datetime | None:
+    """Return the snapshot header's creation time (see the ``_python`` oracle).
+
+    DEC-BACKUP-RUST-OPS-001: under the default-OFF ``BRUTEX_BACKUP_RUST``
+    flag the header DECISION routes through the ``brutex_ops`` twin; a code-3
+    RAW time string is parsed Python-side under the oracle's own
+    ``_parse_snapshot_time`` + ``except BackupError → None`` arm, so values
+    AND fallbacks are byte-identical by construction. Code 0 = the
+    serde-dialect abstain (oracle verbatim); codes 1/2 are the oracle's
+    constant-``None`` outcomes, decided crate-side.
+    """
+
+    def _oracle() -> datetime | None:
+        return _parse_ls_snapshot_time_python(stdout)
+
+    def _compute(crate: ModuleType) -> object:
+        code, time_raw = cast(
+            "tuple[object, object]", crate.parse_ls_snapshot_time_decision(stdout)
+        )
+        if code == _CODE_ORACLE:
+            return backup_rust.USE_ORACLE
+        if code in (1, 2):  # no-header / non-string-time — both the constant None
+            return lambda: None
+        if code == _CODE_LS_TIME_STRING and isinstance(time_raw, str):
+            found_time = time_raw
+
+            def _materialise() -> datetime | None:
+                try:
+                    return _parse_snapshot_time(found_time)
+                except BackupError:
+                    return None
+
+            return _materialise
+        raise TypeError(f"poisoned ls-snapshot-time decision ({code!r}, {time_raw!r})")
+
+    return backup_rust.route_law("parse_ls_snapshot_time", oracle=_oracle, compute=_compute)
 
 
 __all__ = [

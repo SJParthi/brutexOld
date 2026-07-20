@@ -142,6 +142,15 @@ class CascadeVerdictView:
     provisional: bool
     cpcv_pass_rate: float | None
     survivor_rank: int | None
+    #: ADDITIVE regime-evidence statuses (`DEC-REGIME-REJECT-TIER-001`
+    #: PROPOSAL consumer; producers = the flag-gated extreme-vol-stratum /
+    #: regime-fragility filters, whose wire keys are EMIT-ON-PRESENT): the
+    #: VERBATIM wire string when present (``"ok"`` / ``"fail"`` / an honest
+    #: abstain token), ``None`` when the filter never ran (flag-OFF report —
+    #: key absent) or the wire value was junk (nulled + counted, the
+    #: ``rejected_at`` law).
+    extreme_vol_status: str | None = None
+    regime_fragility_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +251,16 @@ def _verdict_view(
         tally.nulled_values += 1
     elif rate_raw is not None and rate is None:
         tally.nulled_values += 1
+    extreme_vol_raw = entry.get("extreme_vol_status")
+    extreme_vol_status = extreme_vol_raw if isinstance(extreme_vol_raw, str) else None
+    if extreme_vol_raw is not None and extreme_vol_status is None:
+        # A junk (non-string) regime status is nulled + counted — the
+        # rejected_at law; the verdict itself is kept.
+        tally.nulled_values += 1
+    fragility_raw = entry.get("regime_fragility_status")
+    regime_fragility_status = fragility_raw if isinstance(fragility_raw, str) else None
+    if fragility_raw is not None and regime_fragility_status is None:
+        tally.nulled_values += 1
     return CascadeVerdictView(
         candidate_id=candidate_id,
         instrument=instrument,
@@ -253,6 +272,8 @@ def _verdict_view(
         provisional=entry.get("provisional") is True,
         cpcv_pass_rate=rate,
         survivor_rank=None,
+        extreme_vol_status=extreme_vol_status,
+        regime_fragility_status=regime_fragility_status,
     )
 
 

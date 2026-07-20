@@ -344,6 +344,42 @@ class TestVerdictTolerance:
         assert view.cpcv_pass_rate is None
         assert join.nulled_values == 1
 
+    # ── ADDITIVE regime statuses (`DEC-REGIME-REJECT-TIER-001` proposal) ──
+
+    def test_regime_statuses_absent_read_none_uncounted(self) -> None:
+        join = self._one([_verdict(_CID_A)], survivor_ids=[_CID_A])
+        view = join.by_candidate[_CID_A]
+        assert view.extreme_vol_status is None
+        assert view.regime_fragility_status is None
+        assert join.nulled_values == 0
+
+    def test_regime_statuses_verbatim_strings_kept(self) -> None:
+        join = self._one(
+            [
+                _verdict(
+                    _CID_A,
+                    extreme_vol_status="unproven_current_regime",
+                    regime_fragility_status="insufficient_strata",
+                )
+            ],
+            survivor_ids=[_CID_A],
+        )
+        view = join.by_candidate[_CID_A]
+        assert view.extreme_vol_status == "unproven_current_regime"
+        assert view.regime_fragility_status == "insufficient_strata"
+        assert join.nulled_values == 0
+
+    @pytest.mark.parametrize("junk", [7, True, ["fail"], {"s": "fail"}])
+    def test_junk_regime_statuses_nulled_counted_verdict_kept(self, junk: Any) -> None:
+        join = self._one(
+            [_verdict(_CID_A, extreme_vol_status=junk, regime_fragility_status=junk)],
+            survivor_ids=[_CID_A],
+        )
+        view = join.by_candidate[_CID_A]
+        assert view.extreme_vol_status is None
+        assert view.regime_fragility_status is None
+        assert join.nulled_values == 2
+
     def test_boundary_rates_kept_exact(self) -> None:
         join = build_cascade_join(
             _payload(

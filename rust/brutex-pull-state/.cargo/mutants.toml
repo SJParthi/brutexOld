@@ -1,0 +1,44 @@
+# `DEC-RUST-PULL-STATE-001` — the ONE cargo-mutants scope for
+# brutex-pull-state, resolved by BOTH the CI job
+# (.github/workflows/mutation.yml, rust-mutation-brutex-pull-state) and any
+# local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11
+# COMMON; the brutex-feed toml precedent).
+#
+# Scope: the TWELVE decision-kernel sources — the whole pull-state decision
+# plane (market-hours window boundary math, the outcome classify ladder,
+# scope token + note-surgery laws, the wedge/alive stall ladder, the auto
+# gate ladder + Muhurat margined window + settle-token verdict, the intent
+# parse/resume/restore lattice, the progress derived-metrics math incl. the
+# round-half-even twin, the scheduler tick/state verdicts, the census fold,
+# the reload predicate, the bridge payload-verdict lattice + memo serve-arm
+# + token revalidation). The in-crate `tests/*_golden.rs` TSV fixture
+# replays + `tests/market_hours_proptest.rs` invariants + the unit matrices
+# in each module are the killing suite; zero-survivor is the standard
+# (DEC-MUTATION-RUNTIME-003).
+#
+# DELIBERATELY OUT (documented, not silent — Golden Rule #10; the
+# trading-core/brutex-feed toml disclosure standard):
+#   src/python.rs — the thin PyO3 mapping edge. cargo-mutants 27.1.0 does
+#                   not resolve the `PyResult` alias and fabricates only
+#                   non-compiling replacements for PyErr-constructing
+#                   wrappers (the trading-core 229-UNVIABLE measurement);
+#                   the edge is exercised end-to-end by the Python wheel
+#                   suites in ci.yml (the facade fault-injection matrix +
+#                   the twelve golden JSON replays driving the kernels
+#                   through the fail-closed facade).
+#   src/lib.rs    — re-exports + the baked SOURCE_DIGEST const only; nothing
+#                   behavioural for cargo-mutants to perturb.
+examine_globs = [
+    "src/market_hours.rs",
+    "src/pull_outcome.rs",
+    "src/pull_scope.rs",
+    "src/stall.rs",
+    "src/auto_pull_gate.rs",
+    "src/intent.rs",
+    "src/progress.rs",
+    "src/auto_pull_scheduler.rs",
+    "src/pull_census.rs",
+    "src/auto_pull.rs",
+    "src/rate_bridge.rs",
+    "src/rate_bridge_cache.rs",
+]

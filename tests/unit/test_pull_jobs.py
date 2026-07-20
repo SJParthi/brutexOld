@@ -2016,3 +2016,87 @@ def test_is_pull_halt_excludes_pull_cancelled() -> None:
     from brutex.adapters.ingest_common import PullCancelled
 
     assert pull_jobs.is_pull_halt(PullCancelled("operator cancel")) is False
+
+
+class TestDhanTerminalPullStop:
+    """DEC-DHAN-SPOT-FEED-001 (design §3): the Dhan terminal-pull-stop arm of is_pull_halt."""
+
+    def test_is_pull_halt_recognises_the_three_dhan_stop_classes(self) -> None:
+        from brutex.adapters.dhan.errors import (
+            DhanAuthError,
+            DhanSubscriptionError,
+            DhanTokenStillStaleError,
+        )
+
+        assert pull_jobs.is_pull_halt(DhanAuthError("dead credential")) is True
+        assert pull_jobs.is_pull_halt(DhanSubscriptionError("806: no sub")) is True
+        assert pull_jobs.is_pull_halt(DhanTokenStillStaleError("same dead token")) is True
+
+    def test_is_pull_halt_dhan_non_stop_classes_read_false(self) -> None:
+        # A per-window Dhan failure is NOT a pull halt — the spine quarantines it.
+        from brutex.adapters.dhan.errors import (
+            DhanBadRequestError,
+            DhanError,
+            DhanServerError,
+            DhanThrottleError,
+        )
+
+        assert pull_jobs.is_pull_halt(DhanThrottleError("slow")) is False
+        assert pull_jobs.is_pull_halt(DhanServerError("blip")) is False
+        assert pull_jobs.is_pull_halt(DhanBadRequestError("813")) is False
+        assert pull_jobs.is_pull_halt(DhanError("unknown")) is False
+
+    def test_pre_existing_class_verdicts_byte_identical(self) -> None:
+        """Blast-radius pin (design §3): adding the Dhan arm changed NO pre-existing
+        verdict — every Groww/global class reads exactly what it read before.
+        """
+        from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+        from brutex.adapters.error_storm_breaker import VendorDownError
+        from brutex.adapters.groww.errors import (
+            GrowwCredentialDeadError,
+            GrowwRateLimitError,
+            GrowwServerError,
+            GrowwTimeoutError,
+        )
+        from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt, MarketHoursHalt
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+
+        expected: list[tuple[BaseException, bool]] = [
+            (LakeWriteHalt("disk_full"), True),
+            (MarketHoursHalt("market hours"), True),
+            (DailyQuotaExceeded("quota"), True),
+            (QuotaInvariantError("invariant"), True),
+            (MassEmptySettleHalt("mass empty"), True),
+            (VendorDownError("vendor down"), True),
+            (GreeksEnrichPoolBroken("worker died"), True),
+            (GrowwCredentialDeadError("dead"), True),  # terminal auth escalation
+            (GrowwRateLimitError("429"), False),  # retryable — never a halt
+            (GrowwTimeoutError("timeout"), False),
+            (GrowwServerError("5xx"), False),
+            (RuntimeError("generic"), False),
+            (ValueError("generic"), False),
+        ]
+        for exc, verdict in expected:
+            assert pull_jobs.is_pull_halt(exc) is verdict, type(exc).__name__
+
+    def test_dhan_terminal_stop_fires_pull_halt_alert_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The job path: a Dhan subscription stop escaping the worker → error state
+        AND exactly ONE CRITICAL emit_pull_halt_alert (the LakeWriteHalt template).
+        """
+        from brutex.adapters.dhan.errors import DhanSubscriptionError
+
+        halts: list[BaseException] = []
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+        job = _job()
+
+        def work(_on_progress: ProgressHook) -> None:
+            raise DhanSubscriptionError("806: Dhan Data-API subscription inactive")
+
+        assert job.start(work, total=1) is True
+        snap = job.snapshot()
+        assert snap.state == STATE_ERROR
+        assert "DhanSubscriptionError" in snap.detail
+        assert len(halts) == 1  # alert fired EXACTLY once for the global stop
+        assert isinstance(halts[0], DhanSubscriptionError)

@@ -1070,19 +1070,32 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     scaled 1m spike is dropped-and-counted before it can poison the derived
     bucket HIGH/LOW or the ``1day`` anchor. Clean frames are returned
     object-identical (zero-copy); clean lakes stay byte-identical.
+
+    Wave-D core (ADR-0020 §6, DEC-RUST-LAKE-WAVED-001 ENDGAME): the COLLECT
+    body (scan → rename/select/sort → the two gates → the screen) is OWNED
+    by the ``brutex_lake`` crate via
+    :func:`brutex.data.lake_rust_waved.read_1m_via_rust` — the Python
+    ``_collect`` oracle is DELETED. A crate-side refusal (a genuine gate
+    violation, a corrupt file, a crate panic) raises the SAME typed
+    quarantining :class:`~brutex.data.errors.ResampleInputError` with the
+    Rust-rendered reason (the ruled endgame semantics — message TEXT is the
+    crate's, the CLASS + isolation posture are unchanged). The ONE
+    exception is the inode-guard class (D-31): a NON-REGULAR inode — a
+    planted FIFO/device/dir — in the read set keeps its pre-Wave-D typed
+    :class:`~brutex.data.sidecar_read.NotRegularFileError` (an ``OSError``
+    — DEC-LAKE-READ-INODE-GUARD-001/-002; crossed from the crate as a real
+    ``OSError``, restored facade-side), raised eagerly and folding into
+    the same ``parquet_read_skip_errors()`` quarantine arms. The months /
+    whole-tree / empty-partition SOURCE DECISION — with its pinned raises —
+    runs BEFORE the seam in ``_resolve_source``. An absent/stale wheel
+    raises the typed
+    :class:`~brutex.data.errors.LakeRustWavedUnavailableError` (the
+    REQUIRED-wheel law).
     """
+    from brutex.data.bad_tick import bad_tick_screen_enabled
+    from brutex.data.lake_rust_waved import read_1m_via_rust
 
-    from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
-    from brutex.data.price_sanity import (
-        validate_frame_price_sanity,
-        validate_frame_ts_datetime_range,
-    )
-
-    columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
-    if with_open_interest:
-        columns = (*columns, "open_interest")
-
-    def _read() -> pl.DataFrame:
+    def _resolve_source() -> str | list[str]:
         base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
         if months is not None:
             # Month-bounded read (DEC-TF-REBUILD-MONTH-BOUND-001): the explicit
@@ -1116,52 +1129,25 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
                 "returned no data for this symbol (windows settled EMPTY), "
                 "there is nothing to derive — no action needed"
             )
-        # Schema-tolerant tree read (DEC-GREEKS-ENGINE-PR2B-001): an enriched
-        # OPTION contract's month files may mix the raw 7-column and the
-        # Greeks-enriched 17-column shape (plan §15.3); only the base
-        # OHLCV(+OI) columns are selected below, which every shape carries —
-        # byte-identical for a uniform tree. Lazily scanned through the EAGER
-        # per-file fd probe (DEC-LAKE-READ-INODE-GUARD-002) — covers BOTH
-        # source shapes (the months-bounded file LIST and the whole-tree GLOB
-        # string): a planted FIFO raises NotRegularFileError at scan-build
-        # instead of hanging the collect; regular files byte-identical.
-        from brutex.data.guarded_read import scan_parquet_regular
+        return source
 
-        # LITERAL month-file lists never glob (DEC-SPOT-DERIVE-TS-RANGE-
-        # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
-        # a symbol dir named `NSE-X[12]` beside real `NSE-X1`/`NSE-X2`
-        # siblings otherwise glob-reads the SIBLINGS' bars into this
-        # symbol. Held INSIDE scan_parquet_regular (the lap-8 fold re-derive:
-        # its explicit-list arm passes glob=False; its path/glob-STRING arm —
-        # the deliberate whole-tree `**` discovery branch — keeps polars'
-        # glob semantics), so this call needs no glob kwarg. The writer
-        # additionally refuses to mint such dirs
-        # (partition._FORBIDDEN_SYMBOL_CHARS gains `[`/`]`).
-        df = scan_parquet_regular(
-            source,
-            missing_columns="insert",
-            extra_columns="ignore",
-        ).collect()
-        frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
+    def _read() -> pl.DataFrame:
+        source = _resolve_source()
+        # The Wave-D core (see the builder docstring): the collect body is
+        # crate-owned. The source decision above already ran (its raises
+        # live there); the months arm passes the explicit file list, the
+        # whole-tree arm passes the partition dir (the crate walks exact
+        # paths — the glob=False law holds by construction).
+        base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
         context = f"{exchange}/{segment}/{symbol}/1minute"
-        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001: refuse an out-of-datetime-
-        # range stored timestamp FIRST (a 2**62-us stamp panics the Rust→Python
-        # conversion downstream — a BaseException past every except Exception;
-        # the price gate's own first-offender message indexes ts too). Raises
-        # the quarantining ResampleInputError.
-        validate_frame_ts_datetime_range(frame, ts_column="ts_utc", context=context)
-        # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
-        # frame to the resamplers (raises the quarantining ResampleInputError).
-        validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
-        # DEC-READ-GUARD-PARITY-001: drop x10/÷10 scaled 1m spikes (the engine
-        # read boundary's BadTickScreen, frame form) BEFORE any resampler — a
-        # self-consistent scaled bar passes price sanity and otherwise poisons
-        # the derived bucket HIGH/LOW + the 1day anchor. Runs AFTER the sanity
-        # gate (is_bad_tick assumes positivity). Default ON; the ONE
-        # BRUTEX_BAD_TICK_SCREEN kill switch flips both boundaries together.
-        if bad_tick_screen_enabled():
-            frame = screen_frame_bad_ticks(frame, ts_column="ts_utc", source=f"prebuild:{context}")
-        return frame
+        return read_1m_via_rust(
+            files=None if isinstance(source, str) else source,
+            tree_root=base.as_posix() if isinstance(source, str) else None,
+            with_open_interest=with_open_interest,
+            screen_enabled=bad_tick_screen_enabled(),
+            warn_source=f"prebuild:{context}",
+            context=context,
+        )
 
     return _read
 

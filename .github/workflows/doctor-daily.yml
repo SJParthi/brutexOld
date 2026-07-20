@@ -9,7 +9,11 @@
 #            PASS against the in-repo EXPECTED_BUILD.json fingerprints and
 #            BOTH wheel source-digest handshakes PASS against the repo crate
 #            trees (DEC-RUST-SOURCE-DIGEST-TWIN-001 #1258 /
-#            DEC-DOCTOR-DAILY-CHECKSET-9-001); the
+#            DEC-DOCTOR-DAILY-CHECKSET-9-001 — SUPERSEDED-IN-PART by
+#            DEC-BRUTEX-LAKE-BOX-WHEEL-001: the check set is reclassified
+#            9 → 11 with the two OPTIONAL brutex_lake wheel stages asserted
+#            deterministic WARN — the wheel is deliberately never installed
+#            in this hermetic env); the
 #            doctor's skip-with-reason machinery abstained honestly on every
 #            check needing the operator envelope (ASSERTED below — a
 #            fabricated PASS on a hosted runner goes red, never fake-green;
@@ -159,7 +163,7 @@ jobs:
             --runtime-file "${CI_DOCTOR_HOME}/runtime.json" \
             | tee doctor-report.txt
 
-      - name: Assert envelope honesty (5x SKIP-with-reason, 4x wheel PASS)
+      - name: Assert envelope honesty (5x SKIP-with-reason, 4x wheel PASS, 2x lake WARN)
         # Exit 0 from the doctor is necessary but NOT sufficient: (a) an
         # envelope check reading PASS against the hermetic empty envelope is
         # a fabricated verdict -> red ("CI must never claim operator-envelope
@@ -207,16 +211,35 @@ jobs:
           # (DEC-DOCTOR-DAILY-CHECKSET-9-001; live-proof run 28834010234).
           assert_status wheel_source_digest PASS
           assert_status wheel_source_digest_fno_math PASS
-          # Two-sided check-set pin: the 9 names above red a REMOVED/RENAMED
+          # The two OPTIONAL brutex_lake wheel stages (DEC-BRUTEX-LAKE-BOX-
+          # WHEEL-001, superseding-in-part DEC-DOCTOR-DAILY-CHECKSET-9-001's
+          # 9-check set): the brutex-lake wheel is OPTIONAL and deliberately
+          # ABSENT in this hermetic env — it is never installed above, and
+          # building it in-cron would risk the 30-min job timeout on a cold
+          # ~24-min-CPU polars source build — so the EXPECTED status is WARN
+          # and the WARN is itself the asserted, proved behavior: the
+          # absent-wheel arm of BOTH lake stages is exercised nightly. The
+          # step comment's clause (b) ("a wheel-freshness WARN/SKIP means
+          # the run proved nothing -> red") stays true for the four
+          # REQUIRED-wheel checks above; for the optional lake wheel this
+          # deterministic-WARN assert is the two-sided contract instead — a
+          # PASS here would mean someone installed the wheel in-cron WITHOUT
+          # reclassifying these two lines (red), and a SKIP would mean the
+          # BRUTEX_SKIP_WHEEL_FRESHNESS escape leaked into the cron (red).
+          # A future in-cron wheel install must consciously flip these two
+          # lines to PASS (and eat the build cost).
+          assert_status wheel_freshness_brutex_lake WARN
+          assert_status wheel_source_digest_brutex_lake WARN
+          # Two-sided check-set pin: the 11 names above red a REMOVED/RENAMED
           # check; this exact-count pin reds an ADDED one. Check rows live
           # strictly between the two ==== rules, so the OVERALL line (whose
           # $3 is also PASS/FAIL) is never miscounted.
           n="$(awk '/^=+$/ { rules++; next } rules == 1 { count++ } END { print count + 0 }' doctor-report.txt)"
-          if [ "$n" -ne 9 ]; then
-            echo "::error::expected exactly 9 doctor check rows, got $n — the doctor check set changed: classify the new/removed check in this step consciously"
+          if [ "$n" -ne 11 ]; then
+            echo "::error::expected exactly 11 doctor check rows, got $n — the doctor check set changed: classify the new/removed check in this step consciously"
             exit 1
           fi
-          echo "envelope-honesty contract holds: 5 SKIP-with-reason + 4 PASS, exactly 9 checks"
+          echo "envelope-honesty contract holds: 5 SKIP-with-reason + 4 PASS + 2 WARN (optional lake wheel absent), exactly 11 checks"
 
       - name: Publish run summary (envelope-honest)
         if: always()

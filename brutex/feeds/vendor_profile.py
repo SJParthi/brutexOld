@@ -91,12 +91,19 @@ profile is OPERATOR-GATED on credentials + a servability probe. The staged-chain
 binder that constructs a vendor's graph FROM its profile is the next WS-C
 commit, and the second vendor's concrete profile is the feed-vendor track's
 (WS-D) — this tree ships no feed profile (tests use a synthetic one). The
-:meth:`VendorPullProfile.assert_write_dest` enforcement hook is a SEAM only:
-NO production writer consults it in this pass — the caller binding + the
-profile-free masquerade pin are the GATED follow-up commit (pending explicit
-user approval on the WS-B containment CLEAR — the permission boundary this
-session recorded; the binding site is marked in
-:mod:`brutex.data.parquet_writer`). The ADR §5 ownership-brokering item (the
+:meth:`VendorPullProfile.assert_write_dest` enforcement hook now has a LIVE
+sibling binding (DEC-WRITE-DOMAIN-CALLER-BINDING-001, the Pin D1-1 caller
+binding): :class:`brutex.data.parquet_writer.ParquetWriter` enforces the
+domain PER WRITE via its ``write_domain=`` ctor param at the minted-dest
+chokepoint, the three live production pull sink builders
+(``pull_controller._build_live_spot_adapter`` ·
+``historical_pull._build_live_client`` · ``cli._build_live_groww_spot``) bind
+:func:`~brutex.data.write_domain.primary_write_domain`, and profile-FREE
+writers ride the masquerade pin
+(:func:`~brutex.data.write_domain.assert_profile_free_dest` — a domain-less
+writer never silently writes under ``feeds/``). This hook remains the
+profile-level enforcement seam a staged-chain binder consults when it
+constructs a vendor's writers FROM its profile. The ADR §5 ownership-brokering item (the
 feed track's ``feeds/{registry,binding}`` layer) resolves toward shape (a) —
 this abstraction is the home, their layer the concrete instance; their branch
 is not visible from this tree, so the inspection is recorded as pending WS-D
@@ -283,13 +290,17 @@ class VendorPullProfile:
         Delegates to :func:`brutex.data.write_domain.assert_write_domain` over
         the profile's own :class:`~brutex.data.write_domain.WriteDomain` — the
         typed refusal on a cross-domain / out-of-lake / symlink-escaping dest
-        (ADR-0021 §12 invariant 1). SEAM ONLY in this pass: NO production
-        writer consults it yet — the caller binding (wiring the vendor-chain
-        writers through this hook, plus the profile-free masquerade pin) is
-        the GATED follow-up commit, pending explicit user approval on the
-        WS-B containment CLEAR (the permission boundary this session
-        recorded); the binding site is marked in
-        :mod:`brutex.data.parquet_writer`.
+        (ADR-0021 §12 invariant 1). The caller binding is LIVE
+        (DEC-WRITE-DOMAIN-CALLER-BINDING-001):
+        :class:`brutex.data.parquet_writer.ParquetWriter` enforces per write
+        via its ``write_domain=`` ctor param at the minted-dest chokepoint,
+        the three live pull sink builders bind
+        :func:`~brutex.data.write_domain.primary_write_domain`, and
+        profile-FREE writers carry the masquerade pin
+        (:func:`~brutex.data.write_domain.assert_profile_free_dest`). This
+        hook stays the PROFILE-level seam: a staged-chain binder constructing
+        a vendor's writers from its profile consults it (or passes the
+        profile's domain straight into the writer).
         """
         from brutex.data.write_domain import assert_write_domain
 

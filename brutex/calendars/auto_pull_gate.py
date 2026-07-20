@@ -14,11 +14,26 @@ composed, never edited. The belt honors the guard's OWN
 ``BRUTEX_MARKET_HOURS_GUARD`` kill switch (guard off ⇒ belt off — one switch
 governs the shared-account protection family; hostile-review r1 ruling).
 
+DEC-RUST-PULL-STATE-001 (flip phase): the ``brutex_pull_state`` Rust kernel
+IS the decision plane of this module — the gate ladder
+(``auto_gate_decision``), the margined Muhurat window
+(``muhurat_window_active``) and the settle-token parse verdict
+(``settle_token_verdict``) are kernel-only; the Python oracle bodies were
+DELETED. The calendars module still resolves every INPUT (the NSE calendar
+predicates, the clock, the settle tier) and composes every OPERATOR-FACING
+string (verdict details, the fail-loud ``ValueError`` texts); a kernel fault
+raises the typed
+:class:`~brutex.pull_state_rust.PullStateKernelError` — FAIL-CLOSED, so an
+unattended ``--auto`` invocation stops loudly instead of deciding blind.
+
 Settle resolution is the THREE-TIER law (DEC-SETTLE-EVIDENCE-ADOPTION-001,
 MIGRATION.md #1793): explicit ``BRUTEX_PULL_ALL_SETTLE_IST`` (fail-loud,
 strict HH:MM — the tier-1 short-circuit, evidence never read) > VALIDATED
 committed probe evidence (:mod:`brutex.calendars.settle_evidence` — the
 #1775 probe's ``--emit-evidence`` artifact) > the conservative 17:30 default.
+The env-tier RESOLUTION (env reads + the tier ladder) stays Python by design
+(the pull_stall env-resolver precedent); only the token's PARSE VERDICT is
+kernel-served.
 Honest envelope (Golden Rule #10): the DEFAULT tier is a NAMED CONSERVATIVE
 GUESS — until a measured evidence file is committed, the vendor's true
 settle time is UNMEASURED; 17:30 IST is the probe's LAST slot
@@ -34,17 +49,16 @@ today-completeness gate + the prev-day end bound are the data safety net.
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Final, overload
 
 import structlog
 
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.calendars.market_hours import (
     BLOCK_END,
-    pull_allowed_default,
     resolve_market_hours_guard_enabled,
 )
 from brutex.calendars.nse import (
@@ -85,43 +99,76 @@ DEFAULT_PULL_ALL_SETTLE_IST: Final[time] = time(17, 30)
 #: ``pull-all-fno`` sibling unchanged). Strict ``HH:MM``; fail-loud on junk.
 PULL_ALL_SETTLE_ENV: Final[str] = "BRUTEX_PULL_ALL_SETTLE_IST"
 
-#: Strict ``HH:MM`` shape — exactly two ASCII digits each side (never a
-#: lenient parse; a junk knob must fail loud, DEC-RAM-BUDGETS-001 env
-#: convention). ``re.ASCII`` per the DEC-LAKE-STATS-MANIFEST-001 round-3
-#: precedent: Unicode ``\d`` would silently accept e.g. ``"١٧:٣٠"``.
-_SETTLE_SHAPE: Final[re.Pattern[str]] = re.compile(r"^(\d{2}):(\d{2})$", re.ASCII)
+
+def _us_of_day(t: time) -> int:
+    """Microsecond-of-day of an IST wall-clock time — the FFI packing law
+    (order-isomorphic to ``datetime.time`` comparison, so every boundary the
+    Rust kernels decide on is bit-exact; DEC-RUST-PULL-STATE-001 Wave 2D)."""
+    return ((t.hour * 60 + t.minute) * 60 + t.second) * 1_000_000 + t.microsecond
+
+
+#: The guard's ``BLOCK_END`` floor in microseconds-of-day — DERIVED from the
+#: imported constant (the one-constant law: ``market_hours.BLOCK_END`` stays
+#: the single Python owner; the Rust side's twin lives in the crate's ONE
+#: ``market_hours`` core, sync-pinned by the goldens).
+_BLOCK_END_US: Final[int] = _us_of_day(BLOCK_END)
+
+#: Microseconds per minute — unpacking the kernel's minute-granular settle
+#: instant back into a wall-clock ``time``.
+_US_PER_MINUTE: Final[int] = 60_000_000
+
+#: The kernel's non-OK ``settle_token_verdict`` codes (mirrors
+#: ``rust/brutex-pull-state/src/auto_pull_gate.rs`` ``SETTLE_BAD_SHAPE`` /
+#: ``SETTLE_NOT_WALL_CLOCK``; ``SETTLE_BELOW_FLOOR`` = 3 is decided by
+#: elimination — the facade's vocabulary gate admits exactly {0, 1, 2, 3}).
+#: The code → refusal-STRING mapping is the CONSUMER's: every fail-loud
+#: ``ValueError`` text below stays Python-composed, never minted in Rust.
+_SETTLE_CODE_BAD_SHAPE: Final[int] = 1
+_SETTLE_CODE_NOT_WALL_CLOCK: Final[int] = 2
 
 
 def _parse_settle_token(raw: str) -> time:
     """The strict ``HH:MM`` parse + the ≥ ``BLOCK_END`` floor — fail-loud.
 
-    The VERBATIM tier-1 parse body (identical error messages — every junk pin
-    stays green): shape, real-wall-clock range, then the STRUCTURAL floor —
-    a value BEFORE the market-hours guard's ``BLOCK_END`` (15:35 IST) is
-    refused naming the guard; exactly 15:35 is ALLOWED (boundary pinned).
+    DEC-RUST-PULL-STATE-001 (flip phase): the parse VERDICT is kernel-only —
+    the PRE-STRIPPED token (``str.strip`` stays Python: its whitespace set
+    is CPython's ``isspace`` law) + the derived floor cross the FFI, and the
+    kernel answers shape → real-wall-clock range → the STRUCTURAL floor (a
+    value BEFORE the market-hours guard's ``BLOCK_END`` — 15:35 IST — is
+    refused naming the guard; exactly 15:35 is ALLOWED, boundary pinned).
+    Every refusal ``ValueError`` is composed HERE, byte-identical to the
+    deleted oracle's messages (the golden settle-token matrix pins them).
+
+    Raises
+    ------
+    ValueError
+        On a junk / out-of-range / below-floor token (the fail-loud env law).
+    brutex.pull_state_rust.PullStateKernelError
+        Wheel absent/stale, kernel raise, or a poisoned verdict — fail-closed.
     """
     token = raw.strip()
-    match = _SETTLE_SHAPE.match(token)
-    if match is None:
+    code, value_us = _pull_state_rust.rust_settle_token_verdict(token, _BLOCK_END_US)
+    if code == _pull_state_rust.SETTLE_CODE_OK:
+        minute_of_day = value_us // _US_PER_MINUTE
+        return time(minute_of_day // 60, minute_of_day % 60)
+    if code == _SETTLE_CODE_BAD_SHAPE:
         raise ValueError(
             f"{PULL_ALL_SETTLE_ENV}={raw!r} is not a strict HH:MM IST wall-clock "
             f"time (e.g. '17:30')"
         )
-    try:
-        value = time(int(match.group(1)), int(match.group(2)))
-    except ValueError as exc:  # out-of-range hour/minute (e.g. "25:99")
+    if code == _SETTLE_CODE_NOT_WALL_CLOCK:
         raise ValueError(
             f"{PULL_ALL_SETTLE_ENV}={raw!r} is not a real wall-clock time "
             f"(hour 00-23, minute 00-59)"
-        ) from exc
-    if value < BLOCK_END:
-        raise ValueError(
-            f"{PULL_ALL_SETTLE_ENV}={raw!r} is before the market-hours guard's "
-            f"BLOCK_END {BLOCK_END:%H:%M} IST — a pre-close settle time would "
-            f"just bounce off the untouched market-hours gate "
-            f"(brutex.calendars.market_hours); use {BLOCK_END:%H:%M} or later"
         )
-    return value
+    # SETTLE_BELOW_FLOOR by elimination (the facade vocabulary gate admits
+    # exactly the four codes).
+    raise ValueError(
+        f"{PULL_ALL_SETTLE_ENV}={raw!r} is before the market-hours guard's "
+        f"BLOCK_END {BLOCK_END:%H:%M} IST — a pre-close settle time would "
+        f"just bounce off the untouched market-hours gate "
+        f"(brutex.calendars.market_hours); use {BLOCK_END:%H:%M} or later"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +257,70 @@ class AutoGateVerdict:
     detail: str
 
 
+# ── The verdict builders + coverage WARN (ONE source per detail string —
+# the kernel answers a machine CODE, these builders own every byte of the
+# operator-facing wording; CLAUDE.md §2 Rule 11 COMMON) ──────────────────────
+
+
+def _warn_coverage_exhausted(d: date) -> None:
+    """The ruling-10 coverage-exhausted WARN (fired at most once per verdict)."""
+    _LOG.warning(
+        "auto_pull_gate.calendar_coverage_exhausted",
+        date=d.isoformat(),
+        detail=(
+            "holiday list does not cover this year — treating the weekday as "
+            "a trading day (add the new NSE holiday circular; a true holiday "
+            "costs bounded EMPTY churn, never wrong data)"
+        ),
+    )
+
+
+def _verdict_non_trading(d: date) -> AutoGateVerdict:
+    """Build the disallowed ``non_trading_day`` verdict for day ``d``."""
+    return AutoGateVerdict(
+        allowed=False,
+        reason="non_trading_day",
+        detail=f"{d.isoformat()} is not an NSE trading day — nothing new to pull",
+    )
+
+
+def _verdict_muhurat(d: date) -> AutoGateVerdict:
+    """Build the disallowed ``muhurat_deferral`` verdict for day ``d``."""
+    return AutoGateVerdict(
+        allowed=False,
+        reason="muhurat_deferral",
+        detail=(
+            f"{d.isoformat()} has a Muhurat session — deferred to the next "
+            f"regular trading day (evening-session settle behavior unverified)"
+        ),
+    )
+
+
+def _verdict_before_settle(res: SettleResolution) -> AutoGateVerdict:
+    """Build the disallowed ``before_settle`` verdict for the resolved settle."""
+    # The provenance clause is per-tier (Golden Rule #10): the DEFAULT
+    # arm's rendered detail is BYTE-IDENTICAL to the pre-#1793 wording.
+    return AutoGateVerdict(
+        allowed=False,
+        reason="before_settle",
+        detail=(f"waiting for post-close settle time {res.value:%H:%M} IST ({res.provenance})"),
+    )
+
+
+def _verdict_market_hours_blocked() -> AutoGateVerdict:
+    """Build the disallowed ``market_hours_blocked`` verdict."""
+    return AutoGateVerdict(
+        allowed=False,
+        reason="market_hours_blocked",
+        detail="inside the NSE market-hours pull window — deferred",
+    )
+
+
+def _verdict_ok() -> AutoGateVerdict:
+    """Build the allowed ``ok`` verdict."""
+    return AutoGateVerdict(allowed=True, reason="ok", detail="ok")
+
+
 def auto_pull_allowed(
     *,
     now: datetime | None = None,
@@ -219,7 +330,13 @@ def auto_pull_allowed(
 
     *now* defaults to the live :func:`~brutex.calendars.nse.now_ist`; *env* is
     parsed ONCE via :func:`resolve_settle_resolution` (junk RAISES out — the
-    caller fails loud BEFORE any lock/vendor work). Decision order:
+    caller fails loud BEFORE any lock/vendor work). The ladder DECISION is
+    kernel-only (DEC-RUST-PULL-STATE-001, flip phase): the Python-resolved
+    calendar predicates (``calendars/nse.py`` stays the one calendar source
+    of truth) + the microsecond-of-day instant/settle pair cross the FFI,
+    and the kernel's ``(reason_code, coverage_warn)`` maps through the ONE
+    set of verdict builders + the coverage WARN — every operator-facing byte
+    stays single-sourced here. The ladder order the kernel enforces:
 
     1. not a trading day → ``non_trading_day`` (the NON-raising
        :func:`~brutex.calendars.nse.is_trading_day`: every listed Muhurat
@@ -229,63 +346,52 @@ def auto_pull_allowed(
        zero-touch product stays alive past the calendar horizon, account
        safety preserved by the untouched in-window market-hours guard; a true
        unlisted holiday costs bounded EMPTY churn, never wrong data);
-    2. :func:`~brutex.calendars.nse.has_muhurat_session` → ``muhurat_deferral``
-       (the belt for a future TRADING-day Muhurat listing);
-    3. ``now.time() < resolve_settle_resolution(env).value`` →
-       ``before_settle`` (the three-tier law: env > validated committed
-       evidence > the conservative 17:30 default; the deferral detail carries
-       the resolved tier's honest provenance);
-    4. not :func:`~brutex.calendars.market_hours.pull_allowed_default` →
-       ``market_hours_blocked`` (a BELT — structurally unreachable while the
-       settle floor is ≥ 15:35 = ``BLOCK_END``, since every in-window minute
-       is already ``before_settle``; kept so a future settle-law change can
-       never open a hole);
+    2. a listed Muhurat session → ``muhurat_deferral`` (the belt for a
+       future TRADING-day Muhurat listing);
+    3. instant < settle → ``before_settle`` (the three-tier law: env >
+       validated committed evidence > the conservative 17:30 default; the
+       deferral detail carries the resolved tier's honest provenance);
+    4. inside the market-hours block window → ``market_hours_blocked``
+       (a BELT — structurally unreachable while the settle floor is ≥
+       15:35 = ``BLOCK_END``, since every in-window minute is already
+       ``before_settle``; the kernel computes it from the crate's ONE
+       market-hours core, so a future settle-law change can never open a
+       hole);
     5. else ``ok``.
+
+    Raises
+    ------
+    ValueError
+        On a junk settle env (the fail-loud tier-1 parse).
+    brutex.pull_state_rust.PullStateKernelError
+        Wheel absent/stale, kernel raise, or a poisoned decision pair —
+        fail-closed: the unattended invocation stops loudly, never decides
+        blind (the Python oracle ladder was deleted).
     """
     res = resolve_settle_resolution(env)
     ist_now = now_ist() if now is None else now
     d = ist_now.date()
-    if not is_trading_day(d):
-        return AutoGateVerdict(
-            allowed=False,
-            reason="non_trading_day",
-            detail=f"{d.isoformat()} is not an NSE trading day — nothing new to pull",
-        )
-    if not is_holiday_data_available(d):
+    code, coverage_warn = _pull_state_rust.rust_auto_gate_decision(
+        trading_day=is_trading_day(d),
+        coverage_available=is_holiday_data_available(d),
+        muhurat_listed=has_muhurat_session(d),
+        now_us_of_day=_us_of_day(ist_now.time()),
+        settle_us_of_day=_us_of_day(res.value),
+    )
+    if coverage_warn:
         # Ruling 10: coverage-exhausted weekday PROCEEDS post-settle, loudly.
-        _LOG.warning(
-            "auto_pull_gate.calendar_coverage_exhausted",
-            date=d.isoformat(),
-            detail=(
-                "holiday list does not cover this year — treating the weekday as "
-                "a trading day (add the new NSE holiday circular; a true holiday "
-                "costs bounded EMPTY churn, never wrong data)"
-            ),
-        )
-    if has_muhurat_session(d):
-        return AutoGateVerdict(
-            allowed=False,
-            reason="muhurat_deferral",
-            detail=(
-                f"{d.isoformat()} has a Muhurat session — deferred to the next "
-                f"regular trading day (evening-session settle behavior unverified)"
-            ),
-        )
-    if ist_now.time() < res.value:
-        # The provenance clause is per-tier (Golden Rule #10): the DEFAULT
-        # arm's rendered detail is BYTE-IDENTICAL to the pre-#1793 wording.
-        return AutoGateVerdict(
-            allowed=False,
-            reason="before_settle",
-            detail=(f"waiting for post-close settle time {res.value:%H:%M} IST ({res.provenance})"),
-        )
-    if not pull_allowed_default(now=ist_now):
-        return AutoGateVerdict(
-            allowed=False,
-            reason="market_hours_blocked",
-            detail="inside the NSE market-hours pull window — deferred",
-        )
-    return AutoGateVerdict(allowed=True, reason="ok", detail="ok")
+        _warn_coverage_exhausted(d)
+    if code == _pull_state_rust.GATE_CODE_NON_TRADING_DAY:
+        return _verdict_non_trading(d)
+    if code == _pull_state_rust.GATE_CODE_MUHURAT_DEFERRAL:
+        return _verdict_muhurat(d)
+    if code == _pull_state_rust.GATE_CODE_BEFORE_SETTLE:
+        return _verdict_before_settle(res)
+    if code == _pull_state_rust.GATE_CODE_MARKET_HOURS_BLOCKED:
+        return _verdict_market_hours_blocked()
+    # The facade's vocabulary gate admits exactly the five codes — this arm
+    # is GATE_CODE_OK by elimination.
+    return _verdict_ok()
 
 
 # ── Muhurat mid-run arm (COMPOSITION — the guard module is untouched) ────────
@@ -295,6 +401,11 @@ def auto_pull_allowed(
 #: after it (15:35 = 15:30 + 5) — the SAME margins around a Muhurat session.
 MUHURAT_PRE_MARGIN: Final[timedelta] = timedelta(minutes=30)
 MUHURAT_POST_MARGIN: Final[timedelta] = timedelta(minutes=5)
+
+#: The margins in microseconds — DERIVED from the one timedelta pair above
+#: (never re-minted), packed for the Rust kernel's interval law.
+_MUHURAT_PRE_MARGIN_US: Final[int] = MUHURAT_PRE_MARGIN // timedelta(microseconds=1)
+_MUHURAT_POST_MARGIN_US: Final[int] = MUHURAT_POST_MARGIN // timedelta(microseconds=1)
 
 
 def muhurat_session_active(ist_dt: datetime) -> bool:
@@ -306,15 +417,25 @@ def muhurat_session_active(ist_dt: datetime) -> bool:
     HONESTLY returns ``False`` — timings are never fabricated (Golden Rule #1;
     the disclosed residual: a long run crossing an UNLISTED evening session is
     not belted until the calendar entry lands).
+
+    DEC-RUST-PULL-STATE-001 (flip phase): the interval verdict is served by
+    the ``muhurat_window_active`` Rust kernel ONLY (microsecond-of-day
+    packing — golden-pinned bit-identical; the session LOOKUP above stays
+    Python, so a session-less date never consults the kernel). A kernel
+    fault raises :class:`~brutex.pull_state_rust.PullStateKernelError` —
+    fail-closed, never a fabricated window verdict.
     """
     session = MUHURAT_SESSIONS.get(ist_dt.date())
     if session is None:
         return False
     open_t, close_t = session
-    day = ist_dt.date()
-    start = datetime.combine(day, open_t, tzinfo=ist_dt.tzinfo) - MUHURAT_PRE_MARGIN
-    end = datetime.combine(day, close_t, tzinfo=ist_dt.tzinfo) + MUHURAT_POST_MARGIN
-    return start <= ist_dt < end
+    return _pull_state_rust.rust_muhurat_window_active(
+        _us_of_day(ist_dt.time()),
+        _us_of_day(open_t),
+        _us_of_day(close_t),
+        _MUHURAT_PRE_MARGIN_US,
+        _MUHURAT_POST_MARGIN_US,
+    )
 
 
 # The two ``@overload`` stubs are typing-only declarations (the

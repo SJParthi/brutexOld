@@ -97,7 +97,11 @@ if TYPE_CHECKING:
     import polars as pl
 
 from brutex.data.errors import ResampleInputError
-from brutex.data.lake_rust_resample import lake_rust_resample_enabled, resample_frame_via_rust
+from brutex.data.lake_rust_resample import (
+    lake_rust_resample_enabled,
+    resample_all_via_rust,
+    resample_frame_via_rust,
+)
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
 from brutex.data.timeframes import ALL_TF_MINUTES, TfAnchor, TfSpec, spec_for_minutes
 
@@ -180,6 +184,27 @@ def _validate_input(df_1m) -> None:  # type: ignore[no-untyped-def]
                 f"inverts the bucket's open/close. Sort + de-duplicate the "
                 f"1m frame before resampling."
             )
+
+
+def validate_resample_frame(df_1m, target_tf_minutes: int) -> None:  # type: ignore[no-untyped-def]
+    """The ONE public resample precondition — schema/ordering + TF membership.
+
+    Runs :func:`_validate_input` (schema · ``ts_utc`` dtype · null ·
+    strictly-increasing — DEC-RESAMPLER-INPUT-GUARD-001) then refuses a
+    *target_tf_minutes* outside :data:`~brutex.data.timeframes.ALL_TF_MINUTES`
+    with the historical ``ValueError`` — token-for-token the two inline
+    blocks :func:`resample_1m_to_tf` always ran (extracted by
+    DEC-LAKE-RUST-RESAMPLE-DAILY-001 so the session/daily Rust seams can run
+    the IDENTICAL validation BEFORE their FFI crossings; CLAUDE.md §11
+    COMMON — one precondition, never a copy). VALIDATION STAYS PYTHON: every
+    Rust face may assume a frame this function accepted.
+    """
+    _validate_input(df_1m)
+    if target_tf_minutes not in ALL_TF_MINUTES:
+        raise ValueError(
+            f"Unsupported target TF: {target_tf_minutes} minutes. "
+            f"Must be one of {sorted(ALL_TF_MINUTES)}."
+        )
 
 
 def _resample_validated(df_1m, spec: TfSpec):  # type: ignore[no-untyped-def]
@@ -341,12 +366,7 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         >>> int(df_5m.get_column("volume")[0])
         30
     """
-    _validate_input(df_1m)
-    if target_tf_minutes not in ALL_TF_MINUTES:
-        raise ValueError(
-            f"Unsupported target TF: {target_tf_minutes} minutes. "
-            f"Must be one of {sorted(ALL_TF_MINUTES)}."
-        )
+    validate_resample_frame(df_1m, target_tf_minutes)
     if lake_rust_resample_enabled():
         # ADR-0020 Wave-B seam (DEC-LAKE-RUST-RESAMPLE-001, default OFF):
         # route the validated frame through the brutex_lake crate, with the
@@ -390,4 +410,13 @@ def resample_all_21_tfs(df_1m) -> dict[int, pl.DataFrame]:  # type: ignore[no-un
         df_5m = all_tfs[5]
         df_daily = all_tfs[375]
     """
+    if lake_rust_resample_enabled():
+        # The T11 batch face (DEC-LAKE-RUST-RESAMPLE-DAILY-001 — the
+        # #1913-named `resample_all_ipc` adoption): ONE FFI crossing for the
+        # whole 21-TF derive instead of 21. Validation runs ONCE (every tf
+        # below is an ALL_TF_MINUTES member by construction); the per-call
+        # oracle is the verbatim Python body, and ANY degrade serves the
+        # WHOLE derive from it (never a partial Rust/Python mix).
+        _validate_input(df_1m)
+        return resample_all_via_rust(df_1m, ALL_TF_MINUTES, oracle=_resample_1m_to_tf_python)
     return {tf: resample_1m_to_tf(df_1m, tf) for tf in ALL_TF_MINUTES}

@@ -102,7 +102,12 @@ that night) is cleared with one manual
 - The self-heal/repair reach is ASYMMETRIC: it repairs a broken `fno_math`
   and a stale-but-loadable `trading_core`, but an UNLOADABLE `trading_core`
   crashes the CLI pre-leg (the wedge row above) — external signals only.
-- brutex-lake is NOT in the wheel set (pending DEC-BRUTEX-LAKE-BOX-WHEEL-001)
-  — lake-family Rust flips get zero box soak telemetry from this lane.
+- brutex-lake IS in the wheel set (REQUIRED) since DEC-RUST-LAKE-WAVED-001
+  (W-6a, MIGRATION.md #1954) landed its required Makefile block — the designed
+  drift-pin pickup, superseding the pending-exclusion clause of
+  DEC-BRUTEX-LAKE-BOX-WHEEL-001. Residual: the gate/rollback import smokes +
+  doctor coherence checks still cover trading_core + fno_math only —
+  brutex_lake gets build + required-failure coverage; its import-smoke/doctor
+  stages remain the (narrowed) DEC-BRUTEX-LAKE-BOX-WHEEL-001 follow-up scope.
 - Repeated same-signature failures demote to WARN after night 1 (the alarm
   dedupe); the report block stays fully forensic every night.

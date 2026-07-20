@@ -18,7 +18,7 @@ CredentialsError, GrowwFileCredentials`` call site is byte-unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class CredentialsError(Exception):
@@ -48,4 +48,30 @@ class GrowwFileCredentials:
     totp_secret: str
 
 
-__all__ = ["CredentialsError", "GrowwFileCredentials"]
+@dataclass(frozen=True, slots=True)
+class DhanCredentials:
+    """An immutable pair of READ-ONLY Dhan credentials (DEC-DHAN-READONLY-AUTH-001).
+
+    The Dhan read path needs exactly these two values (VERIFIED-live: SDK
+    ``dhan_context.py`` — ``DhanContext(client_id, access_token)`` makes NO network
+    call at construction). There is NO api-key / secret / PIN / TOTP on the read
+    path — the 24-h JWT access token is MINTED elsewhere (a dedicated Lambda /
+    TickVault) and BruteX only READS both from AWS SSM. NEVER minted / renewed /
+    PutParameter'd by BruteX.
+
+    Attributes
+    ----------
+    client_id
+        The (public) Dhan account client id (SSM ``/tickvault/prod/dhan/client-id``).
+    access_token
+        The 24-h JWT account bearer token (SSM ``/tickvault/prod/dhan/access-token``,
+        a SecureString). Held only to construct ``DhanContext`` + send the
+        ``access-token`` header; ``repr``-suppressed so it never leaks into a log /
+        traceback.
+    """
+
+    client_id: str
+    access_token: str = field(repr=False)
+
+
+__all__ = ["CredentialsError", "DhanCredentials", "GrowwFileCredentials"]

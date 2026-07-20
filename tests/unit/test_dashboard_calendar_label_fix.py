@@ -42,3 +42,18 @@ def test_movers_reports_headings_have_the_accent_bar() -> None:
     assert "h1::before" in reports
     assert movers.count(_ACCENT) >= 1, "movers heading accent bar missing"
     assert reports.count(_ACCENT) >= 1, "reports heading accent bar missing"
+
+
+def test_doc_listeners_are_delegated_once() -> None:
+    """The rebuild-leak fix's delegated design is pinned: instances REGISTER in
+    the shared doc-target registry, and the document click/keydown listeners are
+    attached exactly ONCE — never one per buildCalendar/buildSelect instance
+    (the old per-instance pattern accumulated listeners + retained detached
+    trees across rebuilds)."""
+    assert "registerDocTarget" in _JS, "the shared doc-target registry is missing"
+    assert _JS.count('document.addEventListener("click"') == 1, (
+        "expected exactly ONE delegated document click listener"
+    )
+    assert _JS.count('document.addEventListener("keydown"') == 1, (
+        "expected exactly ONE delegated document keydown listener"
+    )

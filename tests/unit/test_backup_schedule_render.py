@@ -35,6 +35,15 @@ class TestGoldenDocsCopies:
     def test_drill_plist_golden_equals_docs_copy(self) -> None:
         assert render_drill_plist() == _docs_copy("com.brutex.backup-drill.plist")
 
+    def test_cron_lines_golden_equals_docs_copy(self) -> None:
+        """Review-round MINOR-2: the cron block now has a COMMITTED golden
+        (``backup-cron.golden``) so the cross-language triangle closes
+        standalone — this pin proves Python == file, the cargo suite
+        (``golden_templates.rs``) proves Rust == file, and the wheel-gated
+        seam differential (which CAN skip) is no longer the only Rust==Python
+        evidence for the cron law."""
+        assert render_cron_lines() == _docs_copy("backup-cron.golden")
+
 
 class TestTemplateLaw:
     @pytest.mark.parametrize(
