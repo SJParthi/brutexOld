@@ -1238,10 +1238,21 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     :class:`~brutex.data.errors.ResampleInputError` rides the per-target
     ``except Exception`` quarantine of
     :func:`derive_daily_for_targets` / :func:`reconcile_daily_from_minute`
-    (the target is counted ``errored`` + WARNed, never a pass abort). The
-    bad-tick screen is deliberately NOT wired here (a larger scope change —
-    the named follow-up DEC-DAILY-WINDOW-BADTICK-001 recorded in
-    MIGRATION.md's DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 entry).
+    (the target is counted ``errored`` + WARNed, never a pass abort).
+
+    Bad-tick screen (DEC-DAILY-WINDOW-BADTICK-001 — CLOSING the follow-up
+    named in MIGRATION.md's DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 entry):
+    the window-cut frame is ALSO screened by the SAME
+    :func:`~brutex.data.bad_tick.screen_frame_bad_ticks` the prebuild's
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` runs (head
+    median-confirm + high/low arm; the ONE ``BRUTEX_BAD_TICK_SCREEN`` kill
+    switch), so the heal-recall / post-pull / crossverify ``1day`` derives
+    from the SAME screened kept set as the full prebuild — never a poisoned
+    daily anchor the prebuild would have refused. Class-gated by the ONE
+    COMMON :func:`~brutex.data.bad_tick.resample_screen_applies` predicate
+    (SPOT + FNO ``FUT`` screened; CE/PE premia legitimately move ≥ 4×/minute
+    — never screened; the #1831 structural exclusions already keep CE/PE off
+    this reader in production, so the predicate here is defense-in-depth).
 
     Timestamp-range gate (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): the SAME
     window-cut frame is ALSO validated by
@@ -1256,6 +1267,11 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     """
     import polars as pl
 
+    from brutex.data.bad_tick import (
+        bad_tick_screen_enabled,
+        resample_screen_applies,
+        screen_frame_bad_ticks,
+    )
     from brutex.data.price_sanity import (
         validate_frame_price_sanity,
         validate_frame_ts_datetime_range,
@@ -1337,6 +1353,17 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # WINDOW-CUT frame only (a corrupt row outside [start, end) never
         # blanks this read). Raises the quarantining ResampleInputError.
         validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
+        # DEC-DAILY-WINDOW-BADTICK-001: drop x10/÷10 scaled 1m spikes (the
+        # SAME screen_frame_bad_ticks the prebuild's make_lake_read_1m runs —
+        # head median-confirm + hi/lo arm) BEFORE the daily resampler, so the
+        # window-derived 1day serves the SAME screened kept set as the full
+        # prebuild. Runs AFTER the sanity gate (is_bad_tick assumes
+        # positivity); the ONE BRUTEX_BAD_TICK_SCREEN kill switch flips every
+        # screened boundary together; class-gated by the COMMON
+        # resample_screen_applies predicate (CE/PE never screened — premia
+        # move >= 4x legitimately; defense-in-depth post-#1831).
+        if bad_tick_screen_enabled() and resample_screen_applies(segment, symbol):
+            frame = screen_frame_bad_ticks(frame, ts_column="ts_utc", source=f"window:{context}")
         return frame
 
     return _read

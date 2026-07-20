@@ -452,6 +452,114 @@ def test_window_reader_corrupt_row_outside_window_reads_clean(tmp_path: Path) ->
     assert frame.get_column("high").is_finite().all()
 
 
+# ────────────────────────────────────────────────────────────────────────
+# The window-reader BAD-TICK seam (DEC-DAILY-WINDOW-BADTICK-001 — CLOSED by
+# the #1399-port): pre-port the heal-recall / post-pull / crossverify window
+# path ran NO bad-tick screen, so a SURVIVING self-consistent ×10 bar (which
+# passes price sanity) laundered into the derived 1day while the prebuild's
+# make_lake_read_1m dropped it — the screened-vs-raw split-brain.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _write_spike_window_1m(
+    lake_root: Path, *, segment: str = _SEGMENT, symbol: str = _SYMBOL
+) -> None:
+    """Write a 4-bar session whose LAST bar is a self-consistent ×10 spike.
+
+    Through the REAL writer — the spike is positive + ordered (the bad-tick
+    class the write-side guards accept by design).
+    """
+    open_utc = datetime(2025, 12, 31, 3, 45, tzinfo=UTC)
+    closes = [1400.0, 1400.5, 1401.0, 14010.0]
+    bars = [
+        CandleBar(
+            timestamp=open_utc + timedelta(minutes=i),
+            open=Decimal(str(c)),
+            high=Decimal(str(c + 0.5)),
+            low=Decimal(str(c - 0.5)),
+            close=Decimal(str(c)),
+            volume=10,
+            open_interest=None,
+        )
+        for i, c in enumerate(closes)
+    ]
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    sink.append(exchange=_EXCHANGE, segment=segment, symbol=symbol, interval="1minute", bars=bars)
+
+
+def test_r5_window_reader_screens_surviving_bad_ticks(tmp_path: Path) -> None:
+    """RED-first R5: the window reader serves the SAME screened kept set as
+    the prebuild's ``make_lake_read_1m`` — the ×10 post-head spike drops with
+    the ``window:``-prefixed WARN (boundary-distinct provenance)."""
+    from structlog.testing import capture_logs
+
+    _write_spike_window_1m(tmp_path)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),
+    )
+    with capture_logs() as logs:
+        frame = read()
+    assert frame.get_column("close").to_list() == [1400.0, 1400.5, 1401.0]
+    warns = [e for e in logs if e.get("event") == "feed.bad_tick_skipped"]
+    assert len(warns) == 1
+    assert warns[0]["source"] == f"window:{_EXCHANGE}/{_SEGMENT}/{_SYMBOL}/1minute"
+
+
+def test_window_reader_futures_contract_screened(tmp_path: Path) -> None:
+    """The ONE COMMON ``resample_screen_applies`` gate: an FNO FUT contract
+    (tracks its underlying) IS screened at the window seam."""
+    symbol = "NSE-NIFTY-30Sep25-FUT"
+    _write_spike_window_1m(tmp_path, segment="FNO", symbol=symbol)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment="FNO",
+        symbol=symbol,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),
+    )
+    assert read().get_column("close").to_list() == [1400.0, 1400.5, 1401.0]
+
+
+def test_window_reader_option_contract_not_screened(tmp_path: Path) -> None:
+    """A CE premium legitimately moves ≥4×/minute — the class gate keeps the
+    option window UNSCREENED (the identity read; never destroy real data)."""
+    symbol = "NSE-NIFTY-30Sep25-24650-CE"
+    _write_spike_window_1m(tmp_path, segment="FNO", symbol=symbol)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment="FNO",
+        symbol=symbol,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),
+    )
+    assert read().get_column("close").to_list() == [1400.0, 1400.5, 1401.0, 14010.0]
+
+
+def test_window_reader_kill_switch_serves_spike(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``BRUTEX_BAD_TICK_SCREEN=off`` — the ONE switch disables this seam
+    together with the engine read + the prebuild seam (never a split-brain)."""
+    monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "off")
+    _write_spike_window_1m(tmp_path)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),
+    )
+    assert read().get_column("close").to_list() == [1400.0, 1400.5, 1401.0, 14010.0]
+
+
 def test_window_reader_clean_lake_is_pure_pass_through(tmp_path: Path) -> None:
     """HEALTHY-LAKE IDENTITY PIN (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): on
     a clean lake the wired gate changes NOTHING — the window reader's frame

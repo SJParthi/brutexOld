@@ -1072,7 +1072,11 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     object-identical (zero-copy); clean lakes stay byte-identical.
     """
 
-    from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
+    from brutex.data.bad_tick import (
+        bad_tick_screen_enabled,
+        resample_screen_applies,
+        screen_frame_bad_ticks,
+    )
     from brutex.data.price_sanity import (
         validate_frame_price_sanity,
         validate_frame_ts_datetime_range,
@@ -1154,12 +1158,19 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         # frame to the resamplers (raises the quarantining ResampleInputError).
         validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
         # DEC-READ-GUARD-PARITY-001: drop x10/÷10 scaled 1m spikes (the engine
-        # read boundary's BadTickScreen, frame form) BEFORE any resampler — a
+        # read boundary's BadTickScreen frame form — since the #1399 port the
+        # head median-confirm + hi/lo law, DEC-BADTICK-HEAD-SEED-001 /
+        # DEC-BADTICK-HILO-SCREEN-001) BEFORE any resampler — a
         # self-consistent scaled bar passes price sanity and otherwise poisons
         # the derived bucket HIGH/LOW + the 1day anchor. Runs AFTER the sanity
         # gate (is_bad_tick assumes positivity). Default ON; the ONE
-        # BRUTEX_BAD_TICK_SCREEN kill switch flips both boundaries together.
-        if bad_tick_screen_enabled():
+        # BRUTEX_BAD_TICK_SCREEN kill switch flips every screened boundary
+        # together; class-gated by the COMMON resample_screen_applies
+        # predicate (DEC-BADTICK-RESAMPLE-INPUT-001 — CE/PE premia
+        # legitimately move >= 4x/minute, never screened; the #1831
+        # structural exclusions keep CE/PE off this reader in production, so
+        # the predicate is defense-in-depth here).
+        if bad_tick_screen_enabled() and resample_screen_applies(segment, symbol):
             frame = screen_frame_bad_ticks(frame, ts_column="ts_utc", source=f"prebuild:{context}")
         return frame
 
