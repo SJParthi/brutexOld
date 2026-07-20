@@ -212,7 +212,27 @@ def test_golden_run_id_is_byte_stable() -> None:
 # test below; mask 0b101's stream teeth: 203 trades = 181 × +50 TP wins +
 # 22 × −115 deep-bar stop-outs → net +6_520 — hand-derived in
 # `test_golden_trade_stream_exact`).
-_GOLDEN_CONTENT_HASH = "ee874356dcf6d81cf290eb7d8d7e0d516b668cfcf665c45fca94127ecd4c0789"
+# RE-LOCKED for the W2 metrics-depth fold (MIGRATION.md #1974–#1976, the
+# #1976 census fold of main ace41c7e0 — regenerated 2026-07-19 on the
+# folded tree with a FRESH hand-audit under worst-case fill semantics; the
+# house law: goldens are re-derived, never merged textually). AUDITED
+# DELTA CLASS — schema-additive ONLY, proven against a live main-baseline
+# worktree at ace41c7e0 (which reproduces its literal `ee874356…0789`
+# exactly): the SAME 5 rows with byte-stable run_ids, the SAME 28-column
+# prefix in the SAME order with EVERY old column value byte-equal, plus
+# EXACTLY the lane's 8 appended-LAST nullable columns — the growth trio
+# (loss_rate / kelly_fraction / log_growth_at_half_kelly) + sl_hit_rate
+# (EXIT_QUALITY_FIELDS) + the recency four (RECENCY_FIELDS). WORST-CASE
+# HAND-AUDIT of the mask 0b101 row (203 trades = 181 TP wins × +50 + 22
+# deep-bar SL stop-outs × −115 — the stream teeth below): loss_rate =
+# 22/203 = 0.10837438423645321; EVERY loss is an SL fill under worst-case
+# → sl_hit_rate = 22/203 (== loss_rate on this all-TP-wins fixture);
+# kelly = p − q/b with p = 181/203, b = 50/115 → 0.6423645320197044 and
+# g(f*/2) = p·ln(1 + f/2·b) + q·ln(1 − f/2) = 0.0745655163647005; the
+# 12-synthetic-day fixture sits wholly inside the 24-month trailing window
+# AND decay bucket 0 → trailing_net_pnl_paisa == decay_weighted_net_paisa
+# == net (+6_520) and trailing sharpe/pf equal the full-history columns.
+_GOLDEN_CONTENT_HASH = "011a494ce615aa4551af7d6189f20c4a5eeb34e5416301a4d67d2a4cc61d896c"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:

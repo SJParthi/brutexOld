@@ -96,6 +96,42 @@ use rayon::prelude::*;
 /// `(pnl_paisa, mfe_paisa, mae_paisa, holding_bars, entry_idx, exit_idx)`.
 pub type TradeRecord = (i64, i64, i64, u64, u64, u64);
 
+/// Why a position closed — the kernel twin of the Python `_ExitReason` enum
+/// (DEC-METRICS-LOSSRATE-FIRSTCLASS-001, the Stage-B exit-reason counter
+/// wire). Discriminants are the positions of the append-only Python
+/// `EXIT_REASONS` vocabulary (`brutex/engine/trade_sim.py`) — `stop_loss`,
+/// `take_profit`, `forced_1520`, `signal`, `end_of_data`, `session_gap` —
+/// so `reason as usize` indexes the per-mask counter array and the FFI
+/// counts tuple positionally, exactly like the Python walker's counters.
+/// The kernel already KNEW each close's reason at every `close` call site
+/// (the branch that reached it); this enum only names it so the counter
+/// can be accumulated O(1)/trade — the emitted `TradeRecord` is UNTOUCHED.
+/// Under the worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001) a same-bar
+/// SL/TP tie resolves STOP-first, so the tie feeds the `stop_loss` counter —
+/// the pessimistic attribution is the counted truth by construction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ExitReason {
+    StopLoss = 0,
+    TakeProfit = 1,
+    Forced = 2,
+    Signal = 3,
+    EndOfData = 4,
+    SessionGap = 5,
+}
+
+/// Number of exit-reason vocabulary members (the counter-array width).
+const N_EXIT_REASONS: usize = 6;
+
+/// Per-mask exit-reason counters, one `u64` per `EXIT_REASONS` member in
+/// vocabulary order: `(stop_loss, take_profit, forced_1520, signal,
+/// end_of_data, session_gap)`. Additive FFI output beside the existing
+/// per-mask trade batch (the additive-twin precedent,
+/// DEC-SWEEP-EXIT-INDEX-FASTPATH-001): the `TradeRecord` 6-tuple carries NO
+/// reason, so the counters are the whole per-mask reason surface.
+/// Overflow-free by construction — one increment per closed trade, and a
+/// window holds at most `N_bars` trades (`usize` ≤ `u64`).
+pub type ExitReasonCounts = (u64, u64, u64, u64, u64, u64);
+
 /// Mutable per-trade state while a position is open (int64 paisa). Mirrors the
 /// Python `_OpenPosition`; `last_bar` is replaced by `last_idx` +
 /// `last_exit_basis_paisa` since the kernel holds resident price columns (the
@@ -223,14 +259,24 @@ struct Walker {
     /// the SAME session; a differing fill-bar session drops it (R2-OC-2).
     /// Mirrors the Python walker's `_pending_entry_day`.
     pending_entry_session: i64,
-    /// True iff a next-open exit (Mode-B signal — the only remaining
-    /// scheduler now the retired `LevelFill::NextOpen` optimism knob is
-    /// deleted, DEC-FILL-WORST-CASE-ONLY-001) is scheduled. The Python
-    /// walker stores the reason too, but the emitted trade carries no
-    /// reason, so a bool is sufficient + bit-identical. The sweep path
-    /// never feeds exit signals, so this stays false there — retained for
-    /// the 1:1 state-machine mirror of the Python walker's Mode-B law.
-    pending_exit: bool,
+    /// The next-open exit scheduled on a prior bar (Mode-B signal — the only
+    /// remaining scheduler now the retired `LevelFill::NextOpen` optimism
+    /// knob is deleted, DEC-FILL-WORST-CASE-ONLY-001), carrying WHICH reason
+    /// armed it — `None` when nothing is pending. Mirrors the Python walker's
+    /// `_pending_exit: _ExitReason | None` exactly (pre-Stage-B this was a
+    /// bool: the emitted trade carries no reason, so presence alone was
+    /// bit-sufficient; the exit-reason counters need the reason to attribute
+    /// the eventual next-open fill — `Some(_)` ⇔ the old `true`, so the
+    /// state machine is behaviour-identical). The sweep path never feeds
+    /// exit signals, so this stays `None` there — retained for the 1:1
+    /// state-machine mirror of the Python walker's Mode-B law.
+    pending_exit: Option<ExitReason>,
+    /// Per-reason close counters in `EXIT_REASONS` order — incremented once
+    /// per `close` (O(1)/trade), read out as [`ExitReasonCounts`]. A pure
+    /// OBSERVER of the walk: no branch reads it, so the emitted trades are
+    /// byte-identical with the counters present (the existing suite is the
+    /// frozen-behaviour gate).
+    exit_counts: [u64; N_EXIT_REASONS],
 }
 
 impl Walker {
@@ -242,7 +288,8 @@ impl Walker {
             position: None,
             pending_entry: false,
             pending_entry_session: 0,
-            pending_exit: false,
+            pending_exit: None,
+            exit_counts: [0; N_EXIT_REASONS],
         }
     }
 
@@ -360,17 +407,29 @@ impl Walker {
 
     /// Build the trade record + flatten the walker — mirrors `_close`.
     ///
+    /// `reason` names WHY the position closed — every call site already sat
+    /// on the deciding branch, so threading it costs nothing; the ONLY use
+    /// is the per-reason counter increment (a pure observer — the returned
+    /// record is byte-identical to the pre-Stage-B `close`).
+    ///
     /// Deliberately UNGUARDED raw `−` on the hot path: `|entry| ≤ C` (a
     /// boundary-validated bar open) and `|exit| ≤ 2·C` (a bar open/close ≤ C,
     /// or an SL/TP level ≤ 2·C from [`Walker::levels`]), so `|pnl| ≤ 3·C <
     /// i64::MAX` — see the [`MAX_PRICE_PAISA`] derivation (R2-RC-F1).
-    fn close(&mut self, pos: OpenPosition, exit_price_paisa: i64, exit_idx: usize) -> TradeRecord {
+    fn close(
+        &mut self,
+        pos: OpenPosition,
+        exit_price_paisa: i64,
+        exit_idx: usize,
+        reason: ExitReason,
+    ) -> TradeRecord {
         let pnl = if self.is_buy {
             exit_price_paisa - pos.entry_price_paisa
         } else {
             pos.entry_price_paisa - exit_price_paisa
         };
         self.position = None;
+        self.exit_counts[reason as usize] += 1;
         let holding = holding_bars(pos.entry_idx, exit_idx);
         (
             pnl,
@@ -380,6 +439,12 @@ impl Walker {
             pos.entry_idx as u64,
             exit_idx as u64,
         )
+    }
+
+    /// The accumulated per-reason close counters in `EXIT_REASONS` order.
+    fn exit_counts_tuple(&self) -> ExitReasonCounts {
+        let c = self.exit_counts;
+        (c[0], c[1], c[2], c[3], c[4], c[5])
     }
 
     /// Process one in-position bar — mirrors `_manage_position`. `pos` is taken by
@@ -412,17 +477,19 @@ impl Walker {
         let open_anchored_fill = if self.is_buy { low_paisa } else { high_paisa };
 
         // (1) A next-open exit scheduled on a prior bar fills on THIS bar —
-        // BEFORE forced is checked (pending beats forced).
-        if self.pending_exit {
-            self.pending_exit = false;
+        // BEFORE forced is checked (pending beats forced). The fill is counted
+        // under the reason that ARMED it (the Mode-B signal — the only
+        // remaining pending scheduler) — exactly the Python walker's
+        // pending-reason attribution.
+        if let Some(reason) = self.pending_exit.take() {
             Self::update_excursion(&mut pos, self.is_buy, open_paisa, open_paisa);
-            return Some(self.close(pos, open_anchored_fill, idx));
+            return Some(self.close(pos, open_anchored_fill, idx, reason));
         }
 
         // (2) Forced 15:20 IST exit overrides SL/TP/signal.
         if forced {
             Self::update_excursion(&mut pos, self.is_buy, open_paisa, open_paisa);
-            return Some(self.close(pos, open_anchored_fill, idx));
+            return Some(self.close(pos, open_anchored_fill, idx, ExitReason::Forced));
         }
 
         // (3) Full-range in-position bar: fold its high/low into MFE/MAE.
@@ -437,21 +504,29 @@ impl Walker {
         // |level| <= 2·C and |low|/|high| <= C, so the min/max stays
         // <= 2·C — the MAX_PRICE_PAISA derivation is unchanged. (The retired
         // `LevelFill::NextOpen` optimism arm is deleted — no level fill is
-        // ever deferred to a later bar.) `_is_stop` survives only as the
-        // tuple's discriminant slot — the fill law no longer branches on it.
-        if let Some((_is_stop, level_paisa)) = self.resolve_level_hit(&pos, high_paisa, low_paisa) {
+        // ever deferred to a later bar.) The fill law no longer branches on
+        // `is_stop` — only the exit-reason COUNTER reads it (a pure observer:
+        // the same-bar SL/TP tie is stop-first, so the tie is counted
+        // `stop_loss` — the pessimistic attribution IS the counted truth).
+        if let Some((is_stop, level_paisa)) = self.resolve_level_hit(&pos, high_paisa, low_paisa) {
+            let reason = if is_stop {
+                ExitReason::StopLoss
+            } else {
+                ExitReason::TakeProfit
+            };
             let exit_fill = if self.is_buy {
                 level_paisa.min(low_paisa)
             } else {
                 level_paisa.max(high_paisa)
             };
-            return Some(self.close(pos, exit_fill, idx));
+            return Some(self.close(pos, exit_fill, idx, reason));
         }
 
-        // (5) Mode-B signal exit — fill on the next bar's open.
+        // (5) Mode-B signal exit — fill on the next bar's open, under the
+        // SIGNAL reason (the pending-reason carry the eventual fill reads).
         if exit_signal {
             self.position = Some(pos);
-            self.pending_exit = true;
+            self.pending_exit = Some(ExitReason::Signal);
             return None;
         }
 
@@ -525,9 +600,16 @@ impl Walker {
                 // carries THIS bar's session, so it can never trip the guard;
                 // the inequality compare fires exactly once even across a
                 // multi-session hole. The Python detail sink names this close
-                // `session_gap`; the record's numerics are the parity surface.
-                self.pending_exit = false;
-                closed = Some(self.close(pos, pos.last_exit_basis_paisa, pos.last_idx));
+                // `session_gap`; the record's numerics are the parity surface,
+                // and the counter attributes it under the SAME name (a
+                // subsumed pending exit is cleared — never its stale reason).
+                self.pending_exit = None;
+                closed = Some(self.close(
+                    pos,
+                    pos.last_exit_basis_paisa,
+                    pos.last_idx,
+                    ExitReason::SessionGap,
+                ));
             } else {
                 closed = self.manage_position(
                     pos,
@@ -565,7 +647,12 @@ impl Walker {
     /// `bars[last_idx]`'s resolved basis.
     fn finish(&mut self) -> Option<TradeRecord> {
         let pos = self.position.take()?;
-        Some(self.close(pos, pos.last_exit_basis_paisa, pos.last_idx))
+        Some(self.close(
+            pos,
+            pos.last_exit_basis_paisa,
+            pos.last_idx,
+            ExitReason::EndOfData,
+        ))
     }
 }
 
@@ -669,23 +756,26 @@ fn build_columns(
     })
 }
 
-/// Simulate ONE mask over a resident window — the width-generic pure-Rust core
-/// both pyclasses (and the `#[cfg(test)]` suite, via the u64 delegator) call.
-/// Entry signal for bar `i` is `W::is_superset(bar_bits[i], mask)` — the ONLY
-/// width-touching line; there is no Mode-B exit-signal stream on the sweep
-/// path (it matches `metrics_for_mask`, which passes none).
+/// Simulate ONE mask over a resident window AND report its per-reason exit
+/// counters — the width-generic pure-Rust core every batch path rides
+/// (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B). Entry signal for bar `i` is
+/// `W::is_superset(bar_bits[i], mask)` — the ONLY width-touching line; there
+/// is no Mode-B exit-signal stream on the sweep path (it matches
+/// `metrics_for_mask`, which passes none). The counters are a pure observer
+/// of the ONE walk — [`simulate_one_core`] delegates here and drops them, so
+/// the counted and uncounted surfaces can never drift.
 // The loop indexes SEVEN parallel per-bar sequences by the same `i` (six
 // columns + the width-typed bar_bits); a 7-way iterator zip would obscure the
 // walk, so the index form is kept deliberately.
 #[allow(clippy::needless_range_loop)]
-fn simulate_one_core<W: MaskWord>(
+fn simulate_one_counted_core<W: MaskWord>(
     cols: &SweepColumns,
     bar_bits: &[W],
     mask: W,
     is_buy: bool,
     sl: Option<i64>,
     tp: Option<i64>,
-) -> Vec<TradeRecord> {
+) -> (Vec<TradeRecord>, ExitReasonCounts) {
     let n = cols.open.len();
     let mut walker = Walker::new(is_buy, sl, tp);
     let mut trades: Vec<TradeRecord> = Vec::new();
@@ -708,7 +798,23 @@ fn simulate_one_core<W: MaskWord>(
     if let Some(t) = walker.finish() {
         trades.push(t);
     }
-    trades
+    let counts = walker.exit_counts_tuple();
+    (trades, counts)
+}
+
+/// Simulate ONE mask over a resident window — the pre-Stage-B surface, a thin
+/// delegator over [`simulate_one_counted_core`] dropping the counters (ONE
+/// walk spine; the existing suite passing UNMODIFIED is the frozen-behaviour
+/// gate).
+fn simulate_one_core<W: MaskWord>(
+    cols: &SweepColumns,
+    bar_bits: &[W],
+    mask: W,
+    is_buy: bool,
+    sl: Option<i64>,
+    tp: Option<i64>,
+) -> Vec<TradeRecord> {
+    simulate_one_counted_core(cols, bar_bits, mask, is_buy, sl, tp).0
 }
 
 /// Width-generic core of the batch `simulate_masks` — validates the SL/TP
@@ -743,6 +849,40 @@ fn simulate_masks_core<W: MaskWord>(
             masks
                 .par_iter()
                 .map(|&m| simulate_one_core(cols, bar_bits, m, is_buy, sl_paisa, tp_paisa))
+                .collect()
+        },
+    )
+}
+
+/// Width-generic core of the batch `simulate_masks_with_exit_counts` — same
+/// boundary validation + serial/parallel sweep as [`simulate_masks_core`],
+/// each mask yielding `(trades, exit_reason_counts)` via the ONE counted walk
+/// core (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — the additive-twin
+/// precedent: the pre-existing batch surfaces are byte-untouched).
+fn simulate_masks_with_exit_counts_core<W: MaskWord>(
+    label: &str,
+    cols: &SweepColumns,
+    bar_bits: &[W],
+    masks: &[W],
+    is_buy: bool,
+    sl_paisa: Option<i64>,
+    tp_paisa: Option<i64>,
+) -> Result<Vec<(Vec<TradeRecord>, ExitReasonCounts)>, String> {
+    check_level_distance_for(label, "sl_paisa", sl_paisa)?;
+    check_level_distance_for(label, "tp_paisa", tp_paisa)?;
+    let work = (masks.len() as u64).saturating_mul(cols.open.len() as u64);
+    // Same COMMON-predicate dispatch as `simulate_masks_core`
+    // (DEC-MUTATION-RUNTIME-003); order-preserving on both arms.
+    Ok(
+        if crate::below_parallel_threshold(work, PARALLEL_WORK_THRESHOLD) {
+            masks
+                .iter()
+                .map(|&m| simulate_one_counted_core(cols, bar_bits, m, is_buy, sl_paisa, tp_paisa))
+                .collect()
+        } else {
+            masks
+                .par_iter()
+                .map(|&m| simulate_one_counted_core(cols, bar_bits, m, is_buy, sl_paisa, tp_paisa))
                 .collect()
         },
     )
@@ -868,6 +1008,26 @@ impl ResidentSweepSim {
             tp_paisa,
         )
     }
+
+    /// Pure core of [`Self::simulate_masks_with_exit_counts`] — `W = u64`
+    /// delegator onto [`simulate_masks_with_exit_counts_core`].
+    fn simulate_masks_with_exit_counts_impl(
+        &self,
+        masks: &[u64],
+        is_buy: bool,
+        sl_paisa: Option<i64>,
+        tp_paisa: Option<i64>,
+    ) -> Result<Vec<(Vec<TradeRecord>, ExitReasonCounts)>, String> {
+        simulate_masks_with_exit_counts_core(
+            "ResidentSweepSim",
+            &self.columns,
+            &self.bar_bits,
+            masks,
+            is_buy,
+            sl_paisa,
+            tp_paisa,
+        )
+    }
 }
 
 #[pymethods]
@@ -948,6 +1108,30 @@ impl ResidentSweepSim {
         tp_paisa: Option<i64>,
     ) -> PyResult<Vec<u64>> {
         self.count_trades_impl(&masks, is_buy, sl_paisa, tp_paisa)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// [`Self::simulate_masks`] PLUS per-mask exit-reason counters — the
+    /// ADDITIVE counted twin (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
+    ///
+    /// `out[j]` is `(trades, exit_reason_counts)` for `masks[j]`: the trades
+    /// are byte-identical to [`Self::simulate_masks`]'s (both surfaces ride
+    /// the ONE counted walk core) and the counts tuple holds one `u64` per
+    /// `EXIT_REASONS` member in vocabulary order — `(stop_loss, take_profit,
+    /// forced_1520, signal, end_of_data, session_gap)` — with
+    /// `sum(counts) == len(trades)` by construction (each close increments
+    /// exactly one counter). Same worst-case fill law
+    /// (DEC-FILL-WORST-CASE-ONLY-001), serial/parallel dispatch and R2-RC-F1
+    /// SL/TP boundary → `ValueError` as the uncounted batch.
+    #[pyo3(signature = (masks, is_buy, sl_paisa, tp_paisa))]
+    fn simulate_masks_with_exit_counts(
+        &self,
+        masks: Vec<u64>,
+        is_buy: bool,
+        sl_paisa: Option<i64>,
+        tp_paisa: Option<i64>,
+    ) -> PyResult<Vec<(Vec<TradeRecord>, ExitReasonCounts)>> {
+        self.simulate_masks_with_exit_counts_impl(&masks, is_buy, sl_paisa, tp_paisa)
             .map_err(PyValueError::new_err)
     }
 }
@@ -1051,6 +1235,26 @@ impl ResidentSweepSimU128 {
             tp_paisa,
         )
     }
+
+    /// Pure core of [`Self::simulate_masks_with_exit_counts`] — `W = u128`
+    /// delegator onto [`simulate_masks_with_exit_counts_core`].
+    fn simulate_masks_with_exit_counts_impl(
+        &self,
+        masks: &[u128],
+        is_buy: bool,
+        sl_paisa: Option<i64>,
+        tp_paisa: Option<i64>,
+    ) -> Result<Vec<(Vec<TradeRecord>, ExitReasonCounts)>, String> {
+        simulate_masks_with_exit_counts_core(
+            "ResidentSweepSimU128",
+            &self.columns,
+            &self.bar_bits,
+            masks,
+            is_buy,
+            sl_paisa,
+            tp_paisa,
+        )
+    }
 }
 
 #[pymethods]
@@ -1106,6 +1310,21 @@ impl ResidentSweepSimU128 {
         tp_paisa: Option<i64>,
     ) -> PyResult<Vec<u64>> {
         self.count_trades_impl(&masks, is_buy, sl_paisa, tp_paisa)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Batch trades PLUS per-mask exit-reason counters — the wide twin of
+    /// [`ResidentSweepSim::simulate_masks_with_exit_counts`] (same counts
+    /// vocabulary order, same `sum(counts) == len(trades)` law).
+    #[pyo3(signature = (masks, is_buy, sl_paisa, tp_paisa))]
+    fn simulate_masks_with_exit_counts(
+        &self,
+        masks: Vec<u128>,
+        is_buy: bool,
+        sl_paisa: Option<i64>,
+        tp_paisa: Option<i64>,
+    ) -> PyResult<Vec<(Vec<TradeRecord>, ExitReasonCounts)>> {
+        self.simulate_masks_with_exit_counts_impl(&masks, is_buy, sl_paisa, tp_paisa)
             .map_err(PyValueError::new_err)
     }
 }
@@ -2436,5 +2655,293 @@ mod tests {
             .expect("in-range SL/TP must pass the boundary");
         let expected: Vec<u64> = batch.iter().map(|t| t.len() as u64).collect();
         assert_eq!(counts, expected);
+    }
+
+    // ── Exit-reason counters (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ──
+    // Every expected record below is HAND-DERIVED under the worst-case fill
+    // law (DEC-FILL-WORST-CASE-ONLY-001): entry = the fill bar's adverse
+    // extreme (BUY high), level fills adverse-clamped, gap/EOD closes at the
+    // last managed bar's exit basis.
+
+    /// Counted-batch helper over the u64 sim.
+    fn counted(
+        s: &ResidentSweepSim,
+        masks: &[u64],
+        is_buy: bool,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    ) -> Vec<(Vec<TradeRecord>, ExitReasonCounts)> {
+        s.simulate_masks_with_exit_counts_impl(masks, is_buy, sl, tp)
+            .expect("in-range inputs must pass the boundary")
+    }
+
+    #[test]
+    fn exit_counts_trades_identical_to_uncounted_batch() {
+        // ONE-walk-spine drift pin: the counted twin's trades are byte-equal
+        // to `simulate_masks` on identical inputs (both ride
+        // `simulate_one_counted_core`), and the counters SUM to each mask's
+        // trade count (each close increments exactly one reason).
+        let s = sim(
+            vec![100, 100, 100, 100, 100, 100],
+            vec![100, 110, 100, 100, 110, 100],
+            vec![100, 92, 100, 100, 92, 100],
+            vec![100, 100, 100, 100, 100, 100],
+            vec![1, 0, 0, 1, 0, 0],
+        );
+        let masks = vec![0u64, 1u64, 1u64 << 63];
+        let counted_out = counted(&s, &masks, true, Some(8), Some(5));
+        let plain = s
+            .simulate_masks_impl(&masks, true, Some(8), Some(5))
+            .expect("in-range");
+        for (j, (trades, counts)) in counted_out.iter().enumerate() {
+            assert_eq!(trades, &plain[j], "mask {j}: counted trades must match");
+            let (sl_n, tp_n, forced, signal, eod, gap) = *counts;
+            assert_eq!(
+                sl_n + tp_n + forced + signal + eod + gap,
+                trades.len() as u64,
+                "mask {j}: counter sum must equal the trade count"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_counts_attribute_each_reason_exactly() {
+        // Directed per-reason attribution under the worst-case fill law:
+        //   * SL: entry = high[1] = 105, sl=10 → level 95; bar2 low 85 ≤ 95
+        //     → stop → (1,0,0,0,0,0).
+        //   * TP: entry = high[1] = 105, tp=20 → level 125; bar2 high 125 ≥
+        //     125 → target → (0,1,0,0,0,0).
+        //   * Forced: entry = high[1] = 110 (sl 50 → 60, tp 20 → 130); bar2
+        //     is forced and precedes the would-be TP touch → (0,0,1,0,0,0).
+        //   * End of data: no levels → finish() → (0,0,0,0,1,0).
+        //   * Session gap: the (A2) boundary close → (0,0,0,0,0,1).
+        let sl_sim = sim(
+            vec![50, 100, 95],
+            vec![60, 105, 99],
+            vec![40, 98, 85],
+            vec![55, 100, 95],
+            vec![0, 0, 0],
+        );
+        assert_eq!(
+            counted(&sl_sim, &[0], true, Some(10), None)[0].1,
+            (1, 0, 0, 0, 0, 0)
+        );
+        let tp_sim = sim(
+            vec![50, 100, 115],
+            vec![60, 105, 125],
+            vec![40, 98, 113],
+            vec![55, 100, 118],
+            vec![0, 0, 0],
+        );
+        assert_eq!(
+            counted(&tp_sim, &[0], true, None, Some(20))[0].1,
+            (0, 1, 0, 0, 0, 0)
+        );
+        let forced_sim = ResidentSweepSim::build(
+            vec![50, 100, 125],
+            vec![60, 110, 130],
+            vec![40, 95, 123],
+            vec![55, 105, 128],
+            vec![false, false, true],
+            vec![0, 0, 0],
+            vec![0, 0, 0],
+        )
+        .unwrap();
+        let forced_out =
+            forced_sim.simulate_masks_with_exit_counts_impl(&[0], true, Some(50), Some(20));
+        assert_eq!(
+            forced_out.expect("in-range")[0].1,
+            (0, 0, 1, 0, 0, 0),
+            "forced overrides the would-be TP → counted forced_1520"
+        );
+        let eod_sim = sim(
+            vec![50, 100, 120],
+            vec![60, 110, 130],
+            vec![40, 95, 118],
+            vec![55, 105, 130],
+            vec![0, 0, 0],
+        );
+        assert_eq!(
+            counted(&eod_sim, &[0], true, None, None)[0].1,
+            (0, 0, 0, 0, 1, 0)
+        );
+        // Session gap: entry = high[1] = 10120; folds bar1 (10120,9950) →
+        // 0/170, bar2 (10150,9960) → 30/160 → mfe 30, mae 170; bar3 is
+        // session 1 → (A2) closes at bar2's LOW (9960), exit_idx 2:
+        // pnl = 9960 − 10120 = −160, holding 2.
+        let gap_sim = ResidentSweepSim::build(
+            vec![10000, 10000, 10010, 11900],
+            vec![10100, 10120, 10150, 12000],
+            vec![9900, 9950, 9960, 11800],
+            vec![10000, 10050, 10100, 11900],
+            vec![false, false, false, false],
+            vec![0, 0, 0, 1],
+            vec![1, 0, 0, 0],
+        )
+        .unwrap();
+        let gap_out = gap_sim
+            .simulate_masks_with_exit_counts_impl(&[1], true, None, None)
+            .expect("in-range");
+        assert_eq!(
+            gap_out[0].0,
+            vec![(-160i64, 30i64, 170i64, 2u64, 1u64, 2u64)]
+        );
+        assert_eq!(gap_out[0].1, (0, 0, 0, 0, 0, 1));
+    }
+
+    #[test]
+    fn exit_counts_mode_b_pending_fill_attributes_signal() {
+        // Walker-driven (the Mode-B exit stream never crosses the sweep FFI):
+        // a Mode-B pending exit's next-bar fill is counted under SIGNAL —
+        // the arming reason carried by `pending_exit: Option<ExitReason>` —
+        // exactly the Python walker's pending-reason attribution. Bars are
+        // `mode_b_pending_exit_fills_at_adverse_extreme_fold_unchanged`'s
+        // (trade record re-verified identical there).
+        let mut w = Walker::new(true, None, None);
+        let bars: [(i64, i64, i64, i64, bool, bool); 4] = [
+            (100, 100, 100, 100, true, false),
+            (100, 105, 98, 100, false, false),
+            (100, 104, 99, 100, false, true),
+            (80, 82, 78, 81, false, false),
+        ];
+        let mut trades: Vec<TradeRecord> = Vec::new();
+        for (i, &(o, h, l, c, entry, exit)) in bars.iter().enumerate() {
+            if let Some(t) = w.push(o, h, l, c, i, false, 0, entry, exit) {
+                trades.push(t);
+            }
+        }
+        assert!(w.finish().is_none());
+        assert_eq!(trades.len(), 1);
+        assert_eq!(w.exit_counts_tuple(), (0, 0, 0, 1, 0, 0));
+    }
+
+    #[test]
+    fn exit_counts_session_gap_subsumes_pending_reason() {
+        // The (A2) boundary close SUBSUMES a pending Mode-B exit — the close
+        // is counted session_gap, never the stale pending signal (mirrors
+        // `cross_session_boundary_clears_pending_exit_and_new_position_rides`,
+        // whose bars + trade records these are: trade 1 = the boundary close,
+        // trade 2 = the finish() end-of-data close).
+        let mut w = Walker::new(true, None, None);
+        let bars: [(i64, i64, i64, i64, i64, bool, bool); 7] = [
+            (10000, 10050, 9900, 10000, 0, true, false),
+            (10000, 10060, 9960, 10010, 0, false, false),
+            (9990, 10000, 9940, 9980, 0, false, true),
+            (11900, 12000, 11880, 11900, 1, false, false),
+            (11910, 12010, 11890, 11910, 1, true, false),
+            (11920, 12020, 11900, 11920, 1, false, false),
+            (11930, 12030, 11910, 11940, 1, false, false),
+        ];
+        let mut trades: Vec<TradeRecord> = Vec::new();
+        for (i, &(o, h, l, c, sess, entry, exit)) in bars.iter().enumerate() {
+            if let Some(t) = w.push(o, h, l, c, i, false, sess, entry, exit) {
+                trades.push(t);
+            }
+        }
+        if let Some(t) = w.finish() {
+            trades.push(t);
+        }
+        assert_eq!(trades.len(), 2);
+        assert_eq!(
+            w.exit_counts_tuple(),
+            (0, 0, 0, 0, 1, 1),
+            "boundary close = session_gap; the pending signal is subsumed, \
+             never counted; the second trade is the end-of-data close"
+        );
+    }
+
+    #[test]
+    fn exit_counts_multiple_trades_accumulate() {
+        // Two TP round-trips from one mask → the counter reads 2, matching
+        // `multiple_trades_non_overlapping`'s trade census (its fixture
+        // verbatim: flat entry bars → worst entry 100, tp=5 → level 105,
+        // trigger bars fill min(105, 106) = 105).
+        let s = sim(
+            vec![100, 100, 106, 100, 100, 106],
+            vec![100, 100, 110, 100, 100, 110],
+            vec![100, 100, 106, 100, 100, 106],
+            vec![100, 100, 106, 100, 100, 106],
+            vec![1, 0, 0, 1, 0, 0],
+        );
+        assert_eq!(
+            counted(&s, &[1], true, None, Some(5))[0].1,
+            (0, 2, 0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn exit_counts_parallel_arm_matches_serial() {
+        // rayon out[j] ↔ masks[j] alignment + counter parity ABOVE the work
+        // threshold (the counted twin of `parallel_arm_matches_serial`).
+        let n = 1024usize;
+        let open: Vec<i64> = (0..n as i64).map(|i| 1000 + (i % 7)).collect();
+        let high: Vec<i64> = open.iter().map(|&o| o + 5).collect();
+        let low: Vec<i64> = open.iter().map(|&o| o - 5).collect();
+        let close: Vec<i64> = open.clone();
+        let bar_bits: Vec<u64> = (0..n as u64)
+            .map(|i| (i & 0b111) | (1 << (i % 50)))
+            .collect();
+        let s = sim(open, high, low, close, bar_bits);
+        let masks: Vec<u64> = (0..1100u64).map(|i| (i & 0b1) | (1 << (i % 50))).collect();
+        assert!((masks.len() as u64) * (n as u64) >= PARALLEL_WORK_THRESHOLD);
+        let batch = counted(&s, &masks, true, Some(3), Some(4));
+        for (j, &m) in masks.iter().enumerate() {
+            let solo = s
+                .simulate_masks_with_exit_counts_impl(&[m], true, Some(3), Some(4))
+                .expect("in-range");
+            assert_eq!(batch[j], solo[0], "mask {j}: parallel != serial");
+        }
+    }
+
+    #[test]
+    fn exit_counts_boundary_rejects_like_uncounted() {
+        // The counted batch rides the SAME R2-RC-F1 SL/TP boundary as
+        // `simulate_masks` — out-of-range distances reject with the class label.
+        let s = sim(
+            vec![100, 100],
+            vec![100, 100],
+            vec![100, 100],
+            vec![100, 100],
+            vec![1, 0],
+        );
+        let err = s
+            .simulate_masks_with_exit_counts_impl(&[1], true, Some(i64::MAX), None)
+            .map(|_| ())
+            .expect_err("out-of-range sl_paisa must be rejected");
+        assert!(err.starts_with("ResidentSweepSim:"), "{err}");
+    }
+
+    #[test]
+    fn u128_exit_counts_bridge_matches_u64_kernel() {
+        // ANTI-DRIFT BRIDGE PIN (the counted twin of
+        // `u128_bridge_matches_u64_kernel_on_u64_fit_inputs`): on u64-fit
+        // inputs the two widths' counted batches are field-identical, and
+        // the wide class's boundary reject names ITSELF.
+        let open = vec![100i64, 100, 100, 100];
+        let high = vec![100i64, 110, 100, 108];
+        let low = vec![100i64, 92, 100, 100];
+        let close = vec![100i64, 100, 100, 100];
+        let bits_u64: Vec<u64> = vec![1, 0, 1, 1 << 63];
+        let bits_u128: Vec<u128> = bits_u64.iter().map(|&b| b as u128).collect();
+        let s64 = sim(
+            open.clone(),
+            high.clone(),
+            low.clone(),
+            close.clone(),
+            bits_u64,
+        );
+        let s128 = sim_u128(open, high, low, close, bits_u128);
+        let masks_u64 = vec![0u64, 1, 1 << 63];
+        let masks_u128: Vec<u128> = masks_u64.iter().map(|&m| m as u128).collect();
+        let out64 = counted(&s64, &masks_u64, true, Some(8), Some(5));
+        let out128 = s128
+            .simulate_masks_with_exit_counts_impl(&masks_u128, true, Some(8), Some(5))
+            .expect("in-range");
+        assert_eq!(out64, out128);
+        let err = s128
+            .simulate_masks_with_exit_counts_impl(&[1], true, Some(-1), None)
+            .map(|_| ())
+            .expect_err("negative sl_paisa must be rejected");
+        assert!(err.starts_with("ResidentSweepSimU128:"), "{err}");
     }
 }

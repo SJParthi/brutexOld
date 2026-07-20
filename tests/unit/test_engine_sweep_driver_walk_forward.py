@@ -296,6 +296,7 @@ def _metrics(sharpe: float | None) -> ResultMetrics:
         winning_trades=0,
         losing_trades=0,
         win_rate=0.0,
+        loss_rate=0.0,
         profit_factor=None,
         avg_winning_trade_paisa=0,
         avg_losing_trade_paisa=0,
@@ -310,6 +311,8 @@ def _metrics(sharpe: float | None) -> ResultMetrics:
         skewness=None,
         kurtosis=None,
         returns_std_dev=None,
+        kelly_fraction=None,
+        log_growth_at_half_kelly=None,
         deflated_sharpe_ratio=None,
         pbo_probability=None,
     )
@@ -674,3 +677,25 @@ def test_walk_forward_payload_canonicalise_params_equivalence() -> None:
             ensure_ascii=True,
             allow_nan=False,
         )
+
+
+def test_walk_forward_fold_metrics_keep_recency_none() -> None:
+    # DEC-METRICS-TRAILING-WINDOW-001: the walk-forward scorer's bars are
+    # train/test SLICES, so it deliberately passes NO trailing_anchor (a
+    # slice-end anchor would violate the GLOBAL-anchor law) — every fold
+    # metric's recency fields stay the honest None.
+    result = evaluate_combo_walk_forward(
+        _stream(25),
+        required_mask=0,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=10,
+        test_days=5,
+        step_days=5,
+    )
+    assert result.n_folds >= 1  # anti-vacuity
+    for fr in result.fold_results:
+        for metrics in (fr.train_metrics, fr.test_metrics):
+            assert metrics.trailing_sharpe_ratio is None
+            assert metrics.trailing_net_pnl_paisa is None
+            assert metrics.decay_weighted_net_paisa is None

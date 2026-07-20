@@ -18,7 +18,43 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+_Last updated: 2026-07-18 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 +
+DEC-METRICS-KELLY-GROWTH-001 + DEC-METRICS-TRAILING-WINDOW-001,
+MIGRATION.md #1974–#1976 — the W2 metrics-depth lane on
+`claude/metrics-loss-growth-recency` (STACKED on PR #1605's #1902 branch):
+`loss_rate` first-class + the per-mask exit-reason counters (u64 AND u128
+kernels) feeding `sl_hit_rate`; the Kelly / half-Kelly-log-growth pair +
+the binomial-null Door-5 re-derivation (`max(10, k99)` — the fixed 10
+becomes the FLOOR; alpha 0.01 = the conservative documented default
+per the coordinator ruling of 2026-07-19, calibration a documented
+operator follow-up — the Door-5 delta LOOSENING-only regardless) + the
+opt-in
+`max_sl_hit_rate` ranking Door 6 (ACTIVE-only in the tuple-digest
+identity); the 24-month trailing recency pass + the exponential-decay
+composite behind the GLOBAL `bars[-1].timestamp` anchor, with the
+`RecencyFolds` Rust fold twin under the default-OFF
+`BRUTEX_METRICS_RUST_FOLD` shared-latch burn-in seam; EIGHT nullable
+appended-last ResultRow columns + FOUR new ranking presets. ENGINE
+results UNCHANGED at defaults — NIFTY/BANKNIFTY/SENSEX; run identity
+untouched (`_GOLDEN_RUN_ID` byte-stable); the ONE sanctioned
+ranking-gate delta is Door 5's derived threshold, LOOSENING-only. This
+header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1974–#1976.)
+Earlier: 2026-07-16 (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902
+(a coordinator-granted released S1 spare, verified free on live main) — the Rust mirror of compute.py's
+Slice-0 FOLD layer (`fno_math.metrics_fold_trades` + the seam
+`brutex/metrics/compute_rust.py`) behind the NEW default-OFF
+`BRUTEX_METRICS_RUST_FOLD`; the fold-in-Rust / combine-in-Python split (the
+combine tail carries libm `pow` — the MUST-STAY-PYTHON class), the returns
+column stays Python-computed (CPython correctly-rounded int/int), the
+downside Σr² mirrors CPython 3.12+'s Neumaier-compensated `sum()`
+(burn-in-caught 1-ulp class), 16-sample burn-in + autorevert per
+#1531/#1532; flag OFF (default) byte-identical, flag ON bit-identical —
+the #1685 golden + differential suites and the frozen run-identity goldens
+executed GREEN on BOTH arms. Ships INERT. The per-item record lives in the
+§1 Active-branch blurb + the MIGRATION.md entry — this header carries the
+pointer, never the story. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
+Earlier: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
 MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
 overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
 the overfit gate config the sweep RECORDED at launch (both grid launchers
@@ -3917,7 +3953,156 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-s2-results-v2`
+- **Active branch:** `claude/metrics-loss-growth-recency`
+  (**DEC-METRICS-LOSSRATE-FIRSTCLASS-001 + DEC-METRICS-KELLY-GROWTH-001 +
+  DEC-METRICS-TRAILING-WINDOW-001, MIGRATION.md #1974–#1976 — the lane's
+  coordinator-assigned band; gaps are legal per DEC-LEDGER-RENUMBER-001** —
+  build lane W2, the metrics-depth pack (operator-approved P0 items 4/8/13),
+  STACKED on PR #1605's `claude/rust-metrics-compute-fold-r2` head (#1902) —
+  POSTURE: the vehicle-PR-only creation freeze — NO standalone PR; the branch
+  merges main forward once wave-2 PR #1688 (carrying #1605 via
+  crate-vehicle-6) lands, then declares to the census for post-#1688 vehicle
+  slotting; #1605's two hostile-review MINORs are folded HERE as the carrier
+  (the #1976 CARRIER RECORD carries the story). WHAT SHIPPED, per entry:
+  **(#1974)**
+  `loss_rate` FIRST-CLASS on `ResultMetrics` (`losers/n` — scratch trades in
+  the denominator only, so `loss_rate ≠ 1 − win_rate`, property-pinned) +
+  the per-mask EXIT-REASON COUNTERS on the trade-sim wire
+  (`simulate_masks_with_exit_counts` on BOTH the u64 AND u128 kernel
+  pyclasses + the Python walker oracle twin; the `TradeRecord` 6-tuple FFI
+  trade wire BYTE-UNTOUCHED) feeding `sl_hit_rate` at COMBINE (the
+  "SL exit = losing trade" claim property-pinned AT_LEVEL-only — the
+  documented honesty limit). **(#1975)** the Kelly pair
+  (`kelly_fraction` / `log_growth_at_half_kelly` — COMBINE-side libm,
+  Python by the #1902 split law; honest `None` on the degenerate arms,
+  never a fabricated 0) + the BINOMIAL-NULL Door-5 re-derivation (NEW leaf
+  `brutex/ranking/streaks.py`: threshold `max(10, k99)` — the historical
+  fixed 10 becomes the FLOOR — UNION the WLR ≥ 3.0 exemption; `alpha =
+  0.01` ships as the conservative documented default per the coordinator
+  ruling of 2026-07-19 (stricter than the conventional 0.05 — the safe
+  direction; calibration is a documented follow-up the operator can rule
+  anytime; the Door-5 delta stays LOOSENING-only regardless); the exact O(n·k) DP is the TEST-ONLY
+  oracle, the closed form measured NEVER-tighter-than-exact on the oracle
+  grid) + the `max_sl_hit_rate` knob ENFORCED as the opt-in ranking
+  **Door 6** (ONE shared verdict body under `passes_gates` +
+  `gate_reasons`; FAIL-CLOSED on a None rate under an active knob; folds
+  ACTIVE-ONLY into the tuple-digest identity fragment — the frozen default
+  digest byte-stable (`7a0120c1123b44c6` since the #1976 census fold onto
+  main's worst-case-era re-lock; `5b020e892247deac` pre-fold), an active
+  knob re-keys the store
+  address). **(#1976)** the 24-month TRAILING recency metrics (`trailing_
+  sharpe_ratio` / `trailing_profit_factor` / `trailing_net_pnl_paisa`) +
+  the whole-history exponential-DECAY composite (`decay_weighted_net_
+  paisa`; `DECAY_HALF_LIFE_MONTHS = 12.0`, kw-only configurable) as a
+  SECOND fold/combine pass behind the GLOBAL `trailing_anchor` law —
+  `bars[-1].timestamp`, the loaded bar-range end (snapshot-determined,
+  never a per-combo max; a naive anchor refuses loudly on BOTH arms) —
+  with the `RecencyFolds` Rust fold twin (`fno_math.metrics_fold_recency`)
+  behind the SAME default-OFF `BRUTEX_METRICS_RUST_FOLD` seam (per-face
+  16-call burn-in budgets over the SHARED autorevert latch; refuse-poison
+  wire gate — the conservation check pins the bucket TOTAL, per-bucket
+  correctness rides the burn-in bit-compare, the documented envelope).
+  PERSISTENCE + RANKING: EIGHT nullable appended-LAST `ResultRow` columns
+  under the Ruling-5 optional-column law (`loss_rate` · `kelly_fraction` ·
+  `log_growth_at_half_kelly` · `sl_hit_rate` · the recency four —
+  pre-extension stores load None; None→value backfill; value-vs-value
+  clash = a typed conflict; nulls-last top_k both directions) + FOUR new
+  presets at the ONE preset home (`growth` · `win_rate_safe` · `recent` ·
+  `recent_decay`, appended-last so `TOP100_PRESETS` inherits verbatim;
+  `RankRecord` threaded at BOTH consumers). HONEST LIMITS (named): the
+  display surfaces (/results · /screener · the top100 metrics dict) do
+  NOT yet render the new columns — Stage-D lane work; the map's optional
+  WFO-window exemption flag stays EXCLUDED (a cascade-gate alteration
+  needing its own ruling); the flag-flip parity residual is NAMED in
+  #1976 (the growth/recency columns sit INSIDE the run-identity envelope —
+  a hypothetical Rust/Python recency-fold divergence across a flag flip
+  surfaces as a same-run_id append conflict, the plain `ResultsStoreError`
+  HARD ABORT; mitigants: default-OFF + the burn-in bit-compare +
+  autorevert + the goldens green flag-ON); the log-growth model folds
+  scratch trades into the loss arm `q = 1 − p` (mildly pessimistic when
+  scratches exist — a monotone ranking key, never reported P&L). GATES
+  (executed): coverage 100.00% line+branch on all 13 discovered touched
+  modules (the ci discovery method); cargo fmt/clippy `-D warnings`/test
+  --release --locked 601 passed (wheel rebuilt; 633 post-fold); goldens
+  green flag-OFF AND flag-ON (897 passed each arm post-fold) —
+  `_GOLDEN_RUN_ID` 715212…62fc9 UNCHANGED (main's worst-case-era identity;
+  run identity untouched by this lane) + the TWO audited schema-additive
+  content re-locks, RE-DERIVED at the #1976 census fold with fresh
+  worst-case hand-audits (`_GOLDEN_CONTENT_HASH` 011a494c… + the futures
+  `_EXPECTED_STORE_HASH` 1022bebf…; pre-fold 2f335da9…/3eaa8b08… are
+  HISTORY); ruff/ruff-format clean;
+  `mypy --strict` clean; pyright 0 errors on touched files. ENGINE
+  results UNCHANGED at defaults — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; the ONE sanctioned ranking-gate
+  delta is Door 5's derived threshold, LOOSENING-ONLY (no
+  previously-passing strategy is newly rejected). VEHICLE-LAP FIX ROUNDS
+  (2026-07-19, PR #1699): 490e3a9c9 (CodeQL test hygiene, 11 alerts,
+  tests-only) + 112b0932d — the sweep-verify recount-attribution widening
+  to the appended nullable columns (`_APPENDED_NULLABLE_FIELDS` from the
+  results_store per-family constants; pre-VIX/pre-extension attribution
+  stays honest, identity-envelope divergences still abstain) — the ONE
+  production-module delta beyond the lane's original set; the record
+  lives in MIGRATION.md #1976. W2 RE-INTEGRATION (2026-07-19, local): the
+  #1580 collision fold — main landed the S2 temporal quartet FIRST, so the
+  lane merged main d5a29747 under the coordinator's landed-first-wins
+  RULED order (VIX → the emit-on-present temporal quartet at its landed
+  position → W2's 8 strictly after), threaded Door 6 through the temporal
+  arm via the one `passes_gates` body (batch≡bounded parity restored under
+  temporal+Door-6 ACTIVE), and closed the 5 golden/fixture reds by fresh
+  hand audits (the #1749 additive-only re-lock: the gate-golden hash
+  5d8f4384… → fdc92094… proven schema-additive against a live d5a29747
+  baseline worktree with all 8 values hand-derived; the v2 fixture pair
+  minted as a reviewed act with the v1→v2 delta machine-pinned; the
+  emit-on-present trio re-pinned to the ruled order) — the record lives in
+  MIGRATION.md #1976. The full record lives
+  in MIGRATION.md #1974–#1976 — this blurb carries the shape, never the
+  per-stage story.)
+  Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
+  (**DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
+  coordinator-granted released S1 spare, verified free on live main** — the
+  Rust mirror of `compute.py`'s Slice-0
+  FOLD layer: NEW `rust/fno-math/src/metrics_fold.rs`
+  (`fold_trades_checked` pure `Result` core + the `metrics_fold_trades`
+  pyfunction over five parallel per-trade columns; i128 integer sums →
+  exact Python ints; the Welford/Pébay recurrence transcribed line-by-line;
+  the p95/p5 percentile mirror) + the NEW seam leaf
+  `brutex/metrics/compute_rust.py` behind the default-OFF Pattern-A
+  `BRUTEX_METRICS_RUST_FOLD` (inline `_TRUTHY`/`_FALSY` mirror-pinned — the
+  `feed_rust` LEAF discipline; a metrics→engine import edge would close a
+  cycle) and ONE `compute.py` dispatch chokepoint (`_resolve_folds`; flag
+  OFF = the verbatim `_fold_trades` call, never-routes bomb-spy-pinned).
+  THE SPLIT (recorded honestly): fold-in-Rust / combine-in-Python — the
+  combine tail carries libm `pow` (CAGR `**`, skewness `math.pow`), the
+  NOT-correctly-rounded-portable MUST-STAY-PYTHON class `metrics.rs`
+  documents, so the shipped split holds bit-identity BY CONSTRUCTION; the
+  returns column stays PYTHON-computed at the seam (CPython's
+  correctly-rounded big-int `int/int` — no exactness envelope needed).
+  BURN-IN-CAUGHT FINDING: the first flag-ON corpus run autoreverted on
+  `dense_1500` — CPython 3.12+'s builtin `sum()` is NEUMAIER-COMPENSATED
+  for floats (gh-100425), so the kernel's downside Σr² now mirrors
+  `builtin_sum`'s float fast path exactly (Rust exact-bits pin + seam pin;
+  the oracle value shipped throughout — no wrong number ever served).
+  Burn-in 16-sample bit-compare + autorevert latch (#1531/#1532 pattern);
+  greeks-batch fault taxonomy (MemoryError raw; any other kernel fault →
+  warn-once → oracle; refuse-poison wire gate). PROOF executed BOTH arms:
+  the 52-test #1685 byte-parity golden + the C23 differential (56 passed
+  each arm), the non-vacuous flag-ON corpus pin (engagement spy, every
+  case burn-in cross-checked, zero autoreverts), the hypothesis dual-arm
+  property (150 examples), the frozen `_GOLDEN_CONTENT_HASH`/
+  `_GOLDEN_RUN_ID` run-identity goldens byte-identical flag-OFF AND
+  flag-ON; cargo test 586 green (7 new), fmt/clippy `-D warnings` clean;
+  `compute_rust.py` 100.00% line+branch standalone (NEW ci.yml numpy-safe
+  stanza), `compute.py` 100.00% under its stem suite; ruff/ruff-format
+  clean, `mypy --strict` clean, `pyright brutex tests` 0 errors; SIX
+  hand-applied seam mutants verified killed (ledgered — the mutmut pair
+  list deliberately not extended, the greeks-batch cheaper-honest-option
+  precedent). HONEST: both arms O(n·log n) per fold; ships INERT — a
+  default flip is its own later DEC; measured 6.08× fold-only on the
+  dense_1500 case (sandbox micro-bench, NOT an SLA — the combine tail +
+  `_drawdown_stats` are outside this seam). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
+  identity untouched.)
+  Earlier: `integration/club-s2-results-v2`
   (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
   overfit-recount recovery channel, folded onto the CLUB S2 members
   (#1848–#1850) on this same branch. THE TRUE FAILURE MODE (stated
@@ -11759,7 +11944,45 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-s2-results-v2`
+- **Active feature branch:** `claude/metrics-loss-growth-recency`
+  (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 + DEC-METRICS-KELLY-GROWTH-001 +
+  DEC-METRICS-TRAILING-WINDOW-001, MIGRATION.md #1974–#1976 — the W2
+  metrics-depth pack, STACKED on PR #1605's
+  `claude/rust-metrics-compute-fold-r2` head (#1902): `loss_rate`
+  first-class + the per-mask exit-reason counters (u64 AND u128 kernels)
+  feeding `sl_hit_rate`; the Kelly / half-Kelly-log-growth pair + the
+  binomial-null Door-5 re-derivation (`max(10, k99)` floor law; alpha
+  0.01 = the coordinator-ruled conservative default of 2026-07-19,
+  calibration an operator follow-up — LOOSENING-only regardless) + the
+  opt-in `max_sl_hit_rate` ranking Door 6
+  (ACTIVE-only in the tuple-digest identity — the default digest
+  byte-stable); the 24-month trailing recency pass + the decay composite
+  behind the GLOBAL `bars[-1].timestamp` anchor, with the `RecencyFolds`
+  Rust fold twin under the default-OFF `BRUTEX_METRICS_RUST_FOLD`
+  shared-latch burn-in seam; EIGHT nullable appended-last ResultRow
+  columns + FOUR new presets (`growth` · `win_rate_safe` · `recent` ·
+  `recent_decay`); display surfaces do NOT yet render the new columns
+  (Stage-D lane work) and the WFO-exemption flag stays a named follow-up;
+  ENGINE results UNCHANGED at defaults — NIFTY/BANKNIFTY/SENSEX (the one
+  sanctioned ranking-gate delta is Door 5's derived threshold,
+  loosening-only); matches §1's Active branch line — see §1 +
+  MIGRATION.md #1974–#1976 for the full blurb)
+  Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
+  (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
+  coordinator-granted released S1 spare, verified free on live main — the
+  Rust mirror of `compute.py`'s Slice-0
+  FOLD layer (`fno_math.metrics_fold_trades` + the seam
+  `brutex/metrics/compute_rust.py`) behind the NEW default-OFF Pattern-A
+  `BRUTEX_METRICS_RUST_FOLD`; fold-in-Rust / combine-in-Python (the combine
+  tail carries libm `pow` — MUST-STAY-PYTHON), the returns column stays
+  Python-computed, the downside Σr² mirrors CPython 3.12+'s
+  Neumaier-compensated `sum()` (burn-in-caught), 16-sample burn-in +
+  autorevert; flag OFF (default) byte-identical, flag ON bit-identical —
+  the #1685 golden + differential suites and the frozen run-identity
+  goldens executed GREEN on BOTH arms; ships INERT; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 + the
+  MIGRATION.md entry for the full blurb)
+  Earlier: `integration/club-s2-results-v2`
   (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
   overfit-recount recovery channel: the recount recovers the RECORDED
   overfit gate config (mint on both launchers' START records; the tolerant

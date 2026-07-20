@@ -30,6 +30,7 @@ suites; here we assert behaviour + cover every branch.
 
 from __future__ import annotations
 
+import math
 import sys
 from collections.abc import Callable
 from decimal import Decimal
@@ -42,6 +43,7 @@ if TYPE_CHECKING:  # typing-only — the tests import polars lazily at run time
 import pytest
 from brutex.engine.results_store import (
     CONDITION_NAME_SEP,
+    EXIT_QUALITY_FIELDS,
     MASK_BITS_MAX,
     FlushResult,
     ResultRow,
@@ -49,6 +51,7 @@ from brutex.engine.results_store import (
     ResultsStoreError,
     ResultsStoreGateConflictError,
     ResultsStoreSchemaError,
+    VixTrioConflictError,
 )
 from brutex.strategies.combo import combo_hash
 from brutex.vocabulary.describe import matched_condition_names
@@ -831,3 +834,68 @@ class TestTopThousandStorage:
         after = [r.run_id for r in reloaded.top_k(1000, by="net_pnl_paisa")]
         assert after == before
         assert len(after) == 1000
+
+
+# ── sl_hit_rate exit-quality column (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 B) ──
+
+
+class TestSlHitRateColumn:
+    """The Stage-B exit-quality column: Ruling-5 optionality, backfill,
+    conflict, rank law, and the public field constant."""
+
+    def test_public_constant_and_default_none(self) -> None:
+        assert EXIT_QUALITY_FIELDS == ("sl_hit_rate",)
+        assert _row().sl_hit_rate is None
+
+    def test_concrete_value_round_trips_through_parquet(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        store = ResultsStore(path=tmp_path / "s.parquet")
+        store.append(_row(sl_hit_rate=0.375))
+        store.flush()
+        loaded = ResultsStore.load(tmp_path / "s.parquet")
+        assert loaded.rows()[0].sl_hit_rate == 0.375
+
+    def test_none_round_trips_as_parquet_null(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        store = ResultsStore(path=tmp_path / "s.parquet")
+        store.append(_row())
+        store.flush()
+        assert ResultsStore.load(tmp_path / "s.parquet").rows()[0].sl_hit_rate is None
+
+    def test_non_finite_value_rejected(self) -> None:
+        for bad in (math.nan, math.inf, -math.inf):
+            with pytest.raises(ResultsStoreError, match="sl_hit_rate"):
+                _row(sl_hit_rate=bad)
+
+    def test_directional_backfill_none_to_value(self) -> None:
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row())
+        upgraded = store.append(_row(sl_hit_rate=0.25))
+        assert upgraded is True
+        assert store.get(_rid(1)) is not None
+        assert store.get(_rid(1)).sl_hit_rate == 0.25  # type: ignore[union-attr]
+
+    def test_less_informed_redo_never_erases(self) -> None:
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(sl_hit_rate=0.25))
+        redo_appended = store.append(_row())
+        assert redo_appended is False  # directional no-op
+        assert store.get(_rid(1)).sl_hit_rate == 0.25  # type: ignore[union-attr]
+
+    def test_value_vs_value_conflict_raises_plain_error(self) -> None:
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(sl_hit_rate=0.25))
+        with pytest.raises(ResultsStoreError, match="exit-quality conflict") as exc_info:
+            store.append(_row(sl_hit_rate=0.5))
+        # The reproducibility-breach family — NOT the VIX lake-moved type.
+        assert not isinstance(exc_info.value, VixTrioConflictError)
+
+    def test_top_k_ranks_nulls_last_both_directions(self) -> None:
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(run_id=_rid(1), sl_hit_rate=0.9))
+        store.append(_row(run_id=_rid(2), sl_hit_rate=0.1))
+        store.append(_row(run_id=_rid(3)))  # None — pre-extension unknown
+        asc = store.top_k(3, by="sl_hit_rate", descending=False)
+        assert [r.sl_hit_rate for r in asc] == [0.1, 0.9, None]
+        desc = store.top_k(3, by="sl_hit_rate", descending=True)
+        assert [r.sl_hit_rate for r in desc] == [0.9, 0.1, None]

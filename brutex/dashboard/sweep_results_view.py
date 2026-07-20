@@ -869,6 +869,21 @@ def _preset_rank_record(
         profit_factor=row.profit_factor,
         win_rate=row.win_rate,
         calmar_ratio=row.calmar_ratio,
+        # The growth-preset input (DEC-METRICS-KELLY-GROWTH-001): persisted on
+        # the row; None on a pre-extension store — honestly unscored, ranks
+        # last under the preset's presence flag (never a fabricated 0).
+        log_growth_at_half_kelly=row.log_growth_at_half_kelly,
+        # The win_rate_safe-preset input (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        # Stage B): persisted on the row; None on a pre-extension store —
+        # honestly unknown, ranks after every concrete rate within an equal
+        # win rate under the preset's presence flag (never a fabricated 0).
+        sl_hit_rate=row.sl_hit_rate,
+        # The recency-preset inputs (DEC-METRICS-TRAILING-WINDOW-001):
+        # persisted on the row; None on a pre-extension store / anchor-less
+        # run — honestly unscored, rank last under each preset's presence
+        # flag (never a fabricated 0).
+        trailing_sharpe_ratio=row.trailing_sharpe_ratio,
+        decay_weighted_net_paisa=row.decay_weighted_net_paisa,
     )
 
 

@@ -5,7 +5,11 @@ Hard rejection gates (applied BEFORE composite scoring):
 - profit_factor < 1.2 → REJECT (no edge)
 - max_drawdown_pct > 30% → REJECT (uninvestable)
 - win_rate < 25% AND win_loss_ratio < 2.0 → REJECT
-- max_consecutive_losses > 10 → REJECT (account-blower)
+- max_consecutive_losses > max(10, k99) AND win_loss_ratio < 3.0 → REJECT
+  (account-blower — the BINOMIAL-NULL streak door, DEC-METRICS-KELLY-GROWTH-001:
+  k99 = the strategy's own-loss-rate max-run quantile from
+  :func:`brutex.ranking.streaks.max_loss_streak_quantile`; the legacy 10 is a
+  FLOOR so the door only ever LOOSENS — see :func:`streak_door_threshold`)
 - Deflated_Sharpe < dsr_min → REJECT (multiple-testing overfit)  [6th gate, opt-in]
 
 Composite ranking score (after gates pass):
@@ -69,6 +73,7 @@ from brutex.ranking.overfit import (
     passes_overfit_gate,
     pool_sharpe_dispersion,
 )
+from brutex.ranking.streaks import max_loss_streak_quantile
 from brutex.ranking.temporal import TemporalGateInput, TemporalTriple, apply_temporal_gate
 
 # ── Hard rejection gate thresholds (the spec, above) ──
@@ -84,7 +89,19 @@ _MIN_PROFIT_FACTOR = 1.2
 _MAX_DRAWDOWN_PCT = 30.0
 _MIN_WIN_RATE = 0.25
 _MIN_WIN_LOSS_RATIO = 2.0
+#: Door 5's legacy fixed streak bound — since DEC-METRICS-KELLY-GROWTH-001 the
+#: FLOOR of the derived threshold (see :func:`streak_door_threshold`), and the
+#: whole threshold for the degenerate all-loss (``loss_rate >= 1``) arm.
 _MAX_CONSECUTIVE_LOSSES = 10
+
+#: Door 5's high-payoff exemption bound (DEC-METRICS-KELLY-GROWTH-001, the
+#: map-PINNED 3.0): a combo whose average winner is at least this many times
+#: its average loser survives a long loss streak by construction — its streak
+#: length is not the account-blower signal the door hunts. PUBLIC because the
+#: ``top100_artifact`` gate mirror composes the SAME door from persisted
+#: records (CLAUDE.md §11 COMMON — one constant, never a re-pinned literal).
+#: Deliberately DISTINCT from Door 4's unrelated ``_MIN_WIN_LOSS_RATIO`` 2.0.
+STREAK_DOOR_WLR_EXEMPT: Final[float] = 3.0
 
 # ── Composite weights (the 7 available terms; the 0.05 lockbox term is Stage-3) ──
 _W_SHARPE = 0.25
@@ -178,6 +195,81 @@ class RankedCombo:
         return _risk_efficiency(self.metrics)
 
 
+def streak_door_threshold(total_trades: int, loss_rate: float) -> int:
+    """Door 5's derived max-loss-streak bound (DEC-METRICS-KELLY-GROWTH-001).
+
+    ``max(10, k99)`` where ``k99 =``
+    :func:`brutex.ranking.streaks.max_loss_streak_quantile` at the strategy's
+    OWN loss rate — the smallest run length whose binomial-null probability of
+    appearing at all in ``total_trades`` i.i.d. trades falls below
+    :data:`~brutex.ranking.streaks.STREAK_DOOR_ALPHA`. A streak at-or-below
+    the bound is CONSISTENT with luck under the strategy's own loss
+    probability; only an off-null streak fails the door.
+
+    **The floor is load-bearing (the map's Interactions cell):** relaxing the
+    streak gate widens survivor pools, and a wider pool auto-tightens the
+    Stage-4 DSR deflation (``N`` grows) — the SAFE direction. An UNFLOORED
+    derived bound would TIGHTEN the door for high-win-rate combos (``k99 <
+    10`` at small ``loss_rate``), flipping that direction, so the legacy 10
+    stays as the floor and the door only ever LOOSENS (property-pinned:
+    every metrics row that passed the fixed-10 door passes the derived one).
+
+    The degenerate all-loss arm (``loss_rate >= 1.0`` — the quantile's own
+    refusal domain) keeps the fixed legacy bound: a 100%-loss strategy must
+    never ride its "expected" run of ``n`` losses through the door.
+
+    PUBLIC because the ``top100_artifact`` gate mirror composes the SAME
+    door over persisted records (CLAUDE.md §11 COMMON — the statistics has
+    one home, never a mirrored re-derivation).
+    """
+    if loss_rate >= 1.0:
+        return _MAX_CONSECUTIVE_LOSSES
+    return max(_MAX_CONSECUTIVE_LOSSES, max_loss_streak_quantile(total_trades, loss_rate))
+
+
+def _fails_consecutive_losses_door(m: ResultMetrics) -> bool:
+    """Door 5 verdict — ONE body shared by :func:`passes_gates` + :func:`gate_reasons`.
+
+    FAIL iff the observed ``max_consecutive_losses`` exceeds the derived
+    :func:`streak_door_threshold` AND the high-payoff exemption does not
+    apply (``win_loss_ratio >= STREAK_DOOR_WLR_EXEMPT`` — a ``None`` ratio
+    never exempts, consistent with Door 4's ``None`` → ``0.0`` projection).
+    The door∧exemption UNION is a recorded lane choice
+    (DEC-METRICS-KELLY-GROWTH-001). Callers own the fail-closed junk guard
+    (``win_loss_ratio`` is non-finite-screened and ``loss_rate`` rides
+    :func:`_junk_loss_rate` — ``None`` OR non-finite — there BEFORE any
+    door), so this body sees a finite ``loss_rate`` and a
+    finite-or-``None`` ``win_loss_ratio`` in gate context.
+    """
+    wlr = m.win_loss_ratio
+    if wlr is not None and wlr >= STREAK_DOOR_WLR_EXEMPT:
+        return False
+    return m.max_consecutive_losses > streak_door_threshold(m.total_trades, m.loss_rate)
+
+
+def _fails_sl_hit_rate_door(m: ResultMetrics, max_sl_hit_rate: float | None) -> bool:
+    """Door 6 verdict — ONE body shared by :func:`passes_gates` + :func:`gate_reasons`.
+
+    The opt-in SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    Stage B — the ``SweepGridConfig.max_sl_hit_rate`` knob, folded into the
+    store-address identity by ``_gate_config_fragment``). ``None`` knob (the
+    default) — the door does not exist: every input passes, byte-identical to
+    the pre-door gates. ACTIVE knob — FAIL-CLOSED: a row whose
+    ``sl_hit_rate`` is ``None`` (a counter-less legacy caller / a
+    pre-extension store row — "reasons unavailable") FAILS the door, because
+    an active gate must never pass a row it cannot judge (the non-finite
+    fail-closed posture applied to absence); a measured rate STRICTLY ABOVE
+    the ceiling fails. Callers own the non-finite guard (an active knob adds
+    ``sl_hit_rate`` to the guard's scan), so this body sees
+    finite-or-``None`` inputs in gate context.
+    """
+    if max_sl_hit_rate is None:
+        return False
+    if m.sl_hit_rate is None:
+        return True
+    return m.sl_hit_rate > max_sl_hit_rate
+
+
 def _non_finite_gate_input(value: float | None) -> bool:
     """Whether a float-valued gate input is present but non-finite (``NaN``/±``inf``).
 
@@ -190,7 +282,25 @@ def _non_finite_gate_input(value: float | None) -> bool:
     return value is not None and not math.isfinite(value)
 
 
-def passes_gates(m: ResultMetrics) -> bool:
+def _junk_loss_rate(value: float | None) -> bool:
+    """Fail-closed Door-5 ``loss_rate`` guard: type-illegal ``None`` OR non-finite.
+
+    ``ResultMetrics.loss_rate`` is NON-nullable (``float``), so a ``None`` here
+    is MALFORMED data, not the "mathematically undefined" a legitimately
+    nullable metric carries — unlike the other guarded inputs (whose ``None``
+    keeps its per-gate handling), a ``None`` loss rate takes the SAME
+    fail-closed exit as ``NaN``/±``inf``. Without this arm a type-illegal
+    ``None`` would crash :func:`streak_door_threshold` with a ``TypeError``
+    (``None >= 1.0``) instead of failing the gate — unreachable from the
+    production constructors, but the twin-law totality promise (gate FAILS,
+    reasons non-empty, never a crash) covers it (refuter round 1,
+    DEC-METRICS-KELLY-GROWTH-001). The widened parameter type is exactly what
+    lets the ``None`` arm typecheck under ``warn_unreachable``.
+    """
+    return value is None or not math.isfinite(value)
+
+
+def passes_gates(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> bool:
     """Apply the hard rejection gates to one result (lockbox gate deferred).
 
     Returns ``True`` iff the result survives every applicable gate. A ``None``
@@ -199,17 +309,45 @@ def passes_gates(m: ResultMetrics) -> bool:
 
     **Fail-closed on non-finite inputs (DEC-RANKING-TIEBREAK-001).** A ``NaN`` or
     ±``inf`` in any float-valued gate input (``profit_factor``, ``max_drawdown_pct``,
-    ``win_rate``, ``win_loss_ratio``) would silently slip through a ``<`` / ``>``
+    ``win_rate``, ``win_loss_ratio``, ``loss_rate`` — the last a Door-5 input
+    since DEC-METRICS-KELLY-GROWTH-001: a ``NaN`` loss rate would silently
+    corrupt the derived streak threshold) would slip through a ``<`` / ``>``
     comparison as a PASS (``NaN < x`` and ``NaN > x`` are both ``False``), a silent
-    wrong-ACCEPT on malformed data. Such a result is REJECTED up front. The
+    wrong-ACCEPT on malformed data. Such a result is REJECTED up front.
+    ``loss_rate`` rides the widened :func:`_junk_loss_rate` arm — being
+    NON-nullable, a type-illegal ``None`` there is junk (never "undefined")
+    and takes the SAME fail-closed exit instead of crashing Door 5's derived
+    threshold (totality — this predicate never raises on a junk metric). The
     integer-valued gates (``total_trades``, ``max_consecutive_losses``) cannot be
-    non-finite. Behaviour for every FINITE value and for ``None`` is byte-identical
-    to before this guard.
+    non-finite. Behaviour for every FINITE value and for a ``None`` in the
+    legitimately nullable inputs is byte-identical to before this guard.
+
+    **Door 5 is the derived binomial-null streak door**
+    (DEC-METRICS-KELLY-GROWTH-001, superseding the fixed
+    ``max_consecutive_losses <= 10``): the bound is
+    :func:`streak_door_threshold` (floored at the legacy 10 so the door only
+    LOOSENS), with the high-payoff exemption ``win_loss_ratio >=
+    STREAK_DOOR_WLR_EXEMPT`` — see :func:`_fails_consecutive_losses_door`.
+
+    **Door 6 is the opt-in SL-hit-rate ceiling**
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): ``max_sl_hit_rate=None``
+    (the default) leaves every verdict byte-identical — ``sl_hit_rate`` is
+    then not a gate input at all (a non-finite value in it cannot trip the
+    guard). An ACTIVE ceiling judges the door LAST and FAIL-CLOSED: an
+    absent (``None``) ``sl_hit_rate`` fails (an active gate never passes a
+    row it cannot judge), a present rate joins the non-finite guard's scan,
+    and a measured rate strictly above the ceiling fails — see
+    :func:`_fails_sl_hit_rate_door`.
     """
-    if any(
-        _non_finite_gate_input(value)
-        for value in (m.profit_factor, m.max_drawdown_pct, m.win_rate, m.win_loss_ratio)
-    ):
+    guarded: tuple[float | None, ...] = (
+        m.profit_factor,
+        m.max_drawdown_pct,
+        m.win_rate,
+        m.win_loss_ratio,
+    )
+    if max_sl_hit_rate is not None:
+        guarded = (*guarded, m.sl_hit_rate)
+    if _junk_loss_rate(m.loss_rate) or any(_non_finite_gate_input(value) for value in guarded):
         return False
     if m.total_trades < MIN_TRADES:
         return False
@@ -227,7 +365,9 @@ def passes_gates(m: ResultMetrics) -> bool:
     wlr = m.win_loss_ratio if m.win_loss_ratio is not None else 0.0  # pragma: no mutate
     if m.win_rate < _MIN_WIN_RATE and wlr < _MIN_WIN_LOSS_RATIO:
         return False
-    return m.max_consecutive_losses <= _MAX_CONSECUTIVE_LOSSES
+    if _fails_consecutive_losses_door(m):
+        return False
+    return not _fails_sl_hit_rate_door(m, max_sl_hit_rate)
 
 
 # ── Gate-door reason vocabulary (DEC-SWEEP-RESULTS-DEPTH-001 · gap-register
@@ -236,8 +376,12 @@ def passes_gates(m: ResultMetrics) -> bool:
 # the run manifest (``per_door_kills``); the tokens are a wire vocabulary, so
 # renaming one is a breaking contract change (pinned by test). ──
 #: The fail-closed guard tripped: a float-valued gate input was present but
-#: non-finite (``NaN``/±``inf``) — the metrics are malformed, so NO other door
-#: is judged (judging garbage would fabricate door verdicts, Golden Rule #1).
+#: non-finite (``NaN``/±``inf``) — or the NON-nullable ``loss_rate`` carried a
+#: type-illegal ``None`` (:func:`_junk_loss_rate`; junk, not "undefined") —
+#: the metrics are malformed, so NO other door is judged (judging garbage
+#: would fabricate door verdicts, Golden Rule #1). The wire TOKEN is
+#: unchanged — the ``None``-loss-rate arm is a new trip CAUSE, not a new
+#: reason token (the Ruling-12 append-only vocabulary holds).
 GATE_NON_FINITE_INPUT: Final[str] = "non_finite_input"
 #: Door 1 — ``total_trades < MIN_TRADES`` (statistical noise).
 GATE_MIN_TRADES: Final[str] = "min_trades"
@@ -248,8 +392,22 @@ GATE_MAX_DRAWDOWN: Final[str] = "max_drawdown"
 #: Door 4 — ``win_rate < 25%`` AND ``win_loss_ratio < 2.0`` (``None`` ratio
 #: counts as ``0.0``, exactly like :func:`passes_gates`).
 GATE_WIN_RATE_WLR: Final[str] = "win_rate_wlr"
-#: Door 5 — ``max_consecutive_losses > 10`` (account-blower).
+#: Door 5 — the DERIVED binomial-null streak door
+#: (DEC-METRICS-KELLY-GROWTH-001): ``max_consecutive_losses >
+#: streak_door_threshold(total_trades, loss_rate)`` (= ``max(10, k99)`` —
+#: the own-loss-rate null quantile, floored at the legacy 10 so the door
+#: only LOOSENS) AND no high-payoff exemption (``win_loss_ratio >=
+#: STREAK_DOOR_WLR_EXEMPT``). The wire TOKEN is UNCHANGED — the reason
+#: vocabulary is a stable contract; only the door's bound derivation moved.
 GATE_CONSECUTIVE_LOSSES: Final[str] = "consecutive_losses"
+#: Door 6 — the opt-in SL-hit-rate ceiling
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): with an ACTIVE
+#: ``max_sl_hit_rate`` knob, ``sl_hit_rate > max_sl_hit_rate`` — or
+#: ``sl_hit_rate is None`` (an active gate never passes a row it cannot
+#: judge; fail-closed). Never emitted when the knob is ``None`` (the door
+#: does not exist then). APPENDED LAST — the wire vocabulary is
+#: append-only (the Ruling-12 stable-token contract).
+GATE_SL_HIT_RATE: Final[str] = "sl_hit_rate"
 
 #: The COMPLETE reason vocabulary in EVALUATION order — the exact order
 #: :func:`passes_gates` checks its doors, so ``gate_reasons(m)[0]`` is always
@@ -262,10 +420,11 @@ GATE_REASON_ORDER: Final[tuple[str, ...]] = (
     GATE_MAX_DRAWDOWN,
     GATE_WIN_RATE_WLR,
     GATE_CONSECUTIVE_LOSSES,
+    GATE_SL_HIT_RATE,
 )
 
 
-def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
+def gate_reasons(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> tuple[str, ...]:
     """The reason-returning twin of :func:`passes_gates` — every failed door, named.
 
     DEC-SWEEP-RESULTS-DEPTH-001 (gap-register ruling 12 / R28 per-door kill
@@ -282,7 +441,10 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
 
     * **Fail-closed short-circuit** — a present-but-non-finite float gate input
       (``NaN``/±``inf`` in ``profit_factor`` / ``max_drawdown_pct`` /
-      ``win_rate`` / ``win_loss_ratio``) returns
+      ``win_rate`` / ``win_loss_ratio`` / ``loss_rate``) — or a type-illegal
+      ``None`` in the NON-nullable ``loss_rate`` (the widened
+      :func:`_junk_loss_rate` arm; junk, never "undefined" — totality: this
+      twin never raises on a junk metric) — returns
       ``(``:data:`GATE_NON_FINITE_INPUT```,)`` ALONE: the metrics are
       malformed, and judging the remaining doors on garbage would fabricate
       per-door verdicts (a ``NaN`` silently passes any ``<``/``>``), so no
@@ -292,19 +454,32 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
       doors reports all three, in evaluation order. ``gate_reasons(m)[0]`` is
       therefore exactly the door ``passes_gates`` would short-circuit on;
       counter folds may count first-door-only or every-door as they choose.
-    * **Scope** — the 5 hard gates + the fail-closed guard ONLY. The opt-in
-      6th (overfit / Deflated-Sharpe) gate is deliberately OUT of this
-      vocabulary: it runs pool-relatively inside :func:`rank_combos`
-      (``N = len(candidates)`` — not a per-result predicate) and is counted at
-      its own rank seam, never fabricated per-row here.
+    * **Scope** — the hard gates + the fail-closed guard + (knob-active) the
+      Door-6 SL-hit-rate ceiling. The opt-in overfit / Deflated-Sharpe gate
+      is deliberately OUT of this vocabulary: it runs pool-relatively inside
+      :func:`rank_combos` (``N = len(candidates)`` — not a per-result
+      predicate) and is counted at its own rank seam, never fabricated
+      per-row here.
+    * **Door 6** (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) mirrors
+      :func:`passes_gates` exactly: ``max_sl_hit_rate=None`` (the default)
+      emits no :data:`GATE_SL_HIT_RATE` token ever and leaves the non-finite
+      guard's scan byte-identical; an ACTIVE ceiling adds ``sl_hit_rate`` to
+      the guard's scan and appends the token via the SHARED
+      :func:`_fails_sl_hit_rate_door` body (absent ``None`` rate fails —
+      fail-closed).
 
     O(1) per call (a handful of comparisons + one small tuple allocation);
     holds no state, so it is safe from any fold/counter thread.
     """
-    if any(
-        _non_finite_gate_input(value)
-        for value in (m.profit_factor, m.max_drawdown_pct, m.win_rate, m.win_loss_ratio)
-    ):
+    guarded: tuple[float | None, ...] = (
+        m.profit_factor,
+        m.max_drawdown_pct,
+        m.win_rate,
+        m.win_loss_ratio,
+    )
+    if max_sl_hit_rate is not None:
+        guarded = (*guarded, m.sl_hit_rate)
+    if _junk_loss_rate(m.loss_rate) or any(_non_finite_gate_input(value) for value in guarded):
         return (GATE_NON_FINITE_INPUT,)
     reasons: list[str] = []
     if m.total_trades < MIN_TRADES:
@@ -318,8 +493,14 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
     wlr = m.win_loss_ratio if m.win_loss_ratio is not None else 0.0
     if m.win_rate < _MIN_WIN_RATE and wlr < _MIN_WIN_LOSS_RATIO:
         reasons.append(GATE_WIN_RATE_WLR)
-    if m.max_consecutive_losses > _MAX_CONSECUTIVE_LOSSES:
+    # Door 5 rides the SAME shared body passes_gates consults (the derived
+    # binomial-null streak door + exemption — the two can never drift).
+    if _fails_consecutive_losses_door(m):
         reasons.append(GATE_CONSECUTIVE_LOSSES)
+    # Door 6 rides the SAME shared body passes_gates consults (the opt-in
+    # SL-hit-rate ceiling — a ``None`` knob makes this a no-op).
+    if _fails_sl_hit_rate_door(m, max_sl_hit_rate):
+        reasons.append(GATE_SL_HIT_RATE)
     return tuple(reasons)
 
 
@@ -615,6 +796,8 @@ def _overfit_gate(
 def _temporal_survivors(
     candidates: Sequence[tuple[int, ResultMetrics]],
     temporal: TemporalGateInput,
+    *,
+    max_sl_hit_rate: float | None = None,
 ) -> list[tuple[int, ResultMetrics]]:
     """Hard doors + the temporal year gate in ONE pass (the gate-ON arm only).
 
@@ -626,10 +809,22 @@ def _temporal_survivors(
     ``observe`` counts would-be kills and filters nothing; a whole-gate
     abstention keeps everything and records it on ``temporal.stats``).
 
+    ``max_sl_hit_rate`` is the opt-in Door-6 ceiling
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), threaded VERBATIM into the
+    same ``passes_gates`` call — the temporal arm judges the identical door set
+    the ``temporal=None`` arm judges (kw-only, default ``None`` so the landed
+    two-argument call shape is byte-identical). This also keeps the BATCH arm
+    in verdict parity with the BOUNDED arm, whose gate bits were recorded at
+    append time WITH the ceiling (``SurvivorColumns(max_sl_hit_rate=…)``): a
+    Door-6 reject dies at the DOORS, before the triple lookup and before
+    :func:`~brutex.ranking.temporal.apply_temporal_gate` ever sees it, so it is
+    never counted as a temporal kill on either arm.
+
     Fail-loud wiring guard (Golden Rule #1): the config being active REQUIRES a
     triple per candidate — a length mismatch or a ``None`` triple on a
     gate-passing survivor raises :class:`ValueError` naming the mask, never a
-    silent pass-all.
+    silent pass-all (a ``None`` triple on a door-rejected candidate — Door 6
+    included — stays unobservable, exactly like every other door reject).
     """
     if temporal.triples is None:
         raise ValueError(
@@ -646,7 +841,7 @@ def _temporal_survivors(
     survivors: list[tuple[int, ResultMetrics]] = []
     survivor_triples: list[TemporalTriple] = []
     for index, (mask, m) in enumerate(candidates):
-        if not passes_gates(m):
+        if not passes_gates(m, max_sl_hit_rate=max_sl_hit_rate):
             continue
         triple = temporal.triples[index]
         if triple is None:
@@ -673,6 +868,7 @@ def rank_combos(
     *,
     overfit: OverfitGateConfig | None = None,
     temporal: TemporalGateInput | None = None,
+    max_sl_hit_rate: float | None = None,
 ) -> list[RankedCombo]:
     """Rank a leaderboard: gate, z-normalise the composite terms, score, sort.
 
@@ -706,6 +902,16 @@ def rank_combos(
         ``mode="observe"`` evaluates + counts on ``stats`` and filters
         nothing; a whole-gate abstention filters nothing and records itself.
         ``None`` (the default) is byte-identical legacy ranking.
+    max_sl_hit_rate
+        Opt-in Door-6 SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        Stage B — the ``SweepGridConfig.max_sl_hit_rate`` knob). ``None`` (the
+        default) leaves every gate verdict byte-identical; an active ceiling
+        is threaded into :func:`passes_gates` on BOTH arms — the
+        ``temporal=None`` survivor filter AND :func:`_temporal_survivors`
+        (fail-closed on an absent ``sl_hit_rate``). Under an active *temporal*
+        gate a Door-6 reject dies at the hard doors, BEFORE the temporal
+        predicates — never a temporal kill — matching the bounded rank, whose
+        gate bits carry the same ceiling from append time.
 
     Returns
     -------
@@ -731,12 +937,19 @@ def rank_combos(
         :func:`_temporal_survivors`).
     """
     # Hard doors → temporal (survivors filter) → overfit (full candidate pool).
-    # The temporal=None default arm is LITERALLY the pre-change line — the
-    # temporal machinery is never invoked (the gate-OFF zero-work spy pin).
+    # The temporal=None default arm is LITERALLY the pre-change line (plus the
+    # opt-in Door-6 ceiling threading) — the temporal machinery is never
+    # invoked (the gate-OFF zero-work spy pin). BOTH arms thread the SAME
+    # Door-6 ceiling into the SAME ``passes_gates`` body, so an active
+    # ``max_sl_hit_rate`` can never be silently skipped under an active
+    # temporal gate (batch ≡ bounded verdict parity — the bounded arm's gate
+    # bits were recorded with the ceiling at ``SurvivorColumns.append``).
     if temporal is None:
-        survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
+        survivors = [
+            (mask, m) for mask, m in candidates if passes_gates(m, max_sl_hit_rate=max_sl_hit_rate)
+        ]
     else:
-        survivors = _temporal_survivors(candidates, temporal)
+        survivors = _temporal_survivors(candidates, temporal, max_sl_hit_rate=max_sl_hit_rate)
 
     # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): a local-variable
     # annotation is never evaluated at runtime, so mutmut's ``| None`` → ``& None``
@@ -808,11 +1021,13 @@ __all__ = [
     "GATE_NON_FINITE_INPUT",
     "GATE_PROFIT_FACTOR",
     "GATE_REASON_ORDER",
+    "GATE_SL_HIT_RATE",
     "GATE_WIN_RATE_WLR",
     "HARD_GATES_RECHECK_MARKED",
     "HARD_GATES_RECHECK_OK",
     "MIN_TRADES",
     "N_COMPOSITE_TERMS",
+    "STREAK_DOOR_WLR_EXEMPT",
     "OverfitGateConfig",
     "RankedCombo",
     "TemporalGateInput",
@@ -821,8 +1036,10 @@ __all__ = [
     "dsr_z_contributions",
     "ensure_unique_survivor_masks",
     "gate_reasons",
+    "max_loss_streak_quantile",
     "overfit_gate_positions",
     "passes_gates",
     "persisted_hard_gates_recheck",
     "rank_combos",
+    "streak_door_threshold",
 ]

@@ -40,9 +40,12 @@ from tests.fakes.metrics_fixtures import make_result_metrics
 
 
 def _columns(
-    entries: list[tuple[int, ResultMetrics]], *, with_overfit: bool = False
+    entries: list[tuple[int, ResultMetrics]],
+    *,
+    with_overfit: bool = False,
+    max_sl_hit_rate: float | None = None,
 ) -> SurvivorColumns:
-    columns = SurvivorColumns(with_overfit=with_overfit)
+    columns = SurvivorColumns(with_overfit=with_overfit, max_sl_hit_rate=max_sl_hit_rate)
     for mask, metrics in entries:
         columns.append(mask, metrics)
     return columns
@@ -53,11 +56,14 @@ def _assert_bounded_equals_batch(
     *,
     overfit: OverfitGateConfig | None,
     top_k: int,
+    max_sl_hit_rate: float | None = None,
 ) -> None:
     """The core oracle: bounded output == ``rank_combos(entries)[:top_k]`` exactly."""
-    ranked = rank_combos(entries, overfit=overfit)
+    ranked = rank_combos(entries, overfit=overfit, max_sl_hit_rate=max_sl_hit_rate)
     result = rank_survivor_columns(
-        _columns(entries, with_overfit=overfit is not None), overfit=overfit, top_k=top_k
+        _columns(entries, with_overfit=overfit is not None, max_sl_hit_rate=max_sl_hit_rate),
+        overfit=overfit,
+        top_k=top_k,
     )
     assert result.n_ranked == len(ranked)
     expected = ranked[:top_k]
@@ -111,6 +117,21 @@ class TestSurvivorColumnsRoundTrip:
         columns = _columns([(1, passing), (2, failing), (3, passing)])
         assert [columns.gate_passed(i) for i in range(3)] == [True, False, True]
         assert columns.gate_survivor_positions() == [0, 2]
+
+    def test_gate_bit_honours_the_sl_hit_rate_ceiling(self) -> None:
+        """Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): the gate bit
+        is recorded under the SAME ceiling the batch rank would use — an
+        over-ceiling (or unmeasured ``None``) row records ``False``; the
+        default knob leaves every bit byte-identical."""
+        under = make_result_metrics(sl_hit_rate=0.2)
+        over = make_result_metrics(sl_hit_rate=0.8)
+        absent = make_result_metrics(sl_hit_rate=None)
+        gated = _columns([(1, under), (2, over), (3, absent)], max_sl_hit_rate=0.5)
+        assert [gated.gate_passed(i) for i in range(3)] == [True, False, False]
+        assert gated.max_sl_hit_rate == 0.5
+        ungated = _columns([(1, under), (2, over), (3, absent)])
+        assert [ungated.gate_passed(i) for i in range(3)] == [True, True, True]
+        assert ungated.max_sl_hit_rate is None
 
     def test_term_columns_match_composite_term_inputs(self) -> None:
         metrics = make_result_metrics(
@@ -213,6 +234,17 @@ class TestRankSurvivorColumnsEqualsBatch:
             (4, _spread_metrics(4)),
         ]
         _assert_bounded_equals_batch(entries, overfit=None, top_k=10)
+
+    def test_sl_hit_rate_ceiling_filters_identically(self) -> None:
+        """Door 6 parity: bounded == batch under an active ceiling (over-limit
+        + unmeasured rows excluded by BOTH paths, survivors identical)."""
+        entries = [
+            (1, _spread_metrics(1, sl_hit_rate=0.1)),
+            (2, _spread_metrics(2, sl_hit_rate=0.9)),  # Door-6-fails
+            (3, _spread_metrics(3, sl_hit_rate=None)),  # fail-closed
+            (4, _spread_metrics(4, sl_hit_rate=0.5)),  # at-ceiling passes
+        ]
+        _assert_bounded_equals_batch(entries, overfit=None, top_k=10, max_sl_hit_rate=0.5)
 
     def test_all_gate_fail_yields_empty(self) -> None:
         entries = [(1, _spread_metrics(1, total_trades=2))]

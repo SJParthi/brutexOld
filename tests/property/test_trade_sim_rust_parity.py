@@ -20,7 +20,10 @@ from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import mask_to_entry_signals
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
-from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trade_sim import (
+    simulate_trades,
+    simulate_trades_with_exit_counts,
+)
 from brutex.strategies.types import Side
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -107,6 +110,29 @@ def test_rust_seam_equals_python_oracle(
         for m in masks
     ]
     assert got == expected
+    # Exit-reason counter parity (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B):
+    # the kernel's per-mask counters equal the Python walker's, per reason,
+    # and sum to the mask's trade count (never a silently wrong sl_hit_rate).
+    triples = sim.simulate_masks_with_exit_counts(
+        masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp
+    )
+    for mask, (trades, _idx, counts) in zip(masks, triples, strict=True):
+        _py_trades, _py_idx, py_counts = simulate_trades_with_exit_counts(
+            bars,
+            mask_to_entry_signals(bar_bits, mask),
+            direction=direction,
+            tf_minutes=1,
+            stop_loss_paisa=sl,
+            take_profit_paisa=tp,
+        )
+        assert counts == py_counts
+        assert sum(counts) == len(trades)
+        # Under the ONE worst-case law (DEC-FILL-WORST-CASE-ONLY-001) an SL
+        # fill is adverse-clamped at/beyond the level, so every stop_loss
+        # close is a loss: sl_count <= losers (the retired NEXT_OPEN
+        # gap-profitable caveat is gone with its knob).
+        losers = sum(1 for t in trades if t.pnl_paisa < 0)
+        assert counts[0] <= losers
 
 
 # ── u128 domain parity (DEC-TRADE-SIM-U128-KERNEL-001) ────────────────────────
@@ -215,3 +241,20 @@ def test_rust_u128_seam_equals_python_oracle(
         for m in masks
     ]
     assert got == expected
+    # u128-arm exit-reason counter parity (Stage B — both widths move together).
+    with capture_logs() as count_logs:
+        triples = sim.simulate_masks_with_exit_counts(
+            masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp
+        )
+    assert [e for e in count_logs if e["event"] == "rust_trade_sim.call_fallback"] == []
+    for mask, (trades, _idx, counts) in zip(masks, triples, strict=True):
+        _py_trades, _py_idx, py_counts = simulate_trades_with_exit_counts(
+            bars,
+            mask_to_entry_signals(bar_bits, mask),
+            direction=direction,
+            tf_minutes=1,
+            stop_loss_paisa=sl,
+            take_profit_paisa=tp,
+        )
+        assert counts == py_counts
+        assert sum(counts) == len(trades)

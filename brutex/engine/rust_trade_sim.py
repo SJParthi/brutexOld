@@ -881,14 +881,57 @@ class ResidentTradeSim:
     ) -> list[tuple[list[ClosedTrade], list[int] | None]]:
         """Simulate a BATCH of masks → per-mask ``(trades, exit_indices)`` pairs.
 
-        ``out[j]`` is ``(trades, exit_indices)`` for ``masks[j]`` (signal-only
-        spot; the worst-case adverse-max fill law — the ONLY law,
+        Thin delegate over :meth:`simulate_masks_with_exit_counts` (ONE batch
+        spine — DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B, mirroring how
+        :meth:`simulate_masks` already delegated here) that drops the
+        exit-reason counters — byte-identical trades + indices, same error
+        contract, same fallback/warn behaviour. See that method for the full
+        contract.
+        """
+        return [
+            (trades, exit_indices)
+            for trades, exit_indices, _counts in self.simulate_masks_with_exit_counts(
+                masks,
+                direction=direction,
+                stop_loss_paisa=stop_loss_paisa,
+                take_profit_paisa=take_profit_paisa,
+            )
+        ]
+
+    def simulate_masks_with_exit_counts(
+        self,
+        masks: Sequence[int],
+        *,
+        direction: Side,
+        stop_loss_paisa: int | None = None,
+        take_profit_paisa: int | None = None,
+    ) -> list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]]:
+        """Simulate a BATCH of masks → ``(trades, exit_indices, exit_counts)`` triples.
+
+        ``out[j]`` is the triple for ``masks[j]`` (signal-only spot; the
+        worst-case adverse-max fill law — the ONLY law,
         DEC-FILL-WORST-CASE-ONLY-001 — next-bar entry at the adverse extreme,
         level-clamped SL/TP, 15:20 forced exit at the adverse extreme). The
         trades are bit-identical to ``[simulate_trades(bars,
         mask_to_entry_signals(bar_bits, m), ...) for m in masks]`` — the Rust
         path and the fallback walk the same hardcoded law and direction.
         Empty ``masks`` → ``[]``.
+
+        ``exit_counts`` (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is the
+        mask's per-reason closed-trade counters in
+        :data:`~brutex.engine.trade_sim.EXIT_REASONS` order — on the Rust arm
+        the kernel's own accumulation, on the fallback arm the walker's
+        :attr:`~brutex.engine.trade_sim.TradeSimWalker.exit_reason_counts`;
+        both are parity-pinned bit-equal, and ``sum(exit_counts) ==
+        len(trades)`` is VALIDATED per mask on the kernel arm (a mismatch is
+        a kernel/marshalling bug and raises ``ValueError`` — inside the
+        sweep's chunk try, so it rides the existing re-attribution →
+        tuple-skip ladder, never a silently wrong ``sl_hit_rate``). A STALE
+        wheel predating the kernel's counted twin serves the WHOLE call
+        through the bit-exact Python oracle instead (warn-once reason
+        ``wheel_missing_exit_counts`` — trades/counts identical, only the
+        engine path changes; reachable only from a monkeypatched /
+        hand-imported stale module, the ``wheel_missing_u128`` envelope).
 
         ``exit_indices`` (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) is each trade's
         exit BAR INDEX in the resident window, emitted only under a DOUBLE
@@ -919,9 +962,9 @@ class ResidentTradeSim:
 
         Returns
         -------
-        list[tuple[list[ClosedTrade], list[int] | None]]
-            One ``(trades, exit_indices)`` pair per mask, positionally
-            aligned with ``masks``.
+        list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]]
+            One ``(trades, exit_indices, exit_counts)`` triple per mask,
+            positionally aligned with ``masks``.
 
         Raises
         ------
@@ -962,6 +1005,17 @@ class ResidentTradeSim:
                 rust = self._promote_wide_kernel()
                 if rust is None:
                     call_reason = "wheel_missing_u128"
+            # Stale-wheel probe (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B):
+            # a hand-imported wheel predating the counted twin lacks the
+            # method — serve the WHOLE call through the bit-exact Python
+            # oracle (trades + counts identical, only the engine path
+            # changes), warn-once like every other sticky per-call reason.
+            if (
+                call_reason is None
+                and rust is not None
+                and getattr(rust, "simulate_masks_with_exit_counts", None) is None
+            ):
+                call_reason = "wheel_missing_exit_counts"
             if call_reason is not None:
                 if call_reason not in self._call_fallback_warned:
                     self._call_fallback_warned.add(call_reason)
@@ -986,7 +1040,10 @@ class ResidentTradeSim:
             # The window's OWN stamper rides into every walker, so a
             # fallback-served window stamps identically to the kernel-served
             # one (never a wheel-state divergence — DEC-VIX-STAMP-WIRE-001).
-            out: list[tuple[list[ClosedTrade], list[int] | None]] = []
+            # The exit-reason counters come from the walker's OWN accumulation
+            # (:attr:`~brutex.engine.trade_sim.TradeSimWalker.exit_reason_counts`
+            # — the same source the parity gates pin the kernel against).
+            out: list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]] = []
             for mask in masks:
                 walker = TradeSimWalker(
                     direction=direction,
@@ -998,14 +1055,20 @@ class ResidentTradeSim:
                 trades, exit_indices = walker.run_with_exit_indices(
                     self._bars, mask_to_entry_signals(self._bar_bits, mask)
                 )
-                out.append((trades, exit_indices if self._ts_certified else None))
+                out.append(
+                    (
+                        trades,
+                        exit_indices if self._ts_certified else None,
+                        walker.exit_reason_counts,
+                    )
+                )
             return out
 
-        # Rust path — the flagless worst-case-only kernel call
+        # Rust path — the flagless worst-case-only COUNTED kernel call
         # (DEC-FILL-WORST-CASE-ONLY-001: the retired mode flags are DELETED
         # from the FFI; a stale flag-carrying wheel was demoted to the oracle
         # at construction, so this call is provably the current kernel).
-        raw = rust.simulate_masks(  # type: ignore[attr-defined]
+        raw = rust.simulate_masks_with_exit_counts(  # type: ignore[attr-defined]
             list(masks),
             direction is Side.BUY,
             stop_loss_paisa,
@@ -1015,18 +1078,28 @@ class ResidentTradeSim:
         # ONCE per batch call — not once per trade — and threaded into the
         # per-record converter, which post-stamps each Rust trade Python-side.
         stamper = self._reference_stamper
-        pairs: list[tuple[list[ClosedTrade], list[int] | None]] = []
-        for mask_records in raw:
+        triples: list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]] = []
+        for mask_records, exit_counts in raw:
             mask_trades: list[ClosedTrade] = []
             mask_exit_indices: list[int] = []
             for record in mask_records:
                 trade, exit_idx = self._to_trade_and_exit(record, direction, stamper)
                 mask_trades.append(trade)
                 mask_exit_indices.append(exit_idx)
+            counts = tuple(exit_counts)
+            if sum(counts) != len(mask_trades):
+                # A counter/trade mismatch is a kernel or marshalling bug —
+                # refuse it (docstring: inside the sweep's chunk try, so it
+                # rides the re-attribution → tuple-skip ladder), never a
+                # silently wrong sl_hit_rate downstream.
+                raise ValueError(
+                    "ResidentTradeSim.simulate_masks_with_exit_counts: kernel "
+                    f"exit_counts sum {sum(counts)} != trade count {len(mask_trades)}"
+                )
             if not self._ts_certified:
                 # Malformed (duplicate/reordered timestamp) window: withhold
                 # the indices — the dict path is the historical behaviour.
-                pairs.append((mask_trades, None))
+                triples.append((mask_trades, None, counts))
             elif not _monotonic(mask_exit_indices):
                 # A non-monotonic stream on a CERTIFIED window is a kernel
                 # ordering regression — refuse the indices LOUDLY (once per
@@ -1038,10 +1111,10 @@ class ResidentTradeSim:
                         reason="exit_indices_not_monotonic",
                         n_trades=len(mask_trades),
                     )
-                pairs.append((mask_trades, None))
+                triples.append((mask_trades, None, counts))
             else:
-                pairs.append((mask_trades, mask_exit_indices))
-        return pairs
+                triples.append((mask_trades, mask_exit_indices, counts))
+        return triples
 
     def _to_trade_and_exit(
         self,

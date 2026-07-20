@@ -107,6 +107,14 @@ class SurvivorColumns:
         DEC-SWEEP-TEMPORAL-ROBUSTNESS-001). MUST match the tuple's
         ``temporal`` config — :func:`rank_survivor_columns` refuses a
         mismatch loudly in BOTH directions.
+    max_sl_hit_rate
+        The tuple's opt-in Door-6 SL-hit-rate ceiling
+        (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — the
+        ``SweepRunConfig.max_sl_hit_rate`` knob), threaded into the SAME
+        :func:`~brutex.ranking.passes_gates` call that records the gate bit at
+        append time, so bounded gate verdicts are bit-identical to batch under
+        an active ceiling. ``None`` (the default) is byte-identical to the
+        pre-knob columns.
     """
 
     __slots__ = (
@@ -115,6 +123,7 @@ class SurvivorColumns:
         "_kurt_none",
         "_mask_hi",
         "_mask_lo",
+        "_max_sl_hit_rate",
         "_n",
         "_sharpe",
         "_sharpe_none",
@@ -129,9 +138,16 @@ class SurvivorColumns:
         "_with_temporal",
     )
 
-    def __init__(self, *, with_overfit: bool, with_temporal: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        with_overfit: bool,
+        with_temporal: bool = False,
+        max_sl_hit_rate: float | None = None,
+    ) -> None:
         self._with_overfit = with_overfit
         self._with_temporal = with_temporal
+        self._max_sl_hit_rate = max_sl_hit_rate
         self._n = 0
         self._mask_hi = array("Q")
         self._mask_lo = array("Q")
@@ -168,6 +184,11 @@ class SurvivorColumns:
     def with_temporal(self) -> bool:
         """Whether the temporal-gate triple columns are being retained."""
         return self._with_temporal
+
+    @property
+    def max_sl_hit_rate(self) -> float | None:
+        """The Door-6 SL-hit-rate ceiling the recorded gate bits were judged under."""
+        return self._max_sl_hit_rate
 
     @staticmethod
     def _append_optional(
@@ -227,7 +248,9 @@ class SurvivorColumns:
         index = self._n
         self._mask_hi.append(mask >> 64)
         self._mask_lo.append(mask & _U64_MASK)
-        _append_bit(self._gate_bits, index, passes_gates(metrics))
+        _append_bit(
+            self._gate_bits, index, passes_gates(metrics, max_sl_hit_rate=self._max_sl_hit_rate)
+        )
         self._append_optional(self._sharpe, self._sharpe_none, index, metrics.sharpe_ratio)
         for column, value in zip(self._terms, composite_term_inputs(metrics), strict=True):
             column.append(value)

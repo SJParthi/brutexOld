@@ -51,6 +51,19 @@ class _GateConfigInput(Protocol):
         raise NotImplementedError
 
     @property
+    def max_sl_hit_rate(self) -> float | None:
+        """The opt-in SL-hit-rate gate ceiling, or ``None`` when the gate is off.
+
+        DEC-METRICS-KELLY-GROWTH-001: an ACTIVE (set) knob re-keys the
+        per-tuple store address via the identity fragment; enforcement is
+        ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B —
+        :func:`brutex.ranking.passes_gates` / :func:`brutex.ranking.gate_reasons`).
+        The default ``None`` contributes nothing, so ungated digests are
+        byte-identical.
+        """
+        raise NotImplementedError
+
+    @property
     def stage3_enable(self) -> bool:
         """Whether the Stage-3 refinement pass is enabled."""
         raise NotImplementedError
@@ -106,6 +119,15 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
             float(overfit.default_skew),
             float(overfit.default_excess_kurtosis),
         ]
+    if grid.max_sl_hit_rate is not None:
+        # The opt-in SL-hit-rate gate (DEC-METRICS-KELLY-GROWTH-001) is an
+        # active-gate axis exactly like overfit: a SET ceiling changes what a
+        # tuple's persisted rows MEAN, so it re-keys; the default None
+        # contributes NOTHING and every existing digest is byte-identical
+        # (the frozen 5b020e892247deac default-digest pin). Enforcement is
+        # ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B); the
+        # fragment arm itself stays covered via a Protocol fake.
+        fragment["max_sl_hit_rate"] = grid.max_sl_hit_rate
     if grid.stage3_enable:
         # The Stage-3 knobs matter to the result ONLY when the pass runs; a
         # disabled pass leaves them inert, so they never re-key a light grid.

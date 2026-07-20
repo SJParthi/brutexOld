@@ -200,7 +200,46 @@ def run_sweep(tmp_path: Path, tag: str, cfg: SweepRunConfig) -> SweepRunSummary:
 #: survivors, the documented empty-store hash cadb06a3…) → 5d8f4384… (this
 #: re-craft). The canonical run-identity golden
 #: (test_engine_sweep_run_golden.py) is byte-UNTOUCHED by the adoption.
-_GOLDEN_TEMPORAL_CONTENT_HASH = "5d8f4384c3b781380fe6719a6f58aeda1be0ebe076b73aad518ee5cb4f1e5cf6"
+#: RE-LOCKED at the 2026-07-19 W2 re-integration (MIGRATION.md #1976; the
+#: sanctioned #1749 additive-only re-lock; hop 5d8f4384… → fdc92094…): the
+#: W2 metrics-depth families re-appended to the writer as 8 ALWAYS-written
+#: nullable Float64 columns strictly AFTER the temporal quartet's landed
+#: position, so the temporal-carrying store's bytes moved. AUDITED DELTA
+#: CLASS — schema-additive ONLY, proven against a live pre-W2 main-baseline
+#: worktree at d5a29747 (PR #1580's landing commit), which reproduces its
+#: literal ``5d8f4384…e5cf6`` EXACTLY on this box: the SAME single survivor
+#: row (mask ``1<<0``, run_id byte-stable), the SAME 32-column prefix in the
+#: SAME order with EVERY old column value equal (machine-diffed: zero
+#: old-column diffs), plus EXACTLY the 8 appended columns. HAND AUDIT of the
+#: 8 from the survivor's own 256-trade stream (exit-count wire
+#: [sl=41, tp=214, forced=0, signal=0, eod=0, session_gap=1]; W=214 wins /
+#: L=42 losses / 0 scratch; gp=10_190, gl=5_810, net=+4_380):
+#:   loss_rate           = L/T = 42/256 = 0.1640625
+#:   sl_hit_rate         = SL/T = 41/256 = 0.16015625 (< loss_rate — ONE
+#:                         loss is the session_gap exit, the honest split)
+#:   kelly_fraction      = p − q/b with p = 214/256 = 0.8359375,
+#:                         b = (10190/214)/(5810/42) = 47.61682…/138.33333…
+#:                         = 0.3442179934692039 → 0.35931366535819426
+#:   log_growth_at_half_kelly = p·ln(1 + f/2·b) + q·ln(1 − f/2) at
+#:                         f = kelly → 0.017670134233029836
+#:   trailing (24-month = 730-day window from the GLOBAL anchor
+#:   ``bars[-1].timestamp`` = 2023-03-05 05:45 UTC; cutoff EXACTLY
+#:   2021-03-05 05:45 UTC — all 100 2021 trades excluded, latest excluded
+#:   exit 2021-03-05 05:11 UTC): n=156 (127 W / 29 L), gp=5_840, gl=4_350 →
+#:   trailing_net_pnl_paisa = +1_490, trailing_profit_factor =
+#:   5840/4350 = 1.342528735632184, trailing_sharpe_ratio =
+#:   0.11342874411769895 (the combine sharpe over the windowed per-trade
+#:   returns)
+#:   decay_weighted_net_paisa (30-day age buckets from the anchor, half-life
+#:   12): bucket 0 (2023 trades) +3_780·1 + bucket 12 (2022) −2_290·0.5 +
+#:   bucket 24 (2021) +2_890·0.25 = 3780 − 1145 + 722.5 = 3_357.5
+#:   (cross-check: 3780 − 2290 + 2890 = +4_380 = the row's full net ✓;
+#:   trailing = buckets 0+12 = 3780 − 2290 = +1_490 ✓)
+#: Every derived figure equals the persisted row value EXACTLY (float
+#: bit-compare, executed 2026-07-19). The exclusion truth + summary pins
+#: below are UNCHANGED — the ONE sanctioned ranking-gate delta of the W2
+#: lane (Door 5, loosening-only) kills nothing here.
+_GOLDEN_TEMPORAL_CONTENT_HASH = "fdc92094ad05076c4ec680f597c0de02de321086d8f206ef849d832919780a76"
 
 #: The exclusion truth at DEFAULT thresholds (the operator demand, frozen).
 _SURVIVOR_MASKS = (1 << 0,)
