@@ -1,26 +1,27 @@
-"""Space bench — the lake scan + content token never hold O(files) memory.
+"""Space bench — the lake scan + content token's PYTHON-visible residency.
 
-DEC-LAKE-INVARIANTS-PREINDEX-001. **Honest, narrow claims (Golden Rule #10):**
+DEC-LAKE-INVARIANTS-PREINDEX-001 → DEC-RUST-LAKE-WAVED-001 W-6a. **Honest,
+narrow claims (Golden Rule #10):** the Python scan/token cores are DELETED —
+the crate owns the walk, and its Rust-side residency is NOT observable from
+``tracemalloc`` (a crate-internal concern, covered by the crate's own
+design: the scan streams one series at a time, the token hasher is
+incremental). What THIS bench can honestly pin is the PYTHON-visible
+residency of the ONE remaining Python layer — the wire reconstruction:
 
-1. ``scan_lake_invariants`` streams the ``bars/`` tree ONE SERIES AT A TIME —
-   resident is O(largest single series + findings + symbol dirs), NEVER an
-   O(files) pre-index. Pinned as a gc-settled tracemalloc-PEAK ratio: 10× the
-   files must cost < 3× the peak (measured 2026-07-11 on the shared dev
-   container: post-fix 192 files → 150 KiB, 1,920 files → 172 KiB, ratio
-   1.15×; the pre-streaming scanner FAILED this exact pin at 8.66× — the
-   revert teeth, verified by stashing the fix).
-2. ``lake_content_token`` feeds an INCREMENTAL hasher over a sorted walk —
-   transient peak is O(largest directory listing), never the old O(files)
-   lines list + sorted copy + join (measured 2026-07-11: post-fix 33.5 KiB →
-   48.9 KiB for 10× files, ratio 1.46×; pre-fix FAILED at 8.75× — verified
-   by stashing the fix).
+1. ``scan_lake_invariants`` over a CLEAN lake reconstructs O(findings +
+   events) Python objects — for a clean lake that is O(1), so 10× the
+   files must NOT cost 10× the Python peak. (The pre-endgame Python
+   pre-index class would land HERE if it ever came back as a Python-side
+   wire explosion.)
+2. ``lake_content_token`` returns one 64-hex token + an empty skip list on
+   a healthy tree — Python peak flat in lake size.
 
-Neither claim is O(1) WALL: both passes remain O(files) in TIME (stat / read
-per file — stated in both functions' docstrings; this bench pins SPACE only).
-
-Fixture files are 0-byte markers (synthetic; enough for the pre-index + token
-paths, which only walk/stat/parse — every per-file read skips loudly and the
-scanner's logger is stubbed to keep the bench I/O-quiet).
+Neither claim is O(1) WALL: both passes remain O(files) in TIME (stat/read
+per file, crate-side — stated in both functions' docstrings; this bench
+pins the PYTHON-side SPACE only). An ALL-SKIP hostile lake's skip-event
+wire is O(skipped) BY DESIGN (each skip is a loud counted event — that
+linearity is the honesty law, not a regression, and is deliberately not
+ratio-pinned here).
 """
 
 # pyright: reportPrivateUsage=none
@@ -28,48 +29,57 @@ scanner's logger is stubbed to keep the bench I/O-quiet).
 from __future__ import annotations
 
 import gc
-import os
 import tracemalloc
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 pytest.importorskip("polars")
-pytest.importorskip("pyarrow")
+pa = pytest.importorskip("pyarrow")
+pq = pytest.importorskip("pyarrow.parquet")
 
 pytestmark = pytest.mark.bench
 
+
+@pytest.fixture(autouse=True)
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ONE Rust path (W-6a): retired flag unset."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
+
+
 _SMALL_SYMBOLS = 2
 _BIG_SYMBOLS = 20
-_INTERVALS = ("1minute", "1day")
 _MONTHS = 12
-_YEARS = (2020, 2021, 2022, 2023)  # 2 × 2 × 12 × 4 = 192 / 1,920 files
+_YEARS = (2022, 2023)  # 2 × 12 × 2 = 48 / 480 files
 _PEAK_RATIO_CEILING = 3.0  # 10× files must cost < 3× peak (memory, low-noise)
 
 
-class _NullLog:
-    """A no-op structlog stand-in (0-byte fixtures skip-warn per file)."""
-
-    def warning(self, *args: Any, **kwargs: Any) -> None:
-        """Swallow the per-file scan_skip storm."""
-
-    def info(self, *args: Any, **kwargs: Any) -> None:
-        """Swallow the scan_complete line."""
-
-
-def _build_empty_lake(root: Path, n_symbols: int) -> int:
-    """0-byte marker files in the real layout; returns the file count."""
+def _build_clean_lake(root: Path, n_symbols: int) -> int:
+    """Tiny REAL one-row parquet partitions in the real layout; file count."""
     n = 0
     for i in range(n_symbols):
-        for interval in _INTERVALS:
-            for year in _YEARS:
-                d = root / "bars" / "NSE" / "CASH" / f"SYM{i:04d}" / interval / str(year)
-                d.mkdir(parents=True, exist_ok=True)
-                for month in range(1, _MONTHS + 1):
-                    fd = os.open(d / f"{month:02d}.parquet", os.O_CREAT | os.O_WRONLY, 0o600)
-                    os.close(fd)
-                    n += 1
+        for year in _YEARS:
+            d = root / "bars" / "NSE" / "CASH" / f"SYM{i:04d}" / "1minute" / str(year)
+            d.mkdir(parents=True, exist_ok=True)
+            for month in range(1, _MONTHS + 1):
+                table = pa.table(
+                    {
+                        "timestamp": pa.array(
+                            [datetime(year, month, 2, 4, 0, tzinfo=UTC)],
+                            type=pa.timestamp("us", tz="UTC"),
+                        ),
+                        "open": [100.0],
+                        "high": [100.0],
+                        "low": [100.0],
+                        "close": [100.0],
+                        "volume": pa.array([10], type=pa.int64()),
+                        "open_interest": pa.array([None], type=pa.int64()),
+                    }
+                )
+                pq.write_table(table, d / f"{month:02d}.parquet")
+                n += 1
     return n
 
 
@@ -83,61 +93,47 @@ def _traced_peak(fn: Any) -> int:
     return peak
 
 
-def test_scan_resident_is_per_series_not_per_lake(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """10× the lake files must NOT cost 10× the scan's peak memory.
+def test_scan_python_visible_peak_flat_on_a_clean_lake(tmp_path: Path) -> None:
+    """10× the lake files must NOT cost 10× the scan's PYTHON peak memory.
 
-    The pause seam gc-settles every 50 files: each 0-byte fixture's skip
-    raises an exception whose traceback forms a CYCLE (frame ↔ exception),
-    and that unreachable garbage otherwise accumulates on the automatic gc's
-    threshold timing (~400 B/file measured) — the pin targets REACHABLE
-    retention (the pre-index class), not collector scheduling. The teeth are
-    unaffected: the old scanner's pre-index was reachable, so it failed this
-    pin at 8.66× (measured 2026-07-11) with the same gc-settled pause.
+    The crate walks/reads in Rust; Python holds only the wire
+    reconstruction — O(findings + events), O(1) on a clean lake.
     """
     from brutex.data import lake_invariants as li
 
-    monkeypatch.setattr(li, "_LOG", _NullLog())
     small = tmp_path / "small"
     big = tmp_path / "big"
-    n_small = _build_empty_lake(small, _SMALL_SYMBOLS)
-    n_big = _build_empty_lake(big, _BIG_SYMBOLS)
+    n_small = _build_clean_lake(small, _SMALL_SYMBOLS)
+    n_big = _build_clean_lake(big, _BIG_SYMBOLS)
     assert n_big == 10 * n_small
-    calls = [0]
-
-    def _gc_settle_pause() -> None:
-        calls[0] += 1
-        if calls[0] % 50 == 0:
-            gc.collect()
-
     # Warm the read path once so one-time allocations never land in a peak.
-    li.scan_lake_invariants(small)
-    peak_small = _traced_peak(
-        lambda: li.scan_lake_invariants(small, per_file_pause=_gc_settle_pause)
-    )
-    peak_big = _traced_peak(lambda: li.scan_lake_invariants(big, per_file_pause=_gc_settle_pause))
+    report = li.scan_lake_invariants(small)
+    assert report.findings == () and report.files_scanned == n_small
+    peak_small = _traced_peak(lambda: li.scan_lake_invariants(small))
+    peak_big = _traced_peak(lambda: li.scan_lake_invariants(big))
     ratio = peak_big / peak_small
     assert ratio < _PEAK_RATIO_CEILING, (
-        f"scan peak grew {ratio:.2f}x for 10x files "
-        f"({peak_small} -> {peak_big} B) — an O(files) pre-index is back"
+        f"scan PYTHON peak grew {ratio:.2f}x for 10x files "
+        f"({peak_small} -> {peak_big} B) — an O(files) Python-side wire/"
+        f"pre-index is back"
     )
 
 
-def test_token_transient_is_per_directory_not_per_lake(tmp_path: Path) -> None:
-    """10× the lake files must NOT cost 10× the token walk's peak memory."""
+def test_token_python_visible_peak_flat_on_a_clean_lake(tmp_path: Path) -> None:
+    """10× the lake files must NOT cost 10× the token walk's PYTHON peak."""
     from brutex.data.lake_heal import lake_content_token
 
     small = tmp_path / "small"
     big = tmp_path / "big"
-    n_small = _build_empty_lake(small, _SMALL_SYMBOLS)
-    n_big = _build_empty_lake(big, _BIG_SYMBOLS)
+    n_small = _build_clean_lake(small, _SMALL_SYMBOLS)
+    n_big = _build_clean_lake(big, _BIG_SYMBOLS)
     assert n_big == 10 * n_small
     lake_content_token(small)  # warm
     peak_small = _traced_peak(lambda: lake_content_token(small))
     peak_big = _traced_peak(lambda: lake_content_token(big))
     ratio = peak_big / peak_small
     assert ratio < _PEAK_RATIO_CEILING, (
-        f"token peak grew {ratio:.2f}x for 10x files "
-        f"({peak_small} -> {peak_big} B) — the O(files) lines list is back"
+        f"token PYTHON peak grew {ratio:.2f}x for 10x files "
+        f"({peak_small} -> {peak_big} B) — an O(files) Python-side lines "
+        f"list is back"
     )

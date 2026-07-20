@@ -129,6 +129,10 @@ pub mod resample_daily;
 // (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
 pub mod stats_shard;
 pub mod window_ledger;
+// ADR-0020 Wave-D (the `BRUTEX_LAKE_WAVED_RUST` conversion — facade
+// `brutex/data/lake_rust_waved.py`): the heal/scan/read surface, one module
+// file per conversion step under src/waved/. ADDITIVE (§4.1 merge law).
+pub mod waved;
 // ADR-0020 G10 CONVERT — the window-ledger parquet RENDER
 // (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918; row-equivalence
 // standard, never bytes — the #1917 spike record). ADDITIVE registration.
@@ -580,6 +584,38 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // which is irrelevant to a polars-free law).
     m.add_function(wrap_pyfunction!(window_ledger::classify_window_status, m)?)?;
     m.add_function(wrap_pyfunction!(window_ledger::date_isoformat, m)?)?;
+    // ADR-0020 Wave-D W-1 (`BRUTEX_LAKE_WAVED_RUST` — the timeframe_materialize
+    // read core + drift-pinned twins). Appended AFTER every earlier wave's
+    // registrations, never reordering them (§4.1 additive merge law); the
+    // W-2..W-4 waved steps append below these in their own PRs.
+    m.add_function(wrap_pyfunction!(waved::read::waved_read_1m_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(waved::read::waved_has_stored_1m_bars, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        waved::read::waved_month_partition_files,
+        m
+    )?)?;
+    // ADR-0020 Wave-D W-2 (`BRUTEX_LAKE_WAVED_RUST` — the lake_heal mutation
+    // core + the content-token twin). Appended AFTER the W-1 registrations
+    // (§4.1 additive merge law); W-3/W-4 append below in their own PRs.
+    m.add_function(wrap_pyfunction!(waved::heal::waved_heal_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(waved::heal::waved_lake_content_token, m)?)?;
+    // ADR-0020 Wave-D W-3 (`BRUTEX_LAKE_WAVED_RUST` — the catalog_reconcile
+    // per-file scan primitive). Appended AFTER the W-1/W-2 registrations
+    // (§4.1 additive merge law); W-4 appends below in its own PR.
+    m.add_function(wrap_pyfunction!(waved::reconcile::waved_reconcile_file, m)?)?;
+    // ADR-0020 Wave-D W-4 (`BRUTEX_LAKE_WAVED_RUST` — the lake_invariants
+    // scan core). Appended AFTER the W-1/W-2/W-3 registrations (§4.1
+    // additive merge law).
+    m.add_function(wrap_pyfunction!(waved::scan::waved_scan_lake, m)?)?;
+    // ADR-0020 Wave-D W-2b (`BRUTEX_LAKE_WAVED_RUST` — the multi-file heal
+    // engagement witness: drift + bars-foreign + option-foreign join the
+    // engaged set). Appended AFTER the W-1..W-4 registrations (§4.1
+    // additive merge law).
+    m.add_function(wrap_pyfunction!(waved::heal::waved_heal_engaged_kinds, m)?)?;
+    // ADR-0020 Wave-D W-6a (DEC-RUST-LAKE-WAVED-001 ENDGAME — the Python
+    // cores are deleted; per-finding/per-file isolation is crate-owned).
+    // Appended AFTER every earlier waved registration (§4.1 additive law).
+    m.add_function(wrap_pyfunction!(waved::heal::waved_endgame_witness, m)?)?;
     // ADR-0020 G10 CONVERT (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001) — the
     // window-ledger parquet render; the facade
     // `brutex/data/lake_rust_ledger_render.py` engages it behind the

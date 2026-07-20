@@ -24,7 +24,6 @@ CLAUDE.md §11 COMMON). Throttle (``per_file_pause``) behaviour is unit-tested i
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -35,6 +34,15 @@ pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
 pytestmark = pytest.mark.bench
+
+
+@pytest.fixture(autouse=True)
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ONE Rust path (W-6a): retired flag unset; the read-count law is
+    pinned via the crate's ``last_rust_scan_reads()`` wire counter (the §F2
+    re-bind of the deleted Python-internal ``_read_key_columns`` spies)."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
+
 
 _SHALLOW_FILES = 12
 _DEEP_FILES = 96
@@ -126,24 +134,16 @@ def test_small_file_absolute_cost_bound(tmp_path: Path) -> None:
     )
 
 
-def test_scan_read_calls_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """At bench scale a CLEAN lake pays exactly ONE key-column read per file."""
-    import polars as pl
+def test_scan_read_calls_bounded(tmp_path: Path) -> None:
+    """At bench scale a CLEAN lake pays exactly ONE key-column read per file
+    (the crate's ``reads_performed`` wire counter — the §F2 read witness)."""
     from brutex.data import lake_invariants as li
+    from brutex.data import lake_rust_waved as lrw
 
     _build_lake(tmp_path, _DEEP_FILES, _ROWS_PER_FILE)
-    calls: list[Path] = []
-    real = li._read_key_columns
-
-    def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-        calls.append(path)
-        return real(path, columns)
-
-    monkeypatch.setattr(li, "_read_key_columns", spy)
     report = li.scan_lake_invariants(tmp_path)
     assert report.files_scanned == _DEEP_FILES
-    assert len(calls) == _DEEP_FILES
-    assert len(set(calls)) == _DEEP_FILES
+    assert lrw.last_rust_scan_reads() == _DEEP_FILES
 
 
 def _build_option_tree(root: Path, n_files: int, rows_per_file: int) -> None:
@@ -177,29 +177,20 @@ def _build_option_tree(root: Path, n_files: int, rows_per_file: int) -> None:
         pq.write_table(table, dest)
 
 
-def test_option_scan_read_calls_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_option_scan_read_calls_bounded(tmp_path: Path) -> None:
     """A CLEAN options tree pays exactly ONE key read per file — no sibling reads.
 
     The foreign classifier's min/max fast path means a clean option file adds
-    ZERO reads over the pre-DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 scan (the §6.1
-    unit spy is the primary oracle; this pins the shape at bench scale).
+    ZERO extra reads (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001), pinned at bench
+    scale via the crate's ``reads_performed`` wire counter.
     """
-    import polars as pl
     from brutex.data import lake_invariants as li
+    from brutex.data import lake_rust_waved as lrw
 
     _build_lake(tmp_path, _SHALLOW_FILES, _ROWS_PER_FILE)
     _build_option_tree(tmp_path, _DEEP_FILES, _ROWS_PER_FILE)
-    calls: list[Path] = []
-    real = li._read_key_columns
-
-    def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-        calls.append(path)
-        return real(path, columns)
-
-    monkeypatch.setattr(li, "_read_key_columns", spy)
     report = li.scan_lake_invariants(tmp_path)
     assert report.findings == ()
     assert report.files_scanned == _SHALLOW_FILES
     assert report.option_files_scanned == _DEEP_FILES
-    assert len(calls) == _SHALLOW_FILES + _DEEP_FILES
-    assert len(set(calls)) == _SHALLOW_FILES + _DEEP_FILES
+    assert lrw.last_rust_scan_reads() == _SHALLOW_FILES + _DEEP_FILES

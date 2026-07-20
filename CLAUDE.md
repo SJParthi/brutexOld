@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+_Last updated: 2026-07-19 (DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1979,
+branch `claude/rust-lake-waved-001` — the Wave-D lake Rust conversion: the
+four `brutex/data/` lake-core modules' CORES (`timeframe_materialize` read ·
+`lake_heal` heal+token · `catalog_reconcile` per-file scan ·
+`lake_invariants` whole scan) move to `rust/brutex-lake/src/waved/` and the
+Python cores are DELETED in-lane after TOTAL differential parity (the
+coordinator/operator greenfield ruling: convert → differential → default-ON
+→ delete) — `brutex_lake` is the ONE production arm, the interim
+`BRUTEX_LAKE_WAVED_RUST` flag is RETIRED (any set value refuses loudly; a
+missing/stale wheel is the typed fail-loud `LakeRustWavedUnavailableError`,
+never a silent fallback). Parity record: the #1916 poison corpus 27/27
+ENGAGED+IDENTICAL both directions pre-delete; the heal differential 40/40
+four-strength twin-lake; frozen goldens fixtures BYTE-UNTOUCHED;
+out-of-envelope shapes are per-class ISOLATED errors — and the W-6b closing
+slice WIDENS the bars-tree dup heal with the frame-level verbatim PRESERVE
+arm (the 17-column Greeks-overlay schema enrichment writes + the finite
+big-price shape now HEAL keep-first; two pins consciously flipped). ci.yml
+test/golden/chaos-race/run-smoke build+install the wheel (rust-cache; the
+disclosed CI cold cost); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; run identity untouched. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1979.)
+Earlier: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
 MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
 overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
 the overfit gate config the sweep RECORDED at launch (both grid launchers
@@ -4156,7 +4178,96 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-s2-results-v2`
+- **Active branch:** `claude/rust-lake-waved-001`
+  (**DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1979** — renumbered
+  #1954 → #1969 → #1979 (the 2026-07-19 merge-forward — main's tail advanced
+  through #1968 and the T14 lane landed #1954 — then the 2026-07-19 census
+  adjudication: #1969 was contested four ways in flight and is VACATED,
+  #1979 assigned; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001) — the Wave-D lake Rust conversion, the compressed
+  convert → differential → default-ON → DELETE cycle executed in ONE lane
+  per the coordinator/operator greenfield ruling. THE MOVE: the four lake
+  modules' cores land on `rust/brutex-lake/src/waved/` — W-1
+  `read.rs` (the `make_lake_read_1m` read core: exact-path per-file reads +
+  null-insert projection + ts-range/price-sanity gates + the BadTickScreen
+  twin) · W-2 `heal.rs` (bars/option dedup via the byte-locked PR-1/PR-2
+  render cores, schema-alien quarantine move, the flock +
+  `atomic_write_bytes` twins, the `lake_content_token` walk;
+  ENOSPC/EDQUOT → real `OSError(errno)` → `LakeWriteHalt`) · W-3
+  `reconcile.rs` (one bytes read → sha256 + decode + span + dup/foreign
+  classify, the typed-tuple wire) · W-4 `scan.rs` (the WHOLE
+  `scan_lake_invariants` body: streamed sorted walk, the parse-partition
+  `int_twin` triage, per-file classify + dtype-repr map, the full options
+  tree, the ordered event-replay stream, every report counter + the §F2
+  `reads_performed` wire) · W-2b `heal_multi.rs` (bars/option foreign-month
+  reassignment copy-forward-FIRST/remove-SECOND + legacy-key drift merge —
+  ALL SIX healable kinds engage, `waved_heal_engaged_kinds` witnessed) ·
+  W-5 the crate-owned refusal verdicts (naive-ts source + symlink-loop
+  dest, byte-exact CPython repr twins) + the DEFAULT-ON flip. THE ENDGAME
+  (W-6a): the Python cores are DELETED — the per-finding heal core,
+  `_scan_lake_invariants_python`, `_scan_file`, `_collect`,
+  `_lake_content_token_python` (net −5,507/+2,075 on the delete commit) —
+  the facade (`brutex/data/lake_rust_waved.py`) retires burn-in +
+  degrade-to-oracle for the typed fail-loud
+  `LakeRustWavedUnavailableError` (`_require_crate`: import →
+  all-or-nothing API guard incl. the `waved_endgame_witness` lockstep
+  tooth → polars version guard), the `BRUTEX_LAKE_WAVED_RUST` flag is
+  RETIRED per the BRUTEX_FILL_MODE precedent (ANY set value — even
+  "1"/"0" — refuses via `LakeRustWavedFlagRemovedError`), and
+  out-of-envelope shapes take per-class ISOLATED-error postures (heal:
+  per-finding counted error, byte-untouched, batch continues; reconcile:
+  the GAP-#9 loud per-file skip; scan: the loud counted scan_skip; read:
+  the typed quarantining ResampleInputError — the inode-guard class
+  excepted: EVERY planted non-regular/mis-typed `*.parquet` inode entry
+  (FIFO/device/dir) refuses loudly with the typed `NotRegularFileError`
+  on BOTH read arms per DEC-LAKE-READ-INODE-GUARD-001/-002, crossed from
+  the crate as a real OSError and restored facade-side — the D-31
+  workspace-health fix + the D-32 walker alignment: a `*.parquet`-NAMED
+  directory is collected as a read candidate and refused, never
+  descended into to silently serve its members). W-6b closes the endgame's
+  production-reachable narrowing: the bars-tree dup heal gains the
+  frame-level verbatim PRESERVE arm — the EXACT 17-column Greeks-overlay
+  schema Greeks enrichment writes AND the finite beyond-2^53-paisa
+  big-price shape now HEAL (keep-FIRST unique on `timestamp`, every
+  column's stored values VERBATIM — strictly row-removing, never
+  value-editing — rendered through the PR-1 bars profile; the
+  differential's two isolated pins consciously FLIPPED to heals-cleanly
+  pins with an in-test polars keep-first value oracle + twin-build byte
+  determinism + the quarantined before-image byte pin; NaN-price +
+  drifted-schema isolated pins added; a preserve-class file in the
+  MULTI-file heals stays a named isolated error — the merge legs rebuild
+  values through `BarRow`, the recorded residual). PARITY RECORD
+  (pre-delete, executed): the #1916 poison-corpus harness bound the Rust
+  scan at its own `ScannerImpl` seam — 27/27 cases IDENTICAL + ENGAGED
+  both directions with a loud-fail per-case census; the heal differential
+  40/40 four-strength twin-lake (report · relpath→sha256 tree ·
+  audit+structlog sequences · convergence re-scan); frozen goldens
+  default-ON with fixtures BYTE-UNTOUCHED; wheel-absent fail-closed.
+  Post-delete the differentials pin Rust determinism + FROZEN expectations
+  (the `_FROZEN_HEAL` table captured from the last green Python-parity
+  run); the #1916 harness is byte-UNMODIFIED, green on the Rust path.
+  CI: test/golden/chaos-race/run-smoke build+install the wheel
+  (SHA-pinned rust-cache, retry-looped pip; the property job is a
+  documented NO-wheel — its [dev]-only env module-skips the lake suites,
+  the DEC-FEED-RUST-CORE-001 precedent); the Makefile's run-raw REQUIRES
+  cargo for brutex_lake (documented). Deviations D-1..D-30 recorded in the
+  lane record (wire shapes · verdict-fidelity doctrine · envelope scope
+  incl. D-30's bars-tree/PR-1-profile widening decision · locking/GIL ·
+  D-24 mutation.yml NOT extended — the #1911 no-lake-wiring precedent +
+  budget arithmetic). GATES (lane-final, executed): cargo
+  fmt/clippy--D-warnings/test --locked 135 passed; lake_invariants
+  100.00% (314/106, 167) · lake_heal 100.00% (618/192, 225) ·
+  catalog_reconcile 100.00% (94/24, 38) · timeframe_materialize 100.00%
+  (176/56, 115) · the facade 100.00% standalone (368/166, 152); the waved
+  differentials 43+14+12+55 + the harness 59; the broad -k lake battery
+  1,029 passed; ruff + format clean; `mypy --strict` 0 new (the env-only
+  `cma` baseline); pyright 0 errors on touched files. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; run identity untouched; no new
+  routes; the one retired env var refuses loudly when set. This blurb
+  carries the record's pointer — the full story lives in MIGRATION.md
+  #1979 + the lane PR body.)
+  Earlier: `integration/club-s2-results-v2`
   (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
   overfit-recount recovery channel, folded onto the CLUB S2 members
   (#1848–#1850) on this same branch. THE TRUE FAILURE MODE (stated
@@ -12641,7 +12752,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-s2-results-v2`
+- **Active feature branch:** `claude/rust-lake-waved-001`
+  (DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1979 — the Wave-D lake Rust
+  conversion: the four lake modules' cores (`timeframe_materialize` read ·
+  `lake_heal` heal+token · `catalog_reconcile` per-file scan ·
+  `lake_invariants` whole scan) move to `rust/brutex-lake/src/waved/` and
+  the Python cores are DELETED in-lane after total differential parity
+  (27/27 poison-corpus engaged+identical both directions; heal 40/40
+  four-strength; goldens fixtures byte-untouched); `brutex_lake` is the
+  ONE production arm — a missing/stale wheel is the typed fail-loud
+  `LakeRustWavedUnavailableError`, the retired `BRUTEX_LAKE_WAVED_RUST`
+  flag refuses any set value, out-of-envelope shapes are per-class
+  isolated errors; the W-6b preserve arm heals the 17-col Greeks-overlay
+  + finite big-price dups verbatim keep-first (two pins consciously
+  flipped); ci.yml test/golden/chaos-race/run-smoke build the wheel;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #1979 for the full blurb)
+  Earlier: `integration/club-s2-results-v2`
   (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
   overfit-recount recovery channel: the recount recovers the RECORDED
   overfit gate config (mint on both launchers' START records; the tolerant

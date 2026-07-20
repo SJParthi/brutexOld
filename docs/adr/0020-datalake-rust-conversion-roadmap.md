@@ -462,3 +462,31 @@ already transitive in the committed `Cargo.lock`; rustix stays reserved
 for Wave C per §3). Flag OFF (the default) is byte- and
 call-graph-identical, bomb-spy-pinned; the default-ON flip needs its own
 DEC.
+
+## 12. Wave-D shipped surface (2026-07-19 — appended when the Wave-D lane completed; DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1979)
+
+The four Wave-D convertible rows are **DONE — and past the roadmap's own
+end state**: `timeframe_materialize` (row 16), `lake_heal` (row 7),
+`catalog_reconcile` (row 10) and `lake_invariants` (row 8) moved their
+cores to `rust/brutex-lake/src/waved/` on `claude/rust-lake-waved-001`,
+and — per the coordinator/operator greenfield ruling for this lane — the
+compressed cycle ran convert → differential → default-ON → **Python-core
+DELETE in-lane**, superseding the live-parity-oracle pattern for these
+four modules: `brutex_lake` is the ONE production arm, the interim
+`BRUTEX_LAKE_WAVED_RUST` flag is RETIRED (any set value refuses loudly),
+and a missing/stale wheel is the typed fail-loud
+`LakeRustWavedUnavailableError` (ci.yml's test/golden/chaos-race/run-smoke
+jobs build + install the wheel). The §7 hazard-3 gate was satisfied as
+written: the whole poison corpus drove Python and Rust differentially —
+27/27 cases ENGAGED + IDENTICAL in both directions before any verdict
+path flipped (the #1916 harness's own `ScannerImpl` seam, harness
+byte-unmodified), the heal differential held 40/40 four-strength
+twin-lake parity, and the frozen goldens passed default-ON with fixtures
+byte-untouched. Out-of-envelope shapes carry ruled per-class
+ISOLATED-error postures (heal per-finding · reconcile GAP-#9 per-file
+skip · scan loud counted skip · read typed ResampleInputError); the W-6b
+closing slice widened the bars-tree dup heal with the frame-level
+verbatim PRESERVE arm (17-column Greeks-overlay + finite big-price dups
+heal keep-first). `catalog` (row 9 — the libduckdb dual-pin escalation)
+and the LAST-MILE `window_ledger_store` remain OPEN as recorded; the
+honesty banner held — the conversion was for uniformity, not speed.

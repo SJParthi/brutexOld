@@ -95,6 +95,13 @@ polars-config = { git = "https://github.com/pola-rs/polars", rev = "0df0c25d4db8
 # polars-parquet links (one libzstd in the binary, cargo unifies).
 zstd = "0.13"
 
+# ADR-0020 Wave-D W-2 (waved/heal.rs): sha256 for the quarantine-forensic
+# byte hashes + the `.locks/<sha256(realpath)>.lock` sidecar path law + the
+# lake content token — the `hashlib.sha256` byte-twins. ALREADY a transitive
+# member of the committed Cargo.lock (v0.11.0 via the polars tree — zero new
+# code pulled, `--locked` stays clean); promoted to a direct dep APPEND-ONLY.
+sha2 = "0.11"
+
 # Replicate the polars workspace [patch.crates-io] (polars Cargo.toml @
 # py-1.42.1), pinned to the exact revs the wheel's Cargo.lock resolved —
 # cargo patches do NOT propagate through git dependencies, so this crate

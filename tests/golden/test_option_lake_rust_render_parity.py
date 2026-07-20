@@ -742,9 +742,21 @@ class TestWholePathHealParity:
     ) -> None:
         """R3: an end-to-end ``heal_findings`` batch over a dup + foreign +
         null-side poisoned options tree — final tree sha256-identical,
-        HealReport field-identical, second sweep clean on both arms."""
+        HealReport field-identical, second sweep clean on both arms.
+
+        W-6a RE-SCOPE: the Python heal core (the render seam's former
+        heal-batch consumer) is DELETED — both arms now run the ONE
+        waved-crate heal, which renders natively and never reaches the
+        render facade. The pin is consciously RETARGETED: the render flag
+        is INERT on the waved heal path (trees byte-equal ON vs OFF, no
+        crate-render engagement), and the heal itself converges. The render
+        seam's own ON/OFF parity stays pinned by the write/heal_partition/
+        merge_partition_frame twins above.
+        """
         from brutex.data.lake_heal import HealReport, heal_findings
         from brutex.data.lake_invariants import scan_lake_invariants
+
+        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
 
         def _drive(lake: Path, flag_on: bool) -> tuple[HealReport, dict[str, str], int]:
             _seed_poisoned_options_lake(lake)
@@ -768,7 +780,12 @@ class TestWholePathHealParity:
 
         monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
         on_report, on_tree, on_second = _drive(_mkdtemp("pr2-r3-on-"), flag_on=True)
-        _assert_options_crate_rendered()
+        # The W-6a inertness half: the waved-crate heal renders NATIVELY —
+        # the render facade must never have engaged on this path.
+        assert _OPTIONS_ENGAGED_KEY not in lrr._OBSERVABILITY_MEMO, (
+            "the waved-crate heal unexpectedly routed through the render "
+            "facade — the W-6a native-render law broke"
+        )
 
         assert on_tree == off_tree  # every file byte-identical, recursively
         assert (on_report.findings, on_report.healed, on_report.skipped, on_report.errors) == (
