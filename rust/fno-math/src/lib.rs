@@ -79,16 +79,16 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
-/// DEC-METRICS-RUST-STATS-001 (slice 6): Stage-3/4 statistics kernels — the
-/// sequential/integer heavy loops of the Stage-3/4 statistical filters
-/// (CPCV fold pass-count in PR-1; later PRs append inside the same module).
-/// Python keeps every numpy pairwise reduction, libm call and raise.
-pub mod stats;
 /// DEC-AUDIT-CHAIN-RUST-PORT-001 (slice 9, ADR-0019 / #1727): the orchestrator
 /// SHA-256 audit-chain serializer — CPython-exact float repr + canonical JSON
 /// + `|`-joined preimage + on-disk line bytes, parity-gated on the frozen
 /// `tests/golden/fixtures/audit_chain_parity_*` fixtures. File I/O stays Python.
 pub mod audit_chain;
+/// DEC-METRICS-RUST-STATS-001 (slice 6): Stage-3/4 statistics kernels — the
+/// sequential/integer heavy loops of the Stage-3/4 statistical filters
+/// (CPCV fold pass-count in PR-1; later PRs append inside the same module).
+/// Python keeps every numpy pairwise reduction, libm call and raise.
+pub mod stats;
 
 /// DEC-CALENDAR-VERDICT-RUST-001 (slice 9, ADR-0019 / #1727): the NSE/BSE
 /// calendar VERDICT engine — decision logic only; the calendar DATA stays in
