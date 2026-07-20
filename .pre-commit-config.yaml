@@ -22,6 +22,13 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # Fuzzer corpus seeds are raw INPUT BYTES, not text — "fixing" the
+        # trailing newline rewrites the seed (e.g. the 2-byte \n\n
+        # crash-2-byte-header-underflow seed would shrink to 1 byte and no
+        # longer reproduce its crash). docs/design/sweep_core/ is design-doc
+        # measurement tooling + raw transcripts, outside the production
+        # gates (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^(rust/brutex-feed/fuzz/seeds/|docs/design/sweep_core/)
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-yaml
@@ -47,8 +54,16 @@ repos:
       - id: ruff
         name: ruff check
         args: [--fix, --exit-non-zero-on-fix]
+        # Design-doc measurement tooling (standalone one-shot scripts +
+        # raw transcripts), outside the production gates — T201/S101 etc.
+        # are appropriate there (coordinator ruling).
+        # DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^docs/design/sweep_core/
       - id: ruff-format
         name: ruff format
+        # Same design-doc measurement-tooling carve-out as ruff check
+        # above (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^docs/design/sweep_core/
 
   # ── Python: mypy --strict (only changed files) ──────────────────
   # rev MUST track the pyproject `mypy>=1.10,<3.0` toolchain (the same law

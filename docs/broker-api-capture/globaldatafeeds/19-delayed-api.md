@@ -55,7 +55,7 @@ websocket.send(message);
 **Example of returned data in JSON format. This data returned as per Periodicity & Period values**
 
 ```text
-Note: 
+Note:
 For example: If the API key is configured with a 15-minute delay for NFO.
 Request sent at September 13, 2024  11:40:00 (IST)
 Response received at
@@ -64,7 +64,7 @@ Response received at
 ```
 
 ```text
-RESPONSE: {"Exchange":"NFO", 
+RESPONSE: {"Exchange":"NFO",
 "InstrumentIdentifier":"NIFTY-I",
 "Periodicity":"MINUTE",
 "Period":1,
@@ -139,7 +139,7 @@ Time : Mon Sep 16 2024 14:30:04 GMT+0530 (India Standard Time)
 SENT: {"MessageType":"GetSnapshot","Exchange":"MCX","Periodicity":"MINUTE","Period":1,"InstrumentIdentifiers":[{"Value":"NATURALGAS-I"},{"Value":"CRUDEOIL-I"}]}
 
 Time : Mon Sep 16 2024 14:30:04 GMT+0530 (India Standard Time)
-RESPONSE: 
+RESPONSE:
 {"Result":[{"InstrumentIdentifier":"FUTCOM_CRUDEOIL_19SEP2024__0",
 "Exchange":"MCX",
 "LastTradeTime":1726476900,
@@ -164,10 +164,10 @@ RESPONSE:
 
 **Important Note:**
 
-GetSnapshot (Delayed), the time when request is sent is very important. 
+GetSnapshot (Delayed), the time when request is sent is very important.
 
 For example: If the API key is configured with a 5-minute delay for MCX.
-Request sent at September 16, 2024 14:30:04 (IST) 
+Request sent at September 16, 2024 14:30:04 (IST)
 Response received at
 14:30:04 – Last Trade Time (IST): September 16, 2024 14:25:00 PM For example : If user sends request for 1minute snapshot data at 14:30:01, user will get record of trade data of 14:25:00. However, if request is sent at 14:30:04 i.e. before minute is complete, user will get trade data between 14:25:00 to 14:26:00. In both cases, timestamp of the returned data will be start timestamp of the period. So when data between 14:25:00 to 14:26:00 is returned, it will have timestamp of 14:25:00.
 
@@ -384,13 +384,13 @@ Delay parameter is configured at our backend. Hence this function works exactly 
 **Sample request(JavaScript)**
 
 ```javascript
-{ 
-MessageType: "GetExchangeSnapshot", 
+{
+MessageType: "GetExchangeSnapshot",
 Exchange: "NFO",
-Periodicity: "Minute", 
-Period: 1 
-}; 
-var message = JSON.stringify(request); 
+Periodicity: "Minute",
+Period: 1
+};
+var message = JSON.stringify(request);
 websocket.send(message);
 ```
 

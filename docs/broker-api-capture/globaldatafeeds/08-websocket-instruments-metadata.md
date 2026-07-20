@@ -88,7 +88,7 @@ websocket.send(message);
 		//OptionType:"PE",
 		//Expiry:"30jul2020",
                 //Series:"EQ",
-		detailedInfo: "true"		
+		detailedInfo: "true"
 };
 var message = JSON.stringify(request);
 websocket.send(message);
@@ -146,10 +146,10 @@ var request =
 		//OptionType:"PE",
 		//Expiry:"30jul2020",
 	        //Series:"EQ",
-		//detailedInfo: "true"	
+		//detailedInfo: "true"
 };
 var message = JSON.stringify(request);
-websocket.send(message); 
+websocket.send(message);
 ```
 
 ### Example of returned data in JSON format
