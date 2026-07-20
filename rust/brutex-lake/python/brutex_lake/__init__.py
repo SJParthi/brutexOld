@@ -65,6 +65,7 @@ handshake; the facade refuses to engage when it differs from the installed
 from __future__ import annotations
 
 from brutex_lake._brutex_lake import (
+    SOURCE_DIGEST,
     __version__,
     atomic_commit_replace,
     classify_partial_window_verdict,
@@ -96,7 +97,22 @@ from brutex_lake._brutex_lake import (
     waved_scan_lake,
 )
 
+#: Crate version of the INSTALLED compiled kernel — derived at import from the
+#: compiled module's ``__version__`` (``env!("CARGO_PKG_VERSION")`` baked into
+#: the ``.so`` at build time), NEVER hardcoded here. Deliberately NOT in
+#: ``__all__`` (mirrors the siblings): a build stamp, not kernel API. Consumed
+#: by the ``brutex doctor`` ``wheel_freshness_brutex_lake`` stage
+#: (DEC-BRUTEX-LAKE-BOX-WHEEL-001).
+__build_crate_version__: str = __version__
+
+#: Crate-source BLAKE3 digest of the INSTALLED compiled kernel (FRAMING v1;
+#: DEC-RUST-SOURCE-DIGEST-TWIN-001). Same value as ``SOURCE_DIGEST`` — the
+#: dunder spelling mirrors the sibling wheels' doctor-facing surface
+#: (``wheel_source_digest_brutex_lake`` reads it off the compiled module).
+__source_digest__: str = SOURCE_DIGEST
+
 __all__ = [
+    "SOURCE_DIGEST",
     "__version__",
     "atomic_commit_replace",
     "classify_partial_window_verdict",

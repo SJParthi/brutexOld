@@ -284,11 +284,18 @@ class WheelSpec:
 #: (a missing/stale wheel is the fail-loud ``LakeRustWavedUnavailableError``)
 #: and landed its required Makefile block — the exact drift-pin pickup
 #: DEC-BOX-AUTODEPLOY-LANE-001 (#1939) designed, superseding that entry's
-#: pending-exclusion clause (DEC-BRUTEX-LAKE-BOX-WHEEL-001).  HONEST residual:
-#: the §4.5 gate smoke / §4.6 rollback smoke + doctor coherence checks still
-#: cover trading_core + fno_math only — brutex_lake gets BUILD +
-#: required-failure coverage here; its import-smoke/doctor stages remain the
-#: (narrowed) DEC-BRUTEX-LAKE-BOX-WHEEL-001 follow-up scope.
+#: pending-exclusion clause (DEC-BRUTEX-LAKE-BOX-WHEEL-001, whose remaining
+#: scope — the ``make run-raw`` + ``bootstrap.sh`` build blocks and the lake
+#: doctor stages — has now landed).  HONEST residual: the §4.5 gate smoke /
+#: §4.6 rollback smoke + doctor coherence checks still cover trading_core +
+#: fno_math only — brutex_lake gets BUILD + required-failure coverage here;
+#: the gate's ``_DIGEST_CHECKS``/``_CHECK_TO_WHEEL`` deliberately still map
+#: only those two GATE-MAPPED wheels (the brutex_feed precedent: an unmapped
+#: wheel's ``digest_ok`` stays ``None``; the gate subprocess calls the four
+#: mapped doctor checks by literal name, never ``run_doctor``) — the lake
+#: doctor stages (``wheel_freshness_brutex_lake`` /
+#: ``wheel_source_digest_brutex_lake``, DEC-BRUTEX-LAKE-BOX-WHEEL-001) do
+#: NOT join the gate.
 WHEEL_SET: Final[tuple[WheelSpec, ...]] = (
     WheelSpec("fno_math", "rust/fno-math", required=True),
     WheelSpec("trading_core", "rust/trading-core", required=True),

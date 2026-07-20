@@ -40,6 +40,24 @@ disclosed CI cold cost); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; run identity untouched. This header
 carries the pointer, never the story — the full record lives in the §1
 Active-branch blurb + MIGRATION.md #1979.)
+Earlier: 2026-07-19 (DEC-BRUTEX-LAKE-BOX-WHEEL-001, MIGRATION.md #1986
+(provisional — renumber-at-landing), branch `claude/brutex-lake-box-wheel` —
+the brutex-lake wheel joins the operator BOX build path BEST-EFFORT (warn-only
+`make run-raw` + `bootstrap.sh` blocks; `box_update.WHEEL_SET` gains the
+optional lake entry so the nightly auto-deploy lane rebuilds it on rust/
+deltas) + the crate gains the sibling build stamps (build.rs SOURCE_DIGEST ·
+EXPECTED_BUILD.json · `__build_crate_version__`/`__source_digest__`) + the
+`brutex doctor` check set grows 9 → 11 with the two OPTIONAL lake wheel stages
+(`wheel_freshness_brutex_lake` + `wheel_source_digest_brutex_lake` — absent
+wheel = advisory WARN, never FAIL; supersedes-IN-PART
+DEC-DOCTOR-DAILY-CHECKSET-9-001: the doctor-daily cron asserts the two as
+deterministic WARN in its hermetic wheel-less env; the PASS arm is proven in
+the non-required lake-rust-parity lane against the real wheel). Build-config +
+doctor only — every BRUTEX_LAKE_RUST_* seam stays default-OFF, flag-OFF
+byte-identical; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1986.)
 Earlier: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
 MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
 overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
@@ -4267,6 +4285,59 @@ hostile-review pass._
   routes; the one retired env var refuses loudly when set. This blurb
   carries the record's pointer — the full story lives in MIGRATION.md
   #1979 + the lane PR body.)
+  Earlier: `claude/brutex-lake-box-wheel` (**DEC-BRUTEX-LAKE-BOX-WHEEL-001,
+  MIGRATION.md #1986 (provisional — renumber-at-landing; DEC-IDs are the stable handles
+  per DEC-LEDGER-RENUMBER-001)** — the brutex-lake wheel joins the operator BOX build
+  path + the doctor watch set; build-config + doctor ONLY, zero engine/data behavior
+  change: (1) BUILD — `make run-raw` + `scripts/setup/bootstrap.sh` gain the brutex_feed
+  template's BEST-EFFORT block for `rust/brutex-lake` (warn-only `|| echo`/`_warn` arm —
+  a broken toolchain / no-network box still boots; cost disclosed in the step text: a
+  cold build compiles the rev-pinned polars graph — minutes + ~12 GB target/), and
+  `brutex/nightly/box_update.py::WHEEL_SET` gains
+  `WheelSpec("brutex_lake", "rust/brutex-lake", required=False)` (forced by the
+  WHEEL_SET↔Makefile set-equality drift pin — the two move in ONE commit), so the
+  nightly box auto-deploy lane rebuilds the lake wheel on rust/ deltas from day one
+  (the coordinator's coupling item CLOSED here; the box gate's
+  `_DIGEST_CHECKS`/`_CHECK_TO_WHEEL` deliberately stay required-wheels-only — the
+  brutex_feed precedent, `digest_ok` stays None for optional wheels). (2) CRATE
+  STAMPS — rust/brutex-lake mirrors the brutex-feed stamp surfaces: NEW build.rs
+  (FRAMING v1 SOURCE_DIGEST via the shared rust/source_digest_core.rs; blake3 in
+  [build-dependencies] + [dev-dependencies], the Cargo.lock delta is ONE dependency
+  edge — blake3 1.8.5 was already in the runtime graph via polars-io/plan, zero new
+  package versions, the byte pin unmoved), pymodule `SOURCE_DIGEST` +
+  `__source_digest__`, shim `SOURCE_DIGEST` in `__all__` +
+  `__build_crate_version__`/`__source_digest__` dunders (NOT in `__all__`), NEW
+  EXPECTED_BUILD.json (19 sorted symbols = the shim `__all__`; pinned equal by tests —
+  the lake shim deliberately carries NO `_EXPECTED_COMPILED_SYMBOLS`, the r2 F2-2
+  ruling), NEW tests/source_digest_parity.rs (the shared golden vector), and the
+  .pyi gains the 3 stamp stubs + BACKFILLS the four pre-existing missing stubs
+  (classify_partial_window_verdict · interior_barless_runs · raw_integrity_blake2b_hex
+  · render_parquet_defaults_from_ipc — the file's own lockstep header honored).
+  (3) DOCTOR — two thin bindings over the UNCHANGED generic helpers (zero new branches
+  in the COMMON bodies): `wheel_freshness_brutex_lake` +
+  `wheel_source_digest_brutex_lake` (the digest stage is THE stale-.so detector — the
+  crate version is frozen at 0.1.0, so freshness alone is nearly toothless; absent
+  wheel = advisory WARN naming the rebuild, never a FAIL — DoctorReport.ok is
+  FAIL-only; `BRUTEX_SKIP_WHEEL_FRESHNESS` stays the ONE shared escape; run_doctor 9 →
+  11 stages). SUPERSEDES-IN-PART DEC-DOCTOR-DAILY-CHECKSET-9-001: doctor-daily.yml +
+  the redteam EXPECTED_STATUSES reclassify the check set 9 → 11 in lockstep, with the
+  two lake stages asserted **deterministic WARN** in the cron's hermetic env (the wheel
+  is deliberately never installed there — a ~24-min-CPU cold polars build would risk
+  the 30-min timeout; the WARN is itself the asserted, proved behavior — a PASS there
+  means an unclassified in-cron install, a SKIP means the escape env leaked, both red);
+  the PASS arm is proven by the lake-rust-parity lane's NEW step running both checks
+  against the lane-built wheel (HONEST: that lane is NON-required — the required-CI
+  teeth are the NEW wheel-tolerant twin suite
+  tests/unit/test_doctor_wheel_freshness_brutex_lake.py (fake-sys.modules arms run
+  wheel-less; live-PASS arms skipif-gated) + test_doctor.py's exact-11 pin +
+  the BOX_BUILT_OPTIONAL_KERNELS warn-only-shape pins in
+  test_run_builds_rust_kernels.py). HONEST limits: a digest PASS does not prove polars
+  lockstep (the facades' own version guard owns that WARN); mutation.yml carries no
+  doctor.py mutmut path (no wiring obligation — stated, not papered over); up.sh
+  deliberately untouched (it builds neither optional kernel). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; every
+  BRUTEX_LAKE_RUST_* seam stays default-OFF (flag-OFF byte-identity is the seams' own
+  standing OFF-arm bomb-spy pins — installing the wheel changes nothing flag-OFF).)
   Earlier: `claude/kernel-cache-soak-harness`
   (**DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1971 (renumbered #1962 → #1971 at
   the 2026-07-19 slice-5 merge-forward reconcile — main took #1962 for
@@ -12857,6 +12928,25 @@ hostile-review pass._
   flipped); ci.yml test/golden/chaos-race/run-smoke build the wheel;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
   line — see §1 + MIGRATION.md #1979 for the full blurb)
+  Earlier: `claude/brutex-lake-box-wheel`
+  (DEC-BRUTEX-LAKE-BOX-WHEEL-001, MIGRATION.md #1986 — provisional,
+  renumber-at-landing — the brutex-lake wheel joins the operator BOX build
+  path BEST-EFFORT (warn-only `make run-raw` + `bootstrap.sh` blocks;
+  `box_update.WHEEL_SET` gains the optional lake entry so the nightly
+  auto-deploy lane rebuilds it on rust/ deltas — the WHEEL_SET↔Makefile
+  drift pin forces the lockstep) + the crate gains the sibling build stamps
+  (build.rs SOURCE_DIGEST · EXPECTED_BUILD.json ·
+  `__build_crate_version__`/`__source_digest__`; Cargo.lock delta = one
+  dependency edge, byte pin unmoved) + the doctor check set grows 9 → 11
+  with the two OPTIONAL lake wheel stages (absent wheel = advisory WARN,
+  never FAIL; supersedes-IN-PART DEC-DOCTOR-DAILY-CHECKSET-9-001 — the
+  doctor-daily cron asserts the two as deterministic WARN in its hermetic
+  wheel-less env; the PASS arm is proven in the non-required
+  lake-rust-parity lane against the real wheel); build-config + doctor
+  only — every BRUTEX_LAKE_RUST_* seam stays default-OFF, flag-OFF
+  byte-identical; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1986 for the full blurb)
   Earlier: `claude/kernel-cache-soak-harness`
   (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1971 (renumbered #1962 → #1971 at slice-5 reconcile) —
   the §8 M4-Pro kernel-cache OFF↔ON A/B soak harness gating the #1729

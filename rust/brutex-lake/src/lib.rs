@@ -147,6 +147,16 @@ pub mod detectors;
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
+/// baked at build time by `build.rs` under the shared FRAMING v1 of
+/// `rust/source_digest_core.rs` (DEC-RUST-SOURCE-DIGEST-TWIN-001,
+/// `docs/MIGRATION.md` #1258). The PyO3 module exports it as
+/// `SOURCE_DIGEST` / `__source_digest__`; the `brutex doctor` wheel stages
+/// that consume it (`wheel_freshness_brutex_lake` /
+/// `wheel_source_digest_brutex_lake`) landed with
+/// DEC-BRUTEX-LAKE-BOX-WHEEL-001.
+pub const SOURCE_DIGEST: &str = env!("BRUTEX_SOURCE_DIGEST");
+
 /// The Python polars wheel version this crate's linked polars byte-matches —
 /// the SINGLE SOURCE for the lockstep pin. The manifest carries the matching
 /// commit as [`PINNED_POLARS_GIT_REV`] (asserted in
@@ -560,6 +570,13 @@ fn atomic_commit_replace(
 #[pymodule]
 fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", VERSION)?;
+    // Dunder-named build stamp (sibling convention): invisible to
+    // non-underscore symbol-surface checks.
+    m.add("__source_digest__", SOURCE_DIGEST)?;
+    // Plain-named twin: part of the shim's re-export surface + the doctor's
+    // EXPECTED_BUILD.json symbol fingerprint (DEC-BRUTEX-LAKE-BOX-WHEEL-001;
+    // the brutex_feed python.rs stamp-block pattern).
+    m.add("SOURCE_DIGEST", SOURCE_DIGEST)?;
     m.add_function(wrap_pyfunction!(render_parquet_from_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(render_parquet_defaults_from_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(pinned_polars_version, m)?)?;
