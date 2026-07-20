@@ -707,15 +707,19 @@ class TestTop100ArmBridge:
 
     # ── TOMB-01: retired-condition marking at the reader boundary ──
 
-    def test_pre_reshape_conditions_read_retired(self, tmp_path: Path) -> None:
-        """An OLD artifact's plain tombstoned name gains the "(retired)" suffix;
-        live names + unknown strings pass through verbatim (never a crash)."""
+    def test_retained_vwap_conditions_read_plain(self, tmp_path: Path) -> None:
+        """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): a LIVE retained
+        name passes through the display bridge PLAIN (RETIRED_MASK == 0 — no
+        "(retired)" suffix renders anywhere); unknown strings pass through
+        verbatim (never a crash). The retired-arm teeth live at the ONE
+        display authority's monkeypatched pin in
+        ``test_vocabulary_describe.py``."""
         row = _top100_row(1, conditions=["close_above_vwap", "bar_bullish", "PDH_CROSS_UP"])
         _write_top100(tmp_path, [row])
         result = oc.load_top100(tmp_path)
         assert result.status == "ok"
         assert result.rows[0]["conditions"] == [
-            "close_above_vwap (retired)",
+            "close_above_vwap",
             "bar_bullish",
             "PDH_CROSS_UP",
         ]

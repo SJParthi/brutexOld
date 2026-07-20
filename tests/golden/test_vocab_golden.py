@@ -150,11 +150,12 @@ def test_fixture_exercises_all_implemented_bits_both_ways() -> None:
 def test_layout_only_bits_are_always_clear() -> None:
     """Every non-implemented / reserved bit must be 0 in EVERY golden case.
 
-    The reshape guarantee: the RETIRED VWAP tombstones (52/53) and every
-    reserved bit >= 74 are NEVER set by the evaluator (the SuperTrend bits
-    64/65 left this set at the vocab-66 implemented-flip, the gap trio 66-68
-    at the re-stack and the express bits 69-73 at
-    DEC-FIB-TEMPLATE-EXPRESS-001).
+    With ALL 74 declared bits IMPLEMENTED (the VWAP pair 52/53 came back at
+    DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206; the SuperTrend bits 64/65
+    left this set at the vocab-66 implemented-flip, the gap trio 66-68 at the
+    re-stack and the express bits 69-73 at DEC-FIB-TEMPLATE-EXPRESS-001) the
+    guarded set is exactly the reserved headroom >= 74 — the evaluator must
+    NEVER set a bit past the declared vocabulary.
     """
     for case in _CASES:
         mask = _expected(case)

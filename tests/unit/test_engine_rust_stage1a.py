@@ -257,6 +257,10 @@ def test_hostile_fractal_k_raises_value_error_never_aborts(hostile_k: int) -> No
     # pre-existing MarketStructureState PYCLASS keeps the identical abort
     # behaviour for a direct hostile construction (frozen TickVault-shared
     # surface — deliberately untouched, out of this slice's scope).
+    # Positional order mirrors the retention FFI signature — the five VWAP
+    # feed columns re-inserted at their pre-wipe positions
+    # (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206); hostile_k rides the
+    # fractal_k slot exactly where the production call passes it.
     inputs = _inputs_for(_two_day_feed())
     with pytest.raises(ValueError, match="fractal_k"):
         trading_core.stage1a_bar_bits_batch(
@@ -264,7 +268,12 @@ def test_hostile_fractal_k_raises_value_error_never_aborts(hostile_k: int) -> No
             inputs.high_paisa,
             inputs.low_paisa,
             inputs.close_paisa,
+            inputs.typical_paisa,
+            inputs.volume,
             inputs.tod_seconds,
+            inputs.pre_open,
+            inputs.session_key,
+            inputs.session_day,
             inputs.contract_reset,
             inputs.day_index,
             inputs.ema20_paisa,
@@ -560,20 +569,36 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
     monkeypatch.setattr(trading_core, "MarketStructureState", _RecordingStructure)
 
     # The REAL builder walk records the per-bar marshalled values… (the
-    # constructions counter now rides MarketStructureState — the retired
-    # VwapState spy died with the bits-52/53 tombstone.)
+    # constructions counter rides MarketStructureState; VwapState is real —
+    # RETAINED per DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206.)
     Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
     push_constructions = constructions[0]
     assert len(eval_calls) == len(bars)
 
-    # …and the prepass columns must equal them field-for-field (the 24-arg
-    # ABI: pivot_levels sits at index 7 — the vwap arg is gone; the express
-    # swing pair + band ride appended-last, DEC-FIB-TEMPLATE-EXPRESS-001).
+    # …and the prepass columns must equal them field-for-field (the retention
+    # 28-arg ABI, DEC-VOCAB-VWAP-RETAIN-001 #2206: the LIVE vwap arg sits at
+    # index 7 again, pivot_levels at 8; the express swing pair + band ride
+    # appended-last, DEC-FIB-TEMPLATE-EXPRESS-001).
     constructions[0] = 0
     inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
     assert push_constructions == 1 + sum(inputs.contract_reset)
 
+    # Replay teeth for the five re-inserted VWAP feed columns: the push arm's
+    # marshalled vwap (args[7]) must equal a REAL trading_core.VwapState
+    # replay over the prepass columns (recreated at every contract reset —
+    # the batch kernel's own reset law), binding the columns to the marshal.
+    vwap_state = trading_core.VwapState()
     for i in range(len(bars)):
+        if inputs.contract_reset[i]:
+            vwap_state = trading_core.VwapState()
+        expected_vwap = vwap_state.update(
+            inputs.typical_paisa[i],
+            inputs.volume[i],
+            inputs.pre_open[i],
+            inputs.session_key[i],
+            inputs.session_day[i],
+            inputs.tod_seconds[i],
+        )
         args = eval_calls[i]
         assert args[0] == inputs.tod_seconds[i]
         assert args[1] == inputs.open_paisa[i]
@@ -582,13 +607,14 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
         assert args[4] == inputs.close_paisa[i]
         assert args[5] == inputs.ema20_paisa[i]
         assert args[6] == inputs.ema200_paisa[i]
+        assert args[7] == expected_vwap
         d = inputs.day_index[i]
-        assert args[7] == inputs.day_pivot_levels[12 * d : 12 * (d + 1)]
-        assert args[8] == inputs.day_fib_levels[19 * d : 19 * (d + 1)]
-        assert args[12] == inputs.pivot_bps
-        assert args[13] == inputs.pdh_pdl_bps
-        assert args[14] == inputs.fib_bps
-        assert args[15] == inputs.prior_n
+        assert args[8] == inputs.day_pivot_levels[12 * d : 12 * (d + 1)]
+        assert args[9] == inputs.day_fib_levels[19 * d : 19 * (d + 1)]
+        assert args[13] == inputs.pivot_bps
+        assert args[14] == inputs.pdh_pdl_bps
+        assert args[15] == inputs.fib_bps
+        assert args[16] == inputs.prior_n
 
     # Day-table shape: one row per distinct builder day roll, all consumed.
     n_days = len(inputs.day_has_pivot)

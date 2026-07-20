@@ -143,6 +143,7 @@ _BARS_PER_DAY = len(_BANDS)
 # pre-reshape:  c5d1c3c2523c519a13d7c36f0be62539c80182cf44ba69a965897c0a2a63da5c.
 _EXPECTED_SHA256 = "60a8bacd3d5dc09e830792d806cbf22d0ffb30598aa7f37961a2ca0260bb597c"
 
+
 def _price(day_index: int) -> Decimal:
     """Well-separated flat-doji price for trading day ``day_index`` (BANKNIFTY scale)."""
     return Decimal(50000 + 1000 * day_index)

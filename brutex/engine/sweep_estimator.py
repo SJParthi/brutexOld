@@ -80,12 +80,12 @@ SWEPT_CONDITIONS: Final[int] = IMPLEMENTED_MASK.bit_count()
 #: vocabulary is NEVER reduced here (:func:`count_true_trials` always sweeps
 #: the FULL requested condition set), :func:`effective_condition_count`
 #: merely surfaces the honest effective-vs-nominal count for display.
-#: RESHAPE NOTE (DEC-VOCAB-66-RESHAPE-IMPL-001): bits 52/53 are now
-#: TOMBSTONED — outside :data:`IMPLEMENTED_MASK`, never swept on ANY
-#: segment — so the annotation subtracts only dead bits that are STILL
-#: IMPLEMENTED (currently none: effective == nominal everywhere). The
-#: mechanism is retained so a future volume-dependent implemented bit
-#: revives the honest INDEX-segment annotation automatically.
+#: RETENTION NOTE (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206): the
+#: bits-52/53 wipe is REVERSED — the pair is IMPLEMENTED again, so the
+#: ∩-implemented subtraction SELF-REVIVED exactly as designed: on a
+#: zero-volume INDEX segment the annotation reads effective == nominal - 2
+#: (the pre-wipe "60 vs 58" law at the 74/74 width); every other segment
+#: reads effective == nominal.
 VWAP_DEAD_BITS: Final[frozenset[int]] = frozenset({52, 53})
 
 #: The implemented bit POSITIONS (for the dead-bit ∩ implemented law above).
@@ -223,11 +223,10 @@ def effective_condition_count(*, segment: str, n: int = SWEPT_CONDITIONS) -> tup
     AND some :data:`VWAP_DEAD_BITS` member is still IMPLEMENTED (sweepable):
     such a bit can never fire on zero-volume data and is honestly reported
     as dead — flag-and-run (this module never excludes it from the swept
-    vocabulary, only annotates). On the 66-declared layout the VWAP bits are
-    TOMBSTONED (outside :data:`~brutex.vocabulary.bits.IMPLEMENTED_MASK` —
-    never swept at all), so the subtraction is currently zero on every
-    segment; the mechanism self-revives if a volume-dependent bit ever
-    returns to the implemented set.
+    vocabulary, only annotates). On the 74/74 retention layout the VWAP bits
+    are IMPLEMENTED again (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206 —
+    the wipe reversed), so the INDEX-segment subtraction is TWO: the pair is
+    live-but-volumeless on zero-volume spot indices and can never fire there.
 
     Parameters
     ----------

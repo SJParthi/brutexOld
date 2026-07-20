@@ -83,14 +83,25 @@ def _swing_low_feed() -> list[CandleBar]:
 
 
 def _rust_batch_bits(bars: list[CandleBar]) -> list[int]:
-    """Drive the REAL Rust batch kernel over the prepass columns."""
+    """Drive the REAL Rust batch kernel over the prepass columns.
+
+    Mirrors ``rust_stage1a.rust_bar_bits_or_none``'s production call
+    verbatim — the retention FFI shape re-inserted the five VWAP feed
+    columns (typical/volume/pre_open/session_key/session_day) at their
+    pre-wipe positions (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206).
+    """
     inputs = Stage1AMatrixBuilder().collect_batch_inputs(bars)
     result: list[int] = trading_core.stage1a_bar_bits_batch(
         inputs.open_paisa,
         inputs.high_paisa,
         inputs.low_paisa,
         inputs.close_paisa,
+        inputs.typical_paisa,
+        inputs.volume,
         inputs.tod_seconds,
+        inputs.pre_open,
+        inputs.session_key,
+        inputs.session_day,
         inputs.contract_reset,
         inputs.day_index,
         inputs.ema20_paisa,
@@ -108,6 +119,12 @@ def _rust_batch_bits(bars: list[CandleBar]) -> list[int]:
         inputs.fib_dependent_mask,
         inputs.applies_to_1day_mask,
         inputs.apply_1day_mask,
+        inputs.fractal_k,
+        inputs.supertrend_x2_paisa,
+        inputs.gap_mid_bps,
+        inputs.day_x1_hi_paisa,
+        inputs.day_x1_lo_paisa,
+        inputs.day_has_x1,
     )
     return result
 

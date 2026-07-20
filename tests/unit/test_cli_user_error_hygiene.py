@@ -147,22 +147,36 @@ def test_parse_condition_ids_out_of_range() -> None:
         cli.parse_condition_ids("-1")
 
 
-def test_parse_condition_ids_refuses_a_retired_tombstone_bit() -> None:
-    """TOMB-03 — a saved pre-reshape script's ``--conditions 52`` is refused
-    LOUDLY, naming the bit, its name and its RETIRED status + the DEC family.
+def test_parse_condition_ids_accepts_the_retained_vwap_bits() -> None:
+    """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): the bits-52/53 wipe is
+    REVERSED — the VWAP pair is LIVE in ``IMPLEMENTED_MASK`` again, so the
+    wipe-era TOMB-03 refusal is consciously flipped to acceptance (the
+    RETIRED refusal ARM keeps its teeth in the monkeypatched
+    future-tombstone test below)."""
+    assert cli.parse_condition_ids("0,52,53") == [0, 52, 53]
 
-    Fail-before/pass-after: pre-fix bits 52/53 (in-layout, evaluator emits a
-    constant 0) sailed into the grid — hours of silent dead compute the
-    results store would happily persist (it admits every declared bit)."""
+
+def test_parse_condition_ids_refuses_a_future_retired_tombstone_bit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TOMB-03 teeth preserved (DEC-VOCAB-VWAP-RETAIN-001 #2206:
+    ``RETIRED_MASK == 0`` on the 74/74 retention layout, so the RETIRED
+    refusal arm is reachable only by simulating a future tombstone): a
+    re-tombstoned bit 52 refuses LOUDLY, naming the bit, its name and its
+    RETIRED status."""
+    import brutex.vocabulary.bits as bits_mod
+    from brutex.vocabulary.bits import IMPLEMENTED_MASK
+
+    monkeypatch.setattr(cli, "IMPLEMENTED_MASK", IMPLEMENTED_MASK & ~(1 << 52))
+    # parse_condition_ids reads RETIRED_MASK via a function-local import, so
+    # the patch lands on the bits module itself.
+    monkeypatch.setattr(bits_mod, "RETIRED_MASK", 1 << 52)
     with pytest.raises(cli.CliUserError) as excinfo:
         cli.parse_condition_ids("0,52")
     message = str(excinfo.value)
     assert "bit 52" in message
     assert "close_above_vwap" in message
     assert "RETIRED" in message
-    assert "DEC-ENGINE-SPOT-ONLY-001" in message
-    with pytest.raises(cli.CliUserError, match="close_below_vwap.*RETIRED|RETIRED"):
-        cli.parse_condition_ids("53")
 
 
 def test_parse_condition_ids_accepts_the_live_supertrend_bits() -> None:

@@ -25,9 +25,11 @@ from brutex.vocabulary.bits import (
     BIT_NEAR_FIB_50,
 )
 
-# A fixed swept mask: trend-up + above-CPR-TC + Fib-50 + early-morning (the
-# retired VWAP member was re-pointed to the new CPR bit at the 60→66 reshape —
-# the composed sentence still exercises trend→level→time across groups).
+# A fixed swept mask: trend-up + above-CPR-TC + Fib-50 + early-morning (this
+# golden's swept member moved from VWAP to the CPR bit at the 60→66 reshape and
+# deliberately STAYS on CPR after DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md
+# #2206) revived bits 52/53 — the composed sentence still exercises
+# trend→level→time across groups).
 _GOLDEN_MASK = (
     (1 << BIT_EMA20_ABOVE_EMA200)
     | (1 << BIT_ABOVE_CPR_TC)
@@ -49,12 +51,15 @@ _GOLDEN_DECLARATION = {
     "take_profit_bps": None,
     # DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip, then
     # DEC-GAP-MIDPOINT-CONDITIONS-001, then DEC-FIB-TEMPLATE-EXPRESS-001 at
-    # the train fold): the empty condition_scope means "every IMPLEMENTED
-    # bit", so the candidate mask follows IMPLEMENTED_MASK — bits 64/65
-    # joined at the flip, the gap trio 66-68 at the gap append, and the five
-    # express bits 69-73 (0x3e0 << 64) at the fib-template express
-    # (old: 000000000000001fffcfffffffffffff).
-    "candidate_mask_hex": "00000000000003ffffcfffffffffffff",
+    # the train fold, then DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206)):
+    # the empty condition_scope means "every IMPLEMENTED bit", so the
+    # candidate mask follows IMPLEMENTED_MASK — bits 64/65 joined at the
+    # flip, the gap trio 66-68 at the gap append, the five express bits
+    # 69-73 (0x3e0 << 64) at the fib-template express, and the retained
+    # VWAP pair 52/53 closed the wipe-era ...Cf... hole at the retention
+    # fold, so the mask is exactly (1 << 74) - 1
+    # (old: 00000000000003ffffcfffffffffffff).
+    "candidate_mask_hex": "00000000000003ffffffffffffffffff",
     "spec_mask_hex": "00000000000000001000100000400010",
 }
 

@@ -54,8 +54,9 @@ generator already draws.
 
 The vocab-66 SuperTrend implemented-flip (crate 0.5.0) made bits 64/65 real:
 version 4 APPENDS the ``supertrend_x2_paisa`` input draw STRICTLY AFTER every
-pre-existing per-case RNG draw (the VWAP burn stays consumed in its historical
-position), so every version-3-era input field is byte-identical on
+pre-existing per-case RNG draw (the VWAP draw stays consumed in its historical
+position — LIVE again per DEC-VOCAB-VWAP-RETAIN-001, no longer a burn), so
+every version-3-era input field is byte-identical on
 seed-identical cases and bits 0-63 of every mask are unchanged — pinned per
 case by the migration harness against the committed
 ``vocab_golden_migration_v3_masks.json`` companion.
@@ -135,7 +136,8 @@ def _build_case(
     400-case historical stream (GOLD-02). ``gap_rng`` is the SEPARATE
     Group-15 stream (see ``_GAP_SEED``,
     DEC-GAP-MIDPOINT-CONDITIONS-001) — the gap fields are drawn from it and
-    NEVER from the legacy stream (the BURNED retired-VWAP draw included), so
+    NEVER from the legacy stream (the retained-VWAP draw included — LIVE per
+    DEC-VOCAB-VWAP-RETAIN-001, still in its historical position), so
     the legacy stream's sequence (and every pre-existing field) stays
     byte-identical. Returns the case dict (mask not yet
     final) plus the rebuilt evaluator inputs for the second pass.
@@ -237,7 +239,8 @@ def _build_case(
 
     # Gap midpoint (Group 15, bits 66-68 — DEC-GAP-MIDPOINT-CONDITIONS-001):
     # the resolved session-edge level, absent/exactly-at/around the close like
-    # the retired-VWAP distribution, drawn from the SEPARATE gap stream so every
+    # the (retained) VWAP draw's distribution, drawn from the SEPARATE gap
+    # stream so every
     # legacy field above is byte-identical to the pre-gap fixture. The
     # exact-at-close arm guarantees near_gap_mid (68) fires across 400 cases.
     gap_roll = gap_rng.random()

@@ -3,8 +3,9 @@
 Two REAL end-to-end proofs on top of the unit/property/golden layers:
 
 * **Fire-test flag-ON twin** — the B1 engineered script that fires all six
-  stateful bits (BOS/CHoCH 56-59; the VWAP pair 52-53 retired) through the real ``push()``
-  path fires them IDENTICALLY through the flag-ON batch arm.
+  stateful bits (BOS/CHoCH 56-59 + the RETAINED-LIVE VWAP pair 52-53,
+  DEC-VOCAB-VWAP-RETAIN-001 #2206) through the real ``push()`` path fires
+  them IDENTICALLY through the flag-ON batch arm.
 * **The G-5 second half** — a REAL 2-worker SPAWN ``run_parallel_grid`` with
   ``BRUTEX_SWEEP_RUST_STAGE1A=1`` produces a byte-identical results tree to
   the flag-OFF SEQUENTIAL supervised run, and the workers' own
@@ -48,8 +49,10 @@ def _fresh_seam_state(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyp
 def test_fire_script_structure_bits_fire_identically_flag_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bits 56-59 fire at the SAME bars under the batch arm; the RETIRED VWAP
-    tombstones (52/53) fire on NEITHER arm (the 60→66 reshape)."""
+    """Bits 56-59 AND the RETAINED-LIVE VWAP pair (52/53) fire at the SAME
+    bars under the batch arm (DEC-VOCAB-VWAP-RETAIN-001 #2206 — the wipe-era
+    tombstone-inert pin is flipped to live-fire teeth binding the five
+    re-inserted VWAP feed columns through the kernel)."""
     from brutex.vocabulary import bits as B
 
     bars = [_bar(m, h, low, c) for m, (h, low, c) in enumerate(_HLC_SCRIPT)]
@@ -64,12 +67,12 @@ def test_fire_script_structure_bits_fire_identically_flag_on(
         B.BIT_BOS_BEARISH,
         B.BIT_CHOCH_BULLISH,
         B.BIT_CHOCH_BEARISH,
+        B.BIT_CLOSE_ABOVE_VWAP,
+        B.BIT_CLOSE_BELOW_VWAP,
     ):
         fired = _fired_bits(batch_masks, bit)
         assert fired, f"bit {bit} never fired on the batch arm"
         assert fired == _fired_bits(push_masks, bit)
-    tombstones = (1 << B.BIT_CLOSE_ABOVE_VWAP) | (1 << B.BIT_CLOSE_BELOW_VWAP)
-    assert all((m & tombstones) == 0 for m in batch_masks)
 
 
 @pytest.mark.slow

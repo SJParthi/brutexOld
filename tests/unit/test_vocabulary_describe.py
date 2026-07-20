@@ -95,15 +95,27 @@ class TestTombstoneRendering:
         assert condition_display_name(0) == "close_above_ema20"
         assert condition_display_name(BIT_NARROW_CPR_DAY) == "narrow_cpr_day"
 
-    def test_layout_only_bit_renders_plain_not_retired(self) -> None:
-        # IMPLEMENTED since the vocab-66 SuperTrend flip — plain either way
-        # (the suffix appears ONLY for RETIRED_MASK bits, of which there are
-        # none on the 74/74 tree).
+    def test_supertrend_bit_renders_plain(self) -> None:
+        # Once layout-only, IMPLEMENTED since the vocab-66 SuperTrend flip —
+        # plain like every live bit (the suffix appears ONLY for RETIRED_MASK
+        # bits, of which there are none on the 74/74 retention tree, #2206).
         assert condition_display_name(BIT_CLOSE_ABOVE_SUPERTREND) == "close_above_supertrend"
 
     def test_undeclared_bit_raises(self) -> None:
         with pytest.raises(KeyError):
             condition_display_name(TOTAL_CONDITIONS)
+
+    def test_future_tombstone_arm_renders_the_suffix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Branch teeth for the retired ARM of the ONE display authority
+        (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206: ``RETIRED_MASK == 0``
+        today, so the arm is reachable only by simulating a FUTURE tombstone —
+        the grow-only machinery must keep rendering the suffix)."""
+        from brutex.vocabulary import describe as describe_mod
+
+        monkeypatch.setattr(describe_mod, "RETIRED_MASK", 1 << BIT_CLOSE_ABOVE_VWAP)
+        assert condition_display_name(BIT_CLOSE_ABOVE_VWAP) == f"close_above_vwap{RETIRED_SUFFIX}"
+        # A non-tombstoned sibling stays plain under the same simulated mask.
+        assert condition_display_name(BIT_CLOSE_BELOW_VWAP) == "close_below_vwap"
 
     def test_suffix_set_is_exactly_the_retired_mask(self) -> None:
         # Exhaustive: the suffix appears for EXACTLY the RETIRED_MASK bits —

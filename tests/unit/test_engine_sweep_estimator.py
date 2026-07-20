@@ -24,17 +24,18 @@ from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
 
 def test_swept_conditions_is_the_implemented_count() -> None:
-    """The estimator sizes ``C(n, k)`` off the IMPLEMENTED count (64 on the
-    66-declared layout since the SuperTrend implemented-flip, crate 0.5.0) —
-    ``conditions=None`` resolves to ``default_condition_bits()`` == every
-    implemented bit, so the declared width would overstate every projection
-    (DEC-VOCAB-66-RESHAPE-IMPL-001 merge reconcile)."""
-    assert SWEPT_CONDITIONS == IMPLEMENTED_MASK.bit_count() == 64
+    """The estimator sizes ``C(n, k)`` off the IMPLEMENTED count — ALL 74 on
+    the retention layout (the VWAP pair 52/53 rejoined per
+    DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206; the express train grew
+    the declared width to 74): ``conditions=None`` resolves to
+    ``default_condition_bits()`` == every implemented bit."""
+    assert SWEPT_CONDITIONS == IMPLEMENTED_MASK.bit_count() == 74
 
 
 def test_count_true_trials_matches_hand_computed_combinatorics() -> None:
-    # C(64,1) + C(64,2) = 64 + 2016 = 2080 (the IMPLEMENTED 64-bit set).
-    assert count_true_trials([1, 2], other_axes_product=1) == 2080
+    # C(74,1) + C(74,2) = 74 + 2701 = 2775 (the IMPLEMENTED 74-bit set —
+    # the retention layout, DEC-VOCAB-VWAP-RETAIN-001 #2206).
+    assert count_true_trials([1, 2], other_axes_product=1) == 2775
 
 
 def test_count_true_trials_scales_with_other_axes() -> None:
@@ -67,21 +68,38 @@ def test_count_true_trials_custom_n() -> None:
     assert count_true_trials([1], other_axes_product=1, n=5) == 5
 
 
-def test_effective_condition_count_index_segment_tombstoned_bits_subtract_zero() -> None:
-    """The dead-bit annotation subtracts only dead bits STILL IMPLEMENTED.
-
-    On the 66-declared layout the VWAP bits 52/53 are TOMBSTONED (outside
-    ``IMPLEMENTED_MASK`` — never swept on ANY segment), so the INDEX-segment
-    subtraction is zero: effective == nominal. This pin also kills the
-    drop-the-intersection mutant (a bare ``len(VWAP_DEAD_BITS)`` subtraction
-    would report 60 — double-counting bits the sweep never enumerates)."""
-    assert (
-        VWAP_DEAD_BITS
-        & frozenset(i for i in range(IMPLEMENTED_MASK.bit_length()) if IMPLEMENTED_MASK >> i & 1)
-        == frozenset()
-    )
+def test_effective_condition_count_index_segment_vwap_dead_bits_subtract_two() -> None:
+    """The gap-hunt-#8 INDEX-segment dead-bit annotation SELF-REVIVED at the
+    retention (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206): the VWAP bits
+    52/53 are IMPLEMENTED again, yet structurally dead on zero-volume INDEX
+    spot candles — so the INDEX subtraction is TWO (the pre-wipe direction:
+    effective == nominal - 2; flag-and-run, the vocabulary itself is never
+    reduced)."""
+    assert VWAP_DEAD_BITS & frozenset(
+        i for i in range(IMPLEMENTED_MASK.bit_length()) if IMPLEMENTED_MASK >> i & 1
+    ) == frozenset({52, 53})
     nominal, effective = effective_condition_count(segment="INDEX")
-    assert (nominal, effective) == (SWEPT_CONDITIONS, SWEPT_CONDITIONS)
+    assert (nominal, effective) == (SWEPT_CONDITIONS, SWEPT_CONDITIONS - 2)
+
+
+def test_effective_condition_count_subtracts_only_implemented_dead_bits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teeth for the ∩-IMPLEMENTED law: on the 74/74 retention layout both
+    dead bits are implemented, so a drop-the-intersection mutant (bare
+    ``len(VWAP_DEAD_BITS)``) is observationally EQUIVALENT — simulate a
+    layout with bit 52 unimplemented, where the subtraction must read ONE,
+    never the bare two (DEC-VOCAB-VWAP-RETAIN-001 #2206 teeth preservation).
+    """
+    from brutex.engine import sweep_estimator
+
+    monkeypatch.setattr(
+        sweep_estimator,
+        "_IMPLEMENTED_BIT_SET",
+        sweep_estimator._IMPLEMENTED_BIT_SET - {52},
+    )
+    nominal, effective = effective_condition_count(segment="INDEX", n=10)
+    assert (nominal, effective) == (10, 9)
 
 
 def test_effective_condition_count_index_segment_is_case_insensitive() -> None:
@@ -94,9 +112,9 @@ def test_effective_condition_count_non_index_segment_is_unreduced() -> None:
 
 
 def test_effective_condition_count_custom_n() -> None:
-    # The subtraction is the ∩-implemented dead-bit count (currently 0),
-    # regardless of the caller's nominal n.
-    assert effective_condition_count(segment="INDEX", n=10) == (10, 10)
+    # The subtraction is the ∩-implemented dead-bit count — 2 on the 74/74
+    # retention layout (#2206) — regardless of the caller's nominal n.
+    assert effective_condition_count(segment="INDEX", n=10) == (10, 8)
 
 
 def test_vwap_dead_bits_are_52_and_53() -> None:
@@ -111,13 +129,15 @@ def test_axes_product_no_axes_is_one() -> None:
     assert axes_product() == 1
 
 
-@pytest.mark.parametrize("segment", ["INDEX", "FNO"])
-def test_estimate_sweep_cost_annotates_condition_counts(segment: str) -> None:
-    # Tombstoned VWAP bits are outside the implemented set, so the annotation
-    # reads effective == nominal on EVERY segment on this layout (the
-    # mechanism self-revives if a volume-dependent implemented bit lands —
-    # the lt-arm is driven via a monkeypatched annotation in the preflight
-    # suite, which owns the clamp-row display law).
+@pytest.mark.parametrize(
+    ("segment", "expected_delta"),
+    [("INDEX", 2), ("FNO", 0)],
+)
+def test_estimate_sweep_cost_annotates_condition_counts(segment: str, expected_delta: int) -> None:
+    # The retention (DEC-VOCAB-VWAP-RETAIN-001 #2206) self-revived the
+    # gap-hunt-#8 annotation: the LIVE-but-volumeless VWAP pair subtracts 2
+    # on the zero-volume INDEX segment (flag-and-run — never excluded from
+    # the swept vocabulary); every other segment reads effective == nominal.
     estimate = estimate_sweep_cost(
         k_values=[1, 2],
         other_axes_product=3,
@@ -126,7 +146,7 @@ def test_estimate_sweep_cost_annotates_condition_counts(segment: str) -> None:
         segment=segment,
         calibration=UNCALIBRATED,
     )
-    assert estimate.effective_condition_count == estimate.nominal_condition_count
+    assert estimate.effective_condition_count == estimate.nominal_condition_count - expected_delta
     assert estimate.nominal_condition_count == SWEPT_CONDITIONS
 
 

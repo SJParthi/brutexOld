@@ -216,11 +216,13 @@ def test_conditions_decoded_from_mask(tmp_path: Path) -> None:
     assert by_mask[0b11] != ""  # two condition names, joined
 
 
-def test_pre_reshape_mask_conditions_read_retired(tmp_path: Path) -> None:
-    """TOMB-01 — a persisted pre-reshape mask carrying the tombstoned VWAP bit
-    52 renders "close_above_vwap (retired)" on /results, never the plain name
-    (the dead condition must not present as live); a live-bit sibling row is
-    suffix-free."""
+def test_retained_vwap_mask_conditions_read_plain(tmp_path: Path) -> None:
+    """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): bit 52 is a LIVE
+    member again — a persisted mask carrying it renders the PLAIN name on
+    /results, and NO "(retired)" suffix renders anywhere (``RETIRED_MASK ==
+    0`` on the 74/74 layout). Teeth for the retired-render class live at the
+    ONE display authority (the monkeypatched retired-arm pin in
+    ``test_vocabulary_describe.py``)."""
     _write_store(
         tmp_path,
         instrument="NIFTY",
@@ -230,8 +232,8 @@ def test_pre_reshape_mask_conditions_read_retired(tmp_path: Path) -> None:
     )
     board = build_sweep_leaderboard(tmp_path)
     by_mask = {r["mask_bits"]: r["conditions"] for r in board.rows}
-    assert "close_above_vwap (retired)" in by_mask[(1 << 52) | 1]
-    assert "(retired)" not in by_mask[0b11]
+    assert "close_above_vwap" in by_mask[(1 << 52) | 1]
+    assert all("(retired)" not in r["conditions"] for r in board.rows)
 
 
 def test_mask_hex_field_is_lossless(tmp_path: Path) -> None:

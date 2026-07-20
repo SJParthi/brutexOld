@@ -784,6 +784,9 @@ class TestCanonicalTradeParams:
             "proximity_bps": [5, 10, 25],
             "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
+            # DEC-FILL-WORST-CASE-ONLY-001: the permanent unconditional key —
+            # part of the exact layout, not an express addition.
+            "fill_mode": "worst_case",
         }
 
     def test_swing_band_non_default_adds_exactly_one_key(self) -> None:

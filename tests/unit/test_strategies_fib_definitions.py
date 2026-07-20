@@ -124,14 +124,26 @@ def test_definition_accepts_known_condition_scope() -> None:
     assert d.condition_scope == frozenset({"near_fib_50", "ema20_above_ema200"})
 
 
-def test_definition_rejects_retired_condition_scope() -> None:
-    """A KNOWN-but-RETIRED name (VWAP tombstone bit 52) is refused at construction.
+def test_definition_accepts_live_vwap_scope() -> None:
+    """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): the bits-52/53 wipe is
+    REVERSED — ``close_above_vwap`` is a LIVE member of ``IMPLEMENTED_MASK``
+    again, so a scope naming it constructs (the wipe-era RETIRED refusal pin
+    is consciously flipped; the refusal ARM keeps its teeth in the
+    monkeypatched future-tombstone test below)."""
+    d = _defn(condition_scope=frozenset({"close_above_vwap", "near_fib_50"}))
+    assert d.candidate_mask == (1 << NAME_TO_BIT["close_above_vwap"]) | (1 << BIT_NEAR_FIB_50)
+    assert d.candidate_mask & ~IMPLEMENTED_MASK == 0
 
-    Pre-fix, ``close_above_vwap`` passed the NAME_TO_BIT membership check and
-    ``candidate_mask`` then violated its own "always a subset of
-    IMPLEMENTED_MASK" contract. The refusal names the entry, its bit and its
-    RETIRED status (the ``parse_condition_ids`` wording family).
-    """
+
+def test_definition_refuses_a_retired_scope_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Teeth preserved for the RETIRED wording arm (``RETIRED_MASK == 0`` on
+    the 74/74 retention layout — DEC-VOCAB-VWAP-RETAIN-001 #2206): simulate a
+    future manifest where bit 52 is tombstoned again, so the exact refusal
+    wording + branch stay covered (the layout-only monkeypatch precedent
+    below). The refusal names the entry, its bit and its RETIRED status (the
+    ``parse_condition_ids`` wording family)."""
+    monkeypatch.setattr(F, "IMPLEMENTED_MASK", IMPLEMENTED_MASK & ~(1 << 52))
+    monkeypatch.setattr(F, "RETIRED_MASK", 1 << 52)
     with pytest.raises(ValueError, match=r"'close_above_vwap' \(bit 52\) is RETIRED"):
         _defn(condition_scope=frozenset({"close_above_vwap", "near_fib_50"}))
 

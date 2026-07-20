@@ -2,13 +2,15 @@
 """Verify the `trading_core` PyO3 binding is bit-identical to the Python vocab.
 
 Phase 2a of `DEC-SHARED-CORE-001` (#441): the Rust crate's golden test already
-proves the *Rust* `evaluate_atoms` reproduces the 400-case oracle bit-for-bit.
+proves the *Rust* `evaluate_atoms` reproduces the 408-case oracle (400 seeded +
+8 deterministic express cases, DEC-FIB-TEMPLATE-EXPRESS-001) bit-for-bit.
 This script proves the **Python-callable binding** (`trading_core.evaluate_from_raw`,
-built by maturin) reproduces the same frozen `u64`s — i.e. BruteX can call into
-the Rust crate and get an identical result. It is run in CI's `rust-trading-core`
-job after `maturin build` + `pip install`, isolated from the main Python suite.
+built by maturin) reproduces the same frozen `u128` masks — i.e. BruteX can call
+into the Rust crate and get an identical result. It is run in CI's
+`rust-trading-core` job after `maturin build` + `pip install`, isolated from the
+main Python suite.
 
-Exit 0 = every one of the 400 cases matches; exit 1 = a divergence (printed);
+Exit 0 = every one of the 408 cases matches; exit 1 = a divergence (printed);
 exit 2 = the wheel is not importable (build/install problem).
 """
 
@@ -32,7 +34,7 @@ def _tod_seconds(ts: str) -> int:
 
 
 def main() -> int:
-    """Run the 400-case Python↔Rust parity check."""
+    """Run the 408-case Python↔Rust parity check."""
     try:
         import trading_core  # optional native wheel — imported at runtime, may be absent
     except ImportError as exc:  # pragma: no cover - exercised only without the wheel

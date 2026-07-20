@@ -75,8 +75,12 @@ def _pivot_levels_12(pv: PivotLevels) -> list[int]:
     ]
 
 
-def _fib_levels_15(fb: FibLevels) -> list[int]:
-    """The 15-element ``fib_levels`` list ``evaluate_with_levels`` expects."""
+def _fib_levels_19(fb: FibLevels) -> list[int]:
+    """The 19-element ``fib_levels`` list ``evaluate_with_levels`` expects.
+
+    DEC-FIB-TEMPLATE-EXPRESS-001 grew the evaluator fib ABI 15 -> 19: the
+    bull23/bull78/up424/dn424 slots ride appended-last for bits 69-71.
+    """
     return [
         fb.retrace_level_at_pdh_paisa,
         fb.retrace_23_paisa,
@@ -93,6 +97,10 @@ def _fib_levels_15(fb: FibLevels) -> list[int]:
         fb.ext_down_162_paisa,
         fb.ext_down_200_paisa,
         fb.ext_down_262_paisa,
+        fb.retrace_bull_23_paisa,
+        fb.retrace_bull_78_paisa,
+        fb.ext_up_424_paisa,
+        fb.ext_down_424_paisa,
     ]
 
 
@@ -106,6 +114,10 @@ def _with_levels(case: dict[str, Any], pivot_levels: list[int], fib_levels: list
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
+        # RETAINED-ACTIVE vwap slot at its pre-wipe position
+        # (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206) — express cases
+        # (ids >= 400) are keyless, defaulting to None.
+        case.get("vwap_paisa"),
         pivot_levels,
         fib_levels,
         case["day_high_paisa"],
@@ -120,11 +132,16 @@ def _with_levels(case: dict[str, Any], pivot_levels: list[int], fib_levels: list
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
-        case["supertrend_x2_paisa"],
+        case.get("supertrend_x2_paisa"),
         # Group-15 gap-midpoint (DEC-GAP-MIDPOINT-CONDITIONS-001) —
-        # appended-last, carried VERBATIM like the VWAP.
-        case["gap_mid_paisa"],
-        case["proximity"]["gap_mid_bps"],
+        # appended-last, carried VERBATIM like the VWAP; the express cases
+        # (ids >= 400) omit the keys, so readers default (None / 10).
+        case.get("gap_mid_paisa"),
+        case["proximity"].get("gap_mid_bps", 10),
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — appended-last swing pair + band.
+        case.get("last_swing_high_paisa"),
+        case.get("last_swing_low_paisa"),
+        case["proximity"].get("swing_bps", 10),
     )
     return result
 
@@ -141,7 +158,7 @@ class TestProductionPathParity:
                 day, case["prev_pdh_paisa"], case["prev_pdl_paisa"], case["prev_pdc_paisa"]
             )
             fb = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
-            got = _with_levels(case, _pivot_levels_12(pv), _fib_levels_15(fb))
+            got = _with_levels(case, _pivot_levels_12(pv), _fib_levels_19(fb))
             expected = int(case["expected_mask"], 16)
             if got != expected:
                 mismatches.append(f"case {case['id']}: expected {expected:#034x}, got {got:#034x}")
@@ -156,7 +173,7 @@ class TestProductionPathParity:
                 day, case["prev_pdh_paisa"], case["prev_pdl_paisa"], case["prev_pdc_paisa"]
             )
             fb = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
-            with_levels = _with_levels(case, _pivot_levels_12(pv), _fib_levels_15(fb))
+            with_levels = _with_levels(case, _pivot_levels_12(pv), _fib_levels_19(fb))
             from_raw: int = trading_core.evaluate_from_raw(
                 _tod_seconds(case["timestamp_ist"]),
                 case["open_paisa"],
@@ -165,6 +182,8 @@ class TestProductionPathParity:
                 case["close_paisa"],
                 case["ema20_paisa"],
                 case["ema200_paisa"],
+                # The retained vwap slot (DEC-VOCAB-VWAP-RETAIN-001 #2206).
+                case.get("vwap_paisa"),
                 case["prev_pdh_paisa"],
                 case["prev_pdl_paisa"],
                 case["prev_pdc_paisa"],
@@ -180,10 +199,15 @@ class TestProductionPathParity:
                 case["market_structure"]["bos_bearish"],
                 case["market_structure"]["choch_bullish"],
                 case["market_structure"]["choch_bearish"],
-                case["supertrend_x2_paisa"],
-                # Group-15 gap-midpoint — appended-last, carried verbatim.
-                case["gap_mid_paisa"],
-                case["proximity"]["gap_mid_bps"],
+                case.get("supertrend_x2_paisa"),
+                # Group-15 gap-midpoint — appended-last, carried verbatim
+                # (express cases are keyless: readers default None / 10).
+                case.get("gap_mid_paisa"),
+                case["proximity"].get("gap_mid_bps", 10),
+                # DEC-FIB-TEMPLATE-EXPRESS-001 — the swing pair + band.
+                case.get("last_swing_high_paisa"),
+                case.get("last_swing_low_paisa"),
+                case["proximity"].get("swing_bps", 10),
             )
             if with_levels != from_raw:
                 mismatches.append(
@@ -214,7 +238,8 @@ class TestProductionPathParity:
             24_250_00,
             23_750_00,
         ]
-        fib_levels = [24_050_00] * 15
+        # 19 fib slots since the express ABI growth (FIB_LEVELS_LEN = 19).
+        fib_levels = [24_050_00] * 19
         mask: int = trading_core.evaluate_with_levels(
             10 * 3600 + 30 * 60,  # 10:30 IST
             24_000_00,
@@ -223,6 +248,7 @@ class TestProductionPathParity:
             24_005_00,
             None,
             None,
+            None,  # vwap_paisa — the retained slot (#2206); None = abstain
             pivot_levels,
             fib_levels,
             24_010_00,
@@ -326,11 +352,11 @@ class TestFfiOverflowGuards:
     (SIGABRT) or returning a poisoning non-finite value.
 
     These exercise the PRODUCTION Rust entry points BruteX's ``stage1a`` engine
-    drives directly (``trading_core.compute_ema``; the former ``VwapState``
-    guard trio died with the pyclass at crate 0.4.0 — the bits-52/53 VWAP
-    tombstone), NOT the pure-Python shims (which use unbounded ``int``
-    arithmetic and never overflow), so they reproduce the exact
-    adversarial-sweep findings.
+    drives directly (``trading_core.compute_ema``; the ``VwapState`` pyclass
+    is RETAINED-LIVE again per DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206)
+    and carries its own in-crate guards), NOT the pure-Python shims (which
+    use unbounded ``int`` arithmetic and never overflow), so they reproduce
+    the exact adversarial-sweep findings.
     """
 
     def test_compute_ema_finite_but_huge_seed_raises_not_inf(self) -> None:

@@ -977,8 +977,15 @@ def hit_memo_cell_key(
     DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752): the memo caches
     superset-hit counts, which are a pure function of the tuple's ``bar_bits``
     matrix — so the key is EXACTLY the resident-kernel cache's determinant set
-    (``instrument``, ``tf.label``, flattened proximity bps, ``prior_n``,
-    ``fib_anchor``, ``roll_schedule``, the D12 ``apply_1day_mask`` flag).
+    (``instrument``, ``tf.label``, the FULL flattened proximity bps —
+    pivot / pdh_pdl / fib / gap_mid / swing — ``prior_n``, ``fib_anchor``,
+    the swept ``vwap_source`` / ``ema_source`` price-source cell,
+    ``roll_schedule``, the D12 ``apply_1day_mask`` flag). The train refuter
+    round (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206) caught the memo
+    UNDER-keying vs :class:`~brutex.engine.sweep_kernel.ResidentKernelCache`
+    (3-of-5 proximity bps, no price sources) — two cells differing only in a
+    swing/gap band or a price source must NEVER share hit counts (bits
+    72/73 / 66-68 / 52-53 / 0-5 evaluate differently).
     ``direction`` / ``sl`` / ``tp`` / ``k`` are EXCLUDED so the memo survives a
     whole cell's k-ladder (the extinction walk) — the point of the memo. The
     ONE key builder is shared by the sequential drivers AND the parallel
@@ -1005,6 +1012,8 @@ def hit_memo_cell_key(
             tuple_.proximity.pivot_proximity_bps,
             tuple_.proximity.pdh_pdl_proximity_bps,
             tuple_.proximity.fib_proximity_bps,
+            tuple_.proximity.gap_mid_proximity_bps,
+            tuple_.proximity.swing_proximity_bps,
         )
     )
     return (
@@ -1013,6 +1022,8 @@ def hit_memo_cell_key(
         proximity_bps,
         grid.prior_n,
         tuple_.fib_anchor.value,
+        tuple_.price_source.vwap_source.value,
+        tuple_.price_source.ema_source.value,
         roll_schedule,
         apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
     )

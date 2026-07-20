@@ -8,7 +8,7 @@ ruling (DEC-VOCAB-VWAP-RETAIN-001 — the vocab-66 wipe's tombstone reversed);
 the SuperTrend bits 64/65 (the vocab-66 SuperTrend flip), the session-edge
 gap-midpoint bits 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001) and the
 Fibonacci-Extended / Swing-Proximity bits 69-73 (DEC-FIB-TEMPLATE-EXPRESS-001)
-are all IMPLEMENTED, crate 0.5.0), with headroom to bit 127
+are all IMPLEMENTED, crate 0.6.0), with headroom to bit 127
 (DEC-VOCAB-U128-CODEGEN-001).
 
 Per `docs/TRACK1_VOCABULARY.md` definitions. As of `DEC-SHARED-CORE-001`
@@ -141,10 +141,13 @@ class ProximityParams:
     fib_proximity_bps: int = 10
     # Group-15 `near_gap_mid` tolerance (DEC-GAP-MIDPOINT-CONDITIONS-001),
     # matching the sibling defaults. APPENDED LAST; deliberately NOT part of the
-    # frozen v1 `canonical_bytes` spec encode — a swept non-default value rides
-    # run identity via the default-omit `canonical_trade_params` key (the
-    # DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override-1 pattern; wiring lands with the
-    # Stage-1A state, not this field).
+    # frozen v1 `canonical_bytes` spec encode. HONEST (the #1901 envelope,
+    # re-affirmed at the DEC-VOCAB-VWAP-RETAIN-001 refuter round): this knob is
+    # DORMANT — production grids sweep `proximities=[None]` and
+    # `canonical_trade_params` emits NO gap key today, so its default-omit
+    # run-identity carriage (the DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override-1 /
+    # `swing_params_fragment` pattern) is the MANDATORY named follow-up before
+    # any sweep surface exposes a non-default value.
     gap_mid_proximity_bps: int = 10
     #: Swing-proximity band for the near-swing bits 72/73
     #: (DEC-FIB-TEMPLATE-EXPRESS-001) — appended-last with the sibling default
@@ -267,7 +270,7 @@ def evaluate_atoms(
     proximity: ProximityParams,
     prior_history: PriorBarHistory,
 ) -> int:
-    """Evaluate the 67 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
+    """Evaluate the 74 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
 
     Marshals the pre-built indicator levels into the flat primitive ABI and
     delegates to `trading_core.evaluate_with_levels`. The pivot/fib levels are

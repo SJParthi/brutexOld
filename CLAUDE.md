@@ -36,8 +36,10 @@ six member ledger rows renumbered into the census-CONFIRMED band #2200–#2249
 #1935→#2205 — chains in-entry per DEC-LEDGER-RENUMBER-001); TickVault
 lockstep REQUIRED at adoption per DEC-SHARED-CORE-001 (pin >= 0.6.0;
 appended-last FFI growth ST → gap → swing with the vwap arg back at its
-historical slot; per-member obligations in #2200–#2206); fixture/goldens
-regen = the train's NEXT (Regen) phase. ENGINE VOCABULARY GROWN 60→74 by
+historical slot; per-member obligations in #2200–#2206); the fixture/goldens
+regen LANDED (the ONE golden transition — 408 cases, 74/74/31) and the
+wipe-era pin-class test sweep is COMPLETED by the train's polish commit
+(retention flips + the restored VWAP batteries). ENGINE VOCABULARY GROWN 60→74 by
 operator consent (#2207) — NIFTY/BANKNIFTY/SENSEX spot scope +
 rate/lake/schema untouched. This header carries pointers, never the story;
 each member's full record lives in its §1 Active-branch blurb + its
@@ -4035,11 +4037,15 @@ hostile-review pass._
   back at its historical slot (retention); native-side obligations
   (SupertrendState wiring, the session-edge X1/X2 capture re-implementation,
   ProximityParams/IndicatorSnapshot growth, fib list 15→19) live in the
-  member entries #2200–#2206. NAMED RESIDUALS for the Regen/CI phase: the
-  vocab/truth-table/stage1a-batch fixtures still hold pre-retention masks
-  (vocab blob 245b292e2 — regen wheel-gated), the twin-state/stage1a-batch
-  generator restorations, and the wheel-dependent pin-class test sweep (the
-  retention commit body carries the audit). ENGINE VOCABULARY GROWN 60→74
+  member entries #2200–#2206. REGEN/POLISH STATUS (was "named residuals",
+  now DONE): the vocab/truth-table/stage1a-batch fixtures were regenerated
+  at the ONE golden-transition commit (408 cases, 74/74/31 — retention
+  masks), and the wheel-dependent wipe-era pin-class test sweep is
+  COMPLETED by the train's polish commit (retention flips with
+  teeth-preserved refusal/tombstone arms via monkeypatched masks + the
+  restored pre-wipe VWAP batteries: the stage1a fire/reset battery, the
+  `TestVwapNegativeTypicalRejected` FFI guards and the VWAP-update O(1)
+  bench — all green against crate 0.6.0). ENGINE VOCABULARY GROWN 60→74
   by operator consent (#2207) — NIFTY/BANKNIFTY/SENSEX spot-only scope,
   rate caps, lake/schema ALL untouched; this blurb carries pointers, never
   round narration — each member's full record lives in its own Earlier

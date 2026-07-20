@@ -682,14 +682,15 @@ def test_free_disk_not_blocked_is_silent(tmp_path: Path) -> None:
 # ── VWAP dead-bits flag-and-run (gap-hunt #8) ───────────────────────────────
 
 
-def test_vwap_dead_bit_clamp_absent_for_index_segment_on_tombstoned_layout(
+def test_vwap_dead_bit_clamp_fires_for_index_segment_on_retention_layout(
     tmp_path: Path,
 ) -> None:
-    """66-declared layout: VWAP bits 52/53 are TOMBSTONED (outside
-    ``IMPLEMENTED_MASK`` — never swept), so the INDEX-segment dead-bit
-    annotation subtracts zero and the condition_count clamp row must NOT
-    fire (DEC-VOCAB-66-RESHAPE-IMPL-001 merge reconcile; the clamp arm
-    itself stays covered by the monkeypatched revival test below)."""
+    """74/74 retention layout (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md
+    #2206): the VWAP bits 52/53 are IMPLEMENTED again yet structurally dead
+    on zero-volume INDEX spot candles, so the gap-hunt-#8 annotation
+    SELF-REVIVED — the condition_count clamp row FIRES with effective ==
+    nominal - 2 (flag-and-run; the swept vocabulary itself is never
+    reduced). The absent arm keeps its teeth in the FNO sibling below."""
     _touch_partition(
         tmp_path,
         exchange="NSE",
@@ -702,8 +703,11 @@ def test_vwap_dead_bit_clamp_absent_for_index_segment_on_tombstoned_layout(
     verdict = run_oneclick_preflight(
         **_base_kwargs(lake_root=tmp_path, results_root=tmp_path / "sweeps")
     )
-    assert not any(c.field == "condition_count" for c in verdict.clamps)
-    assert verdict.estimator.effective_condition_count == verdict.estimator.nominal_condition_count
+    rows = [c for c in verdict.clamps if c.field == "condition_count"]
+    assert len(rows) == 1
+    assert verdict.estimator.nominal_condition_count == 74
+    assert verdict.estimator.effective_condition_count == 72
+    assert rows[0].applied == "72 effective (flag-and-run)"
 
 
 def test_vwap_dead_bit_clamp_fires_when_a_dead_bit_is_implemented(

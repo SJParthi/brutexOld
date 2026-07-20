@@ -201,19 +201,33 @@ class TestStrategySpecValidation:
     @pytest.mark.parametrize(
         "bit",
         [
-            pytest.param(52, id="bit52-retired-vwap-above"),
-            pytest.param(53, id="bit53-retired-vwap-below"),
+            pytest.param(52, id="bit52-live-vwap-above"),
+            pytest.param(53, id="bit53-live-vwap-below"),
         ],
     )
-    def test_retired_bits_rejected(self, bit: int) -> None:
-        """The vocab-66 refusal pins (the Rust twin's Python mirror).
+    def test_retained_vwap_bits_accepted(self, bit: int) -> None:
+        """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): the bits-52/53 wipe
+        is REVERSED — the VWAP-position pair is LIVE in ``IMPLEMENTED_MASK``
+        again, so a mask requiring either constructs — alone AND mixed with
+        valid bits (the wipe-era refusal pin is consciously flipped)."""
+        assert (IMPLEMENTED_MASK >> bit) & 1  # genuinely implemented again
+        assert make_spec(condition_mask=1 << bit).condition_mask == 1 << bit
+        mixed = (1 << bit) | 0x1F
+        assert make_spec(condition_mask=mixed).condition_mask == mixed
 
-        The RETIRED VWAP tombstones (52/53) are outside ``IMPLEMENTED_MASK``
-        — a mask requiring either must refuse at construction, alone AND
-        mixed with valid bits. (The SuperTrend bits 64/65 left this refusal
-        set at the vocab-66 implemented-flip — see
-        :meth:`test_live_supertrend_bits_accepted`.)
-        """
+    @pytest.mark.parametrize(
+        "bit",
+        [
+            pytest.param(74, id="bit74-first-out-of-range"),
+            pytest.param(75, id="bit75-out-of-range"),
+        ],
+    )
+    def test_out_of_range_bits_rejected(self, bit: int) -> None:
+        """Teeth preserved for the refusal class (DEC-VOCAB-VWAP-RETAIN-001
+        #2206 moved 52/53 back into ``IMPLEMENTED_MASK``): the first bits
+        BEYOND the 74/74 vocabulary must refuse at construction, alone AND
+        mixed with valid bits — the exact-boundary refusal probe the retired
+        pair used to carry."""
         assert not (IMPLEMENTED_MASK >> bit) & 1  # genuinely unimplemented
         with pytest.raises(StrategyError, match="unimplemented/reserved"):
             make_spec(condition_mask=1 << bit)
@@ -628,9 +642,10 @@ class TestSpecIdentityDedupChain:
             prior_n=0,
             symbol_label="NSE-NIFTY",
         )
-        # One REAL evaluate_spec call (the 26-arg pre-built-levels ABI —
-        # the retired vwap arg is gone at crate 0.4.0; the swing pair + band
-        # appended last at 0.4.1, DEC-FIB-TEMPLATE-EXPRESS-001): the
+        # One REAL evaluate_spec call (the retention pre-built-levels ABI —
+        # the vwap arg is BACK at its pre-wipe slot per
+        # DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206; the swing pair +
+        # band ride appended-last, DEC-FIB-TEMPLATE-EXPRESS-001): the
         # empty mask is a subset of every bar's bits, so it always fires.
         bar_bits, fires, direction_u8 = trading_core.evaluate_spec(
             f"{spec.condition_mask:032x}",
@@ -642,6 +657,7 @@ class TestSpecIdentityDedupChain:
             105_00,  # close
             None,  # ema20
             None,  # ema200
+            None,  # vwap_paisa — the retained slot (#2206); None = abstain
             [100_00] * 12,  # pivot levels (p,r1..r3,s1..s3,pdh,pdl,pdc,r5,s5)
             [100_00] * 19,  # fib levels (15 + the express bull23/bull78/424s)
             110_00,  # day_high
@@ -656,9 +672,9 @@ class TestSpecIdentityDedupChain:
             False,
             False,
             False,
-            None,  # last_swing_high_paisa (no confirmed swing)
-            None,  # last_swing_low_paisa
-            10,  # swing_proximity_bps — the spec path's production default
+            last_swing_high_paisa=None,  # no confirmed swing
+            last_swing_low_paisa=None,
+            swing_bps=10,  # the spec path's production default
         )
         assert fires is True
         assert direction_u8 == 0
