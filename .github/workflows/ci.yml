@@ -324,7 +324,7 @@ jobs:
     name: Unit test shard ${{ matrix.shard }} (coverage data)
     runs-on: ubuntu-24.04
     needs: build-wheels
-    timeout-minutes: 75
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
