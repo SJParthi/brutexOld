@@ -39,7 +39,7 @@ from datetime import date
 from brutex.indicators.fib_levels import FibDirection, FibLevels
 from brutex.indicators.pivots import PivotLevels
 
-from tests.bench._o1_tiers import cache_tier_ceiling
+from tests.bench._o1_tiers import cache_tier_ceiling, ratio_ceiling
 
 #: Number of trading days of precomputed levels for the small vs big tiers.
 N_SMALL = 1_000
@@ -176,7 +176,58 @@ def test_fib_value_lookup_is_o1_in_days_loaded() -> None:
     )
 
 
-# NOTE (the 60→66 vocab reshape): the VWAP-update O(1) bench died with the
-# `VwapState` pyclass (bits 52/53 retired; the class was deleted from the
-# crate at 0.4.0) — the pivot/fib lookup benches above remain this file's
-# teeth.
+# RESTORED (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206): the VWAP-update
+# O(1) bench died with the `VwapState` pyclass at the vocab-66 wipe (crate
+# 0.4.0) and comes back verbatim now that the retention revived the class at
+# crate 0.6.0 (bits 52/53 LIVE again).
+def _time_vwap_update(prefilled_bars: int) -> float:
+    """Mean ns per ``trading_core.VwapState.update`` AFTER the session already
+    accumulated ``prefilled_bars`` bars — proving the running-sum cost is O(1)
+    in the number of bars already seen (NOT a re-sum of session history, PR-2
+    risk #2). Times the PRODUCTION Rust pyclass ``stage1a`` drives — the single
+    VWAP source since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 deleted the
+    hand-synced Python twin this bench previously timed."""
+    from datetime import date as _date
+    from typing import Any
+
+    import trading_core
+
+    state: Any = trading_core.VwapState()
+    day_ordinal = _date(2024, 1, 2).toordinal()
+    base_tod = 9 * 3600 + 16 * 60
+    # Prefill the session so cum_pv/cum_vol carry `prefilled_bars` of history.
+    for k in range(prefilled_bars):
+        state.update(
+            2_000_000 + (k % 1000),
+            100 + (k % 50),
+            False,  # is_pre_open
+            1,  # session_key
+            day_ordinal,
+            base_tod + k,
+        )
+    iters = 200_000
+    tod = base_tod + prefilled_bars
+    for k in range(2_000):  # warm up
+        state.update(2_000_000, 100, False, 1, day_ordinal, tod + k)
+    t0 = time.perf_counter_ns()
+    for k in range(iters):
+        state.update(2_000_000, 100, False, 1, day_ordinal, tod + 2_000 + k)
+    t1 = time.perf_counter_ns()
+    return (t1 - t0) / iters
+
+
+def test_vwap_update_is_o1_in_session_bars() -> None:
+    """VWAP ``update`` latency with a 100K-bar-deep session must hold the ceiling
+    vs a 1K-bar-deep one — the running cum(pv)/cum(vol) is O(1) per bar (two adds
+    + one divide, in Rust), never a re-sum of the session (PR-2 —
+    DEC-NIFTY-INDICATORS-001).
+    """
+    t_small = _time_vwap_update(N_SMALL)
+    t_big = _time_vwap_update(N_BIG)
+    ratio = t_big / max(t_small, 1.0)
+
+    assert ratio < ratio_ceiling(5.0), (
+        f"VWAP update latency ratio {ratio:.2f}× ({N_BIG} vs {N_SMALL} session "
+        f"bars) exceeds the CI ceiling — VWAP may have regressed away from O(1) "
+        f"per bar. t_small={t_small:.1f}ns, t_big={t_big:.1f}ns."
+    )

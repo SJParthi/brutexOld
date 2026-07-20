@@ -11,10 +11,11 @@ SET on at least one produced bar mask — plus a NEGATIVE (a flat stream sets no
 them, proving real logic not always-on) and the worst-case edge battery (zero-volume,
 degenerate bar, look-ahead, idempotence, O(1) space).
 
-The VWAP half of the original six-bit fire test was RETIRED with the bits-52/53
-tombstone (the 60→66 reshape — the ``VwapState`` pyclass was deleted from the
-crate at 0.4.0); this module now ALSO pins the tombstones POSITIVELY: bits
-52/53 are 0 on every produced mask of every stream here.
+The VWAP half of the original six-bit fire test is BACK: the bits-52/53 wipe
+was REVERSED by DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206 — the
+``VwapState`` pyclass is live again), so this module pins the pair LIVE both
+ways: bits 52/53 FIRE on volume-bearing input and ABSTAIN (both clear) on a
+volumeless session (vwap undefined — never fabricated).
 
 The per-bar BOS/CHoCH COMPUTE runs in the SHARED Rust ``trading_core`` state
 object (``trading_core.MarketStructureState``) — this test exercises that Rust
@@ -41,8 +42,9 @@ _BIT_BOS_BULL = B.BIT_BOS_BULLISH  # 56
 _BIT_BOS_BEAR = B.BIT_BOS_BEARISH  # 57
 _BIT_CHOCH_BULL = B.BIT_CHOCH_BULLISH  # 58
 _BIT_CHOCH_BEAR = B.BIT_CHOCH_BEARISH  # 59
-#: The RETIRED VWAP tombstone pair — positively pinned 0 on every mask here.
-_VWAP_TOMBSTONE_MASK = (1 << B.BIT_CLOSE_ABOVE_VWAP) | (1 << B.BIT_CLOSE_BELOW_VWAP)
+#: The RETAINED-LIVE VWAP pair (DEC-VOCAB-VWAP-RETAIN-001 #2206) — pinned to
+#: FIRE on volume-bearing feeds and ABSTAIN on volumeless ones below.
+_VWAP_BITS_MASK = (1 << B.BIT_CLOSE_ABOVE_VWAP) | (1 << B.BIT_CLOSE_BELOW_VWAP)
 
 
 def _bar(
@@ -76,9 +78,11 @@ def _bar(
 
 # A single-day (h, l, c) script engineered, with k=2 fractal market structure, to
 # print: a bearish BOS (from no trend), a bullish CHoCH (reversing the down-trend), a
-# bearish CHoCH (reversing the up-trend), then a bullish BOS. (It also crossed the
-# session VWAP both ways back when bits 52/53 were live — kept unchanged so the
-# roll/batch goldens built on it stay comparable.) The swing-confirmation lag
+# bearish CHoCH (reversing the up-trend), then a bullish BOS. It also crosses
+# the session VWAP both ways — bits 52/53 are LIVE again per
+# DEC-VOCAB-VWAP-RETAIN-001 (#2206), so the crossing is load-bearing once
+# more (kept byte-unchanged so the roll/batch goldens stay comparable). The
+# swing-confirmation lag
 # (k=2 → a swing confirms 2 bars later) is baked into the spacing; verified
 # bar-by-bar in the assertions below.
 _HLC_SCRIPT: tuple[tuple[float, float, float], ...] = (
@@ -129,8 +133,9 @@ def _run(bars: list[CandleBar]) -> list[int]:
 
 def test_all_four_structure_bits_fire_through_real_push() -> None:
     """Each of bits 56-59 is SET on >=1 bar of the real ``push`` output —
-    and the RETIRED VWAP tombstones (52/53) on NONE (the anti-illusion
-    contract, both directions)."""
+    and the RETAINED-LIVE VWAP pair (52/53) EACH fires on this
+    volume-bearing feed (DEC-VOCAB-VWAP-RETAIN-001 #2206 — the wipe-era
+    tombstone-inert pin is consciously flipped to live-fire teeth)."""
     bars = [_bar(m, h, l, c) for m, (h, l, c) in enumerate(_HLC_SCRIPT)]
     masks = _run(bars)
 
@@ -138,7 +143,10 @@ def test_all_four_structure_bits_fire_through_real_push() -> None:
     assert _fired_bits(masks, _BIT_BOS_BEAR), "bos_bearish (bit 57) never fired"
     assert _fired_bits(masks, _BIT_CHOCH_BULL), "choch_bullish (bit 58) never fired"
     assert _fired_bits(masks, _BIT_CHOCH_BEAR), "choch_bearish (bit 59) never fired"
-    assert all((m & _VWAP_TOMBSTONE_MASK) == 0 for m in masks), "a tombstone bit fired"
+    assert _fired_bits(masks, B.BIT_CLOSE_ABOVE_VWAP), "close_above_vwap (52) never fired"
+    assert _fired_bits(masks, B.BIT_CLOSE_BELOW_VWAP), "close_below_vwap (53) never fired"
+    # Strict > / < laws: never both on one bar.
+    assert all((m & _VWAP_BITS_MASK) != _VWAP_BITS_MASK for m in masks)
 
 
 def test_market_structure_directions_fire_at_expected_bars() -> None:
@@ -165,7 +173,8 @@ def test_market_structure_directions_fire_at_expected_bars() -> None:
 
 def test_cpr_position_bits_fire_on_anchor_warm_day_through_real_push() -> None:
     """Day-2 (anchor-warm) bars carry EXACTLY ONE of bits 60/61/62 — and the
-    RETIRED VWAP tombstones (52/53) fire on NO bar of either day.
+    RETAINED-LIVE VWAP pair (52/53) fires where the closes cross the running
+    session VWAP (DEC-VOCAB-VWAP-RETAIN-001 #2206).
 
     The integration-level anti-illusion twin of the unit cold-anchor test
     (``tests/unit/test_engine_stage1a.py::test_cold_anchor_day_clears_every_cpr_bit``):
@@ -200,8 +209,13 @@ def test_cpr_position_bits_fire_on_anchor_warm_day_through_real_push() -> None:
         B.BIT_BELOW_CPR_BC,
         B.BIT_INSIDE_CPR,
     ]
-    # (b) the RETIRED VWAP tombstones never fire — either day.
-    assert all((m & _VWAP_TOMBSTONE_MASK) == 0 for m in masks), "a tombstone bit fired"
+    # (b) the LIVE VWAP pair fires with the crossing closes (#2206): day-2
+    # bar 0 (close 105 > its own first-bar vwap) fires bit 52, bar 1 (close
+    # 95 below the running vwap) fires bit 53; day-1 closes sit ON the vwap
+    # (strict inequalities -> neither).
+    assert masks[3] & (1 << B.BIT_CLOSE_ABOVE_VWAP)
+    assert masks[4] & (1 << B.BIT_CLOSE_BELOW_VWAP)
+    assert all((m & _VWAP_BITS_MASK) == 0 for m in masks[: len(day1)])
 
 
 def test_supertrend_bits_fire_both_ways_and_persist_across_the_day_boundary() -> None:
@@ -276,7 +290,8 @@ def test_flat_stream_fires_none_of_the_structure_bits() -> None:
     """A perfectly flat (no swings) stream sets NONE of the four.
 
     A flat window confirms no strict local extreme, so no BOS/CHoCH can fire.
-    This is the not-always-on guarantee. (The tombstones stay 0 too.)
+    This is the not-always-on guarantee. (The LIVE VWAP pair also stays 0:
+    every close EQUALS the running vwap and the laws are strict — #2206.)
     """
     bars = [_bar(m, 100, 100, 100) for m in range(30)]
     masks = _run(bars)
@@ -288,7 +303,23 @@ def test_flat_stream_fires_none_of_the_structure_bits() -> None:
         _BIT_CHOCH_BEAR,
     ):
         assert not _fired_bits(masks, bit), f"bit {bit} fired on a flat stream"
-    assert all((m & _VWAP_TOMBSTONE_MASK) == 0 for m in masks)
+    assert all((m & _VWAP_BITS_MASK) == 0 for m in masks)
+
+
+def test_strictly_below_stream_never_sets_vwap_above_bit() -> None:
+    """A monotonically FALLING stream never sets close_above_vwap (bit 52).
+
+    RESTORED from the pre-wipe battery (DEC-VOCAB-VWAP-RETAIN-001 #2206). On
+    a falling series each close is at-or-below the cumulative VWAP, so bit 52
+    (close strictly above VWAP) must never fire — a second proof the VWAP
+    gate is a genuine comparison, not always-on. (bit 53, below, naturally
+    fires.)
+    """
+    bars = [_bar(m, 200 - m, 198 - m, 199 - m) for m in range(25)]
+    masks = _run(bars)
+
+    assert not _fired_bits(masks, B.BIT_CLOSE_ABOVE_VWAP)
+    assert _fired_bits(masks, B.BIT_CLOSE_BELOW_VWAP)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -296,22 +327,98 @@ def test_flat_stream_fires_none_of_the_structure_bits() -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def test_zero_volume_bar_is_well_defined() -> None:
-    """A zero-volume bar yields a clean integer mask (volume feeds NOTHING on
-    the spot-only engine since the VWAP retirement — the tombstones stay 0)."""
-    masks = _run([_bar(0, 110, 90, 108, volume=0)])
-    assert isinstance(masks[0], int)
-    assert not (masks[0] & _VWAP_TOMBSTONE_MASK)
+def test_zero_volume_bar_abstains_the_vwap_bits() -> None:
+    """The volumeless ABSTAIN arm (DEC-VOCAB-VWAP-RETAIN-001 #2206): a
+    zero-volume session leaves the vwap UNDEFINED, so the LIVE bits 52/53
+    stay clear — never fabricated — and the mask is a clean integer."""
+    masks = _run([_bar(m, 110, 90, 108, volume=0) for m in range(3)])
+    assert all(isinstance(m, int) for m in masks)
+    assert all((m & _VWAP_BITS_MASK) == 0 for m in masks)
+
+
+def test_first_bar_of_session_seeds_vwap_no_crash() -> None:
+    """The first bar of a session seeds VWAP from itself — no prior data, no
+    crash (RESTORED from the pre-wipe battery, #2206).
+
+    With one counted bar the session VWAP equals that bar's typical price; a
+    close above its own typical price (high-weighted bar) sets bit 52 on the
+    very first bar — proving the seed path is live, not deferred to a
+    warm-up window.
+    """
+    # high 110, low 100, close 108 → typical = (110+100+108)/3 = 106; 108 > 106.
+    masks = _run([_bar(0, 110, 100, 108)])
+    assert len(masks) == 1
+    assert masks[0] & (1 << B.BIT_CLOSE_ABOVE_VWAP)
+
+
+def test_zero_volume_bar_excluded_from_running_vwap() -> None:
+    """A zero-volume bar mid-session never biases the VWAP (it is skipped;
+    RESTORED from the pre-wipe battery, #2206).
+
+    A huge zero-volume print between two real bars must not move the VWAP —
+    the second real bar's VWAP-position bits equal what they would be without
+    the zero-volume bar.
+    """
+    real = _bar(0, 101, 99, 100, volume=100)
+    zero = _bar(1, 9_999, 9_998, 9_999, volume=0)  # huge price, zero volume
+    real2 = _bar(2, 101, 99, 100, volume=100)
+    masks_with_zero = _run([real, zero, real2])
+    masks_without = _run([real, real2])
+    # The zero-volume bar leaves the VWAP-position outcome of the trailing real
+    # bar unchanged (a price spike with no volume cannot flip close_above_vwap).
+    assert (masks_with_zero[-1] & (1 << B.BIT_CLOSE_ABOVE_VWAP)) == (
+        masks_without[-1] & (1 << B.BIT_CLOSE_ABOVE_VWAP)
+    )
+    assert (masks_with_zero[-1] & (1 << B.BIT_CLOSE_BELOW_VWAP)) == (
+        masks_without[-1] & (1 << B.BIT_CLOSE_BELOW_VWAP)
+    )
+
+
+def test_session_reset_at_new_day_does_not_leak_prior_session_vwap() -> None:
+    """VWAP resets at the 09:15 IST boundary — the prior day never leaks in
+    (RESTORED from the pre-wipe battery, #2206).
+
+    Day 1 trades very HIGH; day 2's first bar trades LOW. If the day-1 VWAP
+    leaked into day 2, day-2's first close would read BELOW the (stale high)
+    VWAP. With a correct reset, day-2's first bar seeds a fresh low VWAP from
+    itself, so its close cannot be below a leaked-high VWAP — we assert the
+    day-2 first bar's VWAP-below bit is NOT set.
+    """
+    day1 = [_bar(m, 1_010, 990, 1_000, day=2) for m in range(5)]
+    day2 = [_bar(m, 60, 40, 50, day=3) for m in range(5)]
+    masks = _run(day1 + day2)
+    first_day2 = masks[len(day1)]
+    # A leaked day-1 VWAP (~1000) would make day-2 close (50) read below-VWAP.
+    assert not (first_day2 & (1 << B.BIT_CLOSE_BELOW_VWAP)), (
+        "prior-session VWAP leaked across 09:15"
+    )
+
+
+def test_session_reset_recomputes_vwap_from_fresh_day() -> None:
+    """After the 09:15 reset the day-2 VWAP equals a standalone day-2 run
+    (RESTORED from the pre-wipe battery, #2206).
+
+    Feeding day 2 alone vs day 1 + day 2 must produce IDENTICAL VWAP-position
+    bits for every day-2 bar — the reset wipes the prior session completely.
+    """
+    day1 = [_bar(m, 1_010, 990, 1_000, day=2) for m in range(6)]
+    day2 = [_bar(m, 105 - m, 95 - m, 100 - m, day=3) for m in range(8)]
+    combined = _run(day1 + day2)[len(day1) :]
+    standalone = _run(day2)
+    assert [m & _VWAP_BITS_MASK for m in combined] == [m & _VWAP_BITS_MASK for m in standalone]
 
 
 def test_degenerate_bar_high_eq_low_eq_close_is_well_defined() -> None:
     """A bar with high == low == close produces a clean mask (no crash), and
-    the RETIRED tombstones stay 0 even on this degenerate shape."""
+    the LIVE bit 52 legitimately fires (close 150 above the running vwap
+    ~125 — DEC-VOCAB-VWAP-RETAIN-001 #2206 flipped the wipe-era
+    tombstone-inert pin; strict laws keep 53 clear)."""
     low_seed = _bar(0, 100, 100, 100)
     degenerate = _bar(1, 150, 150, 150)
     masks = _run([low_seed, degenerate])
     assert isinstance(masks[1], int)
-    assert not (masks[1] & _VWAP_TOMBSTONE_MASK)
+    assert masks[1] & (1 << B.BIT_CLOSE_ABOVE_VWAP)
+    assert not (masks[1] & (1 << B.BIT_CLOSE_BELOW_VWAP))
 
 
 def test_choppy_sequence_prints_bos_then_choch_in_order() -> None:
@@ -399,19 +506,26 @@ def _intraday_stream(draw: st.DrawFn) -> list[CandleBar]:
 
 @settings(max_examples=200, deadline=None)
 @given(bars=_intraday_stream())
-def test_property_idempotent_and_tombstones_inert(bars: list[CandleBar]) -> None:
-    """For any random single-session stream: deterministic AND tombstone-inert.
+def test_property_idempotent_and_vwap_laws_hold(bars: list[CandleBar]) -> None:
+    """For any random single-session stream: deterministic AND vwap-lawful.
 
-    Two invariants on the REAL push path:
+    Two invariants on the REAL push path (DEC-VOCAB-VWAP-RETAIN-001 #2206
+    flipped the wipe-era tombstone-inert pin to the LIVE laws):
 
     * **Idempotence** — a second fresh builder over the same bars yields the
       identical mask list (no hidden state / RNG / clock).
-    * **Tombstone inertness** — the RETIRED VWAP bits (52/53) are 0 on every
-      produced mask, whatever the volume/price shape (the 60→66 reshape).
+    * **VWAP laws, both arms** — the strict > / < laws make bits 52/53
+      mutually exclusive on every bar, and while the session's CUMULATIVE
+      volume is zero the vwap is undefined so BOTH stay clear (abstain —
+      never fabricated).
     """
     first = _run(bars)
     second = _run(bars)
     assert first == second  # idempotent / deterministic
 
-    for mask in first:
-        assert (mask & _VWAP_TOMBSTONE_MASK) == 0, "a RETIRED tombstone bit fired"
+    cum_volume = 0
+    for bar, mask in zip(bars, first, strict=True):
+        cum_volume += bar.volume
+        assert (mask & _VWAP_BITS_MASK) != _VWAP_BITS_MASK, "52 and 53 both fired"
+        if cum_volume == 0:
+            assert (mask & _VWAP_BITS_MASK) == 0, "a vwap bit fired with zero volume"

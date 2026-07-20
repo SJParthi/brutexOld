@@ -15,7 +15,7 @@ use pyo3::wrap_pyfunction;
 use crate::bits::{IMPLEMENTED_MASK, TOTAL_CONDITIONS};
 use crate::evaluator::{
     DEFAULT_GAP_MID_PROXIMITY_BPS, IndicatorSnapshot, PriorBarHistory, ProximityParams,
-    evaluate_atoms,
+    default_swing_proximity_bps, evaluate_atoms,
 };
 use crate::greeks::{
     DELTA_ADMISSION_FLOOR, IV_CLAMP_MAX, IV_CLAMP_MIN, T_FLOOR_YEARS, VEGA_ADMISSION_FLOOR, greeks,
@@ -297,7 +297,8 @@ fn check_evaluate_inputs(
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
     supertrend_x2_paisa = None,
     gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
-    last_swing_high_paisa = None, last_swing_low_paisa = None, swing_bps = 10,
+    last_swing_high_paisa = None, last_swing_low_paisa = None,
+    swing_bps = default_swing_proximity_bps(),
 ))]
 fn evaluate_from_raw(
     tod_seconds: u32,
@@ -549,7 +550,8 @@ fn evaluate_from_raw_impl(
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
     supertrend_x2_paisa = None,
     gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
-    last_swing_high_paisa = None, last_swing_low_paisa = None, swing_bps = 10,
+    last_swing_high_paisa = None, last_swing_low_paisa = None,
+    swing_bps = default_swing_proximity_bps(),
 ))]
 fn evaluate_with_levels(
     tod_seconds: u32,
@@ -844,7 +846,8 @@ fn evaluate_with_levels_impl(
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
     supertrend_x2_paisa = None,
     gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
-    last_swing_high_paisa = None, last_swing_low_paisa = None, swing_bps = 10,
+    last_swing_high_paisa = None, last_swing_low_paisa = None,
+    swing_bps = default_swing_proximity_bps(),
 ))]
 fn evaluate_spec(
     condition_mask_hex: &str,

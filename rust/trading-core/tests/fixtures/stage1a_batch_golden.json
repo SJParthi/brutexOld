@@ -2378,6 +2378,7 @@
   "fib_bps": 10,
   "fib_dependent_mask_hex": "e0000000003ff80000",
   "fractal_k": 2,
+  "gap_mid_bps": 10,
   "pdh_pdl_bps": 10,
   "pivot_bps": 10,
   "prior_n": 3,

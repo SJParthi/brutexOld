@@ -186,6 +186,10 @@ def generate() -> dict[str, object]:
             "pivot_bps": inputs.pivot_bps,
             "pdh_pdl_bps": inputs.pdh_pdl_bps,
             "fib_bps": inputs.fib_bps,
+            # Emitted for REAL (DEC-VOCAB-VWAP-RETAIN-001 refuter N2a — the
+            # Rust reader previously hardcoded 10; it now CONSUMES this key,
+            # with `#[serde(default)]` keeping the pre-emit fixture legal).
+            "gap_mid_bps": inputs.gap_mid_bps,
             "swing_bps": inputs.swing_bps,
             "prior_n": inputs.prior_n,
             "fractal_k": inputs.fractal_k,

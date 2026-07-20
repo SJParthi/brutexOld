@@ -74,6 +74,12 @@ struct Config {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    /// Group-15 `near_gap_mid` band (DEC-GAP-MIDPOINT-CONDITIONS-001). The
+    /// generator now EMITS it (DEC-VOCAB-VWAP-RETAIN-001 refuter N2a — the
+    /// reader previously hardcoded 10); serde-defaulted to the production
+    /// default so a pre-emit fixture still parses to the same build.
+    #[serde(default = "default_gap_mid_bps")]
+    gap_mid_bps: i64,
     swing_bps: i64,
     prior_n: usize,
     fractal_k: usize,
@@ -81,6 +87,10 @@ struct Config {
     anchor_dependent_mask_hex: String,
     fib_dependent_mask_hex: String,
     applies_to_1day_mask_hex: String,
+}
+
+fn default_gap_mid_bps() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -162,7 +172,7 @@ fn inputs<'a>(f: &'a Fixture) -> Stage1aBatchInputs<'a> {
         day_x1_hi_paisa: &f.day_tables.day_x1_hi_paisa,
         day_x1_lo_paisa: &f.day_tables.day_x1_lo_paisa,
         day_has_x1: &f.day_tables.day_has_x1,
-        gap_mid_bps: 10,
+        gap_mid_bps: f.config.gap_mid_bps,
     }
 }
 

@@ -21,11 +21,16 @@ that the valid domain is byte-unchanged. The Rust ``#[cfg(test)]`` suite
 covers the pure ``*_impl`` cores; this file is the complementary Python-level
 oracle — mirroring ``tests/unit/test_fno_math_overflow_guard.py``.
 
-Historical note: this file also pinned the VWAP NEGATIVE-TYPICAL rejection
-(the trunc-vs-floor twin-divergence guard). The ``VwapState`` pyclass was
-DELETED with the bits-52/53 VWAP tombstone (crate 0.4.0 — the spot-only
-engine has no traded volume), so those guard pins died with the class; the
-guard's history stays recorded in the crate changelog + MIGRATION.md.
+Also pinned here: the VWAP NEGATIVE-TYPICAL rejection (the trunc-vs-floor
+twin-divergence guard). Historical note: while the hand-synced Python twin
+still existed, feeding bars ``(typical=-7, vol=1)`` then ``(0, 1)`` gave Rust
+``-3`` (i128 ``/`` truncates toward zero) vs Python ``-4`` (``//`` floors)
+pre-guard — a silent one-paisa twin divergence on garbage input. The Python
+twin was deleted by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001, the
+``VwapState`` pyclass itself was deleted with the bits-52/53 tombstone at
+crate 0.4.0, and DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206, crate 0.6.0)
+REVIVED it — so the guard battery below is RESTORED from the pre-wipe suite
+and re-pins the closed domain hole at the single-source Rust boundary.
 """
 
 from __future__ import annotations
@@ -131,3 +136,48 @@ class TestDeriveBarMetadataGuard:
             MAX_DAY_ORDINAL, 23, 59, 59, MAX_CIVIL_SECONDS, MAX_DAY_ORDINAL
         )
         assert bool(on_expiry) is True
+
+
+class TestVwapNegativeTypicalRejected:
+    """The floor-vs-trunc domain hole stays CLOSED at the PyO3 boundary:
+    negative typical raises instead of silently entering the accumulator.
+
+    RESTORED from the pre-wipe suite per DEC-VOCAB-VWAP-RETAIN-001
+    (MIGRATION.md #2206) — the ``VwapState`` pyclass is LIVE again at crate
+    0.6.0. Historical teeth (kept so the closed hole cannot silently
+    reopen): the (-7,1),(0,1) stream is the exact empirical input on which
+    the Rust i128 truncating ``/`` (-3) and the deleted Python twin's
+    flooring ``//`` (-4) diverged pre-guard."""
+
+    def test_rust_state_rejects_negative_typical(self) -> None:
+        state = trading_core.VwapState()
+        with pytest.raises(ValueError, match="non-negative"):
+            state.update(-7, 1, False, 1, 739_621, OPEN_0915)
+        # Guard-first ordering: the rejected bar left NO state behind.
+        assert state.current() is None
+
+    def test_divergence_stream_rejected_at_first_bar(self) -> None:
+        """The exact empirical divergence input is rejected up front — the
+        state can never reach the bar where the trunc-vs-floor answers
+        differed."""
+        rs = trading_core.VwapState()
+        with pytest.raises(ValueError, match="non-negative"):
+            rs.update(-7, 1, False, 1, 739_621, OPEN_0915)
+
+    def test_zero_typical_still_valid(self) -> None:
+        """The guard is strictly ``< 0`` — the golden fixture's zero-typical
+        bar (a valid drag-to-zero print) stays accepted and bit-identical to
+        the independently-derived volume-weighted answer."""
+        rs = trading_core.VwapState()
+        for typical, volume in [(24_000_00, 100), (0, 50)]:
+            rs_out = rs.update(typical, volume, False, 1, 739_621, OPEN_0915)
+            assert rs_out == rs.current()
+        assert rs.current() == (24_000_00 * 100) // 150
+
+    def test_rust_state_magnitude_ceiling_still_enforced(self) -> None:
+        """The pre-existing i128-overflow ceiling guard is unchanged."""
+        state = trading_core.VwapState()
+        with pytest.raises(ValueError, match="typical_paisa"):
+            state.update(MAX_BAR_PAISA + 1, 1, False, 1, 739_621, OPEN_0915)
+        with pytest.raises(ValueError, match="volume"):
+            state.update(0, MAX_BAR_PAISA + 1, False, 1, 739_621, OPEN_0915)
