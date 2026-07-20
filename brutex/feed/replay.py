@@ -59,8 +59,9 @@ from brutex.calendars.nse import IST
 from brutex.data.bad_tick import (
     BAD_TICK_MAX_RATIO,
     BadTickScreen,
+    ScreenWarnEvent,
     bad_tick_screen_enabled,
-    emit_bad_tick_warn,
+    emit_screen_warn,
 )
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
@@ -363,50 +364,83 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
                 result, source, timestamps, opens, highs, lows, closes, volumes, open_interests
             )
 
-    # ── The retained Python oracle (byte-identical legacy path) ─────────
+    # ── The retained Python oracle (the parity reference path) ──────────
     # Bounded bad-tick (spike / fat-finger / vendor-scaling) screen
-    # (DEC-SWEEP-DATA-EDGE-GUARDS-001): a self-consistent SCALED bar — every
+    # (DEC-SWEEP-DATA-EDGE-GUARDS-001 + DEC-BADTICK-HEAD-SEED-001 +
+    # DEC-BADTICK-HILO-SCREEN-001): a self-consistent SCALED bar — every
     # OHLC field ×~10 but internally ordered and positive — passes the
-    # positivity + ordering checks above yet would silently flip every
-    # price-relative bit and (via ``TodayOHLC.absorb``) poison the NEXT day's
-    # PDH/PDL/pivots. The screen SKIPS-and-COUNTS such a bar (never value-edits,
-    # never fabricates) comparing each close to the previous IN-SESSION kept
-    # close; the first bar of each session is exempt (no reopen-gap false trip).
-    # Default ON, ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar.
-    screen = BadTickScreen(source=source) if screen_on else None
+    # finiteness + positivity checks yet would silently flip every
+    # price-relative bit and (via ``TodayOHLC.absorb``) poison the NEXT
+    # day's PDH/PDL/pivots. ``BadTickScreen.screen_mask`` SKIPS-and-COUNTS
+    # such bars (never value-edits, never fabricates): each session's first
+    # ≤ 3 bars vote against their MEDIAN close (a poison FIRST bar no longer
+    # seats the baseline), every later bar is judged against the last KEPT
+    # close, and each bar's HIGH + LOW are judged against the SAME
+    # close-derived reference (an out-of-band high/low on a sane close drops
+    # the whole bar). Default ON, ``BRUTEX_BAD_TICK_SCREEN`` kill switch
+    # (OFF = the raw pre-#1616 path). O(1)/bar.
+    #
+    # COMPOSITION (the #1897-ordering law): the per-row FINITENESS +
+    # POSITIVITY raises come FIRST — the screen judges only the prefix
+    # strictly before the first raising row (`_raise_frontier`), exactly the
+    # rows the per-row-checking legacy loop would have consulted before its
+    # raise fired, and exactly the Rust kernel's stop law (its input is
+    # all-finite by the eligibility gate, so its non-positive stop row IS
+    # the oracle frontier). Both arms then share ONE materializer
+    # (``_bars_from_scan``) over the same ``(kept_rows, warn_events, stop)``
+    # coordinates, so kept bars, WARN bytes/order AND the raise are
+    # identical by construction. A null timestamp raises at the upfront
+    # session-date sweep (pre-existing out-of-envelope class — the lake
+    # writers never render null timestamps; the kernel arm's ``null_column``
+    # gate owns it).
+    frontier, stop = _raise_frontier(opens, highs, lows, closes)
+    events: list[ScreenWarnEvent] = []
+    if screen_on and frontier > 0:
+        ist_dates = [ts.astimezone(IST).date() for ts in timestamps[:frontier]]
+        keep, events = BadTickScreen(source=source).screen_mask(
+            ist_dates,
+            closes[:frontier],
+            highs=highs[:frontier],
+            lows=lows[:frontier],
+        )
+        kept_rows = [i for i in range(frontier) if keep[i]]
+    else:
+        kept_rows = list(range(frontier))
+    return _bars_from_scan(
+        (kept_rows, events, stop),
+        source,
+        timestamps,
+        opens,
+        highs,
+        lows,
+        closes,
+        volumes,
+        open_interests,
+    )
 
-    origin = f" in {source}" if source is not None else ""
-    bars: list[CandleBar] = []
-    for ts, o, h, lo, c, v, oi in zip(
-        timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
-    ):
-        # Engine-boundary FINITENESS + POSITIVITY (DEC-STORED-DATA-VALIDATION-001
-        # + DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): checked BEFORE construction
-        # so an internally-ORDERED all-negative bar (which the ordering-only
-        # constructor would accept), a ``high = inf`` bar (which the ordering +
-        # positivity checks accept VACUOUSLY — inf compares fine) and a NaN bar
-        # (whose Decimal comparison would raise a raw ``decimal.InvalidOperation``
-        # past ``except ValueError``) are all refused with the real defect
-        # named, never laundered into Stage-1A / run identity and never an
-        # uncaught crash of the whole read. The Rust kernel arm never sees a
-        # non-finite price (the eligibility gate degrades to THIS loop), so
-        # the two arms cannot fork on this class.
-        for price_name, price in (("open", o), ("high", h), ("low", lo), ("close", c)):
-            if not math.isfinite(price):
-                raise _nonfinite_error(origin, ts, price_name, price)
-            if price <= 0:
-                raise _positivity_error(origin, ts, price_name, price)
-        # Bad-tick screen (post-positivity, pre-construction): a scaled spike is
-        # DROPPED (not built, not appended) and counted; the last kept good close
-        # carries forward as the comparison baseline. IST session date drives the
-        # per-session grouping (``ts`` is timezone-aware — the constructor rejects
-        # a naive datetime, so ``.astimezone`` is safe).
-        if screen is not None and not screen.keep(ist_date=ts.astimezone(IST).date(), close=c):
-            continue
-        bars.append(_build_bar(origin, ts, o, h, lo, c, v, oi))
-    if screen is not None:
-        screen.finish()
-    return bars
+
+def _raise_frontier(
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+) -> tuple[int, tuple[int, int] | None]:
+    """Locate the first row a per-row finiteness/positivity check would raise at.
+
+    Returns ``(frontier, stop)``: ``frontier`` = the count of leading rows
+    that pass EVERY per-field check (the rows the screen may consult), and
+    ``stop`` = ``(row, field)`` of the first offender (``field`` 0/1/2/3 =
+    open/high/low/close — the legacy loop's fixed check order) or ``None``
+    on a fully-clean table. The materializer re-derives WHICH error to raise
+    from the offending value itself (non-finite → ``_nonfinite_error``,
+    else ``_positivity_error`` — the same finite-before-positive per-field
+    precedence the legacy loop applied).
+    """
+    for i in range(len(opens)):
+        for field, price in enumerate((opens[i], highs[i], lows[i], closes[i])):
+            if not math.isfinite(price) or price <= 0:
+                return i, (i, field)
+    return len(opens), None
 
 
 def _nonfinite_error(origin: str, ts: Any, price_name: str, price: float) -> ValueError:
@@ -535,16 +569,18 @@ def _scan_via_kernel_or_none(
         if table.column(name).null_count > 0:
             warn_degrade_once("null_column", n_rows=n_rows, column=name)
             return None
-    # DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001: the kernel's decision plane is
-    # a bit-identity port of the PRE-guard checks and is BLIND to inf/NaN
-    # (positivity holds vacuously; an inf close would fold into the bad-tick
-    # ratio as a silent DROP instead of the oracle's typed refusal) — so a
-    # non-finite price column DEGRADES to the oracle loop, whose finiteness
-    # gate raises the loud corrupt-bar error. The probe runs over the SAME
-    # already-materialized float lists the oracle checks (short-circuiting
-    # ``all``; one O(rows) pass per price column, kernel-path only —
-    # disclosed: the null gate above is metadata-only, this one genuinely
-    # scans).
+    # DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001: the kernel's positivity plane
+    # cannot raise the oracle's TYPED non-finite refusal (`-inf` would stop
+    # as mere positivity; NaN/`+inf` closes would ride the screen's
+    # keep-unjudged robustness arm instead of raising) — so a non-finite
+    # price column DEGRADES to the oracle arm, whose `_raise_frontier`
+    # produces the loud corrupt-bar error. This gate is also what makes the
+    # kernel's non-positive stop row EQUAL the oracle's raise frontier (its
+    # input is all-finite), so the two arms share one stop law. The probe
+    # runs over the SAME already-materialized float lists the oracle checks
+    # (short-circuiting ``all``; one O(rows) pass per price column,
+    # kernel-path only — disclosed: the null gate above is metadata-only,
+    # this one genuinely scans).
     for name, column in (("open", opens), ("high", highs), ("low", lows), ("close", closes)):
         if not all(map(math.isfinite, column)):
             warn_degrade_once("nonfinite_price_column", n_rows=n_rows, column=name)
@@ -570,26 +606,26 @@ def _scan_via_kernel_or_none(
 
 
 def _emit_warn(
-    event: tuple[int, int, int, int, int],
+    event: ScreenWarnEvent,
     source: str | None,
     timestamps: list[Any],
     closes: list[float],
 ) -> None:
-    """Replay ONE kernel warn event through the shared bad-tick WARN seam.
+    """Replay ONE screen warn event through the shared emission seam.
 
-    The kernel returns ROW COORDINATES only; the session ISO string comes
-    from Python's OWN datetime object (the REAL ``ZoneInfo`` conversion) and
-    the offender closes are the SAME float objects the oracle's screen would
-    have captured — so the WARN record is byte-identical by construction.
+    Both arms return ROW COORDINATES only (the 9-int decision-plane record);
+    the session ISO string comes from Python's OWN datetime object (the REAL
+    ``ZoneInfo`` conversion) and the offender closes are the SAME float
+    objects either arm's screen consulted — so the WARN record is
+    byte-identical by construction (:func:`emit_screen_warn` is the ONE
+    field-building seam, CLAUDE.md §11 COMMON).
     """
-    _, session_first_row, skipped, first_prev_row, first_skip_row = event
-    emit_bad_tick_warn(
+    emit_screen_warn(
+        event,
         source=source,
-        session_iso=timestamps[session_first_row].astimezone(IST).date().isoformat(),
-        skipped=skipped,
+        session_iso=timestamps[event[2]].astimezone(IST).date().isoformat(),
+        closes=closes,
         max_ratio=BAD_TICK_MAX_RATIO,
-        first_prev_close=closes[first_prev_row],
-        first_close=closes[first_skip_row],
     )
 
 
@@ -604,25 +640,32 @@ def _bars_from_scan(
     volumes: list[int],
     open_interests: list[int | None],
 ) -> list[CandleBar]:
-    """Materialize kernel decisions with the ORACLE's exact side-effect order.
+    """Materialize screen decisions — the ONE side-effect path for BOTH arms.
 
-    The replay law (DEC-FEED-RUST-CORE-001 §6): warn anchors are always kept
-    rows (a session's first row is always kept) or ``n_rows`` (the finish
-    flush), so draining every event with ``emit_at_row <= i`` before
-    building bar *i* emits each boundary WARN exactly where the oracle's
-    ``keep()`` would — after row *i*'s positivity, before row *i*'s
-    construction. A constructor raise at kept row *j* leaves later warns
-    un-emitted (the exception propagates first — identical to the oracle's
-    mid-loop raise); a positivity stop was truncated KERNEL-side (no event
-    at/after the stop row, no finish event), so raising after the kept loop
-    reproduces the oracle's log/raise ordering exactly.
+    The replay drain law (DEC-FEED-RUST-CORE-001 §6, re-derived for the
+    head-seed law): every event anchored ``<= i`` drains before kept bar
+    *i*'s construction. Under the head-vote law a session's first row is NOT
+    necessarily kept (a poison head bar drops), so a boundary-anchored event
+    may drain at the FIRST KEPT row at/after its anchor — or in the final
+    drain on a clean pass. A constructor raise at kept row *j* leaves later
+    warns un-emitted (the exception propagates first); a ``stop`` (the
+    finiteness/positivity frontier — kernel-truncated on the Rust arm,
+    ``_raise_frontier`` on the oracle arm) raises AFTER the kept loop with
+    the remaining warns deliberately un-drained (no event at/after the stop
+    anchor exists, and a pending session's flush was never recorded), the
+    bars list discarded by the raise — both arms byte-identical by
+    construction. The stop error is re-derived from the offending value
+    itself: non-finite → ``_nonfinite_error``, else ``_positivity_error``
+    (the legacy loop's finite-before-positive per-field precedence; the
+    kernel's stop values are always finite — its eligibility gate excludes
+    non-finite columns — so its stops raise positivity, exactly as before).
     """
     kept, warns, stop = result
     origin = f" in {source}" if source is not None else ""
     bars: list[CandleBar] = []
     wi = 0
     for i in kept:
-        while wi < len(warns) and warns[wi][0] <= i:
+        while wi < len(warns) and warns[wi][1] <= i:
             _emit_warn(warns[wi], source, timestamps, closes)
             wi += 1
         bars.append(
@@ -641,6 +684,8 @@ def _bars_from_scan(
         row, field = stop
         price_name = ("open", "high", "low", "close")[field]
         price = (opens, highs, lows, closes)[field][row]
+        if not math.isfinite(price):
+            raise _nonfinite_error(origin, timestamps[row], price_name, price)
         raise _positivity_error(origin, timestamps[row], price_name, price)
     while wi < len(warns):
         _emit_warn(warns[wi], source, timestamps, closes)

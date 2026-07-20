@@ -514,14 +514,21 @@ class TestOrderingLaws:
     ) -> None:
         pytest.importorskip("brutex_feed", reason="wheel required for the ordering pins")
         rows: list[Row] = [
+            # Session 1: a clean 3-bar head + a post-head ÷10 spike — the
+            # owed session-1 warn flushes at session 2's first row.
             (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
-            (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
-            # Session 2: first bar KEPT (flushes session 1's warn), a spike
-            # (owes a session-2 warn), then a constructor violation
-            # (high < low) that raises BEFORE session 2's warn can flush.
+            (_BASE + timedelta(minutes=1), 27941.0, 27951.0, 27931.0, 27946.0, 10, None),
+            (_BASE + timedelta(minutes=2), 27942.0, 27952.0, 27932.0, 27947.0, 10, None),
+            (_BASE + timedelta(minutes=3), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
+            # Session 2: a clean head, a post-head spike (owes a session-2
+            # warn that only the FINISH flush would emit), then a
+            # constructor violation (high < low) on a screen-KEPT bar that
+            # raises BEFORE the finish flush can fire.
             (_BASE + timedelta(days=1), 6000.0, 6010.0, 5990.0, 6005.0, 10, None),
-            (_BASE + timedelta(days=1, minutes=1), 600.0, 601.0, 599.0, 600.5, 10, None),
-            (_BASE + timedelta(days=1, minutes=2), 6001.0, 5990.0, 6010.0, 6001.0, 10, None),
+            (_BASE + timedelta(days=1, minutes=1), 6001.0, 6011.0, 5991.0, 6006.0, 10, None),
+            (_BASE + timedelta(days=1, minutes=2), 6002.0, 6012.0, 5992.0, 6007.0, 10, None),
+            (_BASE + timedelta(days=1, minutes=3), 600.0, 601.0, 599.0, 600.5, 10, None),
+            (_BASE + timedelta(days=1, minutes=4), 6001.0, 5990.0, 6010.0, 6001.0, 10, None),
         ]
         off_logs, on_logs, off_msg, on_msg = self._sequences(_table(rows), monkeypatch, ValueError)
         assert off_msg == on_msg
@@ -537,10 +544,16 @@ class TestOrderingLaws:
     ) -> None:
         pytest.importorskip("brutex_feed", reason="wheel required for the ordering pins")
         rows: list[Row] = [
+            # Two sessions, each a clean 3-bar head + one post-head spike:
+            # session 1's warn flushes at the boundary, session 2's at FINISH.
             (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
-            (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
+            (_BASE + timedelta(minutes=1), 27941.0, 27951.0, 27931.0, 27946.0, 10, None),
+            (_BASE + timedelta(minutes=2), 27942.0, 27952.0, 27932.0, 27947.0, 10, None),
+            (_BASE + timedelta(minutes=3), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
             (_BASE + timedelta(days=1), 6000.0, 6010.0, 5990.0, 6005.0, 10, None),
-            (_BASE + timedelta(days=1, minutes=1), 600.0, 601.0, 599.0, 600.5, 10, None),
+            (_BASE + timedelta(days=1, minutes=1), 6001.0, 6011.0, 5991.0, 6006.0, 10, None),
+            (_BASE + timedelta(days=1, minutes=2), 6002.0, 6012.0, 5992.0, 6007.0, 10, None),
+            (_BASE + timedelta(days=1, minutes=3), 600.0, 601.0, 599.0, 600.5, 10, None),
         ]
         off, on, off_logs, on_logs = _run_both_arms(_table(rows), monkeypatch)
         _assert_bars_str_identical(off, on)
@@ -556,10 +569,9 @@ class TestOrderingLaws:
         """R6a regression (MIGRATION #1797 REFUTER ROUND 6): the warn-drain
         boundary mutant ``<= i -> < i`` in ``_bars_from_scan``.
 
-        Kernel shape: ``kept=[0, 2]``, ``warns=[(2, 0, 1, 0, 1)]``,
-        ``stop=(3, 0)`` — session 1's owed bad-tick warn anchors on kept
-        row 2 (session 2's first row = the LAST kept row) and row 3 fails
-        positivity, so the trailing drain after the stop-raise is
+        Kernel shape: ``kept=[0, 1, 2, 4]``, one SKIP warn anchored at row 4
+        (session 2's first row = the LAST kept row), ``stop=(5, 0)`` — row 5
+        fails positivity, so the trailing drain after the stop-raise is
         unreachable.  The warn MUST fire from the in-loop drain (``<= i``)
         before the raise; under the mutant it is silently dropped and the
         full-sequence parity below fails.  Kill-proof recorded in the
@@ -568,8 +580,12 @@ class TestOrderingLaws:
         """
         pytest.importorskip("brutex_feed", reason="wheel required for the ordering pins")
         rows: list[Row] = [
+            # Session 1: a clean 3-bar head + a post-head ÷10 spike (the
+            # owed session-1 warn).
             (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
-            (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
+            (_BASE + timedelta(minutes=1), 27941.0, 27951.0, 27931.0, 27946.0, 10, None),
+            (_BASE + timedelta(minutes=2), 27942.0, 27952.0, 27932.0, 27947.0, 10, None),
+            (_BASE + timedelta(minutes=3), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
             # Session 2's first row: KEPT — session 1's owed warn anchors
             # HERE, on what turns out to be the LAST kept row...
             (_BASE + timedelta(days=1), 6000.0, 6010.0, 5990.0, 6005.0, 10, None),
