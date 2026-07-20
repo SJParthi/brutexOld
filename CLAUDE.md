@@ -4267,6 +4267,95 @@ hostile-review pass._
   routes; the one retired env var refuses loudly when set. This blurb
   carries the record's pointer — the full story lives in MIGRATION.md
   #1979 + the lane PR body.)
+  Earlier: `claude/kernel-cache-soak-harness`
+  (**DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1971 (renumbered #1962 → #1971 at
+  the 2026-07-19 slice-5 merge-forward reconcile — main took #1962 for
+  DEC-RUST-CALENDAR-LEAVES-001 and split PRs #1703/#1704 reserve #1969/#1970;
+  DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001)** — the §8 M4-Pro
+  kernel-cache OFF↔ON A/B SOAK HARNESS: `scripts/ci/kernel_cache_soak.py`
+  (run/verdict — preflight → arm OFF → arm ON as separate `brutex sweep-all`
+  subprocesses against FRESH per-arm results roots, ps-polled per-worker +
+  pool RSS, #1729 telemetry harvest, the PR-A T3 ts-masked byte-identity
+  compare, ONE soak-report.json + a MEASURED/MODELED-tagged summary with the
+  VALUE section surfacing actual wall/RSS deltas + real headroom) + the
+  `workflow_dispatch`-only `[self-hosted, macos, m4pro]` workflow
+  `kernel-cache-soak.yml` (soak-selfhosted plan-job timing fences, SEC9-1
+  budget 1..1195, persist-credentials false, bounded 90 d artifact, issue
+  watchdog on failure||cancelled) + `docs/runbooks/kernel-cache-soak.md`
+  (acceptance bars + one-command fallback + the FIRST MEASUREMENT slot).
+  ALSO RECORDS THE LANDED PR-A TRUTH: the per-worker resident-kernel cache
+  (DEC-SWEEP-WORKER-KERNEL-CACHE-001, MIGRATION.md #1729) is ON MAIN via the
+  train #1553 squash 42117b0f — a default-OFF flag
+  (`BRUTEX_SWEEP_WORKER_KERNEL_CACHE`), byte-identical ON≡OFF, its default-ON
+  flip soak-gated on exactly this harness's M4-Pro evidence. HONEST: the
+  harness + bars are coordinator-blessed; the FLIP is NOT pre-approved — a
+  separate later one-constant DEC needing the MEASURED numbers + operator
+  sign-off; the sandbox `--smoke` run proves MECHANICS only (verdict can
+  never read FLIP-READY). REVIEW-FIX ROUND folded (pre-open — the 3-lens
+  R1-security/R2-correctness/R3-docs session review): the ambient
+  `BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY` handling + effective-capacity echo,
+  the `--fib-anchors`/`--price-source-cells` capacity-widening knobs with
+  the RSS claim SCOPED to the measured capacity, the mechanical
+  fresh-`--out` refusal, the NOT-DECISION-GRADE provenance bar on
+  non-M4-Pro hardware, the script-side 1..1195 budget fence, the engine
+  drift pins, the `uname -sm` + home-redacted report provenance, and the
+  directory-wide no-fork-trigger-on-self-hosted redteam sweep. FIX ROUND 2
+  folded (pre-open — the 2-refuter round): every arm-identity env is
+  EXPLICITLY PINNED, never left absent (the R1 capacity POP was DEFEATED by
+  the child's own dotenv re-read — `apply_dotenv` never overrides a SET
+  var, so the pin is dotenv-immune; cache flag + capacity + results-depth
+  all set; provenance renamed honestly `capacity_env_child_pinned` +
+  `capacity_env_ambient_present`); the identity compare now COVERS the
+  results-depth `sweep_runs/` sibling root (previously silently outside it
+  — the "never silent" claim made true, proven by the FIRST non-smoke
+  end-to-end CI execution); a `BRUTEX_BENCH_BASELINE_KEY`-override-sourced
+  hardware key reads NOT-DECISION-GRADE (the spoof closed) with the
+  trusted-input boundary disclosed; a preflight-refused run writes NOTHING
+  into `--out` (the documented retry works); the workflow-header
+  1..1200→1195 comment fix + the bounded `--min-free-gib` override
+  (default 30, never passed by the workflow). FIX ROUND 3 folded
+  (pre-open — the round-2 refuter pair, 0 MAJOR): the sizing envs are now
+  PINNED too — `BRUTEX_SWEEP_WORKERS` + `BRUTEX_SWEEP_MEM_BUDGET_BYTES`
+  explicitly SET to the parent-resolved DEFAULT laws (dotenv-immune, the
+  capacity precedent) so the absolute RSS/pool bars are measured at KNOWN
+  sizing, with the remaining 23 symmetric sweep envs audited + echoed into
+  provenance; the OFF→ON warm-cache wall-bias disclosed (summary + runbook)
+  with a trivial `--arm-order` reversal lever; per-arm forensics mirrors
+  (the shared `~/.brutex/runs/<run_id>` cross-arm clobber ended); the
+  verdict-time override belt attributes the LIVE env, never the stored
+  probed key; the post-arm compare/summary crash window closed (the
+  report-with-error still ships); `ps_bin`→`df_bin` + the ledger's bar-6
+  scope tightened. FIX ROUND 4 folded (pre-open — the round-3 refuter
+  pair, 1 MAJOR): the mem-budget pin's DIVISOR corrected to the engine's
+  shipped default law — the engine divides the RAM-derived default by the
+  EVAL-POOL size `workers − 1` (the driver's exported
+  `BRUTEX_SWEEP_BUDGET_WORKERS` seam), not by `workers`;
+  `resolve_pinned_mem_budget` now calls the engine's own resolver through
+  that seam, the drift-pin is re-anchored non-tautologically (independent
+  explicit-divisor reference + a REAL un-pinned sweep-all child's own
+  `budget_derived` log line — echo == engine default == child-observed),
+  the SEVEN SUSPECT-latch `BRUTEX_SWEEP_TRIPWIRE_*` knobs are pinned to
+  engine defaults in both arms (the clean-exit bar is judged at the
+  shipped thresholds), the two sweep-path rust toggles join the symmetric
+  echo (25 names), the cmd_run wiring mutants (arm-order + guarded
+  compare/summary call sites) are killed by seam-level pins, and
+  `arm_order` is a fenced workflow dispatch input. FIX ROUNDS 5+6 folded
+  (pre-open — the round-4/round-5 refuter pairs): the symmetric echo audit
+  grows 25 → 30 with the completeness wording honestly HEDGED to the
+  enumerated-audit truth (symmetry-by-construction is the load-bearing
+  property, not enumeration); the verdict's shape/numeric refusal net
+  hardened — AttributeError + a top-level non-dict guard (round 5; the
+  guard's missing pin added in round 6, its removal mutant verified
+  killed), plus the round-6 named non-finite-numeric INGESTION refusal +
+  the OverflowError belt (json.loads accepts Infinity/NaN — the #1558
+  int(inf) precedent); `--sample-interval-s` fenced finite 0.05..300
+  script-side (the budget-fence precedent — the executed fork-storm-at-0 /
+  sampler-death-at-inf repros both now refuse); runbook §7 reworded to the
+  sandbox-mechanics truth; the per-finding record
+  lives ONLY in MIGRATION.md #1962. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; zero
+  `brutex/` source edits; no scope/vocab/rate change; the full record lives
+  in MIGRATION.md #1971 — this header carries the pointer, never the story.)
   Earlier: `integration/club-s2-results-v2`
   (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
   overfit-recount recovery channel, folded onto the CLUB S2 members
@@ -12768,6 +12857,15 @@ hostile-review pass._
   flipped); ci.yml test/golden/chaos-race/run-smoke build the wheel;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
   line — see §1 + MIGRATION.md #1979 for the full blurb)
+  Earlier: `claude/kernel-cache-soak-harness`
+  (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1971 (renumbered #1962 → #1971 at slice-5 reconcile) —
+  the §8 M4-Pro kernel-cache OFF↔ON A/B soak harness gating the #1729
+  default-ON flip: soak script + dispatch workflow + runbook + smoke/unit
+  tests; records the landed PR-A truth (DEC-SWEEP-WORKER-KERNEL-CACHE-001,
+  MIGRATION.md #1729, train #1553 squash 42117b0f, default-OFF flag,
+  soak-gated flip); the flip itself is NOT pre-approved; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1971 for the full blurb)
   Earlier: `integration/club-s2-results-v2`
   (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
   overfit-recount recovery channel: the recount recovers the RECORDED
