@@ -388,6 +388,8 @@ def cpcv_pass_rate(
     n_groups: int = DEFAULT_N_GROUPS,
     n_test_groups: int = DEFAULT_N_TEST_GROUPS,
     min_sharpe: float = 0.0,
+    label_span: int = 0,
+    embargo: int = 0,
 ) -> float:
     """Fraction of CPCV test folds whose held-out Sharpe beats ``min_sharpe``.
 
@@ -402,8 +404,17 @@ def cpcv_pass_rate(
 
     The metric is evaluated on the **test** folds only; purging/embargo
     govern the *training* set (see :func:`cpcv_splits`) and so do not
-    change a test fold's return — they are exposed there for downstream
-    model-based callers.
+    change a test fold's return — the ``label_span``/``embargo`` kwargs
+    (DEC-CASCADE-STAT-TIER-WIRE-001) are therefore VALIDATED and
+    semantically declared, but **provably cannot change the returned
+    rate**: this model-free metric never constructs a training set, so
+    ``rate(embargo=0) == rate(embargo=k)`` for every valid ``k`` (the
+    invariance is pinned in ``tests/unit/test_cpcv.py`` — no illusion of
+    tightening from CPCV; the Stage-4 embargo genuinely bites at the
+    walk-forward filter instead). They exist here so the Stage-4 driver
+    threads ONE resolved embargo (the DEC-STAT-001 law, ``docs/MIGRATION.md``
+    entry #123) into both engines and a future model-based caller inherits
+    the declared, validated parameters.
 
     Returns a value in ``[0, 1]``: ``passing_folds / C(n_groups,
     n_test_groups)``. Computed in ``O(n)`` (one moments pass) plus
@@ -412,11 +423,14 @@ def cpcv_pass_rate(
     Raises
     ------
     ValueError
-        On an invalid returns series or invalid structural parameters.
+        On an invalid returns series or invalid structural parameters
+        (including a negative ``label_span``/``embargo`` —
+        :func:`_validate_params` bounds them at ``>= 0`` only, so a LARGE
+        embargo can never make a previously-valid call raise).
     """
     arr = _validate_returns(returns)
     n_samples = int(arr.size)
-    _validate_params(n_samples, n_groups, n_test_groups, label_span=0, embargo=0)
+    _validate_params(n_samples, n_groups, n_test_groups, label_span=label_span, embargo=embargo)
     bounds = _group_bounds(n_samples, n_groups)
     count, mean, m2 = _group_moments(arr, bounds)
     n_total = math.comb(n_groups, n_test_groups)

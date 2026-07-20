@@ -18,7 +18,26 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #2057
+_Last updated: 2026-07-19 (DEC-CASCADE-STAT-TIER-WIRE-001, MIGRATION.md
+#2058 (renumbered #1986 → #2058 at the 2026-07-20 train-b wave-2b fold —
+#1986 was the QM-assigned provisional; DEC-IDs are the stable handles per
+DEC-LEDGER-RENUMBER-001), branch `claude/cascade-stat-tier-wire` — the Stage-4 cascade WIRES
+its dark statistical engines: filter #4 becomes the RC-first → Hansen-SPA
+JOIN (monotone tightening; RC-fail detail byte-identical; NEW
+`pool_rc_pvalue`/`pool_spa_pvalue` report keys), the CPCV/WFO embargo
+threads end-to-end with the AUTO one-trading-day law
+`resolve_cascade_embargo_bars` = `ceil(375 / tf_minutes)` (DEC-STAT-001
+#123; the CPCV rate is PROVABLY embargo-invariant — pinned, never claimed
+a tightening; the WFO walks genuinely shift), and filter #5 gains the
+PER-CANDIDATE Bailey-CSCV PBO over each finalist's REAL Stage-3 search
+family (the condition-6 refined-cell stores → the NEW spec field
+`family_sl_tp`, cap 256, EMIT-ON-PRESENT manifest key). ZERO
+committed-golden flips; additive-at-REPORT_VERSION-1 keys; measured
+survivor delta OLD 41 → NEW 38 on the synthetic A/B corpus. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX — the cascade is strictly downstream of run
+identity. The per-item record lives in the §1 Active-branch blurb +
+MIGRATION.md #2058 — this header carries the pointer, never the story.)
+Earlier: 2026-07-18 (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #2057
 (renumbered #1956 → #1957 → #2057 — the first hop at the 2026-07-18
 merge-reconcile (main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001); the last
 hop at the 2026-07-20 train-b wave-2b fold (#1957 is held on the woven tree
@@ -4188,7 +4207,80 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/alpha-buyhold-benchmark`
+- **Active branch:** `claude/cascade-stat-tier-wire` (**DEC-CASCADE-STAT-TIER-WIRE-001,
+  MIGRATION.md #2058 — renumbered #1986 → #2058 at the 2026-07-20 train-b
+  wave-2b fold (#1986 was the QM-assigned provisional; DEC-IDs are the stable
+  handles per DEC-LEDGER-RENUMBER-001); P0 item 16, operator-approved
+  2026-07-18** — the Stage-4
+  cascade WIRES its already-shipped-but-dark statistical engines. **(1) Filter #4 = the
+  RC-first → Hansen-SPA JOIN:** White's Reality Check runs FIRST (an RC-fail keeps the EXACT
+  existing reject detail byte-identical); an RC-passing pool advances to `hansen_spa` and
+  rejects on `pvalue_consistent >= spa_alpha` — a strict MONOTONE TIGHTENING; `CascadeReport`
+  gains the additive `pool_rc_pvalue`/`pool_spa_pvalue` (None-distinguishable states); the
+  `_pool_usable` (>=2 obs, var>0) screen provably guarantees SPA's positive-variance
+  precondition. SPEC RECONCILE: TRACK1_BACKTEST_SPEC.md filter #4 ALREADY documents the
+  two-variant sequence — the implementation was the laggard, NO spec edit. **(2) Embargo
+  threading:** `cpcv_pass_rate(label_span=0, embargo=0)` kw-only — the HONESTY clause: the
+  model-free rate scores TEST folds only, so the CPCV rate is PROVABLY embargo-INVARIANT
+  (property-pinned over [0..10_000] + a 10**9 never-raises pin + kernel-arm parity; NO
+  tightening claimed on #3); the WFO arm genuinely shifts walks (`wfo_pass_rate(embargo=)` →
+  `walk_forward_splits(embargo=)`;
+  zero-walks → the existing WALK_FORWARD degrade arm, mirror-pinned);
+  `CascadeConfig.wfo_embargo: int | None = None` (None = AUTO, negative refused) +
+  `run_stage4_cascade(embargo_bars=)` + NEW `cascade_wire.resolve_cascade_embargo_bars(tf,
+  override)` = override or `ceil(DAILY_TF_MINUTES / tf_minutes)` — the DEC-STAT-001 (#123)
+  one-trading-day floor (table-pinned 1→375 · 5→75 · 15→25 · 375→1; the engine 1day TF has
+  minutes=375 so NO special case); `run_cascade_over_specs` resolves per GROUP with a
+  mixed-tf_minutes typed refusal. **(3) Per-candidate PBO (filter #5):** the pool CSCV law runs
+  FIRST unchanged, THEN each candidate with a usable family runs `pbo_probability` over its OWN
+  (T,N) family matrix (same usable-trimming; reject detail `candidate PBO X.XXXX > pbo_max`;
+  skip honestly on family None / K<2 / short; `CandidateVerdict.candidate_pbo` recorded pass AND
+  reject). THE FAMILY SOURCE (condition 6): every stage-3 eval is a persisted ResultRow in one
+  refined-cell store per distinct quantized (sl, tp), so `stage3_wire.cascade_specs_for_refined_cells`
+  recovers each mask's search family per (instrument, tf, direction) group — ONE load per cell
+  store; NEW `CascadeTupleSpec.family_sl_tp` (positive 2-tuples · unique · sorted · own pair a
+  member · concrete legs), EMIT-ON-PRESENT at MANIFEST_VERSION 1 (presence-tolerant parse,
+  unknown-key refusal preserved); `build_candidate_input` re-simulates family pairs through the
+  SAME trade-sim path with only sl/tp swapped — the ONE `simulate_trades(...,
+  reference_stamper=None)` literal lives in the shared `_trades_for_legs` closure so the VIX AST
+  pin's exact count for cascade_wire.py STAYS 2 (pin passes unmodified); CAP LAW
+  `candidate_pbo_family_cap = 256` enforced at the wire consumption seam (truncate-first-N + ONE
+  loud `cascade_wire.family_capped` WARN; own-pair-dropped → family None + its own WARN; cap<1 =
+  typed refusal; the manifest records the FULL family). RECORDED DEVIATIONS (code reality wins):
+  family populated ONLY for stage-3 refined-cell specs (grid specs stay None); an ambiguous
+  multi-mask cell → family None + ONE loud `stage3_wire.family_ambiguous_cell` WARN (a spec-level
+  field cannot express per-mask families — never a fabricated union); the CPCV threading is
+  `_validate_params`-only (no split construction exists in the model-free rate). **(4)
+  Serialization:** `_report_to_dict` adds the two pool keys + per-verdict `candidate_pbo` —
+  ADDITIVE at REPORT_VERSION 1; ZERO COMMITTED-golden flips — the claim SCOPED honestly (r1):
+  every committed golden fixture/suite byte-unchanged, the auto==manual golden proves RELATIVE
+  equality of the two paths only (a real production cascade CAN legitimately yield a different
+  WFO survivor set vs origin/main — the intended embargo de-leakage; the golden pools pass SPA
+  at p=0.0); `cascade_join` tolerates the new keys
+  with zero skips (pinned via fixtures AND real writer bytes); display surfaces deliberately NOT
+  extended (out of lane — the named follow-up DEC-CASCADE-STAT-DISPLAY-001). **(5) MEASURED (never assumed):** the A/B survivor-delta harness
+  (scratchpad, NOT shipped; worktree old-vs-new over a bit-identical seeded 3-pool ×
+  20-candidate corpus with per-candidate independent RNG) reads OLD 41 → NEW 38 survivors (7.3%
+  fewer — the honest number, the brief's ~10-30% expectation NOT claimed): pbo −3, cpcv +0 and
+  reality_check_spa +0 EXACTLY (the invariance validated live; SPA's bite is the RC-marginal
+  class — proven by the unit suite's probe-constructed split pool rc.p=0.37 < 0.5 <=
+  spa.p=0.595); one pool's monte_carlo went 14→15 (the WFO embargo is a CORRECTION, not
+  monotone — disclosed); family re-sim cost 21.7 ms → 84.7 ms per candidate at K=6 over 375 bars
+  (linear ≈12.6 ms/extra column); the real pipeline fixture's family width measured 12 pairs.
+  GATES (executed): `cascade.py` 355/118 + `cpcv.py` 132/44 at 100.00% on their exact ci.yml
+  stanzas; the whole-engine gate 100.00% (the first run caught the ONE uncovered stage3_wire
+  defensive arm — closed by a real test, recorded honestly); test batteries 93 + 61 + 221 + 65 +
+  60 passed; the spa/cpcv_wfo/pbo golden + property suites pass UNMODIFIED; ruff/ruff-format
+  clean; `mypy --strict brutex` clean (the venv `cma` gap closed by installing the optimize
+  extra — env action, not source); pyright 0 NEW vs baseline. HOSTILE-REVIEW ROUND 1 folded
+  (3 lenses, all SHIP — the two boundary-pin test gaps mutant-verified killed (`>`→`>=` cap ·
+  `<`→`<=` family floor) + the CPCV kernel-engagement spy (skip-when-unavailable, wrap-never-
+  replace) + the `candidates_for_spec` `family_cap < 1` typed-refusal alignment + the doc/scoping
+  NITs; per-item record in MIGRATION.md #2058). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; the cascade consumes persisted results strictly DOWNSTREAM of run
+  identity (no canonical_trade_params key, no store-address change); F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes/env vars.)
+  Earlier: `claude/alpha-buyhold-benchmark`
   (**DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #2057 — renumbered
   #1956 → #1957 → #2057 (the first hop at the 2026-07-18 merge-reconcile —
   main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001; the last hop at the
@@ -12922,7 +13014,31 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/alpha-buyhold-benchmark`
+- **Active feature branch:** `claude/cascade-stat-tier-wire`
+  (DEC-CASCADE-STAT-TIER-WIRE-001, MIGRATION.md #2058 — renumbered
+  #1986 → #2058 at the 2026-07-20 train-b wave-2b fold per
+  DEC-LEDGER-RENUMBER-001 — the Stage-4 cascade
+  wires its dark statistical engines: filter #4 = the RC-first → Hansen-SPA
+  JOIN (monotone tightening; RC-fail detail byte-identical; additive
+  `pool_rc_pvalue`/`pool_spa_pvalue` report keys at REPORT_VERSION 1); the
+  CPCV/WFO embargo threads end-to-end with the AUTO one-trading-day law
+  `resolve_cascade_embargo_bars` = `ceil(375 / tf_minutes)` (DEC-STAT-001
+  #123; the CPCV rate is PROVABLY embargo-invariant — pinned, no tightening
+  claimed there; the WFO walks genuinely shift, zero-walks → the existing
+  degrade arm); filter #5 gains the PER-CANDIDATE Bailey-CSCV PBO over each
+  finalist's REAL Stage-3 search family (condition 6 — the refined-cell
+  stores → the NEW validated spec field `family_sl_tp`, EMIT-ON-PRESENT at
+  MANIFEST_VERSION 1; family re-sim through the SAME trade-sim path; cap
+  256 with loud truncation WARNs; ambiguous multi-mask cells abstain
+  loudly, never a fabricated family; the VIX AST pin count stays 2 via the
+  shared `_trades_for_legs` closure); ZERO committed-golden flips
+  (auto==manual golden + spa/cpcv_wfo/pbo goldens + property suites pass
+  UNMODIFIED — relative-equality scope, hostile review r1 folded);
+  measured survivor delta OLD 41 → NEW 38 on the synthetic A/B corpus;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX — the cascade is strictly
+  downstream of run identity; matches §1's Active branch line — see §1 +
+  MIGRATION.md #2058 for the full blurb)
+  Earlier: `claude/alpha-buyhold-benchmark`
   (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #2057 — renumbered
   #1956 → #1957 → #2057 (the first hop at the 2026-07-18 merge-reconcile —
   main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001; the last hop at the

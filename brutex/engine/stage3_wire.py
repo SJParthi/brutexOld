@@ -948,6 +948,21 @@ def cascade_specs_for_refined_cells(
     own quantized coordinates over the cascade's bars, exactly as Amendment A1
     describes.
 
+    Stage-3 search FAMILY (DEC-CASCADE-STAT-TIER-WIRE-001): per condition 6
+    EVERY stage-3 eval is persisted as a ResultRow — the same mask lands in
+    one refined-cell store per DISTINCT quantized ``(sl_paisa, tp_paisa)`` it
+    was tried at, so a mask's search family is recoverable HERE (the one
+    place the cells + their rows are all in hand) as the set of cell
+    coordinates whose store holds a row with that mask, per
+    ``(instrument, tf, direction)`` group. Each cell's spec carries
+    ``family_sl_tp`` = its winner masks' COMMON family (sorted; the cell's
+    own pair is a member by construction — the cell contributed itself).
+    HONEST LIMIT (spec-level field, recorded deviation): a cell whose rows
+    span MULTIPLE masks with DIFFERING family sets cannot be expressed by
+    ONE spec-level family — it is skipped LOUDLY
+    (``stage3_wire.family_ambiguous_cell``; the per-candidate PBO abstains
+    for that cell, never a fabricated family).
+
     Parameters
     ----------
     cells
@@ -960,8 +975,26 @@ def cascade_specs_for_refined_cells(
     list[CascadeTupleSpec]
         One spec per non-empty refined cell.
     """
+    # ONE load per cell store (reused for the family map AND the spec rows).
+    loaded: list[tuple[Stage3RefinedCell, tuple[ResultRow, ...]]] = [
+        (cell, tuple(ResultsStore.load(cell.path).rows())) for cell in cells
+    ]
+    # (instrument, tf_label, direction_label) -> mask -> {(sl, tp), ...}
+    family_by_mask: dict[tuple[str, str, str], dict[int, set[tuple[int, int]]]] = {}
+    for cell, rows in loaded:
+        tuple_ = cell.tuple_
+        if tuple_.sl_paisa is None or tuple_.tp_paisa is None:
+            # Structurally unreachable for refined cells ("refined cells never
+            # carry a disabled leg" — Stage3CellRecord's > 0 law); defensive
+            # totality so a hand-built cell can never poison the map.
+            continue
+        key = (tuple_.instrument, tuple_.tf.label, _direction_label(tuple_.direction))
+        per_mask = family_by_mask.setdefault(key, {})
+        for row in rows:
+            per_mask.setdefault(row.mask_bits, set()).add((tuple_.sl_paisa, tuple_.tp_paisa))
+
     specs: list[CascadeTupleSpec] = []
-    for cell in cells:
+    for cell, rows in loaded:
         tuple_ = cell.tuple_
         proximity = tuple_.proximity
         proximity_bps = (
@@ -973,6 +1006,25 @@ def cascade_specs_for_refined_cells(
                 proximity.fib_proximity_bps,
             )
         )
+        family_sl_tp: tuple[tuple[int, int], ...] | None = None
+        if rows and tuple_.sl_paisa is not None and tuple_.tp_paisa is not None:
+            key = (tuple_.instrument, tuple_.tf.label, _direction_label(tuple_.direction))
+            per_mask = family_by_mask[key]
+            families = {frozenset(per_mask[row.mask_bits]) for row in rows}
+            if len(families) == 1:
+                family_sl_tp = tuple(sorted(next(iter(families))))
+            else:
+                _LOG.warning(
+                    "stage3_wire.family_ambiguous_cell",
+                    cell_path=str(cell.path),
+                    n_masks=len({row.mask_bits for row in rows}),
+                    n_distinct_families=len(families),
+                    detail=(
+                        "the cell's winner masks carry differing search families — "
+                        "the spec-level family_sl_tp cannot express them; the "
+                        "per-candidate PBO is skipped for this cell"
+                    ),
+                )
         spec = spec_from_store_rows(
             instrument=tuple_.instrument,
             tf_label=tuple_.tf.label,
@@ -983,11 +1035,12 @@ def cascade_specs_for_refined_cells(
             prior_n=grid.prior_n,
             proximity_bps=proximity_bps,
             start_equity_paisa=grid.start_equity_paisa,
-            rows=ResultsStore.load(cell.path).rows(),
+            rows=rows,
             top_k=None,
             fib_anchor=tuple_.fib_anchor,
             vwap_source=tuple_.price_source.vwap_source,
             ema_source=tuple_.price_source.ema_source,
+            family_sl_tp=family_sl_tp,
         )
         if spec is not None:
             specs.append(spec)
