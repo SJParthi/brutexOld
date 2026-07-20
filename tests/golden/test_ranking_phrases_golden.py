@@ -42,7 +42,14 @@ from brutex.ranking.phrases import PHRASE_TABLE, reason_for_mask
 # byte-identical (the 69-row prefix hashes to the pre-express gap-era
 # digest). Pre-express (gap-era) digest:
 # 7083320aec5c8726e6f5ffedab41780b57ca815103e68e51219ffb35952900ab.
-_GOLDEN_TABLE_SHA256 = "e37de1cf9b15863344b481679877560b05073e0b16494e0516e10ac51eea075b"
+# RE-LOCKED again at DEC-VOCAB-VWAP-RETAIN-001 (the operator ruling
+# 10f5522e, woven at the train fold): the two VWAP rows (52/53) drop the
+# "(VWAP; retired condition — never fires on current runs)" tombstone prose
+# for the plain live wording — the vocab-66 wipe is REVERSED, bits 52/53 are
+# ACTIVE again (bit positions + every OTHER row byte-identical). Pre-retain
+# (tombstoned-VWAP-era) digest:
+# e37de1cf9b15863344b481679877560b05073e0b16494e0516e10ac51eea075b.
+_GOLDEN_TABLE_SHA256 = "475347f4d7f201b1970cb724b8ae60f036767b626c7436b076f08fc5d9173edb"
 
 
 def test_phrase_table_digest_locked() -> None:
@@ -58,17 +65,15 @@ def test_r33_reference_assembly_locked() -> None:
     # PDH-cross + above-R2 + above-VWAP as one dual-language sentence pair.
     mask = (1 << 13) | (1 << 8) | (1 << 52)
     reason = reason_for_mask(mask)
-    # DELIBERATE RE-PIN (the retired-suffix authority fix): the technical
-    # leg now routes through describe.condition_display_name, so the
-    # tombstoned bit 52 reads "close_above_vwap (retired)" — matching
-    # matched_condition_names exactly (one vocabulary, two surfaces).
-    # Old pinned string: "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap".
-    assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap (retired)"
-    # The VWAP member (a RETIRED tombstone an OLD artifact's mask may carry)
-    # renders the retired prose — never silently skipped, never live-sounding.
+    # DELIBERATE RE-PIN (DEC-VOCAB-VWAP-RETAIN-001, the operator ruling
+    # 10f5522e): the VWAP tombstone is REVERSED — bit 52 is ACTIVE again, so
+    # describe.condition_display_name renders the plain name (no "(retired)"
+    # suffix; RETIRED_MASK is now 0). Old tombstoned pin:
+    # "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap (retired)".
+    assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap"
+    # The VWAP member renders the live plain prose (R33's own worked example).
     assert reason.plain == (
         "price was near resistance level R2"
         "; and the candle closed above yesterday's high"
-        "; and price was above the session's volume-weighted average price (VWAP; "
-        "retired condition — never fires on current runs)"
+        "; and price was above the session's volume-weighted average price (VWAP)"
     )

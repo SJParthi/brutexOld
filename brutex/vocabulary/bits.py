@@ -206,9 +206,7 @@ MASK_WIDTH: Final[int] = 128
 
 #: Bitmask of conditions whose evaluator computes a real boolean. LAYOUT-ONLY
 #: bits (``implemented=false``) are 0 here; the evaluator emits 0 for them.
-#: RETIRED (tombstone, never gets math): bit 52 ``BIT_CLOSE_ABOVE_VWAP``.
-#: RETIRED (tombstone, never gets math): bit 53 ``BIT_CLOSE_BELOW_VWAP``.
-IMPLEMENTED_MASK: Final[int] = 18889452420679698743295
+IMPLEMENTED_MASK: Final[int] = 18889465931478580854783
 
 #: Bitmask of the RETIRED tombstone bits (``reserved = true`` in the manifest).
 #: Positions held forever (grow-only law), evaluator emits 0, NO later PR ever
@@ -216,7 +214,7 @@ IMPLEMENTED_MASK: Final[int] = 18889452420679698743295
 #: unimplemented remainder (``implemented = false``, ``reserved = false``) is
 #: LAYOUT-ONLY, not retired. Python-only export (no Rust consumer exists yet;
 #: the manifest stays the single source — TOMB-01 renderer support).
-RETIRED_MASK: Final[int] = 13510798882111488
+RETIRED_MASK: Final[int] = 0
 
 #: Bitmask of conditions valid on the 1day timeframe (ADR-0012 D12). Relative
 #: to the FULL declared layout it clears the 9 intraday-only bit(s)

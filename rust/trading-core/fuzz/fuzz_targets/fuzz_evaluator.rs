@@ -3,11 +3,13 @@
 //! `trading_core::evaluate_atoms` (`src/evaluator.rs`) — the bit-identical
 //! Stage-3 vocabulary core shared by BruteX (PyO3) and TickVault (native).
 //!
-//! Reconciled to the 66-bit reshape: the VWAP bits 52-53 are TOMBSTONED (the
-//! snapshot's `vwap_paisa` input was DELETED with the VWAP/volume wipe), the
-//! Central Pivot Range bits 60-63 are implemented off the SAME prev-day pivot
-//! anchor, and the Supertrend bits 64-65 are declared layout-only. Every
-//! IMPLEMENTED bit (0..=51, 54..=63) can fire.
+//! Reconciled to the woven 74-bit vocabulary: the VWAP bits 52-53 are
+//! RETAINED (DEC-VOCAB-VWAP-RETAIN-001 — `vwap_paisa` is an `Option` input,
+//! `None` = abstain), the Central Pivot Range bits 60-63 are implemented off
+//! the SAME prev-day pivot anchor, and the Supertrend bits 64-65 read the
+//! resolved ×2-scaled line. The Group-15 gap-midpoint (66-68) and fib/swing
+//! (69-73) inputs are held at `None`/zero here (bits dark — fuzz arms for
+//! them are a named Reconcile-phase obligation; no member authored them).
 //!
 //! On arbitrary bytes it builds a STRUCTURALLY VALID, in-domain bar snapshot
 //! (see the domain note in `fuzz_pivot_fib.rs`: prices capped at `MAX_PAISA`,
@@ -17,11 +19,10 @@
 //! 1. **Never panics / overflows** — all internal products
 //!    (`close·bps`, `body·10`, `(c−day_low)·3`, `pdc·50`, the i128 narrow-CPR
 //!    width test, …) stay in range within the realistic envelope.
-//! 2. **Only sets IMPLEMENTED bits** — the tombstoned VWAP pair (52-53), the
-//!    declared-only Supertrend pair (64-65) and the reserved headroom
-//!    (66-127) are always clear.
+//! 2. **Only sets IMPLEMENTED bits** — the reserved headroom (74-127) is
+//!    always clear.
 //! 3. **Honours every mutually-exclusive condition pair** — a bar cannot be
-//!    both above and below the same level (EMA20/EMA200/PDH/PDL), both
+//!    both above and below the same level (EMA20/EMA200/VWAP/PDH/PDL), both
 //!    bullish and bearish, both a gap-up and a gap-down day, in both the
 //!    upper and lower third, etc. The four time-of-day buckets are an
 //!    `else if` chain → at most one fires; the three CPR position bits
@@ -39,6 +40,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use trading_core::bits;
+use trading_core::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS;
 use trading_core::{
     IndicatorSnapshot, MarketStructureSignal, PriorBarHistory, ProximityParams, compute_fib_levels,
     compute_pivot_levels, evaluate_atoms,
@@ -167,6 +169,7 @@ fuzz_target!(|data: &[u8]| {
         close_paisa: close,
         ema20_paisa: r.opt_price(),
         ema200_paisa: r.opt_price(),
+        vwap_paisa: r.opt_price(),
         pivots,
         fib,
         day_high_paisa: day_high,
@@ -174,11 +177,22 @@ fuzz_target!(|data: &[u8]| {
         open_of_day_paisa: open_of_day,
         market_structure,
         supertrend_x2_paisa,
+        // Groups 15 + swing: abstain inputs (bits dark) — fuzz draw arms for
+        // 66-68/72-73 were never authored by their member PRs; a named
+        // Reconcile-phase obligation, not silently invented here.
+        gap_mid_paisa: None,
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let params = ProximityParams {
         pivot_proximity_bps: r.bps(),
         pdh_pdl_proximity_bps: r.bps(),
         fib_proximity_bps: r.bps(),
+        // Gap/swing bands at the pyo3 signature defaults: the group inputs
+        // above are abstain (None), so these knobs are inert here (the fuzz
+        // draw arms are the named Reconcile-phase obligation).
+        gap_mid_proximity_bps: DEFAULT_GAP_MID_PROXIMITY_BPS,
+        swing_proximity_bps: 10,
     };
     // Prior-bar window of length prior_n in [0, 8], flags from the next bits.
     let prior_n = (r.u64() % 9) as usize;
@@ -193,10 +207,8 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(
         mask & !trading_core::bits::IMPLEMENTED_MASK,
         0,
-        "evaluator set a non-implemented bit (tombstone 52-53 / reserved >= 66)"
+        "evaluator set a non-implemented bit (reserved >= 74)"
     );
-    // The tombstoned VWAP positions specifically (the wipe's permanent pin).
-    assert_eq!(mask & (0b11 << 52), 0, "a tombstoned VWAP bit fired");
 
     // ── 3. Mutually-exclusive condition pairs ──
     assert!(
@@ -210,6 +222,10 @@ fuzz_target!(|data: &[u8]| {
     assert!(
         !(has(mask, bits::BIT_EMA20_ABOVE_EMA200) && has(mask, bits::BIT_EMA20_BELOW_EMA200)),
         "EMA20 cannot be both above and below EMA200"
+    );
+    assert!(
+        !(has(mask, bits::BIT_CLOSE_ABOVE_VWAP) && has(mask, bits::BIT_CLOSE_BELOW_VWAP)),
+        "close cannot be both above and below VWAP"
     );
     assert!(
         !(has(mask, bits::BIT_CLOSE_ABOVE_PDH) && has(mask, bits::BIT_CLOSE_BELOW_PDH)),
@@ -239,6 +255,14 @@ fuzz_target!(|data: &[u8]| {
         !(has(mask, bits::BIT_CLOSE_ABOVE_SUPERTREND) && has(mask, bits::BIT_CLOSE_BELOW_SUPERTREND)),
         "close cannot be both above and below the Supertrend line"
     );
+
+    // A warm-up (None) VWAP must fire NEITHER Group-10 bit.
+    if snapshot.vwap_paisa.is_none() {
+        assert!(
+            !has(mask, bits::BIT_CLOSE_ABOVE_VWAP) && !has(mask, bits::BIT_CLOSE_BELOW_VWAP),
+            "VWAP bits must not fire during warm-up (vwap_paisa = None)"
+        );
+    }
 
     // The three CPR position bits (60-62) form an EXACT PARTITION: the
     // canonicalized band (tc >= bc) makes any close strictly above TC,

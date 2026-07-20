@@ -124,9 +124,9 @@ pub const BIT_INSIDE_DAY: u32 = 50;
 /// today's range engulfs the previous-day range
 pub const BIT_OUTSIDE_DAY: u32 = 51;
 // VWAP Position
-/// TOMBSTONE (VWAP wipe — spot-only engine, no volume): was close strictly above the session-anchored intraday VWAP; position held, evaluator emits 0  (RETIRED — reserved=true, position held forever, never gets math)
+/// close strictly above the session-anchored intraday VWAP (futures)
 pub const BIT_CLOSE_ABOVE_VWAP: u32 = 52;
-/// TOMBSTONE (VWAP wipe — spot-only engine, no volume): was close strictly below the session-anchored intraday VWAP; position held, evaluator emits 0  (RETIRED — reserved=true, position held forever, never gets math)
+/// close strictly below the session-anchored intraday VWAP (futures)
 pub const BIT_CLOSE_BELOW_VWAP: u32 = 53;
 // Pivot Proximity Extended
 /// close within tolerance of resistance R5
@@ -187,9 +187,7 @@ pub const MASK_WIDTH: u32 = 128;
 /// LAYOUT-ONLY bits (`implemented=false`) await their math in a later PR,
 /// while RETIRED bits (`reserved=true`) are tombstones that hold their
 /// position forever and never get math (the grow-only law).
-/// RETIRED: bit 52 `BIT_CLOSE_ABOVE_VWAP`.
-/// RETIRED: bit 53 `BIT_CLOSE_BELOW_VWAP`.
-pub const IMPLEMENTED_MASK: u128 = 18889452420679698743295;
+pub const IMPLEMENTED_MASK: u128 = 18889465931478580854783;
 
 #[cfg(test)]
 mod tests {

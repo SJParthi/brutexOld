@@ -16,8 +16,11 @@
 //! bits 60..=63 (Central Pivot Range) are implemented off the same prev-day
 //! pivot anchor; bits 64..=65 (Supertrend) are implemented off the stateful
 //! ×2-scaled-integer [`SupertrendState`] line (ATR-10 Wilder, factor 3, hl2).
-//! Bits 52..=53 (VWAP) are TOMBSTONED (`implemented=false`,
-//! positions held forever — the VWAP/volume wipe).
+//! Bits 52..=53 (VWAP) are implemented off the stateful session-anchored
+//! [`VwapState`] and RETAINED per the operator ruling
+//! (DEC-VOCAB-VWAP-RETAIN-001): they evaluate when traded volume exists
+//! (futures / broker-provided volume) and ABSTAIN (`None` → bits clear) on
+//! volumeless instruments such as the spot indices.
 //!
 //! The pure-Rust core ([`evaluate_atoms`] + the [`indicators`]) is dependency-free
 //! and is proven identical to the Python source against the language-neutral
@@ -63,6 +66,7 @@ pub use indicators::supertrend::{
     SUPERTREND_ATR_PERIOD, SUPERTREND_DIR_DOWN, SUPERTREND_DIR_UP, SUPERTREND_FACTOR,
     SupertrendState, compute_supertrend,
 };
+pub use indicators::vwap::VwapState;
 pub use spec::{Direction, SPEC_SCHEMA_VERSION, Signal, StrategySpec, evaluate};
 
 /// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),

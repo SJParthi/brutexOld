@@ -5,11 +5,10 @@
 //! code path serves the BruteX backtest (via PyO3, Phase 2) and the TickVault
 //! live tick path (native). Returns a `u128` mask (the mask is u128 for headroom
 //! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); every IMPLEMENTED bit
-//! (0..=51, 54..=73) can fire — bits 52-53 are the TOMBSTONED VWAP positions
-//! (the VWAP/volume wipe: the engine is spot-only and spot indices carry no
-//! volume, so the VWAP math was DELETED; the positions are held forever per
-//! the grow-only law and the evaluator emits 0 for them). PR-2 added the pivot
-//! R5/S5 proximity (bits 54-55) branch; DEC-NIFTY-BOS-CHOCH-001 added the
+//! (0..=73) can fire. PR-2 added the VWAP position (bits 52-53 — RETAINED per
+//! the operator ruling DEC-VOCAB-VWAP-RETAIN-001: evaluate when traded volume
+//! exists, abstain (`None` → bits clear) when it doesn't) and the pivot
+//! R5/S5 proximity (bits 54-55) branches; DEC-NIFTY-BOS-CHOCH-001 added the
 //! BOS/CHoCH branch (bits 56-59) — the four booleans are RESOLVED upstream by the
 //! stateful, look-ahead-clean `indicators::market_structure::MarketStructureState`
 //! and threaded in via the snapshot exactly like the resolved `PriorBarHistory`
@@ -60,6 +59,10 @@ pub struct IndicatorSnapshot {
     pub close_paisa: i64,
     pub ema20_paisa: Option<i64>,
     pub ema200_paisa: Option<i64>,
+    /// Session-anchored intraday VWAP (paisa). `None` during the warm-up bar and
+    /// on the 1day timeframe (ADR-0012 D12 — VWAP is intraday-only/NA on 1day),
+    /// so the Group-10 bits simply do not fire.
+    pub vwap_paisa: Option<i64>,
     pub pivots: PivotLevels,
     pub fib: FibLevels,
     pub day_high_paisa: i64,
@@ -125,6 +128,15 @@ pub struct ProximityParams {
     /// DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override-1 pattern).
     #[cfg_attr(feature = "serde", serde(default = "default_gap_mid_proximity_bps"))]
     pub gap_mid_proximity_bps: i64,
+    /// Swing-proximity tolerance for the near-swing bits 72/73
+    /// (DEC-FIB-TEMPLATE-EXPRESS-001). Appended-last with a serde default so a
+    /// pre-existing serialized `StrategySpec` (which never carried the field)
+    /// deserializes to the production default 10 — the same family-scoped
+    /// default the three sibling knobs use. NOT part of the FROZEN 57-byte
+    /// `StrategySpec::canonical_bytes` encode (the spec axis carries no swing
+    /// knob; a spec-axis swing sweep would need its own DEC).
+    #[cfg_attr(feature = "serde", serde(default = "default_swing_proximity_bps"))]
+    pub swing_proximity_bps: i64,
 }
 
 /// The default `gap_mid_proximity_bps` (10 bps — the sibling knobs' default;
@@ -137,15 +149,6 @@ pub const DEFAULT_GAP_MID_PROXIMITY_BPS: i64 = 10;
 #[cfg(feature = "serde")]
 fn default_gap_mid_proximity_bps() -> i64 {
     DEFAULT_GAP_MID_PROXIMITY_BPS
-    /// Swing-proximity tolerance for the near-swing bits 72/73
-    /// (DEC-FIB-TEMPLATE-EXPRESS-001). Appended-last with a serde default so a
-    /// pre-existing serialized `StrategySpec` (which never carried the field)
-    /// deserializes to the production default 10 — the same family-scoped
-    /// default the three sibling knobs use. NOT part of the FROZEN 57-byte
-    /// `StrategySpec::canonical_bytes` encode (the spec axis carries no swing
-    /// knob; a spec-axis swing sweep would need its own DEC).
-    #[cfg_attr(feature = "serde", serde(default = "default_swing_proximity_bps"))]
-    pub swing_proximity_bps: i64,
 }
 
 /// The production default for [`ProximityParams::swing_proximity_bps`] (10 bps —
@@ -165,6 +168,7 @@ impl Default for ProximityParams {
             pivot_proximity_bps: 10,
             pdh_pdl_proximity_bps: 10,
             fib_proximity_bps: 10,
+            gap_mid_proximity_bps: DEFAULT_GAP_MID_PROXIMITY_BPS,
             swing_proximity_bps: default_swing_proximity_bps(),
         }
     }
@@ -216,8 +220,9 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
 
 /// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
 ///
-/// Every IMPLEMENTED bit (0..=51, 54..=73) can fire — the tombstoned VWAP
-/// positions 52-53 are never set (their math was deleted; grow-only law). The
+/// Every IMPLEMENTED bit (0..=73) can fire. The VWAP bits (52..=53) read the
+/// resolved `snapshot.vwap_paisa` level (`None` = abstain — no volume yet /
+/// volumeless instrument / 1day; DEC-VOCAB-VWAP-RETAIN-001). The
 /// BOS/CHoCH bits (56..=59) read the resolved `snapshot.market_structure`
 /// flags (DEC-NIFTY-BOS-CHOCH-001); the CPR bits (60..=63) derive from the
 /// SAME prev-day pivot anchor as Groups 2/3/9; the Supertrend bits (64..=65)
@@ -466,11 +471,26 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
         mask |= bit(bits::BIT_OUTSIDE_DAY);
     }
 
-    // ── Group 10: VWAP Position (bits 52-53) — TOMBSTONED ──
-    // The VWAP/volume wipe: the engine is spot-only (DEC-ENGINE-SPOT-ONLY-001)
-    // and spot indices carry no traded volume, so the session-VWAP math was
-    // DELETED. Bits 52-53 keep their positions forever (grow-only law) and are
-    // NEVER set — `non_implemented_bits_are_always_clear` pins them clear.
+    // ── Group 10: VWAP Position (bits 52-53) ──
+    // Session-anchored intraday futures VWAP (ADR-0012 D12; RETAINED per the
+    // operator ruling DEC-VOCAB-VWAP-RETAIN-001 — evaluate when volume exists,
+    // abstain when it doesn't). `None` during the warm-up bar (no post-09:15
+    // volume yet), on any volumeless instrument (a spot index stores volume=0
+    // by construction — MIGRATION #394 — so the state never warms) AND on the
+    // 1day timeframe (a session VWAP is degenerate with one bar/session) — so
+    // the bit simply does not fire, mirroring the EMA warm-up `if let Some(..)`
+    // pattern. The running VWAP math (cum(price·vol)/cum(vol), reset at 09:15
+    // IST, auction-volume excluded, i128 accumulators, reset on contract roll)
+    // lives in the stateful `indicators::vwap::VwapState`; the evaluator only
+    // reads the resolved level.
+    if let Some(vwap) = s.vwap_paisa {
+        if close > vwap {
+            mask |= bit(bits::BIT_CLOSE_ABOVE_VWAP);
+        }
+        if close < vwap {
+            mask |= bit(bits::BIT_CLOSE_BELOW_VWAP);
+        }
+    }
 
     // ── Group 11: Pivot Proximity Extended (R5/S5, bits 54-55) ──
     // R5/S5 extend the standard floor-trader pivot ladder past R4/S4
@@ -572,6 +592,8 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
         if is_near(close, gap_mid, p.gap_mid_proximity_bps) {
             mask |= bit(bits::BIT_NEAR_GAP_MID);
         }
+    }
+
     // ── Group: Fibonacci Extended (bits 69-71) — DEC-FIB-TEMPLATE-EXPRESS-001 ──
     // Bits 69/70 read the PDL-anchored BULLISH retracement ladder
     // (DEC-FIB-BULLISH-RETRACE-001 fields — the asymmetric 23.6/78.6 pair only;

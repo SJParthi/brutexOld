@@ -4,16 +4,21 @@ TWO chained frozen-input migrations over the 400-case oracle
 ``fixtures/vocab_golden_vectors.json`` (GOLD-01 — never a free
 regenerate-and-trust):
 
-**v2→v3 (the 60→66 reshape):** VWAP bits 52/53 tombstoned + their math
-deleted; CPR bits 60-63 implemented; SuperTrend bits 64/65 then declared
-layout-only. The generator BURNS the retired VWAP RNG draw in its historical
-position, so every case's v2-era INPUT fields are byte-identical to the
-pre-reshape (version-2) fixture — pinned per case via the committed
-``fixtures/vocab_golden_migration_v2_masks.json`` companion. Per case:
-``new & ((1<<60)-1) == old & ~((1<<52)|(1<<53))`` (the 58 pre-existing active
-conditions evaluate bit-identically; the only in-span change is the tombstone
-clear), and bits 60-63 are exactly the CPR arithmetic recomputed
-INDEPENDENTLY here from the case's own anchors.
+**v2→v3→v4 (VWAP RETAINED — DEC-VOCAB-VWAP-RETAIN-001, the operator ruling
+10f5522e woven at the vocab train):** the vocab-66 wipe TOMBSTONED VWAP bits
+52/53 at v3; the retention REVERSES that tombstone — bits 52/53 are ACTIVE
+again, and the v4 generator FEEDS the (formerly burned) VWAP RNG draw into the
+snapshot, so the v4 fixture's 52/53 come BACK to their pre-reshape v2 values
+(the restored VWAP math is main's verbatim). The v2-era INPUT fields stay
+byte-identical to the pre-reshape (version-2) fixture — pinned per case via the
+committed ``fixtures/vocab_golden_migration_v2_masks.json`` companion. Per case
+the SPLIT-LAW is: ``new & ((1<<60)-1) == old_v2 & ((1<<60)-1)`` (FULL low-60
+identity — the tombstone clear is REVERSED, 52/53 restored to their v2 values;
+the v2 companion carries 355 of 400 cases with 52/53 firing), and bits 60-63
+are exactly the CPR arithmetic recomputed INDEPENDENTLY here from the case's
+own anchors. NOTE: the v4 fixture stays RED against this restored law until
+the Regen phase regenerates ``vocab_golden_vectors.json`` with 52/53 firing —
+this pass adjusts the LAW only (no fixture regeneration; GOLD-01).
 
 **v3→v4 (the vocab-66 SuperTrend implemented-flip, crate 0.5.0):** bits 64/65
 went live. The v4 generator APPENDS the ``supertrend_x2_paisa`` draw strictly
@@ -21,12 +26,18 @@ AFTER the ENTIRE historical draw stream (all 400 cases' v3 draws are consumed
 untouched first), so every v3-era input field is byte-identical — pinned per
 case via the committed ``fixtures/vocab_golden_migration_v3_masks.json``
 companion (input SHA over the case dict minus ``expected_mask`` AND minus the
-NEW ``supertrend_x2_paisa`` field) — and per case
-``new & ((1<<64)-1) == old`` (bits 0-63 bit-identical). The only NEW bits
-(64/65) are exactly the strict ×2-domain comparison recomputed INDEPENDENTLY
-here (``close×2`` vs the case's own ``supertrend_x2_paisa``; ``None`` /
-equality → both clear). No bit at or above 66 is ever
-set by the v4 layer itself.
+NEW ``supertrend_x2_paisa`` field) — and per case the SPLIT-LAW under VWAP
+retention is ``new & ((1<<64)-1) & ~TOMB == old_v3 & ~TOMB`` (bits 0-63 EXCEPT
+the tombstones bit-identical to v3) PLUS ``new & TOMB == old_v2 & TOMB`` (the
+52/53 bits come back to their v2/pre-reshape values, NOT v3's cleared zeros —
+v3 carried 0 of 400 with 52/53 firing, so the retention re-fires them). The
+SuperTrend bits (64/65) are exactly the strict ×2-domain comparison recomputed
+INDEPENDENTLY here (``close×2`` vs the case's own ``supertrend_x2_paisa``;
+``None`` / equality → both clear). The split-law is self-consistent: within
+the low-60 span minus the tombstones, v2 and v3 agree byte-for-byte on all 400
+cases (verified — the reshape touched only 52/53 in that span), so the two
+invariants above never contradict. No bit at or above 66 is ever set by the
+v4 layer itself.
 
 **DEC-GAP-MIDPOINT-CONDITIONS-001 (the 66→69 growth, woven at the vocab
 train):** the gap-midpoint bits 66-68 were APPENDED with exactly two per-case
@@ -201,27 +212,28 @@ def test_inputs_are_byte_identical_to_the_pre_reshape_fixture() -> None:
     assert not mismatches, f"case INPUTS drifted from the frozen pre-reshape corpus: {mismatches}"
 
 
-def test_pre_existing_bits_are_back_compat_and_tombstones_cleared() -> None:
-    """The back-compat harness: bits 0-51 + 54-59 identical; 52/53 cleared.
+def test_pre_existing_bits_are_back_compat_and_tombstones_restored() -> None:
+    """The back-compat harness: FULL low-60 identity (VWAP 52/53 RESTORED).
 
-    ``new & ((1<<60)-1) == old & ~tombstones`` per case over the frozen inputs
-    — i.e. every pre-existing ACTIVE condition evaluates bit-identically
-    pre/post reshape, and the ONLY change inside the old 60-bit span is the
-    tombstone clear.
+    ``new & ((1<<60)-1) == old_v2 & ((1<<60)-1)`` per case over the frozen
+    inputs — i.e. every pre-existing ACTIVE condition evaluates bit-identically
+    pre-reshape/post-retention, INCLUDING the VWAP bits 52/53, which come BACK
+    to their pre-reshape v2 values (DEC-VOCAB-VWAP-RETAIN-001 reverses the
+    vocab-66 tombstone; the restored VWAP math is main's verbatim).
     """
     old = _old_by_id()
     violations: list[str] = []
-    tombstones_cleared = 0
+    tombstones_restored = 0
     for case in _migration_cases():
         new_mask = int(case["expected_mask"], 16)
         old_mask = int(old[case["id"]]["old_mask"], 16)
-        if new_mask & _LOW60 != old_mask & ~_TOMBSTONE_MASK:
+        if new_mask & _LOW60 != old_mask & _LOW60:
             violations.append(f"case {case['id']}: old={old_mask:#034x} new={new_mask:#034x}")
         if old_mask & _TOMBSTONE_MASK:
-            tombstones_cleared += 1
+            tombstones_restored += 1
     assert not violations, "old-vocabulary bit drift:\n" + "\n".join(violations[:20])
-    # Anti-vacuity: the OLD corpus genuinely carried tombstone bits to clear.
-    assert tombstones_cleared > 0
+    # Anti-vacuity: the v2 corpus genuinely carried VWAP bits to restore.
+    assert tombstones_restored > 0
 
 
 #: The five DEC-FIB-TEMPLATE-EXPRESS-001 express bits (69-73) — the newest
@@ -338,20 +350,36 @@ def test_every_seeded_case_carries_the_new_supertrend_field() -> None:
 
 
 def test_pre_flip_bits_are_back_compat_across_the_supertrend_flip() -> None:
-    """The v3→v4 back-compat harness: bits 0-63 bit-identical per seeded case.
+    """The v3→v4 SPLIT-LAW harness (VWAP RETAINED — DEC-VOCAB-VWAP-RETAIN-001).
 
-    ``new & ((1<<64)-1) == old`` over the frozen inputs — every settled
-    condition (the 62 v3-active bits AND the inert tombstones/CPR span)
-    evaluates bit-identically pre/post flip; the ONLY change is above bit 63.
+    ``new & ((1<<64)-1) & ~TOMB == old_v3 & ~TOMB`` over the frozen inputs —
+    every settled condition OUTSIDE the tombstones (the CPR span + SuperTrend +
+    everything 0-51/54-63) evaluates bit-identically pre/post flip — PLUS
+    ``new & TOMB == old_v2 & TOMB`` — the VWAP bits 52/53 come back to their
+    pre-reshape v2 values (v3 had them cleared; retention re-fires them). The
+    ONLY change above bit 63 is the SuperTrend layer.
     """
-    old = _old_v3_by_id()
+    old_v3 = _old_v3_by_id()
+    old_v2 = _old_by_id()
     violations: list[str] = []
+    tombstones_restored = 0
     for case in _migration_cases():
         new_mask = int(case["expected_mask"], 16)
-        old_mask = int(old[case["id"]]["old_mask"], 16)
-        if new_mask & _LOW64 != old_mask:
-            violations.append(f"case {case['id']}: old={old_mask:#034x} new={new_mask:#034x}")
+        old_v3_mask = int(old_v3[case["id"]]["old_mask"], 16)
+        old_v2_mask = int(old_v2[case["id"]]["old_mask"], 16)
+        if new_mask & _LOW64 & ~_TOMBSTONE_MASK != old_v3_mask & ~_TOMBSTONE_MASK:
+            violations.append(
+                f"case {case['id']} (non-tomb): v3={old_v3_mask:#034x} new={new_mask:#034x}"
+            )
+        if new_mask & _TOMBSTONE_MASK != old_v2_mask & _TOMBSTONE_MASK:
+            violations.append(
+                f"case {case['id']} (tomb): v2={old_v2_mask:#034x} new={new_mask:#034x}"
+            )
+        if old_v2_mask & _TOMBSTONE_MASK:
+            tombstones_restored += 1
     assert not violations, "settled-vocabulary bit drift:\n" + "\n".join(violations[:20])
+    # Anti-vacuity: the v2 corpus genuinely carried VWAP bits the retention re-fires.
+    assert tombstones_restored > 0
 
 
 def test_new_supertrend_bits_are_exactly_the_independent_arithmetic() -> None:

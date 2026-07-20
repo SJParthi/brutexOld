@@ -71,7 +71,7 @@ impl Direction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StrategySpec {
     /// Entry required-bits SUPERSET over the same `u128` condition vocabulary
-    /// as [`crate::bits`] (66 declared positions; only IMPLEMENTED bits may be
+    /// as [`crate::bits`] (74 declared positions; only IMPLEMENTED bits may be
     /// required). The spec fires on a bar iff EVERY set bit here is also
     /// set in the bar's `evaluate_atoms` mask. Serialized as a HEX STRING
     /// (`condition_mask` as a JSON number loses precision past bit 52).
@@ -270,6 +270,7 @@ mod tests {
             close_paisa: close,
             ema20_paisa: Some(995_000),
             ema200_paisa: Some(990_000),
+            vwap_paisa: None,
             pivots: PivotLevels {
                 p_paisa: 1_000_000,
                 r1_paisa: 1_005_000,
@@ -377,11 +378,13 @@ mod tests {
         let reserved = 1u128 << 74;
         let err = StrategySpec::new(reserved, Direction::Long, proximity(), 1, 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
-        // Bits 52/53 (VWAP) are TOMBSTONED — refused too (the wipe).
-        let tombstone = 1u128 << 52;
-        assert!(StrategySpec::new(tombstone, Direction::Long, proximity(), 1, 0).is_err());
-        let tombstone_53 = 1u128 << 53;
-        assert!(StrategySpec::new(tombstone_53, Direction::Long, proximity(), 1, 0).is_err());
+        // Bits 52/53 (VWAP) are IMPLEMENTED again — RETAINED per the operator
+        // ruling (DEC-VOCAB-VWAP-RETAIN-001): a mask requiring them is ACCEPTED
+        // (the reverse pin of the wipe-era tombstone refusal).
+        let vwap_52 = 1u128 << 52;
+        assert!(StrategySpec::new(vwap_52, Direction::Long, proximity(), 1, 0).is_ok());
+        let vwap_53 = 1u128 << 53;
+        assert!(StrategySpec::new(vwap_53, Direction::Long, proximity(), 1, 0).is_ok());
         // Bit 64 (Supertrend) is IMPLEMENTED since the vocab-66 flip — a mask
         // requiring it is ACCEPTED (the reverse pin of the old layout-only refusal).
         let supertrend = 1u128 << 64;
@@ -492,10 +495,8 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn serde_round_trips_via_hex_mask() {
-        // (Bit 53 in the original mask moved to bit 54 when 52-53 were
-        // TOMBSTONED — a spec may only require IMPLEMENTED bits.)
         let spec = StrategySpec::new(
-            0x0000_0000_0000_0000_0642_1014_8000_a01a,
+            0x0000_0000_0000_0000_0622_1014_8000_a01a,
             Direction::Short,
             proximity(),
             3,
@@ -505,7 +506,7 @@ mod tests {
         let json = serde_json::to_string(&spec).expect("serialize");
         // The mask is a HEX STRING, never a JSON number.
         assert!(
-            json.contains("\"0000000000000000064210148000a01a\""),
+            json.contains("\"0000000000000000062210148000a01a\""),
             "mask must serialise as zero-padded hex string, got: {json}"
         );
         let back: StrategySpec = serde_json::from_str(&json).expect("deserialize");

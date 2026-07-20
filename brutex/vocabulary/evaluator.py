@@ -3,9 +3,10 @@
 Takes an `IndicatorSnapshot` (all per-bar indicator values) plus proximity
 parameters and prior-bar history, and returns a u128 bitmask where bit `i` is set
 iff condition `i` is true. The vocabulary currently declares bits 0..73 (74
-conditions — 72 ACTIVE: the VWAP bits 52/53 are RETIRED tombstones (the only
-retired bits); the SuperTrend bits 64/65 (the vocab-66 SuperTrend flip), the
-session-edge gap-midpoint bits 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001) and the
+conditions — ALL 74 ACTIVE: the VWAP bits 52/53 are RETAINED per the operator
+ruling (DEC-VOCAB-VWAP-RETAIN-001 — the vocab-66 wipe's tombstone reversed);
+the SuperTrend bits 64/65 (the vocab-66 SuperTrend flip), the session-edge
+gap-midpoint bits 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001) and the
 Fibonacci-Extended / Swing-Proximity bits 69-73 (DEC-FIB-TEMPLATE-EXPRESS-001)
 are all IMPLEMENTED, crate 0.5.0), with headroom to bit 127
 (DEC-VOCAB-U128-CODEGEN-001).
@@ -74,10 +75,16 @@ class IndicatorSnapshot:
     # Today's open price (computed at session start, constant intraday)
     open_of_day_paisa: int
 
-    # NOTE: the former ``vwap_paisa`` field (Group-10 VWAP bits 52/53) was
-    # RETIRED with the VWAP tombstone (the spot-only engine has no traded
-    # volume; the Rust ``VwapState`` was deleted from the crate at 0.4.0).
-    # Bits 52/53 hold their positions forever and never fire.
+    # Session-anchored intraday futures VWAP (None during warm-up AND on the 1day
+    # timeframe — ADR-0012 D12; the Group-10 close_above/below_vwap bits then do
+    # not fire). Computed by the shared Rust trading_core.VwapState — the single
+    # source since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (DEC-NIFTY-INDICATORS-001).
+    # RETAINED per the operator ruling (DEC-VOCAB-VWAP-RETAIN-001 — the vocab-66
+    # wipe's tombstone is REVERSED; bits 52/53 are ACTIVE again). Defaulted to
+    # None so every existing snapshot caller (which predates PR-2 and has no
+    # futures VWAP) keeps working unchanged — the spot-only engine's zero-volume
+    # indices abstain structurally (MIGRATION.md #394).
+    vwap_paisa: int | None = None
 
     # Resolved BOS/CHoCH market-structure flags (Group 12, bits 56-59), produced by
     # the look-ahead-clean shared Rust trading_core.MarketStructureState — the
@@ -276,8 +283,10 @@ def evaluate_atoms(
         prior_history: Rolling N-bar bullish/bearish flags for Group 6.
 
     Returns:
-        u128 bitmask over the 74-bit layout. The 72 IMPLEMENTED bits (0-51,
-        54-73) are set per condition (PR-2 added pivot R5/S5 bits 54-55;
+        u128 bitmask over the 74-bit layout. ALL 74 IMPLEMENTED bits (0-73)
+        are set per condition (PR-2 added the VWAP-position bits 52-53 —
+        RETAINED per DEC-VOCAB-VWAP-RETAIN-001, resolved from
+        ``snapshot.vwap_paisa`` — + pivot R5/S5 bits 54-55;
         DEC-NIFTY-BOS-CHOCH-001 added the BOS/CHoCH bits 56-59, resolved from
         ``snapshot.market_structure``; the CPR bits 60-63 are computed in-core
         from the snapshot's pivot levels; the SuperTrend bits 64/65 compare
@@ -287,8 +296,7 @@ def evaluate_atoms(
         resolved from ``snapshot.gap_mid_paisa``; DEC-FIB-TEMPLATE-EXPRESS-001
         added the Fibonacci-Extended bits 69-71 — bullish 23.6/78.6 + the 424
         extension, off the grown 19-slot fib list — and the Swing-Proximity
-        bits 72-73 off the snapshot's resolved swing levels). The RETIRED VWAP
-        tombstones (52/53) are never set.
+        bits 72-73 off the snapshot's resolved swing levels).
 
     O(1) per bar: one cache-resident Rust call, no allocations beyond the two
     small fixed-length level lists, no I/O.
@@ -315,6 +323,7 @@ def evaluate_atoms(
         snapshot.close_paisa,
         snapshot.ema20_paisa,
         snapshot.ema200_paisa,
+        snapshot.vwap_paisa,
         pivot_levels,
         fib_levels,
         snapshot.day_high_paisa,

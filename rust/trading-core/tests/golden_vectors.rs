@@ -31,13 +31,14 @@ struct Proximity {
     /// evaluator default).
     #[serde(default = "default_gap_mid_bps")]
     gap_mid_bps: i64,
-}
-
-fn default_gap_mid_bps() -> i64 {
     /// DEC-FIB-TEMPLATE-EXPRESS-001 — the swing band (bits 72/73). Defaulted
     /// so the parser stays tolerant of the pre-express fixture shape.
     #[serde(default = "default_swing_bps")]
     swing_bps: i64,
+}
+
+fn default_gap_mid_bps() -> i64 {
+    10
 }
 
 fn default_swing_bps() -> i64 {
@@ -72,6 +73,12 @@ struct Case {
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    /// Session-anchored intraday VWAP (Group 10, bits 52-53 — RETAINED per
+    /// DEC-VOCAB-VWAP-RETAIN-001; `None` = abstain, bits clear).
+    /// serde-defaulted: the RNG-free express cases (ids 400-407,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001) do not emit the key.
+    #[serde(default)]
+    vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
     prev_pdc_paisa: i64,
@@ -149,6 +156,7 @@ fn eval_case(c: &Case) -> u128 {
         close_paisa: c.close_paisa,
         ema20_paisa: c.ema20_paisa,
         ema200_paisa: c.ema200_paisa,
+        vwap_paisa: c.vwap_paisa,
         pivots,
         fib,
         day_high_paisa: c.day_high_paisa,

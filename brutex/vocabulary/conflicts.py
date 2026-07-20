@@ -121,9 +121,11 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         # over the canonicalised `tc >= bc` pair of
         # pivots.rs::compute_cpr_levels), so the three are pairwise mutually
         # exclusive; `narrow_cpr_day` (63) is orthogonal (co-occurs with any).
-        # The RETIRED VWAP tombstones (52/53) never fire, so they carry no
-        # pair — the table prunes IMPOSSIBLE co-occurrence, and a mask
-        # requiring a tombstone is already a zero-trade mask on its own.
+        # The VWAP position bits (52/53) are ACTIVE (RETAINED per
+        # DEC-VOCAB-VWAP-RETAIN-001) but carry NO conflict pair — matching the
+        # pre-reshape main design, which never listed one (the table stays 31
+        # pairs). This is deliberate: the sweep discovers their opposition for
+        # free, and no legal mask is wrongly pruned.
         (BIT_ABOVE_CPR_TC, BIT_BELOW_CPR_BC),
         (BIT_ABOVE_CPR_TC, BIT_INSIDE_CPR),
         (BIT_BELOW_CPR_BC, BIT_INSIDE_CPR),

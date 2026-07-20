@@ -35,14 +35,16 @@ one-past-the-edge misses.
 
 ## The 60→66 reshape migration invariant (frozen inputs)
 
-The vocab reshape (VWAP bits 52/53 tombstoned; CPR bits 60-63 implemented;
-SuperTrend 64/65 then declared layout-only) regenerated this fixture under a
-FROZEN seeded-RNG input stream: the retired VWAP draw is still CONSUMED
-(burned) in exactly its historical position and recorded as the INERT
-``vwap_paisa`` fixture field (it feeds no evaluator input —
-``IndicatorSnapshot`` carries no VWAP), so every one of the 400 case INPUTS is
-byte-identical to the pre-reshape frozen fixture and only ``expected_mask``
-moved. The permanent migration test
+The vocab reshape (CPR bits 60-63 implemented; SuperTrend 64/65 then declared
+layout-only) regenerated this fixture under a FROZEN seeded-RNG input stream.
+The VWAP bits 52/53 were tombstoned by the reshape then RETAINED per
+DEC-VOCAB-VWAP-RETAIN-001 (the operator ruling 10f5522e): the VWAP draw is
+CONSUMED in exactly its historical position AND FED to the evaluator via
+``IndicatorSnapshot.vwap_paisa`` (the un-burn — the draw's position +
+distribution are unchanged, so every one of the 400 case INPUTS stays
+byte-identical to the pre-reshape frozen fixture; only bits 52/53 come back
+ACTIVE in ``expected_mask``, matching the pre-reshape v2 values). The
+permanent migration test
 (``tests/golden/test_vocab_golden_migration.py``) pins that invariant per case
 against a committed copy of the old masks + per-case input SHA-256s. The CPR
 bits need NO new draws — they derive from the prev-day OHLC anchors the
@@ -205,13 +207,14 @@ def _build_case(
     ema20 = None if rng.random() < 0.12 else max(1, close + rng.randint(-30_000, 30_000))
     ema200 = None if rng.random() < 0.12 else max(1, close + rng.randint(-60_000, 60_000))
 
-    # RETIRED VWAP draw — BURNED, never fed to the evaluator (GOLD-02): the
-    # exact historical conditional pair of RNG draws is still consumed here so
-    # the seeded stream feeding every LATER draw (market structure, tod, prox,
-    # prior) is unshifted and the 400 case INPUTS stay byte-identical to the
-    # pre-reshape frozen fixture. The value is recorded as the INERT
-    # ``vwap_paisa`` fixture field (``IndicatorSnapshot`` has no VWAP field;
-    # bits 52/53 are tombstones the evaluator never sets).
+    # VWAP draw — RETAINED per DEC-VOCAB-VWAP-RETAIN-001 (the operator ruling
+    # 10f5522e): the vocab-66 wipe BURNED this draw; the retention UN-BURNS it
+    # and FEEDS it to the evaluator via ``IndicatorSnapshot.vwap_paisa`` below.
+    # The draw's position + distribution are UNCHANGED (the exact historical
+    # conditional pair of RNG draws), so the seeded stream feeding every LATER
+    # draw (market structure, tod, prox, prior) is byte-identically unshifted
+    # and the 400 case INPUTS stay byte-identical to the pre-reshape fixture —
+    # only bits 52/53 come back ACTIVE (matching the pre-reshape v2 values).
     vwap = None if rng.random() < 0.12 else max(1, close + rng.randint(-40_000, 40_000))
 
     # BOS/CHoCH (DEC-NIFTY-BOS-CHOCH-001): the four resolved Group-12 flags
@@ -270,6 +273,7 @@ def _build_case(
         day_high_paisa=day_high,
         day_low_paisa=day_low,
         open_of_day_paisa=open_of_day,
+        vwap_paisa=vwap,
         market_structure=market_structure,
         gap_mid_paisa=gap_mid,
     )

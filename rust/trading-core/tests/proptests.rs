@@ -10,8 +10,7 @@
 //! that fails when that operator is perturbed):
 //!
 //! 1. **Universal invariants** — hold for ALL bounded inputs: determinism,
-//!    non-implemented bits (the tombstoned VWAP 52-53 and the reserved
-//!    headroom >= 66) always clear,
+//!    non-implemented bits (the reserved u128 headroom >= 74) always clear,
 //!    mutually-exclusive bit pairs, at most one time-of-day bucket, the CPR
 //!    partition, the pivot/fib level ladders are monotonic.
 //! 2. **Independent oracle parity** — a deliberately separate re-implementation
@@ -48,10 +47,9 @@ const MIDDAY_END: u32 = 13 * 3600;
 const AFTERNOON_END: u32 = 15 * 3600;
 
 /// All IMPLEMENTED condition bits set — the union the evaluator can ever
-/// produce: bits 0..=51 and 54..=65 (incl. the R5-S5/BOS/CHoCH/CPR/Supertrend
-/// groups). Bits 52-53 are the TOMBSTONED VWAP positions — outside
-/// IMPLEMENTED_MASK, so the `non_implemented_bits_are_always_clear` property
-/// pins them (and the >= 66 headroom) permanently clear.
+/// produce (all 74 bits, incl. the VWAP/R5-S5/BOS/CHoCH/CPR/Supertrend/
+/// gap-mid/fib-express groups, are implemented now — VWAP retained per
+/// DEC-VOCAB-VWAP-RETAIN-001).
 const FULL_MASK: u128 = bits::IMPLEMENTED_MASK;
 
 // ───────────────────────────── strategies ──────────────────────────────────
@@ -221,17 +219,17 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 Just((pdc - gap_thr - 1).max(1)),
                 1i64..=2 * MAX_PAISA,
             ];
-            // Ten elements (nested tuples keep us inside proptest's 12-tuple cap).
+            // Twelve elements (nested tuples keep us inside proptest's 12-tuple cap).
             (
                 Just(pivots),
                 Just(fib),
                 Just(candle),
                 day_strat,
                 ood_strat,
-                // ema20 + ema200 share the `arb_ema` around-close strategy
-                // (above / below / None) so the Group-1 comparisons see their
-                // equality boundary both ways.
-                (arb_ema(close), arb_ema(close)),
+                // ema20, ema200 AND the session VWAP all share the `arb_ema`
+                // around-close strategy (above / below / None) so the Group-10
+                // VWAP-position bits are exercised both ways by the property suite.
+                (arb_ema(close), arb_ema(close), arb_ema(close)),
                 arb_tod(),
                 arb_proximity(),
                 arb_prior(),
@@ -242,16 +240,15 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 // by the `MarketStructureState` unit + property tests; here the
                 // evaluator's job is only to copy each flag onto its bit).
                 arb_market_structure(),
-                // The resolved SuperTrend ×2 line (Group 14) — boundary-aware
-                // around this candle's close (see `arb_supertrend`).
-                arb_supertrend(close),
-                // The resolved Group-15 gap-midpoint level
-                // (DEC-GAP-MIDPOINT-CONDITIONS-001) — around/at/absent like the
-                // EMAs (the stateful X1/X2 RESOLUTION is proven by the
-                // stage1a_batch tests; the evaluator's job here is the pure
-                // above/below/near verdict), so bits 66-68 are exercised both
-                // ways by the property suite.
-                arb_ema(close),
+                // The resolved SuperTrend ×2 line (Group 14, boundary-aware —
+                // see `arb_supertrend`) NESTED with the resolved Group-15
+                // gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001 —
+                // around/at/absent like the EMAs; the stateful X1/X2
+                // RESOLUTION is proven by the stage1a_batch tests, the
+                // evaluator's job here is the pure above/below/near verdict,
+                // so bits 66-68 are exercised both ways) — one pair to stay
+                // inside the tuple cap.
+                (arb_supertrend(close), arb_ema(close)),
                 // The confirmed-swing anchors (bits 72/73,
                 // DEC-FIB-TEMPLATE-EXPRESS-001) — None / around-close / far,
                 // each side independent, so the Option-abstain arm AND both
@@ -271,13 +268,13 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 proximity,
                 prior,
                 market_structure,
-                supertrend_x2_paisa,
-                gap_mid,
+                st_gap,
                 swings,
             )| {
                 let (open, high, low, close) = candle;
                 let (day_high, day_low) = day;
-                let (ema20, ema200) = emas;
+                let (ema20, ema200, vwap) = emas;
+                let (supertrend_x2_paisa, gap_mid) = st_gap;
                 let (swing_high, swing_low) = swings;
                 let snapshot = IndicatorSnapshot {
                     tod_seconds,
@@ -287,6 +284,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                     close_paisa: close,
                     ema20_paisa: ema20,
                     ema200_paisa: ema200,
+                    vwap_paisa: vwap,
                     pivots,
                     fib,
                     day_high_paisa: day_high,
@@ -572,7 +570,15 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         m |= 1u128 << bits::BIT_OUTSIDE_DAY;
     }
 
-    // (Group 10, bits 52-53, is the TOMBSTONED VWAP pair — never set.)
+    // Group 10: VWAP position (bits 52-53). `None` (warm-up / 1day) fires nothing.
+    if let Some(vwap) = s.vwap_paisa {
+        if c > vwap {
+            m |= 1u128 << bits::BIT_CLOSE_ABOVE_VWAP;
+        }
+        if c < vwap {
+            m |= 1u128 << bits::BIT_CLOSE_BELOW_VWAP;
+        }
+    }
 
     // Group 11: pivot R5/S5 proximity (bits 54-55) — same tolerance as Group 2.
     if oracle_is_near(c, pv.r5_paisa, bp) {
@@ -675,8 +681,8 @@ proptest! {
         prop_assert_eq!(a, b);
     }
 
-    /// Every bit outside IMPLEMENTED_MASK must always be clear: the TOMBSTONED
-    /// VWAP bits 52-53 AND the reserved u128 headroom (>= 66).
+    /// Every bit outside IMPLEMENTED_MASK must always be clear: the reserved
+    /// u128 headroom (>= 74).
     #[test]
     fn non_implemented_bits_are_always_clear((s, p, prior) in arb_scenario()) {
         let mask = evaluate_atoms(&s, &p, &prior);
@@ -873,6 +879,7 @@ fn every_implemented_bit_is_individually_reachable() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
+        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,
@@ -1377,9 +1384,25 @@ fn every_implemented_bit_is_individually_reachable() {
         &no_prior,
     );
 
-    // (Group 10, bits 52-53, is the TOMBSTONED VWAP pair — reachability is
-    // deliberately IMPOSSIBLE; `non_implemented_bits_are_always_clear` +
-    // `tombstoned_vwap_bits_never_fire` own that direction.)
+    // Group 10: VWAP position (bits 52-53). close above / below a session VWAP.
+    check(
+        bits::BIT_CLOSE_ABOVE_VWAP,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            vwap_paisa: Some(1_000_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_VWAP,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            vwap_paisa: Some(1_100_000),
+            ..base
+        },
+        &no_prior,
+    );
 
     // Group 11: pivot R5/S5 proximity (bits 54-55). close exactly ON R5 / S5.
     check(
@@ -1491,13 +1514,6 @@ fn every_implemented_bit_is_individually_reachable() {
         bits::BIT_CLOSE_ABOVE_SUPERTREND,
         IndicatorSnapshot {
             supertrend_x2_paisa: Some(2_099_999),
-    // DEC-FIB-TEMPLATE-EXPRESS-001 — the express template bits (69-73).
-    // Anchor levels (pdh 1_100_000 / pdl 1_000_000, r = 100_000):
-    // bull_23 = 1_023_600 · bull_78 = 1_078_600 · ext_up_424 = 1_423_600.
-    check(
-        bits::BIT_NEAR_FIB_BULL_236,
-        IndicatorSnapshot {
-            close_paisa: 1_023_600,
             ..base
         },
         &no_prior,
@@ -1516,9 +1532,6 @@ fn every_implemented_bit_is_individually_reachable() {
         bits::BIT_CLOSE_ABOVE_GAP_MID,
         IndicatorSnapshot {
             gap_mid_paisa: Some(1_049_000),
-        bits::BIT_NEAR_FIB_BULL_786,
-        IndicatorSnapshot {
-            close_paisa: 1_078_600,
             ..base
         },
         &no_prior,
@@ -1527,9 +1540,6 @@ fn every_implemented_bit_is_individually_reachable() {
         bits::BIT_CLOSE_BELOW_GAP_MID,
         IndicatorSnapshot {
             gap_mid_paisa: Some(1_051_000),
-        bits::BIT_NEAR_FIB_424,
-        IndicatorSnapshot {
-            close_paisa: 1_423_600,
             ..base
         },
         &no_prior,
@@ -1538,6 +1548,38 @@ fn every_implemented_bit_is_individually_reachable() {
         bits::BIT_NEAR_GAP_MID,
         IndicatorSnapshot {
             gap_mid_paisa: Some(1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
+    // DEC-FIB-TEMPLATE-EXPRESS-001 — the express template bits (69-73).
+    // Anchor levels (pdh 1_100_000 / pdl 1_000_000, r = 100_000):
+    // bull_23 = 1_023_600 · bull_78 = 1_078_600 · ext_up_424 = 1_423_600.
+    check(
+        bits::BIT_NEAR_FIB_BULL_236,
+        IndicatorSnapshot {
+            close_paisa: 1_023_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_BULL_786,
+        IndicatorSnapshot {
+            close_paisa: 1_078_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_424,
+        IndicatorSnapshot {
+            close_paisa: 1_423_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
         bits::BIT_NEAR_SWING_HIGH,
         IndicatorSnapshot {
             last_swing_high_paisa: Some(1_050_000),
@@ -1556,55 +1598,8 @@ fn every_implemented_bit_is_individually_reachable() {
 
     assert_eq!(
         seen, FULL_MASK,
-        "not all implemented bits (incl. R5-S5/BOS/CHoCH/CPR/Supertrend/gap-mid/fib-express) were exercised"
+        "not all implemented bits (incl. VWAP/R5-S5/BOS/CHoCH/CPR/Supertrend/gap-mid/fib-express) were exercised"
     );
-}
-
-/// The tombstoned VWAP bits 52-53 can NEVER fire — even on the scenario that
-/// used to set them (close far above / below every level, warm EMAs). The
-/// deterministic companion of `non_implemented_bits_are_always_clear`.
-#[test]
-fn tombstoned_vwap_bits_never_fire() {
-    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
-    let fib = compute_fib_levels(1_100_000, 1_000_000);
-    let prox = ProximityParams {
-        pivot_proximity_bps: 10,
-        pdh_pdl_proximity_bps: 10,
-        fib_proximity_bps: 10,
-        gap_mid_proximity_bps: 10,
-        swing_proximity_bps: 10,
-    };
-    let no_prior = PriorBarHistory {
-        prior_n: 3,
-        flags: vec![],
-    };
-    for close in [1i64, 1_050_000, 5_000_000] {
-        let s = IndicatorSnapshot {
-            tod_seconds: 10 * 3600,
-            open_paisa: close,
-            high_paisa: close,
-            low_paisa: close,
-            close_paisa: close,
-            ema20_paisa: Some(1_050_000),
-            ema200_paisa: Some(1_050_000),
-            pivots,
-            fib,
-            day_high_paisa: close,
-            day_low_paisa: close,
-            open_of_day_paisa: close,
-            market_structure: MarketStructureSignal::default(),
-            supertrend_x2_paisa: None,
-            gap_mid_paisa: None,
-            last_swing_high_paisa: None,
-            last_swing_low_paisa: None,
-        };
-        let m = evaluate_atoms(&s, &prox, &no_prior);
-        assert_eq!(
-            m & (0b11u128 << 52),
-            0,
-            "tombstoned VWAP bits fired for close={close}: {m:#x}"
-        );
-    }
 }
 
 /// Deterministic CPR boundary pins: at close == TC the strict above-bit stays
@@ -1636,6 +1631,7 @@ fn cpr_equality_boundaries_are_pinned() {
             close_paisa: close,
             ema20_paisa: None,
             ema200_paisa: None,
+            vwap_paisa: None,
             pivots,
             fib,
             day_high_paisa: close,
@@ -1688,6 +1684,7 @@ fn cpr_equality_boundaries_are_pinned() {
         close_paisa: 1_000_000,
         ema20_paisa: None,
         ema200_paisa: None,
+        vwap_paisa: None,
         pivots: tie,
         fib,
         day_high_paisa: 1_000_000,
@@ -1746,6 +1743,7 @@ fn equality_boundaries_keep_strict_bits_clear() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
+        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,
@@ -2006,6 +2004,7 @@ fn supertrend_bits_fire_both_ways_and_equality_clears_both() {
         close_paisa: 1_050_000, // close_x2 = 2_100_000
         ema20_paisa: None,
         ema200_paisa: None,
+        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,
@@ -2013,11 +2012,16 @@ fn supertrend_bits_fire_both_ways_and_equality_clears_both() {
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
         supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        gap_mid_proximity_bps: 0,
+        swing_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -2083,6 +2087,7 @@ fn degenerate_bars_fire_no_shape_or_gap_bits() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
+        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,

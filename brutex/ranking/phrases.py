@@ -156,21 +156,16 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
     ),
     PhraseEntry(50, "inside_day", "the day's range stayed inside the previous day's range"),
     PhraseEntry(51, "outside_day", "the day's range engulfed the previous day's range"),
-    # ── VWAP Position (bits 52-53) — RETIRED tombstones: the positions are
-    # held forever but the evaluator never sets them (the VWAP/volume wipe;
-    # the spot-only engine has no traded volume). The phrases stay honest
-    # should an OLD artifact's mask carry them.
+    # ── VWAP Position (bits 52-53) ──
     PhraseEntry(
         52,
         "close_above_vwap",
-        "price was above the session's volume-weighted average price (VWAP; retired "
-        "condition — never fires on current runs)",
+        "price was above the session's volume-weighted average price (VWAP)",
     ),
     PhraseEntry(
         53,
         "close_below_vwap",
-        "price was below the session's volume-weighted average price (VWAP; retired "
-        "condition — never fires on current runs)",
+        "price was below the session's volume-weighted average price (VWAP)",
     ),
     # ── Pivot Proximity Extended (bits 54-55) ──
     PhraseEntry(54, "near_pivot_r5", "price was near resistance level R5"),
@@ -326,8 +321,9 @@ def reason_for_mask(mask: int) -> ReasonText:
     ``technical`` joins the vocabulary DISPLAY names with ``" ∧ "`` in
     ascending bit order — each name via the ONE
     :func:`brutex.vocabulary.describe.condition_display_name` authority, so
-    a RETIRED tombstone bit (e.g. the VWAP bits 52/53 an OLD artifact's mask
-    may carry) reads ``"<name> (retired)"`` exactly as
+    a RETIRED tombstone bit (should the vocabulary ever retire one — none are
+    retired today, the VWAP bits 52/53 having been RETAINED per
+    DEC-VOCAB-VWAP-RETAIN-001) reads ``"<name> (retired)"`` exactly as
     ``describe.matched_condition_names`` decodes it (one vocabulary, two
     surfaces); ``plain`` joins the hand-written phrases with ``"; and "``
     (the design B7 assembly law). Bits ``>= TOTAL_CONDITIONS`` are ignored
