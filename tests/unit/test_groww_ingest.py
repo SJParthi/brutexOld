@@ -3415,7 +3415,7 @@ class TestMassAllFilteredBreaker:
         from brutex.adapters.groww import ingest as ingest_mod
         from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
         from brutex.data.session import ALL_FILTERED
-        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger import WindowLedger, is_fetch_exhausted_settle_reason
         from brutex.notifications.sweep_alerts import SweepAlerter
         from brutex.orchestrator.parallel import SerialRunParallel
 
@@ -3476,15 +3476,35 @@ class TestMassAllFilteredBreaker:
         assert by_symbol["AAA"].status == "FAILED"
         assert by_symbol["AAA"].last_error == ALL_FILTERED
         assert by_symbol["AAA"].empty_streak == 2
-        assert led.newly_settled_skipped == 0
+        # MERGE-RECONCILE (2026-07-20): the latch law is pinned PER-WINDOW — no
+        # ALL_FILTERED window may settle post-trip (AAA/BBB/CCC each stay
+        # FAILED + re-pullable below). The original `newly_settled_skipped == 0`
+        # pin predated DEC-AUTO-RESUME-ZERO-SURPRISES-001 (#1800b), whose
+        # SANCTIONED fetch-exhausted law legitimately settles the INCIDENTAL
+        # GGG scaffold (5 consecutive genuine vendor-FAILED records — exactly
+        # its K); that settle is a DIFFERENT, stamped channel, never an AF
+        # settle, so the run's ONE settle is identity-checked as GGG's
+        # exhausted stamp (the stress-test reconcile precedent — the test law
+        # moves, neither production law is loosened).
+        assert led.newly_settled_skipped == 1
+        assert is_fetch_exhausted_settle_reason(by_symbol["GGG"].last_error)
         # BBB/CCC recorded pre-trip in pass 1 (streak 1); the latched breaker
-        # suppresses their retry-pass records too (streaks preserved).
+        # suppresses their retry-pass records too (streaks preserved, status
+        # FAILED + re-pullable — the AF-latch law per window).
+        assert by_symbol["BBB"].status == "FAILED"
+        assert by_symbol["BBB"].last_error == ALL_FILTERED
         assert by_symbol["BBB"].empty_streak == 1
+        assert by_symbol["CCC"].status == "FAILED"
+        assert by_symbol["CCC"].last_error == ALL_FILTERED
         assert by_symbol["CCC"].empty_streak == 1
         # The clean symbols settled SUCCESS in pass 1 and were never re-pulled;
-        # the transient symbol is still honestly FAILED (a NEXT pull's problem).
+        # the persistent-timeout scaffold walked the #1800b exhausted ladder to
+        # its recoverable terminal (SKIPPED + the causal stamp; the AF windows
+        # never did — their failed_streak stays 0, the degraded-demotion guard).
         assert by_symbol["DDD"].status == "SUCCESS"
-        assert by_symbol["GGG"].status == "FAILED"
+        assert by_symbol["GGG"].status == "SKIPPED"
+        assert by_symbol["GGG"].failed_streak == 5
+        assert by_symbol["AAA"].failed_streak == 0
         # EXACTLY ONE alarm for the whole pull — the pass-1 trip transition.
         assert len(_events(logs, "allfiltered_breaker.tripped")) == 1
         assert len(pushes) == 1
