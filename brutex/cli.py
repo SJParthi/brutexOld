@@ -821,6 +821,19 @@ def _add_sweep_grid_args(
         help="Min Deflated-Sharpe probability to survive the overfit gate (default 0.95)",
     )
     parser.add_argument(
+        "--single-event-max-best-day-pct",
+        type=float,
+        default=None,
+        dest="single_event_max_best_day_pct",
+        help=(
+            "OPT-IN Stage-4 cascade single-event sensitivity gate "
+            "(DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001): FAIL a candidate whose "
+            "total return minus its best single IST day is below this percent of the "
+            "total (0 < X < 100; junk fails loud). Default None = OFF — the stage "
+            "does not run and reports are byte-identical."
+        ),
+    )
+    parser.add_argument(
         "--no-options-sim",
         action="store_false",
         dest="options_sim",
@@ -8179,6 +8192,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # CLI-surface default only.
     overfit_gate: bool = True,
     dsr_min: float = 0.95,
+    single_event_max_best_day_pct: float | None = None,
     temporal_mode: str | None = None,
     temporal_min_profitable_frac: float | None = None,
     temporal_max_year_share: float | None = None,
@@ -8477,6 +8491,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         tripwire_config = TripwireConfig.from_env()
         diffcheck_k = resolve_diffcheck_k()
         stall_policy = resolve_stall_policy(per_tuple_estimate_s=None, workers=1)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001 (review round 1): validate
+    # the --single-event-max-best-day-pct knob EAGERLY via the ONE
+    # validate_single_event_pct law CascadeConfig.__post_init__ delegates to —
+    # junk (0, 100, -5, nan, inf) is a clean pre-sweep user-config error,
+    # never a ValueError first discovered at the automatic Stage-4 site AFTER
+    # the whole multi-day sweep has computed. Both dispatch paths funnel
+    # through this entry, so one eager pass covers both.
+    from brutex.metrics.cascade import validate_single_event_pct
+
+    try:
+        validate_single_event_pct(single_event_max_best_day_pct)
     except ValueError as exc:
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -9718,7 +9747,23 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         bars_context=BarsContext(
                             exchange=exchange, segment=segment, start=start, end=end
                         ),
-                        cascade_config=cascade_config_for_sweep(sweep_id),
+                        # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001: the default-OFF
+                        # single-event knob rides the cascade config ONLY when set —
+                        # None forwards no override. Precisely: run identity + the
+                        # CascadeReport are byte-identical at defaults; the manifest
+                        # `cascade_config` block gains an additive
+                        # `"single_event_max_best_day_pct": null` field
+                        # (backward-compatible load; auto==manual golden green).
+                        cascade_config=cascade_config_for_sweep(
+                            sweep_id,
+                            overrides=(
+                                None
+                                if single_event_max_best_day_pct is None
+                                else {
+                                    "single_event_max_best_day_pct": single_event_max_best_day_pct
+                                }
+                            ),
+                        ),
                         stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                         leaderboard_trials=leaderboard_trials,
                         # ADR-0012 (review round-1): the SAME resolved schedule map the
@@ -12852,6 +12897,7 @@ def _dispatch(argv: list[str] | None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            single_event_max_best_day_pct=args.single_event_max_best_day_pct,
             temporal_mode=args.temporal_mode,
             temporal_min_profitable_frac=args.temporal_min_profitable_frac,
             temporal_max_year_share=args.temporal_max_year_share,
@@ -12911,6 +12957,7 @@ def _dispatch(argv: list[str] | None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            single_event_max_best_day_pct=args.single_event_max_best_day_pct,
             temporal_mode=args.temporal_mode,
             temporal_min_profitable_frac=args.temporal_min_profitable_frac,
             temporal_max_year_share=args.temporal_max_year_share,
