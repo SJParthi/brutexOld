@@ -73,7 +73,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
@@ -83,8 +83,14 @@ import blake3
 import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
-from brutex.engine.results_store import ResultsStore, ResultsStoreError, VixTrioConflictError
+from brutex.engine.results_store import (
+    ResultsStore,
+    ResultsStoreError,
+    ResultsStoreSchemaError,
+    VixTrioConflictError,
+)
 from brutex.engine.stage1a import apply_1day_mask_for
+from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_identity import (
     _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
@@ -96,9 +102,18 @@ from brutex.engine.sweep_run import (
     SweepRunSummary,
     run_persisted_sweep,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.ranking import MIN_TRADES, OverfitGateConfig
-from brutex.strategies.types import FibAnchorKind, Side
-from brutex.universe import is_engine_sweep_symbol
+from brutex.ranking.temporal import TemporalRobustnessConfig
+from brutex.strategies.types import (
+    DEFAULT_PRICE_SOURCE_CELL,
+    FibAnchorKind,
+    PriceSource,
+    PriceSourceCell,
+    Side,
+    price_source_params_fragment,
+)
+from brutex.universe import is_engine_spot_symbol, is_engine_sweep_symbol
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -121,6 +136,34 @@ _ACTION_GRID_COMPLETE: Final[str] = "GRID_SWEEP_COMPLETE"
 #: Audit action for a tuple that raised mid-evaluation and was SKIPPED
 #: ("Resilient: skip + continue") — names the exact offending combo + error.
 _ACTION_TUPLE_FAILED: Final[str] = "TUPLE_FAILED"
+
+#: Remediation string for a per-tuple CORRUPT / old-schema finalist store
+#: (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921). A store that raises
+#: :class:`~brutex.engine.results_store.ResultsStoreSchemaError` at LOAD is
+#: CONTAINED to a ``TUPLE_FAILED`` skip (exit 6), never a whole-grid abort — but
+#: it stays in place (un-quarantined, un-sentineled), so every resume re-counts it
+#: failed until the operator heals it. Deliberately NOT auto-quarantined: a fresh
+#: empty store flushed over a still-populated grid-wide MASK dedup would silently
+#: drop the tuple's finalists (the #650 / sweep_heal C5 empty-flush wedge).
+#:
+#: The command chain is COPY-PASTE RUNNABLE against the real CLI (review round 1
+#: MAJOR-1 — the prior text named a nonexistent ``--out-root`` flag and skipped
+#: the required verify→emit-plan→heal steps): the ``--`` flags below are pinned
+#: against the LIVE argparse surface by
+#: ``tests/unit/test_engine_sweep_orchestrator.py::TestRemediationFlagsRunnable``
+#: so the string can never rot again.
+TUPLE_STORE_CORRUPT_REMEDIATION: Final[str] = (
+    "finalist store unreadable — run 'brutex sweep-verify --results-root "
+    "<results-root> --recount --emit-heal-plan' with the SAME grid flags the "
+    "sweep ran with (writes the heal plan under <results-root>/heal/), then "
+    "'brutex sweep-heal <results-root>/heal/<plan>.json --results-root "
+    "<results-root> --execute' (quarantines the store AND wipes checkpoint/ and "
+    "dedup-cache/ so the tuple genuinely recomputes) — or move the corrupt store "
+    "file aside and wipe both skip-tier dirs manually; NOTE: when the plan "
+    "condemns >= 50% of the grid's expected stores (e.g. a single-tuple grid), "
+    "'sweep-heal' refuses until --allow-mass-quarantine is also passed (the C7 "
+    "mass-quarantine gate)"
+)
 
 #: Default ceiling on the number of tuples a grid may enumerate (the honest
 #: opt-in guard — a grid this large is a conscious choice, raise it explicitly).
@@ -156,6 +199,20 @@ class Timeframe:
             raise ValueError("Timeframe.label must be non-empty")
         if self.minutes < 1:
             raise ValueError(f"Timeframe.minutes must be >= 1, got {self.minutes}")
+
+    @property
+    def duration_s(self) -> int:
+        """The interval length in TRADING seconds (``minutes * 60``).
+
+        DEC-TF-REGISTRY-DYNAMIC-001: the seconds-keyed surface of the engine
+        timeframe. ``minutes`` deliberately STAYS the dataclass field — it is
+        constructed positionally at every launch site and serialized into the
+        grid identity / per-tuple digests, so inverting field<->property would
+        churn every construction site and risk a silent 60x digest drift for
+        zero functional gain. A sub-minute ENGINE timeframe is out of scope
+        (its own DEC + a sub-minute feed are prerequisites).
+        """
+        return self.minutes * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +289,20 @@ class SweepGridConfig:
         Stage-3 multiple-testing overfit gate (DEC-RANKING-OVERFIT-001) runs per
         leaderboard. ``None`` (the default) keeps the legacy ranking. Each tuple's
         own backtested-combo count is its authoritative trial count ``N``.
+    temporal
+        Opt-in :class:`~brutex.ranking.temporal.TemporalRobustnessConfig`,
+        forwarded to every tuple's ``SweepRunConfig`` — the temporal-robustness
+        year gate + per-period finalist-stats capture
+        (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001). ``None`` (the default) is
+        byte-identical legacy behaviour. IDENTITY-SAFE by construction: like
+        ``overfit``, this field enters NONE of ``_tuple_digest`` /
+        ``_grid_descriptor`` / ``_tuple_cache_params`` (explicit field
+        enumerations — a pure rejection gate changes WHICH rows persist, never
+        any row's bytes; regression-pinned). INHERITED HAZARD, disclosed: the
+        completion-sentinel resume also excludes it, so toggling the gate does
+        NOT redo completed tuples — a resumed grid can mix gate regimes per
+        tuple (visible in the per-tuple SWEEP_START audit payloads;
+        remediation = a fresh results root).
     unsafe_allow_out_of_scope_instruments
         Layer-1 engine-scope escape hatch (DEC-ENGINE-SCOPE-GUARD-001; default
         ``False``): when False, every instrument must satisfy
@@ -264,6 +335,13 @@ class SweepGridConfig:
     #: The swept Fib-anchor axis (DEC-NIFTY-FIB-AXIS-001). Defaults to prev-day
     #: only so an unset grid is byte-identical to the pre-axis sweep.
     fib_anchors: Sequence[FibAnchorKind] = (FibAnchorKind.PREV_DAY,)
+    #: The swept VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001).
+    #: Defaults to the single baseline cell ``(HLC3, CLOSE)`` so an unset grid is
+    #: cardinality-1 and byte-identical to the pre-axis sweep (dormant axis). A
+    #: non-default cell is an OFAT (one-factor-at-a-time) variant — the honest
+    #: budget verdict is STAGED: each cell runs as a SEPARATE cardinality-1
+    #: invocation (~baseline ≤ 2 days), a combined 5-cell run does NOT fit ≤ 2 days.
+    price_source_cells: Sequence[PriceSourceCell] = (DEFAULT_PRICE_SOURCE_CELL,)
     prior_n: int = 3
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA
     max_combos: int = DEFAULT_MAX_COMBOS
@@ -271,6 +349,7 @@ class SweepGridConfig:
     top_k: int | None = None
     min_hits: int = MIN_TRADES
     overfit: OverfitGateConfig | None = None
+    temporal: TemporalRobustnessConfig | None = None
     #: Stage-3 refinement pass (DEC-STAGE3-WIRE-001, ADR-0007 §5 slice 5) —
     #: DEFAULT-OFF. When enabled, after every grid tuple persists, the launcher
     #: runs the BIPOP-CMA-ES refinement over each (instrument, tf, mode)
@@ -308,6 +387,7 @@ class SweepGridConfig:
         object.__setattr__(self, "take_profits", _dedup_seq(self.take_profits))
         object.__setattr__(self, "proximities", _dedup_seq(self.proximities))
         object.__setattr__(self, "fib_anchors", _dedup_seq(self.fib_anchors))
+        object.__setattr__(self, "price_source_cells", _dedup_seq(self.price_source_cells))
 
         for name in (
             "instruments",
@@ -319,6 +399,7 @@ class SweepGridConfig:
             "take_profits",
             "proximities",
             "fib_anchors",
+            "price_source_cells",
         ):
             if not getattr(self, name):
                 raise ValueError(f"SweepGridConfig.{name} must be a non-empty axis")
@@ -348,6 +429,30 @@ class SweepGridConfig:
             raise ValueError(
                 "SweepGridConfig.directions must not contain Side.HOLD "
                 "(a sweep backtests a directional edge)"
+            )
+        # VWAP-source-on-spot advisory (DEC-NIFTY-PRICE-SOURCE-AXIS-001): a spot
+        # index carries NO traded volume, so a VWAP-variant cell (vwap_source !=
+        # HLC3) produces meaningless bits 52-53 on it — a likely operator mistake
+        # that would waste a ~2-day run. NON-BLOCKING: warn once, never refuse (the
+        # operator may deliberately probe it; the run still completes).
+        vwap_variant_cells = sorted(
+            {
+                c.vwap_source.value
+                for c in self.price_source_cells
+                if c.vwap_source is not PriceSource.HLC3
+            }
+        )
+        spot_instruments = sorted({s for s in self.instruments if is_engine_spot_symbol(s)})
+        if vwap_variant_cells and spot_instruments:
+            _LOG.warning(
+                "stage1a.vwap_source_on_spot",
+                vwap_variant_sources=vwap_variant_cells,
+                spot_instruments=spot_instruments,
+                detail=(
+                    "VWAP-source cells are meaningless on spot indices (no traded "
+                    "volume → bits 52-53 never fire); they apply only to NIFTY "
+                    "futures — this run will produce junk VWAP bits for these symbols"
+                ),
             )
         for name in ("mode", "data_snapshot_hash", "indicator_version", "code_commit_sha"):
             if not getattr(self, name):
@@ -480,6 +585,10 @@ class SweepTuple:
     tp_paisa: int | None
     proximity: ProximityParams | None
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    #: The swept VWAP/EMA price-source cell (DEC-NIFTY-PRICE-SOURCE-AXIS-001) this
+    #: tuple evaluates against. Defaults to the baseline ``(HLC3, CLOSE)`` cell so
+    #: a tuple built without the axis keeps the pre-axis behaviour + store address.
+    price_source: PriceSourceCell = DEFAULT_PRICE_SOURCE_CELL
 
     def to_run_config(
         self,
@@ -530,12 +639,15 @@ class SweepTuple:
             prior_n=grid.prior_n,
             proximity=self.proximity,
             fib_anchor=self.fib_anchor,
+            vwap_source=self.price_source.vwap_source,
+            ema_source=self.price_source.ema_source,
             start_equity_paisa=grid.start_equity_paisa,
             max_combos=grid.max_combos,
             top_k=grid.top_k,
             min_hits=grid.min_hits,
             overfit=grid.overfit,
             roll_schedule=roll_schedule,
+            temporal=grid.temporal,
         )
 
 
@@ -569,6 +681,17 @@ class SweepGridSummary:
         but a non-zero count makes the grid verdict NON-ZERO and leaves each
         failed tuple un-sentineled / un-cached for a deterministic redo next run.
         NOT counted as run or skipped-no-bars.
+    tuples_failed_apriori_budget
+        The SUBSET of ``tuples_failed`` whose failure was the deterministic
+        Apriori mask·bar breaker
+        (:class:`~brutex.engine.sweep_run.SweepAprioriBudgetError`,
+        DEC-SWEEP-APRIORI-DEFAULT-001): a budget trip is target-invariant, so
+        the SAME cell's every deeper-k tuple re-trips identically — the
+        distinct counter lets the CLI/Telegram name the remediation (raise
+        ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` and re-run; the frozen
+        checkpoint re-runs exactly the refused tuples). Defaulted ``0`` (the
+        ``tuples_quarantined_prior`` precedent) so every existing constructor
+        and consumer is unchanged; always ``0`` on a legacy (non-apriori) run.
     """
 
     tuples_total: int
@@ -581,6 +704,7 @@ class SweepGridSummary:
     ranked: int
     persisted: int
     tuples_failed: int
+    tuples_failed_apriori_budget: int = 0
 
 
 def _dedup_seq[T](seq: Sequence[T]) -> tuple[T, ...]:
@@ -615,6 +739,7 @@ def count_sweep_tuples(grid: SweepGridConfig) -> int:
             len(grid.take_profits),
             len(grid.proximities),
             len(grid.fib_anchors),
+            len(grid.price_source_cells),
         )
     )
 
@@ -623,8 +748,9 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
     """Yield every :class:`SweepTuple` of *grid*'s outer product, deterministically.
 
     Streams the product in a fixed nested order (instrument → timeframe →
-    direction → k → stop-loss → take-profit → proximity → fib-anchor) so the
-    enumeration is reproducible. Each ``next`` is O(1) (an :func:`itertools.product`
+    direction → k → stop-loss → take-profit → proximity → fib-anchor →
+    price-source) so the enumeration is reproducible. Each ``next`` is O(1) (an
+    :func:`itertools.product`
     step) with O(1) memory; the generator never materialises the full product.
 
     Parameters
@@ -637,7 +763,17 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
     SweepTuple
         One grid point per step.
     """
-    for instrument, tf, direction, k, sl, tp, proximity, fib_anchor in itertools.product(
+    for (
+        instrument,
+        tf,
+        direction,
+        k,
+        sl,
+        tp,
+        proximity,
+        fib_anchor,
+        price_source,
+    ) in itertools.product(
         grid.instruments,
         grid.timeframes,
         grid.directions,
@@ -646,6 +782,7 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
         grid.take_profits,
         grid.proximities,
         grid.fib_anchors,
+        grid.price_source_cells,
     ):
         yield SweepTuple(
             instrument=instrument,
@@ -656,6 +793,7 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
             tp_paisa=tp,
             proximity=proximity,
             fib_anchor=fib_anchor,
+            price_source=price_source,
         )
 
 
@@ -692,6 +830,7 @@ def bloom_capacity_hint(grid: SweepGridConfig) -> int:
             len(grid.take_profits),
             len(grid.proximities),
             len(grid.fib_anchors),
+            len(grid.price_source_cells),
         )
     )
     return max(1, masks_per_tuple * other_axes)
@@ -747,10 +886,12 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     overfit(dsr_min)/top_k/min_hits/max_combos or Stage-3 config re-keys the
     Parquet + completion-sentinel + trial-stats-sidecar address instead of
     serving the prior config's finalists via the sentinel short-circuit
-    (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001). BYTE-STABLE at defaults: an
-    ungated default-selection grid emits NEITHER fragment, so the descriptor is
-    byte-identical to the pre-fold 16-key dict and no existing on-disk store
-    re-keys.
+    (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) — and the DEFAULT-OMITTED swept
+    price-source cell (:func:`price_source_params_fragment`,
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001). BYTE-STABLE at defaults: an ungated
+    default-selection ``(HLC3, CLOSE)`` grid emits NONE of the fragments, so the
+    descriptor is byte-identical to the pre-fold 16-key dict and no existing
+    on-disk store re-keys.
     """
     proximity_bps = (
         None
@@ -783,6 +924,17 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
         "indicator_version": grid.indicator_version,
         "code_commit_sha": grid.code_commit_sha,
     }
+    # The swept price-source cell distinguishes the store address
+    # (DEC-NIFTY-PRICE-SOURCE-AXIS-001): two tuples differing ONLY by source
+    # evaluate DIFFERENT bits 52-53 / 0-5, so they MUST map to different Parquet
+    # files. DEFAULT-OMITTED (Override 1) via the ONE COMMON fragment (CLAUDE.md
+    # §11): the keys are absent for the baseline ``(HLC3, CLOSE)`` cell so an
+    # existing tuple's store path is byte-identical.
+    descriptor.update(
+        price_source_params_fragment(
+            tuple_.price_source.vwap_source, tuple_.price_source.ema_source
+        )
+    )
     # DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001: fold the non-default SELECTION
     # knobs + the ACTIVE gate config into the store address, each as a nested
     # object mirroring the supervisor's #1330 ``gate_config`` style. Both are
@@ -794,6 +946,12 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         descriptor["gate_config"] = gate_config
+    # DEC-FILL-WORST-CASE-ONLY-001: the store address carries the
+    # UNCONDITIONAL "fill_mode": "worst_case" key — the exact mirror of
+    # canonical_trade_params' unconditional emit. Eliding it would alias
+    # worst-case store addresses with the frozen precise-era addresses, so a
+    # resume could silently adopt precise-priced tuple stores.
+    descriptor["fill_mode"] = FillMode.WORST_CASE.value
     # allow_nan=False is byte-neutral for finite inputs (json emits identical
     # bytes for finite numbers) and converts a hypothetical non-finite gate
     # float from a silent invalid-JSON filename into a loud raise (F5).
@@ -801,6 +959,57 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     # str(...) keeps this typed str where the blake3 stubs are absent (the
     # isolated pre-commit mypy env — the #575 hook-portability precedent).
     return str(blake3.blake3(canonical.encode("utf-8")).hexdigest())[:_PATH_DIGEST_LEN]
+
+
+def hit_memo_cell_key(
+    tuple_: SweepTuple,
+    grid: SweepGridConfig,
+    roll_schedule: tuple[int, ...] | None,
+) -> tuple[Any, ...]:
+    """Return the CELL key the per-cell hit-count memo lives under (§11 COMMON).
+
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752): the memo caches
+    superset-hit counts, which are a pure function of the tuple's ``bar_bits``
+    matrix — so the key is EXACTLY the resident-kernel cache's determinant set
+    (``instrument``, ``tf.label``, flattened proximity bps, ``prior_n``,
+    ``fib_anchor``, ``roll_schedule``, the D12 ``apply_1day_mask`` flag).
+    ``direction`` / ``sl`` / ``tp`` / ``k`` are EXCLUDED so the memo survives a
+    whole cell's k-ladder (the extinction walk) — the point of the memo. The
+    ONE key builder is shared by the sequential drivers AND the parallel
+    worker (never three copies).
+
+    Parameters
+    ----------
+    tuple_
+        The grid point.
+    grid
+        The owning grid config (``prior_n`` participates).
+    roll_schedule
+        The tuple's resolved ADR-0012 roll schedule (``None`` for spot).
+
+    Returns
+    -------
+    tuple[Any, ...]
+        A hashable, equality-comparable cell key.
+    """
+    proximity_bps = (
+        None
+        if tuple_.proximity is None
+        else (
+            tuple_.proximity.pivot_proximity_bps,
+            tuple_.proximity.pdh_pdl_proximity_bps,
+            tuple_.proximity.fib_proximity_bps,
+        )
+    )
+    return (
+        tuple_.instrument,
+        tuple_.tf.label,
+        proximity_bps,
+        grid.prior_n,
+        tuple_.fib_anchor.value,
+        roll_schedule,
+        apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
+    )
 
 
 def tuple_store_path(root: Path, tuple_: SweepTuple, grid: SweepGridConfig) -> Path:
@@ -926,8 +1135,19 @@ class TupleDiffCheck(Protocol):
         bar_bits: Sequence[int],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
+        mask_population: Sequence[int] | None = None,
     ) -> None:
-        """Spot-check one persisted tuple (results-inert by contract)."""
+        """Spot-check one persisted tuple (results-inert by contract).
+
+        ``mask_population`` (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+        round 3) is the tuple's EXECUTED mask population — the Apriori
+        candidate list captured from
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` — passed ONLY
+        on the apriori arm so the spot-check samples what actually ran
+        instead of re-walking the raw C(n, k) enumeration; the legacy arm
+        keeps the pre-round-3 call shape (the kwarg is never passed —
+        defaulted for the implementations).
+        """
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -959,6 +1179,7 @@ def run_one_tuple(
     store_quarantine: StoreQuarantine | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    hit_count_memo: MutableMapping[int, int] | None = None,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
 
@@ -1007,6 +1228,13 @@ def run_one_tuple(
         certified ``bar_bits``. Skipped (honestly, by design) when
         ``kernel_cache`` is ``None`` — the production drivers always run with
         a resident kernel. ``None`` (default) is byte-identical to before.
+        On the APRIORI arm (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+        round 3) the call additionally carries ``mask_population=`` — the
+        tuple's EXECUTED Apriori candidate list captured from
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` (never
+        recomputed) — so the spot-check samples the executed population
+        instead of re-walking raw C(n, k); the legacy arm keeps the
+        pre-round-3 call shape verbatim.
     store_quarantine
         Optional :class:`StoreQuarantine` (G1): a
         :class:`~brutex.engine.results_store.ResultsStoreError` from the store
@@ -1032,6 +1260,14 @@ def run_one_tuple(
         ``vix_mean``/``vix_min``/``vix_max`` columns differ (Stage C persists
         the trio; the pre-Stage-C "persisted bytes identical" wording was
         reconciled by the round-2 panel, MINOR).
+    hit_count_memo
+        Optional per-CELL hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001),
+        forwarded verbatim to
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` — populated by
+        the grid drivers ONLY when the Apriori exploration mode is enabled
+        (keyed by :func:`hit_memo_cell_key`, reset on a cell change). ``None``
+        (default — every legacy call site) is byte-identical to the pre-memo
+        path; memo-on is bit-identical anyway (counts are pure per-mask).
 
     Returns
     -------
@@ -1068,11 +1304,24 @@ def run_one_tuple(
             proximity=tuple_.proximity,
             prior_n=grid.prior_n,
             fib_anchor=tuple_.fib_anchor,
+            vwap_source=tuple_.price_source.vwap_source,
+            ema_source=tuple_.price_source.ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
         )
         if kernel_cache is not None
         else None
+    )
+
+    # R45 executed-population capture (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+    # round 3): when the diffcheck WILL run (bound closure + resident kernel),
+    # ask run_persisted_sweep to hand back the tuple's Apriori candidate list —
+    # fired ONLY on the apriori arm, so an empty capture is the tri-state
+    # "legacy mode" signal (an apriori EXTINCT tuple captures an EMPTY list,
+    # which is a real population → the diffcheck's honest counted skip).
+    population_capture: list[Sequence[int]] = []
+    capture_population = (
+        population_capture.append if (diffcheck is not None and kernel is not None) else None
     )
 
     def _attempt() -> SweepRunSummary:
@@ -1087,6 +1336,8 @@ def run_one_tuple(
             # the digest is the same collision guard the store filename carries.
             trial_stats_digest=_tuple_digest(tuple_, grid),
             reference_stamper=reference_stamper,
+            hit_count_memo=hit_count_memo,
+            on_mask_population=capture_population,
         )
 
     try:
@@ -1116,7 +1367,20 @@ def run_one_tuple(
             ) from retry_exc
     if diffcheck is not None and kernel is not None:
         # R45 — strictly post-persist, read-only; the closure is fail-soft.
-        diffcheck(bars=bars, bar_bits=kernel.bar_bits, tuple_=tuple_, grid=grid)
+        if population_capture:
+            # APRIORI arm (round 3): sample the EXECUTED candidate population
+            # — a quarantine retry re-captures, so the LAST capture (the run
+            # that actually persisted) wins.
+            diffcheck(
+                bars=bars,
+                bar_bits=kernel.bar_bits,
+                tuple_=tuple_,
+                grid=grid,
+                mask_population=population_capture[-1],
+            )
+        else:
+            # LEGACY arm — the pre-round-3 call shape, byte-identical.
+            diffcheck(bars=bars, bar_bits=kernel.bar_bits, tuple_=tuple_, grid=grid)
     return summary
 
 
@@ -1158,11 +1422,18 @@ def run_sweep_grid(
     store is left un-sentineled so it redoes next run), counted in
     ``tuples_failed``, and recorded as a ``TUPLE_FAILED`` audit line naming the
     exact offending combo; the grid finishes the remaining tuples and a non-zero
-    ``tuples_failed`` makes the run's verdict NON-ZERO. Every OTHER exception
-    still propagates uncaught (global abort) — including the PLAIN
-    :class:`~brutex.engine.results_store.ResultsStoreError` run-identity
-    conflict (a genuine reproducibility breach); only the two typed
-    tuple-scoped errors above are caught.
+    ``tuples_failed`` makes the run's verdict NON-ZERO. A
+    :class:`~brutex.engine.results_store.ResultsStoreSchemaError` — a CORRUPT /
+    old-schema finalist store raised at its LOAD boundary on resume — is CONTAINED
+    identically (DB-02, DEC-SWEEP-STORE-CORRUPT-CONTAIN-001) so one damaged store
+    can never abort the whole grid; it also fires a ``sweep_grid.tuple_store_corrupt``
+    WARN carrying the store path + heal remediation, and
+    :class:`~brutex.engine.results_store.VixTrioConflictError` rides the SAME
+    tuple-scoped skip (DEC-VIX-STAMP-WIRE-001). Every OTHER exception still
+    propagates uncaught (global abort) — only ``SweepComboError`` + the G14
+    ``ResultsStoreSchemaError`` + ``VixTrioConflictError`` are caught (NOT the
+    parent ``ResultsStoreError`` run-identity conflict, a genuine
+    reproducibility breach).
 
     Honest envelope (Golden Rule #10): the loop is O(T) tuples, each O(N) masks;
     no part is O(1) total. This function's own memory is O(1) in ``T`` (scalar
@@ -1234,26 +1505,57 @@ def run_sweep_grid(
         f"grid:{len(grid.instruments)}i×{len(grid.timeframes)}tf×"
         f"{len(grid.directions)}d:tuples={total}"
     )
-    audit.append(
-        action=_ACTION_GRID_START,
-        subject=subject,
-        payload={
-            "tuples_total": total,
-            "instruments": list(grid.instruments),
-            "timeframes": [tf.label for tf in grid.timeframes],
-            "directions": [d.value for d in grid.directions],
-            "k_values": list(grid.k_values),
-            "fib_anchors": [a.value for a in grid.fib_anchors],
-            "mode": grid.mode,
-            "data_snapshot_hash": grid.data_snapshot_hash,
-            "indicator_version": grid.indicator_version,
-            "code_commit_sha": grid.code_commit_sha,
-        },
-    )
+    # Resolved ONCE per grid run (DEC-SWEEP-APRIORI-DEFAULT-001): gates the
+    # EMIT-ON-apriori START/COMPLETE payload keys + the per-cell hit-count
+    # memo threading. A legacy run reads False → zero new keys, no memo —
+    # every legacy payload byte-identical (frozen-key-set pinned).
+    apriori_on = apriori_enabled()
+    start_payload: dict[str, Any] = {
+        "tuples_total": total,
+        "instruments": list(grid.instruments),
+        "timeframes": [tf.label for tf in grid.timeframes],
+        "directions": [d.value for d in grid.directions],
+        "k_values": list(grid.k_values),
+        "fib_anchors": [a.value for a in grid.fib_anchors],
+        "mode": grid.mode,
+        "data_snapshot_hash": grid.data_snapshot_hash,
+        "indicator_version": grid.indicator_version,
+        "code_commit_sha": grid.code_commit_sha,
+    }
+    if apriori_on:
+        # The per-run MODE record (DEC-SWEEP-APRIORI-DEFAULT-001): consumed by
+        # sweep-verify's recorded-mode gate (recorded_apriori_from_audit) so a
+        # wrong-mode recount downgrades to INCONCLUSIVE, never a false CORRUPT.
+        # Absence == legacy, which also classifies every pre-flip tree correctly.
+        start_payload["apriori"] = {"enabled": True, "max_mask_bars": resolve_max_mask_bars()}
+    overfit_fragment = _gate_config_fragment(grid)
+    if overfit_fragment is not None and "overfit" in overfit_fragment:
+        # The per-run OVERFIT-gate record (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001):
+        # consumed by sweep-verify's recorded-overfit reconcile
+        # (recorded_overfit_from_audit) so `sweep-verify --recount` re-derives
+        # the gate-folded store addresses (#1336 `_tuple_digest`) instead of
+        # reading a grid_mismatch FALSE-POSITIVE on every healthy overfit-gated
+        # tree. ONLY the overfit leg is persisted — stage3 already rides its
+        # own STAGE_3_PASS_START record. EMIT-ON-active: absence == legacy,
+        # keeping every ungated/legacy payload byte-identical.
+        start_payload["gate_config"] = {"overfit": overfit_fragment["overfit"]}
+    # DEFAULT-OMIT the price-source axis from the audit config line (Override 1) for
+    # symmetry with every identity/store/cache site: a sole-baseline ``(HLC3, CLOSE)``
+    # grid's GRID_SWEEP_START payload stays byte-identical to the pre-axis form. A
+    # non-default axis surfaces the cells (intended observability).
+    # (DEC-NIFTY-PRICE-SOURCE-AXIS-001; coexists with the emit-on-active
+    # apriori/gate_config keys above — each key gates independently.)
+    price_source_cells = grid.price_source_cells
+    if not (len(price_source_cells) == 1 and price_source_cells[0].is_default):
+        start_payload["price_source_cells"] = [
+            [c.vwap_source.value, c.ema_source.value] for c in price_source_cells
+        ]
+    audit.append(action=_ACTION_GRID_START, subject=subject, payload=start_payload)
 
     tuples_run = 0
     tuples_skipped_no_bars = 0
     tuples_failed = 0
+    tuples_failed_apriori_budget = 0
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
@@ -1262,16 +1564,26 @@ def run_sweep_grid(
     persisted = 0
 
     # Bounded resident-kernel cache (DEC-SWEEP-RESIDENT-KERNEL-001): one bar window
-    # per distinct (instrument, tf, proximity, prior_n, fib_anchor). Sized to the
-    # proximity × fib-anchor fan-out (DEC-NIFTY-FIB-AXIS-001 — the kernel's bar_bits
-    # is anchor-SPECIFIC, so each anchor needs its own resident kernel) so a fixed
-    # (instrument, tf) reuses every kernel across its direction/K/sl/tp tuples.
-    # `None` when reuse is disabled (legacy rebuild path).
+    # per distinct (instrument, tf, proximity, prior_n, fib_anchor, price_source).
+    # Sized to the proximity × fib-anchor × price-source fan-out (the kernel's
+    # bar_bits is anchor- AND source-SPECIFIC — DEC-NIFTY-FIB-AXIS-001 /
+    # DEC-NIFTY-PRICE-SOURCE-AXIS-001 — so each combination needs its own resident
+    # kernel) so a fixed (instrument, tf) reuses every kernel across its
+    # direction/K/sl/tp tuples. `None` when reuse is disabled (legacy rebuild path).
     kernel_cache = (
-        ResidentKernelCache(capacity=len(grid.proximities) * len(grid.fib_anchors))
+        ResidentKernelCache(
+            capacity=len(grid.proximities) * len(grid.fib_anchors) * len(grid.price_source_cells)
+        )
         if reuse_bar_bits
         else None
     )
+
+    # Per-cell hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001): ONE single-cell
+    # memo beside the kernel cache, keyed on the bar_bits determinants
+    # (hit_memo_cell_key — direction/sl/tp/k excluded so it survives the whole
+    # cell's k-ladder); reset on a cell-key change. Threaded ONLY when the
+    # Apriori mode is on — legacy runs pass None (structurally untouched).
+    hit_memo_state: tuple[tuple[Any, ...], dict[int, int]] | None = None
 
     for tuple_ in iter_sweep_tuples(grid):
         # "Resilient: skip + continue" — a combo that raises mid-evaluation
@@ -1280,12 +1592,30 @@ def run_sweep_grid(
         # not a transient single combo), count it, audit the fingerprint, and
         # finish the remaining tuples; the failed tuple is left un-sentineled
         # (run_persisted_sweep raised before its flush/mark/sentinel writes) so
-        # it redoes deterministically next run. VixTrioConflictError rides the
-        # SAME skip (DEC-VIX-STAMP-WIRE-001): a redo whose REFERENCE-ONLY VIX
-        # trio disagrees with the stored one means the VIX lake moved between
-        # runs — tuple-scoped by construction, never grounds to abort the
-        # grid. Every other exception still propagates (global abort),
-        # including the PLAIN ResultsStoreError run-identity conflict.
+        # it redoes deterministically next run. SweepComboError (a combo bug /
+        # corrupt bar window) AND ResultsStoreSchemaError (a CORRUPT / old-schema
+        # finalist store surfaced at its LOAD boundary) are per-tuple
+        # containment classes — DELIBERATELY widened (DB-02,
+        # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921): one damaged
+        # store must never abort the WHOLE grid on resume. VixTrioConflictError
+        # rides the SAME skip (DEC-VIX-STAMP-WIRE-001): a redo whose
+        # REFERENCE-ONLY VIX trio disagrees with the stored one means the VIX
+        # lake moved between runs — tuple-scoped by construction. Only the G14
+        # schema class is caught, NOT its parent ResultsStoreError (a
+        # run-identity CONFLICT / missing-polars env fault keeps the documented
+        # global abort). Every OTHER exception still propagates (global abort).
+        hit_count_memo: dict[int, int] | None = None
+        if apriori_on:
+            cell_key = hit_memo_cell_key(
+                tuple_,
+                grid,
+                roll_schedule_by_instrument.get(tuple_.instrument)
+                if roll_schedule_by_instrument is not None
+                else None,
+            )
+            if hit_memo_state is None or hit_memo_state[0] != cell_key:
+                hit_memo_state = (cell_key, {})
+            hit_count_memo = hit_memo_state[1]
         try:
             summary = run_one_tuple(
                 grid,
@@ -1300,13 +1630,29 @@ def run_sweep_grid(
                 store_quarantine=store_quarantine,
                 roll_schedule_by_instrument=roll_schedule_by_instrument,
                 reference_stamper=reference_stamper,
+                hit_count_memo=hit_count_memo,
             )
-        except (SweepComboError, VixTrioConflictError) as exc:
+        except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
+            # Local import (review fix round 1 m8): the EXACT class, not a
+            # name-string compare — a look-alike `SweepAprioriBudgetErrorX`
+            # must never count as a budget trip. Function-local like the
+            # generator's own lazy import (no new module-top edge).
+            from brutex.engine.sweep_run import SweepAprioriBudgetError
+
             tuples_failed += 1
+            if isinstance(exc, SweepAprioriBudgetError):
+                # The DISTINCT budget-trip counter (DEC-SWEEP-APRIORI-DEFAULT-001):
+                # a trip is target-invariant, so the cell's deeper-k tuples
+                # re-trip identically — counted apart from generic failures so
+                # the CLI/Telegram can name the one remediation (raise the
+                # budget and re-run; the redo law re-runs exactly these).
+                tuples_failed_apriori_budget += 1
             label = (
                 f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"
                 f"/k={tuple_.k}/sl={tuple_.sl_paisa}/tp={tuple_.tp_paisa}"
                 f"/fib={tuple_.fib_anchor.value}"
+                f"/vwap={tuple_.price_source.vwap_source.value}"
+                f"/ema={tuple_.price_source.ema_source.value}"
             )
             error = f"{type(exc).__name__}: {exc}"
             audit.append(
@@ -1315,6 +1661,17 @@ def run_sweep_grid(
                 payload={"tuple": label, "error": error},
             )
             _LOG.warning("sweep_grid.tuple_failed", subject=subject, tuple=label, error=error)
+            if isinstance(exc, ResultsStoreSchemaError):
+                # The error string already NAMES the store path (the G14 load
+                # contract) — carry it + the heal remediation on the dedicated
+                # corrupt-store WARN so the completeness hole is loud + fixable.
+                _LOG.warning(
+                    "sweep_grid.tuple_store_corrupt",
+                    subject=subject,
+                    tuple=label,
+                    error=error,
+                    remediation=TUPLE_STORE_CORRUPT_REMEDIATION,
+                )
             continue
         if summary is None:
             tuples_skipped_no_bars += 1
@@ -1340,8 +1697,9 @@ def run_sweep_grid(
         ranked=ranked,
         persisted=persisted,
         tuples_failed=tuples_failed,
+        tuples_failed_apriori_budget=tuples_failed_apriori_budget,
     )
-    payload = {
+    payload: dict[str, Any] = {
         "tuples_total": total,
         "tuples_run": tuples_run,
         "tuples_skipped_no_bars": tuples_skipped_no_bars,
@@ -1353,6 +1711,10 @@ def run_sweep_grid(
         "ranked": ranked,
         "persisted": persisted,
     }
+    if apriori_on:
+        # EMIT-ON-apriori (DEC-SWEEP-APRIORI-DEFAULT-001): legacy COMPLETE
+        # payloads stay byte-identical (frozen-key-set pinned).
+        payload["tuples_failed_apriori_budget"] = tuples_failed_apriori_budget
     audit.append(action=_ACTION_GRID_COMPLETE, subject=subject, payload=payload)
     _LOG.info("sweep_grid.complete", subject=subject, **payload)
     return grid_summary
@@ -1369,6 +1731,7 @@ __all__ = [
     "TupleStoreProvider",
     "bloom_capacity_hint",
     "count_sweep_tuples",
+    "hit_memo_cell_key",
     "iter_sweep_tuples",
     "load_or_create_store",
     "make_store_for",

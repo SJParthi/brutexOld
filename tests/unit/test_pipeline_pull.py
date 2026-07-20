@@ -2234,7 +2234,20 @@ class TestStrictGateSequencer:
 
 
 class TestShouldStop:
-    """The phase-boundary stop probe — graceful, honest, default byte-identical."""
+    """The phase-boundary stop probe — graceful, honest, default byte-identical.
+
+    MERGE-RECONCILE (2026-07-20): the pack's original phase-boundary STOP arms
+    (bare ``stopped_after`` token + the "stopped by operator request" note,
+    DEC-AUTO-RESUME-ZERO-SURPRISES-001) are SUPERSEDED by main's landed
+    DEC-JOB-COOPERATIVE-CANCEL-001 — the SAME ``should_stop`` probe, the same
+    three boundary consultations, PLUS window-boundary threading and the
+    distinct ``"<phase> (cancelled)"`` stop + ``_CANCEL_NOTE``. The stop
+    surface (``POST /api/v1/pull/stop`` → ``BackgroundPullJob.stop_requested``)
+    now FEEDS that one probe (the app.py OR-composition binding), so these
+    tests pin the pack's ORIGINAL intents — boundary consult counts, later
+    phases never run, post-steps skipped, quarantine honesty — against the
+    landed cancel wording.
+    """
 
     def test_unwired_should_stop_is_byte_identical(self) -> None:
         # The default (None) never consults anything — a clean run completes.
@@ -2275,13 +2288,14 @@ class TestShouldStop:
         report = run_full_pipeline(
             run_spot=spot, run_metadata=meta, run_historical=hist, should_stop=lambda: True
         )
-        assert report.stopped_after == PHASE_SPOT
+        assert report.stopped_after == f"{PHASE_SPOT} (cancelled)"
         assert report.metadata is None and report.historical is None
         assert report.ok is False
         assert meta.called is False and hist.called is False
-        assert "stopped by operator request after spot" in report.note
-        # HONESTY: nothing is fabricated as complete by stopping.
-        assert "nothing" in report.note
+        assert "cancelled by operator" in report.note
+        # HONESTY: nothing is fabricated as complete by stopping — the note
+        # promises only the DURABLE completed windows, never a green.
+        assert "completed windows are durable" in report.note
 
     def test_stop_after_metadata_boundary(self) -> None:
         # The flag flips DURING the metadata phase: spot's boundary read False,
@@ -2296,10 +2310,10 @@ class TestShouldStop:
             run_historical=hist,
             should_stop=lambda: next(answers),
         )
-        assert report.stopped_after == PHASE_METADATA
+        assert report.stopped_after == f"{PHASE_METADATA} (cancelled)"
         assert report.metadata is not None and report.historical is None
         assert meta.called is True and hist.called is False
-        assert "stopped by operator request after metadata" in report.note
+        assert "cancelled by operator" in report.note
 
     def test_stop_after_historical_skips_post_steps(self) -> None:
         # The flag flips during the historical phase: the fetches complete but
@@ -2324,14 +2338,13 @@ class TestShouldStop:
             run_prebuild=prebuild,
             should_stop=lambda: next(answers),
         )
-        assert report.stopped_after == PHASE_HISTORICAL
+        assert report.stopped_after == f"{PHASE_HISTORICAL} (cancelled)"
         assert report.historical is not None
         assert prebuild.called is False
         assert warmed == []
         assert report.prebuild_built is None
         assert report.movers_warmed is None
-        assert "stopped by operator request after historical" in report.note
-        assert "prebuild + movers NOT run" in report.note
+        assert "cancelled by operator" in report.note
         assert report.ok is False
 
     def test_stop_after_historical_still_names_quarantined_symbols(self) -> None:
@@ -2345,11 +2358,104 @@ class TestShouldStop:
             run_historical=_Spy(_composite(historical=_historical_inner())),
             should_stop=iter([False, False, True]).__next__,
         )
-        assert report.stopped_after == PHASE_HISTORICAL
+        assert report.stopped_after == f"{PHASE_HISTORICAL} (cancelled)"
         assert "POISON" in report.quarantined_symbols
 
 
 # --------------------------------------------------------------------------- #
+# Cooperative cancel between phases (DEC-JOB-COOPERATIVE-CANCEL-001)
+# --------------------------------------------------------------------------- #
+
+
+def _stop_on_call(n: int) -> Callable[[], bool]:
+    """A ``should_stop`` probe that reads ``True`` on its *n*-th consultation.
+
+    ``run_full_pipeline`` probes exactly once per phase boundary (spot=1,
+    metadata=2, historical=3), so ``_stop_on_call(k)`` cancels AFTER phase k.
+    """
+    calls: list[int] = []
+
+    def _probe() -> bool:
+        calls.append(1)
+        return len(calls) >= n
+
+    return _probe
+
+
+def test_pipeline_cancel_after_spot_via_probe() -> None:
+    """A cancel observed at the spot boundary stops the chain honestly (amber partial)."""
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=meta,
+        run_historical=hist,
+        should_stop=_stop_on_call(1),
+    )
+    assert report.stopped_after == f"{PHASE_SPOT} (cancelled)"
+    assert report.metadata is None
+    assert report.historical is None
+    assert report.ok is False
+    assert "cancelled by operator" in report.note
+    # The later phases never ran (no doomed vendor calls after the cancel).
+    assert meta.called is False
+    assert hist.called is False
+
+
+def test_pipeline_cancel_via_spot_cancelled_report() -> None:
+    """The spot phase itself observed the cancel at a window boundary (report.cancelled)."""
+    from dataclasses import replace
+
+    spot_cancelled = replace(_spot(), cancelled=True)
+    meta = _Spy(_metadata())
+    report = run_full_pipeline(
+        run_spot=_Spy(spot_cancelled),
+        run_metadata=meta,
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        should_stop=None,  # the signal is carried by the report, not the probe
+    )
+    assert report.stopped_after == f"{PHASE_SPOT} (cancelled)"
+    assert report.ok is False
+    assert meta.called is False
+
+
+def test_pipeline_cancel_after_metadata() -> None:
+    """A cancel observed at the metadata boundary stops before the historical phase."""
+    hist = _Spy(_composite(historical=_historical_inner()))
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=hist,
+        should_stop=_stop_on_call(2),
+    )
+    assert report.stopped_after == f"{PHASE_METADATA} (cancelled)"
+    assert report.metadata is not None
+    assert report.historical is None
+    assert report.ok is False
+    assert hist.called is False
+
+
+def test_pipeline_cancel_after_historical_skips_post_steps() -> None:
+    """A cancel observed after the historical phase skips prebuild + movers warm."""
+    prebuild = _PrebuildSpy(_outcome())
+    warm = _Spy(_warm(1))
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=prebuild,
+        warm_spot_movers=warm,
+        should_stop=_stop_on_call(3),
+    )
+    assert report.stopped_after == "historical (cancelled)"
+    assert report.historical is not None
+    assert report.ok is False
+    assert "cancelled by operator" in report.note
+    # Post-steps were skipped — nothing lost, the next clean pull derives.
+    assert prebuild.called is False
+    assert warm.called is False
+
+
 # DEC-LEDGER-LOAD-SPACE-V1-001 — one ledger load per pipeline run
 # --------------------------------------------------------------------------- #
 

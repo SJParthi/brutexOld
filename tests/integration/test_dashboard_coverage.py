@@ -1307,6 +1307,7 @@ _LEDGER_COLS = [
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "streak_provenance",
     "failed_streak",
 ]
 
@@ -1372,9 +1373,12 @@ class TestWindowLedgerApi:
         # the honest unknown (JSON null), never 0.
         assert row[14] is None
         assert row[15] is None
-        # failed_streak (idx 16, DEC-AUTO-RESUME-ZERO-SURPRISES-001): the LAST
+        # streak_provenance (idx 16, DEC-STREAK-PROVENANCE-001): a SUCCESS
+        # resets the lineage to the KNOWN-zero "".
+        assert row[16] == ""
+        # failed_streak (idx 17, DEC-AUTO-RESUME-ZERO-SURPRISES-001): the LAST
         # column — a SUCCESS record reads the honest running-counter 0.
-        assert row[16] == 0
+        assert row[17] == 0
         # first_seen_at (idx 9) shown as clean IST: 2026-06-09 00:00 UTC → 05:30 IST.
         assert row[9] == "2026-06-09 05:30:00"
         assert "+00:00" not in str(row[9])  # the raw UTC offset is gone

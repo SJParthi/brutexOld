@@ -1,0 +1,173 @@
+# data-rust-parity.yml — the brutex-data crate build + parity lane.
+#
+# DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940; ADR-0020 slice T10 PR-1).
+# The fno_symbol Rust seam is DEFAULT-OFF behind BRUTEX_DATA_RUST and the
+# main CI test job deliberately never installs the crate (the facade
+# degrades loudly to the Python oracle when it is absent), so this
+# dedicated lane is where the crate has teeth:
+#
+#   1. cargo fmt / clippy -D warnings / test --release (--locked
+#      everywhere — the committed Cargo.lock is enforced; the cargo tests
+#      carry the FULL probed CPython strptime `%d%b%y` truth table + the
+#      grammar edges + the proptest never-panics/determinism properties).
+#   2. maturin wheel build + install beside the repo's Python deps.
+#   3. The REAL-wheel parity suites: the frozen 3-arm golden corpus
+#      (tests/golden/test_fno_symbol_rust_parity.py — the flag-ON arm
+#      un-skips here), the hypothesis differential
+#      (tests/property/test_fno_symbol_rust_differential.py), and the
+#      wheel-free facade unit matrix
+#      (tests/unit/test_fno_symbol_rust.py).
+#   4. The flag-ON verbatim leg: the UNMODIFIED tests/unit/test_fno_symbol.py
+#      suite re-run byte-identically under BRUTEX_DATA_RUST=1 with the real
+#      wheel (the lake-parity heal-twin precedent).
+#   5. The lake_keys 3-law parity + the heal-findings-parity integration
+#      pin (PR-2, DEC-DATA-RUST-PURELAW-002) — the wheel-gated golden /
+#      differential / heal-parity files plus the flag-ON verbatim
+#      lake_keys + lake_invariants legs. (tests/unit/test_lake_keys.py is
+#      deliberately NOT a path trigger — the PR-1 test_fno_symbol.py
+#      choice.)
+#
+# NOT a required gate: it gates the FUTURE default-ON flip, which must cite
+# a fresh green run of this lane as a stated precondition — a red run here
+# blocks re-engaging the flag, never an unrelated merge.
+#
+# COST HONESTY: the crate is stdlib-pure (no polars graph) — a cold run
+# compiles in ~seconds, so no cargo cache is carried (the lake lane's cache
+# machinery earns its keep against a ~6.5 min polars build; here it would
+# be pure config surface).
+
+name: data-rust-parity
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+    paths:
+      - "rust/brutex-data/**"
+      - "brutex/data/fno_symbol.py"
+      - "brutex/data/fno_symbol_rust.py"
+      - "tests/unit/test_fno_symbol_rust.py"
+      - "tests/golden/test_fno_symbol_rust_parity.py"
+      - "tests/property/test_fno_symbol_rust_differential.py"
+      - "brutex/data/lake_keys.py"
+      - "brutex/data/lake_keys_rust.py"
+      - "tests/unit/test_lake_keys_rust.py"
+      - "tests/golden/test_lake_keys_rust_parity.py"
+      - "tests/property/test_lake_keys_rust_differential.py"
+      - "tests/integration/test_lake_keys_rust_heal_parity.py"
+      - ".github/workflows/data-rust-parity.yml"
+  pull_request:
+    paths:
+      - "rust/brutex-data/**"
+      - "brutex/data/fno_symbol.py"
+      - "brutex/data/fno_symbol_rust.py"
+      - "tests/unit/test_fno_symbol_rust.py"
+      - "tests/golden/test_fno_symbol_rust_parity.py"
+      - "tests/property/test_fno_symbol_rust_differential.py"
+      - "brutex/data/lake_keys.py"
+      - "brutex/data/lake_keys_rust.py"
+      - "tests/unit/test_lake_keys_rust.py"
+      - "tests/golden/test_lake_keys_rust_parity.py"
+      - "tests/property/test_lake_keys_rust_differential.py"
+      - "tests/integration/test_lake_keys_rust_heal_parity.py"
+      - ".github/workflows/data-rust-parity.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # brutex-data's floor is rust-version 1.85 (edition 2024, stdlib-only);
+  # latest stable satisfies it — no pinned toolchain (no MSRV cliff).
+  # Cargo network resilience — the ci.yml convention.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONHASHSEED: "0"
+  HYPOTHESIS_PROFILE: "ci"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  data-rust-parity:
+    name: brutex-data build + fno_symbol parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (stable — the stdlib crate has no MSRV cliff)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: cargo fmt --check
+        working-directory: rust/brutex-data
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings (--locked)
+        working-directory: rust/brutex-data
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test (the strptime truth table + proptests, --locked)
+        working-directory: rust/brutex-data
+        run: cargo test --release --locked
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install brutex (data extra) + the brutex-data wheel
+        # Belt-and-suspenders crates.io flake guard on the maturin build
+        # (the cargo download point) — the ci.yml retry idiom, POSIX sh.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[data,dev]"
+          pip install maturin
+          n=0
+          until pip install ./rust/brutex-data; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-data failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-data failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Facade matrix + 3-arm golden corpus + hypothesis differential
+        # With the wheel installed, the corpus's flag-ON arm and the
+        # differential cannot module-skip — -rs surfaces any skip reason
+        # in the log as belt-and-suspenders.
+        run: |
+          pytest -rs -q \
+            tests/unit/test_fno_symbol_rust.py \
+            tests/golden/test_fno_symbol_rust_parity.py \
+            tests/property/test_fno_symbol_rust_differential.py \
+            tests/unit/test_lake_keys_rust.py \
+            tests/golden/test_lake_keys_rust_parity.py \
+            tests/property/test_lake_keys_rust_differential.py \
+            tests/integration/test_lake_keys_rust_heal_parity.py
+
+      - name: Flag-ON verbatim leg (the UNMODIFIED fno_symbol suite)
+        run: BRUTEX_DATA_RUST=1 pytest -rs -q tests/unit/test_fno_symbol.py
+
+      - name: Flag-ON verbatim leg (the UNMODIFIED lake_keys + lake_invariants suites)
+        # ONE deselect HERE ONLY (the core-rust-parity.yml precedent): the
+        # greeks_enrich ALIAS-identity pin imports brutex.data.greeks_enrich
+        # -> brutex.engine -> combo_mask -> `import fno_math` INSIDE the test
+        # body, and this stdlib-pure lane deliberately never builds the
+        # fno_math wheel (the COST HONESTY header). The pin is flag-independent
+        # (an import-identity check, not a law value) and stays fully
+        # exercised in main CI, where the wheels are built.
+        run: |
+          BRUTEX_DATA_RUST=1 pytest -rs -q \
+            tests/unit/test_lake_keys.py \
+            tests/unit/test_lake_invariants.py \
+            --deselect "tests/unit/test_lake_keys.py::TestSpotRecoveryCandidates::test_greeks_enrich_alias_is_the_same_object"

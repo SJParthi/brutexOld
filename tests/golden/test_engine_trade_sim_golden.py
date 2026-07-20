@@ -1,35 +1,52 @@
 """Golden byte-equality oracle for the Stage-2 trade-sim walker.
 
 Two small, fully hand-derived fixtures whose every emitted :class:`ClosedTrade`
-field is computed by hand below and locked as a literal expected list. Any change
-to the walker (entry/exit fill timing, the same-bar tie-break, the forced-exit
-override, MFE/MAE folding, paisa P&L) that alters output breaks this test
-(DEC-TRADESIM-001 / NFR-DET-001 bit-exactness).
+field is computed by hand below and locked as a literal expected list. Any
+change to the walker (the ONE worst-case fill law — DEC-FILL-WORST-CASE-ONLY-001
+— entry at the adverse extreme, level fills clamped to the bar extreme, the
+same-bar SL-first tie-break, the forced-exit adverse-extreme override, MFE/MAE
+folding, paisa P&L) that alters output breaks this test (DEC-TRADESIM-001 /
+NFR-DET-001 bit-exactness).
 
-All prices are rupees; entries fill at the next bar's OPEN (= 100.00 → 10000
-paisa in both fixtures). Money is int64 paisa throughout.
+All prices are rupees; money is int64 paisa throughout. Under the one law a
+BUY entry fills at the entry bar's HIGH and a SELL entry at its LOW; a long
+take-profit fills at ``min(level, bar.low)``, a long stop at
+``min(level, bar.low)``'s adverse twin ``min(level, low)`` — i.e. the fill is
+never better than the bar's adverse extreme; forced/signal exits fill at the
+exit bar's adverse extreme (BUY → low, SELL → high).
 
-Fixture A — a long with the default conservative policy (AT_LEVEL, SL-first),
-three round-trips:
+Fixture A — a long, three round-trips (every value re-derived BY HAND for the
+worst-case law):
 
-* **Trade 1 (take-profit)** — enter @09:16 (open 100.00). @09:17 the high 100.60
-  crosses the +50p target (level 100.50) → fill 100.50 → **pnl +50**. Excursion
-  folds @09:16 (H100.10/L99.95 → fav 10 / adv 5) then @09:17 (H100.60/L99.90 →
-  fav 60 / adv 10) → **mfe 60, mae 10**; **holding 2**.
-* **Trade 2 (stop-loss)** — enter @09:19 (open 100.00). @09:20 the low 99.60
-  breaches the −30p stop (level 99.70) → fill 99.70 → **pnl −30**. Excursion
-  @09:19 (fav 5 / adv 10) then @09:20 (H100.10/L99.60 → fav 10 / adv 40) →
-  **mfe 10, mae 40**; **holding 2**.
-* **Trade 3 (forced 15:20)** — enter @15:18 (open 100.00). @15:18 (fav 20 /
-  adv 20) and @15:19 (H100.30 → fav 30 / L99.90 → adv 10) keep it open; the
-  15:20 bar forces an exit at its OPEN 100.15 → **pnl +15** (the forced exit
-  overrides the bar's 101.00 high, which would otherwise hit the target).
-  Open-only excursion at 100.15 → **mfe 30, mae 20**; **holding 3**.
+* **Trade 1 (take-profit)** — enter @09:16 at the bar HIGH 100.10 (10_010p).
+  TP level = 10_010 + 50 = 10_060 (100.60). @09:17 the high 100.60 touches the
+  level → worst-case fill ``min(100.60, low 99.90)`` = **99.90** →
+  **pnl 9_990 − 10_010 = −20**. Excursions vs entry 10_010: @09:16
+  (H100.10/L99.95 → fav 0 / adv 15), @09:17 (H100.60/L99.90 → fav 50 /
+  adv 20) → **mfe 50, mae 20**; **holding 2**. (SL level 99.80 is never
+  touched: lows 99.95/99.90 stay above it — no same-bar tie.)
+* **Trade 2 (stop-loss)** — enter @09:19 at the bar HIGH 100.05 (10_005).
+  SL level = 10_005 − 30 = 9_975 (99.75). @09:20 the low 99.60 breaches →
+  worst-case fill ``min(99.75, 99.60)`` = **99.60** →
+  **pnl 9_960 − 10_005 = −45**. Excursions: @09:19 (H100.05/L99.90 → fav 0 /
+  adv 15), @09:20 (H100.10/L99.60 → fav 5 / adv 45) → **mfe 5, mae 45**;
+  **holding 2**.
+* **Trade 3 (forced 15:20)** — enter @15:18 at the bar HIGH 100.20 (10_020).
+  The 15:18/15:19 lows sit at 99.95, ABOVE the SL level 99.90
+  (10_020 − 30 = 9_990), so the position survives to the forced window; the
+  15:20 bar forces an exit at its adverse extreme LOW **100.00** →
+  **pnl 10_000 − 10_020 = −20** (the forced exit overrides the bar's 101.00
+  high, which would otherwise hit the target). Excursions: @15:18 (fav 0 /
+  adv 25), @15:19 (H100.30 → fav 10 / L99.95 → adv 25), exit fill 100.00 →
+  adv 20 (≤ 25) → **mfe 10, mae 25**; **holding 3**.
 
-Fixture B — a short closed by a Mode-B signal exit (next-bar OPEN fill): enter
-@09:16 (open 100.00); the exit signal on @09:17 (H100.20/L99.50 → short fav 50 /
-adv 20) fills at @09:18 OPEN 99.70 → **pnl +30** (a short profits as price
-falls); open-only excursion at 99.70 leaves **mfe 50, mae 20**; **holding 3**.
+Fixture B — a short closed by a Mode-B signal exit. PROVABLY LAW-INVARIANT:
+the entry bar (@09:16) and the exit-fill bar (@09:18) are both FLAT (O=H=L=C),
+so the adverse extreme IS the open on both — the expected trade is
+byte-identical to the precise-era lock. Enter @09:16 at the bar LOW 100.00;
+the exit signal on @09:17 (H100.20/L99.50 → short fav 50 / adv 20) fills on
+@09:18 at the bar's adverse extreme HIGH 99.70 (flat) → **pnl +30**;
+open-only excursion at 99.70 leaves **mfe 50, mae 20**; **holding 3**.
 """
 
 from __future__ import annotations
@@ -39,7 +56,7 @@ from decimal import Decimal
 
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
-from brutex.engine.trade_sim import FillPolicy, LevelFill, simulate_trades
+from brutex.engine.trade_sim import simulate_trades
 from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
 
@@ -65,41 +82,41 @@ def _bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
 # ── Fixture A — long: take-profit, stop-loss, forced 15:20 ──────────────────
 _A_BARS = [
     _bar(9, 15, "100", "100", "100", "100"),  # 0 signal → enter @1
-    _bar(9, 16, "100.00", "100.10", "99.95", "100.05"),  # 1 entry (open 100.00)
-    _bar(9, 17, "100.00", "100.60", "99.90", "100.40"),  # 2 TP hit
+    _bar(9, 16, "100.00", "100.10", "99.95", "100.05"),  # 1 entry (worst fill = HIGH 100.10)
+    _bar(9, 17, "100.00", "100.60", "99.90", "100.40"),  # 2 TP touch → fill @low 99.90
     _bar(9, 18, "100", "100", "100", "100"),  # 3 signal → enter @4
-    _bar(9, 19, "100.00", "100.05", "99.90", "99.95"),  # 4 entry
-    _bar(9, 20, "100.00", "100.10", "99.60", "99.70"),  # 5 SL hit
+    _bar(9, 19, "100.00", "100.05", "99.90", "99.95"),  # 4 entry (worst fill = HIGH 100.05)
+    _bar(9, 20, "100.00", "100.10", "99.60", "99.70"),  # 5 SL breach → fill @low 99.60
     _bar(15, 17, "100", "100", "100", "100"),  # 6 signal → enter @7
-    _bar(15, 18, "100.00", "100.20", "99.80", "100.10"),  # 7 entry
-    _bar(15, 19, "100.00", "100.30", "99.90", "100.20"),  # 8 open
-    _bar(15, 20, "100.15", "101.00", "100.00", "100.50"),  # 9 forced exit @open
+    _bar(15, 18, "100.00", "100.20", "99.95", "100.10"),  # 7 entry (worst fill = HIGH 100.20)
+    _bar(15, 19, "100.00", "100.30", "99.95", "100.20"),  # 8 open (low above SL 99.90)
+    _bar(15, 20, "100.15", "101.00", "100.00", "100.50"),  # 9 forced exit @adverse LOW 100.00
 ]
 _A_SIGNALS = [True, False, False, True, False, False, True, False, False, False]
 
 _A_EXPECTED = [
     ClosedTrade(
-        pnl_paisa=50,
-        mfe_paisa=60,
-        mae_paisa=10,
+        pnl_paisa=-20,
+        mfe_paisa=50,
+        mae_paisa=20,
         holding_bars=2,
         entry_ts=_ts(9, 16),
         exit_ts=_ts(9, 17),
         direction=Side.BUY,
     ),
     ClosedTrade(
-        pnl_paisa=-30,
-        mfe_paisa=10,
-        mae_paisa=40,
+        pnl_paisa=-45,
+        mfe_paisa=5,
+        mae_paisa=45,
         holding_bars=2,
         entry_ts=_ts(9, 19),
         exit_ts=_ts(9, 20),
         direction=Side.BUY,
     ),
     ClosedTrade(
-        pnl_paisa=15,
-        mfe_paisa=30,
-        mae_paisa=20,
+        pnl_paisa=-20,
+        mfe_paisa=10,
+        mae_paisa=25,
         holding_bars=3,
         entry_ts=_ts(15, 18),
         exit_ts=_ts(15, 20),
@@ -120,12 +137,12 @@ def test_golden_long_tp_sl_forced() -> None:
     assert trades == _A_EXPECTED
 
 
-# ── Fixture B — short closed by a Mode-B signal exit (next-open fill) ────────
+# ── Fixture B — short closed by a Mode-B signal exit (flat bars → invariant) ─
 _B_BARS = [
     _bar(9, 15, "100", "100", "100", "100"),  # 0 signal → enter @1
-    _bar(9, 16, "100.00", "100.00", "100.00", "100.00"),  # 1 entry (open 100.00)
+    _bar(9, 16, "100.00", "100.00", "100.00", "100.00"),  # 1 entry (flat → fill 100.00)
     _bar(9, 17, "100.00", "100.20", "99.50", "99.80"),  # 2 exit signal
-    _bar(9, 18, "99.70", "99.70", "99.70", "99.70"),  # 3 exit fill @open 99.70
+    _bar(9, 18, "99.70", "99.70", "99.70", "99.70"),  # 3 exit fill (flat → 99.70)
     _bar(9, 19, "100", "100", "100", "100"),  # 4 flat
 ]
 _B_ENTRY = [True, False, False, False, False]
@@ -159,7 +176,7 @@ def test_golden_short_signal_exit_streaming_matches_batch() -> None:
     # The streaming push/finish path must reproduce the same golden trades.
     from brutex.engine.trade_sim import TradeSimWalker
 
-    walker = TradeSimWalker(direction=Side.SELL, tf_minutes=1, policy=FillPolicy())
+    walker = TradeSimWalker(direction=Side.SELL, tf_minutes=1)
     streamed: list[ClosedTrade] = []
     for bar, entry, exit_ in zip(_B_BARS, _B_ENTRY, _B_EXIT, strict=True):
         closed = walker.push(bar, entry_signal=entry, exit_signal=exit_)
@@ -169,33 +186,3 @@ def test_golden_short_signal_exit_streaming_matches_batch() -> None:
     if tail is not None:
         streamed.append(tail)
     assert streamed == _B_EXPECTED
-
-
-def test_golden_take_profit_next_open_policy() -> None:
-    # Same fixture-A trade-1 window but with NEXT_OPEN TP fill: the +50 target is
-    # touched @09:17 yet fills at @09:18 OPEN (here 100.00) → pnl 0, not +50.
-    bars = [
-        _bar(9, 15, "100", "100", "100", "100"),
-        _bar(9, 16, "100.00", "100.10", "99.95", "100.05"),
-        _bar(9, 17, "100.00", "100.60", "99.90", "100.40"),
-        _bar(9, 18, "100.00", "100.00", "100.00", "100.00"),
-    ]
-    trades = simulate_trades(
-        bars,
-        [True, False, False, False],
-        direction=Side.BUY,
-        tf_minutes=1,
-        take_profit_paisa=50,
-        policy=FillPolicy(take_profit=LevelFill.NEXT_OPEN),
-    )
-    assert trades == [
-        ClosedTrade(
-            pnl_paisa=0,
-            mfe_paisa=60,
-            mae_paisa=10,
-            holding_bars=3,
-            entry_ts=_ts(9, 16),
-            exit_ts=_ts(9, 18),
-            direction=Side.BUY,
-        )
-    ]

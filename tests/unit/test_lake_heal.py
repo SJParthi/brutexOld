@@ -547,6 +547,101 @@ class TestHealBatchDedupEndToEnd:
         assert daily["close"].to_list() == [101.0]
         assert daily["volume"].to_list() == [22]
 
+    def test_recall_never_derives_option_daily(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE: pre-retirement the recall re-derived ``1day`` for EVERY
+        healed symbol — a healed CE/PE 1-minute partition got a fresh option
+        1day. Under DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of
+        2026-07-15 as relayed via the coordinator — ADR-0021 RULING B, draft
+        PR #1555) options are 1-minute-native: the daily recall is gated for
+        CE/PE, counted + logged ONCE per batch (never per-contract spam)."""
+        lake = tmp_path / "lake"
+        ce_symbol = "NSE-NIFTY-27Jun24-20000-CE"
+        pe_symbol = "NSE-NIFTY-27Jun24-20000-PE"
+        for symbol in (ce_symbol, pe_symbol):
+            _poison(
+                _dest(lake, segment="FNO", symbol=symbol),
+                [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11), (_ts(1), 101.0, 12)],
+            )
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                now=_now,
+            )
+        assert report.healed == 2
+        # ABSENCE PIN (the fails-before core): NO derived 1day was written for
+        # either healed option contract — the partitions stay 1-minute-only.
+        for symbol in (ce_symbol, pe_symbol):
+            assert not (lake / "bars" / "NSE" / "FNO" / symbol / "1day").exists()
+        assert report.recall is not None
+        assert report.recall.daily_targets == 0
+        assert report.recall.daily_bars == 0
+        assert report.recall.option_daily_skipped == 2
+        # ONE capped batch-level log naming the law — never per-contract spam.
+        events = [e for e in logs if e["event"] == "lake_heal.recall_option_daily_skipped"]
+        assert len(events) == 1
+        assert events[0]["count"] == 2
+        assert events[0]["symbols"] == [ce_symbol, pe_symbol]
+        assert "DEC-OPTIONS-PREBUILD-RETIRE-001" in events[0]["law"]
+
+    def test_recall_option_skip_log_symbols_are_capped(self, tmp_path: Path) -> None:
+        """The batch log's ``symbols`` list is CAPPED (the MAX_REPORTED idiom);
+        the TRUE total stays in ``count`` + ``RecallReport.option_daily_skipped``."""
+        from brutex.data.lake_heal import RECALL_OPTION_SKIP_LOG_CAP
+
+        lake = tmp_path / "lake"
+        symbols = [f"NSE-NIFTY-27Jun24-{20000 + i * 100}-CE" for i in range(12)]
+        for symbol in symbols:
+            _poison(
+                _dest(lake, segment="FNO", symbol=symbol),
+                [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)],
+            )
+        scan = scan_lake_invariants(lake)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                now=_now,
+            )
+        assert report.recall is not None
+        assert report.recall.option_daily_skipped == 12
+        (event,) = [e for e in logs if e["event"] == "lake_heal.recall_option_daily_skipped"]
+        assert event["count"] == 12
+        assert len(event["symbols"]) == RECALL_OPTION_SKIP_LOG_CAP
+
+    def test_recall_fut_daily_still_derived(self, tmp_path: Path) -> None:
+        """FUT byte-identity pin: futures keep their daily prebuild under the
+        ruling, so a healed FUT 1-minute partition still gets its 1day
+        recall (and no option-skip log fires)."""
+        lake = tmp_path / "lake"
+        fut_symbol = "NSE-NIFTY-27Jun24-FUT"
+        _poison(
+            _dest(lake, segment="FNO", symbol=fut_symbol),
+            [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11), (_ts(1), 101.0, 12)],
+        )
+        scan = scan_lake_invariants(lake)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                now=_now,
+            )
+        assert report.healed == 1
+        assert report.recall is not None
+        assert report.recall.daily_targets == 1
+        assert report.recall.daily_bars == 1
+        assert report.recall.option_daily_skipped == 0
+        assert (lake / "bars" / "NSE" / "FNO" / fut_symbol / "1day").is_dir()
+        assert not [e for e in logs if e["event"] == "lake_heal.recall_option_daily_skipped"]
+
     def test_skipped_findings_vanished_and_already_clean(self, tmp_path: Path) -> None:
         """A vanished path and an already-clean file are SKIPPED (idempotent
         convergence), never errored."""
@@ -3266,12 +3361,14 @@ class TestDerivedRecall:
 
     def test_recall_fno_daily_carries_oi_through_fno_resampler(self, tmp_path: Path) -> None:
         """The F&O branch reads OI + resamples through the OI-carry positional
-        resampler — the recalled 1day row carries last-of-day open_interest."""
+        resampler — the recalled 1day row carries last-of-day open_interest.
+        A FUT contract carries the pin (DEC-OPTIONS-PREBUILD-RETIRE-001: a
+        CE/PE never reaches the daily recall any more — futures keep it)."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
         lake = tmp_path / "lake"
-        symbol = "NSE-NIFTY-27Jun24-24000-CE"
+        symbol = "NSE-NIFTY-27Jun24-FUT"
         dest = _dest(lake, segment="FNO", symbol=symbol)
         dest.parent.mkdir(parents=True, exist_ok=True)
         rows = [(_ts(0), 100.0, 10, 500), (_ts(0), 100.0, 10, 500), (_ts(1), 101.0, 12, 600)]
@@ -3481,6 +3578,52 @@ class TestDerivedRecall:
                 recall=True,
                 now=_now,
             )
+
+    def test_recall_tf_rebuild_conversion_panic_is_per_symbol_isolation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 — FAILS-BEFORE: a stored
+        out-of-datetime-range timestamp panicked the rebuild's Rust→Python
+        conversion as ``pyo3_runtime.PanicException`` (a BaseException), which
+        sailed PAST ``_rebuild_tf_months``' former bare ``except Exception``
+        and aborted the WHOLE recall batch. Now the guard is the round-18
+        ``_SWEEP_GUARD_ERRORS`` — counted ``tf_failed``, loudly logged, the
+        batch completes."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0)), _bar(_ts(1))])
+        materialize_lake_timeframes(
+            lake_root=lake,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            tfs=["5m"],
+        )
+        _replant_with_dup(_dest(lake))
+        scan = scan_lake_invariants(lake)
+
+        def _panic(**_kwargs: Any) -> Any:
+            pl = pytest.importorskip("polars")
+            raise pl.exceptions.PanicException(
+                "called `Result::unwrap()` on an `Err` value: OverflowError"
+            )
+
+        monkeypatch.setattr(lake_heal, "materialize_lake_timeframes", _panic)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                recall=True,
+                now=_now,
+            )
+        assert report.recall is not None
+        assert report.recall.tf_rebuilt == 0
+        assert report.recall.tf_failed == 1
+        failures = _events(logs, "lake_heal.tf_rebuild_failed")
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
 
     def test_recall_tf_rebuild_is_month_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

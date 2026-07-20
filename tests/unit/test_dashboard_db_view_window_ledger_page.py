@@ -322,7 +322,8 @@ class TestDegradeLaw:
             None,
             None,
             None,
-            0,  # failed_streak — the 17th column (DEC-AUTO-RESUME-ZERO-SURPRISES-001)
+            None,  # streak_provenance
+            0,  # failed_streak — the 18th column (DEC-AUTO-RESUME-ZERO-SURPRISES-001)
         )
         path = wls.ledger_path(tmp_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -465,7 +466,8 @@ class TestLedgerPageRow:
         3,
         2,
         1,
-        # failed_streak — the 17th column (DEC-AUTO-RESUME-ZERO-SURPRISES-001).
+        "EMPTY@2026-07-05",  # streak_provenance (DEC-STREAK-PROVENANCE-001)
+        # failed_streak — the 18th column (DEC-AUTO-RESUME-ZERO-SURPRISES-001).
         2,
     )
 
@@ -479,9 +481,11 @@ class TestLedgerPageRow:
         row[13] = None  # bars_net_new
         row[14] = None  # empty_retries
         row[15] = None  # transient_retries
+        row[16] = None  # streak_provenance
         projected = _ledger_page_row(tuple(row))
         assert projected[8] is None and projected[10] is None
         assert projected[13] is None and projected[14] is None and projected[15] is None
+        assert projected[16] is None
 
     def test_null_required_cell_raises(self) -> None:
         row = list(self._BASE)

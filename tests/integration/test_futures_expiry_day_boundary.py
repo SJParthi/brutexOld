@@ -302,13 +302,17 @@ def test_expiry_day_tail_hole_closes_open_position_at_last_stored_jun_bar(
     exit_ist = trade.exit_ts.astimezone(IST)
     assert (exit_ist.hour, exit_ist.minute) == (15, 14)  # the LAST stored Jun bar
     assert [d.exit_reason for d in sink] == ["session_gap"]
-    # Fills on the Jun plane (base 110): entry = 15:11 open 111.00, exit =
-    # 15:14 close 115.00 — the ~+30-point roll-basis gap is NOT in the pnl.
-    assert sink[0].entry_fill_paisa == 11_100
-    assert sink[0].exit_fill_paisa == 11_500
-    assert trade.pnl_paisa == 400
-    # Excursions bounded by the Jun contract's own bars (never the Jul plane):
-    # per-bar high = close + 1 → best high 116.00 → MFE = 500; every low ≥
-    # open − 1 → MAE ≤ 100. A Jul-plane leak would read thousands of paisa.
-    assert trade.mfe_paisa == 500
-    assert trade.mae_paisa == 100
+    # Fills on the Jun plane under the ONE worst-case law
+    # (DEC-FILL-WORST-CASE-ONLY-001): entry = the 15:11 bar's adverse HIGH
+    # 113.00 (o=111, c=112, high=c+1), session_gap exit = the LAST stored Jun
+    # bar's adverse LOW 113.00 (15:14: o=114, low=o−1) — the ~+30-point
+    # roll-basis gap is NOT in the pnl.
+    assert sink[0].entry_fill_paisa == 11_300
+    assert sink[0].exit_fill_paisa == 11_300
+    assert trade.pnl_paisa == 0
+    # Excursions bounded by the Jun contract's own bars (never the Jul
+    # plane), measured from the worst-case entry fill 113.00: best high
+    # 116.00 → MFE = 300; worst low 110.00 (the 15:11 entry bar's o−1) →
+    # MAE = 300. A Jul-plane leak would read thousands of paisa.
+    assert trade.mfe_paisa == 300
+    assert trade.mae_paisa == 300

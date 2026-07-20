@@ -42,10 +42,20 @@ prior day`` — :mod:`brutex.data.spot_daily_resample`), so an IST day's 1-day b
 can sit in the PRIOR UTC month's file (e.g. IST ``2026-07-01`` ⇒ ``2026-06``).
 This helper is therefore used ONLY by the **intraday** session readers — the
 1-minute base AND the prebuilt derived intraday-TF partitions
-(``2minute`` … ``4hour``, whose bucket labels share the bar's own IST date by
-the fixed-arithmetic session anchor, DEC-RESAMPLE-ANCHOR-002 — so the same
-one-month-file argument holds; DEC-PIPELINE-AUTOPREBUILD-001 chunk 2's
-stored-first movers read rides it). The ``1day`` prior-close / daily-snapshot
+(``2minute`` … ``4hour``, whose bucket labels share the bar's own IST date for
+a session-filtered symbol by the fixed-arithmetic session anchor,
+DEC-RESAMPLE-ANCHOR-002 — but NOT always the bar's UTC **month**: a label
+before 05:30 IST maps to the prior UTC day, so on the 1st of an IST month a
+derived-TF bucket — e.g. a stray 09:00 pre-open bar's 05:15-IST 4hour label —
+is FILED under the prior UTC month's file (DEC-MOVERS-STORED-FRESHNESS-001
+REFUTER ROUND 2 defect B2; the earlier "the same one-month-file argument
+holds" wording here was falsified by that executed shape). The stored-TF
+consumer (:func:`brutex.dashboard.movers_stored_read.read_stored_day_frame` —
+DEC-PIPELINE-AUTOPREBUILD-001 chunk 2's stored-first movers read) therefore
+ALSO probes the prior month's file exactly on that month-edge; the 1-minute
+base itself is unaffected — a session-filtered symbol's bar TIMES
+(~09:00–19:15 IST) never precede 05:30 IST, so the one-month-file argument
+stays exact for 1-minute). The ``1day`` prior-close / daily-snapshot
 readers keep their whole-partition read (a daily series is tiny — at most
 ``years × ~250`` rows — so it is not a hot path). Mis-applying this to ``1day``
 would silently drop month-boundary days, so the contract is documented here and
@@ -116,8 +126,7 @@ def read_day_month_frame(base: Path, day: date_cls) -> pl.DataFrame | None:
         The month's bars (all columns as stored, incl. ``open_interest``), or
         ``None`` when the month file is absent.
     """
-    import polars as pl
-
+    from brutex.data.guarded_read import read_parquet_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     path = day_month_file(base, day)
@@ -126,8 +135,15 @@ def read_day_month_frame(base: Path, day: date_cls) -> pl.DataFrame | None:
     # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): every /movers session/day
     # reader flows through here — a poisoned-era duplicated month file would
     # otherwise double-count session volume/turnover. Keep-FIRST, warned.
+    # DEC-LAKE-READ-INODE-GUARD-001 defense (a): fd-validated literal read —
+    # a FIFO/device planted at the month file folds into the callers'
+    # existing movers skip arms (NotRegularFileError is an OSError) instead
+    # of hanging the /movers route. The literal read also carries the #1594
+    # round-15 metachar law by construction (DEC-SPOT-DERIVE-TS-RANGE-
+    # HARDENING-001 — a `[`-carrying symbol dir can never glob-read the
+    # SIBLINGS' bars into this symbol's day view).
     frame, _dropped = dedup_bars_frame(
-        pl.read_parquet(path.as_posix()), source=f"lake_day:{path.as_posix()}"
+        read_parquet_regular(path), source=f"lake_day:{path.as_posix()}"
     )
     return frame
 
@@ -167,16 +183,16 @@ def read_day_intraday_frame(base: Path, day: date_cls, *, symbol: str) -> pl.Dat
         # GIFT Nifty (and any future exempt symbol): its full-day series can cross
         # a UTC month boundary, so read the whole partition (the old O(all-bars)
         # path) to stay byte-equivalent — the caller's IST-day filter is unchanged.
-        import polars as pl
-
+        from brutex.data.guarded_read import read_parquet_glob_regular
         from brutex.data.lake_read import dedup_bars_frame
 
         if not (base.is_dir() and any(base.rglob("*.parquet"))):
             return None
         # SAME keep-FIRST read gate as the month-bounded path
-        # (DEC-LAKE-READ-UNIQUE-001) — warned, never silent.
+        # (DEC-LAKE-READ-UNIQUE-001) — warned, never silent; the glob read is
+        # per-file fd-validated (DEC-LAKE-READ-INODE-GUARD-001 defense (a)).
         frame, _dropped = dedup_bars_frame(
-            pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+            read_parquet_glob_regular(base.as_posix() + "/**/*.parquet"),
             source=f"lake_day:{base.as_posix()}",
         )
         return frame

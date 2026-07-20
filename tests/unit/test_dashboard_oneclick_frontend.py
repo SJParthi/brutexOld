@@ -38,6 +38,33 @@ _ONECLICK = _STATIC / "bx-oneclick.js"
 _ALL_FIVE = (_POLL, _CHART, _SCREENER, _EXPLAIN, _ONECLICK)
 _IDS = ("bx-poll", "bx-chart", "bx-screener", "bx-explain", "bx-oneclick")
 
+#: DEC-OPERATOR-PAGE-CONSOLIDATE-001 modules — the screener/strategy page
+#: wiring extracted into shared mountable files + the pure portal URL codec.
+#: Same file discipline as the five originals, their OWN decision id in the
+#: header; createElement presence is ROLE-AWARE (bx-portal-state builds no
+#: DOM and must NOT be forced to carry dead code).
+_PORTAL_STATE = _STATIC / "bx-portal-state.js"
+_SCREENER_PANEL = _STATIC / "bx-screener-panel.js"
+_STRATEGY_PANEL = _STATIC / "bx-strategy-panel.js"
+_OPERATOR_PORTAL = _STATIC / "bx-operator-portal.js"
+_CONSOLIDATE_FILES = (_PORTAL_STATE, _SCREENER_PANEL, _STRATEGY_PANEL, _OPERATOR_PORTAL)
+_CONSOLIDATE_IDS = (
+    "bx-portal-state",
+    "bx-screener-panel",
+    "bx-strategy-panel",
+    "bx-operator-portal",
+)
+
+#: Per-file DOM-builder expectation (the role-aware createElement law):
+#: the panels BUILD nodes; the pure codec and the class-flipping portal
+#: glue must never grow node-building code.
+_CONSOLIDATE_BUILDS_DOM = {
+    _PORTAL_STATE: False,
+    _SCREENER_PANEL: True,
+    _STRATEGY_PANEL: True,
+    _OPERATOR_PORTAL: False,
+}
+
 
 def _js(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -80,6 +107,53 @@ class TestFileDiscipline:
         assert "textContent" in oneclick
         # bx-oneclick builds its own nodes through BXUI.el (createElement+textContent).
         assert "BXUI.el(" in oneclick
+
+
+class TestConsolidateFileDiscipline:
+    """The DEC-OPERATOR-PAGE-CONSOLIDATE-001 modules ride the SAME file
+    discipline as the five originals (strict mode, decision id, honest
+    envelope, CommonJS guard, zero raw string-to-DOM sink tokens), with the
+    createElement expectation asserted PER FILE (role-aware — the pure URL
+    codec builds no DOM)."""
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_file_exists_and_is_not_suspiciously_small(self, path: Path) -> None:
+        assert path.is_file()
+        assert len(path.read_bytes()) > 500
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_use_strict_and_decision_id_header(self, path: Path) -> None:
+        js = _js(path)
+        assert '"use strict";' in js
+        assert "DEC-OPERATOR-PAGE-CONSOLIDATE-001" in js
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_honest_envelope_comment_present(self, path: Path) -> None:
+        assert "Honest envelope (Golden Rule #10)" in _js(path)
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_commonjs_export_guard_for_the_node_golden_harness(self, path: Path) -> None:
+        assert 'typeof module !== "undefined" && module.exports' in _js(path)
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_zero_string_to_dom_sinks(self, path: Path) -> None:
+        """The F-M2 XSS law: createElement(NS)/textContent ONLY — a raw
+        SUBSTRING ban, so even a comment cannot carry a sink token."""
+        js = _js(path)
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+            assert sink not in js, f"{path.name} must never contain {sink}"
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_role_aware_dom_builder_expectation(self, path: Path) -> None:
+        js = _js(path)
+        if _CONSOLIDATE_BUILDS_DOM[path]:
+            assert "document.createElement(" in js
+            assert "textContent" in js
+        else:
+            assert "createElement" not in js, (
+                f"{path.name} builds no DOM nodes by design (pure codec / "
+                "class-flipping glue) — it must never grow node-building code"
+            )
 
 
 class TestPollDiscipline:

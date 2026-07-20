@@ -57,7 +57,13 @@ def _bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
     )
 
 
-# TP → SL → forced-15:20 (the trade-sim golden Fixture A, verbatim bars).
+# TP → SL → forced-15:20 under the ONE worst-case law
+# (DEC-FILL-WORST-CASE-ONLY-001). Derived from the trade-sim golden Fixture A
+# with TWO low edits (15:18 low 99.80 → 99.95, 15:19 low 99.90 → 99.95): the
+# worst-case entry fills at the 15:18 bar HIGH (100.20), so its SL floor sits
+# at 99.90 — the ORIGINAL lows touched it on the entry bar itself; the raised
+# lows keep the third trade riding to the forced 15:20 wall (the fixture's
+# point: TP, then SL, then forced_1520).
 _BARS = [
     _bar(9, 15, "100", "100", "100", "100"),
     _bar(9, 16, "100.00", "100.10", "99.95", "100.05"),
@@ -66,8 +72,8 @@ _BARS = [
     _bar(9, 19, "100.00", "100.05", "99.90", "99.95"),
     _bar(9, 20, "100.00", "100.10", "99.60", "99.70"),
     _bar(15, 17, "100", "100", "100", "100"),
-    _bar(15, 18, "100.00", "100.20", "99.80", "100.10"),
-    _bar(15, 19, "100.00", "100.30", "99.90", "100.20"),
+    _bar(15, 18, "100.00", "100.20", "99.95", "100.10"),
+    _bar(15, 19, "100.00", "100.30", "99.95", "100.20"),
     _bar(15, 20, "100.15", "101.00", "100.00", "100.50"),
 ]
 #: bar_bits with bit 0 set exactly where Fixture A's signals fired.
@@ -153,25 +159,34 @@ class TestCaptureParityPass:
         # Contract fields: real fill prices as 2dp Decimals; lots/costs are
         # honest None — NULL-by-design until P5 (Ruling 18), never a
         # fabricated 1/0.
-        assert [t.entry_px for t in capture.trades] == [Decimal("100.00")] * 3
+        # Hand-derived under the one worst-case law: entries fill at the
+        # NEXT bar's HIGH (100.10 / 100.05 / 100.20); the TP fill is
+        # min(level, low) = min(100.60, 99.90) = 99.90 (−20); the SL fill is
+        # min(99.75, 99.60) = 99.60 (−45); the forced 15:20 exit fills at the
+        # 15:20 bar's adverse LOW = 100.00 (−20).
+        assert [t.entry_px for t in capture.trades] == [
+            Decimal("100.10"),
+            Decimal("100.05"),
+            Decimal("100.20"),
+        ]
         assert [t.exit_px for t in capture.trades] == [
-            Decimal("100.50"),
-            Decimal("99.70"),
-            Decimal("100.15"),
+            Decimal("99.90"),
+            Decimal("99.60"),
+            Decimal("100.00"),
         ]
         assert all(t.lots is None for t in capture.trades)
         assert all(t.costs_paisa is None for t in capture.trades)
-        assert [t.pnl_paisa for t in capture.trades] == [50, -30, 15]
+        assert [t.pnl_paisa for t in capture.trades] == [-20, -45, -20]
         # No minute index → honest NO_1M_DATA, None excursions.
         assert all(t.path_1m_status is PathStatus.NO_1M_DATA for t in capture.trades)
         assert all(t.mae_1m_paisa is None and t.mfe_1m_paisa is None for t in capture.trades)
         # No stamper → every trade counts as VIX-missing (honest NULL).
         assert capture.vix_missing_trades == 3
         assert all(t.vix_entry is None and t.vix_exit is None for t in capture.trades)
-        # Equity: one session, close carries the +35 net.
+        # Equity: one session, close carries the −85 worst-case net.
         assert capture.equity_status is PathStatus.NO_1M_DATA
         assert len(capture.equity) == 1
-        assert capture.equity[0].equity_close_paisa == 10_000_000 + 35
+        assert capture.equity[0].equity_close_paisa == 10_000_000 - 85
         assert capture.equity[0].trades_closed == 3
 
     def test_sell_direction_maps_bear(self) -> None:
@@ -316,7 +331,7 @@ class TestCaptureParityPass:
 
 class TestCaptureParityFail:
     def test_mismatch_returns_loud_empty_capture(self) -> None:
-        row = _row(total=99, winning=98)  # deliberately wrong stored counts
+        row = _row(total=99, winning=9)  # deliberately wrong stored counts
         with structlog.testing.capture_logs() as logs:
             capture = capture_combo(
                 row,
@@ -332,7 +347,7 @@ class TestCaptureParityFail:
         assert capture.trades == ()
         assert capture.equity == ()
         assert "total_trades=3!=99" in capture.parity_detail
-        assert "winning_trades=2!=98" in capture.parity_detail
+        assert "winning_trades=0!=9" in capture.parity_detail
         events = [log for log in logs if log["event"] == "results_depth.capture_mismatch"]
         assert len(events) == 1
         assert events[0]["run_id"] == _RUN_ID
@@ -349,7 +364,7 @@ class TestCaptureParityFail:
             stamper=None,
         )
         assert capture.parity_ok is False
-        assert capture.parity_detail == "net_pnl_paisa=35!=999999"
+        assert capture.parity_detail == "net_pnl_paisa=-85!=999999"
 
 
 class TestReentryPinAsFound:
@@ -422,8 +437,9 @@ _GAP_BAR_BITS = [1, 0, 0, 0]
 
 
 def _gap_row() -> ResultRow:
-    # ONE BUY trade: entry fill 10_000 paisa (09:16 open); session_gap close
-    # at day-1 09:17's CLOSE 10_020 paisa → pnl +20; 1 winner, 0 losers.
+    # ONE BUY trade under the one worst-case law: entry fill 10_010 paisa
+    # (09:16 HIGH); session_gap close prices day-1 09:17's adverse LOW
+    # 9_900 paisa → pnl −110; 0 winners, 1 loser.
     return ResultRow(
         run_id=_RUN_ID,
         instrument="NIFTY",
@@ -431,14 +447,14 @@ def _gap_row() -> ResultRow:
         direction="bull",
         mode="B",
         mask_bits=_MASK,
-        net_pnl_paisa=20,
-        gross_profit_paisa=20,
-        gross_loss_paisa=0,
+        net_pnl_paisa=-110,
+        gross_profit_paisa=0,
+        gross_loss_paisa=110,
         max_drawdown_paisa=0,
         expectancy_paisa=0,
         total_trades=1,
-        winning_trades=1,
-        losing_trades=0,
+        winning_trades=0,
+        losing_trades=1,
         sharpe_ratio=0.0,
         sortino_ratio=0.0,
         calmar_ratio=0.0,
@@ -446,7 +462,7 @@ def _gap_row() -> ResultRow:
         win_rate=0.0,
         max_drawdown_pct=0.0,
         avg_entry_price=Decimal("100.00"),
-        avg_exit_price=Decimal("100.20"),
+        avg_exit_price=Decimal("99.00"),
     )
 
 
@@ -458,7 +474,7 @@ class TestSessionGapExitBarFullRangeFold:
     drove a ``session_gap`` trade WITH a minute index whose exit bar's range
     extends beyond its open. Under that mutant ``trade_excursions_1m`` folds
     the exit minute OPEN-ONLY, silently UNDERSTATING ``mae_1m``/``mfe_1m``
-    (5/10 here instead of the true 100/100).
+    (15/0 here instead of the true 110/90 — worst-case entry fill 10_010).
     """
 
     def test_session_gap_exit_bar_folds_full_1m_range(self) -> None:
@@ -476,25 +492,26 @@ class TestSessionGapExitBarFullRangeFold:
         (trade,) = capture.trades
         assert trade.exit_reason == "session_gap"
         assert trade.exit_ts == _gap_ts(9, 17)  # day-1's LAST stored bar
-        assert trade.pnl_paisa == 20  # close 10_020 − entry 10_000
-        # Hand-derived walker (TF-path) excursions from the entry fill 10_000:
-        #   09:16 (entry bar, full range): fav = 10_010 − 10_000 = 10;
-        #                                  adv = 10_000 − 9_995 = 5.
+        assert trade.pnl_paisa == -110  # session_gap LOW 9_900 − entry 10_010
+        # Hand-derived walker (TF-path) excursions from the worst-case entry
+        # fill 10_010 (the 09:16 bar HIGH — DEC-FILL-WORST-CASE-ONLY-001):
+        #   09:16 (entry bar, full range): fav = 10_010 − 10_010 = 0;
+        #                                  adv = 10_010 − 9_995 = 15.
         #   09:17 (exit bar, managed as an ordinary bar BEFORE the retroactive
-        #          close): fav = 10_100 − 10_000 = 100;
-        #                  adv = 10_000 − 9_900 = 100.
-        # → walker mae = max(5, 100) = 100, mfe = max(10, 100) = 100.
-        assert trade.mae_paisa == 100
-        assert trade.mfe_paisa == 100
+        #          close): fav = 10_100 − 10_010 = 90;
+        #                  adv = 10_010 − 9_900 = 110.
+        # → walker mae = max(15, 110) = 110, mfe = max(0, 90) = 90.
+        assert trade.mae_paisa == 110
+        assert trade.mfe_paisa == 90
         # THE MUTANT KILLER: the 1m fold must mirror the walker's fold law —
         # the session_gap EXIT bar contributes its FULL 1m range, so at tf==1m
         # the 1m pair equals the walker pair bit-for-bit. Under the CM4 mutant
         # (session_gap dropped from _FULL_RANGE_EXIT_REASONS) the exit minute
-        # contributes only its OPEN (fav 0 / adv 0) and the pair understates
-        # to mae_1m=5 / mfe_1m=10.
+        # contributes only its OPEN (10_000) and the pair understates to
+        # mae_1m=15 / mfe_1m=0.
         assert trade.path_1m_status is PathStatus.OK
-        assert trade.mae_1m_paisa == 100 == trade.mae_paisa
-        assert trade.mfe_1m_paisa == 100 == trade.mfe_paisa
+        assert trade.mae_1m_paisa == 110 == trade.mae_paisa
+        assert trade.mfe_1m_paisa == 90 == trade.mfe_paisa
 
     def test_session_gap_is_a_full_range_exit_reason(self) -> None:
         # Frozenset contents pin: the walker itself folds the session_gap exit
@@ -642,8 +659,12 @@ class TestCaptureOverRealSweepStore:
             indicator_version="ind-v1",
             code_commit_sha="deadbeef",
             tf_minutes=1,
-            sl_paisa=80,
-            tp_paisa=50,
+            # EOD-only exits (DEC-FILL-WORST-CASE-ONLY-001): a tight SL/TP
+            # over these wide-range synthetic bars always fills at the
+            # adverse extreme and gate-rejects every combo — the sweep_run
+            # suite's _trending_bars recipe, mirrored here.
+            sl_paisa=None,
+            tp_paisa=None,
         )
         store = ResultsStore(path=tmp_path / "store.parquet")
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
@@ -674,14 +695,24 @@ class TestCaptureOverRealSweepStore:
 
 
 def _drift_bars() -> list[CandleBar]:
-    """The sweep golden's 12-day upward-drift fixture shape (deterministic)."""
+    """The sweep suite's 45-day mostly-up drift with every-5th-day DOWN days.
+
+    The worst-case twin of the old 12-day up-drift fixture: up days win via
+    the #1743 ``session_gap`` close despite the entry-at-HIGH haircut, the
+    DOWN days keep ``profit_factor`` finite so the ranking gates can pass,
+    and 45 days clears MIN_TRADES=30 (deterministic — no RNG).
+    """
     from datetime import timedelta
 
     out: list[CandleBar] = []
-    for d in range(12):
+    for d in range(45):
         price = 100.0
+        down_day = d % 5 == 4
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)

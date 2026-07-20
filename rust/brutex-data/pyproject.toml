@@ -1,0 +1,54 @@
+# Maturin build configuration for the BruteX data pure-law kernel crate
+# (ADR-0020 slice T10 PR-1, DEC-DATA-RUST-PURELAW-001 — MIGRATION.md #1940).
+#
+# Pip installs this as a separate distribution alongside `brutex`, exactly
+# like the sibling kernels (`rust/fno-math`, `rust/trading-core`,
+# `rust/brutex-lake`). It is DELIBERATELY not installed by the main CI test
+# job: the Python facade (`brutex/data/fno_symbol_rust.py`) is default-OFF
+# and degrades loudly to the Python oracle when the crate is absent; only
+# the dedicated `.github/workflows/data-rust-parity.yml` lane builds +
+# installs it and runs the parity corpus + hypothesis differential.
+#
+# References:
+#   - docs/MIGRATION.md #1940 (DEC-DATA-RUST-PURELAW-001)
+#   - rust/brutex-lake/pyproject.toml (the OPTIONAL-class layout template)
+#   - rust/fno-math/pyproject.toml (the mixed-layout convention, DEC-P0-055)
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-data"
+version = "0.1.0"
+description = "BruteX data pure-law kernels — F&O symbol grammar (ADR-0020 slice T10 PR-1)."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [
+    { name = "SJParthi" },
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+# Mixed Python + Rust layout (the fno-math DEC-P0-055 convention): Python
+# source under `python/`, the cdylib registered as the private
+# `brutex_data._brutex_data` submodule, re-exported by `__init__.py` with a
+# matched `__init__.pyi` + `py.typed` marker for pyright/mypy strict mode.
+python-source = "python"
+module-name = "brutex_data._brutex_data"
+# `features = ["python"]` turns on the crate's optional pyo3 dependency
+# (which itself carries extension-module + abi3-py312) — the brutex-feed /
+# trading-core shape, NOT brutex-lake's `["pyo3/extension-module"]` (that
+# crate has no `python` feature gate; this one is pure-Rust-first).
+features = ["python"]
+strip = true
+# Enforce the committed Cargo.lock on every wheel build (cargo --locked) —
+# the house law; lock drift must fail LOUD, never silently re-resolve.
+locked = true

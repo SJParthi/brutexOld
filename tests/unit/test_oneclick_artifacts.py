@@ -21,6 +21,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -373,10 +374,12 @@ class TestLoadManifest:
         assert result.revision is None
 
     def test_unreadable_is_corrupt(self, tmp_path: Path) -> None:
-        (tmp_path / oc.MANIFEST_FILENAME).mkdir()  # a directory → IsADirectoryError
+        # A directory is a non-regular inode → NotRegularFileError
+        # (DEC-LAKE-READ-INODE-GUARD-001 — the fd-level S_ISREG gate).
+        (tmp_path / oc.MANIFEST_FILENAME).mkdir()
         result = oc.load_manifest(tmp_path)
         assert result.status == "corrupt"
-        assert "IsADirectoryError" in result.detail
+        assert "NotRegularFileError" in result.detail
 
     def test_invalid_utf8_is_corrupt(self, tmp_path: Path) -> None:
         (tmp_path / oc.MANIFEST_FILENAME).write_bytes(b"\xff\xfe\x00garbage")
@@ -530,7 +533,10 @@ class TestLoadTop100:
         assert f"schema_version {pun!r}" in result.detail
 
     def test_object_root_without_entries_array_is_corrupt(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"schema_version": 1, "rows": []}))
+        _write(
+            tmp_path / oc.TOP100_FILENAME,
+            json.dumps({"schema_version": oc.TOP100_SCHEMA_VERSION, "rows": []}),
+        )
         result = oc.load_top100(tmp_path)
         assert result.status == "corrupt"
         assert "no entries array" in result.detail
@@ -754,7 +760,7 @@ class TestTailEvents:
         (tmp_path / oc.EVENTS_FILENAME).mkdir()
         page = oc.tail_events(tmp_path)
         assert page.status == "corrupt"
-        assert "IsADirectoryError" in page.detail
+        assert "NotRegularFileError" in page.detail
 
     def test_paging_resumes_at_next_offset(self, tmp_path: Path) -> None:
         _write_events(tmp_path, _event_bodies(10))
@@ -914,7 +920,7 @@ class TestVerifyEventsChain:
         (tmp_path / oc.EVENTS_FILENAME).mkdir()
         ok, _, _, detail = oc.verify_events_chain(tmp_path)
         assert ok is False
-        assert "IsADirectoryError" in detail
+        assert "NotRegularFileError" in detail
 
     def test_empty_file_verifies_zero_records(self, tmp_path: Path) -> None:
         _write(tmp_path / oc.EVENTS_FILENAME, "")
@@ -1737,7 +1743,7 @@ class TestFixtureTradesReader:
     def test_unreadable_file_is_corrupt(self, tmp_path: Path) -> None:
         oc.trades_path(oc.fixture_results_root(tmp_path), "r-x", 1).mkdir(
             parents=True
-        )  # dir → IsADirectoryError
+        )  # dir → NotRegularFileError (inode guard)
         page = oc.FixtureTradesReader(tmp_path).page("r-x", 1, offset=0, limit=10)
         assert page.status == "corrupt"
 
@@ -1766,15 +1772,133 @@ class TestFixtureTradesReader:
         assert [row["entry_ts"] for row in page.rows] == ["t0"]
         assert "trade row 1" in page.detail
 
-    def test_different_rank_is_a_memo_miss(self, tmp_path: Path) -> None:
-        """The memo is SINGLE-ENTRY by design (one artifact hot at a time)."""
+    def test_two_rank_alternation_no_longer_thrashes(self, tmp_path: Path) -> None:
+        """Fix 4b (DEC-MEMORY-FOOTPRINT-HARDENING-001): the bounded 2-entry
+        ``_RevisionMemo`` holds BOTH sides of a two-artifact alternation, so
+        flipping back to rank 1 is a HIT — the superseded single-entry memo
+        re-parsed on EVERY flip (this test previously pinned that thrash as
+        ``parse_count == 3``; the thrash IS the defect fix 4b removes).
+        """
         _trades_file(tmp_path, rank=1, rows=2)
         _trades_file(tmp_path, rank=2, rows=2)
         reader = oc.FixtureTradesReader(tmp_path)
         reader.page("r-x", 1, offset=0, limit=2)
         reader.page("r-x", 2, offset=0, limit=2)
-        reader.page("r-x", 1, offset=0, limit=2)  # single-entry memo: re-parse
+        reader.page("r-x", 1, offset=0, limit=2)  # 2-entry memo: a HIT now
+        assert reader.parse_count == 2
+
+    def test_third_artifact_evicts_lru_first(self, tmp_path: Path) -> None:
+        """Past the 2-entry bound the LEAST-recently-used artifact re-parses."""
+        for rank in (1, 2, 3):
+            _trades_file(tmp_path, rank=rank, rows=2)
+        reader = oc.FixtureTradesReader(tmp_path)
+        reader.page("r-x", 1, offset=0, limit=2)
+        reader.page("r-x", 2, offset=0, limit=2)
+        reader.page("r-x", 3, offset=0, limit=2)  # evicts rank 1 (the LRU)
         assert reader.parse_count == 3
+        reader.page("r-x", 2, offset=0, limit=2)  # still memoised — a hit
+        assert reader.parse_count == 3
+        reader.page("r-x", 1, offset=0, limit=2)  # evicted — re-parses
+        assert reader.parse_count == 4
+
+
+# ── _RevisionMemo (fix 4b, DEC-MEMORY-FOOTPRINT-HARDENING-001) ──────────
+
+
+class TestRevisionMemo:
+    """The ONE consolidated reader memo: bounded LRU + per-key single-flight."""
+
+    def test_capacity_below_one_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="capacity must be >= 1"):
+            oc._RevisionMemo(capacity=0)
+
+    def test_hit_refreshes_lru_recency(self) -> None:
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo(capacity=2)
+        calls: list[str] = []
+
+        def _compute(tag: str) -> Callable[[], str]:
+            def _run() -> str:
+                calls.append(tag)
+                return tag
+
+            return _run
+
+        assert memo.get_or_compute(("a",), _compute("a")) == "a"
+        assert memo.get_or_compute(("b",), _compute("b")) == "b"
+        # Touch "a" so "b" becomes the LRU, then insert "c" → "b" evicts.
+        assert memo.get_or_compute(("a",), _compute("a-again")) == "a"
+        assert memo.get_or_compute(("c",), _compute("c")) == "c"
+        assert memo.get_or_compute(("a",), _compute("a-again")) == "a"  # still a hit
+        assert memo.get_or_compute(("b",), _compute("b2")) == "b2"  # evicted → recompute
+        assert calls == ["a", "b", "c", "b2"]
+
+    def test_concurrent_misses_pay_one_compute(self) -> None:
+        """Per-key single-flight: 8 cold threads on ONE key pay exactly 1 parse."""
+        memo: oc._RevisionMemo[int] = oc._RevisionMemo()
+        gate = threading.Event()
+        calls: list[int] = []
+        results: list[int] = []
+
+        def _compute() -> int:
+            gate.wait(timeout=5.0)
+            time.sleep(0.02)  # widen the window so followers genuinely wait
+            calls.append(1)
+            return 42
+
+        def _worker() -> None:
+            results.append(memo.get_or_compute(("k",), _compute))
+
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        gate.set()
+        for thread in threads:
+            thread.join(timeout=10.0)
+        assert results == [42] * 8
+        assert len(calls) == 1
+
+    def test_raising_compute_caches_nothing_and_releases_the_flight(self) -> None:
+        """A raising compute propagates raw; the NEXT caller recomputes (no wedge)."""
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo()
+        with pytest.raises(RuntimeError, match="boom"):
+            memo.get_or_compute(("k",), _raise_boom)
+        assert memo.get_or_compute(("k",), lambda: "ok") == "ok"
+
+    def test_waiter_takes_ownership_when_the_owner_raises(self) -> None:
+        """A follower parked on a raising owner's flight LOOPS and recomputes."""
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo()
+        owner_entered = threading.Event()
+        release_owner = threading.Event()
+        outcomes: list[str] = []
+
+        def _owner_compute() -> str:
+            owner_entered.set()
+            release_owner.wait(timeout=5.0)
+            raise RuntimeError("owner failed")
+
+        def _owner() -> None:
+            try:
+                memo.get_or_compute(("k",), _owner_compute)
+            except RuntimeError:
+                outcomes.append("owner-raised")
+
+        def _follower() -> None:
+            outcomes.append(memo.get_or_compute(("k",), lambda: "recovered"))
+
+        owner = threading.Thread(target=_owner)
+        owner.start()
+        assert owner_entered.wait(timeout=5.0)
+        follower = threading.Thread(target=_follower)
+        follower.start()
+        time.sleep(0.05)  # let the follower park on the in-flight event
+        release_owner.set()
+        owner.join(timeout=10.0)
+        follower.join(timeout=10.0)
+        assert sorted(outcomes) == ["owner-raised", "recovered"]
+
+
+def _raise_boom() -> str:
+    raise RuntimeError("boom")
 
 
 # ── production trades reader (DEC-ONECLICK-SWEEP-RUNS-REBIND-001) ───────
@@ -2167,6 +2291,45 @@ class TestTradeStoreReader:
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2  # nothing cached — no memo to serve
 
+    def test_top100_outage_with_evicted_memo_parses_fresh_uncached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An outage whose last-known entry was LRU-EVICTED falls back honestly.
+
+        The #1719 merge-compose: the serve-last-known doctrine now peeks the
+        bounded ``_RevisionMemo`` (capacity 2) — a two-sibling-run alternation
+        can evict the outage path's entry, in which case the gate still holds
+        a last-known key but the peek misses and the honest fresh UNCACHED
+        parse stands (never a fabricated serve, never a crash).
+        """
+        results_root = _rebind_run(tmp_path)
+        _rebind_run(tmp_path, run_id="r-y")
+        _rebind_run(tmp_path, run_id="r-z")
+        reader = oc.TradeStoreReader(results_root)
+        reader.page("r-x", 1, offset=0, limit=5)  # memo primed for r-x
+        reader.page("r-y", 1, offset=0, limit=5)
+        reader.page("r-z", 1, offset=0, limit=5)  # capacity 2 → r-x evicted
+        assert reader.parse_count == 3
+        real_probe = oc.artifact_probe
+
+        def _outage_on_rx_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME and path.parent.name == "r-x":
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_rx_top100)
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 4  # peek missed (evicted) → fresh parse
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 5  # and nothing was cached under outage
+
+    def test_revision_memo_peek_hit_and_miss(self) -> None:
+        """``_RevisionMemo.peek`` returns without computing — hit and miss arms."""
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo()
+        assert memo.peek(("k", "r1")) is None  # miss — nothing computed
+        assert memo.get_or_compute(("k", "r1"), lambda: "v1") == "v1"
+        assert memo.peek(("k", "r1")) == "v1"  # hit — no compute ran
+
     def test_top100_outage_memo_for_a_different_path_is_not_served(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2511,3 +2674,198 @@ class TestBridgeCascade:
         # The oversized-cap detail wins the slot; the drops still happened.
         assert "beyond the" in result.detail
         assert all("cascade" not in row for row in result.rows)
+
+
+# ── The B1 stored buy-&-hold baseline read (DEC-RESULTS-TRUST-HONESTY-001) ──
+
+
+def _baseline_series(instrument: str = "NSE-NIFTY", *, total_return_pct: float = 3.0) -> Any:
+    """A tiny valid :class:`BaselineSeries` (two ascending sessions)."""
+    from datetime import date
+    from decimal import Decimal
+
+    from brutex.engine.baseline import BaselineSeries
+
+    return BaselineSeries(
+        instrument=instrument,
+        start=date(2024, 1, 5),
+        end=date(2024, 1, 8),
+        anchor_open=Decimal("100.00"),
+        sessions=((date(2024, 1, 5), Decimal("101.00")), (date(2024, 1, 8), Decimal("103.00"))),
+        total_return_pct=total_return_pct,
+        source_note="unit fixture",
+    )
+
+
+def _write_run_baseline(run_dir: Path, instrument: str = "NSE-NIFTY") -> Path:
+    """Write a REAL engine-writer baseline artifact into *run_dir*."""
+    from brutex.engine.baseline import baseline_filename, write_baseline
+
+    path = run_dir / baseline_filename(instrument)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_baseline(path, _baseline_series(instrument), data_snapshot_hash="ab" * 32)
+    return path
+
+
+def _write_top100_baselines(run_dir: Path, baselines: Any) -> None:
+    """An OBJECT-root top100.json carrying exactly the *baselines* value."""
+    _write(run_dir / oc.TOP100_FILENAME, json.dumps({"rows": [], "baselines": baselines}))
+
+
+class TestLoadBaselinesMap:
+    """The top100 object-root ``baselines`` map read (B1 resolution step 1)."""
+
+    def test_absent_top100_is_awaiting(self, tmp_path: Path) -> None:
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert oc.AWAITING_DETAIL in detail
+        assert not detail.startswith("corrupt")
+
+    def test_unreadable_top100_is_corrupt(self, tmp_path: Path) -> None:
+        (tmp_path / oc.TOP100_FILENAME).mkdir(parents=True)  # IsADirectoryError
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert detail.startswith("corrupt: ")
+
+    def test_invalid_json_is_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, "{nope")
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert detail == f"corrupt: {oc.TOP100_FILENAME} is not valid JSON"
+
+    def test_array_root_is_the_interim_contract_not_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, "[]")
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert "ARRAY root" in detail
+        assert not detail.startswith("corrupt")
+
+    def test_scalar_root_is_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, "42")
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert detail == f"corrupt: {oc.TOP100_FILENAME} root is neither object nor array"
+
+    def test_object_without_baselines_key(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"rows": []}))
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert "carries no baselines map" in detail
+        assert not detail.startswith("corrupt")
+
+    @pytest.mark.parametrize("bad", [["x"], {"NSE-NIFTY": 7}, {"NSE-NIFTY": None}])
+    def test_wrong_typed_baselines_is_corrupt(self, tmp_path: Path, bad: Any) -> None:
+        _write_top100_baselines(tmp_path, bad)
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines is None
+        assert detail == f"corrupt: {oc.TOP100_FILENAME} baselines is not a string→string map"
+
+    def test_ok_map_round_trips(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        baselines, detail = oc._load_baselines_map(tmp_path)
+        assert baselines == {"NSE-NIFTY": "baseline-NSE-NIFTY.json"}
+        assert detail == ""
+
+
+class TestLoadBaselineResult:
+    """The full B1 resolution law — STORED bytes only, every degrade NAMED."""
+
+    def test_awaiting_map_propagates_awaiting(self, tmp_path: Path) -> None:
+        result = oc.load_baseline_result(tmp_path, None)
+        assert result.status == "awaiting"
+        assert result.series is None
+        assert result.instruments == ()
+        assert oc.AWAITING_DETAIL in result.detail
+
+    def test_corrupt_map_propagates_corrupt_without_prefix(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, "{nope")
+        result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "corrupt"
+        assert result.instrument == "NSE-NIFTY"
+        assert not result.detail.startswith("corrupt")
+        assert "not valid JSON" in result.detail
+
+    def test_auto_select_single_stored_instrument(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        _write_run_baseline(tmp_path)
+        result = oc.load_baseline_result(tmp_path, None)
+        assert result.status == "ok"
+        assert result.instrument == "NSE-NIFTY"
+        assert result.filename == "baseline-NSE-NIFTY.json"
+        assert result.series is not None
+        assert result.series.total_return_pct == 3.0
+        assert result.instruments == ("NSE-NIFTY",)
+        assert result.detail == ""
+        assert result.revision is not None
+
+    def test_multi_instrument_requires_explicit_choice(self, tmp_path: Path) -> None:
+        _write_top100_baselines(
+            tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json", "BSE-SENSEX": "b.json"}
+        )
+        result = oc.load_baseline_result(tmp_path, None)
+        assert result.status == "awaiting"
+        assert result.instrument is None
+        assert "instrument required — 2 baseline(s) stored" in result.detail
+        assert "BSE-SENSEX, NSE-NIFTY" in result.detail
+        assert result.instruments == ("BSE-SENSEX", "NSE-NIFTY")
+
+    def test_empty_map_names_zero_stored(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {})
+        result = oc.load_baseline_result(tmp_path, None)
+        assert result.status == "awaiting"
+        assert result.detail == "instrument required — 0 baseline(s) stored"
+
+    def test_unknown_instrument_names_the_stored_set(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        result = oc.load_baseline_result(tmp_path, "BSE-SENSEX")
+        assert result.status == "awaiting"
+        assert "no stored baseline for 'BSE-SENSEX'" in result.detail
+        assert "stored: NSE-NIFTY" in result.detail
+
+    def test_unknown_instrument_on_empty_map(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {})
+        result = oc.load_baseline_result(tmp_path, "BSE-SENSEX")
+        assert result.status == "awaiting"
+        assert result.detail == "no stored baseline for 'BSE-SENSEX'"
+
+    def test_unsafe_filename_ref_is_corrupt_and_never_touches_disk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tampered map ref (traversal) is refused BEFORE any read."""
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "../../etc/passwd"})
+
+        def _boom(_path: Path) -> None:  # pragma: no cover - must never run
+            raise AssertionError("load_baseline must not be reached for an unsafe ref")
+
+        monkeypatch.setattr(oc, "load_baseline", _boom)
+        with structlog.testing.capture_logs() as logs:
+            result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "corrupt"
+        assert "not one safe path segment" in result.detail
+        assert result.filename == "../../etc/passwd"
+        assert any(log["event"] == "oneclick.baseline_ref_unsafe" for log in logs)
+
+    def test_safe_ref_but_absent_file_is_awaiting(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "awaiting"
+        assert "baseline-NSE-NIFTY.json absent" in result.detail
+        assert result.revision is None
+
+    def test_damaged_baseline_file_is_corrupt(self, tmp_path: Path) -> None:
+        _write_top100_baselines(tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json"})
+        _write(tmp_path / "baseline-NSE-NIFTY.json", "{nope")
+        result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "corrupt"
+        assert "failed validation" in result.detail
+        assert result.series is None
+
+    def test_explicit_instrument_ok(self, tmp_path: Path) -> None:
+        _write_top100_baselines(
+            tmp_path, {"NSE-NIFTY": "baseline-NSE-NIFTY.json", "BSE-SENSEX": "b.json"}
+        )
+        _write_run_baseline(tmp_path)
+        result = oc.load_baseline_result(tmp_path, "NSE-NIFTY")
+        assert result.status == "ok"
+        assert result.series is not None
+        assert result.series.instrument == "NSE-NIFTY"

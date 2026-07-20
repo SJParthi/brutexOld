@@ -428,7 +428,10 @@ def test_sweep_progress_stalled_read_keeps_loop_free_and_is_bounded(
     def _stalled_read(path: Path) -> dict[str, object]:
         entered.set()
         release.wait(timeout=_STALL_S)
-        return {"state": "running", "running": True, "enumerated": 999}
+        # A FRESH wall_time stamp, as publish_progress always writes it — a
+        # running claim without one is DEAD EVIDENCE under the
+        # DEC-JOB-COOPERATIVE-CANCEL-001 staleness law and would decay to idle.
+        return {"state": "running", "running": True, "enumerated": 999, "wall_time": time.time()}
 
     monkeypatch.setattr("brutex.engine.sweep_supervisor.read_progress", _stalled_read)
 
@@ -753,6 +756,115 @@ def test_wedged_lake_offloads_do_not_starve_liveness_routes(
         for thread in threads:
             thread.join(timeout=20.0)
     assert all(not t.is_alive() for t in threads), "wedged lake requests never completed"
+    for slot in results:
+        assert "error" not in slot, f"a wedged request failed: {slot.get('error')}"
+        assert slot["status"] == 200
+
+
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — equity + launch join the lake limiter ──
+
+
+def test_wedged_equity_and_launch_offloads_share_the_lake_limiter(
+    server: _RealServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """44 wedged equity + launch offloads must share ONE 32-token lake limiter.
+
+    DEC-DASHBOARD-LAKE-IO-LIMITER-002 (the #1642 named follow-up + the #1665
+    merge-seam straggler): GET /api/v1/oneclick/equity and the three
+    /api/v1/launch/* offloads rode the DEFAULT 40-token AnyIO pool, so a
+    wedged lake volume let the launch page's 2.5 s poll + equity polls pin
+    every default token and starve the deadline-guarded liveness routes
+    (whose bounds hold only GIVEN a free token — #1522's stated envelope).
+    Post-fix both families ride the app's OWN ``_run_lake`` limiter: at most
+    32 wedge, the rest park as coroutines, and the default pool stays free.
+
+    ``held_peak <= 32`` additionally pins the SHARED single limiter: a partial
+    wiring (one family converted) or launch minting its OWN second LakeOffload
+    reads 44 concurrent wedges and fails. Pre-fix (both families bare) this
+    test FAILS — verified 2026-07-12 with the production files reverted to the
+    branch base: the shipped test fails FIRST at the starved /api/v1/pull/rate
+    probe — a measured 5522 ms (> the 2.5 s budget) — before reaching the
+    held_peak check; held_peak == 40 (the default pool's exact size) was
+    measured by the same wedge run's diagnostic probe-less variant (transcript
+    + evidence capture in the PR body).
+
+    Budgets are generous for CI noise: the probes get 2.5 s against a 6 s
+    stall — an unambiguous separation either way.
+    """
+    entered_lock = threading.Lock()
+    entered_count = 0
+    entered_reached = threading.Event()
+    release = threading.Event()
+    wedge_target = 32  # the lake limiter's full size — every token pinned
+
+    def _wedge() -> None:
+        nonlocal entered_count
+        with entered_lock:
+            entered_count += 1
+            if entered_count >= wedge_target:
+                entered_reached.set()
+        release.wait(timeout=6.0)
+
+    def _stalled_equity_payload(*_a: object, **_k: object) -> dict[str, Any]:
+        _wedge()
+        return {"status": "wedged-equity-stub", "points": []}
+
+    def _stalled_launch_state(*_a: object, **_k: object) -> dict[str, Any]:
+        _wedge()
+        return {"status": "wedged-launch-stub"}
+
+    # Both patch targets are CALL-TIME module-attribute lookups (app.py imports
+    # the oneclick_view MODULE; launch_button's closure resolves
+    # build_launch_state from module globals), so the patches reach the
+    # running server (shared process memory — file header doctrine).
+    monkeypatch.setattr(
+        "brutex.dashboard.oneclick_view.build_equity_payload", _stalled_equity_payload
+    )
+    monkeypatch.setattr("brutex.dashboard.launch_button.build_launch_state", _stalled_launch_state)
+
+    results: list[dict[str, Any]] = []
+    threads: list[threading.Thread] = []
+
+    def _fire(slot: dict[str, Any], path: str) -> None:
+        try:
+            slot["status"], slot["body"] = _get(server.port, path, timeout=30.0)
+        except Exception as exc:  # pragma: no cover - only on a hung/failed offload
+            slot["error"] = repr(exc)
+
+    paths = ["/api/v1/oneclick/equity?run_id=r-x&rank=1"] * 22 + ["/api/v1/launch/state"] * 22
+    try:
+        for path in paths:
+            slot: dict[str, Any] = {}
+            results.append(slot)
+            thread = threading.Thread(target=_fire, args=(slot, path), daemon=True)
+            threads.append(thread)
+            thread.start()
+        assert entered_reached.wait(timeout=10.0), (
+            f"only {entered_count} lake offloads entered the wedge — the lake "
+            "limiter should admit exactly its token count"
+        )
+        for probe in ("/api/v1/pull/rate", "/api/v1/state"):
+            start = time.perf_counter()
+            status, _ = _get(server.port, probe, timeout=10.0)
+            elapsed = time.perf_counter() - start
+            assert status == 200
+            assert elapsed < 2.5, (
+                f"{probe} took {elapsed * 1000:.0f}ms while 32 equity/launch "
+                "offloads were wedged — the routes are starving the default "
+                "AnyIO pool (regression: not riding the shared lake limiter)."
+            )
+        with entered_lock:
+            held_peak = entered_count
+        assert held_peak <= wedge_target, (
+            f"{held_peak} equity/launch offloads ran concurrently — both route "
+            "families must share the ONE app-owned 32-token lake limiter "
+            "(44 > 32 means a family is bare OR minted its own limiter)"
+        )
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=20.0)
+    assert all(not t.is_alive() for t in threads), "wedged requests never completed"
     for slot in results:
         assert "error" not in slot, f"a wedged request failed: {slot.get('error')}"
         assert slot["status"] == 200

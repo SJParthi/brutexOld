@@ -1,0 +1,260 @@
+/* bx-oneclick-panels.css — the ONE home for the screener/strategy panel
+ * component CSS (DEC-OPERATOR-PAGE-CONSOLIDATE-001), previously duplicated
+ * in screener.html/strategy.html inline styles. Linked by v29.html,
+ * screener.html and strategy.html AFTER bx-design.css.
+ *
+ * Scope law: every rule sits under the `.bx-scpanel` / `.bx-stpanel` panel
+ * roots (or the portal-owned `.strategy-drawer` / `.drawer-back` roots) so
+ * nothing cascades into v29's own tables. The Beginner/Pro BLOCK twins move
+ * verbatim and deliberately UNSCOPED — the one shared body-class mechanism.
+ *
+ * Deliberately NOT in bx-design.css: that surface's evolution belongs to
+ * the design-system track; a new file is collision-free.
+ */
+
+/* ── screener panel (.bx-scpanel) — moved from screener.html ── */
+
+.bx-scpanel .controls { display:flex; gap:12px; padding:14px 24px; border-bottom:1px solid var(--border);
+  flex-wrap:wrap; align-items:flex-end; }
+.bx-scpanel .ctl { display:flex; flex-direction:column; gap:4px; }
+.bx-scpanel .ctl label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
+.bx-scpanel .ctl select, .bx-scpanel .ctl input {
+  background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
+  border-radius:var(--r-md); min-height:var(--ctl-h); padding:0 12px; font:inherit; font-size:13px;
+  color-scheme:dark; min-width:110px;
+}
+.bx-scpanel .count { padding:10px 24px; font-size:12px; color:var(--muted); }
+.bx-scpanel .tablewrap { margin:0 24px 24px; background:var(--surface); border:1px solid var(--border);
+  border-radius:12px; overflow-x:auto; }
+.bx-scpanel table { width:100%; border-collapse:collapse; font-size:12.5px; }
+.bx-scpanel th, .bx-scpanel td { padding:9px 12px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
+.bx-scpanel th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
+  cursor:pointer; user-select:none; position:sticky; top:0; background:var(--surface); }
+.bx-scpanel tbody tr { cursor:pointer; }
+.bx-scpanel tbody tr:hover { background:var(--surface-2); }
+.bx-scpanel td.pos { color:var(--green-bright); }
+.bx-scpanel td.neg { color:var(--red); }
+.bx-scpanel .showall { margin:0 24px 24px; }
+.bx-scpanel .showall button { cursor:pointer; border:1px dashed var(--border-strong); border-radius:var(--r-md);
+  padding:9px 16px; font:inherit; font-size:12px; color:var(--muted); background:transparent; }
+.bx-scpanel .strip { display:flex; align-items:center; gap:12px; padding:10px 24px; flex-wrap:wrap;
+  border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); }
+
+/* ── strategy panel (.bx-stpanel) — moved from strategy.html ── */
+
+.bx-stpanel section { margin:16px 24px 0; padding:16px 18px; background:var(--surface);
+  border:1px solid var(--border); border-radius:12px; }
+.bx-stpanel section h3 { margin:0 0 10px; font-size:14px; font-weight:800; }
+.bx-stpanel .note { font-size:11.5px; color:var(--muted); margin-top:8px; overflow-wrap:anywhere; }
+.bx-stpanel .warnnote { font-size:12px; color:var(--yellow); font-weight:700; margin-top:8px; }
+.bx-stpanel .chart-host svg { width:100%; height:340px; display:block; background:rgba(0,0,0,0.25);
+  border-radius:8px; }
+.bx-stpanel .equity-host svg { width:100%; height:220px; display:block; background:rgba(0,0,0,0.25);
+  border-radius:8px; }
+.bx-stpanel .bx-candle-wick { stroke: var(--muted); stroke-width: 1; }
+.bx-stpanel .bx-candle-up { fill: #26D9B0; stroke: #26D9B0; }
+.bx-stpanel .bx-candle-down { fill: #FF5C5C; stroke: #FF5C5C; }
+.bx-stpanel .bx-arrow-entry { fill: #26D9B0; }
+.bx-stpanel .bx-arrow-exit { fill: #FFB74D; }
+.bx-stpanel .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
+/* DEC-RESULTS-TRUST-HONESTY-001 (B1): the STORED buy-&-hold benchmark overlay */
+.bx-stpanel .bx-buyhold-line { stroke: #7FB3FF; stroke-width: 1.6; stroke-dasharray: 5 4; }
+.bx-stpanel table { width:100%; border-collapse:collapse; font-size:12px; }
+.bx-stpanel th, .bx-stpanel td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
+.bx-stpanel th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }
+.bx-stpanel td.pos { color:var(--green-bright); }
+.bx-stpanel td.neg { color:var(--red); }
+.bx-stpanel .tablewrap { overflow-x:auto; }
+.bx-stpanel .oc-source-badge { padding:2px 8px; border:1px solid var(--border-strong); border-radius:6px;
+  font-size:10.5px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+.bx-stpanel .story-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
+.bx-stpanel .story-cell { background:var(--surface-2); border:1px solid var(--border-strong);
+  border-radius:10px; padding:12px 14px; }
+.bx-stpanel .story-cell .k { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-weight:700; }
+.bx-stpanel .story-cell .v { font-size:18px; font-weight:800; margin-top:4px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.bx-stpanel .vixband { margin-top:10px; padding:8px 12px; border:1px solid var(--border-strong);
+  border-radius:8px; font-size:12px; color:var(--yellow); display:inline-block; }
+.bx-stpanel .pager { display:flex; gap:10px; align-items:center; margin-top:10px; font-size:12px; }
+.bx-stpanel .pager button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
+  padding:6px 12px; font:inherit; font-size:12px; color:var(--text); background:var(--surface-2); }
+
+/* ── Beginner/Pro BLOCK twins (moved verbatim from strategy.html —
+      deliberately UNSCOPED: the one shared body-class mechanism) ── */
+
+.jargon-block { display:block; }
+.plain-eng-block { display:none; }
+body.share-mode .jargon-block { display:none; }
+body.share-mode .plain-eng-block { display:block; }
+
+/* DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (#1749): a cascade-FAILED strategy
+   stays rendered (annotation never hides) but its verdict badge reads RED.
+   Moved here from strategy.html so the standalone /strategy page AND the
+   v29 strategy drawer share the one law. */
+.cascade-fail { color:var(--red); font-weight:700; }
+
+/* ════════════════════════════════════════════════════════════════════
+   Operator-portal choreography (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
+   Motion covenants: numbers never count-animate (values snap via
+   textContent, then may receive a one-shot pop); empty/awaiting/corrupt
+   states render instantly un-animated; ZERO new looping keyframes;
+   transform/opacity/stroke-dashoffset only (the ONE sanctioned layout
+   transition — the winners grid-template-rows unfold — lives in v29's
+   inline style with its own honesty comment); prefers-reduced-motion +
+   the html.bx-paused hidden-tab pause both collapse everything.
+   Shared keyframes bxRowIn / bxRiseIn / bxCountPop are REUSED from
+   bx-design.css — never redefined here.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Sticky winners filter bar (the mode-bar blur idiom). */
+.wn-filterbar { position:sticky; top:58px; z-index:5; background:rgba(10,13,17,.85);
+  backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
+@media (max-width: 720px) { .wn-filterbar { position:static; } }
+
+/* Winners row cascade — one-shot on section OPEN only; the stagger index
+   (--wn-i, set inline by the row builder) is CAPPED at 24 rows via min()
+   so a full table lands within ~340 ms; rows 25+ ride the last wave. */
+.wn-cascade tr { animation: bxRowIn .32s var(--ease) backwards;
+  animation-delay: calc(min(var(--wn-i, 0), 24) * 14ms); }
+
+/* You-are-here: the drawer's current winners row, tracking prev/next. */
+.wn-row-active { background:var(--surface-2);
+  box-shadow: inset 3px 0 0 var(--yellow); }
+
+/* The strategy drawer (slide-over) + backdrop. Visibility discipline is
+   CSS-owned: shut = visibility:hidden (untabbable) + translateX; .open
+   flips visibility instantly and slides in; on CLOSE the delayed
+   visibility transition re-hides the drawer only AFTER the slide-out
+   completes — transform/opacity/visibility only, no display toggling. */
+.strategy-drawer { position:fixed; inset:0 0 0 auto; width:min(760px,94vw);
+  background:var(--surface); border-left:1px solid var(--border-strong);
+  box-shadow:-24px 0 60px rgba(0,0,0,.5); transform:translateX(103%);
+  visibility:hidden;
+  transition: transform .32s var(--ease), visibility 0s linear .34s;
+  overflow-y:auto; overscroll-behavior:contain; z-index:1300; }
+.strategy-drawer.open { transform:translateX(0); visibility:visible;
+  transition: transform .32s var(--ease), visibility 0s; }
+.drawer-back { position:fixed; inset:0; z-index:1290; background:rgba(6,8,12,.55);
+  backdrop-filter:blur(6px); opacity:0; visibility:hidden; pointer-events:none;
+  transition: opacity .32s var(--ease), visibility 0s linear .34s; }
+.drawer-back.open { opacity:1; visibility:visible; pointer-events:auto;
+  transition: opacity .32s var(--ease), visibility 0s; }
+.drawer-head { position:sticky; top:0; z-index:6; display:flex; gap:10px;
+  align-items:center; padding:12px 16px; background:rgba(10,13,17,.85);
+  backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
+.drawer-head button { cursor:pointer; border:1px solid var(--border-strong);
+  border-radius:8px; padding:6px 12px; font:inherit; font-size:13px;
+  color:var(--text); background:var(--surface-2); }
+.drawer-head button:disabled { opacity:.4; cursor:default; }
+.drawer-head a { color:var(--blue); font-size:12px; text-decoration:none; }
+.drawer-head .drawer-close { margin-left:auto; }
+.drawer-rank-pill { position:relative; padding:4px 12px; border:1px solid var(--border-strong);
+  border-radius:999px; font-weight:800; font-size:13px; color:var(--yellow); }
+.drawer-rank-pill::after { content:""; position:absolute; inset:-3px;
+  border-radius:999px; border:1px solid var(--yellow); opacity:0;
+  pointer-events:none; }
+/* The pill glow is SCOPED under .open (adversarial-review fold, P-N3/E-M2):
+   CSS animations run even at visibility:hidden, so an unscoped rule played
+   once invisibly at page load and never replayed — .open re-matching the
+   selector restarts it on every real open. */
+.strategy-drawer.open .drawer-rank-pill::after { animation: bxdGlowRing 1.2s var(--ease) 2; }
+body.bx-drawer-open { overflow:hidden; } /* scroll lock while the drawer is open */
+
+/* Drawer section rise — one-shot nth-of-type ladder (≤ .35s tail), SCOPED
+   under .open (P-N3/E-M2 — same dead-at-load class as the pill glow: the
+   ladder now fires on every real open, never invisibly at first paint). */
+.strategy-drawer.open .drawer-body section { animation: bxRiseIn .3s var(--ease) backwards; }
+.strategy-drawer.open .drawer-body section:nth-of-type(2) { animation-delay:.05s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(3) { animation-delay:.1s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(4) { animation-delay:.15s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(5) { animation-delay:.2s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(6) { animation-delay:.25s; }
+.strategy-drawer.open .drawer-body section:nth-of-type(7) { animation-delay:.3s; }
+
+/* Candle materialization: the WHOLE session rises off the axis as ONE
+   animated group (O(1) animated elements over ≤500 nodes). */
+.bxd-chart-reveal { transform-origin:50% 100%;
+  animation: bxdChartIn .45s var(--ease) backwards; }
+/* Arrows land AFTER the candles (their own one-shot group). */
+.bxd-arrows-in { animation: bxdArrowDrop .3s var(--ease) .45s backwards; }
+/* Equity line draw-in: pathLength="1" normalization + a dashoffset
+   keyframe — zero getTotalLength() reads, zero JS measurement. */
+.bxd-equity-draw { stroke-dasharray:1; stroke-dashoffset:1;
+  animation: bxdDraw .8s var(--ease) .15s forwards; }
+/* Deep-stat value pop — added ONLY on a real '—'→value transition
+   (covenant: numbers snap to truth first, then may pop). */
+.bxd-pop { animation: bxCountPop .45s var(--ease); }
+/* Trades cascade — first render per (rank, page) only, capped 16 rows. */
+.bxd-cascade tr { animation: bxRowIn .28s var(--ease) backwards;
+  animation-delay: calc(min(var(--bxd-i, 0), 16) * 12ms); }
+/* Rank-surf swap: direction-aware fade-through of ONE container. */
+.bxd-swap { animation: bxdSwap .28s var(--ease); }
+.bxd-swapRev { animation: bxdSwapRev .28s var(--ease); }
+
+/* NEW keyframes — all one-shot, none loops forever. */
+@keyframes bxdChartIn { from { opacity:0; transform:scaleY(.85); } to { opacity:1; transform:none; } }
+@keyframes bxdArrowDrop { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:none; } }
+@keyframes bxdDraw { to { stroke-dashoffset:0; } }
+@keyframes bxdSwap { 0% { opacity:1; transform:none; } 45% { opacity:0; transform:translateX(-14px); } 55% { opacity:0; transform:translateX(14px); } 100% { opacity:1; transform:none; } }
+@keyframes bxdSwapRev { 0% { opacity:1; transform:none; } 45% { opacity:0; transform:translateX(14px); } 55% { opacity:0; transform:translateX(-14px); } 100% { opacity:1; transform:none; } }
+@keyframes bxdGlowRing { 0% { opacity:0; transform:scale(1); } 35% { opacity:.9; } 100% { opacity:0; transform:scale(1.25); } }
+
+/* Covenant #5: this sheet carries its OWN reduced-motion block —
+   strategy.html/screener.html lack v29's global kill. */
+@media (prefers-reduced-motion: reduce) {
+  .wn-cascade tr, .wn-filterbar, .strategy-drawer, .drawer-back,
+  .strategy-drawer .drawer-body section, .bxd-chart-reveal, .bxd-arrows-in,
+  .bxd-equity-draw, .bxd-pop, .bxd-cascade tr, .bxd-swap, .bxd-swapRev,
+  .drawer-rank-pill::after {
+    animation: none !important;
+    transition-duration: .001ms !important;
+  }
+  /* NEW-R4C-1 (fix round 3): .bxd-equity-draw is the ONE forwards-fill class
+     whose BASE rule IS the hidden state — with pathLength=1, dasharray:1
+     (dash 1 / gap 1) and offset:1 every path position p ∈ [0,1) maps to
+     dash-pattern position (p+1) mod 2 ∈ [1,2) — the GAP, zero pixels
+     painted — and visibility arrives ONLY via bxdDraw's `forwards` fill,
+     which the `animation: none` above kills. This deterministic reset keeps
+     the equity curve visible with no animation dependency. */
+  .bxd-equity-draw { stroke-dashoffset: 0 !important; }
+}
+
+/* ── Losing-streak resilience panel (DEC-RESILIENCE-STREAKS-001; re-ported
+   at the club-O merge-forward onto the DEC-OPERATOR-PORTAL-REFOLD-001
+   extracted-panel layout — the styles were originally inline in
+   strategy.html, now .bx-stpanel-scoped so the standalone /strategy page
+   AND the v29 #ocStrategyDrawer mirror share ONE law). ── */
+.bx-stpanel .story-cell .sub { font-size:11px; color:var(--muted); margin-top:4px; overflow-wrap:anywhere; }
+.bx-stpanel .story-cell .badge-bad { color:var(--red); font-weight:700; }
+.bx-stpanel .story-cell .badge-ok { color:var(--green); }
+.bx-stpanel .resilience-locate { margin-top:12px; padding:8px 12px; border:1px solid var(--border-strong);
+  border-radius:8px; font-size:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.bx-stpanel .resilience-locate input { width:96px; font:inherit; font-size:12px; padding:4px 6px;
+  border:1px solid var(--border-strong); border-radius:6px; background:var(--surface-2); color:var(--text); }
+.bx-stpanel .resilience-verdict { font-weight:700; }
+.bx-stpanel .resilience-verdict.ok { color:var(--green); }
+.bx-stpanel .resilience-verdict.warn { color:var(--yellow); }
+.bx-stpanel .resilience-verdict.bad { color:var(--red); }
+/* Broker-grade polish, PANEL-SCOPED (#stResilienceSection only — the shared
+   .story-cell idiom on the combo card above is untouched): the coloured TRUTH
+   states read as designed status pills and the cells lift subtly on hover.
+   Transform/opacity only (no JS, no new polling); every honest "—" /
+   "unavailable" surface stays fully visible. */
+#stResilienceSection .story-cell { transition:transform .12s ease, border-color .12s ease; }
+#stResilienceSection .story-cell:hover { transform:translateY(-1px); border-color:var(--muted); }
+#stResilienceSection .badge-ok, #stResilienceSection .badge-bad {
+  display:inline-block; margin-top:6px; padding:2px 9px; border-radius:999px;
+  font-size:11px; letter-spacing:.02em; }
+#stResilienceSection .badge-ok { background:rgba(38,217,176,0.12); border:1px solid var(--green-dim); }
+#stResilienceSection .badge-bad { background:rgba(255,92,92,0.12); border:1px solid var(--red); }
+#stResilienceSection .resilience-verdict {
+  display:inline-block; padding:2px 10px; border-radius:999px; border:1px solid var(--border-strong); }
+#stResilienceSection .resilience-verdict.ok { background:rgba(38,217,176,0.12); border-color:var(--green-dim); }
+#stResilienceSection .resilience-verdict.warn { background:rgba(255,183,77,0.12); border-color:var(--yellow); }
+#stResilienceSection .resilience-verdict.bad { background:rgba(255,92,92,0.12); border-color:var(--red); }
+
+/* Covenant #6: the hidden-tab pause (BXUI.initVisibilityPause stamps
+   html.bx-paused) freezes any in-flight one-shots. */
+html.bx-paused .strategy-drawer *, html.bx-paused .bx-scpanel *,
+html.bx-paused .drawer-rank-pill::after {
+  animation-play-state: paused !important;
+}

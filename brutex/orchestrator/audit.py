@@ -76,7 +76,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 from types import TracebackType
-from typing import Any, BinaryIO, ClassVar, Final, Protocol, Self, runtime_checkable
+from typing import IO, Any, ClassVar, Final, Protocol, Self, runtime_checkable
 
 from brutex.models import BruteXError
 
@@ -836,7 +836,11 @@ def _has_torn_tail(path: Path) -> bool:
     (DEC-AUDIT-TORN-TAIL-001). An empty file has no lines, so it is never torn.
     One ``seek`` + a single-byte read — never the whole log.
     """
-    with open(path, "rb") as f:
+    from brutex.data.guarded_read import (
+        open_regular_binary,
+    )
+
+    with open_regular_binary(path) as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()
         if size == 0:
@@ -893,7 +897,7 @@ def _read_entries(path: Path) -> list[AuditEntry]:
 _TAIL_CHUNK_BYTES: Final[int] = 8192
 
 
-def _iter_reverse_chunks(f: BinaryIO, size: int) -> Iterator[tuple[int, bytes]]:
+def _iter_reverse_chunks(f: IO[bytes], size: int) -> Iterator[tuple[int, bytes]]:
     """Yield ``(pos, block)`` reading *f* backward from *size* in bounded blocks.
 
     The SINGLE reverse-seek mechanism shared by :func:`_read_tail_entry` (isolate
@@ -960,7 +964,11 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
     if not path.exists():
         raise AuditError(f"Audit log not found: {path}")
 
-    with open(path, "rb") as f:
+    from brutex.data.guarded_read import (
+        open_regular_binary,
+    )
+
+    with open_regular_binary(path) as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()
         if size == 0:
@@ -992,7 +1000,7 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
     return AuditEntry.from_json_line(line), torn_tail
 
 
-def _isolate_last_committed_line(f: BinaryIO, size: int) -> bytes | None:
+def _isolate_last_committed_line(f: IO[bytes], size: int) -> bytes | None:
     """Reverse-walk *f* and return its last committed NON-BLANK line, or ``None``.
 
     The accumulate-and-scan half of :func:`_read_tail_entry`: prepend
@@ -1059,7 +1067,7 @@ def _last_nonblank_committed_line(chunk: bytes) -> bytes | None:
     return None
 
 
-def _find_last_newline_offset(f: BinaryIO, size: int) -> int:
+def _find_last_newline_offset(f: IO[bytes], size: int) -> int:
     """Return the absolute offset of the LAST ``"\\n"`` in *f*, or ``-1`` if none.
 
     Walks *f* backward via :func:`_iter_reverse_chunks`, so it reads O(1) tail

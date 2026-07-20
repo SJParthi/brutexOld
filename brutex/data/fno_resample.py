@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 # source of truth; do NOT redefine ``1`` here). The friend import is the established
 # convention (pyproject reportPrivateUsage="warning" + per-site ignore at deliberate
 # cross-module reuse sites — DEC-P0-017).
+from brutex.data.session import ist_offset_duration
 from brutex.data.spot_resample import _BASE_TF_MINUTES  # pyright: ignore[reportPrivateUsage]
 from brutex.data.tf_resampler import resample_1m_to_tf, resample_all_21_tfs
 from brutex.data.timeframes import DAILY_TF_MINUTES, TF_LABELS
@@ -127,7 +128,7 @@ def resample_session_to_tf(
     # ``s + M``; keep it only when fully closed at/under the cutoff (``s + M <= cutoff``).
     # IST minute-of-day of the bucket label = (ts_utc + 05:30) hour*60 + minute, Int32-cast
     # before the arithmetic (Int8 hour/minute overflow guard — CLAUDE.md §11 COMMON).
-    ist = pl.col(_RESAMPLER_TS_COLUMN) + pl.duration(hours=5, minutes=30)
+    ist = pl.col(_RESAMPLER_TS_COLUMN) + ist_offset_duration()
     bucket_start_min = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
     guarded: pl.DataFrame = resampled.filter(bucket_start_min + target_tf_minutes <= cutoff_min)
     return guarded

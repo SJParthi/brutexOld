@@ -47,7 +47,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.orchestrator.audit import AuditWriter
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import FibAnchorKind, PriceSource, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -215,6 +215,8 @@ class _FakeKernel:
         proximity: object,
         prior_n: int,
         fib_anchor: object,
+        vwap_source: object = PriceSource.HLC3,
+        ema_source: object = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
     ) -> None:
@@ -222,6 +224,8 @@ class _FakeKernel:
         self.proximity = proximity
         self.prior_n = prior_n
         self.fib_anchor = fib_anchor
+        self.vwap_source = vwap_source
+        self.ema_source = ema_source
         self.roll_schedule = roll_schedule
         self.apply_1day_mask = apply_1day_mask
 
@@ -236,6 +240,8 @@ def _fake_builder() -> tuple[list[int], object]:
         proximity: object,
         prior_n: int,
         fib_anchor: object,
+        vwap_source: object = PriceSource.HLC3,
+        ema_source: object = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
     ) -> _FakeKernel:
@@ -245,6 +251,8 @@ def _fake_builder() -> tuple[list[int], object]:
             proximity=proximity,
             prior_n=prior_n,
             fib_anchor=fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
         )
@@ -283,8 +291,13 @@ class TestResidentKernelCache:
             # bar_bits matrix is anchor-specific, so a different anchor must build
             # its own kernel, never reuse a stale one (R-1).
             {"fib_anchor": FibAnchorKind.ROLLING_WEEKLY},
-            # DEC-STAGE1A-ROLL-RESET-001: the ADR-0012 roll schedule is the 6th
-            # key slot — a long-lived daemon re-launching over a changed lake
+            # DEC-NIFTY-PRICE-SOURCE-AXIS-001: the VWAP / EMA price source is part
+            # of the key — bar_bits bits 52-53 / 0-5 are source-specific, so a
+            # different source must build its own kernel, never reuse a stale one.
+            {"vwap_source": PriceSource.OPEN},
+            {"ema_source": PriceSource.HLC3},
+            # DEC-STAGE1A-ROLL-RESET-001: the ADR-0012 roll schedule is a key
+            # slot — a long-lived daemon re-launching over a changed lake
             # must never serve a stale-schedule kernel (roll twin of R-1).
             {"roll_schedule": (739428, 739463)},
         ],
@@ -429,6 +442,97 @@ class TestGridReuseBarBits:
         # 2 directions × 2 sl × 2 proximities = 8 tuples; all run (bars present).
         seen = self._run(reuse=True, root=tmp_path / "g")
         assert len(seen) == 8
+
+
+class TestKernelPathMuhuratWeeklyAnchor:
+    """DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — resident-KERNEL-path coverage.
+
+    The crash-hardening completeness requirement: the Muhurat weekly-anchor
+    abstain guard must be proven on BOTH bar_bits build paths — the non-kernel
+    path (``build_bar_bits`` from ``sweep_run.py``, pinned in
+    ``tests/unit/test_engine_stage1a.py``) AND the resident-kernel path.
+    Structurally the kernel reaches anchors through the SAME seam
+    (``ResidentSweepKernel.__init__`` → :func:`build_bar_bits` →
+    ``Stage1AMatrixBuilder._compute_anchors`` — ``sweep_kernel.py``), so no
+    guard mirror is needed; these tests EXECUTE that path over a real Muhurat
+    window for both weekly anchors so the claim is proven, never inferred.
+    """
+
+    @staticmethod
+    def _muhurat_window() -> list[CandleBar]:
+        # The real 2024 boundary: a regular session (2024-10-31), the Muhurat
+        # evening session (2024-11-01, ~18:00 IST), the next regular session.
+        def day_bars(y: int, mo: int, d: int, hh: int, mm: int, base: float) -> list[CandleBar]:
+            return [
+                CandleBar(
+                    timestamp=datetime(y, mo, d, hh, mm + i, tzinfo=UTC),
+                    open=Decimal(str(base + i)),
+                    high=Decimal(str(base + i + 0.5)),
+                    low=Decimal(str(base + i - 0.5)),
+                    close=Decimal(str(base + i + 0.25)),
+                    volume=10,
+                    open_interest=None,
+                )
+                for i in range(4)
+            ]
+
+        return (
+            day_bars(2024, 10, 31, 3, 45, 100.0)  # 09:15 IST regular
+            + day_bars(2024, 11, 1, 12, 30, 104.0)  # ~18:00 IST Muhurat
+            + day_bars(2024, 11, 4, 3, 45, 105.0)  # next regular
+        )
+
+    @pytest.mark.parametrize("anchor", [FibAnchorKind.ROLLING_WEEKLY, FibAnchorKind.WEEKLY_STATIC])
+    def test_resident_kernel_builds_across_muhurat_with_weekly_anchor(
+        self, anchor: FibAnchorKind
+    ) -> None:
+        # Pre-fix this CONSTRUCTION raised the weekly resolvers' ValueError
+        # ("not a trading day") out of build_bar_bits — the kernel path was
+        # exactly as exposed as the non-kernel path. Post-fix it completes,
+        # emits the one abstain WARN, and its bar_bits are bit-identical to
+        # the non-kernel build (the kernel is a cache, never a second math).
+        from brutex.engine.stage1a import _MUHURAT_WEEKLY_ANCHOR_EVENT, build_bar_bits
+        from structlog.testing import capture_logs
+
+        bars = self._muhurat_window()
+        with capture_logs() as logs:
+            kernel = ResidentSweepKernel(bars, fib_anchor=anchor)
+        warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["day"] == "2024-11-01"
+        assert kernel.bar_bits == build_bar_bits(bars, fib_anchor=anchor)
+
+    def test_resident_kernel_cache_get_across_muhurat_weekly_anchor(self) -> None:
+        # The production seam (`run_sweep_grid` threads ResidentKernelCache.get
+        # per tuple): a miss BUILDS across the Muhurat window without raising,
+        # and the subsequent hit reuses the kernel (no second Stage-1A build,
+        # no second WARN).
+        from brutex.engine.stage1a import _MUHURAT_WEEKLY_ANCHOR_EVENT
+        from structlog.testing import capture_logs
+
+        bars = self._muhurat_window()
+        cache = ResidentKernelCache(capacity=2)
+        with capture_logs() as logs:
+            first = cache.get(
+                bars,
+                instrument="NIFTY",
+                tf_label="1minute",
+                proximity=None,
+                prior_n=3,
+                fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+            )
+            again = cache.get(
+                bars,
+                instrument="NIFTY",
+                tf_label="1minute",
+                proximity=None,
+                prior_n=3,
+                fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+            )
+        assert again is first  # hit — built exactly once
+        assert cache.builds == 1 and cache.hits == 1
+        warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+        assert len(warns) == 1  # one WARN per Muhurat session, not per lookup
 
 
 # ════════════════════════════════════════════════════════════════════════════

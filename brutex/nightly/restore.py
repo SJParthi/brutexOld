@@ -45,6 +45,7 @@ from typing import Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.models import BruteXError
 from brutex.nightly.backup import (
     MANIFEST_NAME,
@@ -114,7 +115,7 @@ def _load_manifest(snapshot_dir: Path) -> BackupManifest:
         )
     manifest_path = snapshot_dir / MANIFEST_NAME
     try:
-        raw = manifest_path.read_text(encoding="utf-8")
+        raw = read_regular_text(manifest_path)
     except OSError as exc:
         raise RestoreRefused(f"cannot read snapshot manifest {manifest_path}: {exc}") from exc
     try:

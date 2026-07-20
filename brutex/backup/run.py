@@ -22,7 +22,7 @@ path is benign).
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -53,6 +53,7 @@ from brutex.backup.state import (
     save_state,
     state_path,
 )
+from brutex.calendars.nse import IST_FIXED_OFFSET
 from brutex.config.backup_env import VERIFY_SUBSET_BUCKETS
 from brutex.config.paths import resolve_lake_root
 from brutex.notifications.sweep_alerts import SweepAlerter
@@ -69,8 +70,10 @@ if TYPE_CHECKING:
 _LOG = structlog.get_logger(__name__)
 
 #: IST — the box TZ law (fixed +05:30, no DST); the weekly prune gate is
-#: judged in IST so "Sunday" means the operator's Sunday.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+#: judged in IST so "Sunday" means the operator's Sunday. The ONE canonical
+#: :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[timezone] = IST_FIXED_OFFSET
 
 #: Consecutive rc-3 partial runs at (and past) which the WARN escalates to a
 #: CRITICAL ``partial_streak`` alert (F8 — a systemic reader problem).

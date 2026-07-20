@@ -82,7 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 import structlog
 
-from brutex.calendars.nse import daily_derive_cutoff
+from brutex.calendars.nse import IST_FIXED_OFFSET, daily_derive_cutoff
 from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.catalog import Catalog
 from brutex.data.derive_stamp import remove_derive_stamp
@@ -93,8 +93,10 @@ from brutex.data.errors import (
     datetime_out_of_range_escape_errors,
     parquet_read_skip_errors,
 )
+from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.guarded_read import read_regular_bytes, read_regular_text
 from brutex.data.lake_invariants import (
     OPTIONS_DIR_NAME,
     ForeignMonthRows,
@@ -151,8 +153,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 _LOG = structlog.get_logger("brutex.data.lake_heal")
 
-#: IST is a fixed +05:30 offset (no DST) — the forming-session cutoff timezone.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+#: IST is a fixed +05:30 offset (no DST) — the forming-session cutoff timezone;
+#: the ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[timezone] = IST_FIXED_OFFSET
 
 # ── mode + throttle env ──────────────────────────────────────────────────────
 
@@ -437,12 +441,20 @@ class RecallReport:
         Intraday-TF interval dirs whose rebuild FAILED — their affected month
         files stay deleted (honest: rebuilt lazily by the derive route /
         gated pre-build; never a silently poisoned bucket).
+    option_daily_skipped
+        Healed CE/PE OPTION contracts whose ``1day`` recall was SKIPPED by
+        the 1-minute-native law (DEC-OPTIONS-PREBUILD-RETIRE-001 — the
+        operator ruling of 2026-07-15 as relayed via the coordinator,
+        ADR-0021 RULING B, draft PR #1555): the derived option ``1day`` is
+        retired, so a healed option partition gets NO daily re-derive —
+        counted here + logged ONCE per batch, never silently dropped.
     """
 
     daily_targets: int
     daily_bars: int
     tf_rebuilt: int
     tf_failed: int
+    option_daily_skipped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,6 +527,10 @@ _PER_FINDING_HEAL_ERRORS: Final[tuple[type[BaseException], ...]] = (
 #: the sweep daemon thread (the "boot never crashes" contract). The scan gate
 #: + ``_PER_FINDING_HEAL_ERRORS`` stop it upstream; this is the last-line rail
 #: (OverflowError is already an ``Exception`` — the fold only ADDS the panic).
+#: ALSO consumed by ``_rebuild_tf_months``'s per-symbol isolation
+#: (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): the recall's months-bounded
+#: re-materialise converts bars Python-side, so the SAME panic class escaped
+#: its former bare ``except Exception`` and aborted the whole recall batch.
 #: A named constant because mypy --strict rejects a starred-unpack tuple
 #: DISPLAY in an ``except`` clause while accepting a tuple-typed expression.
 _SWEEP_GUARD_ERRORS: Final[tuple[type[BaseException], ...]] = (
@@ -705,7 +721,7 @@ def _remove_dataset_stats_for(lake_root: Path, source: Path) -> None:
 def _quarantine_move(state: _BatchState, source: Path) -> Path:
     """Quarantine-COPY *source* then unlink it (a whole-file move, audited)."""
     dest = state.quarantine_path(source)
-    content = source.read_bytes()
+    content = read_regular_bytes(source)
     with lake_write_guard():
         dest.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_via(dest, lambda tmp: tmp.write_bytes(content))
@@ -1403,6 +1419,13 @@ def _prune_empty_dirs(root: Path) -> None:
 
 # ── derived-data recall ──────────────────────────────────────────────────────
 
+#: Cap on the SYMBOL names carried by the ONE per-batch
+#: ``lake_heal.recall_option_daily_skipped`` log (DEC-OPTIONS-PREBUILD-RETIRE-001
+#: — a healed option chain can be hundreds of CE/PE contracts; the log names a
+#: bounded sample, the TRUE total stays in its ``count`` field + in
+#: :attr:`RecallReport.option_daily_skipped` — the MAX_REPORTED cap idiom).
+RECALL_OPTION_SKIP_LOG_CAP: Final[int] = 10
+
 
 def _first_day_after(year: int, month: int) -> date:
     """The first day of the month AFTER ``(year, month)``."""
@@ -1415,10 +1438,18 @@ def _prebuild_kind_from_coords(segment: str, symbol: str) -> PrebuildKind | None
     """The TF-rebuild kind for one lake coordinate, or ``None`` = never rebuild.
 
     ``INDEX``/``CASH`` → SPOT; ``FNO`` + a ``groww_symbol`` decoding to a
-    ``FUT`` contract → FUTURES; a CE/PE contract or an undecodable FNO symbol →
-    ``None`` (options intraday is never materialised —
+    ``FUT`` contract → FUTURES; a CE/PE contract or an undecodable FNO
+    symbol → ``None``. For CE/PE the ``None`` is the 1-minute-native law
+    (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+    relayed via the coordinator, ADR-0021 RULING B, draft PR #1555: the
+    pipeline's derived option TFs are RETIRED; a stored legacy option TF dir
+    stays INERT, never quarantine-rebuilt here). For an undecodable FNO
+    symbol the ``None`` is conservatism — the kind cannot be classified, so
+    nothing is rebuilt. NOTE the pre-retirement docstring's claim that
     :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes`
-    raises for OPTIONS by design).
+    "raises for OPTIONS by design" was STALE — it has materialised
+    ``PrebuildKind.OPTIONS`` since DEC-PIPELINE-AUTOPREBUILD-001; this gate
+    is the real (and now law-aligned) reason options are never rebuilt.
     """
     if segment != "FNO":
         return PrebuildKind.SPOT
@@ -1467,7 +1498,7 @@ def _rebuild_tf_months(
         return 0, 0  # TF partitions exist only when the operator materialised
     kind = _prebuild_kind_from_coords(segment, symbol)
     if kind is None:
-        return 0, 0  # options intraday is never materialised (defensive)
+        return 0, 0  # CE/PE (1-minute-native law) / undecodable FNO — never rebuilt
     try:
         for label in tf_labels:
             interval = INTRADAY_TF_INTERVALS[label]
@@ -1500,7 +1531,15 @@ def _rebuild_tf_months(
         )
     except LakeWriteHalt:
         raise
-    except Exception as exc:  # pylint: disable=broad-exception-caught — per-symbol isolation
+    # _SWEEP_GUARD_ERRORS = Exception + the out-of-range-timestamp conversion
+    # panics (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the round-18 idiom): a
+    # planted 2**62-us stored stamp panics the rebuild's Rust→Python conversion
+    # as a BaseException that sailed PAST the former bare `except Exception`
+    # and aborted the WHOLE recall batch; the read-boundary gate refuses it
+    # FIRST as ResampleInputError — this is the defense-in-depth rail so any
+    # residual panic stays per-symbol isolation. KeyboardInterrupt/SystemExit
+    # still propagate (the guard is never a blanket BaseException).
+    except _SWEEP_GUARD_ERRORS as exc:  # pylint: disable=broad-exception-caught — per-symbol isolation
         _LOG.warning(
             "lake_heal.tf_rebuild_failed", symbol=symbol, tfs=sorted(tf_labels), error=str(exc)
         )
@@ -1523,17 +1562,34 @@ def _run_recall(state: _BatchState, *, before: date) -> RecallReport:
     MIGRATION #1145). The F&O branch reads OI + resamples through the OI-carry
     positional resampler. Then the symbol's materialised intraday TFs are
     delete-and-rebuilt (:func:`_rebuild_tf_months`).
+
+    A healed CE/PE OPTION contract is EXEMPT from the whole recall
+    (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+    relayed via the coordinator, ADR-0021 RULING B, draft PR #1555): the
+    derived option ``1day`` is retired (options are 1-minute-native), so
+    this recall must not stay its second producer. The skip is COUNTED
+    (:attr:`RecallReport.option_daily_skipped`) and logged ONCE per batch
+    (capped symbol list — never per-contract spam); a stored legacy option
+    ``1day``/TF stays INERT (never rebuilt, never deleted). FUT + spot keep
+    their recall byte-identically.
     """
     daily_targets = 0
     daily_bars = 0
     tf_rebuilt = 0
     tf_failed = 0
+    option_daily_skipped: list[str] = []
     for (exchange, segment, symbol), months in sorted(state.touched_minute.items()):
         # DEC-PREBUILD-INCREMENTAL-001: the heal rewrote this symbol's 1-minute
         # source, so its derive stamp is stale by definition — remove it OUTRIGHT
         # (belt-and-braces: the rewrite already moved the source token) so the
         # next pipeline prebuild can never skip a healed symbol.
         remove_derive_stamp(state.lake_root, exchange, segment, symbol)
+        if is_option_contract_coords(segment, symbol):
+            # DEC-OPTIONS-PREBUILD-RETIRE-001: no derived 1day (and no TF
+            # rebuild — the healed option stays 1-minute-native); counted +
+            # batch-logged below, never a silent drop.
+            option_daily_skipped.append(symbol)
+            continue
         y_min, m_min = min(months)
         y_max, m_max = max(months)
         target = DailyDeriveTarget(
@@ -1575,11 +1631,25 @@ def _run_recall(state: _BatchState, *, before: date) -> RecallReport:
         )
         tf_rebuilt += rebuilt
         tf_failed += failed
+    if option_daily_skipped:
+        # ONE bounded log per recall BATCH (the MAX_REPORTED cap idiom —
+        # never per-contract spam): a healed option chain can be hundreds of
+        # contracts; the TRUE total rides ``count`` + the report field.
+        _LOG.info(
+            "lake_heal.recall_option_daily_skipped",
+            count=len(option_daily_skipped),
+            symbols=option_daily_skipped[:RECALL_OPTION_SKIP_LOG_CAP],
+            law=(
+                "DEC-OPTIONS-PREBUILD-RETIRE-001 — options are 1-minute-native; "
+                "no derived 1day/TF recall for CE/PE"
+            ),
+        )
     return RecallReport(
         daily_targets=daily_targets,
         daily_bars=daily_bars,
         tf_rebuilt=tf_rebuilt,
         tf_failed=tf_failed,
+        option_daily_skipped=len(option_daily_skipped),
     )
 
 
@@ -1630,7 +1700,7 @@ def load_heal_stats(lake_root: Path) -> dict[str, Any]:
     """
     path = lake_root / STATS_RELPATH
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_regular_text(path))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -1645,7 +1715,7 @@ def load_last_sweep(lake_root: Path) -> dict[str, Any] | None:
     """
     path = lake_root / SENTINEL_RELPATH
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_regular_text(path))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -1662,7 +1732,7 @@ def load_last_attempt(lake_root: Path) -> dict[str, Any] | None:
     """
     path = lake_root / ATTEMPT_RELPATH
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_regular_text(path))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -3033,6 +3103,7 @@ __all__ = [
     "MASS_HEAL_FRACTION",
     "MASS_HEAL_MIN_FILES",
     "QUARANTINE_DIRNAME",
+    "RECALL_OPTION_SKIP_LOG_CAP",
     "SENTINEL_RELPATH",
     "STATS_RELPATH",
     "HealAction",

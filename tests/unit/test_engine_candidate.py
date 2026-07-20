@@ -194,3 +194,19 @@ class TestValidateCandidate:
         monkeypatch.setattr(robustness_mod, "build_bar_bits", _spy_for("cpcv"))
         validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
         assert seen == {"oos": (None, False), "cpcv": (None, False)}
+
+    def test_no_fill_policy_seam_survives(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law, so
+        # the round-2 policy pass-through is DELETED — validate_candidate and
+        # both composed re-simulations (the OOS holdout + the CPCV
+        # return-series producer) carry NO policy/fill_mode seam; a knob
+        # sneaking back in fails this killed-token pin.
+        import inspect
+
+        from brutex.engine.robustness import combo_returns
+        from brutex.engine.validation import validate_out_of_sample
+
+        for fn in (validate_candidate, validate_out_of_sample, combo_returns):
+            params = inspect.signature(fn).parameters
+            assert "policy" not in params, fn.__name__
+            assert "fill_mode" not in params, fn.__name__

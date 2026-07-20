@@ -10,6 +10,7 @@ unknown counts, blocked(<link>) verdicts, duration formatting).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -100,11 +101,41 @@ def _report(
 
 
 def test_mint_nightly_id_format_and_uniqueness() -> None:
+    """Format golden + the uniqueness LAW, both DETERMINISTIC.
+
+    The uniqueness law is "distinct entropy within one second ⇒ distinct ids",
+    so it is asserted by INJECTING a counter entropy source through the seam
+    the minter already exposes. The previous shape minted 64 ids off REAL
+    ``os.urandom`` in one second and asserted all 64 unique — a probabilistic
+    claim asserted deterministically: with a 24-bit suffix,
+    P(collision) ≈ C(64,2)/2**24 ≈ 1.2e-4 per run, which randomly redded
+    repo-wide CI (run 29141165245, ``assert 63 == 64``) — the defect class
+    this pins away (DEC-NIGHTLY-ID-FLAKY-TEST-001, MIGRATION.md #1737).
+    """
     minted = mint_nightly_id(now=lambda: 1785086400.0, entropy=lambda n: b"\xa1\xb2\xc3"[:n])
     assert minted == "nightly-20260726T172000Z-a1b2c3"
-    ids = {mint_nightly_id() for _ in range(64)}
-    assert len(ids) == 64  # entropy suffix ⇒ collision-safe within one second
-    assert all(i.startswith("nightly-") and "/" not in i for i in ids)
+    counter = iter(range(64))
+    ids = {
+        mint_nightly_id(
+            now=lambda: 1785086400.0,
+            entropy=lambda n: next(counter).to_bytes(3, "big")[:n],
+        )
+        for _ in range(64)
+    }
+    assert len(ids) == 64  # distinct entropy ⇒ distinct ids within ONE second
+    assert all(i.startswith("nightly-20260726T172000Z-") and "/" not in i for i in ids)
+
+
+def test_mint_nightly_id_default_seams_format() -> None:
+    """The real defaults (``time.time`` + ``os.urandom``) mint the pinned shape.
+
+    Deliberately NO uniqueness assertion here — over real 24-bit entropy that
+    would be the probabilistic-claim-asserted-deterministically flake
+    test_mint_nightly_id_format_and_uniqueness documents (MIGRATION.md #1737).
+    """
+    minted = mint_nightly_id()
+    assert re.fullmatch(r"nightly-\d{8}T\d{6}Z-[0-9a-f]{6}", minted)
+    assert "/" not in minted  # filesystem-safe: it names the report dir
 
 
 def test_paths_are_nightly_owned(tmp_path: Path) -> None:

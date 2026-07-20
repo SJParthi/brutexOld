@@ -92,6 +92,7 @@ from brutex.strategies.fib_definitions import (
     FibAnchorKind,
     resolve_fib_anchor_levels,
 )
+from brutex.strategies.types import PriceSource
 from brutex.vocabulary import bits as B  # noqa: N812 — B = bit-position namespace
 from brutex.vocabulary.evaluator import (
     IndicatorSnapshot,
@@ -112,6 +113,13 @@ _LOG = structlog.get_logger(__name__)
 #: Diwali *Muhurat* session's OHLC is deliberately NOT rolled into the prior-day
 #: anchor (``DEC-SWEEP-DATA-EDGE-GUARDS-001``).
 _MUHURAT_ANCHOR_SKIP_EVENT: Final[str] = "stage1a.muhurat_prev_day_anchor_skip"
+
+#: Structlog event emitted (exactly once per Muhurat session — each IST day rolls
+#: exactly once) when a NON-prev-day Fib anchor honestly ABSTAINS on the Muhurat
+#: day's OWN bars instead of calling the weekly resolvers, whose deliberate
+#: non-trading-``today`` ``ValueError`` refusal would otherwise abort the WHOLE
+#: sweep grid (``DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001``).
+_MUHURAT_WEEKLY_ANCHOR_EVENT: Final[str] = "stage1a.muhurat_weekly_anchor_ineligible"
 
 #: Paisa per rupee — the lake stores Decimal rupees; the evaluator wants int64
 #: paisa (``DEC-PAISA-DOC-RECONCILE-001``).
@@ -316,6 +324,124 @@ def _ema_to_paisa(value: float | None) -> int | None:
     return _price_to_paisa(Decimal(str(value)))
 
 
+def _reduce_vwap_source_paisa(
+    source: PriceSource,
+    bar: CandleBar,
+    *,
+    open_paisa: int,
+    high_paisa: int,
+    low_paisa: int,
+    close_paisa: int,
+) -> int:
+    """Reduce *bar* to the VWAP typical-price scalar in int64 paisa for *source*.
+
+    The swept VWAP price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): the value
+    fed into the running :class:`trading_core.VwapState` each bar. The ``HLC3``
+    arm is today's hardcoded typical price VERBATIM — routed through the SAME
+    :func:`_price_to_paisa` seam as OHLC/EMA so the ``(HLC3, CLOSE)`` baseline
+    cell stays byte-identical (Override 1 / the golden). The O/H/L/C arms reuse
+    the ``*_paisa`` locals already snapped at the bar boundary, so they cost no
+    extra ``_price_to_paisa`` call. O(1) per bar.
+
+    RUST-OWNER INTERFACE CONTRACT (the sibling Rust sweep-core port — the
+    reduction stays Python pre-FFI TODAY; ``VwapState::update`` /
+    ``EmaState::update`` and the FFI signatures are UNCHANGED, only this per-cell
+    scalar selection must be mirrored bit-identically)::
+
+        enum PriceSource { Open, High, Low, Close, Hlc3 }   // hl2/ohlc4 absent
+
+        // VWAP -> typical_paisa: i64 (o/h/l/c are exact 2dp paisa integers)
+        Open  => o_paisa
+        High  => h_paisa                    // (deferred variant)
+        Low   => l_paisa                    // (deferred variant)
+        Close => c_paisa
+        Hlc3  => let s = h_paisa + l_paisa + c_paisa;   // exact i64 add
+                 let (q, r) = (s / 3, s % 3);           // Euclidean, s >= 0
+                 q + if 2*r >= 3 { 1 } else { 0 }       // ROUND_HALF_UP on thirds
+
+    The integer HLC3 form is PROVABLY bit-identical to this Python
+    ``int(round_money((H+L+C)/Decimal(3)) * 100)`` path: at the paisa scale the
+    remainder ``r ∈ {0,1,2}`` so ``r/3`` never equals ½ — no tie ever reaches the
+    HALF_UP boundary, so the 28-sig-fig Decimal path and the integer path
+    coincide. In PYTHON keep the Decimal ``_price_to_paisa`` path (do NOT
+    float-divide, do NOT introduce a new integer path) so the baseline is
+    byte-identical to today (the golden). (If ``hl2`` / ``ohlc4`` are ever added,
+    ``/2`` and ``/4`` CAN tie at ½ paisa → ROUND_HALF_UP becomes load-bearing;
+    add a golden then.)
+    """
+    match source:
+        case PriceSource.OPEN:
+            return open_paisa
+        case PriceSource.HIGH:
+            return high_paisa
+        case PriceSource.LOW:
+            return low_paisa
+        case PriceSource.CLOSE:
+            return close_paisa
+        case PriceSource.HLC3:
+            # VERBATIM the pre-axis line so the (HLC3, CLOSE) baseline is
+            # byte-identical (Override 1 / the golden).
+            return _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        case _:  # pragma: no cover — unreachable: PriceSource is a closed 5-member enum
+            # A future enum member (hl2/ohlc4/…) added WITHOUT a reduction arm raises
+            # LOUDLY here at runtime (never silently computes HLC3). All 5 real
+            # members are exercised by test_vwap_reduction_all_five (runtime
+            # exhaustiveness). An explicit ``raise`` — not ``assert_never`` — keeps
+            # every path returning-or-raising so CodeQL can prove no implicit-None
+            # fall-through and no uninitialized read.
+            raise AssertionError(f"unreachable PriceSource: {source!r}")
+
+
+def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
+    """Reduce *bar* to the EMA-input price scalar (float rupees) for *source*.
+
+    The swept EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): the value
+    fed into both :class:`EMAState` recurrences each bar. The ``CLOSE`` arm is
+    today's hardcoded ``float(bar.close)`` VERBATIM so the ``(HLC3, CLOSE)``
+    baseline stays byte-identical (Override 1 / the golden). The EMA source is
+    deliberately NOT paisa-snapped (preserving today's unsnapped EMA contract —
+    the snap happens once AFTER the recurrence via :func:`_ema_to_paisa`). O(1).
+
+    RUST-OWNER INTERFACE CONTRACT (see :func:`_reduce_vwap_source_paisa`). NOTE
+    the EMA source is in RUPEES (float), NOT paisa — unlike the VWAP contract
+    above: the EMA arm feeds ``float(bar.<field>)`` (the Decimal rupee price cast
+    to f64 once), deliberately NOT paisa-snapped (today's unsnapped EMA contract).
+    A literal Rust port MUST feed the rupee value, never a ×100 paisa integer::
+
+        // EMA -> ema_source: f64 (RUPEES — the Decimal rupee price cast once)
+        Open  => float(bar.open)                      // == today's float(bar.open), verbatim
+        Close => float(bar.close)                     // == today's float(bar.close), verbatim
+        Hlc3  => float( (H + L + C) / Decimal(3) )     // Decimal-divide THEN one float() cast
+
+    CRITICAL: for ``Hlc3`` mirror Python's Decimal-divide-THEN-convert-to-f64-once,
+    NOT ``(f64(H)+f64(L)+f64(C))/3.0`` — the two are not IEEE-754-identical. This
+    is the one place the Rust owner must ship a golden/property test against
+    Python's ``float((H+L+C)/Decimal(3))`` over a wide rupee-price corpus.
+    ``Open`` / ``Close`` are single Decimal→f64 casts of the rupee price,
+    trivially identical to today's hardcoded ``float(bar.open/close)``.
+    """
+    match source:
+        case PriceSource.OPEN:
+            return float(bar.open)
+        case PriceSource.HIGH:
+            return float(bar.high)
+        case PriceSource.LOW:
+            return float(bar.low)
+        case PriceSource.CLOSE:
+            return float(bar.close)
+        case PriceSource.HLC3:
+            # Decimal-divide THEN a single float() cast (never float-add-then-divide
+            # — not IEEE-754-identical). VERBATIM the pre-axis HLC3 line.
+            return float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        case _:  # pragma: no cover — unreachable: PriceSource is a closed 5-member enum
+            # A future enum member added WITHOUT a reduction arm raises LOUDLY here at
+            # runtime (never silently computes HLC3). All 5 real members are exercised
+            # by test_ema_reduction_all_five (runtime exhaustiveness). An explicit
+            # ``raise`` — not ``assert_never`` — keeps every path returning-or-raising
+            # so CodeQL can prove no implicit-None fall-through and no uninitialized read.
+            raise AssertionError(f"unreachable PriceSource: {source!r}")
+
+
 @dataclass
 class _DayOHLC:
     """Running OHLC accumulator for one IST trading day (int64 paisa).
@@ -397,6 +523,15 @@ class Stage1AMatrixBuilder:
         (DEFAULT-PRESERVATION — the goldens still pin the same matrix). Only the
         Group-4 Fib levels move with this anchor; the pivot / PDH / day-type
         groups stay prev-day-anchored regardless (R-2).
+    vwap_source, ema_source
+        The SWEPT VWAP / EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001)
+        — which per-bar scalar feeds the running VWAP / EMA accumulators. Default
+        ``(HLC3, CLOSE)`` reproduces today's hardcoded reduction bit-for-bit, so a
+        builder constructed without these arguments is byte-identical to the
+        pre-axis builder (the goldens still pin the same matrix). ``vwap_source``
+        moves only bits 52-53 (VWAP position); ``ema_source`` moves only bits 0-5
+        (EMA-vs-close). See :func:`_reduce_vwap_source_paisa` /
+        :func:`_reduce_ema_source_float`.
     roll_schedule
         ADR-0012 NIFTY-futures roll schedule (DEC-STAGE1A-ROLL-RESET-001):
         strictly increasing owning-expiry day-ordinals from
@@ -437,6 +572,8 @@ class Stage1AMatrixBuilder:
         proximity: ProximityParams | None = None,
         prior_n: int = _DEFAULT_PRIOR_N,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        vwap_source: PriceSource = PriceSource.HLC3,
+        ema_source: PriceSource = PriceSource.CLOSE,
         *,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
@@ -445,6 +582,12 @@ class Stage1AMatrixBuilder:
         self._prior_n = prior_n  # stored for the roll-reset re-construction (D11)
         self._prior_history = PriorBarHistory(prior_n=prior_n)
         self._fib_anchor = fib_anchor
+        # Swept VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001). The
+        # defaults (HLC3 / CLOSE) reproduce today's hardcoded reduction bit-for-bit
+        # (Override 1 / the golden). Only bits 52-53 (VWAP position) move with
+        # ``vwap_source`` and bits 0-5 (EMA-vs-close) with ``ema_source``.
+        self._vwap_source = vwap_source
+        self._ema_source = ema_source
         # ADR-0012 roll schedule (DEC-STAGE1A-ROLL-RESET-001): sorted owning-
         # expiry day-ordinals for the NIFTY-futures track. None (the default —
         # every spot caller) keeps the constant-key path byte-identical.
@@ -654,17 +797,29 @@ class Stage1AMatrixBuilder:
                     high_paisa=high_paisa, low_paisa=low_paisa, close_paisa=close_paisa
                 )
 
-            # push() step-5 position: the float close feeds the (deferred)
+            # push() step-5 position: the EMA-source scalar feeds the (deferred)
             # EMA columns — collected HERE so a conversion raise fires at the
-            # same bar the streaming arm's would.
-            closes_f64.append(float(bar.close))
+            # same bar the streaming arm's would. Routed through the SAME
+            # `_reduce_ema_source_float` seam as push() (the price-source axis,
+            # DEC-NIFTY-PRICE-SOURCE-AXIS-001); the CLOSE default is today's
+            # `float(bar.close)` verbatim.
+            closes_f64.append(_reduce_ema_source_float(self._ema_source, bar))
 
             # push() step-7 expressions (verbatim seams): tod via the shared
-            # Rust seam, typical via the ONE _price_to_paisa HLC3 snap.
+            # Rust seam, typical via the SAME `_reduce_vwap_source_paisa` seam
+            # as push() (the HLC3 default is the ONE _price_to_paisa HLC3 snap
+            # verbatim — DEC-NIFTY-PRICE-SOURCE-AXIS-001).
             tod_seconds = int(
                 trading_core.seconds_of_day(ts_ist.hour, ts_ist.minute, ts_ist.second)
             )
-            typical_paisa = _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+            typical_paisa = _reduce_vwap_source_paisa(
+                self._vwap_source,
+                bar,
+                open_paisa=open_paisa,
+                high_paisa=high_paisa,
+                low_paisa=low_paisa,
+                close_paisa=close_paisa,
+            )
 
             if contract_reset:
                 reset_indices.append(len(open_col))
@@ -791,12 +946,14 @@ class Stage1AMatrixBuilder:
             today_ohlc = self._today_ohlc
             today_ohlc.absorb(high_paisa=high_paisa, low_paisa=low_paisa, close_paisa=close_paisa)
 
-        # Both EMAs are close-driven (vocabulary Group 1: "EMA 20 close, EMA
-        # 200 close"). The float close is taken directly from the Decimal bar;
-        # the EMA recurrence runs in float, then snaps to paisa once.
-        close_float = float(bar.close)
-        ema20_paisa = _ema_to_paisa(self._ema_fast.update(close_float))
-        ema200_paisa = _ema_to_paisa(self._ema_slow.update(close_float))
+        # Both EMAs are fed the swept EMA price-source scalar (default CLOSE ==
+        # today's ``float(bar.close)`` verbatim, so the (HLC3, CLOSE) baseline is
+        # byte-identical — Override 1 / the golden). The recurrence runs in float,
+        # then snaps to paisa once; the source is NOT paisa-snapped (today's
+        # unsnapped EMA contract). Only bits 0-5 (EMA-vs-close) move with it.
+        ema_source_float = _reduce_ema_source_float(self._ema_source, bar)
+        ema20_paisa = _ema_to_paisa(self._ema_fast.update(ema_source_float))
+        ema200_paisa = _ema_to_paisa(self._ema_slow.update(ema_source_float))
 
         day_high_paisa, day_low_paisa = self._day_extremes.update(
             ts_ist=ts_ist, high_paisa=high_paisa, low_paisa=low_paisa
@@ -817,7 +974,17 @@ class Stage1AMatrixBuilder:
         # re-derives the same value for this bar (+1 crossing) — threading one
         # value through is a larger refactor, out of scope here.
         tod_seconds = int(trading_core.seconds_of_day(ts_ist.hour, ts_ist.minute, ts_ist.second))
-        typical_paisa = _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        # Swept VWAP price-source scalar (default HLC3 == today's typical price
+        # verbatim, so the (HLC3, CLOSE) baseline is byte-identical — Override 1 /
+        # the golden). Only bits 52-53 (VWAP position) move with it.
+        typical_paisa = _reduce_vwap_source_paisa(
+            self._vwap_source,
+            bar,
+            open_paisa=open_paisa,
+            high_paisa=high_paisa,
+            low_paisa=low_paisa,
+            close_paisa=close_paisa,
+        )
         vwap_paisa = self._vwap.update(
             typical_paisa,
             bar.volume,
@@ -1032,6 +1199,25 @@ class Stage1AMatrixBuilder:
             the pivots are warm but the swept Fib anchor is cold (R-2).
         """
         if prev_ohlc is None:
+            if self._fib_anchor is not FibAnchorKind.PREV_DAY and has_muhurat_session(today):
+                # First-day-Muhurat shape (round-2 review, DEC-MUHURAT-WEEKLY-
+                # ANCHOR-ABSTAIN-001 precision fold): when the bar stream STARTS
+                # on a Muhurat date (an operator from-date landing exactly on
+                # e.g. 2024-11-01), this no-prior-day early return used to run
+                # BEFORE the Muhurat abstain below, so the session rolled with
+                # ZERO WARNs — silently violating the "one WARN per Muhurat
+                # session" law. The weekly anchor is just as ineligible here
+                # (the resolvers refuse a non-trading `today` regardless of
+                # history), so the SAME abstain WARN now fires; the returned
+                # ``None`` bundle then clears ALL anchor-dependent bits — a
+                # strictly WIDER abstain than fib=None (no prior day exists, so
+                # the pivots are cold too). PREV_DAY streams stay silent (the
+                # event is weekly-anchor-specific) and byte-identical.
+                _LOG.warning(
+                    _MUHURAT_WEEKLY_ANCHOR_EVENT,
+                    day=today.isoformat(),
+                    fib_anchor=self._fib_anchor.value,
+                )
             return None
         pivots = compute_pivot_levels(
             today,
@@ -1047,11 +1233,48 @@ class Stage1AMatrixBuilder:
                 pdh_paisa=prev_ohlc.high_paisa,
                 pdl_paisa=prev_ohlc.low_paisa,
             )
+        elif has_muhurat_session(today):
+            # Muhurat weekly-anchor ABSTAIN (DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001):
+            # a Diwali Muhurat evening session is NOT a regular trading day, so the
+            # weekly resolvers deliberately REFUSE it (`ValueError: today (...) is
+            # not a trading day` — a documented, test-pinned honest refusal for
+            # direct callers, byte-untouched). But the ingest boundary KEEPS
+            # Muhurat bars (#1294) and every 2020→today sweep span contains
+            # Muhurat sessions, so calling the resolver here aborted EVERY
+            # full-scope ROLLING_WEEKLY / WEEKLY_STATIC grid (the ValueError is
+            # not a SweepComboError — the grid drivers' tuple-skip quarantine
+            # never engaged). The Muhurat day's OWN Fib anchor now honestly
+            # ABSTAINS instead: fib=None rides the EXISTING has_fib_anchor=False
+            # path, clearing ONLY the Group-4 Fib bits via _NON_FIB_MASK (the
+            # ADR-0012 combo-ineligible convention) while the warm prev-day
+            # pivots stay. One WARN per Muhurat session (each IST day rolls
+            # exactly once, and the first-day-Muhurat shape is covered by the
+            # prev_ohlc-is-None arm above — round-2 review fold);
+            # look-ahead-clean — keyed on `today`'s own IST date.
+            _LOG.warning(
+                _MUHURAT_WEEKLY_ANCHOR_EVENT,
+                day=today.isoformat(),
+                fib_anchor=self._fib_anchor.value,
+            )
+            fib = None
         else:
             # Multi-day anchor: dispatch through the COMMON resolver over the
             # bounded rolling history. Returns None on a cold week (< 5 sessions
             # for rolling-weekly / no completed prior week for weekly-static) — the
             # caller then clears ONLY the Group-4 Fib bits, keeping the warm pivots.
+            # RESIDUAL HONEST LIMIT (disclosed, #1625/#1626 round-1 review): the
+            # abstain above keys ONLY on `has_muhurat_session(today)`. Any OTHER
+            # stored bar whose IST date is not a trading day — e.g. a
+            # weekend/holiday leak written by the pre-#1294 date-blind ingest
+            # filter and never retro-cleaned (`arrow_table_to_bars` performs no
+            # session-date validation) — still drives this dispatch into the
+            # weekly resolvers' plain ValueError, which the grid drivers'
+            # SweepComboError quarantine does NOT catch → whole-grid abort
+            # (test-pinned as the documented behavior). Remediation: re-pull /
+            # `brutex lake audit-unique` census the named partition and remove
+            # the leaked rows; a typed quarantinable error is a NAMED follow-up
+            # (deliberately not widened here — the fix stays Muhurat-narrow per
+            # the #1625 prescription).
             fib = resolve_fib_anchor_levels(self._fib_anchor, today, self._daily_history)
         return _DayAnchors(pivots=pivots, fib=fib)
 
@@ -1061,6 +1284,8 @@ def build_bar_bits(
     proximity: ProximityParams | None = None,
     prior_n: int = _DEFAULT_PRIOR_N,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    vwap_source: PriceSource = PriceSource.HLC3,
+    ema_source: PriceSource = PriceSource.CLOSE,
     *,
     roll_schedule: tuple[int, ...] | None = None,
     apply_1day_mask: bool = False,
@@ -1082,6 +1307,10 @@ def build_bar_bits(
         The SWEPT Fibonacci anchor (DEC-NIFTY-FIB-AXIS-001). Defaults to
         :attr:`FibAnchorKind.PREV_DAY` so an unset call is byte-identical to the
         pre-axis prev-day-only build.
+    vwap_source, ema_source
+        The SWEPT VWAP / EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001).
+        Default ``(HLC3, CLOSE)`` reproduces today's hardcoded reduction, so an
+        unset call is byte-identical to the pre-axis build.
     roll_schedule
         ADR-0012 futures roll schedule (DEC-STAGE1A-ROLL-RESET-001) — see
         :class:`Stage1AMatrixBuilder`. ``None`` (the default) is the
@@ -1116,6 +1345,8 @@ def build_bar_bits(
             proximity=proximity,
             prior_n=prior_n,
             fib_anchor=fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
         )
@@ -1128,6 +1359,8 @@ def build_bar_bits(
                 proximity=proximity,
                 prior_n=prior_n,
                 fib_anchor=fib_anchor,
+                vwap_source=vwap_source,
+                ema_source=ema_source,
                 roll_schedule=roll_schedule,
                 apply_1day_mask=apply_1day_mask,
             ).build(bar_list),
@@ -1139,6 +1372,8 @@ def build_bar_bits(
         proximity=proximity,
         prior_n=prior_n,
         fib_anchor=fib_anchor,
+        vwap_source=vwap_source,
+        ema_source=ema_source,
         roll_schedule=roll_schedule,
         apply_1day_mask=apply_1day_mask,
     ).build(bars)

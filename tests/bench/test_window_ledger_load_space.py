@@ -11,12 +11,19 @@ window dates / status / last_error; timestamps deliberately excluded)
 collapses equal cells onto one object.
 
 MEASURED on this harness's 36,053-unique-row realistic fixture (Linux x86-64,
-CPython 3.12, 2026-07-09 sandbox):
+CPython 3.12). The fixture builds the CANONICAL 17-field ledger row — the 16
+columns of DEC-LEDGER-LOAD-SPACE-V1-001's original shape plus
+``streak_provenance`` (DEC-STREAK-PROVENANCE-001), appended LAST when that
+column landed; it is NOT an ``_INTERNED_COLUMN``, so it lifts the interned +
+uninterned decodes by the SAME per-row constant and leaves the ratio teeth
+intact:
 
-* interned (the real ``load_window_ledger``): **479 B/row logical**;
-* uninterned pre-fix decode shape (the teeth twin below): **770 B/row logical**
-  — ratio **1.61×** (~38% saved, matching the design's ~40% projection);
-* wall (no tracemalloc): 13.2 µs/row interned vs 12.2 µs/row for the raw
+* interned (the real ``load_window_ledger``): **508 B/row logical**
+  (the 16-field shape measured 479 on the 2026-07-09 sandbox — the +29 is
+  ``streak_provenance``'s uninterned string share);
+* uninterned pre-fix decode shape (the teeth twin below): **799 B/row logical**
+  — ratio **1.57×** (~36% saved, matching the design's ~40% projection);
+* wall (no tracemalloc): ~13 µs/row interned vs ~12 µs/row for the raw
   uninterned decode — the memo's dict op adds ~1 µs/row against an
   I/O-dominated load (the repo's own db_view figure is 13.6 µs/row).
 
@@ -54,13 +61,15 @@ from brutex.data.window_ledger_store import (
 #: off the loaded ledger, never assumed).
 _N_ROWS = 40_000
 
-#: Absolute per-row ceiling for the REAL (interned) load — measured 479 B/row;
-#: the pre-fix uninterned decode measures 770 B/row, so a memo revert FAILS
-#: this ceiling while ~35% headroom absorbs allocator/build noise.
+#: Absolute per-row ceiling for the REAL (interned) load — measured 508 B/row on
+#: the 17-field shape (479 on the 16-field pre-``streak_provenance`` shape); the
+#: pre-fix uninterned decode measures 799 B/row, so a memo revert FAILS this
+#: ceiling while the remaining headroom absorbs allocator/build noise + the
+#: (uninterned) ``streak_provenance`` column that lifts both shapes equally.
 _INTERNED_CEILING_B_PER_ROW = 640.0
 
 #: Ratio floor: the uninterned twin must cost at least this much more per row
-#: than the real load (measured 1.61×) — the teeth can never go vacuous by
+#: than the real load (measured 1.57×) — the teeth can never go vacuous by
 #: both shapes drifting together.
 _RATIO_FLOOR = 1.25
 
@@ -138,6 +147,21 @@ def _build_rows(n: int, seed: int = 42) -> list[tuple[Any, ...]]:
             d1 = f"2025-{base_m:02d}-{(1 + w * 7 + 6) % 28 + 1:02d}"
             bars = rng.randrange(0, 9_000) if status == "SUCCESS" else 0
             last_error = None if status != "FAILED" else "GrowwTimeoutError: read timed out"
+            # streak_provenance (DEC-STREAK-PROVENANCE-001) — the 17th ledger
+            # column appended after the empty/transient split. A ``str | None``
+            # tri-state matching production: ``""`` for a SUCCESS-reset / fresh
+            # plan (the dominant share), ``None`` for the legacy-unknown / FAILED
+            # share, and a low-cardinality ``<channel>@<pull_id>`` lineage on the
+            # EMPTY/SKIPPED bump share. It is NOT an ``_INTERNED_COLUMN``, so it
+            # lifts the interned + uninterned decodes EQUALLY — the ratio teeth
+            # below are unchanged and the absolute stays under the ceiling.
+            streak_prov = (
+                ""
+                if status == "SUCCESS"
+                else None
+                if status == "FAILED"
+                else f"{'EMPTY' if status == 'EMPTY' else 'ALL_FILTERED'}@2026-07-{1 + i % 8:02d}"
+            )
             first_seen = (
                 f"2026-07-{rng.randrange(1, 9):02d}"
                 f"T0{rng.randrange(1, 9)}:1{w}:33.4{i % 10}1236+00:00"
@@ -161,7 +185,8 @@ def _build_rows(n: int, seed: int = 42) -> list[tuple[Any, ...]]:
                     rng.choice((None, 0, bars)),
                     rng.choice((None, 0, 1, 2)),
                     rng.choice((None, 0, 1)),
-                    # failed_streak — the 17th on-disk column (appended LAST,
+                    streak_prov,
+                    # failed_streak — the 18th on-disk column (appended LAST,
                     # DEC-AUTO-RESUME-ZERO-SURPRISES-001): a sub-threshold run
                     # on FAILED rows, the reset 0 everywhere else.
                     rng.randrange(0, 3) if status == "FAILED" else 0,

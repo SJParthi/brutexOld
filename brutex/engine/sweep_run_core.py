@@ -74,6 +74,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.errors import LakeWriteHalt
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.run_layout import mirror_run_dir, run_dir
 from brutex.engine.run_verdicts import VERDICTS_FILENAME, build_run_verdicts
 from brutex.engine.sweep_diffcheck import (
@@ -864,6 +865,11 @@ class RunCoreHandles:
         from brutex.metrics.types import ClosedTrade
         from brutex.strategies.types import Side
 
+        # DEC-FILL-WORST-CASE-ONLY-001: the ONE hardcoded worst-case fill law
+        # prices BOTH legs — the production trade sim here and the naive
+        # reference's independently re-stated worst-case arm — so the R45
+        # differential is always a same-law compare with no mode plumbing.
+
         def _production_simulate(
             bars: Sequence[Any],
             entry_signals: Sequence[bool],
@@ -922,12 +928,22 @@ class RunCoreHandles:
             bar_bits: Sequence[int],
             tuple_: Any,
             grid: Any,
+            mask_population: Sequence[int] | None = None,
         ) -> None:
+            # ``mask_population`` (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+            # round 3): the apriori arm's EXECUTED candidate list, forwarded
+            # verbatim so the hook samples what actually ran; ``None`` (every
+            # legacy call site) keeps the raw-enumeration path byte-identical.
             give = min(per_tuple, budget["left"])
             if give <= 0:
                 return
             report = hook.run_for_tuple(
-                bars=bars, bar_bits=bar_bits, tuple_=tuple_, grid=grid, budget_left=give
+                bars=bars,
+                bar_bits=bar_bits,
+                tuple_=tuple_,
+                grid=grid,
+                budget_left=give,
+                mask_population=mask_population,
             )
             budget["left"] -= report.checked
             if report.checked:
@@ -981,11 +997,30 @@ class RunCoreHandles:
     # ── launch / terminal progress ────────────────────────────────────────
 
     def _reset_progress_at_launch(self) -> None:
-        """Write the launch baseline progress file (G4 — reset-at-launch)."""
+        """Write the launch baseline progress file (G4 — reset-at-launch).
+
+        The baseline carries BOTH bridge wall stamps ``publish_progress``
+        writes: ``wall_time_utc`` (the G4 liveness evidence
+        :func:`~brutex.engine.sweep_liveness.progress_verdict` judges) AND the
+        :data:`~brutex.engine.sweep_supervisor.PROGRESS_WALL_TIME_KEY` decay
+        stamp :func:`~brutex.engine.sweep_supervisor.progress_bridge_stale`
+        keys on. Without the decay stamp a ``running=True`` claim is DEAD
+        EVIDENCE ≡ absent — and the first per-tuple publish only lands at the
+        first APPLIED slot, so for the whole first-tuple window (HOURS on a
+        heavy k=5 tuple, the #1608 arithmetic) the dashboard read idle, the
+        v29 Stop button never showed, and the cancel route's bridge arm
+        refused. ONE ``self._wall()`` tick feeds both stamps (the G3
+        exact-tick discipline — the stamp must not add a tick).
+        ``_terminal_progress_patch`` deliberately does NOT re-stamp the decay
+        key: terminal files carry ``running=False`` and are never stale-gated
+        (``progress_bridge_stale`` returns ``False`` before reading the
+        stamp), and the patched payload keeps the last publish's own stamp.
+        """
         if self._progress_path is None:
             return
-        from brutex.engine.sweep_supervisor import idle_progress
+        from brutex.engine.sweep_supervisor import PROGRESS_WALL_TIME_KEY, idle_progress
 
+        wall = float(self._wall())
         payload = idle_progress()
         payload.update(
             {
@@ -994,7 +1029,8 @@ class RunCoreHandles:
                 "run_id": self.run_id,
                 "stage": self._stage,
                 "suspect": False,
-                "wall_time_utc": self._wall(),
+                PROGRESS_WALL_TIME_KEY: wall,
+                "wall_time_utc": wall,
                 "pid": os.getpid(),
             }
         )
@@ -1007,7 +1043,7 @@ class RunCoreHandles:
         if self._progress_path is None:
             return
         try:
-            payload = json.loads(self._progress_path.read_text(encoding="utf-8"))
+            payload = json.loads(read_regular_text(self._progress_path))
         except (OSError, json.JSONDecodeError):
             return
         if not isinstance(payload, dict):
@@ -1452,7 +1488,7 @@ def _append_run_manifest_line(manifest_path: Path, chain_path: Path, *, run_id: 
     """Append the ONE additive D-3 ``RUN_MANIFEST`` action to the CLI SHA-256 chain."""
     from brutex.orchestrator.audit import AuditWriter
 
-    doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    doc = json.loads(read_regular_text(manifest_path))
     payload = {"manifest": doc, "manifest_content_hash": content_hash_of(manifest_path)}
     chain_path.parent.mkdir(parents=True, exist_ok=True)
     with AuditWriter.open(chain_path, resume=chain_path.exists()) as audit:

@@ -70,6 +70,11 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 
 import structlog
 
+from brutex.data.guarded_read import (
+    open_regular_binary,
+    read_regular_text_deadline,
+)
+from brutex.engine.baseline import BaselineSeries, load_baseline
 from brutex.engine.top100_artifact import TOP100_SCHEMA_VERSION
 from brutex.engine.trade_store import (
     RESULTS_DEPTH_DIRNAME,
@@ -101,6 +106,7 @@ __all__ = [
     "ArtifactProbe",
     "ArtifactStatus",
     "AwaitingTradesReader",
+    "BaselineResult",
     "CachedPayloadMissingError",
     "ChainNotVerifiedError",
     "EventsPage",
@@ -121,6 +127,7 @@ __all__ = [
     "discover_runs",
     "fixture_results_root",
     "is_safe_run_id",
+    "load_baseline_result",
     "load_manifest",
     "load_preflight_fixture",
     "load_top100",
@@ -613,6 +620,120 @@ def sibling_key_token(gate: OutageGate, *, coordinate: str, probe: ArtifactProbe
         return None
     gate.healthy(coordinate, probe.token)
     return probe.token
+
+
+#: Reader-memo capacity: TWO entries hold BOTH sides of a two-run (or
+#: two-rank) page alternation — the exact thrash shape the previous
+#: single-entry memos paid a full re-parse per flip on.
+_REVISION_MEMO_CAPACITY: Final[int] = 2
+
+
+class _RevisionMemo[MemoValueT]:
+    """Bounded keyed revision memo with per-key single-flight (fix 4b).
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001: the ONE consolidation of this
+    module's previously THREE hand-rolled single-entry ``(path, revision)``
+    reader memos (fixture trades parse / top100 parse / equity series),
+    which duplicated the same subtle memo logic, had NO single-flight
+    (N concurrent cold pollers each paid the full O(file) parse,
+    last-write-wins), and thrashed on a two-run alternation (a page flip
+    between two runs/ranks evicted the single entry on EVERY flip).
+
+    Deliberately NOT the :func:`serve_revision_cached` chokepoint (the
+    honest fix-4b escape clause, ledgered): that chokepoint is ROUTE-payload
+    machinery — its :class:`PayloadCache` protocol is dict-typed and injected
+    by the app, and its :class:`OutageGate` doctrine distinguishes ABSENT
+    from probe OUTAGE — while the reader seam's pre-existing contract is
+    byte-pinned the other way (:func:`artifact_revision` maps ANY stat
+    failure to ``None`` ⇒ compute fresh, cache NOTHING) and the readers are
+    constructed WITHOUT any injected cache across the standalone suite
+    (leaf discipline: this module never imports the dashboard cache).
+    Changing either would move route payloads/semantics; this memo changes
+    neither — every payload stays byte-identical (parity-pinned).
+
+    Semantics: per-key single-flight (N concurrent misses of one key pay
+    exactly one *compute*; a raising *compute* caches nothing and releases
+    the flight — the next caller recomputes); LRU-bounded at
+    :data:`_REVISION_MEMO_CAPACITY` entries; a hit refreshes recency.
+    Thread-safe; the lock is held only for O(1) dict work, never across a
+    compute.
+    """
+
+    def __init__(self, *, capacity: int = _REVISION_MEMO_CAPACITY) -> None:
+        if capacity < 1:
+            raise ValueError(f"capacity must be >= 1, got {capacity}")
+        self._capacity = capacity
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[tuple[str, ...], MemoValueT] = OrderedDict()
+        self._inflight: dict[tuple[str, ...], threading.Event] = {}
+
+    def peek(self, key: tuple[str, ...]) -> MemoValueT | None:
+        """Return the memoised value for *key* WITHOUT computing (``None`` on a miss).
+
+        The serve-last-known outage arm (DEC-CACHE-SERVE-LAST-KNOWN-001,
+        merge-composed onto this memo) peeks the last healthily-served
+        revision key during a stat-probe outage — a hit refreshes LRU
+        recency (a long outage keeps its last-known entry resident), a miss
+        falls back to the caller's honest fresh uncached parse.
+        """
+        with self._lock:
+            value = self._entries.get(key)
+            if value is not None:
+                self._entries.move_to_end(key)
+            return value
+
+    def get_or_compute(self, key: tuple[str, ...], compute: Callable[[], MemoValueT]) -> MemoValueT:
+        """Return the memoised value for *key*, running *compute* on a miss.
+
+        Parameters
+        ----------
+        key
+            The revision-carrying memo key (e.g. ``(path, revision)`` —
+            callers fold the stat token in, so staleness is impossible by
+            construction; a ``None`` revision must NOT reach here).
+        compute
+            The zero-arg loader. Exceptions propagate raw (cached nothing);
+            per-key single-flight means concurrent misses pay one call.
+
+        Returns
+        -------
+        _MemoValueT
+            The cached or freshly computed value.
+        """
+        while True:
+            with self._lock:
+                if key in self._entries:
+                    self._entries.move_to_end(key)
+                    return self._entries[key]
+                event = self._inflight.get(key)
+                if event is None:
+                    event = threading.Event()
+                    self._inflight[key] = event
+                    owner = True
+                else:
+                    owner = False
+            if not owner:
+                # A peer is computing this exact key: wait, then re-check —
+                # either the entry landed (hit) or the peer raised/was
+                # evicted, in which case this thread takes ownership on the
+                # next loop pass.
+                event.wait()
+                continue
+            try:
+                value = compute()
+            except BaseException:
+                with self._lock:
+                    self._inflight.pop(key, None)
+                event.set()
+                raise
+            with self._lock:
+                self._entries[key] = value
+                self._entries.move_to_end(key)
+                while len(self._entries) > self._capacity:
+                    self._entries.popitem(last=False)
+                self._inflight.pop(key, None)
+            event.set()
+            return value
 
 
 # ── Result types (split per artifact — the isinstance narrowing happens ONCE here) ──
@@ -1146,7 +1267,11 @@ def _read_artifact_text(path: Path, *, artifact: str) -> tuple[str | None, str |
     any other read/decode defect maps to a NAMED corrupt detail (logged).
     """
     try:
-        return path.read_text(encoding="utf-8"), None
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — every cached
+        # oneclick route's fresh parse lands here): a planted FIFO / wedged
+        # volume folds into the NAMED-corrupt arm below (both guard errors
+        # are OSError subclasses) instead of wedging the poll thread.
+        return read_regular_text_deadline(path, what="oneclick artifact read"), None
     except FileNotFoundError:
         return None, None
     except (OSError, UnicodeDecodeError) as exc:
@@ -1546,6 +1671,175 @@ def load_top100(run_dir: Path) -> Top100Result:
     return Top100Result("ok", tuple(rows), "", revision, preset, cascade_join)
 
 
+@dataclass(frozen=True, slots=True)
+class BaselineResult:
+    """One resolved buy-&-hold baseline read (DEC-RESULTS-TRUST-HONESTY-001 · B1).
+
+    Attributes
+    ----------
+    status
+        ``ok`` = a validated stored series is served; ``awaiting`` = the
+        artifact chain is not there yet (absent top100 / array-root interim
+        top100 with no baselines map / no baseline recorded for the
+        instrument / baseline file absent); ``corrupt`` = present-but-damaged
+        (bad top100 JSON, a non-string-map ``baselines`` key, an UNSAFE
+        filename ref, or a baseline file failing the engine's validating
+        loader). NEVER a fabricated series (Golden Rule #1).
+    instrument
+        The RESOLVED instrument token (``None`` until resolvable).
+    filename
+        The baselines-map filename ref that was (or would be) read.
+    series
+        The validated :class:`~brutex.engine.baseline.BaselineSeries` on the
+        ``ok`` arm — STORED values only, never recomputed at serve.
+    instruments
+        The sorted instrument keys of the run's baselines map (empty when the
+        map itself is unavailable) — the honest "what IS stored" hint.
+    detail
+        Human-readable awaiting/defect note (empty when ``ok``).
+    revision
+        The served baseline FILE's ``mtime_ns:size`` stat token (``ok`` arm),
+        else ``None``.
+    """
+
+    status: ArtifactStatus
+    instrument: str | None
+    filename: str | None
+    series: BaselineSeries | None
+    instruments: tuple[str, ...]
+    detail: str
+    revision: str | None
+
+
+def _load_baselines_map(run_dir: Path) -> tuple[dict[str, str] | None, str]:
+    """Read the top100.json ROOT's ``baselines`` map → ``(map, detail)``.
+
+    ``(None, detail)`` = unavailable, with the detail carrying the honest
+    cause; the ARRAY-root interim contract (the shape :func:`load_top100`
+    pages rows from) carries NO baselines map and reads as an awaiting-style
+    absence, never corrupt. A present-but-wrong-typed ``baselines`` key IS
+    damage (``detail`` starts ``corrupt:`` — the caller maps it).
+    """
+    path = run_dir / TOP100_FILENAME
+    text, error = _read_artifact_text(path, artifact=TOP100_FILENAME)
+    if text is None:
+        if error is None:
+            return None, f"{AWAITING_DETAIL} — {TOP100_FILENAME} absent"
+        return None, f"corrupt: {error}"
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return None, f"corrupt: {TOP100_FILENAME} is not valid JSON"
+    if isinstance(obj, list):
+        return None, (
+            f"{TOP100_FILENAME} has an ARRAY root (the interim contract) — no baselines "
+            "map; re-run the results-depth pass to write the object-root artifact"
+        )
+    if not isinstance(obj, dict):
+        return None, f"corrupt: {TOP100_FILENAME} root is neither object nor array"
+    baselines = obj.get("baselines")
+    if baselines is None:
+        return None, f"{TOP100_FILENAME} object root carries no baselines map"
+    if not isinstance(baselines, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in baselines.items()
+    ):
+        return None, f"corrupt: {TOP100_FILENAME} baselines is not a string→string map"
+    return dict(baselines), ""
+
+
+def load_baseline_result(run_dir: Path, instrument: str | None) -> BaselineResult:
+    """Resolve one run's stored buy-&-hold baseline (R27) for the serve route.
+
+    Resolution law (DEC-RESULTS-TRUST-HONESTY-001 · B1 — STORED bytes only,
+    never a recompute): the filename comes from the run's top100.json object
+    root ``baselines`` map (the #1275 writer's instrument → filename record);
+    *instrument* ``None`` auto-selects IFF exactly ONE baseline is stored
+    (the common single-instrument sweep), else the awaiting detail NAMES the
+    stored instruments so the caller can re-ask precisely. The filename ref
+    is validated as ONE safe path segment BEFORE any disk touch (a tampered
+    map can never traverse — the ``sidecar_paths_from_ref`` posture), and the
+    file is read through the engine's VALIDATING :func:`load_baseline` (any
+    damage → ``corrupt``, never a half-trusted series).
+    """
+    baselines, detail = _load_baselines_map(run_dir)
+    if baselines is None:
+        if detail.startswith("corrupt: "):
+            return BaselineResult(
+                "corrupt", instrument, None, None, (), detail.removeprefix("corrupt: "), None
+            )
+        return BaselineResult("awaiting", instrument, None, None, (), detail, None)
+    instruments = tuple(sorted(baselines))
+    if instrument is None:
+        if len(instruments) == 1:
+            instrument = instruments[0]
+        else:
+            return BaselineResult(
+                "awaiting",
+                None,
+                None,
+                None,
+                instruments,
+                (
+                    f"instrument required — {len(instruments)} baseline(s) stored"
+                    + (f": {', '.join(instruments)}" if instruments else "")
+                ),
+                None,
+            )
+    filename = baselines.get(instrument)
+    if filename is None:
+        return BaselineResult(
+            "awaiting",
+            instrument,
+            None,
+            None,
+            instruments,
+            f"no stored baseline for {instrument!r}"
+            + (f" — stored: {', '.join(instruments)}" if instruments else ""),
+            None,
+        )
+    if not is_safe_run_id(filename):
+        _LOG.warning(
+            "oneclick.baseline_ref_unsafe",
+            run_dir=str(run_dir),
+            instrument=instrument,
+            filename=filename,
+        )
+        return BaselineResult(
+            "corrupt",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"baseline filename ref {filename!r} is not one safe path segment",
+            None,
+        )
+    path = run_dir / filename
+    revision = artifact_revision(path)
+    if revision is None:
+        return BaselineResult(
+            "awaiting",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"{AWAITING_DETAIL} — {filename} absent",
+            None,
+        )
+    series = load_baseline(path)
+    if series is None:
+        # load_baseline already logged the named reason (baseline.load_invalid).
+        return BaselineResult(
+            "corrupt",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"{filename} failed validation — rebuild via the results-depth pass",
+            None,
+        )
+    return BaselineResult("ok", instrument, filename, series, instruments, "", revision)
+
+
 def load_preflight_fixture(run_dir: Path) -> ManifestResult:
     """Load the P1 preflight-verdict fixture ``preflight.json`` when present.
 
@@ -1643,7 +1937,11 @@ def tail_events(
     """
     path = run_dir / EVENTS_FILENAME
     try:
-        fh = path.open("rb")
+        # DEC-LAKE-READ-INODE-GUARD-001 defense (a): the fd-validated open —
+        # a planted FIFO at the events path blocked the plain open() forever;
+        # NotRegularFileError folds into the OSError corrupt arm below. The
+        # window reads themselves stay bounded (the 1 MiB cap law).
+        fh = open_regular_binary(path)
     except FileNotFoundError:
         return EventsPage(
             "awaiting", (), 0, 0, False, f"{AWAITING_DETAIL} — {EVENTS_FILENAME} absent"
@@ -1811,7 +2109,10 @@ def verify_events_chain(
     """
     path = run_dir / EVENTS_FILENAME
     try:
-        fh = path.open("rb")
+        # DEC-LAKE-READ-INODE-GUARD-001 defense (a): fd-validated open — the
+        # click-only chain verify must refuse a planted FIFO loudly, never
+        # block; NotRegularFileError folds into the OSError arm below.
+        fh = open_regular_binary(path)
     except FileNotFoundError:
         return (
             False,
@@ -2001,8 +2302,10 @@ class FixtureTradesReader:
     """FIXTURE-ONLY trades reader over the interim ``rank-%04d.json`` layout (§0.3).
 
     Activated ONLY when :func:`resolve_fixture_root` is non-``None``. Parses
-    the file ONCE per stat-token revision into a single-entry memo keyed by
-    ``(path, revision)``, so a repeat page click is an O(page) slice — the
+    the file ONCE per stat-token revision into the bounded single-flight
+    :class:`_RevisionMemo` keyed by ``(path, revision)`` (fix 4b,
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 — supersedes the hand-rolled
+    single-entry memo), so a repeat page click is an O(page) slice — the
     FIRST parse per revision is O(file), stated honestly.
 
     Attributes
@@ -2023,8 +2326,7 @@ class FixtureTradesReader:
             reader never leaves the fixture tree).
         """
         self._root = fixture_root
-        self._lock = threading.Lock()
-        self._memo: tuple[str, str, _ParsedTrades] | None = None
+        self._memo: _RevisionMemo[_ParsedTrades] = _RevisionMemo()
         self.parse_count: int = 0
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -2098,16 +2400,8 @@ class FixtureTradesReader:
         )
 
     def _parse_cached(self, path: Path, revision: str) -> _ParsedTrades:
-        """Serve the single-entry ``(path, revision)`` memo, parsing on a miss."""
-        key = str(path)
-        with self._lock:
-            memo = self._memo
-        if memo is not None and memo[0] == key and memo[1] == revision:
-            return memo[2]
-        parsed = self._parse(path)
-        with self._lock:
-            self._memo = (key, revision, parsed)
-        return parsed
+        """Serve the ``(path, revision)`` memo (single-flight, bounded), parsing on a miss."""
+        return self._memo.get_or_compute((str(path), revision), lambda: self._parse(path))
 
     def _parse(self, path: Path) -> _ParsedTrades:
         """Parse the whole interim trades file — O(file), once per revision."""
@@ -2186,6 +2480,8 @@ def sidecar_paths_from_ref(run_dir: Path, tuple_ref: str) -> SidecarPaths | None
         aggs=base / f"{stem}.aggs.parquet",
         equity=base / f"{stem}.equity.parquet",
         stamp=base / f"{stem}.stamp.json",
+        resilience=base / f"{stem}.resilience.parquet",
+        resilience_stamp=base / f"{stem}.resilience.stamp.json",
     )
 
 
@@ -2273,9 +2569,11 @@ class TradeStoreReader:
             The sweep results root; runs resolve via :func:`runs_root`.
         """
         self._results_root = results_root
-        self._lock = threading.Lock()
-        self._top100_memo: tuple[str, str, Top100Result] | None = None
-        self._equity_memo: tuple[tuple[str, str, str], tuple[dict[str, Any], ...]] | None = None
+        # fix 4b (DEC-MEMORY-FOOTPRINT-HARDENING-001): both memos ride the
+        # ONE bounded single-flight _RevisionMemo — a two-run/two-rank page
+        # alternation no longer re-parses on every flip.
+        self._top100_memo: _RevisionMemo[Top100Result] = _RevisionMemo()
+        self._equity_memo: _RevisionMemo[tuple[dict[str, Any], ...]] = _RevisionMemo()
         #: Reader-owned once-per-outage WARN bookkeeping for the top100 stat
         #: probe (DEC-CACHE-SERVE-LAST-KNOWN-001, reconciled onto the ONE
         #: repo-wide :class:`OutageGate` mechanism — #1406's C-r2-5 gate;
@@ -2346,7 +2644,8 @@ class TradeStoreReader:
 
         HONEST envelope: the stamp carries NO equity span index (unlike the
         trades' ``trade_spans``), so the FIRST read per (file revision, combo)
-        is an O(equity-file) ``run_id`` filter; the single-entry memo makes
+        is an O(equity-file) ``run_id`` filter; the bounded single-flight memo
+        (:class:`_RevisionMemo`, fix 4b) makes
         every repeat page an O(page) slice. ``limit`` clamps to
         ``[1, 5000]`` (one row per session ≈ 250/year — one fetch charts ~20
         years) and the clamp is named in ``detail``.
@@ -2470,7 +2769,7 @@ class TradeStoreReader:
         return combo_run_id, paths, outage_note
 
     def _equity_cached(self, path: Path, combo_run_id: str) -> tuple[dict[str, Any], ...]:
-        """Serve the single-entry ``(path, revision, combo)`` equity memo.
+        """Serve the ``(path, revision, combo)`` equity memo (single-flight, bounded).
 
         A ``None`` revision (absent/unstattable) reads fresh and caches
         NOTHING (the ``lake_revision`` doctrine — no stale illusion).
@@ -2483,18 +2782,13 @@ class TradeStoreReader:
         revision = artifact_revision(path)
         if revision is None:
             return _load_equity_records(path, combo_run_id)
-        key = (str(path), revision, combo_run_id)
-        with self._lock:
-            memo = self._equity_memo
-        if memo is not None and memo[0] == key:
-            return memo[1]
-        series = _load_equity_records(path, combo_run_id)
-        with self._lock:
-            self._equity_memo = (key, series)
-        return series
+        return self._equity_memo.get_or_compute(
+            (str(path), revision, combo_run_id),
+            lambda: _load_equity_records(path, combo_run_id),
+        )
 
     def _top100_cached(self, run_dir: Path) -> tuple[Top100Result, bool]:
-        """Serve the single-entry ``(path, revision)`` top100 memo, parsing on a miss.
+        """Serve the ``(path, revision)`` top100 memo (single-flight, bounded), parsing on a miss.
 
         Returns ``(result, served_last_known)``. A ``None`` revision splits
         (DEC-CACHE-SERVE-LAST-KNOWN-001): a merely-ABSENT artifact computes
@@ -2514,23 +2808,25 @@ class TradeStoreReader:
         key = str(path)
         if probe.token is None:
             if probe.outage:
-                self._outages.outage_key(key)  # once-per-outage WARN latch
-                with self._lock:
-                    memo = self._top100_memo
-                if memo is not None and memo[0] == key:
-                    return memo[2], True
+                # once-per-outage WARN latch; the returned last-known revision
+                # keys the bounded _RevisionMemo peek (merge-compose: #1719's
+                # serve-last-known doctrine over #1721's fix-4b memo — a
+                # two-run alternation may have evicted the entry, in which
+                # case the honest fresh uncached parse below stands).
+                last = self._outages.outage_key(key)
+                if last is not None:
+                    memo = self._top100_memo.peek((key, last))
+                    if memo is not None:
+                        return memo, True
             else:
                 self._outages.absent(key)
             self.parse_count += 1
             return load_top100(run_dir), False
         revision = probe.token
         self._outages.healthy(key, revision)
-        with self._lock:
-            memo = self._top100_memo
-        if memo is not None and memo[0] == key and memo[1] == revision:
-            return memo[2], False
-        self.parse_count += 1
-        parsed = load_top100(run_dir)
-        with self._lock:
-            self._top100_memo = (key, revision, parsed)
-        return parsed, False
+
+        def _parse() -> Top100Result:
+            self.parse_count += 1
+            return load_top100(run_dir)
+
+        return self._top100_memo.get_or_compute((key, revision), _parse), False

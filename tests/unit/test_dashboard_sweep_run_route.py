@@ -74,11 +74,23 @@ def client(store: InstrumentStore) -> Iterator[TestClient]:
 _CAPTURED: dict[str, Any] = {}
 
 
-def _fake_run_sweep_from_request(request: Any, *, lake_root: Path, results_root: Path) -> int:
-    """Offline stand-in for the grid sweep (no lake, returns at once)."""
+def _fake_run_sweep_from_request(
+    request: Any,
+    *,
+    lake_root: Path,
+    results_root: Path,
+    on_summary: Any = None,
+) -> int:
+    """Offline stand-in for the grid sweep (no lake, returns at once).
+
+    Accepts the additive ``on_summary`` seam (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 /
+    G5b) so the dashboard job's ``_work`` capture-and-note path drives cleanly; a
+    clean run reports no summary, so the finish note stays "done".
+    """
     _CAPTURED["request"] = request
     _CAPTURED["lake_root"] = lake_root
     _CAPTURED["results_root"] = results_root
+    _CAPTURED["on_summary"] = on_summary
     return 0
 
 
@@ -112,6 +124,97 @@ def test_default_params_start_job(client: TestClient, monkeypatch: pytest.Monkey
     # The background body received the resolved request + the lake-relative roots.
     assert _CAPTURED["request"].symbols == "NIFTY,BANKNIFTY"
     assert _CAPTURED["results_root"] == _CAPTURED["lake_root"] / "sweeps"
+    # A clean run captures no summary → the finish note stays "done".
+    assert _wait_for_job(client)["detail"] == "done"
+
+
+def test_failed_tuples_surface_in_the_finish_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G5b: a sweep that SKIPPED failed tuples renders an honest finish note.
+
+    The job stays "done" (the results ARE on disk — a warn-flavoured completion
+    is more honest than a failure), but the finish detail now NAMES the skipped
+    count instead of a bare "done" — driven by the ``on_summary`` capture in the
+    dashboard ``_work``. The CLI/cron int exit code is unchanged upstream.
+    """
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
+
+    def _fake_with_failures(
+        request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None
+    ) -> int:
+        summary = SupervisedGridSummary(
+            sweep_id="x",
+            tuples_total=5,
+            tuples_run=3,
+            tuples_skipped_no_bars=0,
+            skipped_cache=0,
+            skipped_resume=0,
+            enumerated=10,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=10,
+            ranked=3,
+            persisted=3,
+            tuples_failed=2,
+            tuples_quarantined_prior=1,
+        )
+        if on_summary is not None:
+            on_summary(summary)
+        return 4  # sweep_all_exit_code(tuples_failed>0) — a non-zero cron-red exit
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_with_failures)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    snap = _wait_for_job(client)
+    assert snap["state"] == "done"  # results on disk — not a failure
+    assert "2 tuple(s) FAILED" in snap["detail"]
+    assert "1 tuple(s) quarantined from a prior run" in snap["detail"]
+
+
+def test_nonzero_exit_code_surfaces_a_failure_not_a_false_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-12 adversarial-refuter finding: this route's ``_work`` used to
+    return ``cmd_sweep_all``'s bare exit code with no check —
+    ``BackgroundPullJob`` silently discards a non-zero int, so a genuine
+    internal ``cmd_sweep_all`` failure (e.g. the engine's own construction
+    guards) reported the SAME "done" finish detail as full success. Must
+    now surface a named failure in the finish detail instead."""
+
+    def _fails(request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None) -> int:
+        return 1
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    final = _wait_for_job(client)
+    assert final["state"] == "done"  # the job thread itself never raises
+    assert "FAILED" in final["detail"]
+    assert "exit 1" in final["detail"]
+
+
+def test_nonzero_exit_code_does_not_mark_cache_dirty(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same finding: ``on_success``/``mark_dirty`` must not fire on a run
+    that did nothing — only a REAL success invalidates the results cache."""
+    from brutex.dashboard.summary_cache import SummaryCache
+
+    mark_dirty_calls: list[int] = []
+    cache = SummaryCache()
+    monkeypatch.setattr(cache, "mark_dirty", lambda: mark_dirty_calls.append(1))
+
+    def _fails(request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None) -> int:
+        return 1
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
+    with TestClient(build_app(DashboardState(), instrument_store=store, summary_cache=cache)) as c:
+        resp = c.post("/api/v1/sweep/run")
+        assert resp.status_code == 200
+        final = _wait_for_job(c)
+    assert final["state"] == "done"
+    assert mark_dirty_calls == []
 
 
 def test_custom_params_are_echoed(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,7 +347,9 @@ def test_second_click_while_running_is_a_noop(
     started = __import__("threading").Event()
     release = __import__("threading").Event()
 
-    def _blocking(request: Any, *, lake_root: Path, results_root: Path) -> int:
+    def _blocking(
+        request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None
+    ) -> int:
         started.set()
         release.wait(timeout=10.0)
         return 0
@@ -320,3 +425,63 @@ def test_operator_page_carries_sweep_button(client: TestClient) -> None:
     assert reports.status_code == 200
     assert 'id="run-sweep"' not in reports.text
     assert 'id="run-cascade"' not in reports.text
+
+
+# ── R54 none-leg launches on the production HTTP surface (operator ruling ────
+# 2026-07-08: none cells are first-class RUNNABLE — warn/disclose, never a
+# hard refusal; pinned at the ROUTE so a future route-side re-validation
+# cannot silently re-violate R54 without failing here).
+
+
+def test_none_leg_launch_accepted_with_stage3_disclosure_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/v1/sweep/run with an explicit ``sl=none`` leg must be
+    launch-ACCEPTED (the pre-R54 behavior was a 400 hard refusal) and the
+    response payload must DISCLOSE the launch's effective Stage-3 downgrade
+    (``stage3_enable: false``) — operator-visible, never server-log-only."""
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run", params={"sl": "none"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is True
+    assert body["sl"] == "none"
+    assert body["stage3_enable"] is False
+    assert _wait_for_job(client)["state"] == "done"
+    assert _CAPTURED["request"].sl == "none"
+
+
+def test_mixed_csv_none_leg_launch_accepted_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's REAL mixed grid shape (a ``none`` cell among gridded
+    values — PR #1297's default grid string, the only single-sweep shape
+    covering BOTH SL/TP arms AND no-SL/TP arms in one run) must be
+    launch-accepted on this surface too — the R54 review round 2 BLOCKER."""
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post(
+        "/api/v1/sweep/run",
+        params={"sl": "none,5,100,200", "tp": "100,200,300"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is True
+    assert body["sl"] == "none,5,100,200"
+    assert body["stage3_enable"] is False
+    assert _wait_for_job(client)["state"] == "done"
+    assert _CAPTURED["request"].sl == "none,5,100,200"
+
+
+def test_gridded_launch_payload_reports_stage3_true_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Complement pin: the institutional (fully-gridded) default launch's
+    payload reports ``stage3_enable: true`` — the disclosure key is always
+    present, so its absence can never be mistaken for "not downgraded"."""
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    assert resp.json()["stage3_enable"] is True
+    assert _wait_for_job(client)["state"] == "done"

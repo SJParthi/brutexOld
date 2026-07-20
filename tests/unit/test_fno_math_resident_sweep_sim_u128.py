@@ -51,11 +51,13 @@ class TestU128FfiExtractionEnvelope:
 
     def test_max_u128_bar_bits_and_mask_round_trip(self) -> None:
         # 2**128 − 1 is IN envelope on both bar_bits and masks: the all-ones
-        # mask fires only on the all-ones bar (arms bar0, fills at open[1],
-        # end-of-data close at close[2] → pnl 0, holding 2).
+        # mask fires only on the all-ones bar (arms bar0, worst-case fill at
+        # high[1] = 10_150, end-of-data at the last bar's adverse low[2] =
+        # 9_850 → pnl −300, mfe 0, mae 300, holding 2 — the one law,
+        # DEC-FILL-WORST-CASE-ONLY-001).
         sim = _u128_sim([(1 << 128) - 1, 0, 0])
         out = sim.simulate_masks([(1 << 128) - 1], True, None, None)
-        assert out == [[(0, 150, 150, 2, 1, 2)]]
+        assert out == [[(-300, 0, 300, 2, 1, 2)]]
 
     @pytest.mark.parametrize("bad", [1 << 128, -1])
     def test_out_of_range_bar_bits_raise_overflow_error(self, bad: int) -> None:
@@ -79,13 +81,14 @@ class TestU128WideMasksThroughTheWheel:
         # bar0 carries bits 63+64 (straddles the limb boundary), bar2 bit 127.
         sim = _u128_sim([(1 << 63) | (1 << 64), 0, 1 << 127, 0])
         out = sim.simulate_masks([(1 << 63) | (1 << 64), 1 << 64, 1 << 127], True, None, None)
-        # Straddle + lone-bit-64 masks: bar0 is a superset of both → entry at
-        # open[1], end-of-data close at close[3] → pnl 0, holding 3.
-        assert out[0] == [(0, 150, 150, 3, 1, 3)]
+        # Straddle + lone-bit-64 masks: bar0 is a superset of both → worst-case
+        # entry at high[1] = 10_150, end-of-data at the adverse low[3] = 9_850
+        # → pnl −300, mfe 0, mae 300, holding 3 (the one law).
+        assert out[0] == [(-300, 0, 300, 3, 1, 3)]
         assert out[1] == out[0]
-        # Bit-127 mask fires bar2 → entry open[3], end-of-data close close[3]
-        # (the flat window folds the same ±150 excursion on the entry bar).
-        assert out[2] == [(0, 150, 150, 1, 3, 3)]
+        # Bit-127 mask fires bar2 → entry at high[3], end-of-data at low[3]
+        # (the flat window folds the same −300 adverse depth on the entry bar).
+        assert out[2] == [(-300, 0, 300, 1, 3, 3)]
         assert sim.count_trades([(1 << 63) | (1 << 64), 1 << 64, 1 << 127], True, None, None) == [
             1,
             1,

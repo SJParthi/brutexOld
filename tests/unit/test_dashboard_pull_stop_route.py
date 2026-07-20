@@ -242,12 +242,22 @@ def test_pipeline_work_binds_should_stop_to_the_job_flag() -> None:
     # the job thread against real spines), so pin it at SOURCE level: the
     # sequencer must receive the job's stop flag, or the route's flag would be
     # set and silently never consulted (the mutant this kills).
+    #
+    # MERGE-RECONCILE (2026-07-20): main landed DEC-JOB-COOPERATIVE-CANCEL-001
+    # (the same `should_stop` sequencer probe, consulted at the same phase
+    # boundaries + threaded window-deep), so the merged binding is the
+    # OR-COMPOSITION — the route's stop flag AND the job-slot cancel flag both
+    # feed the ONE probe. The pin now matches that composition verbatim
+    # (whitespace-normalized across the ruff line wrap): dropping EITHER flag
+    # from the binding — or dropping the binding — still fails this test.
     import inspect
 
     from brutex.dashboard import app as app_module
 
-    source = inspect.getsource(app_module)
-    assert "should_stop=lambda: _pull_job.stop_requested" in source
+    source = " ".join(inspect.getsource(app_module).split())
+    assert (
+        "should_stop=lambda: ( _pull_job.stop_requested or _pull_job.cancel_requested() )" in source
+    )
 
 
 def test_stop_idle_no_intent_message_is_truthful(

@@ -105,9 +105,24 @@ from typing import Final, TypeVar, cast
 
 import structlog
 
+from brutex.data.stat_deadline import StatSweepGate, StatSweepTimeout
+
 _LOG = structlog.get_logger("brutex.dashboard.lake_revision")
 
 _T = TypeVar("_T")
+
+#: The composite generation probe's deadline gate
+#: (DEC-DASHBOARD-COLD-IO-DEADLINE-001, guarantee-audit BUG-2c) — ONE
+#: :func:`~brutex.config.deadline.run_with_deadline` daemon per
+#: :func:`lake_revision` call (never per component stat), keyed per
+#: ``str(lake_root)``; a breach latches the key so a wedged volume costs
+#: ZERO threads per later poll until the zombie probe returns. The
+#: single-component probes (:func:`rate_bridge_revision` et al.) stay
+#: unguarded here — their callers own their guards (the RateBridgeCache
+#: precedent) or serve-last-known on ``None``. This import keeps the
+#: module's lean-import law: :mod:`brutex.data.stat_deadline` is
+#: config-layer + structlog only.
+_PROBE_GATE: Final[StatSweepGate] = StatSweepGate(what="lake revision probe")
 
 #: Stable sentinel component for a lake whose window ledger / sweeps tree does
 #: not exist yet (a fresh/empty lake, or one populated before the ledger
@@ -286,7 +301,9 @@ def sweep_results_revision(lake_root: Path) -> str | None:
     DEC-LEDGER-DELTA-O-PAGE-001: the composite is the :func:`sweeps_revision`
     directory-mtime digest PLUS the audit chain's ``(mtime_ns:size)`` stat
     token (``<sweeps>/audit/sweep-all.jsonl`` — :data:`_SWEEP_AUDIT_RELPATH`,
-    test-pinned to ``sweep_results_view._AUDIT_RELPATH``).
+    test-pinned to ``sweep_results_view._AUDIT_RELPATH``) PLUS — since
+    DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 — the cascade report's
+    ``(mtime_ns:size)`` stat token (:data:`_CASCADE_REPORT_RELPATH`).
     :func:`sweeps_revision` alone digests DIRECTORY mtimes, and an append to
     the audit chain (a ``SWEEP_START`` — the era / mixed-era honesty source
     the leaderboard scan reads) moves NO directory mtime, so the file stat
@@ -295,7 +312,7 @@ def sweep_results_revision(lake_root: Path) -> str | None:
     ``brutex sweep-all``) is a tempfile + ``os.replace`` into ``<tf>/``, and a
     store delete moves its parent dir.
 
-    Cost + envelope: one O(dirs) scandir digest plus ONE ``os.stat`` — paid per
+    Cost + envelope: one O(dirs) scandir digest plus TWO ``os.stat`` — paid per
     poll (honest, never claimed O(1)-total). An absent chain contributes the
     stable :data:`ABSENT_TOKEN` (its first-ever creation moves the composite
     exactly once). ``None`` = "unknown, no signal" (either probe failed with a
@@ -312,7 +329,21 @@ def sweep_results_revision(lake_root: Path) -> str | None:
     )
     if chain is None:
         return None
-    return f"{dirs}|{chain}"
+    # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the cascade report's own file stat
+    # rides as a THIRD component — the /results cascade-verdict join reads
+    # ``<sweeps>/cascade/cascade-report.json`` per revision, and a report
+    # rewrite (``write_report``) moves only its PARENT dir's mtime, which
+    # ``sweeps_revision`` digests already — but the belt makes join
+    # correctness independent of writer rename discipline (the audit-chain
+    # stat precedent above). An absent report contributes the stable
+    # :data:`ABSENT_TOKEN`; cost is one extra ``os.stat`` per poll (stated).
+    report = _stat_token(
+        lake_root.joinpath(_SWEEPS_DIRNAME, *_CASCADE_REPORT_RELPATH),
+        event="lake_revision.cascade_report_stat_failed",
+    )
+    if report is None:
+        return None
+    return f"{dirs}|{chain}|{report}"
 
 
 def cascade_report_revision(lake_root: Path) -> str | None:
@@ -391,6 +422,12 @@ def registry_revision(registry_path: Path) -> str | None:
     DEC-O1-GUARANTEE-HARDEN-001 (the H1 registry-pager count cache): the ``/db``
     registry pagers' FILTERED ``COUNT(*)`` totals are paging-invariant, so they
     are memoised per registry CONTENT — and this token is the content signal.
+    The SECOND consumer (DEC-MEMORY-FOOTPRINT-HARDENING-001, consolidated onto
+    this ONE probe at the merge-reconcile — the two in-flight twins collapsed
+    per Golden Rule #11 COMMON): the options expiry-calendar / strike-chain /
+    CANDIDATE cache keys fold it at the ``app.py`` key-build sites
+    (``_registry_key_component``), so a CROSS-PROCESS metadata pull — which
+    bumps NO write generation — re-keys them on the next poll.
     TWO stat probes folded into one token (O(1), never a table read):
 
     * the ``registry.duckdb`` file itself — a metadata pull's write session
@@ -631,6 +668,27 @@ def _greeks_backfill_revision(lake_root: Path) -> str | None:
     )
 
 
+def _lake_revision_probe(lake_root: Path) -> str | None:
+    """The composite probe body — extracted VERBATIM for the deadline gate.
+
+    DEC-DASHBOARD-COLD-IO-DEADLINE-001: :func:`lake_revision` runs this whole
+    composite (≥4 stats + the O(dirs) sweeps scandir) under ONE
+    :data:`_PROBE_GATE` daemon, so the extraction keeps the pre-guard
+    behaviour byte-identical while the public function owns the timeout →
+    ``None`` mapping.
+    """
+    ledger = _ledger_revision(lake_root)
+    if ledger is None:
+        return None
+    sweeps = sweeps_revision(lake_root)
+    if sweeps is None:
+        return None
+    greeks = _greeks_backfill_revision(lake_root)
+    if greeks is None:
+        return None
+    return f"{ledger}|{sweeps}|{greeks}"
+
+
 def lake_revision(lake_root: Path) -> str | None:
     """Return the composite O(1)/O(dirs) content token for *lake_root*, or ``None``.
 
@@ -645,6 +703,20 @@ def lake_revision(lake_root: Path) -> str | None:
     that does not exist yet contributes the stable :data:`ABSENT_TOKEN`
     sentinel (its creation moves the composite exactly once).
 
+    DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-2c): the whole
+    composite runs under the :data:`_PROBE_GATE` deadline
+    (``BRUTEX_LAKE_STAT_DEADLINE_S``, default 5 s) — a WEDGED volume's probe
+    times out to the module's EXACT existing ``None`` "unknown, no signal"
+    contract (never a fabricated token, never :data:`ABSENT_TOKEN` — a
+    fabricated flip would double-invalidate every generation-keyed cache and
+    storm the wedged volume), and while the zombie probe stays wedged every
+    later call returns ``None`` instantly with ZERO new threads (the
+    breach-armed latch). The gate's own WARN/recovered events carry the
+    outage story. Healthy-path cost: one short-lived daemon spawn/join per
+    probe call (~0.1 ms) on top of the existing stat+scandir composite —
+    every healthy probe still returns a real token (no memo, no
+    in-flight-``None``: concurrent healthy probes all proceed).
+
     Parameters
     ----------
     lake_root
@@ -656,20 +728,16 @@ def lake_revision(lake_root: Path) -> str | None:
     str | None
         The composite token, or ``None`` — "unknown, no signal" — when ANY
         component probe failed with a non-missing-file :class:`OSError`
-        (logged inside the component). ``None`` tells the caller to make NO
-        freshness decision (never a spurious invalidation, never a masked
-        error).
+        (logged inside the component) OR the whole probe blew the stat
+        deadline. ``None`` tells the caller to make NO freshness decision
+        (never a spurious invalidation, never a masked error).
     """
-    ledger = _ledger_revision(lake_root)
-    if ledger is None:
+    try:
+        return _PROBE_GATE.run(
+            str(lake_root), lambda: _lake_revision_probe(lake_root), op="lake_revision"
+        )
+    except StatSweepTimeout:
         return None
-    sweeps = sweeps_revision(lake_root)
-    if sweeps is None:
-        return None
-    greeks = _greeks_backfill_revision(lake_root)
-    if greeks is None:
-        return None
-    return f"{ledger}|{sweeps}|{greeks}"
 
 
 __all__ = [

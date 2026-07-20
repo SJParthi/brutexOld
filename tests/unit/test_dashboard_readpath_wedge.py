@@ -260,3 +260,30 @@ def test_healthy_lake_limiter_serve_returns_the_payload_byte_identically(
     asyncio.run(scenario())
     # The route DID go through the injected lake limiter (not plain run_in_threadpool).
     assert spy.calls, "the /coverage/windows route did not offload through the lake limiter"
+
+
+def test_temporal_baseline_equity_routes_ride_the_lake_limiter(
+    store: InstrumentStore,
+) -> None:
+    """The #1851 R3 adoption pin: the three S2-club lake-read dispatches —
+    ``/api/v1/sweep/temporal`` (the per-period drill), ``/api/v1/oneclick/baseline``
+    (the stored buy-&-hold series) and ``/api/v1/oneclick/equity`` (the
+    club-devolved main-parity restore) — ride the injected lake limiter, not
+    plain ``run_in_threadpool``. Artifact-free lake: each serves its honest
+    absent/awaiting degrade at 200 THROUGH the offload (never a 500)."""
+    spy = _SpyOffload()
+    app = build_app(DashboardState(), instrument_store=store, lake_offload=spy)
+    rid = "a" * 64
+
+    async def scenario() -> None:
+        async with _asgi_client(app) as client:
+            for url, params in (
+                ("/api/v1/sweep/temporal", {"run_id": rid, "horizon": "quarter"}),
+                ("/api/v1/oneclick/baseline", {"run_id": rid}),
+                ("/api/v1/oneclick/equity", {"run_id": rid}),
+            ):
+                resp = await client.get(url, params=params)
+                assert resp.status_code == 200, (url, resp.status_code)
+
+    asyncio.run(scenario())
+    assert spy.calls.count("_resolve") == 3, spy.calls

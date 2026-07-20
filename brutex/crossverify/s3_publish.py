@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 import structlog
 
 from brutex.crossverify.journal import staging_path_for_key
+from brutex.data.guarded_read import read_regular_bytes_deadline
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only imports
@@ -230,7 +231,11 @@ def publish_staged(
             failed.append(key)
             continue
         try:
-            body = staged.read_bytes()
+            # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — the
+            # publish loop is the daily producer's last leg; a planted FIFO /
+            # wedged volume folds into the existing failed+WARN arm instead
+            # of hanging the run).
+            body = read_regular_bytes_deadline(staged, what="crossverify staged read")
         except OSError as exc:
             _LOG.warning(
                 "crossverify.staged_bytes_missing",
