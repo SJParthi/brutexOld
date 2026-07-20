@@ -4012,7 +4012,11 @@ hostile-review pass._
   re-shapes it); futures-sweep/price-source/tuple-digest re-locks by the same one-key law;
   capture/aggregate digests SCHEMA-ADDITIVE (five INT64 counter columns, counters measured 0
   on those fixtures); rust/trade-sim/paisa/sensex absolute pins PROVEN UNCHANGED at the tf=1
-  fixed point; `tests/golden/fixtures/` BYTE-UNTOUCHED (`git diff
+  fixed point — EXCEPT the degenerate same-bar terminal-close (the u128 wide-mask out[2] unit
+  golden), which B3 correctly re-shaped −300→−150 (entry@high − terminal-close, the #1743
+  finish() basis) and whose unit golden was re-locked (it was uncollectable until the Class-1
+  signature fix); the other two adverse-LOW literals are unchanged; `tests/golden/fixtures/`
+  BYTE-UNTOUCHED (`git diff
   origin/main...HEAD -- tests/golden/fixtures/` EMPTY, branch-scoped — Stage-1A/60-vocab/
   indicator_version out of scope). PARITY: the COMMITTED dual-stream Python≡Rust hypothesis
   property (the two `test_{u64,u128}_kernel_dual_stream_parity` tests, `max_examples=25`

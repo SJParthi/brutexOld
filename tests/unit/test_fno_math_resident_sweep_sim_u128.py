@@ -98,9 +98,19 @@ class TestU128WideMasksThroughTheWheel:
         # → pnl −300, mfe 0, mae 300, holding 3 (the one law).
         assert out[0] == [(-300, 0, 300, 3, 1, 3)]
         assert out[1] == out[0]
-        # Bit-127 mask fires bar2 → entry at high[3], end-of-data at low[3]
-        # (the flat window folds the same −300 adverse depth on the entry bar).
-        assert out[2] == [(-300, 0, 300, 1, 3, 3)]
+        # Bit-127 mask fires bar2 (the LAST bar) → the position opens and
+        # immediately hits end_of_data with no next bar, so exit_idx==entry_idx==3
+        # (the degenerate same-bar terminal). bar[3] = open 10_000, high 10_150,
+        # low 9_850, close 10_000; worst-case BUY entry @high[3]=10_150.
+        # DEC-FILL-EXEC-GRID-1M-001 (#1989) §1 — the legalized exit_idx==entry_idx
+        # degenerate terminal prices the entry bar's CLOSE (the #1743 finish()-idiom
+        # forced mark-to-close on end_of_data/session_gap), NOT the adverse LOW:
+        # exit @close[3]=10_000 ⇒ pnl = 10_000 − 10_150 = −150. The prior −300
+        # (adverse-LOW) was #1825's correct PRE-B3 value; it hid behind a TypeError
+        # until the Class-1 signature fix a81c5a29 made this test collectable — a
+        # stale golden, not a kernel bug. The other two −300 literals (non-degenerate)
+        # remain adverse-LOW and unchanged.
+        assert out[2] == [(-150, 0, 300, 1, 3, 3)]
         assert sim.count_trades([(1 << 63) | (1 << 64), 1 << 64, 1 << 127], True, None, None) == [
             1,
             1,
