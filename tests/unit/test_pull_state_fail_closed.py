@@ -141,7 +141,8 @@ class TestBackgroundPullJobStartFailsClosed:
 
         ran: list[str] = []
         job = pull_jobs.BackgroundPullJob(progress=PullProgress(), spawn=lambda fn: fn())
-        assert job.start(lambda _p: ran.append("ran"), total=1, market_hours_exempt=True) is True
+        started = job.start(lambda _p: ran.append("ran"), total=1, market_hours_exempt=True)
+        assert started is True
         assert ran == ["ran"]
 
 
