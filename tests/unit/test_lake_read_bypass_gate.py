@@ -84,16 +84,33 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/data/spot_daily_resample.py": (
         "1m->1d derive read — its own frame-level dedup self-heal (DEC-PULL-FORENSIC-WAVE3-001)"
     ),
-    "brutex/data/timeframe_materialize.py": (
-        "derive read over the SAME writer-deduped 1m base; derived writes re-render whole months"
+    # W-6a (DEC-RUST-LAKE-WAVED-001): timeframe_materialize.py,
+    # catalog_reconcile.py and lake_invariants.py DROPPED from this
+    # allowlist — their Python raw-read cores are DELETED; the raw reads
+    # now live in the brutex_lake crate (the same raw-see-everything laws,
+    # crate-side), so the Python modules no longer contain the pattern.
+    "brutex/data/lake_heal.py": (
+        "the Wave-D W-2 option-stats replay re-read (DEC-RUST-LAKE-WAVED-001, "
+        "deviation D-12): after the Rust heal REWRITES an options file "
+        "keep-first, the shell re-reads THAT freshly-deduped file once to "
+        "drive the verbatim _record_option_stats — a stats-manifest hook "
+        "over just-written bytes (no dups by construction; never a "
+        "bar-serving read), so the dedup gate has nothing to collapse"
     ),
-    "brutex/data/catalog_reconcile.py": (
-        "physical row-count audit — MUST see raw (possibly duplicated) rows to reconcile"
+    "brutex/adapters/dhan/rolling_option_writer.py": (
+        "write-side merge read under the partition locks; timestamp keep-first "
+        "dedup before the atomic rewrite — the dhan feed-lake twin of "
+        "option_parquet_writer (DEC-DHAN-ROLLING-OPTIONS-001)"
     ),
-    "brutex/data/lake_invariants.py": (
-        "invariant scanner (_read_key_columns) — MUST see raw rows to DETECT "
-        "intra-file duplicates; a dedup-gated read would hide the very defect "
-        "it exists to find (DEC-LAKE-HEAL-001)"
+    "brutex/adapters/dhan/rolling_option_greeks.py": (
+        "dhan rolling-option Greeks overlay — reads the keep-first writer's OWN "
+        "partitions + the locked write-side overlay merge read "
+        "(DEC-DHAN-ROLLING-OPTIONS-001)"
+    ),
+    "brutex/adapters/dhan/daily_consistency.py": (
+        "observe-only daily-vs-minute close probe over the dhan feed lake "
+        "(timestamp+close columns; never serves bar rows) — "
+        "DEC-DHAN-NATIVE-DAILY-001"
     ),
     "brutex/dashboard/db_view.py": (
         "wired: pagers use DEDUP_PARQUET_SOURCE_SQL + QUALIFY; totals use distinct_count_sql"

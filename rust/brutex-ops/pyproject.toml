@@ -1,0 +1,48 @@
+# Maturin build config for brutex-ops (the unified ops crate:
+# DEC-BACKUP-RUST-OPS-001 + DEC-CROSSVERIFY-RUST-CORE-001 +
+# DEC-NIGHTLY-RUST-CORE-001).
+#
+# Mixed Python + Rust layout (the brutex-feed / trading-core shape): the
+# cdylib ships as the private submodule `brutex_ops._brutex_ops`;
+# `python/brutex_ops/__init__.py` re-exports it behind the stale-wheel
+# handshake. `features = ["python"]` turns on the optional pyo3 dependency
+# (extension-module + abi3-py312) so the wheel includes the binding.
+#
+# DELIBERATELY not installed by the main CI test job: all three facades
+# (`brutex/backup/backup_rust.py`, `brutex/crossverify/rust_seam.py`,
+# `brutex/nightly/nightly_rust.py`) are default-OFF and degrade loudly to
+# their Python oracles when the crate is absent; the dedicated non-required
+# `.github/workflows/ops-rust-parity.yml` lane builds + installs it and runs
+# the flag-ON legs (the brutex-lake lane posture), and the `rust-brutex-ops`
+# ci.yml cargo job gates the pure-Rust core.
+#
+# https://www.maturin.rs/
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-ops"
+version = "0.1.0"
+description = "BruteX ops Rust kernels — backup deadman/template/restic laws, cross-verify CSV/canonical laws, nightly chain decision laws."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [{ name = "SJParthi" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "brutex_ops._brutex_ops"
+features = ["python"]
+strip = true
+# The committed Cargo.lock is the dependency pin — a wheel build must never
+# silently re-resolve it (the brutex-lake `locked = true` posture).
+locked = true

@@ -248,6 +248,16 @@ class TestDiscoverTouchedModules:
         #     100% gate is the dedicated static per-module gate in ci.yml (the
         #     three-file suite at --cov-fail-under=100) + the whole-package
         #     floor (DEC-RESILIENCE-STREAKS-001).
+        #   * brutex/pull_state_rust.py — the pull-state Rust facade
+        #     (DEC-RUST-PULL-STATE-001): each wave's kernel-accessor section
+        #     is exercised by that wave's OWN seam suite, stem-named for the
+        #     CONSUMER module it gates
+        #     (test_pull_outcome_rust_seam.py / test_pull_scope_rust_seam.py …),
+        #     so the stem-matched test_pull_state_rust*.py pair measures ~62%
+        #     standalone; the dedicated static ci.yml gate runs the curated
+        #     static suite (every per-wave seam file it enumerates) at
+        #     100.00% + the whole-package floor (the pull_controller.py
+        #     precedent).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -261,6 +271,7 @@ class TestDiscoverTouchedModules:
                     "brutex/engine/sweep_driver.py",
                     "brutex/engine/resilience_streaks.py",
                     "brutex/engine/results_depth_pass.py",
+                    "brutex/pull_state_rust.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE

@@ -148,6 +148,48 @@ else
   fi
 fi
 
+# ────────── 6a3. brutex_lake wheel ──────────
+# DEC-BRUTEX-LAKE-BOX-WHEEL-001: the data-lake Rust crate (ADR-0020).
+# Since DEC-RUST-LAKE-WAVED-001 (W-6a) the ``brutex_lake`` wheel is the ONE
+# production arm of the four waved lake cores (a missing/stale wheel is the
+# fail-loud ``LakeRustWavedUnavailableError`` at USE time — the Python cores
+# are deleted), but it is NOT module-top imported by brutex/, so bootstrap
+# keeps this step's shipped WARN-not-abort control flow: a build failure
+# warns loudly and bootstrap proceeds (`import brutex` still works; lake
+# operations refuse loudly until the operator re-runs the build).
+# COST: a cold build compiles the rev-pinned polars graph from source —
+# minutes of wall time and ~12 GB of rust/brutex-lake/target/ disk.
+_step "Step 6a3/7 — build + install brutex_lake Rust extension (cold build compiles the pinned polars graph — minutes + ~12 GB target/)"
+if python -c "import brutex_lake" 2>/dev/null; then
+  _ok "brutex_lake already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-lake && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_lake" 2>/dev/null; then
+    _ok "brutex_lake built + installed via maturin"
+  else
+    _warn "brutex_lake build failed — lake Rust ops will refuse loudly (LakeRustWavedUnavailableError, DEC-RUST-LAKE-WAVED-001) until it is built; re-run: cd rust/brutex-lake && maturin develop --release"
+  fi
+fi
+
+# ────────── 6c. brutex_pull_state wheel ──────────
+# The pull-state decision plane is Rust-only and fail-closed (module-top
+# imported by brutex/), so it is a REQUIRED build prerequisite — build it the
+# same way as fno_math/trading_core and ABORT bootstrap on failure.
+_step "Step 6c/7 — build + install brutex_pull_state Rust extension"
+if python -c "import brutex_pull_state" 2>/dev/null; then
+  _ok "brutex_pull_state already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-pull-state && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_pull_state" 2>/dev/null; then
+    _ok "brutex_pull_state built + installed via maturin"
+  else
+    _err "maturin develop failed; see output above"
+    exit 1
+  fi
+fi
+
 # ────────── 6b. git hooks (pre-commit + commit-msg + pre-push) ──────────
 # DEC-PRE-PUSH-HOOK-001: install ALL hook stages so the local gates
 # (.pre-commit-config.yaml) actually fire — including the new pre-push

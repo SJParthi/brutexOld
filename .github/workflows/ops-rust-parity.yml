@@ -1,0 +1,292 @@
+# ops-rust-parity.yml — the UNIFIED brutex-ops crate build + all-lane parity lane.
+#
+# ONE lane for the ONE unified ops crate (the integration/brutex-ops-unified
+# vehicle): DEC-BACKUP-RUST-OPS-001 (backup) + DEC-CROSSVERIFY-RUST-CORE-001
+# (crossverify) + DEC-NIGHTLY-RUST-CORE-001 (nightly). Started from the
+# crossverify lane's variant (it carried the HARD wheel-health gate) and
+# extended to run ALL THREE lanes' flag-ON parity legs after that gate.
+#
+# All three seams are DEFAULT-OFF (BRUTEX_BACKUP_RUST /
+# BRUTEX_CROSSVERIFY_RUST / BRUTEX_NIGHTLY_RUST) and the main CI test jobs
+# deliberately never install the crate (each facade degrades loudly to its
+# Python oracle when it is absent), so this dedicated lane is where the
+# WHEEL has teeth:
+#
+#   1. cargo fmt / clippy -D warnings (default AND `python` feature sets) /
+#      test --release --locked (the deadman verdict matrix + the FOUR golden
+#      byte pins vs docs/runbooks/backup-templates/, the M&M.csv golden
+#      literal, the nightly launchd-plist byte golden, and every proptest).
+#   2. maturin wheel build + install beside the repo's Python deps.
+#   3. The HARD wheel-health gate: the wheel must import and expose the FULL
+#      27-symbol union surface — a broken-but-installed wheel can never turn
+#      the importorskip-guarded legs below into a vacuous green.
+#   4. Per lane, the REAL-wheel seam/golden/differential suites + the
+#      flag-ON verbatim leg (the UNMODIFIED law-module suites re-run
+#      byte-identically under the lane's flag with the real wheel — the
+#      data-rust-parity heal-twin precedent).
+#
+# NOT a required gate: it gates the FUTURE default-ON flips, which must cite
+# a fresh green run of this lane as a stated precondition — a red run here
+# blocks re-engaging a flag, never an unrelated merge. (The pure-Rust core
+# is ALSO gated per-PR by the required `rust-brutex-ops` cargo job in
+# ci.yml — no wheel there, cargo only.)
+#
+# COST HONESTY: the crate is std + serde_json (no polars graph) — a cold
+# cargo run compiles in ~seconds; the cargo cache is carried for the wheel
+# build step.
+
+name: ops-rust-parity
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+      - "integration/**"
+    paths:
+      - "rust/brutex-ops/**"
+      - "rust/source_digest_core.rs"
+      - "brutex/backup/backup_rust.py"
+      - "brutex/backup/deadman.py"
+      - "brutex/backup/schedule_render.py"
+      - "brutex/backup/restic_runner.py"
+      - "brutex/crossverify/rust_seam.py"
+      - "brutex/crossverify/csv_render.py"
+      - "brutex/crossverify/canonical.py"
+      - "brutex/nightly/nightly_rust.py"
+      - "brutex/nightly/chain.py"
+      - "brutex/nightly/report.py"
+      - "brutex/nightly/schedule.py"
+      - "docs/runbooks/backup-templates/**"
+      - "tests/unit/test_backup_rust.py"
+      - "tests/unit/test_backup_deadman_rust_seam.py"
+      - "tests/unit/test_backup_schedule_render_rust_seam.py"
+      - "tests/unit/test_backup_restic_runner_rust_seam.py"
+      - "tests/property/test_backup_rust_differential.py"
+      - "tests/unit/test_crossverify_rust_seam.py"
+      - "tests/unit/test_crossverify_csv_render.py"
+      - "tests/unit/test_crossverify_csv_render_rust_arm.py"
+      - "tests/unit/test_crossverify_canonical.py"
+      - "tests/unit/test_crossverify_canonical_rust_arm.py"
+      - "tests/golden/test_crossverify_rust_golden.py"
+      - "tests/golden/test_crossverify_golden.py"
+      - "tests/golden/_crossverify_harness.py"
+      - "tests/golden/fixtures/crossverify/**"
+      - "tests/property/test_crossverify_rust_differential.py"
+      - "tests/unit/test_nightly_rust.py"
+      - "tests/unit/test_nightly_chain_rust_seam.py"
+      - "tests/unit/test_nightly_report_rust_seam.py"
+      - "tests/unit/test_nightly_schedule_rust_seam.py"
+      - "tests/golden/test_nightly_ops_rust_parity.py"
+      - "tests/fakes/fake_brutex_ops.py"
+      - ".github/workflows/ops-rust-parity.yml"
+  pull_request:
+    paths:
+      - "rust/brutex-ops/**"
+      - "rust/source_digest_core.rs"
+      - "brutex/backup/backup_rust.py"
+      - "brutex/backup/deadman.py"
+      - "brutex/backup/schedule_render.py"
+      - "brutex/backup/restic_runner.py"
+      - "brutex/crossverify/rust_seam.py"
+      - "brutex/crossverify/csv_render.py"
+      - "brutex/crossverify/canonical.py"
+      - "brutex/nightly/nightly_rust.py"
+      - "brutex/nightly/chain.py"
+      - "brutex/nightly/report.py"
+      - "brutex/nightly/schedule.py"
+      - "docs/runbooks/backup-templates/**"
+      - "tests/unit/test_backup_rust.py"
+      - "tests/unit/test_backup_deadman_rust_seam.py"
+      - "tests/unit/test_backup_schedule_render_rust_seam.py"
+      - "tests/unit/test_backup_restic_runner_rust_seam.py"
+      - "tests/property/test_backup_rust_differential.py"
+      - "tests/unit/test_crossverify_rust_seam.py"
+      - "tests/unit/test_crossverify_csv_render.py"
+      - "tests/unit/test_crossverify_csv_render_rust_arm.py"
+      - "tests/unit/test_crossverify_canonical.py"
+      - "tests/unit/test_crossverify_canonical_rust_arm.py"
+      - "tests/golden/test_crossverify_rust_golden.py"
+      - "tests/golden/test_crossverify_golden.py"
+      - "tests/golden/_crossverify_harness.py"
+      - "tests/golden/fixtures/crossverify/**"
+      - "tests/property/test_crossverify_rust_differential.py"
+      - "tests/unit/test_nightly_rust.py"
+      - "tests/unit/test_nightly_chain_rust_seam.py"
+      - "tests/unit/test_nightly_report_rust_seam.py"
+      - "tests/unit/test_nightly_schedule_rust_seam.py"
+      - "tests/golden/test_nightly_ops_rust_parity.py"
+      - "tests/fakes/fake_brutex_ops.py"
+      - ".github/workflows/ops-rust-parity.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # ci.yml's RUST_VERSION — the crate pins rust-version 1.93.1 (edition 2024,
+  # std + serde_json; no third-party MSRV cliff).
+  RUST_VERSION: "1.93.1"
+  # Cargo network resilience — the ci.yml convention.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONHASHSEED: "0"
+  HYPOTHESIS_PROFILE: "ci"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  ops-rust-parity:
+    name: brutex-ops build + ops seam parity (backup + crossverify + nightly)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/brutex-ops -> target
+          key: ops-${{ hashFiles('rust/brutex-ops/Cargo.toml', 'rust/brutex-ops/Cargo.lock') }}
+
+      - name: cargo fmt --check
+        working-directory: rust/brutex-ops
+        run: cargo fmt --check
+
+      # --locked on every cargo invocation: the committed Cargo.lock is the
+      # dependency pin — lock drift must fail LOUD (the brutex-lake law; the
+      # maturin wheel build below enforces the same lock via `locked = true`
+      # in rust/brutex-ops/pyproject.toml).
+      - name: cargo clippy -D warnings (default features, --locked)
+        working-directory: rust/brutex-ops
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo clippy -D warnings (python feature, --locked)
+        working-directory: rust/brutex-ops
+        run: cargo clippy --all-targets --features python --locked -- -D warnings
+
+      - name: cargo test (verdict matrix + golden byte pins + proptests, --locked)
+        working-directory: rust/brutex-ops
+        run: cargo test --release --locked
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install brutex (data extra) + the brutex-ops wheel
+        # Belt-and-suspenders crates.io flake guard on the maturin build
+        # (the cargo download point) — the ci.yml retry idiom, POSIX sh.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[data,dev]"
+          pip install maturin
+          n=0
+          until pip install ./rust/brutex-ops; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-ops failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-ops failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Hard wheel-health gate (no vacuous skips — the FULL 27-symbol union)
+        # The crossverify round-1 hostile-review MINOR-1 gate, widened to the
+        # unified crate: several legs below guard on
+        # `pytest.importorskip("brutex_ops")`, and pytest treats a skip as
+        # green — a broken-but-installed wheel would turn the lane's only
+        # real-crate drift teeth VACUOUS. This step FAILS the lane outright
+        # when the wheel cannot import or misses ANY symbol of the shim's
+        # declared surface (the import itself already runs the stale-wheel
+        # handshake); the in-test skip guards stay for local crate-free runs.
+        run: |
+          python -c "
+          import brutex_ops
+          missing = [
+              name
+              for name in brutex_ops._EXPECTED_COMPILED_SYMBOLS
+              if not hasattr(brutex_ops, name)
+          ]
+          assert not missing, 'brutex_ops wheel is missing: ' + ', '.join(missing)
+          n = len(brutex_ops._EXPECTED_COMPILED_SYMBOLS)
+          print(f'brutex_ops wheel healthy: all {n} union symbols present')
+          "
+
+      # ── backup lane (DEC-BACKUP-RUST-OPS-001) ─────────────────────────
+      - name: Backup — facade matrix + seam suites + hypothesis differential (real wheel)
+        run: |
+          pytest -rs -q \
+            tests/unit/test_backup_rust.py \
+            tests/unit/test_backup_deadman_rust_seam.py \
+            tests/unit/test_backup_schedule_render_rust_seam.py \
+            tests/unit/test_backup_restic_runner_rust_seam.py \
+            tests/property/test_backup_rust_differential.py
+
+      - name: Backup — flag-ON verbatim leg (the UNMODIFIED law-module suites)
+        env:
+          BRUTEX_BACKUP_RUST: "1"
+        run: |
+          pytest -rs -q \
+            tests/unit/test_backup_deadman.py \
+            tests/unit/test_backup_schedule_render.py \
+            tests/unit/test_backup_restic_runner.py
+
+      # ── crossverify lane (DEC-CROSSVERIFY-RUST-CORE-001) ──────────────
+      - name: Crossverify — seam unit suite + REAL-wheel golden + differential
+        run: |
+          pytest -rs -q \
+            tests/unit/test_crossverify_rust_seam.py \
+            tests/golden/test_crossverify_rust_golden.py \
+            tests/property/test_crossverify_rust_differential.py
+
+      - name: Crossverify — law-module suites with the Rust seam ENGAGED (flag-ON twin)
+        # The non-perturbation leg: the csv_render + canonical + golden
+        # suites run VERBATIM (zero test-line edits) with the seam armed +
+        # the REAL crate installed. Any test failing ONLY under the flag is
+        # a perturbation finding — fix-or-refuse, never a test edit.
+        env:
+          BRUTEX_CROSSVERIFY_RUST: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_crossverify_csv_render.py \
+            tests/unit/test_crossverify_csv_render_rust_arm.py \
+            tests/unit/test_crossverify_canonical.py \
+            tests/unit/test_crossverify_canonical_rust_arm.py \
+            tests/golden/test_crossverify_golden.py
+
+      # ── nightly lane (DEC-NIGHTLY-RUST-CORE-001) ──────────────────────
+      - name: Nightly — facade matrix + seam suites + REAL-wheel parity goldens
+        run: |
+          pytest -rs -q \
+            tests/unit/test_nightly_rust.py \
+            tests/unit/test_nightly_chain_rust_seam.py \
+            tests/unit/test_nightly_report_rust_seam.py \
+            tests/unit/test_nightly_schedule_rust_seam.py \
+            tests/golden/test_nightly_ops_rust_parity.py
+
+      - name: Nightly — flag-ON verbatim leg (the UNMODIFIED law-module suites)
+        env:
+          BRUTEX_NIGHTLY_RUST: "1"
+        run: |
+          # test_nightly_report.py is deliberately ABSENT: its un-guarded
+          # sweep_audit import transitively needs fno_math (not installed in
+          # this lane); report.py's flag-ON/real-wheel parity is already
+          # covered by test_nightly_report_rust_seam.py + the golden above.
+          # The deselected exit-codes test is a CLI-constant drift pin, not
+          # an ops-seam test (`from brutex import cli` transitively imports
+          # trading_core, which this lane is deliberately free of); it still
+          # runs on main CI where trading_core exists.
+          pytest -rs -q \
+            tests/unit/test_nightly_chain.py \
+            tests/unit/test_nightly_schedule.py \
+            --deselect tests/unit/test_nightly_chain.py::test_exit_codes_drift_pinned_against_cli

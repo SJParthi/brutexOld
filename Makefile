@@ -97,6 +97,11 @@ run-raw: preflight
 		$(VPIP) install maturin; \
 		cd rust/trading-core && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
 	}
+	@$(VPY) -c "import brutex_lake" 2>/dev/null || { \
+		echo "==> brutex_lake kernel not importable — building it (REQUIRED since DEC-RUST-LAKE-WAVED-001 W-6a; needs cargo)"; \
+		$(VPIP) install maturin; \
+		cd rust/brutex-lake && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
+	}
 	@$(VPY) -c "import brutex_feed" 2>/dev/null || { \
 		echo "==> brutex_feed kernel not importable — building it (optional; DEC-FEED-RUST-CORE-001)"; \
 		$(VPIP) install maturin; \
@@ -107,6 +112,11 @@ run-raw: preflight
 		echo "==> brutex_refine kernel not importable — building it (one-time; needs cargo; DEC-RUST-STAGE3-REFINE-001)"; \
 		$(VPIP) install maturin; \
 		cd rust/brutex-refine && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
+	}
+	@$(VPY) -c "import brutex_pull_state" 2>/dev/null || { \
+		echo "==> brutex_pull_state kernel not importable — building it (REQUIRED; the pull-state decision plane is Rust-only and fail-closed)"; \
+		$(VPIP) install maturin; \
+		cd rust/brutex-pull-state && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
 	}
 	$(VPY) -m brutex run
 

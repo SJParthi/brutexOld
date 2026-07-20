@@ -826,6 +826,19 @@ def _add_sweep_grid_args(
         help="Min Deflated-Sharpe probability to survive the overfit gate (default 0.95)",
     )
     parser.add_argument(
+        "--single-event-max-best-day-pct",
+        type=float,
+        default=None,
+        dest="single_event_max_best_day_pct",
+        help=(
+            "OPT-IN Stage-4 cascade single-event sensitivity gate "
+            "(DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001): FAIL a candidate whose "
+            "total return minus its best single IST day is below this percent of the "
+            "total (0 < X < 100; junk fails loud). Default None = OFF — the stage "
+            "does not run and reports are byte-identical."
+        ),
+    )
+    parser.add_argument(
         "--no-options-sim",
         action="store_false",
         dest="options_sim",
@@ -1191,6 +1204,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Legacy chunk-window override — ignored on Groww (tiled internally)",
     )
     fetch.add_argument(
+        "--feed",
+        choices=("groww", "dhan"),
+        default="groww",
+        help=(
+            "Historical feed (default groww — Groww behaviour byte-unchanged). "
+            "'dhan' pulls the standalone read-only Dhan feed into feeds/dhan/ "
+            "(DEC-DHAN-ROLLING-OPTIONS-001)"
+        ),
+    )
+    fetch.add_argument(
+        "--dataset",
+        choices=("spot", "rolling-options"),
+        default="spot",
+        help=(
+            "Dhan dataset (only with --feed dhan; default spot): 'spot' = the 3 index "
+            "1-minute series; 'rolling-options' = the ROLLING-ATM option series "
+            "(ATM±N per bar, NOT per-contract — Dhan serves no option chain)"
+        ),
+    )
+    fetch.add_argument(
         "--dry-run",
         action="store_true",
         help="Use synthetic candles (no Groww creds) — proves the pipe + writes sample lake data",
@@ -1371,6 +1404,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Print discovery counts only; enrich nothing, take no lock",
+    )
+    enrich.add_argument(
+        "--feed",
+        choices=("groww", "dhan"),
+        default="groww",
+        help=(
+            "Feed (default groww — Groww behaviour byte-unchanged). 'dhan' enriches the "
+            "standalone Dhan feed under feeds/dhan/ (DEC-DHAN-ROLLING-OPTIONS-001)"
+        ),
+    )
+    enrich.add_argument(
+        "--dataset",
+        choices=("spot", "rolling-options"),
+        default="rolling-options",
+        help=(
+            "Dhan dataset (only with --feed dhan; default rolling-options): "
+            "'rolling-options' = re-enrich the ROLLING-ATM option bars (ATM±N per bar, "
+            "NOT per-contract) with Greeks. 'spot' has NO Greeks (index spot)"
+        ),
     )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
@@ -4763,6 +4815,7 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.raw_integrity_store import make_capture_hook_factory
     from brutex.data.sink import ParquetBarSink
+    from brutex.data.write_domain import primary_write_domain
 
     aws_creds = resolve_groww_aws_credentials()
     creds = GrowwCredentials(api_key=aws_creds.api_key, totp_secret=aws_creds.totp_secret)
@@ -4774,7 +4827,17 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     adapter = GrowwMarketAdapter(
         client=client, index=index, capture_hook_factory=make_capture_hook_factory(lake_root)
     )
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root), catalog=catalog)
+    # Pin D1-1 caller binding (DEC-WRITE-DOMAIN-CALLER-BINDING-001, review
+    # fold): the CLI live spot pull writes under the PRIMARY (Groww-exclusive)
+    # write domain, exactly like its two dashboard siblings — a mis-rooted
+    # dest (e.g. under `feeds/<vendor>/`) refuses typed BEFORE any byte is
+    # touched; every legitimate primary dest passes silently (the A/B
+    # byte-identity pinned through the real writer path). Wiring pinned by
+    # tests/unit/test_write_domain_binding_pin.py.
+    sink = ParquetBarSink(
+        writer=ParquetWriter(lake_root=lake_root, write_domain=primary_write_domain(lake_root)),
+        catalog=catalog,
+    )
     return adapter, sink
 
 
@@ -5375,6 +5438,185 @@ def _run_cli_greeks_enrich(
             file=sys.stderr,
         )
     return outcome
+
+
+def _run_dhan_fetch(  # pragma: no cover — real-run: needs AWS SSM creds + the dhanhq SDK
+    *, request: Any, dataset: str, resolved: Path
+) -> int:
+    """Execute the REAL Dhan pull (spot or rolling-ATM options); return the exit code.
+
+    The live-credential boundary — ``# pragma: no cover`` (needs real AWS SSM + the
+    ``dhanhq`` SDK), mirroring the spot precedents (``build_dhan_spot_clients`` / the
+    dashboard route's production seam). Held under ``keep_awake``; a ``rolling-options``
+    dataset drives the ROLLING-ATM ingest (ATM±N per bar, NOT per-contract), ``spot`` the
+    3-index series. Both nest under ``feeds/dhan/`` (Groww bytes untouched).
+    """
+    from brutex.dashboard.dhan_pull import default_dhan_spot_pull
+    from brutex.dashboard.dhan_rolling_pull import default_dhan_rolling_option_pull
+    from brutex.observability.power_keepawake import keep_awake
+
+    with keep_awake("brutex fetch --feed dhan"):
+        print(
+            f"[brutex] fetch --feed dhan --dataset {dataset} → {resolved}/feeds/dhan/",
+            file=sys.stderr,
+        )
+        if dataset == "rolling-options":
+            rolling = default_dhan_rolling_option_pull(request)
+            print(
+                "[brutex] fetch --feed dhan done — rolling-ATM (ATM±N per bar, NOT "
+                f"per-contract) keys={rolling.keys_planned} total_bars={rolling.total_bars} "
+                f"failed_windows={rolling.failed_windows}"
+            )
+        else:
+            spot = default_dhan_spot_pull(request)
+            print(
+                f"[brutex] fetch --feed dhan done — spot bars={spot.spot.total_bars} "
+                f"failed_windows={spot.spot.failed_windows}"
+            )
+    return EXIT_OK
+
+
+def cmd_fetch_dhan(
+    lake_root: Path | None,
+    *,
+    start: str | None,
+    end: str | None,
+    dataset: str,
+    dry_run: bool,
+) -> int:
+    """Pull the standalone read-only Dhan feed into ``feeds/dhan/`` (``fetch --feed dhan``).
+
+    The Dhan arm of ``brutex fetch`` (DEC-DHAN-ROLLING-OPTIONS-001) — a SEPARATE
+    read-only feed track, additive to Groww (``--feed groww`` is the default and leaves
+    Groww byte-unchanged). ``--dataset rolling-options`` pulls the ROLLING-ATM option
+    series (ATM±N per bar, NOT per-contract/per-expiry/per-strike — Dhan serves no option
+    chain) via the lean rolling spine; ``--dataset spot`` pulls the 3 index 1-minute
+    series. Always 1-minute; the tree nests under ``<lake_root>/feeds/dhan/`` (Groww bytes
+    untouched — path-structural attribution).
+
+    The range is HALF-OPEN ``[start, end)``; a blank ``--start`` defaults to the
+    UNIFIED rolling-options floor
+    (:func:`~brutex.adapters.dhan.constants.dhan_rolling_options_floor` —
+    ``max(dhan_history_floor(today_ist), the requested 2022-06-01 start)``,
+    DEC-DHAN-ROLLING-FLOOR-UNIFY-001; byte-identical to the previously-fixed
+    2022-06-01 default until the rolling term passes it, honest floor still
+    UNVERIFIED — a pre-servable span records clean-empty windows, never a
+    fabricated bar), a blank ``--end`` to today (UTC). The IST ``today`` is
+    resolved ONCE here and threaded on the request, so the spine's plan
+    chokepoint clamps from the SAME instant. ``--dry-run`` makes NO vendor call
+    and writes nothing (Golden Rule #1); the real run is the live-credential
+    boundary :func:`_run_dhan_fetch`.
+
+    Returns
+    -------
+    int
+        ``EXIT_OK`` on a clean run / dry-run; ``EXIT_USER_ERROR`` on a bad date range.
+    """
+    from brutex.adapters.dhan.constants import dhan_rolling_options_floor
+    from brutex.adapters.ingest_common import now_ist
+    from brutex.dashboard.dhan_pull import DhanPullRequest
+
+    resolved = _resolve_lake_root(lake_root)
+    today_ist = now_ist().date()
+    try:
+        start_d = date.fromisoformat(start) if start else dhan_rolling_options_floor(today_ist)
+        end_d = date.fromisoformat(end) if end else datetime.now(UTC).date()
+    except ValueError as exc:
+        print(f"[brutex] fetch --feed dhan: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if start_d >= end_d:
+        print(
+            f"[brutex] fetch --feed dhan: start {start_d.isoformat()} must be before "
+            f"end {end_d.isoformat()} (half-open [start, end))",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    label = (
+        "rolling-ATM options (ATM±N per bar, NOT per-contract)"
+        if dataset == "rolling-options"
+        else "spot indices"
+    )
+    request = DhanPullRequest(
+        lake_root=resolved, start=start_d, end=end_d, dry_run=dry_run, today=today_ist
+    )
+    if dry_run:
+        print(
+            f"[brutex] fetch --feed dhan --dataset {dataset} --dry-run — {label}; "
+            f"window=[{start_d.isoformat()}, {end_d.isoformat()}) lake: "
+            f"{resolved}/feeds/dhan/ — NO vendor call, writes nothing (Golden Rule #1)"
+        )
+        return EXIT_OK
+    return _run_dhan_fetch(request=request, dataset=dataset, resolved=resolved)
+
+
+def cmd_enrich_greeks_dhan(lake_root: Path | None, *, dataset: str) -> int:
+    """(Re-)enrich the Dhan ROLLING-ATM option bars with Greeks (``enrich-greeks --feed dhan``).
+
+    The Dhan arm of ``brutex enrich-greeks`` (DEC-DHAN-ROLLING-OPTIONS-001) — runs the ONE
+    fenced rolling-ATM Greeks pass
+    (:func:`~brutex.adapters.dhan.rolling_option_greeks.run_dhan_rolling_greeks_pass`) over
+    the stored rolling-ATM 1-minute OPTION bars under ``feeds/dhan/rolling_options/``
+    (ATM±N per bar, NOT per-contract). It makes ZERO vendor calls — the Greeks are priced
+    from the stored bars + the risk-free source — so it is a pure lake read/write. Dhan
+    SPOT is an INDEX (no Greeks), so ``--dataset spot`` is a loud refusal.
+
+    Returns
+    -------
+    int
+        ``EXIT_OK`` on a clean pass (incl. an empty lake — nothing to enrich);
+        ``EXIT_USER_ERROR`` for ``--dataset spot`` (index has no Greeks) or a missing
+        lake; ``EXIT_INTERNAL_ERROR`` on a quarantined / failed pass.
+
+    Raises
+    ------
+    LakeWriteHalt, GreeksEnrichPoolBroken
+        A pull-wide HOST condition (disk full / OOM / dead pool worker): CRITICAL alert
+        then re-raise (the ``enrich-greeks`` halt convention).
+    """
+    from brutex.adapters.dhan.rolling_option_greeks import run_dhan_rolling_greeks_pass
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+    from brutex.data.feed_root import feed_lake_root
+    from brutex.observability.power_keepawake import keep_awake
+
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="enrich-greeks")
+    if dataset != "rolling-options":
+        print(
+            "[brutex] enrich-greeks --feed dhan: Dhan SPOT is an INDEX (no Greeks); "
+            "use --dataset rolling-options",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    dhan_root = feed_lake_root(resolved, feed="dhan")
+    with keep_awake("brutex enrich-greeks --feed dhan"):
+        print(
+            f"[brutex] enrich-greeks --feed dhan — rolling-ATM Greeks (ATM±N per bar, "
+            f"NOT per-contract) over {dhan_root}",
+            file=sys.stderr,
+        )
+        try:
+            outcome = run_dhan_rolling_greeks_pass(lake_root=dhan_root)
+        except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+            _emit_pull_halt_alert(exc)
+            raise
+    if outcome.ok is None:
+        print(
+            "[brutex] enrich-greeks --feed dhan — no rolling-ATM option targets "
+            "(pull rolling options first); nothing to enrich"
+        )
+        return EXIT_OK
+    if outcome.ok is True and outcome.errored_targets == 0:
+        print("[brutex] enrich-greeks --feed dhan done — rolling-ATM Greeks, errored_targets=0")
+        return EXIT_OK
+    if outcome.ok is True:
+        print(
+            f"[brutex] enrich-greeks --feed dhan completed with {outcome.errored_targets} "
+            "quarantined target(s) — the stamp-driven pass is idempotent, re-run after fixing",
+            file=sys.stderr,
+        )
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] enrich-greeks --feed dhan FAILED ({outcome.error})", file=sys.stderr)
+    return EXIT_INTERNAL_ERROR
 
 
 def cmd_fetch(
@@ -8184,6 +8426,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # CLI-surface default only.
     overfit_gate: bool = True,
     dsr_min: float = 0.95,
+    single_event_max_best_day_pct: float | None = None,
     temporal_mode: str | None = None,
     temporal_min_profitable_frac: float | None = None,
     temporal_max_year_share: float | None = None,
@@ -8489,6 +8732,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # CascadeConfig default (1000) is byte-identical.
         mc_permutations = resolve_mc_permutations()
         stall_policy = resolve_stall_policy(per_tuple_estimate_s=None, workers=1)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001 (review round 1): validate
+    # the --single-event-max-best-day-pct knob EAGERLY via the ONE
+    # validate_single_event_pct law CascadeConfig.__post_init__ delegates to —
+    # junk (0, 100, -5, nan, inf) is a clean pre-sweep user-config error,
+    # never a ValueError first discovered at the automatic Stage-4 site AFTER
+    # the whole multi-day sweep has computed. Both dispatch paths funnel
+    # through this entry, so one eager pass covers both.
+    from brutex.metrics.cascade import validate_single_event_pct
+
+    try:
+        validate_single_event_pct(single_event_max_best_day_pct)
     except ValueError as exc:
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -9750,6 +10008,27 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
                     )
                     sweep_id = grid_identity(grid)
+                    # Train-b refresh fold (main@cbc2f581b): BOTH default-OFF
+                    # knobs share the ONE overrides seam — each rides the
+                    # manifest-stored cascade config ONLY when set, so the
+                    # MANUAL `brutex cascade` replay stays exact.
+                    # DEC-REHEARSAL-MC-BUDGET-001: the optional MC permutation
+                    # budget; None = no override = the byte-identical
+                    # production config.
+                    # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001: the
+                    # default-OFF single-event knob — None forwards no
+                    # override. Precisely: run identity + the CascadeReport
+                    # are byte-identical at defaults; the manifest
+                    # `cascade_config` block gains an additive
+                    # `"single_event_max_best_day_pct": null` field
+                    # (backward-compatible load; auto==manual golden green).
+                    cascade_overrides: dict[str, object] = {}
+                    if mc_permutations is not None:
+                        cascade_overrides["mc_n_permutations"] = mc_permutations
+                    if single_event_max_best_day_pct is not None:
+                        cascade_overrides["single_event_max_best_day_pct"] = (
+                            single_event_max_best_day_pct
+                        )
                     cascade_report = run_and_write_from_specs(
                         out_root,
                         sweep_id=sweep_id,
@@ -9758,18 +10037,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         bars_context=BarsContext(
                             exchange=exchange, segment=segment, start=start, end=end
                         ),
-                        # DEC-REHEARSAL-MC-BUDGET-001: the optional MC permutation
-                        # budget rides the EXISTING overrides seam, so the resolved
-                        # value lands in the manifest-stored cascade config and the
-                        # MANUAL `brutex cascade` replay stays exact; None = no
-                        # override = the byte-identical production config.
                         cascade_config=cascade_config_for_sweep(
                             sweep_id,
-                            overrides=(
-                                None
-                                if mc_permutations is None
-                                else {"mc_n_permutations": mc_permutations}
-                            ),
+                            overrides=cascade_overrides or None,
                         ),
                         stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                         leaderboard_trials=leaderboard_trials,
@@ -12864,6 +13134,14 @@ def _dispatch(argv: list[str] | None) -> int:
             open_browser=not args.no_browser,
         )
     if args.command == "fetch":
+        if args.feed == "dhan":
+            return cmd_fetch_dhan(
+                args.lake_root,
+                start=args.start,
+                end=args.end,
+                dataset=args.dataset,
+                dry_run=args.dry_run,
+            )
         return cmd_fetch(
             lake_root=args.lake_root,
             start=args.start,
@@ -12890,6 +13168,8 @@ def _dispatch(argv: list[str] | None) -> int:
             strict_exit=args.strict_exit,
         )
     if args.command == "enrich-greeks":
+        if args.feed == "dhan":
+            return cmd_enrich_greeks_dhan(args.lake_root, dataset=args.dataset)
         return cmd_enrich_greeks(
             args.lake_root,
             underlying=args.underlying,
@@ -12967,6 +13247,7 @@ def _dispatch(argv: list[str] | None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            single_event_max_best_day_pct=args.single_event_max_best_day_pct,
             temporal_mode=args.temporal_mode,
             temporal_min_profitable_frac=args.temporal_min_profitable_frac,
             temporal_max_year_share=args.temporal_max_year_share,
@@ -13026,6 +13307,7 @@ def _dispatch(argv: list[str] | None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            single_event_max_best_day_pct=args.single_event_max_best_day_pct,
             temporal_mode=args.temporal_mode,
             temporal_min_profitable_frac=args.temporal_min_profitable_frac,
             temporal_max_year_share=args.temporal_max_year_share,

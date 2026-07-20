@@ -98,7 +98,7 @@ class TestGuardRefusesRedCI:
         rollup: dict[str, Any] = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
-                for i in range(25)
+                for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -118,7 +118,7 @@ class TestGuardRefusesRedCI:
         rollup: dict[str, Any] = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
-                for i in range(25)
+                for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -135,7 +135,7 @@ class TestGuardRefusesRedCI:
         rollup = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
-                for i in range(25)
+                for i in range(50)
             ],
             "mergeable": "CONFLICTING",
             "number": 99,
@@ -163,7 +163,7 @@ class TestGuardAllowsGreenCI:
         rollup = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
-                for i in range(25)
+                for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -202,7 +202,7 @@ class TestOperatorOverride:
                     "conclusion": "FAILURE" if i == 0 else "SUCCESS",
                     "status": "COMPLETED",
                 }
-                for i in range(25)
+                for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -291,7 +291,7 @@ class TestIgnoreCheckNames:
         rollup: dict[str, Any] = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
-                for i in range(25)
+                for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -320,7 +320,7 @@ class TestIgnoreCheckNames:
         rollup: dict[str, Any] = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
-                for i in range(25)
+                for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -348,8 +348,8 @@ class TestIgnoreCheckNames:
     ) -> None:
         """The ignored check must NOT count toward the EXPECTED_MIN_CHECKS floor.
 
-        20 real green checks + the ignored self-check = 21 entries, but after
-        excluding the ignored one only 20 real checks remain — exactly the
+        45 real green checks + the ignored self-check = 46 entries, but after
+        excluding the ignored one only 45 real checks remain — exactly the
         floor, so the merge is allowed. (Without the exclusion-from-count this
         would still pass; this pins that the ignored entry is not double-counted
         as a real check that could mask an under-registered rollup.)
@@ -357,12 +357,12 @@ class TestIgnoreCheckNames:
         rollup: dict[str, Any] = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
-                for i in range(19)
+                for i in range(44)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
         }
-        # Only 19 real checks + the ignored one → 19 real < 20 floor → blocks.
+        # Only 44 real checks + the ignored one → 44 real < 45 floor → blocks.
         rollup["statusCheckRollup"].append(
             {"name": "Auto-merge on green CI", "conclusion": None, "status": "IN_PROGRESS"}
         )
@@ -373,7 +373,7 @@ class TestIgnoreCheckNames:
             extra_path=fake_bin,
         )
         assert result.returncode == 7, (
-            "with the ignored check excluded, only 19 real checks remain (< 20 "
+            "with the ignored check excluded, only 44 real checks remain (< 45 "
             f"floor) so the rollup is incomplete and must block; got {result.returncode}"
         )
 
@@ -388,7 +388,7 @@ class TestM4proNonblocking:
     REQUIRED check still gates fully and a failed m4pro is surfaced as a
     WARN-only line that never affects the exit code."""
 
-    def _green_rollup(self, count: int = 25) -> dict[str, Any]:
+    def _green_rollup(self, count: int = 50) -> dict[str, Any]:
         """A rollup of `count` green required-style checks (clears the floor)."""
         return {
             "statusCheckRollup": [
@@ -564,20 +564,20 @@ class TestM4proNonblocking:
     ) -> None:
         """The excluded m4pro entry must NOT inflate the rollup count.
 
-        19 real green checks + the excluded m4pro check = 20 raw entries,
-        but after the union-exclusion only 19 real checks remain — below the
-        EXPECTED_MIN_CHECKS floor of 20, so the gate must still block
+        44 real green checks + the excluded m4pro check = 45 raw entries,
+        but after the union-exclusion only 44 real checks remain — below the
+        EXPECTED_MIN_CHECKS floor of 45, so the gate must still block
         (the exact TestIgnoreCheckNames count-floor law, unioned in).
         """
-        rollup = self._green_rollup(count=19)
+        rollup = self._green_rollup(count=44)
         rollup["statusCheckRollup"].append(
             {"name": "m4pro-absolute-throughput", "conclusion": None, "status": "QUEUED"}
         )
         fake_bin = fake_gh_returning(json.dumps(rollup))
         result = _run_guard(99, {}, extra_path=fake_bin)
         assert result.returncode == 7, (
-            "with the non-blocking check excluded, only 19 real checks remain "
-            f"(< 20 floor) so the rollup is incomplete and must block; got {result.returncode}"
+            "with the non-blocking check excluded, only 44 real checks remain "
+            f"(< 45 floor) so the rollup is incomplete and must block; got {result.returncode}"
         )
 
     def test_nonblocking_constant_is_exactly_m4pro(self) -> None:
@@ -707,7 +707,7 @@ class TestOverrideRateLimit:
                 {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
             ]
             + [
-                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -737,7 +737,7 @@ class TestOverrideRateLimit:
                 {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
             ]
             + [
-                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -767,7 +767,7 @@ class TestOverrideRateLimit:
                 {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
             ]
             + [
-                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -798,7 +798,7 @@ class TestOverrideRateLimit:
                 {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
             ]
             + [
-                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -835,7 +835,7 @@ class TestOverrideRateLimit:
                 {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
             ]
             + [
-                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(50)
             ],
             "mergeable": "MERGEABLE",
             "number": 99,
@@ -854,3 +854,111 @@ class TestOverrideRateLimit:
         assert result.returncode == 8, (
             f"Wrong escalation token must still block; got exit {result.returncode}"
         )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# TRAIN A red-team mandate: statusCheckRollup PAGINATION
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRollupPagination:
+    """`gh pr view --json statusCheckRollup` returns only the first GraphQL
+    page (100 contexts). At exactly the 100-entry page cap the guard must
+    re-fetch the FULL check-run list via the paginated REST endpoint
+    (`gh api --paginate`) — otherwise a failed check beyond item 100 is
+    invisible (fail OPEN on a mega-train head). Below the cap the rollup is
+    complete by construction and the guard must not call `gh api` at all —
+    pinned implicitly by every OTHER test in this file: their fake `gh`
+    exits 2 on any non-`pr view` invocation, so an unexpected `gh api` call
+    would fail the paginated-fetch arm closed and flip their expected exit
+    codes."""
+
+    def _build_fake_gh(self, tmp_path: Path, status_json: str, api_ndjson: str | None) -> Path:
+        """Fake `gh` serving `pr view` (fixed JSON) + `api` (NDJSON or outage)."""
+        bindir = tmp_path / "fake-bin-paginated"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        if api_ndjson is None:
+            api_body = 'echo "synthetic gh api outage" >&2\n    exit 1'
+        else:
+            api_body = f"cat <<'NDJSON'\n{api_ndjson}\nNDJSON\n    exit 0"
+        gh.write_text(
+            f"""#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+    cat <<'JSON'
+{status_json}
+JSON
+    exit 0
+fi
+if [[ "$1" == "api" ]]; then
+    {api_body}
+fi
+echo "unexpected gh args: $*" >&2
+exit 2
+"""
+        )
+        gh.chmod(0o755)
+        return bindir
+
+    @staticmethod
+    def _capped_rollup() -> str:
+        """A pr-view payload whose rollup sits EXACTLY at the 100-entry cap."""
+        return json.dumps(
+            {
+                "statusCheckRollup": [
+                    {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
+                    for i in range(100)
+                ],
+                "mergeable": "MERGEABLE",
+                "number": 99,
+                "headRefOid": "a" * 40,
+            }
+        )
+
+    @staticmethod
+    def _rest_ndjson(total: int, failed_at: int | None = None) -> str:
+        """REST-shaped (lowercase) check-run NDJSON, as `gh api --jq` emits."""
+        lines = []
+        for i in range(total):
+            conclusion = "failure" if i == failed_at else "success"
+            lines.append(
+                json.dumps({"name": f"check-{i}", "status": "completed", "conclusion": conclusion})
+            )
+        return "\n".join(lines)
+
+    def test_failure_beyond_the_page_cap_blocks(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE case: rollup at the 100 cap, real check #110 FAILED.
+
+        Pre-pagination the guard scanned only the truncated first page (all
+        green) and approved the merge — fail OPEN. With pagination the REST
+        list (120 runs, one failure past item 100) must block, which ALSO
+        pins the lowercase-REST → UPPERCASE-GraphQL normalization.
+        """
+        fake_bin = self._build_fake_gh(
+            tmp_path, self._capped_rollup(), self._rest_ndjson(120, failed_at=110)
+        )
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 1, (
+            "a FAILED check beyond the 100-entry GraphQL page cap must block; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "check-110" in result.stdout or "check-110" in result.stderr
+
+    def test_green_paginated_rollup_allows(self, tmp_path: Path) -> None:
+        """All 120 paginated runs green → merge allowed (the happy path)."""
+        fake_bin = self._build_fake_gh(tmp_path, self._capped_rollup(), self._rest_ndjson(120))
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 0, (
+            "a fully-green paginated rollup must allow the merge; "
+            f"got exit {result.returncode}\nstdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    def test_failed_paginated_fetch_fails_closed(self, tmp_path: Path) -> None:
+        """gh api outage at the page cap → exit 3 (cannot measure ⇒ no merge)."""
+        fake_bin = self._build_fake_gh(tmp_path, self._capped_rollup(), None)
+        result = _run_guard(99, {}, extra_path=fake_bin)
+        assert result.returncode == 3, (
+            "a failed paginated fetch on a possibly-truncated rollup must fail "
+            f"CLOSED (exit 3); got exit {result.returncode}\nstderr={result.stderr!r}"
+        )
+        assert "paginated" in result.stderr.lower() or "truncated" in result.stderr.lower()

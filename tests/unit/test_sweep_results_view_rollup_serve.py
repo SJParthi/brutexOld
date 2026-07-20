@@ -411,6 +411,35 @@ class TestLeaderboardRouteRollup:
         resp = client.get("/api/v1/sweep/leaderboard", params={"gate": "gate:" + "f" * 16})
         assert resp.status_code == 400
 
+    def test_regime_robust_preset_never_touches_the_rollup(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Train-A refresh fold seam (DEC-REGIME-REJECT-TIER-001 ×
+        DEC-RESULTS-TOPK-ROLLUP-001): ``regime_robust`` is a
+        MEMBERSHIP-changing preset — its cascade-verdict cut applied over the
+        persisted K-union would silently under-serve (a regime-passing row
+        ranked below the union cut never appears), so the preset bypasses the
+        rollup and the LEGACY full scan owns it (the gate-scoped + composite-
+        preset fallback precedents). build_sweep_leaderboard's superset_only
+        guard enforces the same invariant structurally."""
+        lake_root = store.path.parent
+        _write_store(lake_root, [_row(1), _row(2)])
+        rr.rebuild_rollup(lake_root / SWEEPS_DIRNAME)
+
+        def _forbidden(root: Path, *, current_rev: str) -> object:
+            raise AssertionError("a regime_robust request must never consult the rollup")
+
+        monkeypatch.setattr(rr, "classify_rollup", _forbidden)
+        payload = client.get("/api/v1/sweep/leaderboard", params={"preset": "regime_robust"}).json()
+        legacy = build_sweep_leaderboard(lake_root, preset="regime_robust", top_n=50).to_dict()
+        assert payload == legacy
+        assert payload["available"] is True
+        assert payload["preset"] == "regime_robust"
+        # No cascade report on this lake — the honest zero counts ride the
+        # emit-on-present wire keys (never fabricated, never omitted here).
+        assert payload["regime_rejected_count"] == 0
+        assert payload["regime_unproven_count"] == 0
+
     def test_rank_by_and_top_ride_the_rollup(
         self, client: TestClient, store: InstrumentStore
     ) -> None:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, time
+from types import SimpleNamespace
 
 import pytest
 from brutex.calendars.market_hours import (
@@ -18,6 +20,7 @@ from brutex.calendars.market_hours import (
     resolve_market_hours_guard_enabled,
 )
 from brutex.calendars.nse import IST
+from brutex.pull_state_rust import PullStateKernelError
 
 # A verified NSE trading WEEKDAY (Thu 2026-05-07 — inside holiday coverage, not a
 # holiday) and a plain Saturday within coverage.
@@ -236,3 +239,72 @@ def test_resolve_market_closed_reads_os_environ_by_default(
     predicate = resolve_market_closed()
     monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _at(10, 0))
     assert predicate() is True
+
+
+# ── DEC-RUST-PULL-STATE-001 (flip phase) — the fail-closed kernel path ───────
+#
+# ``pull_allowed_now`` IS the ``brutex_pull_state`` kernel consult now: the
+# Python oracle body was DELETED, so the kernel is ALWAYS consulted and a
+# wheel fault propagates as the typed ``PullStateKernelError`` — the guard
+# fails CLOSED (a pull is refused, never silently allowed). These pins are
+# the inverse of the retired flag-OFF bomb-spy pins: the kernel IS consulted
+# (a stub's sentinel verdict is honoured), and every fault raises.
+
+
+class TestPullStateKernelPath:
+    def test_kernel_is_consulted_stub_sentinel_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deliberately-WRONG stub verdict is served — proving the kernel,
+        not a retained oracle, decides (the inverse of the old bomb-spy pin)."""
+
+        monkeypatch.setitem(
+            sys.modules,
+            "brutex_pull_state",
+            SimpleNamespace(pull_allowed_us=lambda us, flag: False),
+        )
+        # A Saturday evening is law-ALLOWED; the stub says False — and the
+        # guard serves the stub's answer (kernel consulted, oracle gone).
+        assert pull_allowed_now(_at(20, 0, day=_SATURDAY), False) is False
+
+    def test_missing_wheel_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No wheel ⇒ ``PullStateKernelError`` out of ``pull_allowed_now`` —
+        never a ``True`` (the shared-TOTP guard must never fail OPEN)."""
+
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # ImportError
+        with pytest.raises(PullStateKernelError):
+            pull_allowed_now(_at(1, 30), True)  # even an out-of-window instant raises
+
+    def test_raising_stub_propagates_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A raising kernel propagates as the typed error — the fail-closed pin."""
+
+        def boom(us: int, flag: bool) -> bool:
+            raise RuntimeError("poisoned wheel")
+
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", SimpleNamespace(pull_allowed_us=boom))
+        with pytest.raises(PullStateKernelError, match="kernel_error"):
+            pull_allowed_now(_at(10, 0), True)
+
+    def test_removed_knob_set_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A SET ``BRUTEX_PULL_STATE_RUST`` refuses the guard consult loudly."""
+        from brutex.pull_state_rust import PullStateFlagRemovedError
+
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        with pytest.raises(PullStateFlagRemovedError):
+            pull_allowed_now(_at(10, 0), True)
+
+    def test_real_wheel_serves_the_boundary_table(self) -> None:
+        """The REAL kernel serves the whole hand-derived boundary matrix."""
+        for hh, mm, ss, expected in [
+            (0, 0, 0, True),
+            (8, 44, 59, True),
+            (8, 45, 0, False),
+            (9, 15, 0, False),
+            (12, 0, 0, False),
+            (15, 34, 59, False),
+            (15, 35, 0, True),
+            (20, 0, 0, True),
+        ]:
+            assert pull_allowed_now(_at(hh, mm, ss), True) is expected, (hh, mm, ss)
+            # Non-trading: always allowed, any instant.
+            assert pull_allowed_now(_at(hh, mm, ss, day=_SATURDAY), False) is True

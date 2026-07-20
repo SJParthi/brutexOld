@@ -40,13 +40,18 @@ pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
 from brutex.data.lake_invariants import (
-    _engine_coord_from_path,
     build_lake_census,
     census_to_dict,
     scan_lake_invariants,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+
+
+@pytest.fixture(autouse=True)
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the ONE (Rust) scan arm — W-6a deleted the Python scan core."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
 
 
 def _partition(
@@ -288,19 +293,3 @@ class TestEngineMalformedPathAttribution:
         assert report.files_skipped == 1
         assert report.engine_files_skipped == 0
         assert build_lake_census(report).engine_clean is True
-
-
-class TestEngineCoordFromPath:
-    """Direct pins for the positional coord helper's defensive branches."""
-
-    def test_engine_series_recognized(self, tmp_path: Path) -> None:
-        p = _partition(tmp_path, symbol="SENSEX", exchange="BSE", segment="INDEX")
-        assert _engine_coord_from_path(p, tmp_path) == ("BSE", "INDEX", "SENSEX")
-
-    def test_path_outside_bars_returns_none(self, tmp_path: Path) -> None:
-        # relative_to(lake_root/bars) raises ValueError → honest None.
-        assert _engine_coord_from_path(tmp_path / "elsewhere" / "x.parquet", tmp_path) is None
-
-    def test_too_shallow_path_returns_none(self, tmp_path: Path) -> None:
-        # Under bars/ but fewer than 3 parts → honest None (never an IndexError).
-        assert _engine_coord_from_path(tmp_path / "bars" / "NSE", tmp_path) is None

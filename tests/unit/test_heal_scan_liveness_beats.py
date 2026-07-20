@@ -136,8 +136,14 @@ def _poison_engine_partition(lake_root: Path) -> None:
 class TestHealScanBeats:
     """The L2 heal scan's per-target / per-file / per-finding beat wiring."""
 
-    def test_clean_heal_scan_beats_per_target_and_per_file(self, tmp_path: Path) -> None:
+    def test_clean_heal_scan_beats_per_target_and_per_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """1 target + 1 scanned file ⇒ 2 beats (fail-before: ZERO beats)."""
+        # EXPLICIT flag-OFF since the W-5 default flip: the exact beat COUNT
+        # pins the PYTHON scanner's per-file beat wiring; the engaged crate
+        # arm's beat replay is pinned by the waved scan differential.
+        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
         lake_root = tmp_path / "lake"
         lake_root.mkdir()
         _write_engine_bar(lake_root)
@@ -281,7 +287,9 @@ class TestForensicReplay:
 class TestKeyedChannelRouting:
     """The heal/save beats ride the run's KEYED channel (DEC-PULL-BEAT-PERRUN-001)."""
 
-    def test_heal_and_save_beats_arrive_on_the_run_keyed_channel(self, tmp_path: Path) -> None:
+    def test_heal_and_save_beats_arrive_on_the_run_keyed_channel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The ambient-pull-id routing pin — the production `pull_jobs` pattern.
 
         `BackgroundPullJob._run` registers the run's beat KEYED on its own
@@ -296,6 +304,11 @@ class TestKeyedChannelRouting:
         """
         from brutex.observability.correlation import pull_id_scope
 
+        # EXPLICIT flag-OFF since the W-5 default flip: the exact keyed beat
+        # COUNT pins the PYTHON scanner's beat wiring (the crate arm's beat
+        # replay rides the SAME keyed channel but with its own cadence —
+        # pinned by the waved differentials).
+        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
         lake_root = tmp_path / "lake"
         lake_root.mkdir()
         _write_engine_bar(lake_root)

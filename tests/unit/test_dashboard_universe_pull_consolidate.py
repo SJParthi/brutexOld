@@ -227,7 +227,13 @@ def test_pull_all_spot_button_wired_scope_chip_and_verify_row() -> None:
     assert '"/api/v1/universe/pull-pipeline?scope=spot-only"' not in html, (
         "the arm-less URL form must not linger beside the self-arming one"
     )
-    wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split("function toggleMulti")[0]
+    # The wiring slice ends at the DHAN button const (the next handler on the
+    # page) — the standalone Dhan feed button legitimately reuses the date
+    # pickers (DEC-DHAN-PULL-SURFACE-001, MIGRATION.md entry #1797), so the
+    # spot-only full-range pin must scope to the ▶ Pull Spot handler alone.
+    wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split(
+        'getElementById("pullDhanBtn")'
+    )[0]
     assert "startAndPoll(" in wiring
     assert "pipelineDateQuery" not in wiring, (
         "the spot-only button must NOT thread the date pickers (full-range promise)"
@@ -270,7 +276,9 @@ def test_auto_pull_chip_seed_rides_the_one_pull_progress_fetch_site() -> None:
     assert "\nrefreshAutoPullChip();" in html, "the chip must seed at page load"
     # Post-click refresh: the ▶ Pull Spot onclick re-seeds (the arming took
     # effect even on a market-hours-refused start).
-    wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split("function toggleMulti")[0]
+    wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split(
+        'getElementById("pullDhanBtn")'
+    )[0]
     assert "refreshAutoPullChip();" in wiring, "the ▶ click must refresh the chip"
     # LIVE updates: pollProgress renders the chip from its own payload — the
     # subscription that makes the one-shot seed sufficient.

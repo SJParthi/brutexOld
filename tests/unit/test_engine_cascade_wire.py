@@ -1046,6 +1046,7 @@ class TestFuturesRollScheduleCarriage:
             lockbox_min_trades: int,
             roll_schedule: tuple[int, ...] | None = None,
             family_cap: int | None = None,
+            compute_regime_evidence: bool = False,
         ) -> list[Any]:
             calls.append((spec.instrument, roll_schedule))
             return []

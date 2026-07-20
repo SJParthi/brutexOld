@@ -54,6 +54,13 @@ from brutex.data.registry_store import RegistryStore
 from tests.fakes.lake_poison import poison_partition as _poison_partition
 from tests.fakes.lake_poison import stored_timestamps as _stored_timestamps
 
+
+@pytest.fixture(autouse=True)
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the ONE (Rust) heal/scan arm — W-6a deleted the Python cores."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
+
+
 _NOW = datetime(2026, 6, 14, 9, 15, tzinfo=UTC)
 _RUN_ID = "heal-seam-test"
 _FETCHED = datetime(2026, 1, 1, tzinfo=UTC)

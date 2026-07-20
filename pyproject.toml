@@ -171,10 +171,23 @@ src = ["brutex", "tests"]
 # hooks (which pass --force-exclude) match the CI scope (`ruff check brutex
 # tests`); DEC-SETTLE-EVIDENCE-ADOPTION-001 made the standing posture
 # mechanical when the emitter edits first put the file in a hook-scanned diff.
+# The sweep-core perf-reconcile RAW measurement scripts (tri-fold PR #1698,
+# DEC-RUST-SWEEP-CORE docs evidence) are the same class: committed raw
+# scratch evidence under docs/, outside the CI lint scope, first pulled into
+# a hook-scanned push range by the brutex-ops merge-forward over main
+# 1a3f4852 — force-excluded on the SAME standing posture so the local
+# pre-push ruff hooks match `ruff check brutex tests` (the files stay
+# byte-identical to main).
 extend-exclude = [
     "tests/redteam/fixtures/*.stripped.py",
     "tests/redteam/fixtures/planted_*.py",
     "docs/groww/probe/postclose_settle_probe.py",
+    "docs/design/sweep_core/perf_reconcile_raw/*.py",
+    # The sweep-core design measurement scripts landed on main outside the
+    # CI lint scope (`ruff check brutex tests`); force-excluded so the
+    # pre-commit ruff hooks (--force-exclude) match it (the #1775 probe
+    # precedent — see .pre-commit-config.yaml's scoped exclude note).
+    "docs/design/sweep_core",
 ]
 
 [tool.ruff.lint]
@@ -311,7 +324,7 @@ no_implicit_reexport = true
 # site (e.g. strategies/combo.py -> fno_math.blake3_hash) failed the hook with
 # `no-any-return` on files the commit never touched. mypy_path lets BOTH envs
 # resolve the same in-repo stubs (mypy has no CLI flag for this — config only).
-mypy_path = ["rust/fno-math/python", "rust/trading-core/python", "rust/brutex-feed/python"]
+mypy_path = ["rust/fno-math/python", "rust/trading-core/python", "rust/brutex-feed/python", "rust/brutex-pull-state/python"]
 # DEC-P0-004 Agent 5 HIGH fix: pyright [tool.pyright] exclude already
 # covers redteam planted-bug fixtures; mypy needs the same exclusion or
 # strict mode will trip on the intentional bugs on every PR.
@@ -363,6 +376,7 @@ module = [
     "trading_core", "trading_core.*",
     "fno_math", "fno_math.*",
     "brutex_feed", "brutex_feed.*",  # DEC-FEED-RUST-CORE-001: same in-repo shim promotion class
+    "brutex_pull_state", "brutex_pull_state.*",  # `DEC-RUST-PULL-STATE-001` lane (unminted): same in-repo shim promotion class
 ]
 follow_imports = "silent"
 
