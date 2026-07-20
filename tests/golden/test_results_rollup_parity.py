@@ -78,6 +78,14 @@ def _row(
         max_drawdown_pct=(max_drawdown_pct if max_drawdown_pct is not None else (x % 1000) / 1000),
         avg_entry_price=Decimal("100.00"),
         avg_exit_price=Decimal("101.00"),
+        # The four NULLABLE metrics-preset axes union_axes() self-extended to
+        # since #1699 (DEC-METRICS-*) — seed/x-distinct finite values so every
+        # union axis (concrete AND nullable) genuinely discriminates in the
+        # parity + trim goldens (a real sweep row always carries them).
+        log_growth_at_half_kelly=((x % 3000) - 1500) / 1000,
+        sl_hit_rate=(x % 1001) / 1000,
+        trailing_sharpe_ratio=((x % 6000) - 3000) / 1000,
+        decay_weighted_net_paisa=float((x % 1_000_000) - 500_000),
     )
 
 

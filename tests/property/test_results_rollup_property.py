@@ -52,6 +52,14 @@ def _row_from(seed: int, x: int) -> ResultRow:
         max_drawdown_pct=((x >> 9) % 100) / 100,
         avg_entry_price=Decimal("100.00"),
         avg_exit_price=Decimal("101.00"),
+        # The four NULLABLE metrics-preset axes union_axes() self-extended to
+        # since #1699 (DEC-METRICS-*) — x-distinct finite values so the prefix /
+        # monotonicity / order-independence properties exercise those axes with
+        # real data (a real sweep row always carries them).
+        log_growth_at_half_kelly=((x % 3000) - 1500) / 1000,
+        sl_hit_rate=(x % 101) / 100,
+        trailing_sharpe_ratio=((x % 600) - 300) / 100,
+        decay_weighted_net_paisa=float((x % 100_000) - 50_000),
     )
 
 

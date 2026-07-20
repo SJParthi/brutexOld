@@ -82,6 +82,15 @@ def _row(
         avg_entry_price=Decimal("100.00"),
         avg_exit_price=Decimal("101.00"),
         vix_mean=vix_mean,
+        # The four NULLABLE metrics-preset axes union_axes() self-extended to
+        # since #1699 (DEC-METRICS-*): a real sweep-written row ALWAYS carries
+        # concrete values here (the spine threads the counters), so the fakes
+        # carry seed-distinct finite values — the union axes discriminate and
+        # the trim's nulls-last sort has real data to order.
+        log_growth_at_half_kelly=0.01 + seed / 1000,
+        sl_hit_rate=0.3 + seed / 10_000,
+        trailing_sharpe_ratio=0.8 + seed / 1000,
+        decay_weighted_net_paisa=float(1_000 + seed),
     )
 
 
@@ -205,13 +214,40 @@ def reset_derivation() -> Any:
 
 
 class TestUnionAxes:
-    def test_axes_are_the_14_rankables_desc_plus_min_dd_asc(self) -> None:
-        axes = rr.union_axes()
-        assert len(axes) == len(view.RANKABLE_COLUMNS) + 1
-        by_field = {(a.field, a.descending) for a in axes}
+    def test_axes_are_the_rankables_desc_plus_probed_preset_axes(self) -> None:
+        """The union == 14 RANKABLE_COLUMNS DESC ∪ every axis a live preset
+        probes over a persisted RankRecord field — asserted by set-equality
+        against an INDEPENDENT re-derivation from the SAME live registry
+        ``union_axes()`` reads, NOT a stale ``len == 14 + 1`` count (#1699 grew
+        the registry with the DEC-METRICS-* metrics presets 15 → 19, so the
+        ``min_dd_first`` ASC axis is now joined by four nullable preset axes;
+        the structural pin re-derives, a literal would drift)."""
+        import dataclasses
+
+        from brutex.ranking import presets as ranking_presets
+
+        by_field = {(a.field, a.descending) for a in rr.union_axes()}
+        # Intent sub-checks: every RANKABLE column rides its DESC rank_by axis,
+        # and the min_dd_first primary rides its ASC axis.
         for col in view.RANKABLE_COLUMNS:
             assert (col, True) in by_field
         assert ("max_drawdown_pct", False) in by_field  # the min_dd_first primary
+        # The FULL structural law: re-derive the expected axis set the SAME way
+        # union_axes() does (14 RANKABLE DESC + every non-inert persisted
+        # RankRecord field a live preset is sensitive to) and assert equality.
+        expected = {(col, True) for col in view.RANKABLE_COLUMNS}
+        row_fields = {f.name for f in dataclasses.fields(ResultRow)}
+        rank_fields = (
+            f.name for f in dataclasses.fields(ranking_presets.RankRecord) if f.name != "run_id"
+        )
+        for field_name in rank_fields:
+            if field_name in view.PRESET_INERT_AXES or field_name not in row_fields:
+                continue
+            for preset_name in ranking_presets.PRESET_NAMES:
+                direction = rr._probe_preset_axis_direction(preset_name, field_name)
+                if direction is not None:
+                    expected.add((field_name, direction))
+        assert by_field == expected
 
     def test_axes_are_memoised(self) -> None:
         assert rr.union_axes() is rr.union_axes()
@@ -328,7 +364,58 @@ class TestTrimToUnion:
                 pool.sort(key=lambda r: getattr(r, axis.field), reverse=axis.descending)
             assert [r.run_id for r in rows[:k]] == [r.run_id for r in kept_list[:k]]
 
-            # ────── era scan + AuditCursor ──────
+    def test_none_bearing_axis_does_not_crash_and_ranks_nulls_last(self) -> None:
+        """TEETH (i) — the None-safe union-axes sort (DEC-METRICS-* #1699 nullable
+        axes): a ``None`` on a nullable union axis no longer raises the raw
+        ``getattr`` sort's ``None``-vs-``None`` :class:`TypeError`, and ranks
+        NULLS-LAST — the concrete-valued rows take that axis's top-k prefix, a
+        ``None`` row never does. REVERTING the None-safe dispatch to the raw
+        ``getattr`` sort reds this pin (the TypeError re-appears)."""
+        # Base row: EVERY concrete axis identical across the set (all 15 non-null
+        # axes tie -> their top-k is the run_id prefix {seed 1,2}); the three
+        # other nullable axes are None for all rows (they tie too). Only
+        # sl_hit_rate discriminates: rows 5,6 carry the two highest concrete
+        # values, rows 1-4 carry None.
+        base = _row(seed=0)
+        concrete_sl = {5: 0.9, 6: 0.8}
+        rows = [
+            replace(
+                base,
+                run_id=_run_id(seed),
+                log_growth_at_half_kelly=None,
+                trailing_sharpe_ratio=None,
+                decay_weighted_net_paisa=None,
+                sl_hit_rate=concrete_sl.get(seed),
+            )
+            for seed in range(1, 7)
+        ]
+        kept_ids = {r.run_id for r in rr.trim_to_union(rows, 2)}  # must NOT raise
+        # sl_hit_rate DESC top-2 = the two CONCRETE rows (None ranks LAST), so
+        # they enter the union via that axis. Under a None-FIRST bug the None
+        # rows would fill the prefix and {5,6} would be excluded (the 15 tied
+        # axes + the run_id prefix keep only {seed 1,2}).
+        assert _run_id(5) in kept_ids
+        assert _run_id(6) in kept_ids
+
+    def test_all_non_none_order_matches_the_raw_getattr_sort(self) -> None:
+        """TEETH (ii) — the fix is ADDITIVE None-handling only: with every axis
+        value concrete, the None-safe dispatch keeps the BYTE-IDENTICAL kept set
+        of the pre-remedy raw ``getattr`` union, so a non-None rollup is never
+        reordered."""
+        rows = [
+            _row(seed=i, sharpe=float(i % 4), net_pnl_paisa=10_000 - 3 * i) for i in range(1, 40)
+        ]
+        k = 5
+        kept_ids = {r.run_id for r in rr.trim_to_union(rows, k)}
+        # Independently union the exact pre-remedy raw-getattr top-k prefixes.
+        base = sorted(rows, key=lambda r: r.run_id)
+        expected: set[str] = {r.run_id for r in base[:k]}
+        for axis in rr.union_axes():
+            ordered = sorted(base, key=lambda r: getattr(r, axis.field), reverse=axis.descending)
+            expected.update(r.run_id for r in ordered[:k])
+        assert kept_ids == expected
+
+        # ────── era scan + AuditCursor ──────
 
 
 class TestSnapshotEras:

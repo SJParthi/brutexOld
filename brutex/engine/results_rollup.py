@@ -97,10 +97,21 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.partition_lock import partition_write_lock
+
+# The three ``_`` names are a FRIEND import (DEC-P0-017 reportPrivateUsage
+# convention, per-line ignore): ``trim_to_union`` REUSES ResultsStore.top_k's
+# EXACT nulls-last sort-key law (§11 COMMON — the ONE null-placement law of
+# DEC-METRICS-KELLY-GROWTH-001, never re-derived), so a NULLABLE union axis (the
+# DEC-METRICS-* preset fields #1699 grew ``union_axes()`` to include) ranks
+# NULLS-LAST identically to top_k and the per-axis sort never raises the
+# ``None``-vs-``None`` TypeError.
 from brutex.engine.results_store import (
+    _NULLABLE_RANKABLE_FIELDS,  # pyright: ignore[reportPrivateUsage]
     ResultRow,
     ResultsStore,
     ResultsStoreError,
+    _field_getter,  # pyright: ignore[reportPrivateUsage]
+    _nullable_field_getter,  # pyright: ignore[reportPrivateUsage]
 )
 from brutex.models import BruteXError
 
@@ -124,7 +135,7 @@ from brutex.orchestrator.audit import GENESIS_PREV_HASH, AuditEntry, AuditError
 from brutex.ranking import presets as ranking_presets
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
 
     # Engine→engine only. This module deliberately has NO module-level import
     # of brutex.dashboard.* (not even TYPE_CHECKING — the CodeQL cycle fix):
@@ -438,6 +449,16 @@ def trim_to_union(rows: Iterable[ResultRow], k: int = ROLLUP_K) -> tuple[ResultR
     (stable run_id-ASC pre-sort, then ONE stable sort on the axis field), so
     each prefix is the axis's genuine total-order head; the run_id-ASC prefix
     rides unconditionally (the ``composite``-preset / generic-tie cover).
+    A **nullable** union axis (the DEC-METRICS-* preset fields
+    :func:`union_axes` self-extended to include since #1699) ranks under
+    ``ResultsStore.top_k``'s SAME nulls-last law — REUSED via the store's
+    ``_nullable_field_getter`` (never re-derived, §11 COMMON): a ``None`` value
+    (a pre-extension store's honest unknown or an anchor-less run) ranks AFTER
+    every real value in BOTH directions, so it can never occupy a top-k prefix
+    slot it could not hold under the preset — and the raw ``getattr`` sort's
+    ``None``-vs-``None`` :class:`TypeError` is gone. Every always-concrete axis
+    keeps the byte-identical ``_field_getter`` == raw ``getattr`` key, so an
+    all-non-``None`` rollup's order is unchanged.
     Kept rows return in run_id-sorted order. O(axes · R log R) time; additions
     only ever DEMOTE rows (trim monotonicity — a row outside every axis's
     top-k can never re-enter under further additions; property-pinned), so
@@ -449,8 +470,18 @@ def trim_to_union(rows: Iterable[ResultRow], k: int = ROLLUP_K) -> tuple[ResultR
         return tuple(ordered_base)
     kept: set[str] = {r.run_id for r in ordered_base[:k]}
     for axis in union_axes():
+        # Dispatch the per-axis sort key EXACTLY as ``ResultsStore.top_k`` does
+        # (the ONE nulls-last law reused, never copied): a nullable rankable
+        # axis rides ``_nullable_field_getter`` (presence-flag NULLS-LAST in
+        # both directions); every other axis rides ``_field_getter`` == raw
+        # ``getattr`` (byte-identical order).
+        key: Callable[[ResultRow], float] | Callable[[ResultRow], tuple[int, float]]
+        if axis.field in _NULLABLE_RANKABLE_FIELDS:
+            key = _nullable_field_getter(axis.field, descending=axis.descending)
+        else:
+            key = _field_getter(axis.field)
         ordered = list(ordered_base)
-        ordered.sort(key=lambda r: getattr(r, axis.field), reverse=axis.descending)
+        ordered.sort(key=key, reverse=axis.descending)
         kept.update(r.run_id for r in ordered[:k])
     return tuple(r for r in ordered_base if r.run_id in kept)
 
