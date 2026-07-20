@@ -174,6 +174,16 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // statistics kernels. Additive registration only; existing registrations
     // above are untouched. Later slice-6 PRs append inside this fence.
     m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
+    // ── DEC-METRICS-RUST-STATS-002 (slice 6, PR-2 — the stats tails):
+    // DSR (PSR + SR_0), PBO/CSCV and WFO kernels. Additive appends only,
+    // inside the same slice-6 fence; existing registrations untouched.
+    m.add_function(wrap_pyfunction!(stats::deflated_sharpe::stats_psr, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        stats::deflated_sharpe::stats_expected_max_sharpe,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(stats::pbo::stats_pbo_cscv, m)?)?;
+    m.add_function(wrap_pyfunction!(stats::wfo::stats_wfo_pass_count, m)?)?;
     // ---- end stats module ----
     Ok(())
 }

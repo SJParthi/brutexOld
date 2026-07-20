@@ -81,6 +81,12 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "metrics_fold_trades",
     "popcount_bytes",
     "stats_cpcv_pass_count",
+    # DEC-METRICS-RUST-STATS-002 — the slice-6 PR-2 stats-tail kernels
+    # (DSR PSR/SR_0 + PBO/CSCV + WFO; fenced additive entries).
+    "stats_expected_max_sharpe",
+    "stats_pbo_cscv",
+    "stats_psr",
+    "stats_wfo_pass_count",
     "sweep_drawdown_stats",
 )
 
@@ -135,6 +141,10 @@ from ._fno_math import (  # noqa: E402
     metrics_fold_trades,
     popcount_bytes,
     stats_cpcv_pass_count,
+    stats_expected_max_sharpe,
+    stats_pbo_cscv,
+    stats_psr,
+    stats_wfo_pass_count,
     sweep_drawdown_stats,
 )
 
@@ -172,5 +182,9 @@ __all__ = [
     "metrics_fold_trades",
     "popcount_bytes",
     "stats_cpcv_pass_count",
+    "stats_expected_max_sharpe",
+    "stats_pbo_cscv",
+    "stats_psr",
+    "stats_wfo_pass_count",
     "sweep_drawdown_stats",
 ]
