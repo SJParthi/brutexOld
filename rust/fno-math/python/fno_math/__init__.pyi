@@ -149,6 +149,7 @@ class CalendarVerdictEngine:
         bse_only: list[int],
         muhurat: list[tuple[int, int, int]],
         special_weekend: list[tuple[int, int, int]],
+        extended: list[tuple[int, int, int]],
         coverage_first_year: int,
         coverage_last_year: int,
         session_open_s: int,

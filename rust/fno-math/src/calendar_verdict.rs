@@ -84,6 +84,11 @@ pub struct CalendarEngine {
     bse_only: HashSet<i32>,
     muhurat: HashMap<i32, (u32, u32)>,
     special_weekend: HashMap<i32, (u32, u32)>,
+    /// Per-date EXTENDED sessions (DEC-EXTENDED-SESSION-OUTAGE-001 — the
+    /// 2021-02-24 NSE exchange-outage day, close extended to 17:00 IST).
+    /// Mirrors `nse.EXTENDED_SESSIONS`: REGULAR type, resolved AFTER the
+    /// special-weekend tier and BEFORE the regular arm in both session twins.
+    extended: HashMap<i32, (u32, u32)>,
     coverage_first_year: i32,
     coverage_last_year: i32,
     session_open_s: u32,
@@ -100,6 +105,7 @@ impl CalendarEngine {
         bse_only: Vec<i32>,
         muhurat: Vec<(i32, u32, u32)>,
         special_weekend: Vec<(i32, u32, u32)>,
+        extended: Vec<(i32, u32, u32)>,
         coverage_first_year: i32,
         coverage_last_year: i32,
         session_open_s: u32,
@@ -114,6 +120,7 @@ impl CalendarEngine {
                 .into_iter()
                 .map(|(d, o, c)| (d, (o, c)))
                 .collect(),
+            extended: extended.into_iter().map(|(d, o, c)| (d, (o, c))).collect(),
             coverage_first_year,
             coverage_last_year,
             session_open_s,
@@ -199,14 +206,19 @@ impl CalendarEngine {
     }
 
     /// Unguarded `get_session` → `(type, open_s, close_s)` or `None`.
-    /// Resolution order: Muhurat → special weekend → regular-if-trading →
-    /// `None`. An out-of-coverage weekday FABRICATES a regular session —
+    /// Resolution order: Muhurat → special weekend → extended →
+    /// regular-if-trading → `None` (the `_py_get_session` tier order —
+    /// DEC-EXTENDED-SESSION-OUTAGE-001 added the extended tier on main).
+    /// An out-of-coverage weekday FABRICATES a regular session —
     /// the documented, load-bearing unguarded behaviour, preserved verbatim.
     pub fn get_session(&self, ordinal: i32, sel: u8) -> Option<(u8, u32, u32)> {
         if let Some(&(open_s, close_s)) = self.muhurat.get(&ordinal) {
             return Some((SESSION_MUHURAT, open_s, close_s));
         }
         if let Some(&(open_s, close_s)) = self.special_weekend.get(&ordinal) {
+            return Some((SESSION_REGULAR, open_s, close_s));
+        }
+        if let Some(&(open_s, close_s)) = self.extended.get(&ordinal) {
             return Some((SESSION_REGULAR, open_s, close_s));
         }
         if !self.is_trading_day(ordinal, sel) {
@@ -217,11 +229,17 @@ impl CalendarEngine {
 
     /// `get_session_checked` → `(verdict, type, open_s, close_s)`; verdict
     /// `0` None / `1` Some / `2` RAISE (type/open/close are 0 for 0 and 2).
+    /// The extended tier is data-complete — it resolves TRUE without raising
+    /// even out of coverage, exactly like Muhurat / special weekend
+    /// (the `_py_get_session_checked` tier order).
     pub fn get_session_checked(&self, ordinal: i32, sel: u8) -> (i8, u8, u32, u32) {
         if let Some(&(open_s, close_s)) = self.muhurat.get(&ordinal) {
             return (VERDICT_TRUE, SESSION_MUHURAT, open_s, close_s);
         }
         if let Some(&(open_s, close_s)) = self.special_weekend.get(&ordinal) {
+            return (VERDICT_TRUE, SESSION_REGULAR, open_s, close_s);
+        }
+        if let Some(&(open_s, close_s)) = self.extended.get(&ordinal) {
             return (VERDICT_TRUE, SESSION_REGULAR, open_s, close_s);
         }
         match self.is_trading_day_checked(ordinal, sel) {
@@ -407,6 +425,7 @@ impl CalendarVerdictEngine {
         bse_only: Vec<i32>,
         muhurat: Vec<(i32, u32, u32)>,
         special_weekend: Vec<(i32, u32, u32)>,
+        extended: Vec<(i32, u32, u32)>,
         coverage_first_year: i32,
         coverage_last_year: i32,
         session_open_s: u32,
@@ -419,6 +438,7 @@ impl CalendarVerdictEngine {
                 bse_only,
                 muhurat,
                 special_weekend,
+                extended,
                 coverage_first_year,
                 coverage_last_year,
                 session_open_s,
@@ -539,6 +559,9 @@ mod tests {
     const OOC_FRI_2027: i32 = 739_982;
     /// 2026-12-31 (Thursday, last covered trading day).
     const THU_2026_12_31: i32 = 739_981;
+    /// 2021-02-24 (Wednesday) — the NSE exchange-outage EXTENDED session
+    /// (close 17:00 IST; DEC-EXTENDED-SESSION-OUTAGE-001).
+    const OUTAGE_WED_2021: i32 = 737_845;
 
     fn engine() -> CalendarEngine {
         CalendarEngine::new(
@@ -547,6 +570,7 @@ mod tests {
             vec![],
             vec![(MUHURAT_2025, 49_500, 53_100)], // 13:45–14:45
             vec![(BUDGET_SAT_2025, 33_300, 55_800)],
+            vec![(OUTAGE_WED_2021, 33_300, 61_200)], // 09:15–17:00
             2020,
             2026,
             33_300, // 09:15
@@ -605,6 +629,7 @@ mod tests {
             vec![],
             vec![],
             vec![(BUDGET_SAT_2025, 33_300, 55_800)],
+            vec![],
             2020,
             2024,
             33_300,
@@ -660,6 +685,58 @@ mod tests {
         assert_eq!(
             eng.get_session_checked(REPUBLIC_2026, 0),
             (VERDICT_FALSE, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn extended_session_resolution() {
+        // DEC-EXTENDED-SESSION-OUTAGE-001: 2021-02-24 (a plain Wednesday
+        // trading day) carries the extended 09:15–17:00 close on BOTH
+        // session twins — REGULAR type, the tier between special-weekend
+        // and the regular arm (`_py_get_session` order).
+        let eng = engine();
+        assert_eq!(
+            eng.get_session(OUTAGE_WED_2021, 0),
+            Some((SESSION_REGULAR, 33_300, 61_200))
+        );
+        assert_eq!(
+            eng.get_session_checked(OUTAGE_WED_2021, 0),
+            (VERDICT_TRUE, SESSION_REGULAR, 33_300, 61_200)
+        );
+        // Trading-day verdicts are untouched by the extended tier (the date
+        // is a plain weekday non-holiday either way).
+        assert!(eng.is_trading_day(OUTAGE_WED_2021, 0));
+        assert_eq!(eng.is_trading_day_checked(OUTAGE_WED_2021, 0), VERDICT_TRUE);
+        // `daily_derive_cutoff` inherits the extended close through
+        // `get_session`: at exactly 17:00 the session is still forming
+        // (strict `>`); one microsecond later it derives.
+        let extended_close_us = 61_200_u64 * 1_000_000;
+        assert_eq!(
+            eng.daily_derive_cutoff(OUTAGE_WED_2021, extended_close_us, 0),
+            OUTAGE_WED_2021
+        );
+        assert_eq!(
+            eng.daily_derive_cutoff(OUTAGE_WED_2021, extended_close_us + 1, 0),
+            OUTAGE_WED_2021 + 1
+        );
+        // The data-complete checked resolution mirrors muhurat/special
+        // weekend: a narrow-coverage engine still answers TRUE for the
+        // extended date instead of raising.
+        let narrow = CalendarEngine::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![(OUTAGE_WED_2021, 33_300, 61_200)],
+            2023,
+            2026,
+            33_300,
+            55_800,
+        );
+        assert_eq!(
+            narrow.get_session_checked(OUTAGE_WED_2021, 0),
+            (VERDICT_TRUE, SESSION_REGULAR, 33_300, 61_200)
         );
     }
 
@@ -739,6 +816,7 @@ mod tests {
         let eng = CalendarEngine::new(
             vec![REPUBLIC_2026],
             vec![nse_div],
+            vec![],
             vec![],
             vec![],
             vec![],

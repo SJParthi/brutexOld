@@ -7,7 +7,9 @@
 //! [`fno_math::calendar_verdict::CalendarEngine`], with the engine CONFIG
 //! **derived from the fixture itself** (holiday ordinals = weekday records
 //! whose `td` is false with no special/Muhurat session; Muhurat +
-//! special-weekend sessions = the records that carry them; coverage span =
+//! special-weekend sessions = the records that carry them; extended
+//! sessions = trading weekdays whose bounds differ from the regular bounds
+//! — DEC-EXTENDED-SESSION-OUTAGE-001, 2021-02-24; coverage span =
 //! the fixture meta) — so NO calendar data is duplicated into Rust
 //! (ADR-0012 D8: the data stays in `brutex.calendars`; the Python-side
 //! flag-ON golden proves the real nse.py-built config, THIS test proves the
@@ -118,7 +120,27 @@ fn engine_from_fixture(doc: &serde_json::Value) -> CalendarEngine {
     let mut holidays: Vec<i32> = Vec::new();
     let mut muhurat: Vec<(i32, u32, u32)> = Vec::new();
     let mut special: Vec<(i32, u32, u32)> = Vec::new();
+    let mut extended: Vec<(i32, u32, u32)> = Vec::new();
+    // Pass 1: the regular session bounds — the FIRST plain trading weekday
+    // (2020-01-01 in the frozen span). Needed BEFORE classification so an
+    // extended day (a trading weekday whose bounds differ from the regular
+    // bounds — DEC-EXTENDED-SESSION-OUTAGE-001, 2021-02-24 close 17:00) can
+    // be told apart from a regular record wherever it sits in the table.
     let mut session_bounds: Option<(u32, u32)> = None;
+    for record in days {
+        let td = record["td"].as_bool().expect("td");
+        let m = record["m"].as_bool().expect("m");
+        let w = record["w"].as_bool().expect("w");
+        if td && !w && !m {
+            let session = &record["s"];
+            let o = parse_iso_time(session["o"].as_str().expect("regular open"));
+            let c = parse_iso_time(session["c"].as_str().expect("regular close"));
+            session_bounds = Some((o, c));
+            break;
+        }
+    }
+    let (open_s, close_s) = session_bounds.expect("a regular session exists in the span");
+    // Pass 2: classify every record against the derived bounds.
     for record in days {
         let ordinal = parse_iso_date(record["d"].as_str().expect("d"));
         let td = record["td"].as_bool().expect("td");
@@ -141,13 +163,16 @@ fn engine_from_fixture(doc: &serde_json::Value) -> CalendarEngine {
             // holiday (Muhurat weekdays are holidays in the real data too).
             holidays.push(ordinal);
         }
-        if session_bounds.is_none() && td && !w && !m {
-            let o = parse_iso_time(session["o"].as_str().expect("regular open"));
-            let c = parse_iso_time(session["c"].as_str().expect("regular close"));
-            session_bounds = Some((o, c));
+        if td && !w && !m {
+            let o = parse_iso_time(session["o"].as_str().expect("trading open"));
+            let c = parse_iso_time(session["c"].as_str().expect("trading close"));
+            if (o, c) != (open_s, close_s) {
+                // A trading weekday with non-regular bounds is an EXTENDED
+                // session (2021-02-24, the NSE exchange-outage day).
+                extended.push((ordinal, o, c));
+            }
         }
     }
-    let (open_s, close_s) = session_bounds.expect("a regular session exists in the span");
     let meta = &doc["meta"];
     CalendarEngine::new(
         holidays,
@@ -155,6 +180,7 @@ fn engine_from_fixture(doc: &serde_json::Value) -> CalendarEngine {
         vec![], // BSE_ONLY — empty by verified fact
         muhurat,
         special,
+        extended,
         meta["coverage_first_year"].as_i64().expect("first year") as i32,
         meta["coverage_last_year"].as_i64().expect("last year") as i32,
         open_s,
