@@ -12,7 +12,7 @@ params)"* into a **reproducible, idempotent, audited** leaderboard on disk. It
          --mask_run_id (combo_hash)--> run-identity          (Golden Rule #4)
          --ComboDedup.seen--> skip already-evaluated         (Bloom→exact, O(1))
          --count_supermasks--> Stage-1B min-hits prefilter   (combo_mask)
-         --ResidentTradeSim.simulate_masks_with_exit_indices--> (trades, exit_idx)
+         --ResidentTradeSim.simulate_masks_with_exit_counts--> (trades, exit_idx, counts)
                                                              (rust_trade_sim, CHUNKED)
          --metrics_from_trades--> (mask, ResultMetrics)      (sweep_driver tail)
          --rank_combos--> RankedCombo leaderboard            (ranking)

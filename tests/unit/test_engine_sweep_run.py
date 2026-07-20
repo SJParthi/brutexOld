@@ -157,7 +157,9 @@ _FUT_SCHEDULE: tuple[int, ...] = (
 #
 # The wired sweep batch-simulates via `sweep_run.ResidentTradeSim`; failure
 # injection therefore targets (a) the batch call (a subclass whose
-# `simulate_masks_with_exit_indices` raises — the chunk-failure seam), (b) the construction
+# `simulate_masks_with_exit_counts` — the ONE batch spine the chunk loop
+# actually calls (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) — raises;
+# the chunk-failure seam), (b) the construction
 # (`__init__` raises), and (c) the per-mask metrics tail
 # (`sweep_run.metrics_from_trades`). The per-mask ORACLE seam
 # (`sweep_run.metrics_for_mask`) is now exercised by the chunk-failure

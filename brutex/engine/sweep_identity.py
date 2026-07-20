@@ -172,7 +172,9 @@ def _gate_config_fragment_python(grid: _GateConfigInput) -> dict[str, Any] | Non
         # active-gate axis exactly like overfit: a SET ceiling changes what a
         # tuple's persisted rows MEAN, so it re-keys; the default None
         # contributes NOTHING and every existing digest is byte-identical
-        # (the frozen 5b020e892247deac default-digest pin). Enforcement is
+        # (the frozen 7a0120c1123b44c6 default-digest pin
+        # (test_engine_sweep_orchestrator.py; 5b020e892247deac is the retired
+        # precise-era negative pin)). Enforcement is
         # ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B); the
         # fragment arm itself stays covered via a Protocol fake.
         fragment["max_sl_hit_rate"] = grid.max_sl_hit_rate

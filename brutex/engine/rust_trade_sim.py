@@ -856,10 +856,12 @@ class ResidentTradeSim:
     ) -> list[list[ClosedTrade]]:
         """Simulate a BATCH of masks over the resident window → per-mask trades.
 
-        Thin delegate over :meth:`simulate_masks_with_exit_indices` (ONE
-        batch spine, DEC-SWEEP-EXIT-INDEX-FASTPATH-001) that drops the
+        Thin delegate over :meth:`simulate_masks_with_exit_indices` (itself
+        a thin delegate over :meth:`simulate_masks_with_exit_counts` — the
+        ONE batch spine, DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B over
+        the DEC-SWEEP-EXIT-INDEX-FASTPATH-001 shape) that drops the
         exit-index halves — byte-identical trades, same error contract,
-        same fallback/warn behaviour. See that method for the full contract.
+        same fallback/warn behaviour. See the spine for the full contract.
         """
         return [
             trades

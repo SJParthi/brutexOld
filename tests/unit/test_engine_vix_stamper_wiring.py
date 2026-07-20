@@ -246,8 +246,11 @@ class TestResidentTradeSimStamping:
 
     def test_pair_method_stamps_both_arms_and_keeps_exit_indices(self) -> None:
         """The ADR-0017 merge-reconciliation pin: the exit-idx-native batch
-        spine (``simulate_masks_with_exit_indices``, the method the sweep's
-        chunk loop actually calls since DEC-SWEEP-EXIT-INDEX-FASTPATH-001)
+        method (``simulate_masks_with_exit_indices`` — since
+        DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B a thin delegate over
+        ``simulate_masks_with_exit_counts``, the ONE batch spine the sweep's
+        chunk loop actually calls; the exit-idx shape dates to
+        DEC-SWEEP-EXIT-INDEX-FASTPATH-001)
         routes through the STAMPED converter on BOTH arms — the Rust batch
         post-stamps via ``_to_trade_and_exit`` and the fallback walker stamps
         natively — with the pairs' trades bit-identical across arms AND the

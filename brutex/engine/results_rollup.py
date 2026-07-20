@@ -22,13 +22,18 @@ sweep-verify walks (``root.glob("**/*.parquet")`` with root = the sweeps dir)
 Row content (the preset-agnostic superset)
 ------------------------------------------
 Kept rows = the union, over the full deduped row set, of the exact total-order
-top-K (K = :data:`ROLLUP_K` = 1000) prefixes of every serveable ordering axis:
-the 14 ``RANKABLE_COLUMNS`` DESC (run_id-ASC tie — the ``ResultsStore.top_k``
-two-pass law), ``max_drawdown_pct`` ASC (the ``min_dd_first`` preset's primary
-key over /results rows — its other key parts are constant-filled inert axes),
-and the ``run_id``-ASC prefix (the ``composite`` preset degenerates to the
-stable run_id pre-sort because its axes are inert on /results; also generic
-tie coverage). The axis set is DERIVED (:func:`union_axes`), never
+top-K (K = :data:`ROLLUP_K` = 1000) prefixes of every serveable ordering axis
+— :func:`union_axes` yields 19 today: the 14 ``RANKABLE_COLUMNS`` DESC
+(run_id-ASC tie — the ``ResultsStore.top_k`` two-pass law),
+``max_drawdown_pct`` ASC (the ``min_dd_first`` preset's primary key over
+/results rows — its other key parts are constant-filled inert axes), and the
+four NULLABLE DEC-METRICS-* preset axes ``union_axes`` self-extended to
+include since #1699 (``log_growth_at_half_kelly`` · ``sl_hit_rate`` ·
+``trailing_sharpe_ratio`` · ``decay_weighted_net_paisa`` — probed per-preset
+directions; they do NOT dedupe into the 14) — plus the ``run_id``-ASC prefix
+(the ``composite`` preset degenerates to the stable run_id pre-sort because
+its axes are inert on /results; also generic tie coverage). The axis set is
+DERIVED (:func:`union_axes`), never
 hand-listed: every non-inert :class:`~brutex.ranking.presets.RankRecord` axis
 must be a persisted :class:`ResultRow` field (else a LOUD
 :class:`RollupRefusalError` — a future de-inerting forces a new union axis or
@@ -351,10 +356,13 @@ def union_axes() -> tuple[UnionAxis, ...]:
     """The DERIVED serveable ordering axes of the union superset (memoised).
 
     14 ``RANKABLE_COLUMNS`` DESC (the ``rank_by`` axes) plus every probed
-    preset axis (today: ``max_drawdown_pct`` ASC — the ``min_dd_first``
-    primary; the alternates' DESC axes dedupe into the 14). The run_id-ASC
-    prefix is applied by :func:`trim_to_union` unconditionally (it is not a
-    metric axis). Refuses LOUDLY (:class:`RollupRefusalError`) when a
+    preset axis — 19 axes today: ``max_drawdown_pct`` ASC (the
+    ``min_dd_first`` primary) and the four NULLABLE DEC-METRICS-* preset
+    fields self-extended since #1699 (``log_growth_at_half_kelly`` ·
+    ``sl_hit_rate`` · ``trailing_sharpe_ratio`` · ``decay_weighted_net_paisa``
+    — probed per-preset directions; they do NOT dedupe into the 14). The
+    run_id-ASC prefix is applied by :func:`trim_to_union` unconditionally (it
+    is not a metric axis). Refuses LOUDLY (:class:`RollupRefusalError`) when a
     non-inert ``RankRecord`` axis is not a persisted ``ResultRow`` field.
     """
     with _DERIVATION_LOCK:
