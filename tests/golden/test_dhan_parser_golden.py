@@ -133,7 +133,7 @@ def test_capability_matrix_golden_pin() -> None:
     }
     got = {cap.name: cap.unverified for cap in DHAN_CAPABILITY_MATRIX}
     assert got == pinned
-    # the register mirrors ADR-0024 §4's ELEVEN gates 1:1 (round-1 re-pin: gate #8,
+    # the register mirrors ADR-0026 §4's ELEVEN gates 1:1 (round-1 re-pin: gate #8,
     # the earliest-history floor, was missing while the ADR named it; round-2
     # re-pin: 8 → 11 — the two response ENVELOPES + the dhanClientId header
     # spelling counted, gate #4 widened to the value-code encoding)

@@ -136,7 +136,7 @@ DHAN_CAPABILITY_MATRIX: tuple[EndpointCapability, ...] = (
 
 #: The full ``_UNVERIFIED`` probe-gate register — every aspect a live credentialed
 #: probe must close (Golden Rule #1). Ordered, deduplicated, machine-enumerable;
-#: mirrors ADR-0024 §4's ELEVEN gates 1:1 (the round-1 review caught gate #8 —
+#: mirrors ADR-0026 §4's ELEVEN gates 1:1 (the round-1 review caught gate #8 —
 #: the earliest-history floor — missing from this register while the ADR named
 #: it; the round-2 review grew it 8 → 11: gate #4 widened to the single-letter
 #: EXCH_ID/SEGMENT value-code encoding, and gates #9–#11 — the expiry-list +

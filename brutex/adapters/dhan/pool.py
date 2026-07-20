@@ -10,7 +10,7 @@ when the caller constructs every leaf with the SAME
 :class:`~brutex.adapters.dhan.reauth.DhanTokenRefresher` instance (the generation
 counter is instance-scoped — distinct per-leaf refreshers would degrade to per-leaf
 single-flight; the future live-wiring DEC must bind ONE shared refresher, named in
-ADR-0024 §5's wiring checklist). It satisfies the same
+ADR-0026 §5's wiring checklist). It satisfies the same
 :class:`~brutex.adapters.dhan.client.DhanClientProtocol` as a single client, so the
 adapter is identical for both.
 
