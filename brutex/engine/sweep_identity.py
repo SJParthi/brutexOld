@@ -29,7 +29,10 @@ from typing import Any, Protocol
 # default path is byte-identical (including attribute-access order); the
 # verbatim Python law below is the live oracle. This law feeds RUN IDENTITY
 # (`grid_identity` / `tuple_cache_key` / `_tuple_digest`) — the facade's
-# burn-in + exact-type gates are the anti-drift teeth.
+# burn-in + exact-type gates are the anti-drift teeth. A SET
+# `max_sl_hit_rate` (DEC-METRICS-KELLY-GROWTH-001 — the identity axis
+# post-dates the crate's fragment law) is refused to the oracle INSIDE the
+# facade (`gate_fragment_beyond_crate`; the train-b tier-2 seam remedy).
 from brutex.engine.sweep_ops_rust import routed_gate_fragment, sweep_ops_rust_enabled
 from brutex.ranking import OverfitGateConfig
 
@@ -128,6 +131,7 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
         overfit_values,
         bool(grid.stage3_enable),
         (grid.stage3_top_k, grid.stage3_max_fevals, grid.stage3_max_restarts),
+        max_sl_hit_rate=grid.max_sl_hit_rate,
         python_law=lambda: _gate_config_fragment_python(grid),
     )
 

@@ -159,3 +159,26 @@ class TestSweepOpsRouting:
                 assert _gate_config_fragment(grid) == _gate_config_fragment_python(grid)
         finally:
             self._reset_facade()
+
+    def test_flag_on_set_max_sl_hit_rate_routes_to_oracle(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """The train-b tier-2 seam gate at the WIRED seam (#1699 knob ×
+        #1665 facade): a SET ``max_sl_hit_rate`` is outside the crate
+        fragment law's domain, so flag-ON the wired seam serves the Python
+        oracle VALUE — the identity key intact, never silently dropped by
+        the knob-blind crate fragment."""
+        from brutex.engine.sweep_identity import _gate_config_fragment_python
+
+        self._arm_fake_crate(monkeypatch)
+        try:
+            grid = _grid(max_sl_hit_rate=0.5, stage3_enable=True)
+            frag = _gate_config_fragment(grid)
+            assert frag == _gate_config_fragment_python(grid)
+            assert frag is not None
+            assert frag["max_sl_hit_rate"] == 0.5
+            # A clean REFUSAL, never a burn-in autorevert: a knob-blind crate
+            # route would mismatch the oracle here and latch the process OFF.
+            from brutex.engine.sweep_ops_rust import sweep_ops_rust_disabled
+
+            assert sweep_ops_rust_disabled() is False
+        finally:
+            self._reset_facade()

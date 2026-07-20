@@ -124,6 +124,7 @@ from brutex.observability.stage_stamp import (  # noqa: E402
 from brutex.ranking import OverfitGateConfig  # noqa: E402
 from hypothesis import given  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
+from structlog.testing import capture_logs  # noqa: E402
 
 _RUN_ID: Final[str] = "deadbeef" * 8
 
@@ -158,18 +159,27 @@ def _flag_on(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
 
 
 class _FragmentGrid:
-    """A minimal structural `_GateConfigInput` (frozen-attribute style)."""
+    """A minimal structural `_GateConfigInput` (frozen-attribute style).
+
+    Carries `max_sl_hit_rate` (default None — the real grid's default) so
+    the fake tracks the REAL `SweepGridConfig` shape after the
+    DEC-METRICS-KELLY-GROWTH-001 identity-axis extension (the train-b
+    tier-2 seam: a stale fake without the attribute AttributeError'd the
+    extended Python law inside the burn-in oracle callback).
+    """
 
     def __init__(
         self,
         *,
         overfit: OverfitGateConfig | None = None,
+        max_sl_hit_rate: float | None = None,
         stage3_enable: bool = False,
         stage3_top_k: int = 10,
         stage3_max_fevals: int = 200,
         stage3_max_restarts: int = 3,
     ) -> None:
         self._overfit = overfit
+        self._max_sl_hit_rate = max_sl_hit_rate
         self._stage3_enable = stage3_enable
         self._stage3_top_k = stage3_top_k
         self._stage3_max_fevals = stage3_max_fevals
@@ -178,6 +188,10 @@ class _FragmentGrid:
     @property
     def overfit(self) -> OverfitGateConfig | None:
         return self._overfit
+
+    @property
+    def max_sl_hit_rate(self) -> float | None:
+        return self._max_sl_hit_rate
 
     @property
     def stage3_enable(self) -> bool:
@@ -249,6 +263,80 @@ class TestGateFragmentParity:
     def test_fragment_parity(self, grid: _FragmentGrid) -> None:
         assert _gate_config_fragment(grid) == _gate_config_fragment_python(grid)
         assert sweep_ops_rust_disabled() is False
+
+
+class TestGateFragmentBeyondCrateRouting:
+    """The train-b tier-2 seam routing gate (#1699 knob × #1665 facade).
+
+    A SET ``max_sl_hit_rate`` (DEC-METRICS-KELLY-GROWTH-001) is OUTSIDE the
+    crate fragment law's domain — the crate predates the field — so the
+    WHOLE computation routes to the Python oracle (warn-once
+    ``gate_fragment_beyond_crate``): never a burn-in autorevert, never a
+    post-burn-in silent key drop. The unset-knob routing is UNCHANGED.
+    """
+
+    def test_set_knob_routes_to_oracle_crate_never_called(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+        real = brutex_sweep_ops.gate_config_fragment
+
+        def _spy(*args: object) -> object:
+            calls.append(args)
+            return real(*args)
+
+        monkeypatch.setattr(brutex_sweep_ops, "gate_config_fragment", _spy)
+        grid = _FragmentGrid(
+            overfit=OverfitGateConfig(dsr_min=0.95),
+            max_sl_hit_rate=0.35,
+            stage3_enable=True,
+        )
+        with capture_logs() as logs:
+            result = _gate_config_fragment(grid)
+        assert result == _gate_config_fragment_python(grid)
+        assert result is not None
+        assert result["max_sl_hit_rate"] == 0.35  # the identity key survives
+        assert calls == []  # the crate fragment fn is NEVER consulted
+        assert sweep_ops_rust_disabled() is False  # a refusal, never an autorevert
+        warns = [e for e in logs if e.get("reason") == "gate_fragment_beyond_crate"]
+        assert len(warns) == 1
+        assert warns[0]["leg"] == "max_sl_hit_rate"
+
+    def test_unset_knob_still_routes_to_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[object, ...]] = []
+        real = brutex_sweep_ops.gate_config_fragment
+
+        def _spy(*args: object) -> object:
+            calls.append(args)
+            return real(*args)
+
+        monkeypatch.setattr(brutex_sweep_ops, "gate_config_fragment", _spy)
+        grid = _FragmentGrid(stage3_enable=True)
+        assert _gate_config_fragment(grid) == _gate_config_fragment_python(grid)
+        assert len(calls) == 1  # the crate path engages exactly as before the gate
+        assert sweep_ops_rust_disabled() is False
+
+    def test_post_burn_in_set_knob_keeps_identity_key(self) -> None:
+        """The latent divergence the gate kills: post-burn-in (remaining=0 —
+        no oracle in the crate path) a SET knob must STILL carry the
+        ``max_sl_hit_rate`` identity key; pre-gate the crate fragment
+        silently dropped it (a run-identity-class divergence)."""
+        reset_sweep_ops_rust_for_tests(remaining=0)
+        fragment = _gate_config_fragment(_FragmentGrid(max_sl_hit_rate=0.25))
+        assert fragment == {"max_sl_hit_rate": 0.25}
+        assert sweep_ops_rust_disabled() is False
+
+    def test_flag_off_set_knob_byte_identical_and_crate_free(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _bomb(*args: object) -> object:
+            raise AssertionError("flag OFF must never consult the crate")
+
+        monkeypatch.setattr(brutex_sweep_ops, "gate_config_fragment", _bomb)
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        grid = _FragmentGrid(overfit=OverfitGateConfig(dsr_min=0.95), max_sl_hit_rate=0.4)
+        assert _gate_config_fragment(grid) == _gate_config_fragment_python(grid)
 
 
 class TestStallPolicyParity:

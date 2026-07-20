@@ -465,6 +465,57 @@ class TestRoutedGateFragment:
         result = routed_gate_fragment(overfit, stage3_enable, knobs, python_law=lambda: expected)
         assert result == expected
 
+    def test_set_max_sl_hit_rate_routes_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The train-b tier-2 seam gate (#1699 knob × #1665 facade): a SET
+        ``max_sl_hit_rate`` is outside the crate fragment law's domain — the
+        WHOLE computation routes to the oracle, the crate is never even
+        imported, and the refusal is the NAMED warn-once
+        ``gate_fragment_beyond_crate`` (never a latch/autorevert)."""
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        sentinel = {"overfit": list(_OVERFIT), "max_sl_hit_rate": 0.35}
+        with capture_logs() as logs:
+            result = routed_gate_fragment(
+                _OVERFIT,
+                False,
+                (1, 2, 3),
+                max_sl_hit_rate=0.35,
+                python_law=lambda: sentinel,
+            )
+        assert result is sentinel
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "gate_fragment_beyond_crate"]
+        assert len(warns) == 1
+        assert warns[0]["leg"] == "max_sl_hit_rate"
+        assert sweep_ops_rust_disabled() is False
+
+    def test_unset_max_sl_hit_rate_keeps_crate_routing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gate's False arm: an UNSET knob (the default) leaves the crate
+        routing exactly as shipped — the fake crate serves the fragment."""
+        _enable(monkeypatch)
+        crate = _good_crate()
+        seen: list[tuple[object, ...]] = []
+        real = crate.gate_config_fragment
+
+        def _spy(*args: object) -> object:
+            seen.append(args)
+            return real(*args)
+
+        crate.gate_config_fragment = _spy
+        _install_crate(monkeypatch, crate)
+        result = routed_gate_fragment(
+            _OVERFIT,
+            True,
+            (10, 200, 3),
+            max_sl_hit_rate=None,
+            python_law=_fragment_oracle_both,
+        )
+        assert result == _fragment_oracle_both()
+        assert len(seen) == 1
+        assert sweep_ops_rust_disabled() is False
+
     def test_nonfloat_overfit_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
         calls = _install_import_bomb(monkeypatch)

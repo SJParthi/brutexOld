@@ -23,7 +23,14 @@ byte-identical including attribute-access order):
    precedent); EXACT-type gates (``float``/``int``, ``bool`` excluded)
    refuse anything lossy to the oracle. This law feeds RUN IDENTITY
    (``grid_identity`` / ``tuple_cache_key`` / ``_tuple_digest``) — the
-   burn-in + the exact-type gates are the anti-drift teeth.
+   burn-in + the exact-type gates are the anti-drift teeth. ELIGIBILITY
+   GATE (the train-b tier-2 seam remedy): a SET ``max_sl_hit_rate`` (the
+   DEC-METRICS-KELLY-GROWTH-001 identity axis, which post-dates the
+   crate's fragment law) is OUTSIDE the oracle-equivalent FFI domain —
+   the crate would silently DROP the key post-burn-in — so the WHOLE
+   computation routes to the Python oracle
+   (``gate_fragment_beyond_crate`` warn-once); teaching the crate the
+   knob is the NAMED follow-up "crate-max-sl-hit-rate parity".
 3. **Scaled stall-timeout law** (:func:`routed_stall_timeout`) —
    ``brutex/engine/sweep_stall_policy.py``'s raise-only scaled tail. The
    fail-loud env parses + ``StallPolicy`` construction stay Python.
@@ -813,6 +820,7 @@ def routed_gate_fragment(
     stage3_enable: bool,
     stage3_knobs: tuple[int, int, int],
     *,
+    max_sl_hit_rate: float | None = None,
     python_law: Callable[[], dict[str, Any] | None],
 ) -> dict[str, Any] | None:
     """The routed gate-config fragment law (feeds RUN IDENTITY — see docstring).
@@ -821,8 +829,23 @@ def routed_gate_fragment(
     every stage-3 knob exact ``int`` (``bool`` IS an ``int`` subclass whose
     canonical-JSON render differs — excluded), so the f64/i64 FFI roundtrip
     is bit-exact by construction; anything else is refused to the oracle.
+
+    Eligibility gate (the train-b tier-2 seam remedy — #1699 knob ×
+    #1665 facade): a SET *max_sl_hit_rate* (the
+    DEC-METRICS-KELLY-GROWTH-001 identity axis) is OUTSIDE the crate
+    fragment law's domain — ``gate_config_fragment`` predates the field,
+    so post-burn-in it would serve a fragment that silently DROPS the
+    ``max_sl_hit_rate`` key: a run-identity-class divergence. The knob
+    never crosses the FFI; when SET the WHOLE computation routes to the
+    Python oracle with the ``gate_fragment_beyond_crate`` warn-once (the
+    house only-provably-oracle-equivalent-inputs-cross idiom). Teaching
+    the crate the knob is the NAMED follow-up "crate-max-sl-hit-rate
+    parity" — never a routing-gate's business.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if max_sl_hit_rate is not None:
+        _warn_once("gate_fragment_beyond_crate", leg="max_sl_hit_rate")
         return python_law()
     if overfit_values is not None and any(type(value) is not float for value in overfit_values):
         _warn_once("gate_fragment_input_refused", leg="overfit")
