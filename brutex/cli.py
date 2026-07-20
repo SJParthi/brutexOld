@@ -5435,13 +5435,6 @@ def _run_cli_greeks_enrich(
     return outcome
 
 
-#: The Dhan CLI default half-open ``[start, end)`` START — the operator's REQUESTED
-#: reachable-today start (2022-06-01, recorded non-load-bearing; the honest history
-#: floor is UNVERIFIED, so an unservable pre-floor span degrades to clean-empty, never
-#: a fabricated bar — DEC-DHAN-ROLLING-OPTIONS-001 §7).
-_DHAN_CLI_DEFAULT_START: Final[date] = date(2022, 6, 1)
-
-
 def _run_dhan_fetch(  # pragma: no cover — real-run: needs AWS SSM creds + the dhanhq SDK
     *, request: Any, dataset: str, resolved: Path
 ) -> int:
@@ -5496,22 +5489,32 @@ def cmd_fetch_dhan(
     series. Always 1-minute; the tree nests under ``<lake_root>/feeds/dhan/`` (Groww bytes
     untouched — path-structural attribution).
 
-    The range is HALF-OPEN ``[start, end)``; a blank ``--start`` defaults to
-    :data:`_DHAN_CLI_DEFAULT_START` (the honest floor is UNVERIFIED, so a pre-servable
-    span records clean-empty windows, never a fabricated bar), a blank ``--end`` to
-    today (UTC). ``--dry-run`` makes NO vendor call and writes nothing (Golden Rule #1);
-    the real run is the live-credential boundary :func:`_run_dhan_fetch`.
+    The range is HALF-OPEN ``[start, end)``; a blank ``--start`` defaults to the
+    UNIFIED rolling-options floor
+    (:func:`~brutex.adapters.dhan.constants.dhan_rolling_options_floor` —
+    ``max(dhan_history_floor(today_ist), the requested 2022-06-01 start)``,
+    DEC-DHAN-ROLLING-FLOOR-UNIFY-001; byte-identical to the previously-fixed
+    2022-06-01 default until the rolling term passes it, honest floor still
+    UNVERIFIED — a pre-servable span records clean-empty windows, never a
+    fabricated bar), a blank ``--end`` to today (UTC). The IST ``today`` is
+    resolved ONCE here and threaded on the request, so the spine's plan
+    chokepoint clamps from the SAME instant. ``--dry-run`` makes NO vendor call
+    and writes nothing (Golden Rule #1); the real run is the live-credential
+    boundary :func:`_run_dhan_fetch`.
 
     Returns
     -------
     int
         ``EXIT_OK`` on a clean run / dry-run; ``EXIT_USER_ERROR`` on a bad date range.
     """
+    from brutex.adapters.dhan.constants import dhan_rolling_options_floor
+    from brutex.adapters.ingest_common import now_ist
     from brutex.dashboard.dhan_pull import DhanPullRequest
 
     resolved = _resolve_lake_root(lake_root)
+    today_ist = now_ist().date()
     try:
-        start_d = date.fromisoformat(start) if start else _DHAN_CLI_DEFAULT_START
+        start_d = date.fromisoformat(start) if start else dhan_rolling_options_floor(today_ist)
         end_d = date.fromisoformat(end) if end else datetime.now(UTC).date()
     except ValueError as exc:
         print(f"[brutex] fetch --feed dhan: {exc}", file=sys.stderr)
@@ -5528,7 +5531,9 @@ def cmd_fetch_dhan(
         if dataset == "rolling-options"
         else "spot indices"
     )
-    request = DhanPullRequest(lake_root=resolved, start=start_d, end=end_d, dry_run=dry_run)
+    request = DhanPullRequest(
+        lake_root=resolved, start=start_d, end=end_d, dry_run=dry_run, today=today_ist
+    )
     if dry_run:
         print(
             f"[brutex] fetch --feed dhan --dataset {dataset} --dry-run — {label}; "

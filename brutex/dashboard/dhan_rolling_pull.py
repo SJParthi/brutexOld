@@ -122,6 +122,7 @@ def run_dhan_rolling_option_pull(
     interval: str = DHAN_ROLLING_FETCH_INTERVAL,
     pace: Callable[[], None] = _noop_pace,
     max_rounds: int = 3,
+    today: date | None = None,
 ) -> RollingOptionIngestReport:
     """Run the Dhan rolling-ATM option ingest into ``<lake_root>/feeds/dhan/`` and report.
 
@@ -146,6 +147,11 @@ def run_dhan_rolling_option_pull(
     interval, pace, max_rounds
         The interval (1-minute — the only rolling interval), the controller pace hook,
         and the retry-round budget.
+    today
+        The IST date the unified rolling-options floor keys on
+        (DEC-DHAN-ROLLING-FLOOR-UNIFY-001) — resolved ONCE per launch at the
+        surface (``DhanPullRequest.today``) and threaded to the plan chokepoint;
+        ``None`` resolves once inside the spine (never re-read mid-plan).
     """
     dhan_root = feed_lake_root(lake_root, feed="dhan")
     writer = RollingOptionWriter(lake_root=dhan_root)
@@ -158,6 +164,7 @@ def run_dhan_rolling_option_pull(
         interval=interval,
         pace=pace,
         max_rounds=max_rounds,
+        today=today,
     )
 
 
@@ -265,6 +272,7 @@ def default_dhan_rolling_option_pull(
         end=request.end,
         pace=pace,
         max_rounds=max_rounds,
+        today=request.today,
     )
     _LOG.info(
         "dhan.rolling_option.pull_done",

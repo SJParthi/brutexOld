@@ -22,6 +22,13 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Final
 
+# The rolling-options constants module is a stdlib-only LEAF (it imports nothing
+# from the package — by design, see its module docstring), so importing the
+# requested-start term here can never cycle.
+from brutex.adapters.dhan.rolling_option_constants import (
+    DHAN_ROLLING_HISTORY_FLOOR_REQUESTED,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Endpoint + request shape (VERIFIED-live: SDK ``_historical_data.py`` + ``dhan_http.py``)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,6 +194,30 @@ def dhan_history_floor(today: date) -> date:
     return dhan_rolling_edge(today) + timedelta(days=DHAN_FLOOR_MARGIN_DAYS)
 
 
+def dhan_rolling_options_floor(today: date) -> date:
+    """The UNIFIED rolling-OPTIONS effective floor: ``max(rolling law, requested start)``.
+
+    DEC-DHAN-ROLLING-FLOOR-UNIFY-001 (implementing DEC-SCOPE-MINIMAL-CORE-001,
+    the operator-authorized scope decision):
+    the rolling-ATM options track's effective floor is
+    ``max(dhan_history_floor(today), DHAN_ROLLING_HISTORY_FLOOR_REQUESTED)`` —
+    the SPOT rolling today−5y(+margin) law (DEC-DHAN-ROLLING-FLOOR-001) unified
+    with the operator's REQUESTED 2022-06-01 reachable start, so the two laws can
+    never diverge silently. TODAY (adoption, pinned at frozen 2026-07-15):
+    ``today−5y+7d ≈ 2021-07-22 < 2022-06-01`` → the requested term binds and the
+    resolved floor is byte-identical to the fixed date every consumer read before.
+    From the first ``today`` where ``dhan_history_floor(today)`` passes 2022-06-01
+    (strictly after 2027-05-25) the ROLLING term binds and the options floor moves
+    with the vendor's 5-year window — exactly like spot. Pure (no I/O, no clock,
+    no logging — the once-per-plan binding-term INFO lives at the plan chokepoint,
+    :func:`~brutex.adapters.dhan.run_dhan_rolling_option_ingest.plan_rolling_option_work`).
+    *today* is the IST date, resolved ONCE per launch and threaded (the
+    :func:`dhan_history_floor` law). The floor governs VENDOR REQUESTS ONLY —
+    stored rolling bars aging past it are NEVER deleted (keep-first, append-only).
+    """
+    return max(dhan_history_floor(today), DHAN_ROLLING_HISTORY_FLOOR_REQUESTED)
+
+
 #: Per-index intraday SERVABILITY — UNVERIFIED until a credentialed probe transcript
 #: lands (Golden Rule #1). These are HONESTY MARKERS ONLY: no decision branch reads
 #: them (AST-pinned in ``tests/unit/test_dhan_constants.py``), so the pull can never
@@ -321,4 +352,5 @@ __all__ = [
     "SENSEX_SYMBOL",
     "dhan_history_floor",
     "dhan_rolling_edge",
+    "dhan_rolling_options_floor",
 ]

@@ -131,6 +131,57 @@ def test_history_floor_rolls_daily() -> None:
     assert (b - a).days == 1
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The UNIFIED rolling-OPTIONS floor law (DEC-DHAN-ROLLING-FLOOR-UNIFY-001):
+# dhan_rolling_options_floor(today) = max(dhan_history_floor(today),
+# DHAN_ROLLING_HISTORY_FLOOR_REQUESTED) — the two laws never diverge silently.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_rolling_options_floor_byte_identical_at_adoption() -> None:
+    # Frozen adoption date 2026-07-15: today−5y+7d = 2021-07-22 < 2022-06-01, so
+    # the REQUESTED term binds and the resolved floor is byte-identical to the
+    # previously-fixed date every consumer read before the unification.
+    assert constants.dhan_history_floor(date(2026, 7, 15)) == date(2021, 7, 22)
+    assert constants.dhan_rolling_options_floor(date(2026, 7, 15)) == date(2022, 6, 1)
+
+
+def test_rolling_options_floor_crossover_boundary_exact() -> None:
+    # The exact crossover: dhan_history_floor(2027-05-25) == 2022-06-01 == the
+    # requested start (max of equals — still the adoption value); ONE day later
+    # the ROLLING term strictly exceeds it and the unified floor starts moving.
+    assert constants.dhan_history_floor(date(2027, 5, 25)) == date(2022, 6, 1)
+    assert constants.dhan_rolling_options_floor(date(2027, 5, 25)) == date(2022, 6, 1)
+    assert constants.dhan_rolling_options_floor(date(2027, 5, 26)) == date(2022, 6, 2)
+
+
+def test_rolling_options_floor_future_date_rolling_term_wins() -> None:
+    # A synthetic future today: the rolling term exceeds the requested start, so
+    # the unified floor == dhan_history_floor(that today) — the flip pin.
+    assert constants.dhan_rolling_options_floor(date(2028, 8, 1)) == constants.dhan_history_floor(
+        date(2028, 8, 1)
+    )
+    assert constants.dhan_rolling_options_floor(date(2028, 8, 1)) == date(2023, 8, 8)
+
+
+def test_rolling_options_floor_feb29_mirrors_history_floor_rounding() -> None:
+    # Feb-29 edge (mirrors test_history_floor_feb29_case): 2028-02-29 → edge
+    # 2023-03-01, floor 2023-03-08 > 2022-06-01 → the rolling term wins verbatim.
+    assert constants.dhan_rolling_options_floor(date(2028, 2, 29)) == date(2023, 3, 8)
+
+
+def test_rolling_options_floor_never_below_either_term() -> None:
+    # Structural max() law: the unified floor is ≥ BOTH terms for any today.
+    from brutex.adapters.dhan.rolling_option_constants import (
+        DHAN_ROLLING_HISTORY_FLOOR_REQUESTED,
+    )
+
+    for today in (date(2024, 1, 1), date(2026, 7, 15), date(2027, 5, 26), date(2030, 12, 31)):
+        floor = constants.dhan_rolling_options_floor(today)
+        assert floor >= DHAN_ROLLING_HISTORY_FLOOR_REQUESTED
+        assert floor >= constants.dhan_history_floor(today)
+
+
 def test_servability_sentinels_are_none() -> None:
     assert constants.NIFTY_SERVABILITY_UNVERIFIED is None
     assert constants.BANKNIFTY_SERVABILITY_UNVERIFIED is None

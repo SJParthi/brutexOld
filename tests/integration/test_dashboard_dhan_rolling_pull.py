@@ -15,7 +15,7 @@ from __future__ import annotations
 import importlib
 import threading
 from collections.abc import Iterator, Mapping
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -207,3 +207,79 @@ class TestDhanRollingPullRoute:
         assert "pull-rolling-options-dhan" in html
         assert "rolling-ATM" in html
         assert "NOT per-contract" in html
+
+
+class TestDhanRollingUnifiedFloorRoute:
+    """DEC-DHAN-ROLLING-FLOOR-UNIFY-001 — the route-level unified-floor surface.
+
+    Frozen clock 2026-07-14 → rolling term 2021-07-21 < the requested 2022-06-01
+    start → the unified floor resolves 2022-06-01 (the adoption value).
+    """
+
+    def test_whole_pre_floor_pick_is_400_naming_the_floor_zero_fetches(
+        self,
+        client: TestClient,
+        fake_pull: _FakeRollingPull,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A range ending on/before the UNIFIED floor is a LOUD HTTP 400 naming
+        both terms — zero vendor calls, zero job start (the spot route posture;
+        ``dry_run=True`` keeps the test offline, the refusal applies identically)."""
+        frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(app_module, "now_ist", lambda: frozen)
+        resp = client.post(
+            "/api/v1/universe/pull-rolling-options-dhan",
+            params={"from_date": "2020-01-01", "to_date": "2022-05-01", "dry_run": True},
+        )
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "2022-06-01" in detail  # the unified floor = the requested-start term today
+        assert "rolling-options" in detail
+        assert "nothing was pulled" in detail
+        # ZERO fetches, ZERO job start: the fake pull was never invoked.
+        assert fake_pull.request is None
+        assert fake_pull.client.calls == 0
+
+    def test_clamped_start_payload_gains_floor_keys_and_threads_today(
+        self,
+        client: TestClient,
+        fake_pull: _FakeRollingPull,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A pre-floor start with a servable end → the start payload names the clamp
+        # (EMIT-ON-CLAMP additive keys) and the request threads the SAME resolved
+        # today (resolved ONCE per launch — the plan clamps from the same instant).
+        frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(app_module, "now_ist", lambda: frozen)
+        resp = client.post(
+            "/api/v1/universe/pull-rolling-options-dhan",
+            params={"from_date": "2020-01-01", "dry_run": True},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["started"] is True
+        assert body["floor"] == "2022-06-01"
+        assert body["effective_start"] == "2022-06-01"
+        assert fake_pull.done.wait(timeout=10.0)
+        assert fake_pull.request is not None
+        assert fake_pull.request.today == date(2026, 7, 14)
+
+    def test_post_floor_pick_payload_has_no_floor_keys(
+        self,
+        client: TestClient,
+        fake_pull: _FakeRollingPull,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(app_module, "now_ist", lambda: frozen)
+        resp = client.post(
+            "/api/v1/universe/pull-rolling-options-dhan",
+            params={"from_date": "2024-01-01", "to_date": "2024-02-01", "dry_run": True},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "floor" not in body
+        assert "effective_start" not in body
+        assert fake_pull.done.wait(timeout=10.0)
+        assert fake_pull.request is not None
+        assert fake_pull.request.today == date(2026, 7, 14)

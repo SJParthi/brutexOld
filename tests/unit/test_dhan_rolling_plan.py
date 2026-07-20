@@ -90,3 +90,35 @@ def test_key_is_frozen() -> None:
     assert isinstance(key, RollingOptionKey)
     with pytest.raises((AttributeError, TypeError)):
         key.underlying = "X"  # type: ignore[misc]
+
+
+def test_plan_strike_offset_law_atm_pm10_and_full_cartesian() -> None:
+    """The ATM±10 plan pin (DEC-DHAN-ROLLING-OPTIONS-001): the default plan's
+    strike-offset law is EXACTLY offsets −10..+10 (21 values, ATM inclusive), and
+    the full cartesian is 3 underlyings × {WEEK, MONTH} × expiry_code {0,1,2,3} ×
+    21 offsets × {CALL, PUT} = 1008 keys — each combination exactly once. This is
+    also the SOLE derivative-history plan surface of the Dhan feed
+    (DEC-DHAN-NO-FUTURES-001, two distinct claims split honestly): the SCOPE
+    decision — no futures leg — implements DEC-SCOPE-MINIMAL-CORE-001 (the
+    operator-authorized scope decision); the VENDOR-capability claim — Dhan
+    serves no expired index futures history — is documented-as-unsupported,
+    probes unrun."""
+    keys = enumerate_rolling_option_keys()
+    # The offset law: exactly ATM−10..ATM+10, ATM inclusive — 21 labels.
+    expected_offsets = (
+        {"ATM"} | {f"ATM+{i}" for i in range(1, 11)} | {f"ATM-{i}" for i in range(1, 11)}
+    )
+    offsets = {k.strike_offset for k in keys}
+    assert offsets == expected_offsets == set(strike_offset_labels(10))
+    assert len(offsets) == 21
+    # The per-dimension value sets, pinned exactly.
+    assert {k.underlying for k in keys} == {"NIFTY", "BANKNIFTY", "SENSEX"}
+    assert {k.expiry_flag for k in keys} == {"WEEK", "MONTH"}
+    assert {k.expiry_code for k in keys} == {0, 1, 2, 3}
+    assert {k.option_type for k in keys} == {"CALL", "PUT"}
+    # The full cartesian: 3 × 2 × 4 × 21 × 2 = 1008, every combination ONCE.
+    assert len(keys) == 3 * 2 * 4 * 21 * 2 == 1008 == DHAN_ROLLING_PLAN_KEY_COUNT
+    combos = {
+        (k.underlying, k.expiry_flag, k.expiry_code, k.strike_offset, k.option_type) for k in keys
+    }
+    assert len(combos) == DHAN_ROLLING_PLAN_KEY_COUNT

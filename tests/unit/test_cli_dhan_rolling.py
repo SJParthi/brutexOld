@@ -10,6 +10,7 @@ Greeks pass (pure lake I/O — no network).
 
 from __future__ import annotations
 
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -217,3 +218,55 @@ def test_enrich_dhan_missing_lake_is_user_error(tmp_path: Path) -> None:
     missing = tmp_path / "nope"
     with pytest.raises(cli.CliUserError):
         cmd_enrich_greeks_dhan(missing, dataset="rolling-options")
+
+
+# ── the unified rolling-options floor default start (DEC-DHAN-ROLLING-FLOOR-UNIFY-001) ─
+
+
+def test_fetch_dhan_blank_start_defaults_to_unified_floor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blank ``--start`` resolves ``dhan_rolling_options_floor(today_ist)`` — at the
+    frozen adoption clock that is the previously-fixed 2022-06-01 default
+    byte-for-byte (the byte-identical-at-adoption pin, CLI arm)."""
+    frozen = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("brutex.adapters.ingest_common.now_ist", lambda: frozen)
+    rc = cmd_fetch_dhan(tmp_path, start=None, end=None, dataset="rolling-options", dry_run=True)
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "window=[2022-06-01," in out  # the unified floor = the requested start today
+
+
+def test_fetch_dhan_blank_start_follows_rolling_term_in_the_future(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The flip pin: at a synthetic future clock the ROLLING term binds and the
+    # blank-start default moves with it (dhan_history_floor(2028-08-01)=2023-08-08).
+    frozen = datetime(2028, 8, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("brutex.adapters.ingest_common.now_ist", lambda: frozen)
+    rc = cmd_fetch_dhan(tmp_path, start=None, end=None, dataset="rolling-options", dry_run=True)
+    assert rc == EXIT_OK
+    assert "window=[2023-08-08," in capsys.readouterr().out
+
+
+def test_fetch_dhan_threads_launch_resolved_today_on_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The CLI resolves the IST today ONCE and threads it on the request, so the
+    # spine's plan chokepoint clamps from the SAME instant (never a mid-run re-read).
+    frozen = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("brutex.adapters.ingest_common.now_ist", lambda: frozen)
+    seen: dict[str, object] = {}
+
+    def _fake_run(*, request: object, dataset: str, resolved: Path) -> int:
+        seen["request"] = request
+        return EXIT_OK
+
+    monkeypatch.setattr(cli, "_run_dhan_fetch", _fake_run)
+    rc = cmd_fetch_dhan(
+        tmp_path, start="2024-06-01", end="2024-06-30", dataset="rolling-options", dry_run=False
+    )
+    assert rc == EXIT_OK
+    request = seen["request"]
+    assert getattr(request, "today", None) == date(2026, 7, 15)
+    assert getattr(request, "start", None) == date(2024, 6, 1)  # explicit start untouched
