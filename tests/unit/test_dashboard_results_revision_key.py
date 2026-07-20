@@ -371,24 +371,77 @@ class TestSweepResultsRevisionToken:
     """Branch-level unit fixtures for ``lake_revision.sweep_results_revision``."""
 
     def test_absent_tree_is_the_stable_sentinel_composite(self, tmp_path: Path) -> None:
-        """No sweeps tree at all → ``absent|absent`` (stable — never oscillates)."""
+        """No sweeps tree at all → ``absent|absent|absent`` (stable — never
+        oscillates). Third component since DEC-SWEEP-TEMPORAL-ROBUSTNESS-001:
+        the cascade report's own file stat (conscious pin update).
+        """
         token = sweep_results_revision(tmp_path)
-        assert token == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        assert token == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}|{ABSENT_TOKEN}"
         assert token == sweep_results_revision(tmp_path)
 
     def test_absent_chain_composes_with_the_dir_digest(self, tmp_path: Path) -> None:
-        """A sweeps tree with no audit chain → ``<digest>|absent``; the chain's
-        first-ever creation moves the composite exactly once.
+        """A sweeps tree with no audit chain → ``<digest>|absent|absent``; the
+        chain's first-ever creation moves the composite exactly once (the
+        report component stays honestly absent).
         """
         _write_sweeps(tmp_path, [_row(1)])
         token = sweep_results_revision(tmp_path)
         assert token is not None
-        assert token.endswith(f"|{ABSENT_TOKEN}")
+        assert token.endswith(f"|{ABSENT_TOKEN}|{ABSENT_TOKEN}")
         _append_sweep_start(tmp_path, snapshot="a" * 64)
         created = sweep_results_revision(tmp_path)
         assert created is not None
         assert created != token
+        chain_component = created.split("|")[1]
+        assert chain_component != ABSENT_TOKEN
+        assert created.endswith(f"|{ABSENT_TOKEN}")  # report still absent
+
+    def test_cascade_report_create_rewrite_delete_move_the_composite(self, tmp_path: Path) -> None:
+        """DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the report's create, atomic
+        ``os.replace`` rewrite, and delete EACH move the composite — verdict-join
+        correctness never depends on writer rename discipline.
+        """
+        _write_sweeps(tmp_path, [_row(1)])
+        report = tmp_path / "sweeps" / "cascade" / "cascade-report.json"
+        report.parent.mkdir(parents=True)
+        before = sweep_results_revision(tmp_path)
+        assert before is not None
+
+        report.write_bytes(b'{"groups": []}')
+        created = sweep_results_revision(tmp_path)
+        assert created is not None
+        assert created != before
         assert not created.endswith(f"|{ABSENT_TOKEN}")
+
+        # A REAL atomic rewrite (tempfile + os.replace — the writer idiom).
+        time.sleep(0.01)  # ensure a distinct mtime_ns even on coarse clocks
+        staged = tmp_path / "sweeps" / "cascade" / ".staged"
+        staged.write_bytes(b'{"groups": [1]}')
+        os.replace(staged, report)
+        rewritten = sweep_results_revision(tmp_path)
+        assert rewritten is not None
+        assert rewritten != created
+
+        report.unlink()
+        deleted = sweep_results_revision(tmp_path)
+        assert deleted is not None
+        assert deleted != rewritten
+        assert deleted.endswith(f"|{ABSENT_TOKEN}")
+
+    def test_report_probe_failure_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing OSError on the cascade-report stat → ``None`` (no signal)."""
+        _write_sweeps(tmp_path, [_row(1)])
+        real_stat = os.stat
+
+        def _deny(target: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            if str(target).endswith("cascade-report.json"):
+                raise PermissionError("synthetic report stat outage")
+            return real_stat(target, *args, **kwargs)
+
+        monkeypatch.setattr(lake_revision_mod.os, "stat", _deny)
+        assert sweep_results_revision(tmp_path) is None
 
     def test_audit_append_moves_the_composite_but_not_the_dir_digest(self, tmp_path: Path) -> None:
         """The invalidation gap all three judges confirmed: an append to the
@@ -440,3 +493,15 @@ class TestSweepResultsRevisionToken:
         from brutex.dashboard import sweep_results_view as view_mod
 
         assert lake_revision_mod._SWEEP_AUDIT_RELPATH == view_mod._AUDIT_RELPATH
+
+    def test_cascade_report_relpath_pinned_to_the_engine_copy(self) -> None:
+        """DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the not-imported report relpath
+        copy cannot drift from the engine's canonical constants (same
+        stdlib-lean precedent as the audit relpath above).
+        """
+        from brutex.engine import cascade_wire as cw
+
+        assert lake_revision_mod._CASCADE_REPORT_RELPATH == (
+            cw.CASCADE_DIRNAME,
+            cw.REPORT_FILENAME,
+        )

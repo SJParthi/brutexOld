@@ -36,6 +36,8 @@ from typing import Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
+
 _LOG = structlog.get_logger("brutex.observability.pull_journal")
 
 #: Journal directory + file name under the lake root.
@@ -233,7 +235,7 @@ def read_journal(lake_root: Path) -> list[JournalEvent]:
     if not path.is_file():
         return []
     events: list[JournalEvent] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in read_regular_text(path).splitlines():
         text = line.strip()
         if not text:
             continue

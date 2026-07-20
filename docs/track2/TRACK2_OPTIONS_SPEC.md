@@ -850,7 +850,7 @@ Track 2 entries must satisfy: `entry_strike.bar_price > 5 × TICK_PAISA`
 - **Dual validation oracle** (NOT py_vollib alone):
   1. **`lets_be_rational` (Jäckel 2015)** — for IV (gold standard, 2-iteration Householder, machine precision)
   2. **QuantLib `AnalyticEuropeanEngine` (C++)** — for prices + Greeks (independent implementation)
-  
+
   Tolerance: 1e-10 absolute for BSM-on-BSM cross-checks; 50bp for
   NSE-observed sanity checks (NSE uses r=10% fixed assumption).
 

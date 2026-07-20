@@ -58,6 +58,7 @@ from pathlib import Path
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.data.raw_integrity import (
     HASH_ALGORITHM,
     RawIntegrityError,
@@ -292,7 +293,7 @@ def load_records(lake_root: Path) -> dict[tuple[str, str, str, str, str, str], R
     records: dict[tuple[str, str, str, str, str, str], RawIntegrityRecord] = {}
     for path in sorted(directory.glob("*.jsonl")):
         try:
-            text = path.read_text(encoding="utf-8")
+            text = read_regular_text(path)
         except OSError as exc:
             _LOG.warning("raw_integrity.load_failed", path=str(path), error=str(exc))
             continue

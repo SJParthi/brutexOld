@@ -25,6 +25,8 @@ from brutex.dashboard.sweep_results_view import (
     SweepLeaderboard,
     build_sweep_leaderboard,
     load_sweep_scan,
+    parse_filter_float,
+    parse_filter_int,
 )
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.money import format_inr
@@ -175,6 +177,30 @@ def test_money_and_full_precision_projection(tmp_path: Path) -> None:
     assert row["win_rate"] == 0.6
 
 
+def test_risk_rank_axis_keys_projected(tmp_path: Path) -> None:
+    """DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 6): the two rankable risk
+    scalars ride the row under their bare ResultRow names as EXACT ints —
+    both were rank axes the operator could pick yet invisible on the wire.
+    """
+    _write_store(
+        tmp_path,
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        rows=[_row(seed=1)],
+    )
+    board = build_sweep_leaderboard(tmp_path)
+    row = board.rows[0]
+    assert row["max_drawdown_paisa"] == 50_00
+    assert row["expectancy_paisa"] == 10_00
+    assert isinstance(row["max_drawdown_paisa"], int)
+    assert isinstance(row["expectancy_paisa"], int)
+    # The percent risk figure stays the raw float (display scaling is
+    # client-side and never touches the sorted value).
+    assert row["max_drawdown_pct"] == 0.05
+    assert row["calmar_ratio"] == 0.9
+
+
 def test_conditions_decoded_from_mask(tmp_path: Path) -> None:
     """A mask with set bits decodes to its condition names; mask 0 → empty string."""
     _write_store(
@@ -305,6 +331,10 @@ def test_to_dict_shape(tmp_path: Path) -> None:
         "mixed_snapshot_eras",
         "run_id_conflicts",
         "rows",
+        # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (graft 9): the two always-present
+        # additive envelope keys — a conscious pin update, not a drift.
+        "temporal_coverage",
+        "cascade_report",
     }
     assert isinstance(payload["rows"], list)
     assert isinstance(payload["instruments"], list)
@@ -435,7 +465,15 @@ class TestSnapshotEraHonesty:
         era = "a" * 64
         _write_sweep_start_audit(tmp_path, [_start_payload(snapshot=era)])
         payload = build_sweep_leaderboard(tmp_path).to_dict()
-        new_top_level = {"snapshot_hashes", "mixed_snapshot_eras", "run_id_conflicts"}
+        new_top_level = {
+            "snapshot_hashes",
+            "mixed_snapshot_eras",
+            "run_id_conflicts",
+            # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 additive envelope keys
+            # (their own values pinned in test_sweep_results_view_temporal.py).
+            "temporal_coverage",
+            "cascade_report",
+        }
         legacy = {k: v for k, v in payload.items() if k not in new_top_level}
         for row in legacy["rows"]:
             row.pop("snapshot_era")
@@ -680,3 +718,277 @@ def test_prescanned_scan_is_ranked_without_a_rescan(tmp_path: Path) -> None:
     board = build_sweep_leaderboard(tmp_path, scan=scan)
     assert board == build_sweep_leaderboard(tmp_path)
     assert [r["sharpe_ratio"] for r in board.rows] == [2.5, 0.5]
+
+
+class TestServeFiltersAndRecheck:
+    """DEC-RESULTS-TRUST-HONESTY-001 · B2a — serving-side floors + the
+    hard-gate re-check belt (operator CONTROLS over an already-gated board)."""
+
+    def test_absent_filters_are_byte_identical_legacy(self, tmp_path: Path) -> None:
+        """No filter kwargs == explicit None kwargs — the pinned legacy arm."""
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[_row(seed=1)])
+        legacy = build_sweep_leaderboard(tmp_path).to_dict()
+        with_none = build_sweep_leaderboard(
+            tmp_path, min_trades=None, min_pf=None, min_dsr=None, max_abs_dd_pct=None
+        ).to_dict()
+        assert legacy == with_none
+
+    def test_min_trades_floor_filters_and_counts(self, tmp_path: Path) -> None:
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, total_trades=10), _row(seed=2, total_trades=60)],
+        )
+        board = build_sweep_leaderboard(tmp_path, min_trades=30)
+        assert [r["total_trades"] for r in board.rows] == [60]
+        assert board.total_rows == 1
+
+    def test_min_pf_and_max_abs_dd_floors(self, tmp_path: Path) -> None:
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[_row(seed=1)])
+        # profit_factor is 2.0 and max_drawdown_pct 0.05 on the fixture row.
+        assert build_sweep_leaderboard(tmp_path, min_pf=2.5).total_rows == 0
+        assert build_sweep_leaderboard(tmp_path, min_pf=2.0).total_rows == 1
+        assert build_sweep_leaderboard(tmp_path, max_abs_dd_pct=0.01).total_rows == 0
+        assert build_sweep_leaderboard(tmp_path, max_abs_dd_pct=0.05).total_rows == 1
+
+    def test_min_dsr_excludes_rows_that_cannot_demonstrate_it(self, tmp_path: Path) -> None:
+        """The fixture rows persist NO deflated_sharpe (None) — under an ACTIVE
+        min_dsr floor they are excluded (fail-closed on the operator's explicit
+        request; the unfiltered view still shows them)."""
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[_row(seed=1)])
+        assert build_sweep_leaderboard(tmp_path).total_rows == 1
+        assert build_sweep_leaderboard(tmp_path, min_dsr=0.0).total_rows == 0
+
+    def test_hard_gates_recheck_marks_never_drops(self, tmp_path: Path) -> None:
+        """A sub-MIN_TRADES legacy row is SERVED with hard_gates_recheck
+        "marked"; a door-passing row reads "ok" (the snapshot_era pattern)."""
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, total_trades=10), _row(seed=2, total_trades=60)],
+        )
+        board = build_sweep_leaderboard(tmp_path)
+        by_trades = {r["total_trades"]: r["hard_gates_recheck"] for r in board.rows}
+        assert by_trades == {10: "marked", 60: "ok"}
+        assert board.total_rows == 2  # marked, NEVER dropped
+
+
+class TestFilterParamParsers:
+    """parse_filter_int / parse_filter_float — blank inactive, junk refused."""
+
+    def test_none_and_blank_are_inactive(self) -> None:
+        assert parse_filter_int("min_trades", None) is None
+        assert parse_filter_int("min_trades", "  ") is None
+        assert parse_filter_float("min_pf", None) is None
+        assert parse_filter_float("min_pf", "") is None
+
+    def test_valid_tokens_parse(self) -> None:
+        assert parse_filter_int("min_trades", " 30 ") == 30
+        assert parse_filter_float("min_pf", "1.5") == 1.5
+        assert parse_filter_float("min_dsr", "0") == 0.0
+
+    @pytest.mark.parametrize("raw", ["abc", "30.5", "-1", "1e999"])
+    def test_int_junk_raises_naming_the_param(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="min_trades"):
+            parse_filter_int("min_trades", raw)
+
+    @pytest.mark.parametrize("raw", ["abc", "-0.1", "nan", "inf", "1e999"])
+    def test_float_junk_raises_naming_the_param(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="max_abs_dd_pct"):
+            parse_filter_float("max_abs_dd_pct", raw)
+
+
+# ── B1 benchmark join (DEC-RESULTS-TRUST-HONESTY-001, audit BLOCKER 1) ──
+
+
+def _write_depth_stamp(lake_root: Path, *, grid_run: str, combo_run_ids: list[str]) -> None:
+    """REAL writer-produced results-depth sidecars under ``<lake>/sweep_runs``."""
+    from datetime import UTC, date, datetime
+
+    from brutex.calendars.nse import IST
+    from brutex.engine.minute_path import PathStatus, SessionEquityPoint
+    from brutex.engine.trade_capture import CapturedTrade, ComboCapture
+    from brutex.engine.trade_store import sidecar_paths_for, write_tuple_sidecars
+    from brutex.strategies.types import Side
+
+    day = date(2024, 1, 5)
+
+    def _ts(hh: int, mm: int) -> datetime:
+        return datetime(day.year, day.month, day.day, hh, mm, tzinfo=IST).astimezone(UTC)
+
+    captures = []
+    for seq, combo_run_id in enumerate(combo_run_ids):
+        trade = CapturedTrade(
+            entry_ts=_ts(9, 16 + 2 * seq),
+            entry_px=Decimal("100.00"),
+            exit_ts=_ts(9, 17 + 2 * seq),
+            exit_px=Decimal("100.50"),
+            direction=Side.BUY,
+            lots=None,
+            exit_reason="take_profit",
+            pnl_paisa=50,
+            costs_paisa=None,
+            mae_paisa=10,
+            mfe_paisa=60,
+            mae_1m_paisa=None,
+            mfe_1m_paisa=None,
+            path_1m_status=PathStatus.NO_1M_DATA,
+            vix_entry=None,
+            vix_exit=None,
+        )
+        captures.append(
+            ComboCapture(
+                run_id=combo_run_id,
+                trades=(trade,),
+                equity=(SessionEquityPoint(day, 10_000_050, 9_999_990, 1),),
+                equity_status=PathStatus.OK,
+                vix_missing_trades=1,
+                parity_ok=True,
+                parity_detail="",
+            )
+        )
+    store = lake_root / "sweeps" / "NIFTY" / "1minute" / f"bull_k1_{'0' * 16}.parquet"
+    paths = sidecar_paths_for(store, lake_root / "sweeps", run_id=grid_run)
+    write_tuple_sidecars(paths, captures, [], store_content_hash="12" * 32)
+
+
+def _write_run_baseline(
+    lake_root: Path,
+    *,
+    grid_run: str,
+    instrument: str = "NIFTY",
+    series_instrument: str | None = None,
+) -> Path:
+    """A REAL engine-writer baseline at ``sweep_runs/<grid_run>/baseline-<instrument>.json``."""
+    from datetime import date
+
+    from brutex.engine.baseline import BaselineSeries, baseline_filename, write_baseline
+
+    series = BaselineSeries(
+        instrument=series_instrument or instrument,
+        start=date(2024, 1, 5),
+        end=date(2024, 1, 8),
+        anchor_open=Decimal("100.00"),
+        sessions=((date(2024, 1, 5), Decimal("101.00")), (date(2024, 1, 8), Decimal("103.00"))),
+        total_return_pct=3.0,
+        source_note="unit fixture",
+    )
+    run_dir = lake_root / "sweep_runs" / grid_run
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / baseline_filename(instrument)
+    write_baseline(path, series, data_snapshot_hash="ab" * 32)
+    return path
+
+
+class TestBenchmarkJoin:
+    """The STORED buy-&-hold facts join — never recomputed, never fabricated."""
+
+    def test_no_depth_runs_yields_null_benchmark_keys(self, tmp_path: Path) -> None:
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[_row(seed=1)])
+        board = build_sweep_leaderboard(tmp_path)
+        assert load_sweep_scan(tmp_path).benchmarks == {}
+        assert board.rows[0]["benchmark_return_pct"] is None
+        assert board.rows[0]["benchmark_window"] is None
+
+    def test_benchmark_joined_from_the_stored_baseline(self, tmp_path: Path) -> None:
+        row = _row(seed=1)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row])
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[row.run_id])
+        _write_run_baseline(tmp_path, grid_run="grid-a")
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.rows[0]["benchmark_return_pct"] == 3.0
+        assert board.rows[0]["benchmark_window"] == "2024-01-05 → 2024-01-08"
+
+    def test_combo_without_a_stamp_reads_null(self, tmp_path: Path) -> None:
+        captured = _row(seed=1)
+        uncaptured = _row(seed=2, sharpe=0.5)
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[captured, uncaptured],
+        )
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[captured.run_id])
+        _write_run_baseline(tmp_path, grid_run="grid-a")
+        board = build_sweep_leaderboard(tmp_path)
+        by_id = {r["run_id"]: r for r in board.rows}
+        assert by_id[captured.run_id]["benchmark_return_pct"] == 3.0
+        assert by_id[uncaptured.run_id]["benchmark_return_pct"] is None
+
+    def test_missing_baseline_file_reads_null(self, tmp_path: Path) -> None:
+        row = _row(seed=1)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row])
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[row.run_id])
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.rows[0]["benchmark_return_pct"] is None
+
+    def test_instrument_mismatched_artifact_is_never_served(self, tmp_path: Path) -> None:
+        """A renamed/foreign artifact must not serve under the wrong name."""
+        row = _row(seed=1)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row])
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[row.run_id])
+        _write_run_baseline(
+            tmp_path, grid_run="grid-a", instrument="NIFTY", series_instrument="BANKNIFTY"
+        )
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.rows[0]["benchmark_return_pct"] is None
+
+    def test_one_validated_load_per_baseline_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two combos on one depth run share ONE memoised baseline load."""
+        from brutex.dashboard import sweep_results_view as srv
+
+        row_a = _row(seed=1)
+        row_b = _row(seed=2, sharpe=0.5)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row_a, row_b])
+        _write_depth_stamp(tmp_path, grid_run="grid-a", combo_run_ids=[row_a.run_id, row_b.run_id])
+        _write_run_baseline(tmp_path, grid_run="grid-a")
+        calls = {"n": 0}
+        real = srv.load_baseline
+
+        def _counting(path: Path) -> object:
+            calls["n"] += 1
+            return real(path)
+
+        monkeypatch.setattr(srv, "load_baseline", _counting)
+        facts = load_sweep_scan(tmp_path).benchmarks
+        assert set(facts) == {row_a.run_id, row_b.run_id}
+        assert calls["n"] == 1
+
+    def test_depth_run_dir_path_law(self, tmp_path: Path) -> None:
+        from brutex.dashboard.sweep_results_view import _depth_run_dir
+        from brutex.engine.trade_store import RESULTS_DEPTH_DIRNAME
+
+        run_dir = tmp_path / "sweep_runs" / "grid-a"
+        stamp = run_dir / RESULTS_DEPTH_DIRNAME / "NIFTY" / "x.stamp.json"
+        assert _depth_run_dir(stamp) == run_dir
+        assert _depth_run_dir(tmp_path / "elsewhere" / "x.stamp.json") is None
+
+    def test_defensive_stamp_outside_the_depth_shape_reads_null(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stamp with NO results-depth ancestor is skipped, never guessed."""
+        from brutex.dashboard import sweep_results_view as srv
+        from brutex.engine.trade_store import SidecarPaths
+
+        row = _row(seed=1)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[row])
+        weird = tmp_path / "sweep_runs" / "grid-a" / "x.stamp.json"
+        paths = SidecarPaths(
+            trades=weird.with_suffix(".trades.parquet"),
+            aggs=weird.with_suffix(".aggs.parquet"),
+            equity=weird.with_suffix(".equity.parquet"),
+            stamp=weird,
+            # Merge-forward reconcile: main's DEC-RESILIENCE-STREAKS-001
+            # extended SidecarPaths with the resilience sibling pair.
+            resilience=weird.with_suffix(".resilience.parquet"),
+            resilience_stamp=weird.with_suffix(".resilience.stamp.json"),
+        )
+        monkeypatch.setattr(srv, "build_sidecar_index", lambda _lake: {row.run_id: paths})
+        assert srv._benchmark_facts(tmp_path, [row]) == {}

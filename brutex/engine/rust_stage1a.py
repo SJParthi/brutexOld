@@ -13,12 +13,14 @@ carrier the ``Stage1AMatrixBuilder.collect_batch_inputs`` prepass fills.
 ## The flag — ``BRUTEX_SWEEP_RUST_STAGE1A`` over ``STAGE1A_RUST_DEFAULT``
 
 :func:`stage1a_rust_enabled` reads the env per call, exactly like the sibling
-:func:`brutex.engine.rust_metrics.sweep_rust_metrics_enabled` (the ``_TRUTHY``
-/ ``_FALSY`` vocabulary is consumed through the PUBLIC
-:func:`brutex.engine.sweep_lookahead.env_flag_tristate` classifier, never
+:func:`brutex.engine.rust_metrics.sweep_rust_metrics_enabled` (the
+``TRUTHY_LITERALS`` / ``FALSY_LITERALS`` vocabulary — PROMOTED to the
+wheel-free :mod:`brutex.config.env_flags` leaf by
+DEC-PREBUILD-FRAME-WRITE-001 — is consumed through the PUBLIC
+:func:`brutex.engine.sweep_lookahead.env_flag_tristate` re-export, never
 copied — CLAUDE.md §11 COMMON; per-call resolution means no module-global flag
 state and every spawn worker reads its OWN inherited environment). Resolution:
-a ``_TRUTHY`` value forces ON, a ``_FALSY`` value forces OFF, unset /
+a ``TRUTHY_LITERALS`` value forces ON, a ``FALSY_LITERALS`` value forces OFF, unset /
 whitespace-empty falls to :data:`STAGE1A_RUST_DEFAULT` (**False — the kernel
 ships INERT**; the flip to default-ON is a SEPARATE later one-constant DEC,
 the #1531/#1532 two-step), and any unrecognised value fails SAFE to OFF with
@@ -74,8 +76,10 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-# The truthy/falsy literal sets live ONCE on the sweep-flag vocabulary home and
-# are consumed through its PUBLIC classifier — never copied (CLAUDE.md §11).
+# The truthy/falsy literal sets live ONCE in the wheel-free
+# ``brutex.config.env_flags`` leaf (the vocabulary home since
+# DEC-PREBUILD-FRAME-WRITE-001) and are consumed through the sweep-flag
+# module's PUBLIC re-exported classifier — never copied (CLAUDE.md §11).
 from brutex.engine.sweep_lookahead import env_flag_tristate
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -83,7 +87,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.engine.rust_stage1a")
 
-#: The env flag. ``_TRUTHY`` forces the batch Rust arm ON, ``_FALSY`` forces
+#: The env flag. ``TRUTHY_LITERALS`` forces the batch Rust arm ON, ``FALSY_LITERALS`` forces
 #: it OFF, unset/empty falls to :data:`STAGE1A_RUST_DEFAULT`, anything
 #: unrecognised fails SAFE to OFF with one warn-once ``flag_unrecognised``.
 STAGE1A_RUST_ENV: Final[str] = "BRUTEX_SWEEP_RUST_STAGE1A"
@@ -172,8 +176,8 @@ class Stage1ABatchInputs:
 def stage1a_rust_enabled() -> bool:
     """Resolve the batch-Rust flag over :data:`STAGE1A_RUST_DEFAULT`.
 
-    * a ``_TRUTHY`` value (``1/true/yes/on``) → ``True``;
-    * a ``_FALSY`` value (``0/false/no/off``) → ``False`` — the explicit
+    * a ``TRUTHY_LITERALS`` value (``1/true/yes/on``) → ``True``;
+    * a ``FALSY_LITERALS`` value (``0/false/no/off``) → ``False`` — the explicit
       operator kill switch, honoured regardless of the default;
     * unset or whitespace-empty → :data:`STAGE1A_RUST_DEFAULT` (**False** —
       the inert-ship default; the one-constant flip lever);

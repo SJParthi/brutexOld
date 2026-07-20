@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Final
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import open_regular_binary, read_regular_text
 from brutex.models import BruteXError
 from brutex.observability.flight_recorder import FlightRecorder
 
@@ -145,7 +146,7 @@ def content_hash_of(artifact: Path) -> str:
     """
     digest = hashlib.sha256()
     try:
-        with open(artifact, "rb") as handle:
+        with open_regular_binary(artifact) as handle:
             while chunk := handle.read(_HASH_CHUNK_BYTES):
                 digest.update(chunk)
     except OSError as exc:
@@ -259,7 +260,7 @@ def read_stage_stamp(artifact: Path) -> StageStamp:
     """
     sidecar = stamp_path(artifact)
     try:
-        text = sidecar.read_text(encoding="utf-8")
+        text = read_regular_text(sidecar)
     except OSError as exc:
         raise StageStampError(f"cannot read stamp {sidecar}: {exc}") from exc
     return _parse_stamp(text, source=sidecar)
@@ -321,7 +322,7 @@ def validate_stage_stamp(
     if not sidecar.is_file():
         return (StampVerdict.MISSING_STAMP, None)
     try:
-        stamp = _parse_stamp(sidecar.read_text(encoding="utf-8"), source=sidecar)
+        stamp = _parse_stamp(read_regular_text(sidecar), source=sidecar)
     except (StageStampError, OSError):
         return (StampVerdict.MALFORMED, None)
     recomputed = content_hash_of(artifact)

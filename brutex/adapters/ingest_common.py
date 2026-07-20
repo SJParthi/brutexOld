@@ -195,10 +195,15 @@ def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
     finalize-side :func:`brutex.calendars.nse.daily_derive_cutoff` (strict
     ``>``, at-close = still forming). Request-side vs finalize-side rationale:
     ALLOWING the ``today + 1`` end-exclusive bound at 15:30:00 is safe — no
-    bar at/after 15:30 can exist under the half-open ``[open, close)`` ingest
-    session filter, and the partial-window detector + keep-first sink guard
-    downstream — while FINALIZING a daily bar at 15:30:00 could bake in a
-    15:29 bar not yet pulled. The two verdicts are a pinned, cross-referenced
+    CURRENT-DAY bar at/after 15:30 can exist under the half-open
+    ``[open, close)`` ingest session filter (the HISTORICAL 2021-02-24
+    extended session's 15:30-16:59 bars ARE kept since
+    DEC-EXTENDED-SESSION-OUTAGE-001, but today can never be that date, and
+    the >=2025 extended-session enumeration pin in ``test_calendar_nse.py``
+    is the tripwire forcing a conscious clamp decision before any FUTURE
+    extended entry could land), and the partial-window detector + keep-first
+    sink guard downstream — while FINALIZING a daily bar at 15:30:00 could
+    bake in a 15:29 bar not yet pulled. The two verdicts are a pinned, cross-referenced
     pair (the #1267 drift-pin pattern), not hidden duplication. The date-blind
     hardcoded 15:30 here remains defended by the #1492 G2 Muhurat enumeration
     pin; calendar-awareness on this pull-planning side is a separate decision,

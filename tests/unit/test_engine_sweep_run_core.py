@@ -1529,6 +1529,47 @@ def test_diffcheck_zero_checked_records_nothing(tmp_path: Path) -> None:
     assert not [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
 
 
+def test_r45_diffcheck_closure_forwards_the_executed_population(tmp_path: Path) -> None:
+    """Round 3 (MIGRATION.md #1752): the closure forwards ``mask_population=``
+    verbatim to the hook — an injected 1-mask population checks exactly 1
+    (the raw k=1 walk over the grid bits would offer 3)."""
+    from brutex.engine.stage1a import build_bar_bits
+
+    grid = _grid()
+    tuple_ = next(iter_sweep_tuples(grid))
+    bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
+    with _core(tmp_path, grid, diffcheck_k=4) as (core, _s):
+        assert core.diffcheck is not None
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[0b100])
+        run_id = core.run_id
+    ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
+    assert len(ok_rows) == 1
+    payload = cast("dict[str, Any]", ok_rows[0]["payload"])
+    assert payload["checked"] == 1  # the population, not the 3-mask raw walk
+    assert payload["mismatches"] == 0
+
+
+def test_r45_diffcheck_closure_empty_population_skips_and_spends_no_budget(
+    tmp_path: Path,
+) -> None:
+    """An EXTINCT population is a counted skip that consumes NO K budget —
+    the very next (legacy-population) call still has the full budget."""
+    from brutex.engine.stage1a import build_bar_bits
+
+    grid = _grid()
+    tuple_ = next(iter_sweep_tuples(grid))
+    bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
+    with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
+        assert core.diffcheck is not None
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[])
+        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        run_id = core.run_id
+    ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
+    assert len(ok_rows) == 1  # the skip recorded nothing; the second call ran
+    payload = cast("dict[str, Any]", ok_rows[0]["payload"])
+    assert payload["checked"] == 2  # the FULL budget survived the skip
+
+
 def test_on_tuple_without_inner_still_records(tmp_path: Path) -> None:
     grid = _grid()
     tuple_ = next(iter_sweep_tuples(grid))
@@ -1825,8 +1866,10 @@ def test_r45_run_one_tuple_invokes_diffcheck_post_persist(tmp_path: Path) -> Non
         bar_bits: Sequence[int],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
+        mask_population: Sequence[int] | None = None,
     ) -> None:
         assert len(bar_bits) == len(bars)
+        assert mask_population is None  # legacy arm — the kwarg is never passed
         calls.append(len(bar_bits))
 
     grid = _grid()
@@ -1949,7 +1992,14 @@ def test_g03_parallel_driver_streams_progress(tmp_path: Path) -> None:
         sup.close()
         cache.close()
     assert summary.tuples_run == 2
-    assert seen == [1, 2]  # one tick per applied slot, in enumeration order
+    # one running tick per applied slot (enumeration order) and NO trailing
+    # finish duplicate — the #1445 G3 exact-count law (merge-fold reconcile,
+    # DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 ⇄ DEC-JOB-COOPERATIVE-CANCEL-001):
+    # cmd_sweep_all's parallel arm publishes the terminal done snapshot to the
+    # bridge itself after the driver returns (the tick shape is asserted
+    # precisely in test_engine_sweep_parallel_runcore.py::
+    # test_g3_writer_actor_ticks_on_progress_per_applied_tuple).
+    assert seen == [1, 2]
 
 
 def test_g06_cli_main_maps_refusals_to_clean_user_error(

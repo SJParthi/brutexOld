@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text_deadline
 
 #: The cache filename under the cache dir. One file, the raw last-good CSV text.
 _CACHE_FILENAME = "ntm_constituents.csv"
@@ -149,7 +150,7 @@ def load_cached_constituent_csv(*, cache_dir: Path) -> str | None:
         The cached CSV text, or ``None`` when there is no usable cache.
     """
     try:
-        text = _cache_file(cache_dir).read_text(encoding="utf-8")
+        text = read_regular_text_deadline(_cache_file(cache_dir), what="NTM constituent cache read")
     except OSError:
         return None
     return text or None
@@ -188,7 +189,7 @@ def load_cached_constituent_with_age(
     """
     file = _cache_file(cache_dir)
     try:
-        text = file.read_text(encoding="utf-8")
+        text = read_regular_text_deadline(file, what="NTM constituent cache read")
         mtime = file.stat().st_mtime
     except OSError:
         return None
