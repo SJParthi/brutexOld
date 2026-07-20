@@ -1,8 +1,11 @@
 # Expiry-Day Option Selling on NIFTY/SENSEX Weeklies: A Tail-First Study
 
-> **Status:** FINAL (research output only; no repo source modified; no
-> decision ID minted — the companion harness + this document live under
+> **Status:** FINAL (research output only; no repo source modified — the
+> companion harness + this document live under
 > `docs/design/options-strategies/11-expiry-day-tail-study/`).
+> **Decision:** DEC-OPTION-SELLING-RESEARCH-001 (MIGRATION.md #2210,
+> provisional — renumber-at-landing per DEC-LEDGER-RENUMBER-001; the
+> DEC-ID is the stable handle).
 > **Evidence verified as of 2026-07-18; document finalized 2026-07-20.**
 > File:line citations were verified against `/home/user/bruteX` @ branch
 > `claude/rust-slice-t10-lake-keys` on 2026-07-18; the harness citations
