@@ -17,9 +17,11 @@ diverge from what the engine refuses.
 This module COMPOSES the EXISTING PUBLIC predicates — it invents no screening
 logic (Golden Rule #11 COMMON):
 
-* :class:`~brutex.data.bad_tick.BadTickScreen` / :func:`~brutex.data.bad_tick.is_bad_tick`
+* :class:`~brutex.data.bad_tick.BadTickScreen` (``screen_mask`` — the head
+  median-confirm law DEC-BADTICK-HEAD-SEED-001 + the high/low arm
+  DEC-BADTICK-HILO-SCREEN-001) / :func:`~brutex.data.bad_tick.is_bad_tick`
   / :func:`~brutex.data.bad_tick.bad_tick_screen_enabled` (the ``BRUTEX_BAD_TICK_SCREEN``
-  kill switch) — the stateful, causal, per-session bad-tick state machine the
+  kill switch) — the whole-table per-session bad-tick decision plane the
   engine drives, reused VERBATIM here so a corrupt bar is dropped identically;
 * :func:`~brutex.data.price_sanity.price_row_insane` — the scalar twin of the
   vectorized :func:`~brutex.data.price_sanity.price_violation_expr`
@@ -31,15 +33,16 @@ logic (Golden Rule #11 COMMON):
   error, never an uncaught escape) — neither surface ever serves a
   non-finite bar; see ``price_row_insane``'s non-finite-arm note.
 
-:class:`SessionBarScreen` is the single causal per-session screen; two thin
-wrappers drive it — :func:`screen_frame` for the polars readers (``/movers``)
-and :func:`screen_rows` for the ``/db`` DuckDB page (seedable for cross-page
-bad-tick left-edge correctness). An anti-divergence property test pins
-:class:`SessionBarScreen`'s KEEP-set equal to
-:func:`~brutex.feed.replay.arrow_table_to_bars`'s kept set, so the two call
-sites can never diverge from each other OR from the engine, and both inherit any
-future internal change to first-bar handling (DEC-BADTICK-HEAD-SEED-001)
-automatically.
+:class:`SessionBarScreen` is the single two-phase whole-table screen (the
+insane pre-filter runs first — unconditional — then ``screen_mask`` judges the
+SANE subsequence, re-expanded to page coordinates); two thin wrappers drive it
+— :func:`screen_frame` for the polars readers (``/movers``) and
+:func:`screen_rows` for the ``/db`` DuckDB page (seedable for cross-page
+bad-tick left-edge correctness via ``screen_mask``'s ``seed_prev_close``). An
+anti-divergence property test pins :class:`SessionBarScreen`'s KEEP-set equal
+to :func:`~brutex.feed.replay.arrow_table_to_bars`'s kept set, so the two call
+sites can never diverge from each other OR from the engine — the head-seed +
+hi/lo laws hold identically at every serving surface.
 
 Disposition (mirrors the engine, with ONE sanctioned divergence):
 
@@ -91,7 +94,7 @@ _IST_TZ: Final[str] = IST_TZ_NAME
 
 
 class BarVerdict(Enum):
-    """The per-bar screening verdict returned by :meth:`SessionBarScreen.classify`."""
+    """The per-bar screening verdict returned by :meth:`SessionBarScreen.screen_table`."""
 
     #: Serve the bar (positive + ordered + not a bad tick).
     KEEP = "keep"
@@ -119,72 +122,110 @@ def session_date_from_ts(ts: datetime) -> date:
 
 
 class SessionBarScreen:
-    """Stateful, causal, per-session bar screen composing the public predicates.
+    """Two-phase whole-table bar screen composing the public predicates.
 
-    Fed bars in chronological (ascending) order within each session; decides per
-    bar KEEP / DROP_BAD_TICK / DROP_INSANE. Insane bars are dropped + counted and
-    do NOT advance the bad-tick baseline (like a dropped spike), so the bad-tick
-    comparison always runs against the last KEPT, positive, ordered close —
-    exactly the engine's ordering (positivity BEFORE the bad-tick compare).
+    Phase 1 (unconditional): the INSANE arm — every row is classified by
+    :func:`~brutex.data.price_sanity.price_row_insane` (finiteness +
+    positivity + ordering); insane rows are dropped + counted and are
+    INVISIBLE to the bad-tick arm (they join no head vote, never advance the
+    baseline — exactly the engine's finiteness/positivity-BEFORE-screen
+    ordering). Phase 2 (kill-switchable): the bad-tick arm —
+    :meth:`~brutex.data.bad_tick.BadTickScreen.screen_mask` judges the SANE
+    subsequence (session-head median vote + last-kept-close baseline + the
+    high/low arm), and the verdicts re-expand to the table's own row
+    coordinates. WARN events drain immediately through the shared emission
+    seam (:meth:`~brutex.data.bad_tick.BadTickScreen.emit_events`).
 
     Parameters
     ----------
     source
-        Human-readable partition origin woven into the per-session bad-tick WARN
-        (e.g. ``"NSE/INDEX/NSE-NIFTY/1minute"``), or ``None``.
+        Human-readable partition origin woven into the per-session bad-tick
+        WARNs (e.g. ``"NSE/INDEX/NSE-NIFTY/1minute"``), or ``None``.
     bad_tick_enabled
         Override for the bad-tick arm; ``None`` reads the
         :func:`~brutex.data.bad_tick.bad_tick_screen_enabled` kill switch
         (``BRUTEX_BAD_TICK_SCREEN``, default ON) — the SAME switch the engine
-        obeys, so the two stay consistent. Disabling turns OFF only the bad-tick
-        arm; the insane (positivity / ordering) drop is unconditional, mirroring
-        the engine's always-on positivity guard.
+        obeys, so the two stay consistent. Disabling turns OFF only the
+        bad-tick arm; the insane (finiteness / positivity / ordering) drop is
+        unconditional, mirroring the engine's always-on guard.
     """
 
-    __slots__ = ("_bad_tick", "_insane")
+    __slots__ = ("_bad_tick_enabled", "_insane", "_source")
 
     def __init__(self, *, source: str | None = None, bad_tick_enabled: bool | None = None) -> None:
-        enabled = bad_tick_screen_enabled() if bad_tick_enabled is None else bad_tick_enabled
-        # NOTE (DEC-BADTICK-HEAD-SEED-001 coordination point): the bad-tick arm
-        # is the EXISTING public BadTickScreen. If that fix later adds a public
-        # first-bar seed (e.g. BadTickScreen(seed_prev_close=...)), thread the
-        # reader's seed here — this is the ONE construction site. The
-        # anti-divergence property test vs arrow_table_to_bars fails loudly on
-        # any drift, so no forking of the logic is possible.
-        self._bad_tick: BadTickScreen | None = BadTickScreen(source=source) if enabled else None
+        self._source = source
+        self._bad_tick_enabled = (
+            bad_tick_screen_enabled() if bad_tick_enabled is None else bad_tick_enabled
+        )
         self._insane: int = 0
 
-    def classify(
+    def screen_table(
         self,
         *,
-        ist_date: date,
-        o: float | None,
-        h: float | None,
-        l: float | None,  # noqa: E741 - o/h/l/c mirror the OHLC field names
-        c: float | None,
-    ) -> BarVerdict:
-        """Classify one bar; the insane arm never advances the bad-tick baseline."""
-        if price_row_insane(o, h, l, c):
-            self._insane += 1
-            return BarVerdict.DROP_INSANE
-        # Past the insane guard every price is a non-None positive float (the
-        # engine's positivity-BEFORE-bad-tick ordering); cast narrows for the
-        # typed ``keep(close: float)`` with no runtime branch (coverage-safe).
-        if self._bad_tick is not None and not self._bad_tick.keep(
-            ist_date=ist_date, close=cast("float", c)
-        ):
-            return BarVerdict.DROP_BAD_TICK
-        return BarVerdict.KEEP
+        ist_dates: list[date],
+        opens: list[float | None],
+        highs: list[float | None],
+        lows: list[float | None],
+        closes: list[float | None],
+        seed_bar: tuple[date, float | None, float | None, float | None, float | None] | None = None,
+    ) -> list[BarVerdict]:
+        """Classify every row of one chronologically-ASCENDING bar table.
+
+        *seed_bar* is ``(session_date, open, high, low, close)`` of the single
+        in-session bar IMMEDIATELY preceding row 0 (the ``/db`` page-seed law).
+        It seeds ``screen_mask``'s first-session baseline ONLY when it is
+        price-sane AND shares the first sane row's session (a cross-session
+        predecessor has no bearing — the first session head-votes normally,
+        exactly as the engine would); an insane seed is ignored (it could
+        never have advanced the engine's baseline either).
+        """
+        n = len(closes)
+        verdicts = [BarVerdict.KEEP] * n
+        sane: list[int] = []
+        for i in range(n):
+            if price_row_insane(opens[i], highs[i], lows[i], closes[i]):
+                verdicts[i] = BarVerdict.DROP_INSANE
+                self._insane += 1
+            else:
+                sane.append(i)
+        if not self._bad_tick_enabled or not sane:
+            return verdicts
+        seed_close: float | None = None
+        if seed_bar is not None:
+            s_date, s_o, s_h, s_l, s_c = seed_bar
+            if not price_row_insane(s_o, s_h, s_l, s_c) and s_date == ist_dates[sane[0]]:
+                # Past the insane guard the close is a real positive float.
+                seed_close = float(cast("float", s_c))
+        # Past the insane guard every sane row's price is a non-None positive
+        # float (the engine's positivity-BEFORE-bad-tick ordering); the casts
+        # narrow for the typed float sequences with no runtime branch.
+        sane_dates = [ist_dates[i] for i in sane]
+        sane_closes = [float(cast("float", closes[i])) for i in sane]
+        sane_highs = [float(cast("float", highs[i])) for i in sane]
+        sane_lows = [float(cast("float", lows[i])) for i in sane]
+        screen = BadTickScreen(source=self._source)
+        mask, events = screen.screen_mask(
+            sane_dates,
+            sane_closes,
+            highs=sane_highs,
+            lows=sane_lows,
+            seed_prev_close=seed_close,
+        )
+        screen.emit_events(
+            events,
+            session_dates=sane_dates,
+            closes=sane_closes,
+            seed_prev_close=seed_close,
+        )
+        for j, i in enumerate(sane):
+            if not mask[j]:
+                verdicts[i] = BarVerdict.DROP_BAD_TICK
+        return verdicts
 
     @property
     def insane_dropped(self) -> int:
-        """How many price-insane bars were dropped (positivity / ordering)."""
+        """How many price-insane bars were dropped (finiteness / positivity / ordering)."""
         return self._insane
-
-    def finish(self) -> None:
-        """Flush the bad-tick WARN owed for the final session (call once at end)."""
-        if self._bad_tick is not None:
-            self._bad_tick.finish()
 
 
 def screen_frame(
@@ -222,16 +263,14 @@ def screen_frame(
     if df.height == 0:
         return df
     screen = SessionBarScreen(source=source, bad_tick_enabled=bad_tick_enabled)
-    ist_dates = df.get_column(ts_col).dt.convert_time_zone(_IST_TZ).dt.date().to_list()
-    opens = df.get_column("open").to_list()
-    highs = df.get_column("high").to_list()
-    lows = df.get_column("low").to_list()
-    closes = df.get_column("close").to_list()
-    keep = [
-        screen.classify(ist_date=d, o=o, h=h, l=lo, c=c) is BarVerdict.KEEP
-        for d, o, h, lo, c in zip(ist_dates, opens, highs, lows, closes, strict=True)
-    ]
-    screen.finish()
+    verdicts = screen.screen_table(
+        ist_dates=df.get_column(ts_col).dt.convert_time_zone(_IST_TZ).dt.date().to_list(),
+        opens=df.get_column("open").to_list(),
+        highs=df.get_column("high").to_list(),
+        lows=df.get_column("low").to_list(),
+        closes=df.get_column("close").to_list(),
+    )
+    keep = [v is BarVerdict.KEEP for v in verdicts]
     if all(keep):
         return df
     return df.filter(pl.Series(keep, dtype=pl.Boolean))
@@ -299,11 +338,6 @@ def screen_rows(
         c_idx = out_columns.index("close")
     except ValueError:
         return rows
-    screen = SessionBarScreen(source=source, bad_tick_enabled=bad_tick_enabled)
-    if seed_bar is not None:
-        s_ts, s_o, s_h, s_l, s_c = seed_bar
-        # Advance the baseline from the predecessor; its verdict is not served.
-        screen.classify(ist_date=session_date_from_ts(s_ts), o=s_o, h=s_h, l=s_l, c=s_c)
     # Screen ONLY the rows carrying a real datetime timestamp (see the docstring
     # resilience note) — a None/junk ts cell is served raw, never a TypeError.
     screenable = [i for i in range(len(rows)) if isinstance(rows[i][ts_idx], datetime)]
@@ -353,19 +387,22 @@ def screen_rows(
         if not insane:
             return rows
         return [row for i, row in enumerate(rows) if i not in insane]
-    dropped: set[int] = set()
-    for i in order:
-        row = rows[i]
-        verdict = screen.classify(
-            ist_date=session_date_from_ts(row[ts_idx]),
-            o=row[o_idx],
-            h=row[h_idx],
-            l=row[l_idx],
-            c=row[c_idx],
-        )
-        if verdict is not BarVerdict.KEEP:
-            dropped.add(i)
-    screen.finish()
+    screen = SessionBarScreen(source=source, bad_tick_enabled=bad_tick_enabled)
+    seed: tuple[date, float | None, float | None, float | None, float | None] | None = None
+    if seed_bar is not None:
+        s_ts, s_o, s_h, s_l, s_c = seed_bar
+        seed = (session_date_from_ts(s_ts), s_o, s_h, s_l, s_c)
+    verdicts = screen.screen_table(
+        ist_dates=[session_date_from_ts(rows[i][ts_idx]) for i in order],
+        opens=[rows[i][o_idx] for i in order],
+        highs=[rows[i][h_idx] for i in order],
+        lows=[rows[i][l_idx] for i in order],
+        closes=[rows[i][c_idx] for i in order],
+        seed_bar=seed,
+    )
+    dropped = {
+        i for i, verdict in zip(order, verdicts, strict=True) if verdict is not BarVerdict.KEEP
+    }
     if not dropped:
         return rows
     return [row for i, row in enumerate(rows) if i not in dropped]

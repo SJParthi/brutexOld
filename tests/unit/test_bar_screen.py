@@ -8,10 +8,11 @@ never render one number on ``/movers`` and a different one on ``/db`` (the
 "split-brain"), nor diverge from what the engine refuses.
 
 The ANTI-DIVERGENCE ORACLE (:class:`TestAntiDivergenceOracle`) is the load-bearing
-guarantee: over random bar streams :class:`SessionBarScreen`'s KEEP-set equals
-:func:`arrow_table_to_bars`'s kept set, so the two call sites can never diverge
-and both inherit any future internal change to first-bar handling
-(DEC-BADTICK-HEAD-SEED-001) automatically.
+guarantee: over random bar streams :meth:`SessionBarScreen.screen_table`'s
+KEEP-set equals :func:`arrow_table_to_bars`'s kept set, so the two call sites can
+never diverge — and the DEC-BADTICK-HEAD-SEED-001 head-median law + the
+DEC-BADTICK-HILO-SCREEN-001 high/low arm hold identically at every serving
+surface (both sides re-derived together in the #1399-port).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ pytest.importorskip("pyarrow")
 
 import polars as pl
 import pyarrow as pa
-from brutex.data.bad_tick import BAD_TICK_SKIP_EVENT
+from brutex.data.bad_tick import BAD_TICK_HEAD_UNCONFIRMED_EVENT, BAD_TICK_SKIP_EVENT
 from brutex.data.bar_screen import (
     BarVerdict,
     SessionBarScreen,
@@ -42,7 +43,8 @@ _DAY = date(2024, 1, 2)
 # 09:15 IST == 03:45 UTC.
 _OPEN_UTC = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
 #: The split-brain reproducer: a ×10 fat-finger spike (positive + ordered — the
-#: bad-tick class the positivity/ordering checks miss). Engine drops the 10000.
+#: bad-tick class the positivity/ordering checks miss). Engine drops the 10000
+#: (the head-median vote: median 1001 @ row 1).
 _REPRO_CLOSES = [1000.0, 1001.0, 10000.0, 1002.0, 1003.0]
 
 
@@ -83,6 +85,20 @@ def _arrow(closes: list[float], *, days: list[date] | None = None) -> pa.Table:
     )
 
 
+def _flat_table(
+    screen: SessionBarScreen, closes: list[float | None], *, days: list[date] | None = None
+) -> list[BarVerdict]:
+    """screen_table over o=h=l=c bars (the scalar-law harness)."""
+    dates = days if days is not None else [_DAY] * len(closes)
+    return screen.screen_table(
+        ist_dates=dates,
+        opens=list(closes),
+        highs=list(closes),
+        lows=list(closes),
+        closes=list(closes),
+    )
+
+
 class TestSessionDateFromTs:
     def test_tz_aware_uses_ist_date(self) -> None:
         # 23:00 UTC on the 1st is 04:30 IST on the 2nd.
@@ -93,53 +109,135 @@ class TestSessionDateFromTs:
         assert session_date_from_ts(datetime(2024, 1, 2, 5, 0)) == date(2024, 1, 2)
 
 
-class TestSessionBarScreenClassify:
+class TestSessionBarScreenTable:
     def test_reproducer_spike_is_bad_tick(self) -> None:
         s = SessionBarScreen(bad_tick_enabled=True)
-        verdicts = [s.classify(ist_date=_DAY, o=c, h=c, l=c, c=c).value for c in _REPRO_CLOSES]
+        verdicts = [v.value for v in _flat_table(s, list(_REPRO_CLOSES))]
         assert verdicts == ["keep", "keep", "drop_bad_tick", "keep", "keep"]
         assert s.insane_dropped == 0
 
-    def test_insane_row_dropped_and_does_not_advance_baseline(self) -> None:
+    def test_insane_row_dropped_and_invisible_to_bad_tick_arm(self) -> None:
         s = SessionBarScreen(bad_tick_enabled=True)
-        # 100 kept; an insane high<low bar dropped; 101 judged vs 100 (kept, not
-        # vs the insane close) — proving the insane row never advanced the baseline.
-        assert s.classify(ist_date=_DAY, o=100.0, h=101.0, l=99.0, c=100.0) is BarVerdict.KEEP
-        assert s.classify(ist_date=_DAY, o=100.0, h=1.0, l=50.0, c=100.5) is BarVerdict.DROP_INSANE
-        assert s.classify(ist_date=_DAY, o=101.0, h=102.0, l=100.0, c=101.0) is BarVerdict.KEEP
+        # 100 kept; an insane high<low bar dropped in PHASE 1; 101 joins the
+        # sane subsequence beside 100 (a 2-bar consistent head) — proving the
+        # insane row never reached the bad-tick arm.
+        verdicts = s.screen_table(
+            ist_dates=[_DAY, _DAY, _DAY],
+            opens=[100.0, 100.0, 101.0],
+            highs=[101.0, 1.0, 102.0],
+            lows=[99.0, 50.0, 100.0],
+            closes=[100.0, 100.5, 101.0],
+        )
+        assert verdicts == [BarVerdict.KEEP, BarVerdict.DROP_INSANE, BarVerdict.KEEP]
         assert s.insane_dropped == 1
 
     def test_null_price_is_insane(self) -> None:
         s = SessionBarScreen(bad_tick_enabled=True)
-        assert s.classify(ist_date=_DAY, o=None, h=1.0, l=1.0, c=1.0) is BarVerdict.DROP_INSANE
+        verdicts = s.screen_table(
+            ist_dates=[_DAY],
+            opens=[None],
+            highs=[1.0],
+            lows=[1.0],
+            closes=[1.0],
+        )
+        assert verdicts == [BarVerdict.DROP_INSANE]
+
+    def test_all_insane_page_skips_bad_tick_arm(self) -> None:
+        # The `not sane` early return: nothing for the bad-tick arm to judge.
+        s = SessionBarScreen(bad_tick_enabled=True)
+        verdicts = s.screen_table(
+            ist_dates=[_DAY, _DAY],
+            opens=[None, None],
+            highs=[1.0, 1.0],
+            lows=[1.0, 1.0],
+            closes=[1.0, 1.0],
+        )
+        assert verdicts == [BarVerdict.DROP_INSANE, BarVerdict.DROP_INSANE]
 
     def test_kill_switch_off_keeps_spike_but_still_drops_insane(self) -> None:
         s = SessionBarScreen(bad_tick_enabled=False)
-        verdicts = [s.classify(ist_date=_DAY, o=c, h=c, l=c, c=c) for c in _REPRO_CLOSES]
-        assert all(v is BarVerdict.KEEP for v in verdicts)  # bad-tick arm OFF
-        assert s.classify(ist_date=_DAY, o=100.0, h=1.0, l=50.0, c=100.5) is BarVerdict.DROP_INSANE
+        assert all(v is BarVerdict.KEEP for v in _flat_table(s, list(_REPRO_CLOSES)))
+        verdicts = s.screen_table(
+            ist_dates=[_DAY],
+            opens=[100.0],
+            highs=[1.0],
+            lows=[50.0],
+            closes=[100.5],
+        )
+        assert verdicts == [BarVerdict.DROP_INSANE]
 
     def test_env_kill_switch_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
         s = SessionBarScreen()
-        assert s.classify(ist_date=_DAY, o=1001.0, h=1001.0, l=1001.0, c=1001.0) is BarVerdict.KEEP
-        assert (
-            s.classify(ist_date=_DAY, o=10000.0, h=10000.0, l=10000.0, c=10000.0)
-            is BarVerdict.DROP_BAD_TICK
-        )
+        # A post-head ×10 spike: the default-ON arm must drop it.
+        verdicts = _flat_table(s, [1001.0, 1001.0, 1001.0, 10000.0])
+        assert verdicts == [
+            BarVerdict.KEEP,
+            BarVerdict.KEEP,
+            BarVerdict.KEEP,
+            BarVerdict.DROP_BAD_TICK,
+        ]
 
-    def test_finish_emits_one_warn_per_session(self) -> None:
-        from structlog.testing import capture_logs
-
+    def test_screen_table_emits_one_warn_per_session(self) -> None:
         with capture_logs() as logs:
             s = SessionBarScreen(bad_tick_enabled=True, source="x")
-            for c in _REPRO_CLOSES:
-                s.classify(ist_date=_DAY, o=c, h=c, l=c, c=c)
-            s.finish()
+            _flat_table(s, list(_REPRO_CLOSES))
         assert [entry["event"] for entry in logs].count(BAD_TICK_SKIP_EVENT) == 1
 
-    def test_finish_no_bad_tick_arm_is_noop(self) -> None:
-        SessionBarScreen(bad_tick_enabled=False).finish()  # must not raise
+    def test_bad_tick_off_emits_no_warns(self) -> None:
+        with capture_logs() as logs:
+            s = SessionBarScreen(bad_tick_enabled=False, source="x")
+            _flat_table(s, list(_REPRO_CLOSES))
+        assert logs == []
+
+    def test_two_bar_session_head_unconfirmed_kept_with_warn(self) -> None:
+        # DEC-BADTICK-HEAD-SEED-001: a mutually-inconsistent 2-bar session
+        # names no offender — BOTH kept + the honest disclosure WARN.
+        with capture_logs() as logs:
+            s = SessionBarScreen(bad_tick_enabled=True)
+            verdicts = _flat_table(s, [1000.0, 10000.0])
+        assert verdicts == [BarVerdict.KEEP, BarVerdict.KEEP]
+        assert [entry["event"] for entry in logs].count(BAD_TICK_HEAD_UNCONFIRMED_EVENT) == 1
+
+    def test_seed_bar_insane_is_ignored(self) -> None:
+        # An insane seed (high < low) never seeds the baseline: the page's
+        # 2-bar session falls back to the unconfirmable-head keep-both law.
+        s = SessionBarScreen(bad_tick_enabled=True)
+        verdicts = s.screen_table(
+            ist_dates=[_DAY, _DAY],
+            opens=[10000.0, 1002.0],
+            highs=[10000.0, 1002.0],
+            lows=[10000.0, 1002.0],
+            closes=[10000.0, 1002.0],
+            seed_bar=(_DAY, 1001.0, 1.0, 50.0, 1001.0),  # high<low → insane
+        )
+        assert verdicts == [BarVerdict.KEEP, BarVerdict.KEEP]
+
+    def test_seed_bar_cross_session_is_ignored(self) -> None:
+        # A predecessor from ANOTHER session has no bearing: the first
+        # session head-votes normally (2-bar unconfirmable here).
+        s = SessionBarScreen(bad_tick_enabled=True)
+        verdicts = s.screen_table(
+            ist_dates=[_DAY, _DAY],
+            opens=[10000.0, 1002.0],
+            highs=[10000.0, 1002.0],
+            lows=[10000.0, 1002.0],
+            closes=[10000.0, 1002.0],
+            seed_bar=(date(2024, 1, 1), 1001.0, 1001.0, 1001.0, 1001.0),
+        )
+        assert verdicts == [BarVerdict.KEEP, BarVerdict.KEEP]
+
+    def test_seed_bar_same_session_seeds_baseline(self) -> None:
+        s = SessionBarScreen(bad_tick_enabled=True)
+        verdicts = s.screen_table(
+            ist_dates=[_DAY, _DAY],
+            opens=[10000.0, 1002.0],
+            highs=[10000.0, 1002.0],
+            lows=[10000.0, 1002.0],
+            closes=[10000.0, 1002.0],
+            seed_bar=(_DAY, 1001.0, 1001.0, 1001.0, 1001.0),
+        )
+        assert verdicts == [BarVerdict.DROP_BAD_TICK, BarVerdict.KEEP]
 
 
 class TestScreenFrame:
@@ -183,6 +281,20 @@ class TestScreenFrame:
     def test_kill_switch_off_keeps_spike(self) -> None:
         out = screen_frame(_movers_frame(_REPRO_CLOSES), ts_col="ts_utc", bad_tick_enabled=False)
         assert out.get_column("close").to_list() == _REPRO_CLOSES
+
+    def test_high_only_poison_dropped(self) -> None:
+        # DEC-BADTICK-HILO-SCREEN-001 at the dashboard surface: a ×10 HIGH
+        # with a sane close drops the WHOLE bar — the same row the engine
+        # read + the resample seams drop.
+        df = _movers_frame([1000.0, 1001.0, 1002.0, 1003.0])
+        df = df.with_columns(
+            pl.when(pl.arange(0, df.height) == 2)
+            .then(10020.0)
+            .otherwise(pl.col("high"))
+            .alias("high")
+        )
+        out = screen_frame(df, ts_col="ts_utc")
+        assert out.get_column("close").to_list() == [1000.0, 1001.0, 1003.0]
 
     def test_str_close_column_dropped_insane_never_raises(self) -> None:
         """Non-numeric guard on the polars path (round-4 fold): a Utf8 close
@@ -247,15 +359,18 @@ class TestScreenRows:
         cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
         rows = [
             (_OPEN_UTC, 1.0, 1.5, 0.5, 1.0, 10, None),  # premium 1.00
-            (_OPEN_UTC + timedelta(minutes=1), 5.0, 5.5, 4.5, 5.0, 10, None),  # 5× jump, KEPT
-            (_OPEN_UTC + timedelta(minutes=2), 2.0, 1.0, 3.0, 2.0, 10, None),  # high<low, DROPPED
+            (_OPEN_UTC + timedelta(minutes=1), 1.0, 1.5, 0.5, 1.0, 10, None),
+            (_OPEN_UTC + timedelta(minutes=2), 1.0, 1.5, 0.5, 1.0, 10, None),
+            (_OPEN_UTC + timedelta(minutes=3), 5.0, 5.5, 4.5, 5.0, 10, None),  # 5× jump, KEPT
+            (_OPEN_UTC + timedelta(minutes=4), 2.0, 1.0, 3.0, 2.0, 10, None),  # high<low, DROPPED
         ]
         out = screen_rows(rows, cols, bad_tick_enabled=False)
-        assert [r[4] for r in out] == [1.0, 5.0]  # 5× kept, insane dropped
-        # The served-vs-dropped asymmetry, live (the reviewer-2 reproducer shape):
-        # the SAME premium sequence under default-ON drops the 5× as a bad tick.
-        default_on = screen_rows(rows[:2], cols, bad_tick_enabled=True)
-        assert [r[4] for r in default_on] == [1.0]  # ×4 arm drops the 5.00 bar
+        assert [r[4] for r in out] == [1.0, 1.0, 1.0, 5.0]  # 5× kept, insane dropped
+        # The served-vs-dropped asymmetry, live (the reviewer-2 reproducer
+        # shape, post-head): the SAME premium sequence under default-ON drops
+        # the 5× as a bad tick.
+        default_on = screen_rows(rows[:4], cols, bad_tick_enabled=True)
+        assert [r[4] for r in default_on] == [1.0, 1.0, 1.0]  # ×4 arm drops the 5.00 bar
 
     def test_none_timestamp_row_served_raw_never_raises(self) -> None:
         # DEC-DB-CORRUPT-SKIP-001 never-500 posture: a schema-drifted page with a
@@ -265,26 +380,36 @@ class TestScreenRows:
         rows = [
             (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None),
             (None, 999.0, 1002.0, 998.0, 1001.0, 10, None),  # junk ts → served raw
-            (_OPEN_UTC + timedelta(minutes=2), 9999.0, 10002.0, 9998.0, 10000.0, 10, None),
+            (_OPEN_UTC + timedelta(minutes=2), 999.5, 1002.5, 998.5, 1000.5, 10, None),
+            (_OPEN_UTC + timedelta(minutes=3), 1000.0, 1003.0, 999.0, 1001.0, 10, None),
+            (_OPEN_UTC + timedelta(minutes=4), 9999.0, 10002.0, 9998.0, 10000.0, 10, None),
         ]
         out = screen_rows(rows, cols)
-        # The ×10 spike (a datetime row) is screened out; the None-ts row survives.
-        assert [r[4] for r in out] == [1000.0, 1001.0]
+        # The ×10 spike (a datetime row, post-head vs the screenable head
+        # 1000/1000.5/1001) is screened out; the None-ts row survives raw.
+        assert [r[4] for r in out] == [1000.0, 1001.0, 1000.5, 1001.0]
 
-    def test_seed_catches_left_edge_spike(self) -> None:
-        # A page whose FIRST row is itself a spike vs a same-session predecessor:
-        # without a seed the first bar is exempt (kept); WITH the seed it drops.
-        rows, cols = _page([10000.0, 1002.0, 1003.0])
-        # shift the page's timestamps forward so a seed can precede them
+    def test_seed_catches_left_edge_spike_on_two_bar_page(self) -> None:
+        # A 2-row page whose FIRST row is a spike vs a same-session
+        # predecessor: page-locally the pair is the unconfirmable 2-bar head
+        # (kept-both + disclosure); WITH the seed the head is resolved
+        # upstream — the spike drops, the sane successor survives.
+        rows, cols = _page([10000.0, 1002.0])
         rows = [(t + timedelta(minutes=5), *rest) for (t, *rest) in rows]
         seed = (_OPEN_UTC, 1001.0, 1001.0, 1001.0, 1001.0)  # ts, o, h, l, close=1001
         no_seed = screen_rows(rows, cols)
         seeded = screen_rows(rows, cols, seed_bar=seed)
-        # Without a seed the spike is the exempt first-of-session bar (kept) and
-        # cascades — it drops the healthy successors (the split-brain left-edge
-        # gap); WITH the seed the spike is judged vs 1001 and dropped correctly.
-        assert [r[4] for r in no_seed] == [10000.0]
-        assert [r[4] for r in seeded] == [1002.0, 1003.0]
+        assert [r[4] for r in no_seed] == [10000.0, 1002.0]
+        assert [r[4] for r in seeded] == [1002.0]
+
+    def test_head_vote_catches_left_edge_spike_seedless(self) -> None:
+        # DEC-BADTICK-HEAD-SEED-001 shrinks the old left-edge gap: on a ≥3-row
+        # page the head MEDIAN vote drops a first-row spike even WITHOUT the
+        # seed (the pre-port first-bar-exempt law kept it and cascaded).
+        rows, cols = _page([10000.0, 1002.0, 1003.0])
+        rows = [(t + timedelta(minutes=5), *rest) for (t, *rest) in rows]
+        out = screen_rows(rows, cols)
+        assert [r[4] for r in out] == [1002.0, 1003.0]
 
     def test_kill_switch_off_keeps_spike(self) -> None:
         rows, cols = _page(_REPRO_CLOSES)
@@ -294,9 +419,9 @@ class TestScreenRows:
     def test_duplicate_ts_asc_desc_same_kept_set(self) -> None:
         """CANONICAL dup-ts order (round-2 refuter MINOR-2): ASC == DESC kept set.
 
-        Two rows at the SAME timestamp with closes 1000/5000 — a stable ts-only
-        sort kept PAGE order, so an ASC page kept [1000] and a DESC page kept
-        [5000] for identical data. The full-row canonical tie-break makes both
+        Two rows at the SAME timestamp — a stable ts-only sort kept PAGE
+        order, so an ASC page and a DESC page of identical data could keep
+        DIFFERENT rows. The full-row canonical tie-break makes both
         directions classify identically.
         """
         cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
@@ -351,19 +476,23 @@ class TestScreenRows:
         assert out == [aware_ok, aware_spike]
         assert any(log["event"] == "bar_screen.unsortable_page_bad_tick_skipped" for log in logs)
 
-    def test_nan_close_dropped_and_never_advances_baseline(self) -> None:
-        """NaN arm (round-2 refuter MINOR-1): a NaN bar drops + never poisons the baseline."""
+    def test_nan_close_dropped_and_invisible_to_bad_tick_arm(self) -> None:
+        """NaN arm (round-2 refuter MINOR-1): a NaN bar drops as INSANE in
+        phase 1 and never joins the head vote / baseline — the spike is still
+        caught against the REAL sane closes around it."""
         cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
         nan = float("nan")
         rows = [
             (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None),
             (_OPEN_UTC + timedelta(minutes=1), 999.0, 1002.0, 998.0, nan, 10, None),
-            # Judged vs 1000 (the last KEPT close), NOT vs NaN — a NaN baseline
+            (_OPEN_UTC + timedelta(minutes=2), 999.5, 1002.5, 998.5, 1000.5, 10, None),
+            (_OPEN_UTC + timedelta(minutes=3), 1000.0, 1003.0, 999.0, 1001.0, 10, None),
+            # Judged vs the sane baseline (1001), NOT vs NaN — a NaN reference
             # would silently disable the ×4 arm (every comparison False).
-            (_OPEN_UTC + timedelta(minutes=2), 9999.0, 10002.0, 9998.0, 10000.0, 10, None),
+            (_OPEN_UTC + timedelta(minutes=4), 9999.0, 10002.0, 9998.0, 10000.0, 10, None),
         ]
         out = screen_rows(rows, cols)
-        assert [r[4] for r in out] == [1000.0]  # NaN dropped; spike still caught
+        assert [r[4] for r in out] == [1000.0, 1000.5, 1001.0]  # NaN + spike dropped
 
     def test_str_price_cell_dropped_insane_never_raises(self) -> None:
         """Non-numeric guard (round-4 fold): a str price cell (DuckDB
@@ -400,27 +529,27 @@ class TestScreenRows:
 
 
 class TestAntiDivergenceOracle:
-    """SessionBarScreen KEEP-set == arrow_table_to_bars kept set (the oracle)."""
+    """screen_table KEEP-set == arrow_table_to_bars kept set (the oracle)."""
 
     def _engine_and_screen(
         self, closes: list[float], days: list[date] | None = None
     ) -> tuple[list[float], list[float]]:
         table = _arrow(closes, days=days)
         engine = [float(b.close) for b in arrow_table_to_bars(table, source="oracle")]
-        screen = SessionBarScreen(bad_tick_enabled=True, source="oracle")
-        kept: list[float] = []
         ts_list = table.column("timestamp").to_pylist()
-        o = table.column("open").to_pylist()
-        h = table.column("high").to_pylist()
-        low = table.column("low").to_pylist()
-        c = table.column("close").to_pylist()
-        for ts, oo, hh, ll, cc in zip(ts_list, o, h, low, c, strict=True):
-            if (
-                screen.classify(ist_date=session_date_from_ts(ts), o=oo, h=hh, l=ll, c=cc)
-                is BarVerdict.KEEP
-            ):
-                kept.append(float(cc))
-        screen.finish()
+        screen = SessionBarScreen(bad_tick_enabled=True, source="oracle")
+        verdicts = screen.screen_table(
+            ist_dates=[session_date_from_ts(ts) for ts in ts_list],
+            opens=table.column("open").to_pylist(),
+            highs=table.column("high").to_pylist(),
+            lows=table.column("low").to_pylist(),
+            closes=table.column("close").to_pylist(),
+        )
+        kept = [
+            float(c)
+            for c, v in zip(table.column("close").to_pylist(), verdicts, strict=True)
+            if v is BarVerdict.KEEP
+        ]
         return engine, kept
 
     def test_reproducer_matches_engine(self) -> None:
@@ -428,11 +557,18 @@ class TestAntiDivergenceOracle:
         assert screen == engine == [1000.0, 1001.0, 1002.0, 1003.0]
 
     def test_multi_session_reset(self) -> None:
-        # Two sessions; a spike opening day 2 is the first bar (exempt) on BOTH.
+        # Two sessions; the ×10 opening day 2 is a single-bar session (no
+        # in-session witness → kept silently) on BOTH surfaces.
         closes = [1000.0, 1001.0, 10000.0]
         days = [date(2024, 1, 2), date(2024, 1, 2), date(2024, 1, 3)]
         engine, screen = self._engine_and_screen(closes, days=days)
-        assert screen == engine
+        assert screen == engine == closes
+
+    def test_head_median_vote_matches_engine(self) -> None:
+        # The poison-HEAD shape (the #1625 headline): both surfaces drop the
+        # first bar via the median vote.
+        engine, screen = self._engine_and_screen([279400.0, 27940.0, 27941.0, 27942.0])
+        assert screen == engine == [27940.0, 27941.0, 27942.0]
 
     @given(
         closes=st.lists(

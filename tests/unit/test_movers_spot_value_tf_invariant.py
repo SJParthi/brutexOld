@@ -105,20 +105,14 @@ def _screen_kept(bars: list[CandleBar]) -> list[CandleBar]:
     from brutex.data.bar_screen import BarVerdict, SessionBarScreen, session_date_from_ts
 
     screen = SessionBarScreen(bad_tick_enabled=True)
-    kept = [
-        b
-        for b in bars
-        if screen.classify(
-            ist_date=session_date_from_ts(b.timestamp),
-            o=float(b.open),
-            h=float(b.high),
-            l=float(b.low),
-            c=float(b.close),
-        )
-        is BarVerdict.KEEP
-    ]
-    screen.finish()
-    return kept
+    verdicts = screen.screen_table(
+        ist_dates=[session_date_from_ts(b.timestamp) for b in bars],
+        opens=[float(b.open) for b in bars],
+        highs=[float(b.high) for b in bars],
+        lows=[float(b.low) for b in bars],
+        closes=[float(b.close) for b in bars],
+    )
+    return [b for b, v in zip(bars, verdicts, strict=True) if v is BarVerdict.KEEP]
 
 
 def _hand_raw_1m_paisa(bars: list[CandleBar]) -> int:
