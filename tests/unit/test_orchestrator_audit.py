@@ -20,9 +20,10 @@ import math
 import os
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, ClassVar
 
 import pytest
+from brutex.orchestrator import audit as audit_module
 from brutex.orchestrator.audit import (
     GENESIS_PREV_HASH,
     AuditChainCorruption,
@@ -58,6 +59,7 @@ from brutex.orchestrator.audit import (
 )
 from hypothesis import given
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -1785,3 +1787,361 @@ class TestTruncateTornTailPins:
         with pytest.raises(AuditWriteError) as exc_info:
             truncate_torn_tail(p)
         assert str(exc_info.value) == f"Failed to truncate torn tail of audit log {p}: boom"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Rust audit-chain kernel seam (DEC-AUDIT-CHAIN-RUST-PORT-001, ADR-0019)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRustAuditSeam:
+    """The flag-gated Rust dispatch: flag arms, kernel resolution, envelope
+    fallback, burn-in + autorevert latch, and both-arms byte identity."""
+
+    _ENTRY_KWARGS: ClassVar[dict[str, Any]] = {
+        "seq": 0,
+        "prev_hash": "0" * 64,
+        "ts_utc": 1700000000.0,
+        "actor": "brutex",
+        "action": "RUN_START",
+        "subject": "run:seam",
+        "payload": {"k": 1},
+    }
+
+    @pytest.fixture(autouse=True)
+    def _fresh_seam(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        """Every test starts and ends with a fresh-process seam view."""
+        monkeypatch.delenv(audit_module.RUST_AUDIT_CHAIN_ENV, raising=False)
+        audit_module._reset_rust_audit_for_tests()
+        yield
+        audit_module._reset_rust_audit_for_tests()
+
+    def _entry(self, **overrides: Any) -> AuditEntry:
+        return AuditEntry(**{**self._ENTRY_KWARGS, **overrides})
+
+    def _arm(self, monkeypatch: pytest.MonkeyPatch, *, burn_in_remaining: int = 16) -> None:
+        monkeypatch.setenv(audit_module.RUST_AUDIT_CHAIN_ENV, "1")
+        audit_module._reset_rust_audit_for_tests(burn_in_remaining=burn_in_remaining)
+
+    @staticmethod
+    def _fake_kernel(
+        hash_value: str = "f" * 64, line_value: str = "{}"
+    ) -> audit_module._RustAuditKernel:
+        return audit_module._RustAuditKernel(
+            hash_fn=lambda *a: hash_value,
+            line_fn=lambda *a: line_value,
+            envelope_error=KeyError,
+        )
+
+    # ── flag arms ────────────────────────────────────────────────────────
+
+    def test_flag_default_off_resolves_no_kernel(self) -> None:
+        assert audit_module._rust_audit_kernel() is None
+
+    def test_flag_falsy_off_silent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(audit_module.RUST_AUDIT_CHAIN_ENV, "off")
+        audit_module._reset_rust_audit_for_tests()
+        with capture_logs() as logs:
+            assert audit_module._rust_audit_kernel() is None
+        assert logs == []
+
+    def test_flag_junk_warns_once_and_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(audit_module.RUST_AUDIT_CHAIN_ENV, "flase")
+        audit_module._reset_rust_audit_for_tests()
+        with capture_logs() as logs:
+            assert audit_module._rust_flag_enabled() is False
+            assert audit_module._rust_flag_enabled() is False  # memo: warn once
+        events = [r["event"] for r in logs]
+        assert events == ["audit.rust_flag_unrecognised"]
+
+    # ── kernel resolution arms ───────────────────────────────────────────
+
+    def test_flag_on_resolves_the_real_kernel_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        kernel = audit_module._rust_audit_kernel()
+        assert kernel is not None
+        # Memoized: a second call returns the SAME resolved object.
+        assert audit_module._rust_audit_kernel() is kernel
+
+    def test_wheel_missing_warns_once_and_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm(monkeypatch)
+
+        def _no_wheel() -> Any:
+            raise ImportError("no fno_math")
+
+        monkeypatch.setattr(audit_module, "_import_fno_math", _no_wheel)
+        with capture_logs() as logs:
+            assert audit_module._rust_audit_kernel() is None
+        assert [r["event"] for r in logs] == ["audit.rust_kernel_unavailable"]
+        assert logs[0]["reason"] == "wheel_missing"
+        # The entry still serves from the Python oracle.
+        entry = self._entry()
+        assert entry.compute_hash() == entry._compute_hash_python()
+
+    @pytest.mark.parametrize(
+        "stale_ns",
+        [
+            {},
+            {"audit_entry_hash": lambda *a: "h"},
+            {"audit_entry_hash": lambda *a: "h", "audit_entry_line": lambda *a: "l"},
+            {
+                "audit_entry_hash": lambda *a: "h",
+                "audit_entry_line": lambda *a: "l",
+                "AuditEnvelopeError": "not-a-type",
+            },
+        ],
+        ids=["empty", "hash-only", "no-envelope", "envelope-not-a-type"],
+    )
+    def test_wheel_stale_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, stale_ns: dict[str, Any]
+    ) -> None:
+        self._arm(monkeypatch)
+        import types
+
+        monkeypatch.setattr(
+            audit_module, "_import_fno_math", lambda: types.SimpleNamespace(**stale_ns)
+        )
+        with capture_logs() as logs:
+            assert audit_module._rust_audit_kernel() is None
+        assert [r["event"] for r in logs] == ["audit.rust_kernel_unavailable"]
+        assert logs[0]["reason"] == "wheel_stale"
+
+    # ── dispatch + burn-in ───────────────────────────────────────────────
+
+    def test_flag_on_hash_and_line_match_the_python_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        entry = self._entry()
+        assert entry.compute_hash() == entry._compute_hash_python()
+        stamped = self._entry(entry_hash=entry.compute_hash())
+        assert stamped.to_json_line() == stamped._to_json_line_python()
+
+    def test_burn_in_consumes_independent_per_surface_budgets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each surface owns its OWN burn-in budget (slice-9 review, audit
+        MINOR-1 — a shared budget let a verify-heavy process exhaust the
+        window before the line surface was ever validated)."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=2)
+        entry = self._entry(entry_hash="h")
+        entry.compute_hash()
+        entry.to_json_line()
+        assert audit_module._RUST_BURN_IN_REMAINING == {"compute_hash": 1, "to_json_line": 1}
+        entry.compute_hash()
+        entry.compute_hash()  # hash budget exhausted — no decrement below 0
+        assert audit_module._RUST_BURN_IN_REMAINING == {"compute_hash": 0, "to_json_line": 1}
+
+    def test_hash_exhausted_burn_in_still_validates_the_line_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MINOR-1 regression: a verify-heavy process (compute_hash
+        budget exhausted) must STILL burn-in-validate its first
+        ``to_json_line`` — a wrong kernel line ships the PYTHON bytes and
+        latches, never serving the kernel value unvalidated."""
+        entry = self._entry(entry_hash="h")
+        correct_hash = entry._compute_hash_python()
+        self._arm(monkeypatch, burn_in_remaining=1)
+        audit_module._set_rust_kernel_for_tests(
+            self._fake_kernel(hash_value=correct_hash, line_value='{"fake": true}')
+        )
+        # The verify_chain shape: hash calls only, exhausting THAT budget.
+        assert entry.compute_hash() == correct_hash
+        assert audit_module._RUST_BURN_IN_REMAINING["compute_hash"] == 0
+        # The line surface still owes its own burn-in: the wrong kernel
+        # line is caught, the Python bytes ship, the kernel latches.
+        with capture_logs() as logs:
+            assert entry.to_json_line() == entry._to_json_line_python()
+        assert audit_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
+        assert [r["event"] for r in logs] == ["audit.kernel_autoreverted"]
+
+    def test_burn_in_mismatch_ships_python_latches_and_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._arm(monkeypatch)
+        audit_module._set_rust_kernel_for_tests(self._fake_kernel(hash_value="f" * 64))
+        entry = self._entry()
+        with capture_logs() as logs:
+            first = entry.compute_hash()
+        assert first == entry._compute_hash_python()  # the PYTHON bytes ship
+        events = [r["event"] for r in logs]
+        assert events == ["audit.kernel_autoreverted"]
+        assert audit_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
+        # Latched: every later call short-circuits to the oracle (no kernel).
+        assert audit_module._rust_audit_kernel() is None
+        assert entry.compute_hash() == entry._compute_hash_python()
+        # The latch logs ONCE — a second disable call is a no-op.
+        with capture_logs() as logs:
+            audit_module._disable_rust_kernel("again")
+        assert logs == []
+
+    def test_post_burn_in_rust_value_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With the budget exhausted the kernel value serves directly —
+        proven with a fake kernel whose value is distinguishable."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        audit_module._set_rust_kernel_for_tests(
+            self._fake_kernel(hash_value="f" * 64, line_value='{"fake": true}')
+        )
+        entry = self._entry(entry_hash="h")
+        assert entry.compute_hash() == "f" * 64
+        assert entry.to_json_line() == '{"fake": true}'
+
+    # ── fallback arms ────────────────────────────────────────────────────
+
+    def test_envelope_fallback_warns_once_and_serves_python(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        entry = self._entry(payload={"big": 1 << 100})
+        with capture_logs() as logs:
+            assert entry.compute_hash() == entry._compute_hash_python()
+            assert entry.compute_hash() == entry._compute_hash_python()  # warn once
+        events = [r["event"] for r in logs]
+        assert events == ["audit.rust_envelope_fallback"]
+        assert logs[0]["reason"] == "compute_hash"
+
+    def test_conversion_fallback_on_out_of_i64_seq(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        entry = self._entry(seq=1 << 80)  # a tampered-line shape; PyO3 OverflowError
+        with capture_logs() as logs:
+            assert entry.compute_hash() == entry._compute_hash_python()
+        assert [r["event"] for r in logs] == ["audit.rust_conversion_fallback"]
+
+    def test_lone_surrogate_field_raises_like_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lone-surrogate free-form field crashes BOTH arms with
+        ``UnicodeEncodeError`` — the Rust arm routes through the oracle."""
+        pytest.importorskip("fno_math")
+        entry = self._entry(actor="ac\ud800tor")
+        with pytest.raises(UnicodeEncodeError):
+            entry._compute_hash_python()
+        self._arm(monkeypatch)
+        with pytest.raises(UnicodeEncodeError):
+            entry.compute_hash()
+
+    def test_nonfinite_ts_line_raises_payload_error_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-finite ts refuses at the kernel envelope → the oracle raises
+        today's exact ``AuditPayloadError`` from ``to_json_line``."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        entry = self._entry(ts_utc=float("inf"), entry_hash="h")
+        with pytest.raises(AuditPayloadError):
+            entry.to_json_line()
+
+    # ── flag-ON tamper matrix + torn-tail rerun ─────────────────────────
+
+    def test_tamper_detection_and_torn_tail_resume_flag_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The tamper matrix + torn-tail auto-repair hold under the Rust arm."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        path = tmp_path / "chain.jsonl"
+        with AuditWriter.open(path, resume=False) as writer:
+            writer.append(action="RUN_START", subject="run:x", payload={"n": 1})
+            writer.append(action="PHASE", subject="p:1", payload={"pnl": -0.0, "sci": 1e16})
+        assert verify_chain(path) == 2
+        # Tamper: flip a payload byte on line 2 → corruption at seq 1.
+        lines = path.read_bytes().split(b"\n")
+        lines[1] = lines[1].replace(b'"n":1', b'"n":2', 1).replace(b'"pnl"', b'"qnl"', 1)
+        path.write_bytes(b"\n".join(lines))
+        with pytest.raises(AuditChainCorruption):
+            verify_chain(path)
+        # Torn tail: a partial third line is skipped + repaired on resume.
+        torn = tmp_path / "torn.jsonl"
+        with AuditWriter.open(torn, resume=False) as writer:
+            writer.append(action="RUN_START", subject="run:y")
+        with open(torn, "ab") as f:
+            f.write(b'{"seq": 1, "partial')
+        with AuditWriter.open(torn, resume=True) as writer:
+            entry = writer.append(action="RUN_COMPLETE", subject="run:y")
+        assert entry.seq == 1
+        assert verify_chain(torn) == 2
+
+    # ── seam plumbing ────────────────────────────────────────────────────
+
+    def test_reset_seam_restores_a_fresh_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm(monkeypatch, burn_in_remaining=0)
+        audit_module._set_rust_kernel_for_tests(self._fake_kernel())
+        audit_module._disable_rust_kernel("test")
+        audit_module._reset_rust_audit_for_tests()
+        assert audit_module._RUST_DISABLED_REASON[0] is None
+        assert audit_module._RUST_BURN_IN_REMAINING == {
+            "compute_hash": audit_module.AUDIT_BURN_IN_SAMPLES,
+            "to_json_line": audit_module.AUDIT_BURN_IN_SAMPLES,
+        }
+        assert audit_module._RUST_KERNEL_RESOLVED[0] is False
+
+    # ── logging can never fail an append (audit MINOR-2) ─────────────────
+
+    def test_raising_log_sink_never_fails_the_envelope_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising structlog processor (simulated at the seam-log sink)
+        must never fail an append/verify — the #1630 guarantee extended to
+        the seam (slice-9 review, audit MINOR-2)."""
+        pytest.importorskip("fno_math")
+        from brutex.orchestrator import audit_seam_log
+
+        self._arm(monkeypatch)
+
+        def _boom(event: str, **context: object) -> None:
+            raise RuntimeError("raising structlog processor")
+
+        monkeypatch.setattr(audit_seam_log, "warn", _boom)
+        entry = self._entry(payload={"big": 1 << 100})  # envelope fallback fires
+        assert entry.compute_hash() == entry._compute_hash_python()
+
+    def test_raising_log_sink_never_fails_the_autorevert_append(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The autorevert ERROR line is best-effort: a raising sink loses
+        the line but the append still ships the Python bytes + latches."""
+        from brutex.orchestrator import audit_seam_log
+
+        self._arm(monkeypatch)
+        audit_module._set_rust_kernel_for_tests(self._fake_kernel(hash_value="f" * 64))
+
+        def _boom(event: str, **context: object) -> None:
+            raise RuntimeError("raising structlog processor")
+
+        monkeypatch.setattr(audit_seam_log, "error", _boom)
+        entry = self._entry()
+        assert entry.compute_hash() == entry._compute_hash_python()
+        assert audit_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
+
+    # ── out-of-contract int ts_utc routes to the oracle (audit NIT-1) ────
+
+    def test_int_ts_utc_routes_to_the_oracle_never_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An int ``ts_utc`` (out of the ``float`` contract) would render
+        "1700000000" via str() but "1700000000.0" via f64 repr — the
+        dispatch routes it to the oracle; the kernel is never invoked."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        calls: list[str] = []
+
+        def _spy_hash(*args: object) -> str:
+            calls.append("hash")
+            return "x" * 64
+
+        def _spy_line(*args: object) -> str:
+            calls.append("line")
+            return "{}"
+
+        kernel = audit_module._RustAuditKernel(
+            hash_fn=_spy_hash, line_fn=_spy_line, envelope_error=KeyError
+        )
+        audit_module._set_rust_kernel_for_tests(kernel)
+        entry = self._entry(ts_utc=1_700_000_000, entry_hash="h")  # int, not float
+        assert entry.compute_hash() == entry._compute_hash_python()
+        assert entry.to_json_line() == entry._to_json_line_python()
+        assert calls == []  # the kernel never saw the out-of-contract entry

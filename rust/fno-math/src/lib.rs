@@ -84,6 +84,24 @@ pub mod metrics;
 /// (CPCV fold pass-count in PR-1; later PRs append inside the same module).
 /// Python keeps every numpy pairwise reduction, libm call and raise.
 pub mod stats;
+/// DEC-AUDIT-CHAIN-RUST-PORT-001 (slice 9, ADR-0019 / #1727): the orchestrator
+/// SHA-256 audit-chain serializer — CPython-exact float repr + canonical JSON
+/// + `|`-joined preimage + on-disk line bytes, parity-gated on the frozen
+/// `tests/golden/fixtures/audit_chain_parity_*` fixtures. File I/O stays Python.
+pub mod audit_chain;
+
+/// DEC-CALENDAR-VERDICT-RUST-001 (slice 9, ADR-0019 / #1727): the NSE/BSE
+/// calendar VERDICT engine — decision logic only; the calendar DATA stays in
+/// `brutex.calendars` (ADR-0012 D8) and crosses the FFI as runtime config,
+/// parity-gated on the frozen 2,557-day calendar verdict-table golden.
+pub mod calendar_verdict;
+
+/// DEC-RATE-MATH-RUST-001 (slice 9, ADR-0019 / #1727a): the adaptive
+/// token-bucket's FOUR pure IEEE f64 expressions (refill / consume /
+/// retry-wait / set-rate post-state) — bit-exact CPython min/max order
+/// semantics; locks, clock, deque window, and every cap/ladder VALUE stay
+/// Python (§2 Rule 6).
+pub mod rate_math;
 
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -168,5 +186,48 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // above are untouched. Later slice-6 PRs append inside this fence.
     m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
     // ---- end stats module ----
+    // ── slice-9 audit-chain kernels (DEC-AUDIT-CHAIN-RUST-PORT-001, ADR-0019) ──
+    // The orchestrator SHA-256 chain's serializer + hash + line bytes; the
+    // envelope-error type routes out-of-model payloads back to the Python oracle.
+    m.add(
+        "AuditEnvelopeError",
+        m.py().get_type::<audit_chain::AuditEnvelopeError>(),
+    )?;
+    m.add_function(wrap_pyfunction!(audit_chain::audit_entry_hash_py, m)?)?;
+    m.add_function(wrap_pyfunction!(audit_chain::audit_entry_line_py, m)?)?;
+    m.add_function(wrap_pyfunction!(audit_chain::py_float_repr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(audit_chain::canonical_json_py, m)?)?;
+    // ── slice-9 calendar-verdict kernels (DEC-CALENDAR-VERDICT-RUST-001) ──
+    // The NSE/BSE verdict engine (config supplied by brutex.calendars at
+    // runtime — ADR-0012 D8) + the four module-level session-law scalars
+    // (`_s` suffix = seconds-of-day, avoiding nse.py name shadowing).
+    m.add_class::<calendar_verdict::CalendarVerdictEngine>()?;
+    m.add_function(wrap_pyfunction!(
+        calendar_verdict::expected_bars_per_day_for_tf_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        calendar_verdict::is_forced_exit_bar_s_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        calendar_verdict::forced_exit_seconds_s_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        calendar_verdict::session_last_bar_complete_s_py,
+        m
+    )?)?;
+    // ── slice-9 rate-limiter token math (DEC-RATE-MATH-RUST-001) ──
+    // The AdaptiveTokenBucket's four pure f64 expressions; every cap /
+    // floor / governor VALUE and the eps/isclose gates stay owned by
+    // brutex/orchestrator/rate_limiter.py. The ONE ladder-adjacent literal
+    // Rust-side is bucket_set_rate_state's `/ 2.0` downshift halving —
+    // inherent to the ported set_rate expression itself (byte-identical to
+    // the Python line it transcribes), not an independently tunable value.
+    m.add_function(wrap_pyfunction!(rate_math::bucket_refill_py, m)?)?;
+    m.add_function(wrap_pyfunction!(rate_math::bucket_consume_py, m)?)?;
+    m.add_function(wrap_pyfunction!(rate_math::bucket_more_wait_py, m)?)?;
+    m.add_function(wrap_pyfunction!(rate_math::bucket_set_rate_state_py, m)?)?;
     Ok(())
 }

@@ -1633,12 +1633,13 @@ def run_until_clean(
         tests.
     quota_exhausted
         Optional ``() -> bool`` hook checked AFTER each round (DEC-AUTO-RESUME-
-        QUOTA-001): ``True`` means the day's 100,000-call quota is spent, so the
+        QUOTA-001): ``True`` means the day's vendor quota is spent, so the
         loop stops with ``stop_quota`` rather than re-firing batches that would only
         raise :class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded`. ``None``
-        (the default) → quota is never the limit (the pre-feature behaviour, for the
-        bounded ``DEFAULT_MAX_ROUNDS`` path + tests). The hook reads the shared
-        persisted :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`, so
+        (the default) → quota is never the limit (the production posture — Groww has
+        no daily quota, DEC-QUOTA-VERDICT-MOOT-001 — and the bounded
+        ``DEFAULT_MAX_ROUNDS`` path + tests). A future capped vendor's hook reads the
+        shared :class:`~brutex.orchestrator.quota_tracker.QuotaGate`, so
         it reflects the SAME counter the rate bucket increments per call.
     market_closed
         Optional ``() -> bool`` hook checked AFTER each round (DEC-GROWW-MARKET-HOURS-

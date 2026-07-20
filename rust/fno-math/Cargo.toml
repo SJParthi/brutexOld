@@ -8,7 +8,16 @@
 
 [package]
 name = "fno-math"
-version = "0.3.0"
+# 0.3.0 → 0.4.0: the ONE slice-9 wheel-surface bump (DEC-AUDIT-CHAIN-RUST-PORT-001
+# + DEC-CALENDAR-VERDICT-RUST-001, ADR-0019 / MIGRATION.md #1727) — the audit-chain
+# + calendar-verdict kernels land as one batch. Run-identity honesty
+# (merged-tree reconcile at the Event-D re-forward): main has since LANDED
+# DEC-SWEEP-RUN-IDENTITY-COMPLETE-001 — cli.py's `_indicator_version()` now
+# folds `fno_math.__version__` — so THIS bump re-keys every new sweep run
+# identity the moment it lands (the #1548 precedent) — announced, never
+# silent; the run-identity-derived goldens/seeds are re-derived fresh at the
+# campaign land turn.
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.93.1"
 description = "Minimal Rust scaffold for BruteX Phase 2/3 hot kernels (Track 1 backtest)"
@@ -56,6 +65,15 @@ chrono-tz = "0.10.0"
 # Error handling
 anyhow = "1.0.100"
 thiserror = "2.0.17"
+
+# DEC-AUDIT-CHAIN-RUST-PORT-001 (slice 9, ADR-0019): the audit-chain kernel.
+# `ryu` supplies the shortest-round-trip float digit strings (the same
+# closest-tie-even rule as CPython's _Py_dg_dtoa mode 0); the CPython repr
+# NOTATION layer is hand-rolled in src/audit_chain.rs — ryu output is NEVER
+# emitted directly. `sha2` is the SHA-256 for the orchestrator hash chain
+# (the engine sweep chain stays BLAKE3 — a DIFFERENT chain, deliberately).
+ryu = "1.0"
+sha2 = "0.10"
 
 # Tracing (silent unless a subscriber is registered)
 tracing = "0.1.44"

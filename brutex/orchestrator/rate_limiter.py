@@ -33,8 +33,9 @@ env-var path, not the production pull.
   :meth:`acquire` blocks until a token is available. The caller
   always gets through eventually.
 * **Optional daily quota gate.** When constructed with a
-  ``DailyQuotaTracker``, :meth:`acquire` consults the tracker AFTER
-  bucket success — if the tracker's daily limit is exhausted, raises
+  :class:`~brutex.orchestrator.quota_tracker.QuotaGate`, :meth:`acquire`
+  consults the gate AFTER
+  bucket success — if the gate's daily limit is exhausted, raises
   :class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded` which
   the adapter maps to ``Outcome.FATAL`` (halt the phase, no auto-retry).
   DORMANT in production: Groww backtesting has NO daily quota
@@ -65,17 +66,23 @@ production, these default to ``time.monotonic`` and ``time.sleep``.
 from __future__ import annotations
 
 import math
+import os
+import struct
 import threading
 import time as _time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final, cast
+
+import structlog
 
 if TYPE_CHECKING:
-    from brutex.orchestrator.quota_tracker import DailyQuotaTracker
+    from brutex.orchestrator.quota_tracker import QuotaGate
 
 from brutex.models import BruteXError
+
+_LOG = structlog.get_logger(__name__)
 
 # ────────────────────────────────────────────────────────────────────────
 # Constants (tuned per FR-ING-017)
@@ -122,6 +129,297 @@ _LEGACY_HARD_CAP_RPS: Final[float] = 5.0
 #: the token count at ``0.9999…`` indefinitely — this bound guarantees
 #: the loop terminates after at most 16 iterations even in that case.
 _ACQUIRE_LOOP_CAP: Final[int] = 16
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Rust rate-math kernel seam (DEC-RATE-MATH-RUST-001, ADR-0019 / #1727a)
+# ────────────────────────────────────────────────────────────────────────
+#
+# The FOUR pure IEEE f64 token-math expressions of this bucket (refill /
+# consume / retry-wait / set-rate post-state) dispatch to the fno_math
+# kernel under the default-OFF ``BRUTEX_RUST_RATE_MATH`` flag, with the
+# #1531-pattern burn-in (16 double-computes compared on exact f64 BYTES via
+# ``struct.pack``) + autorevert latch (``rate_math.kernel_autoreverted``) +
+# the retained Python expressions as the oracle. Everything stateful stays
+# Python: locks, clock/sleep, the 429 deque window, the quota-gate seam,
+# events, the ``_ACQUIRE_LOOP_CAP`` escape hatch. §2 Rule 6 scope guard:
+# NO cap / floor / ladder / governor VALUE moves — the kernel receives the
+# already-resolved floats and returns arithmetic, nothing else.
+
+#: The default-OFF opt-in flag for the Rust token-math kernel.
+RUST_RATE_MATH_ENV: Final[str] = "BRUTEX_RUST_RATE_MATH"
+
+#: Burn-in double-compute budget PER SURFACE — each of the four token-math
+#: expressions carries its OWN budget (mirrors the audit/calendar seams'
+#: per-surface 16; slice-9 refuter round-2 NIT, the audit.py MINOR-1
+#: pattern): a hot refill/consume loop must not exhaust the window before
+#: the same process's first ``set_rate`` downshift ever gets an in-process
+#: oracle compare.
+RATE_MATH_BURN_IN_SAMPLES: Final[int] = 16
+
+#: The env-flag vocabulary — a DELIBERATE local copy of the sweep flags'
+#: ``_TRUTHY`` / ``_FALSY`` literal sets: the COMMON classifier lives in
+#: ``brutex.engine.sweep_lookahead``, but the engine package imports THIS
+#: package (``engine.sweep_run`` → ``orchestrator.audit``), so importing the
+#: engine from here would create an orchestrator ⇄ engine package cycle
+#: (the CodeQL ``py/cyclic-import`` class). Layering wins over §11 COMMON
+#: here — noted, not silent (the audit.py seam precedent).
+_RUST_FLAG_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+_RUST_FLAG_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
+
+
+@dataclass(frozen=True, slots=True)
+class _RustRateKernel:
+    """The resolved Rust kernel surface — the four token-math functions.
+
+    Held in the process memo so the seam resolves ``fno_math`` exactly once;
+    tests inject a fake instance through :func:`_set_rust_kernel_for_tests`.
+    """
+
+    refill_fn: Callable[[float, float, float, float], float]
+    consume_fn: Callable[[float, float], tuple[float, float]]
+    more_wait_fn: Callable[[float, float, float], float]
+    set_rate_fn: Callable[[float], tuple[float, float]]
+
+
+#: Kernel memo + per-surface burn-in budgets + autorevert latch +
+#: warn-once memo — single-cell mutable module state, the same documented
+#: exception to the no-global-mutable-state rule as the audit.py seam. The
+#: cells are written under a BUCKET's lock (or test-only seams), so two
+#: buckets could race a burn-in decrement — worst case one extra
+#: double-compute, never a wrong result (mismatch always ships the PYTHON
+#: value and the latch write is idempotent).
+_RUST_KERNEL_RESOLVED: Final[list[bool]] = [False]
+_RUST_KERNEL_VALUE: Final[list[_RustRateKernel | None]] = [None]
+
+#: The four dispatched surface names — the burn-in dict's key vocabulary.
+#: A dispatch site MUST use one of these (an unregistered surface fails
+#: LOUDLY with a ``KeyError`` at the first burn-in probe, never a silent
+#: shared budget — the audit.py per-surface-dict pattern).
+_RUST_MATH_SURFACES: Final[tuple[str, ...]] = (
+    "bucket_refill",
+    "bucket_consume",
+    "bucket_more_wait",
+    "bucket_set_rate_state",
+)
+_RUST_BURN_IN_REMAINING: Final[dict[str, int]] = dict.fromkeys(
+    _RUST_MATH_SURFACES, RATE_MATH_BURN_IN_SAMPLES
+)
+_RUST_DISABLED_REASON: Final[list[str | None]] = [None]
+_RUST_WARN_MEMO: Final[set[str]] = set()
+
+
+def _warn_rust_once(event: str, **context: object) -> None:
+    """Log *event* at WARNING once per process (per event + reason key)."""
+    key = f"{event}:{context.get('reason', '')}"
+    if key in _RUST_WARN_MEMO:
+        return
+    _RUST_WARN_MEMO.add(key)
+    _LOG.warning(event, **context)
+
+
+def _rust_flag_enabled() -> bool:
+    """Resolve the default-OFF ``BRUTEX_RUST_RATE_MATH`` flag (fail-safe OFF).
+
+    A junk (unrecognised, non-empty) value warns once and stays OFF — an
+    operator's mistyped intent is never silently ignored.
+    """
+    raw = os.environ.get(RUST_RATE_MATH_ENV, "")
+    value = raw.strip().lower()
+    if value in _RUST_FLAG_TRUTHY:
+        return True
+    if value and value not in _RUST_FLAG_FALSY:
+        # repr(): a newline-bearing env value must not forge log lines
+        # (slice-9 review, edge NIT-3 — the repr() log-injection convention).
+        _warn_rust_once("rate_math.rust_flag_unrecognised", value=repr(raw))
+    return False
+
+
+def _import_fno_math() -> Any:
+    """Import indirection for the kernel wheel (monkeypatched by tests)."""
+    import fno_math
+
+    return fno_math
+
+
+def _resolve_rust_kernel() -> _RustRateKernel | None:
+    """Resolve the Rust kernel once per process — ``None`` = the Python arm.
+
+    A wheel that is absent, or too old to carry the slice-9 rate-math
+    symbols, warns ONCE (``rate_math.rust_kernel_unavailable``) and
+    permanently falls back — never a crash (the #1531 wheel-state law).
+    """
+    if not _rust_flag_enabled():
+        return None
+    try:
+        fno_math = _import_fno_math()
+    except ImportError:
+        _warn_rust_once("rate_math.rust_kernel_unavailable", reason="wheel_missing")
+        return None
+    refill_fn = getattr(fno_math, "bucket_refill", None)
+    consume_fn = getattr(fno_math, "bucket_consume", None)
+    more_wait_fn = getattr(fno_math, "bucket_more_wait", None)
+    set_rate_fn = getattr(fno_math, "bucket_set_rate_state", None)
+    if (
+        not callable(refill_fn)
+        or not callable(consume_fn)
+        or not callable(more_wait_fn)
+        or not callable(set_rate_fn)
+    ):
+        _warn_rust_once("rate_math.rust_kernel_unavailable", reason="wheel_stale")
+        return None
+    return _RustRateKernel(
+        refill_fn=cast("Callable[[float, float, float, float], float]", refill_fn),
+        consume_fn=cast("Callable[[float, float], tuple[float, float]]", consume_fn),
+        more_wait_fn=cast("Callable[[float, float, float], float]", more_wait_fn),
+        set_rate_fn=cast("Callable[[float], tuple[float, float]]", set_rate_fn),
+    )
+
+
+def _rust_rate_kernel() -> _RustRateKernel | None:
+    """The memoized kernel handle; ``None`` while OFF/unavailable/latched."""
+    if _RUST_DISABLED_REASON[0] is not None:
+        return None
+    if not _RUST_KERNEL_RESOLVED[0]:
+        _RUST_KERNEL_VALUE[0] = _resolve_rust_kernel()
+        _RUST_KERNEL_RESOLVED[0] = True
+    return _RUST_KERNEL_VALUE[0]
+
+
+def _disable_rust_kernel(reason: str, **context: object) -> None:
+    """Latch the kernel OFF for the process (the burn-in autorevert).
+
+    The first call logs ``rate_math.kernel_autoreverted`` at ERROR — a
+    genuine kernel-wrongness signal, never throttled; repeats are no-ops.
+    """
+    if _RUST_DISABLED_REASON[0] is None:
+        _RUST_DISABLED_REASON[0] = reason
+        _LOG.error("rate_math.kernel_autoreverted", reason=reason, **context)
+
+
+def _set_rust_kernel_for_tests(kernel: _RustRateKernel | None) -> None:
+    """Inject a resolved kernel (test isolation ONLY — the fake-kernel seam)."""
+    _RUST_KERNEL_VALUE[0] = kernel
+    _RUST_KERNEL_RESOLVED[0] = True
+
+
+def _reset_rust_rate_math_for_tests(*, burn_in_remaining: int = RATE_MATH_BURN_IN_SAMPLES) -> None:
+    """Restore a fresh-process seam view (test isolation ONLY)."""
+    _RUST_KERNEL_RESOLVED[0] = False
+    _RUST_KERNEL_VALUE[0] = None
+    for surface in _RUST_BURN_IN_REMAINING:
+        _RUST_BURN_IN_REMAINING[surface] = burn_in_remaining
+    _RUST_DISABLED_REASON[0] = None
+    _RUST_WARN_MEMO.clear()
+
+
+def _f64_bytes(values: tuple[float, ...]) -> bytes:
+    """Exact IEEE-754 bit pattern of each value — the burn-in comparator.
+
+    ``==`` would call ``-0.0`` equal to ``0.0`` and ``nan`` unequal to
+    itself; the byte comparison is the honest "same f64" predicate.
+    """
+    return struct.pack(f"<{len(values)}d", *values)
+
+
+def _settle_rust_result(
+    surface: str,
+    rust_values: tuple[float, ...],
+    python_thunk: Callable[[], tuple[float, ...]],
+) -> tuple[float, ...]:
+    """Serve a kernel result through the burn-in double-compute window.
+
+    Post burn-in (for *surface* — each surface owns its OWN budget, so a
+    hot refill/consume loop cannot exhaust the ``set_rate`` window): the
+    kernel values serve directly. During burn-in the Python oracle also
+    runs and the tuples are compared on exact f64 BYTES — a mismatch
+    ships the PYTHON values (correctness first), latches the kernel off,
+    and logs ONE ``rate_math.kernel_autoreverted`` ERROR.
+    """
+    if _RUST_BURN_IN_REMAINING[surface] <= 0:
+        return rust_values
+    python_values = python_thunk()
+    if _f64_bytes(rust_values) != _f64_bytes(python_values):
+        _disable_rust_kernel(
+            "burn_in_mismatch", surface=surface, rust=rust_values, python=python_values
+        )
+        return python_values
+    _RUST_BURN_IN_REMAINING[surface] -= 1
+    return rust_values
+
+
+def _py_bucket_refill(tokens: float, burst: float, rps: float, elapsed: float) -> float:
+    """The retained Python oracle — ``_refill_locked``'s exact expression.
+
+    Callers pre-guard ``elapsed > 0`` (the ``_refill_locked`` early return,
+    which also owns the ``_last_refill`` stamp decision), so this is the
+    pure clamp arm only.
+    """
+    return min(burst, tokens + elapsed * rps)
+
+
+def _py_bucket_consume(tokens: float, rps: float) -> tuple[float, float]:
+    """The retained Python oracle — ``acquire``'s first consume step."""
+    if tokens >= 1.0:
+        return (tokens - 1.0, 0.0)
+    # Not enough tokens — compute wait time for one full token.
+    return (tokens, (1.0 - tokens) / rps)
+
+
+def _py_bucket_more_wait(tokens: float, rps: float, eps: float) -> float:
+    """The retained Python oracle — the acquire retry-loop wait step."""
+    return max((1.0 - tokens) / rps, eps)
+
+
+def _py_bucket_set_rate_state(new_rps: float) -> tuple[float, float]:
+    """The retained Python oracle — ``set_rate``'s drained post-state pair."""
+    return (0.0, new_rps / 2.0)
+
+
+def _bucket_refill(tokens: float, burst: float, rps: float, elapsed: float) -> float:
+    """Flag-dispatched refill arithmetic (state writes stay at the call site)."""
+    kernel = _rust_rate_kernel()
+    if kernel is None:
+        return _py_bucket_refill(tokens, burst, rps, elapsed)
+    rust = (kernel.refill_fn(tokens, burst, rps, elapsed),)
+    return _settle_rust_result(
+        "bucket_refill", rust, lambda: (_py_bucket_refill(tokens, burst, rps, elapsed),)
+    )[0]
+
+
+def _bucket_consume(tokens: float, rps: float) -> tuple[float, float]:
+    """Flag-dispatched consume step → ``(new_tokens, wait_seconds)``."""
+    kernel = _rust_rate_kernel()
+    if kernel is None:
+        return _py_bucket_consume(tokens, rps)
+    settled = _settle_rust_result(
+        "bucket_consume", kernel.consume_fn(tokens, rps), lambda: _py_bucket_consume(tokens, rps)
+    )
+    return (settled[0], settled[1])
+
+
+def _bucket_more_wait(tokens: float, rps: float, eps: float) -> float:
+    """Flag-dispatched retry-loop wait step."""
+    kernel = _rust_rate_kernel()
+    if kernel is None:
+        return _py_bucket_more_wait(tokens, rps, eps)
+    rust = (kernel.more_wait_fn(tokens, rps, eps),)
+    return _settle_rust_result(
+        "bucket_more_wait", rust, lambda: (_py_bucket_more_wait(tokens, rps, eps),)
+    )[0]
+
+
+def _bucket_set_rate_state(new_rps: float) -> tuple[float, float]:
+    """Flag-dispatched ``set_rate`` post-state → ``(tokens, downshift_rps)``."""
+    kernel = _rust_rate_kernel()
+    if kernel is None:
+        return _py_bucket_set_rate_state(new_rps)
+    settled = _settle_rust_result(
+        "bucket_set_rate_state",
+        kernel.set_rate_fn(new_rps),
+        lambda: _py_bucket_set_rate_state(new_rps),
+    )
+    return (settled[0], settled[1])
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -209,15 +507,17 @@ class AdaptiveTokenBucket:
     #: Optional daily-quota gate. When set, :meth:`acquire` calls
     #: ``quota_tracker.acquire_or_raise()`` AFTER the bucket token is
     #: consumed (Agent 1 §A — outside the bucket lock to avoid leaking
-    #: 150µs LMDB latency into observability reads). When ``None``, the
-    #: bucket runs in legacy "bucket-only" mode (production callers
-    #: MUST always pass a tracker; ``None`` is for test fixtures only).
+    #: gate latency into observability reads). When ``None``, the
+    #: bucket runs in "bucket-only" mode — the PRODUCTION posture (Groww
+    #: has no daily quota, DEC-QUOTA-VERDICT-MOOT-001); a future capped
+    #: vendor wires a :class:`~brutex.orchestrator.quota_tracker.QuotaGate`
+    #: implementation here (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001).
     #: ``# pragma: no mutate`` (DEC-MUTATION-RUNTIME-001): the ``| None`` →
     #: ``& None`` annotation flip is provably equivalent (PEP 563 — never
-    #: evaluated; ``DailyQuotaTracker`` is a TYPE_CHECKING-only name). The
+    #: evaluated; ``QuotaGate`` is a TYPE_CHECKING-only name). The
     #: ``None`` default the line-scoped pragma also skips stays pinned by
     #: ``test_quota_tracker_none_is_legacy_path``.
-    quota_tracker: DailyQuotaTracker | None = None  # pragma: no mutate
+    quota_tracker: QuotaGate | None = None  # pragma: no mutate
     #: Ease-in: start the bucket EMPTY (0 tokens) instead of full (``burst``).
     #: With the default ``False`` the bucket grants its ``burst`` allowance
     #: immediately (legacy behaviour). The :class:`RateController` passes ``True`` so
@@ -290,13 +590,12 @@ class AdaptiveTokenBucket:
         with self._lock:
             self._maybe_upshift_locked()
             self._refill_locked()
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                wait_seconds = 0.0
-            else:
-                # Not enough tokens — compute wait time for one full token.
-                needed = 1.0 - self._tokens
-                wait_seconds = needed / self._current_rps
+            # The consume step's arithmetic is the flag-dispatched
+            # ``_bucket_consume`` (DEC-RATE-MATH-RUST-001); on the
+            # not-enough-tokens arm the returned tokens equal the input, so
+            # the state write is byte-identical to the historical
+            # branch-local ``-= 1.0`` / untouched split.
+            self._tokens, wait_seconds = _bucket_consume(self._tokens, self._current_rps)
 
         if wait_seconds > 0.0:
             # Release the lock while sleeping so other threads can still
@@ -324,15 +623,15 @@ class AdaptiveTokenBucket:
                         # ``break`` → ``continue`` re-tests the guard and exits
                         # identically. Provably equivalent.
                         break  # pragma: no mutate
-                    more_wait = max((1.0 - self._tokens) / self._current_rps, eps)
+                    more_wait = _bucket_more_wait(self._tokens, self._current_rps, eps)
                     self.sleep(more_wait)
                     self._refill_locked()
                     wait_seconds += more_wait
                 self._tokens -= 1.0
 
         # Daily quota gate (DEC-P0-030, PR #50c). Called OUTSIDE the
-        # bucket lock per Agent 1 §A to avoid leaking 150µs LMDB latency
-        # into dashboard reads. The quota tracker has its own lock; the
+        # bucket lock per Agent 1 §A to avoid leaking gate latency
+        # into dashboard reads. The quota gate carries its own locking; the
         # two locks compose sequentially (bucket released → quota acquired)
         # so no deadlock possible. If the daily quota is exhausted, the
         # bucket token is "wasted" — acceptable per FATAL semantics
@@ -441,10 +740,11 @@ class AdaptiveTokenBucket:
         if new_rps <= 0:
             raise RateLimiterError(f"new_rps must be > 0, got {new_rps}")
         with self._lock:
+            drained_tokens, downshift_rps = _bucket_set_rate_state(new_rps)
             self.initial_rps = new_rps
-            self.downshift_rps = new_rps / 2.0
+            self.downshift_rps = downshift_rps
             self._current_rps = new_rps
-            self._tokens = 0.0
+            self._tokens = drained_tokens
             self._last_refill = self.clock()
 
     def available_tokens(self) -> float:
@@ -489,10 +789,7 @@ class AdaptiveTokenBucket:
         # by ``test_subsecond_elapsed_refill_pinned``.
         if elapsed <= 0:  # pragma: no mutate
             return
-        self._tokens = min(
-            float(self.burst),
-            self._tokens + elapsed * self._current_rps,
-        )
+        self._tokens = _bucket_refill(self._tokens, float(self.burst), self._current_rps, elapsed)
         self._last_refill = now
 
     def _maybe_upshift_locked(self) -> RateLimiterEvent | None:

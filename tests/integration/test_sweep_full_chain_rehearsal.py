@@ -82,6 +82,7 @@ TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
     "test_r38_full_chain_completes_clean": ("R38", "R7"),
     "test_r38_rehearsal_runtime_is_ci_feasible": ("R38",),
     "test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds": ("R38",),
+    "test_r38_chain_runs_under_production_log_posture": ("R38",),
     "test_r38_stage3_cells_genuinely_written": ("R38",),
     "test_r38_cascade_genuinely_ran": ("R38",),
     "test_r28_manifest_contract_shape_and_funnel": ("R28",),
@@ -100,6 +101,38 @@ TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
     "test_r38_adversarial_poisoned_lake_refuses_with_nothing_touched": ("R38", "R42"),
     "test_g14_old_schema_store_degrades_typed_never_raw": ("G14",),
 }
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _production_log_posture() -> Iterator[None]:
+    """Reset structlog around this module (the documented isolation pattern).
+
+    ``_sweep_all`` below applies the production
+    DEC-SWEEP-LOG-VOLUME-GUARD-001 INFO guard before every chain run (see
+    its docstring). The guard defers to an already-configured process, so
+    the reset BEFORE guarantees the guard genuinely engages here even when
+    an earlier test in the same pytest process left a configuration behind;
+    the reset AFTER un-freezes structlog's first-use logger cache
+    (:func:`brutex.observability.logging.reset_configuration`) so a later
+    test's ``capture_logs`` is never silently bypassed by a module logger
+    frozen against this module's INFO config — the exact hazard
+    ``_clear_structlog_first_use_cache`` documents. ``$BRUTEX_LOG_LEVEL`` is
+    cleared for the module (the file's ``BRUTEX_SWEEP_DIFFCHECK_K`` env
+    idiom) so the measured posture is deterministically the INFO default —
+    an ambient operator override must not re-slow (or re-level) the budgeted
+    chain runs on a dev box.
+    """
+    from brutex.observability.logging import LOG_LEVEL_ENV, reset_configuration
+
+    env_backup = os.environ.pop(LOG_LEVEL_ENV, None)
+    reset_configuration()
+    try:
+        yield
+    finally:
+        if env_backup is not None:
+            os.environ[LOG_LEVEL_ENV] = env_backup
+        reset_configuration()
+
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 _SYMBOL = "NIFTY"
@@ -278,9 +311,29 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
     deflation benchmark sqrt(V)*E[max-z] sat above every candidate. 1/4
     yields a 9-candidate pool (variance 0.788 measured) while stage-3 still
     genuinely refines (cells_written > 0 — the sibling test's teeth).
+
+    PRODUCTION LOG POSTURE: mirror the ``main()`` dispatch exactly — the
+    DEC-SWEEP-LOG-VOLUME-GUARD-001 (MIGRATION.md #1630) INFO sink guard runs
+    BEFORE the handler on every real ``brutex sweep-all`` invocation, so the
+    rehearsal (which drives ``cmd_sweep_all`` directly, bypassing ``main()``)
+    must apply the SAME guard or it measures an UNPRODUCTION configuration:
+    with structlog left UNCONFIGURED the default wrapper filters at NOTSET,
+    and a chain whose Stage-4 cascade reaches the Monte-Carlo permutation
+    stage (1,000 full-slice re-simulations — whether ANY candidate survives
+    that far is re-rolled per commit, because the stage-3 CMA-ES seeding
+    derives from the ``code_commit_hash``-keyed run identity) renders ~1.4M
+    per-trade DEBUG events through the dev ConsoleRenderer: a MEASURED
+    ~225 s of pure log rendering per chain pass (2026-07-15, this branch's
+    profile — 240.6 s total vs 14.8 s at the merge base), which broke the
+    R38 ``seconds_first < 300.0`` budget on CI twice (310.9 s / 321.6 s,
+    run 29173702313). The guard is level-filtering ONLY (the #1630 law):
+    engine results + audit-chain bytes are structlog-free and byte-identical
+    either way. The module autouse fixture below resets the configuration
+    around this file so nothing leaks into later tests in the same process.
     """
     from brutex import cli
 
+    cli._configure_sweep_logging()
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(cli, "_resolve_code_commit_sha", lambda: _PINNED_CODE_COMMIT_SHA)
         return cli.cmd_sweep_all(
@@ -495,6 +548,33 @@ def test_r38_rehearsal_runtime_is_ci_feasible(rehearsal: _Rehearsal) -> None:
     assert rehearsal.seconds_first < ceiling, (
         f"first rehearsal pass took {rehearsal.seconds_first:.1f}s"
         f" (ceiling {ceiling:.0f}s) — the CI budget claim broke"
+    )
+
+
+def test_r38_chain_runs_under_production_log_posture(rehearsal: _Rehearsal) -> None:
+    """The rehearsal measured the PRODUCTION log configuration (#1630).
+
+    Regression pin for the ``_sweep_all`` guard call: if the
+    ``cli._configure_sweep_logging()`` production mirror is ever dropped,
+    structlog stays unconfigured here (the module fixture resets it first)
+    and this fails BEFORE the runtime budget flakes red on the next commit
+    whose run-identity lottery re-engages the Monte-Carlo stage — the exact
+    shape that broke run 29173702313 (310.9 s / 321.6 s vs the 300 s
+    ceiling, ~1.4M per-trade DEBUG lines rendered through the NOTSET
+    default). Asserts the #1630 posture precisely: configured, with the
+    level-filtering wrapper bound at INFO (``make_filtering_bound_logger``
+    is per-level cached, so the identity comparison is exact).
+    """
+    import structlog
+
+    assert structlog.is_configured(), (
+        "the rehearsal chain ran with structlog UNCONFIGURED — _sweep_all lost its "
+        "production _configure_sweep_logging() mirror (DEC-SWEEP-LOG-VOLUME-GUARD-001)"
+    )
+    wrapper = structlog.get_config()["wrapper_class"]
+    assert wrapper is structlog.make_filtering_bound_logger(logging.INFO), (
+        f"the rehearsal's structlog wrapper is {wrapper!r}, not the #1630 INFO "
+        "filtering wrapper — the production log posture drifted"
     )
 
 

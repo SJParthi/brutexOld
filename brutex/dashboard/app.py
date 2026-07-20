@@ -25,8 +25,8 @@ dependencies and is fully unit-testable offline.
 ## State lifecycle
 
 The state is updated via pipeline event subscriptions —
-:meth:`DashboardState.on_pipeline_event` is intended to be passed
-to :class:`~brutex.orchestrator.pipeline.PhaseRunner` as a subscriber.
+:meth:`DashboardState.on_pipeline_event` consumes the
+:class:`~brutex.orchestrator.events.PipelineEvent` stream as a subscriber.
 A second subscription point,
 :meth:`DashboardState.on_telegram_stats`, is called periodically to
 refresh the Telegram panel.
@@ -379,11 +379,11 @@ from brutex.notifications.sweep_alerts import emit_greeks_backfill_complete_aler
 from brutex.observability.correlation import request_id_scope
 from brutex.observability.loop_watchdog import LoopWatchdog
 from brutex.observability.power_keepawake import keep_awake
-from brutex.orchestrator.pipeline import (
+from brutex.orchestrator.events import (
+    IngestPhase,
     PipelineEvent,
     PipelineEventKind,
 )
-from brutex.orchestrator.state import IngestPhase
 from brutex.universe import (
     derive_lake_underlyings,
     is_index_instrument,
@@ -667,8 +667,9 @@ class DashboardState:
     def on_pipeline_event(self, event: PipelineEvent) -> None:
         """Apply a :class:`PipelineEvent` to the state.
 
-        Intended to be passed as a subscriber callback to
-        :class:`~brutex.orchestrator.pipeline.PhaseRunner`. This
+        Intended to be registered as an
+        :data:`~brutex.orchestrator.events.EventSubscriber` callback on any
+        pipeline event producer. This
         method is thread-safe — it acquires the state lock.
         """
         with self._lock:
@@ -768,7 +769,7 @@ class DashboardState:
         The daily-quota gauge fields the panel once carried are GONE
         (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has no daily quota
         (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6) and no
-        production controller wires a ``DailyQuotaTracker``, so the snapshot never
+        production controller wires a quota gate, so the snapshot never
         carried ``quota_*`` keys — the fields were a constant ``(0, 0, -1)``.
 
         ``recent_minute`` / ``ceiling_per_min`` are the controller's rolling-60s issue
@@ -1038,7 +1039,7 @@ def make_rate_observer(
     def _observe(rate: Mapping[str, Any], meter: Mapping[str, Any]) -> None:
         """Map one (rate-controller, call-meter) snapshot pair onto the rate panel."""
         # The controller snapshot's conditional ``quota_*`` keys (a wired
-        # DailyQuotaTracker only) are deliberately NOT mapped: no production
+        # QuotaGate only) are deliberately NOT mapped: no production
         # controller wires one (DEC-QUOTA-VERDICT-MOOT-001 — Groww has no daily
         # quota) and the panel's gauge fields are deleted with the /universe gauge.
         # ``ceiling_per_min`` is ``None`` in the snapshot when no governor is wired

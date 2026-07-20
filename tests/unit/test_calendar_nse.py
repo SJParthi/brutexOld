@@ -12,9 +12,10 @@ Covers:
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from typing import ClassVar
+from typing import ClassVar, Never
 
 import pytest
+from brutex.calendars import nse as nse_module
 from brutex.calendars.nse import (
     ALL_HOLIDAYS,
     CIRCUIT_HALT_REASON,
@@ -1832,3 +1833,521 @@ class TestWholeDomainSessionParity:
             old.session_type,
             old.open_time_ist,
         )
+
+
+# Rust calendar-verdict kernel seam (DEC-CALENDAR-VERDICT-RUST-001, ADR-0019)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _FakeEngine:
+    """A wrong-on-purpose engine for the burn-in autorevert arms."""
+
+    def __init__(self, **overrides: object) -> None:
+        self._overrides = overrides
+
+    def __getattr__(self, name: str) -> object:
+        if name in self._overrides:
+            value = self._overrides[name]
+            return lambda *args: value
+        # AttributeError (not AssertionError) — the standard exception for a
+        # special method, per CodeQL py/unexpected-raise-in-special-method.
+        # The tripwire strength is identical: no production call site catches
+        # AttributeError or hasattr()-probes the engine, so an un-overridden
+        # access still fails the test loudly.
+        raise AttributeError(f"fake engine method {name!r} must not be called")
+
+
+def _fake_kernel(**overrides: object) -> nse_module._RustCalendarKernel:
+    """A `_RustCalendarKernel` around :class:`_FakeEngine` (scalar fns raise)."""
+
+    def _never(*args: int) -> Never:
+        raise AssertionError("fake scalar fn must not be called")
+
+    return nse_module._RustCalendarKernel(
+        engine=_FakeEngine(**overrides),
+        expected_bars=_never,
+        forced_exit_bar=_never,
+        forced_exit_seconds=_never,
+        last_bar_complete=_never,
+    )
+
+
+class TestRustCalendarSeam:
+    """The flag-gated Rust dispatch: flag arms, engine build, both-arms
+    verdict identity across every ported function, burn-in + autorevert."""
+
+    REGULAR_MON: ClassVar[date] = date(2026, 7, 6)
+    SATURDAY: ClassVar[date] = date(2026, 7, 4)
+    HOLIDAY: ClassVar[date] = date(2026, 1, 26)
+    MUHURAT: ClassVar[date] = date(2025, 10, 21)
+    BUDGET_SAT: ClassVar[date] = date(2025, 2, 1)
+    OOC_WEEKDAY: ClassVar[date] = date(2027, 1, 1)
+    OOC_WEEKEND: ClassVar[date] = date(2027, 1, 2)
+    PRE_COVERAGE: ClassVar[date] = date(2019, 12, 30)
+
+    PROBES: ClassVar[tuple[date, ...]] = (
+        REGULAR_MON,
+        SATURDAY,
+        HOLIDAY,
+        MUHURAT,
+        BUDGET_SAT,
+        OOC_WEEKDAY,
+        OOC_WEEKEND,
+        PRE_COVERAGE,
+    )
+
+    @pytest.fixture(autouse=True)
+    def _fresh_seam(self, monkeypatch: pytest.MonkeyPatch) -> object:
+        """Every test starts and ends with a fresh-process seam view."""
+        monkeypatch.delenv(nse_module.RUST_CALENDAR_ENV, raising=False)
+        nse_module._reset_rust_calendar_for_tests()
+        yield
+        nse_module._reset_rust_calendar_for_tests()
+
+    def _arm(self, monkeypatch: pytest.MonkeyPatch, *, burn_in_remaining: int = 16) -> None:
+        monkeypatch.setenv(nse_module.RUST_CALENDAR_ENV, "1")
+        nse_module._reset_rust_calendar_for_tests(burn_in_remaining=burn_in_remaining)
+
+    # ── flag + resolution arms ───────────────────────────────────────────
+
+    def test_flag_default_off_resolves_no_kernel(self) -> None:
+        assert nse_module._rust_calendar() is None
+        # Memoized: the second probe hits the resolved cell.
+        assert nse_module._rust_calendar() is None
+
+    def test_flag_falsy_off_silent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(nse_module.RUST_CALENDAR_ENV, "off")
+        nse_module._reset_rust_calendar_for_tests()
+        with capture_logs() as logs:
+            assert nse_module._rust_calendar() is None
+        assert logs == []
+
+    def test_flag_junk_warns_once_and_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(nse_module.RUST_CALENDAR_ENV, "0n")
+        nse_module._reset_rust_calendar_for_tests()
+        with capture_logs() as logs:
+            assert nse_module._cal_flag_enabled() is False
+            assert nse_module._cal_flag_enabled() is False  # warn once
+        assert [r["event"] for r in logs] == ["calendar.rust_flag_unrecognised"]
+
+    def test_flag_on_builds_the_real_engine_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        kernel = nse_module._rust_calendar()
+        assert kernel is not None
+        assert nse_module._rust_calendar() is kernel  # memoized
+
+    def test_wheel_missing_warns_once_and_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm(monkeypatch)
+
+        def _no_wheel() -> object:
+            raise ImportError("no fno_math")
+
+        monkeypatch.setattr(nse_module, "_import_fno_math", _no_wheel)
+        with capture_logs() as logs:
+            assert nse_module._rust_calendar() is None
+        assert [r["event"] for r in logs] == ["calendar.rust_kernel_unavailable"]
+        assert logs[0]["reason"] == "wheel_missing"
+        # The verdicts still serve from the Python oracle.
+        assert is_trading_day(self.REGULAR_MON) is True
+
+    @pytest.mark.parametrize(
+        "stale_attrs",
+        [
+            (),
+            ("CalendarVerdictEngine",),
+            ("CalendarVerdictEngine", "expected_bars_per_day_for_tf"),
+            (
+                "CalendarVerdictEngine",
+                "expected_bars_per_day_for_tf",
+                "is_forced_exit_bar_s",
+            ),
+            (
+                "CalendarVerdictEngine",
+                "expected_bars_per_day_for_tf",
+                "is_forced_exit_bar_s",
+                "forced_exit_seconds_s",
+            ),
+        ],
+        ids=["empty", "engine-only", "no-forced-exit", "no-seconds", "no-last-bar"],
+    )
+    def test_wheel_stale_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, stale_attrs: tuple[str, ...]
+    ) -> None:
+        import types
+
+        self._arm(monkeypatch)
+        ns = types.SimpleNamespace(**{name: (lambda *a: 0) for name in stale_attrs})
+        monkeypatch.setattr(nse_module, "_import_fno_math", lambda: ns)
+        with capture_logs() as logs:
+            assert nse_module._rust_calendar() is None
+        assert [r["event"] for r in logs] == ["calendar.rust_kernel_unavailable"]
+        assert logs[0]["reason"] == "wheel_stale"
+
+    # ── both-arms verdict identity (burn-in ACTIVE — the compare window) ──
+
+    def test_every_ported_function_matches_the_oracle_under_burn_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=10_000)
+        for d in self.PROBES:
+            for exchange in (None, "NSE", "BSE"):
+                assert (
+                    is_holiday(d, exchange=exchange)
+                    == nse_module._py_is_holiday_checked(d, exchange)
+                    if is_holiday_data_available(d)
+                    else True
+                )
+                assert is_trading_day(d, exchange=exchange) == nse_module._py_is_trading_day(
+                    d, exchange
+                )
+                assert get_session(d, exchange=exchange) == nse_module._py_get_session(d, exchange)
+            assert is_weekend(d) == (d.weekday() >= 5)
+            assert has_muhurat_session(d) == (d in MUHURAT_SESSIONS)
+            assert is_special_weekend_session(d) == (d in SPECIAL_WEEKEND_TRADING_SESSIONS)
+        # The checked variants: value AND raise arms both compare clean.
+        assert is_trading_day_checked(self.REGULAR_MON) is True
+        assert is_trading_day_checked(self.HOLIDAY) is False
+        assert is_holiday_checked(self.HOLIDAY) is True
+        assert get_session_checked(self.MUHURAT) is not None
+        assert get_session_checked(self.HOLIDAY) is None
+        with pytest.raises(HolidayDataUnavailableError):
+            is_trading_day_checked(self.OOC_WEEKDAY)
+        with pytest.raises(HolidayDataUnavailableError):
+            get_session_checked(self.OOC_WEEKDAY)
+        # Walks + scalars.
+        assert previous_trading_session(date(2026, 7, 7)) == self.REGULAR_MON
+        assert previous_trading_session(date(2020, 1, 1)) is None  # abstain
+        assert trading_days_between(date(2026, 7, 3), date(2026, 7, 7)) == [
+            date(2026, 7, 3),
+            self.REGULAR_MON,
+            date(2026, 7, 7),
+        ]
+        assert trading_days_between_checked(date(2026, 7, 3), date(2026, 7, 7)) == [
+            date(2026, 7, 3),
+            self.REGULAR_MON,
+            date(2026, 7, 7),
+        ]
+        with pytest.raises(HolidayDataUnavailableError):
+            trading_days_between_checked(date(2026, 12, 28), date(2027, 1, 5))
+        assert daily_derive_cutoff(datetime(2026, 7, 6, 15, 30, 0)) == self.REGULAR_MON
+        assert expected_bars_per_day_for_tf(60) == 7
+        assert is_forced_exit_bar(time(15, 19), 1) is False
+        assert is_forced_exit_bar(time(15, 19, 1), 1) is True
+        session = get_session(self.REGULAR_MON)
+        assert session is not None
+        assert forced_exit_seconds_for_session(session) == 55_200
+        assert session_last_bar_complete(session, datetime(2026, 7, 6, 15, 29)) is True
+        # ZERO mismatches: the kernel is still engaged and EVERY surface's
+        # own budget was consumed (per-surface dict — the audit pattern).
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+        assert all(v < 10_000 for v in nse_module._CAL_BURN_IN_REMAINING.values())
+
+    # ── steady state (burn-in exhausted — genuinely Rust-served) ─────────
+
+    def test_steady_state_serves_rust_verdicts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=0)
+        assert is_trading_day(self.REGULAR_MON) is True
+        assert is_trading_day(self.HOLIDAY) is False
+        assert is_holiday(self.HOLIDAY) is True
+        assert is_weekend(self.SATURDAY) is True
+        assert has_muhurat_session(self.MUHURAT) is True
+        assert is_special_weekend_session(self.BUDGET_SAT) is True
+        assert is_holiday_checked(self.HOLIDAY) is True
+        assert is_trading_day_checked(self.BUDGET_SAT) is True
+        session = get_session(self.MUHURAT)
+        assert session is not None and session.session_type is SessionType.MUHURAT
+        assert get_session(self.HOLIDAY) is None
+        checked = get_session_checked(self.REGULAR_MON)
+        assert checked is not None and checked.open_time_ist == SESSION_OPEN_IST
+        assert get_session_checked(self.HOLIDAY) is None
+        assert previous_trading_session(date(2026, 7, 7)) == self.REGULAR_MON
+        assert trading_days_between(date(2026, 7, 4), date(2026, 7, 5)) == []
+        assert trading_days_between_checked(date(2026, 7, 4), date(2026, 7, 5)) == []
+        assert expected_bars_per_day_for_tf(375) == 1
+        assert is_forced_exit_bar(time(15, 20), 5) is True
+        assert daily_derive_cutoff(datetime(2026, 7, 6, 15, 30, 0, 1)) == date(2026, 7, 7)
+        assert daily_derive_cutoff(datetime(2026, 7, 6, 15, 30, 0)) == self.REGULAR_MON
+        session = get_session(self.REGULAR_MON)
+        assert session is not None
+        assert forced_exit_seconds_for_session(session) == 55_200
+        assert session_last_bar_complete(session, datetime(2026, 7, 6, 15, 28)) is False
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_steady_state_checked_raise_matches_the_python_arm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Post burn-in verdict-2 routes through the SHARED WARN+raise —
+        event fields and message byte-equal to the Python arm."""
+        pytest.importorskip("fno_math")
+
+        def _observe() -> tuple[dict[str, object], str]:
+            with capture_logs() as logs, pytest.raises(HolidayDataUnavailableError) as exc_info:
+                is_trading_day_checked(self.OOC_WEEKDAY)
+            (record,) = logs
+            return dict(record), str(exc_info.value)
+
+        python_event, python_msg = _observe()  # flag OFF (fixture default)
+        self._arm(monkeypatch, burn_in_remaining=0)
+        rust_event, rust_msg = _observe()
+        assert rust_event == python_event
+        assert rust_msg == python_msg
+
+    def test_steady_state_prev_session_abstain_warns_identically(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("fno_math")
+
+        def _observe() -> tuple[list[dict[str, object]], date | None]:
+            with capture_logs() as logs:
+                result = previous_trading_session(date(2020, 1, 1))
+            return [dict(r) for r in logs], result
+
+        python_logs, python_result = _observe()
+        self._arm(monkeypatch, burn_in_remaining=0)
+        rust_logs, rust_result = _observe()
+        assert rust_result is None and python_result is None
+        assert rust_logs == python_logs
+        # BOTH arms emit the probe's unavailable WARN then the exhausted WARN.
+        assert [r["event"] for r in rust_logs] == [
+            "calendar.holiday_data_unavailable",
+            "calendar.previous_session_coverage_exhausted",
+        ]
+
+    def test_steady_state_range_checked_raises_on_the_offending_date(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=0)
+        with pytest.raises(HolidayDataUnavailableError, match="2027-01-01"):
+            trading_days_between_checked(date(2026, 12, 28), date(2027, 1, 5))
+
+    # ── burn-in autorevert arms (fake kernels, wrong on purpose) ─────────
+
+    def test_serve_value_mismatch_ships_python_and_latches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._arm(monkeypatch)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel(is_trading_day=False))
+        with capture_logs() as logs:
+            assert is_trading_day(self.REGULAR_MON) is True  # the PYTHON verdict ships
+        assert [r["event"] for r in logs] == ["calendar.kernel_autoreverted"]
+        assert nse_module._CAL_DISABLED_REASON[0] == "is_trading_day"
+        # Latched: the kernel handle is gone; later calls are pure Python.
+        assert nse_module._rust_calendar() is None
+        assert is_trading_day(self.REGULAR_MON) is True
+        # A second disable is a no-op (no duplicate ERROR).
+        with capture_logs() as logs:
+            nse_module._disable_rust_calendar("again", rust="r", python="p")
+        assert logs == []
+
+    def test_serve_checked_false_raise_verdict_latches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rust says RAISE for an in-coverage date → python value ships."""
+        self._arm(monkeypatch)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel(is_trading_day_checked=2))
+        with capture_logs() as logs:
+            assert is_trading_day_checked(self.REGULAR_MON) is True
+        assert [r["event"] for r in logs] == ["calendar.kernel_autoreverted"]
+
+    def test_serve_checked_missed_raise_verdict_latches_and_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rust says True for an OOC weekday the oracle refuses → the oracle's
+        raise replays (WARN once, from the oracle) and the kernel latches."""
+        self._arm(monkeypatch)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel(is_trading_day_checked=1))
+        with capture_logs() as logs, pytest.raises(HolidayDataUnavailableError):
+            is_trading_day_checked(self.OOC_WEEKDAY)
+        events = [r["event"] for r in logs]
+        assert events == ["calendar.holiday_data_unavailable", "calendar.kernel_autoreverted"]
+
+    def test_serve_checked_matched_raise_consumes_burn_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=2)
+        with pytest.raises(HolidayDataUnavailableError):
+            is_trading_day_checked(self.OOC_WEEKDAY)
+        assert nse_module._CAL_BURN_IN_REMAINING["is_trading_day_checked"] == 1
+        # Only ITS surface consumed — every other budget is untouched.
+        assert all(
+            v == 2
+            for s, v in nse_module._CAL_BURN_IN_REMAINING.items()
+            if s != "is_trading_day_checked"
+        )
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_prev_session_mismatch_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm(monkeypatch)
+        nse_module._set_rust_calendar_for_tests(
+            _fake_kernel(previous_trading_session=(1, date(2020, 1, 1).toordinal()))
+        )
+        with capture_logs() as logs:
+            assert previous_trading_session(date(2026, 7, 7)) == self.REGULAR_MON
+        assert [r["event"] for r in logs] == ["calendar.kernel_autoreverted"]
+
+    def test_post_burn_in_fake_verdict_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With the budget exhausted the (fake) Rust verdict serves directly —
+        the proof the steady state genuinely serves the kernel."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel(is_trading_day=False))
+        assert is_trading_day(self.REGULAR_MON) is False  # the fake verdict
+
+    # ── guards + plumbing ────────────────────────────────────────────────
+
+    def test_invalid_exchange_raises_eagerly_before_any_rust_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel())  # any touch would raise
+        with pytest.raises(ValueError, match="unknown exchange"):
+            is_trading_day(self.REGULAR_MON, exchange="LSE")
+
+    def test_tf_validation_raises_before_any_rust_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel())
+        with pytest.raises(ValueError, match="tf_minutes must be >= 1"):
+            expected_bars_per_day_for_tf(0)
+        with pytest.raises(ValueError, match="tf_minutes must be >= 1"):
+            is_forced_exit_bar(time(15, 0), 0)
+
+    def test_huge_in_i64_tf_saturates_never_aborts_and_matches_python(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slice-9 edge MINOR-1 regression: ``tf=10**18`` previously
+        SIGABRTed the whole process (`tf * 60` overflow under the release
+        ``overflow-checks = true`` / ``panic = "abort"`` profile). The
+        kernel now SATURATES; the burn-in compare (budget > 0 here) proves
+        the Rust verdict equals the Python oracle's bigint result — and no
+        autorevert latches."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=4)
+        assert is_forced_exit_bar(time(9, 15), 10**18) is True
+        assert is_forced_exit_bar(time(9, 15), 10**18, 55_200) is True
+        assert is_forced_exit_bar(time(23, 59, 59), 2**63 - 1) is True  # i64::MAX exactly
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_tf_beyond_i64_routes_to_the_oracle_never_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slice-9 edge NIT-2: a ``tf > i64::MAX`` cannot cross the FFI
+        (PyO3 would raise ``OverflowError`` where the Python arm computes
+        fine) — both scalar wrappers route it to the oracle. The fake
+        kernel's raising scalar fns prove the bypass."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel())
+        beyond_i64 = 2**63  # _RUST_TF_MAX + 1
+        assert expected_bars_per_day_for_tf(beyond_i64) == 1
+        assert is_forced_exit_bar(time(9, 15), beyond_i64) is True
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_boundary_beyond_u32_routes_to_the_oracle_never_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slice-9 refuter-round-1 R2-NIT: a resolved ``boundary``
+        (forced_exit_seconds) outside the kernel's ``u32`` domain cannot
+        cross the FFI (PyO3 would raise ``OverflowError`` flag-ON where the
+        flag-OFF Python arm returns a bool) — the wrapper now mirrors the
+        ``_RUST_TF_MAX`` guard for it. The fake kernel's raising scalar fns
+        prove the bypass on BOTH out-of-range directions."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel())
+        beyond_u32 = 2**32  # _RUST_BOUNDARY_MAX + 1
+        # 09:15 + 1m closes at 33_360s — far below the huge boundary → False.
+        assert is_forced_exit_bar(time(9, 15), 1, beyond_u32) is False
+        # A negative boundary equally cannot convert to u32 → oracle (True:
+        # every close is strictly after a negative instant).
+        assert is_forced_exit_bar(time(9, 15), 1, -1) is True
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_boundary_beyond_u32_real_kernel_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refuter's flag-ON repro, killed: with the REAL wheel armed a
+        ``forced_exit_seconds > u32::MAX`` returns the oracle's bool instead
+        of an ``OverflowError`` at the PyO3 seam."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=4)
+        assert is_forced_exit_bar(time(15, 15), 15, 2**32) is False
+        assert is_forced_exit_bar(time(15, 15), 15, -1) is True
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_cross_date_last_bar_stays_on_the_python_arm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cross-date pair never touches the kernel (the seconds-of-day
+        port is same-date-only); the fake kernel raising proves the bypass."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel())
+        session = nse_module._py_get_session(self.REGULAR_MON, None)
+        assert session is not None
+        next_day = datetime(2026, 7, 7, 9, 15)
+        assert session_last_bar_complete(session, next_day) is True
+
+    def test_consume_burnin_clamps_at_zero(self) -> None:
+        nse_module._reset_rust_calendar_for_tests(burn_in_remaining=0)
+        nse_module._cal_consume_burnin("is_trading_day")
+        assert nse_module._CAL_BURN_IN_REMAINING["is_trading_day"] == 0
+
+    def test_burn_in_budgets_are_independent_per_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each surface owns its OWN burn-in budget (slice-9 refuter
+        round-2 NIT, the audit MINOR-1 pattern — a shared budget let a hot
+        ``is_trading_day`` loop exhaust the window before a rarer surface
+        was ever validated)."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=2)
+        assert is_trading_day(self.REGULAR_MON) is True
+        assert is_trading_day(self.HOLIDAY) is False
+        assert is_trading_day(self.SATURDAY) is False  # exhausted — clamps at 0
+        assert is_weekend(self.SATURDAY) is True
+        assert nse_module._CAL_BURN_IN_REMAINING["is_trading_day"] == 0
+        assert nse_module._CAL_BURN_IN_REMAINING["is_weekend"] == 1
+        # Every never-called surface's budget is untouched.
+        assert all(
+            v == 2
+            for s, v in nse_module._CAL_BURN_IN_REMAINING.items()
+            if s not in {"is_trading_day", "is_weekend"}
+        )
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+
+    def test_hot_surface_exhaustion_still_validates_a_rarer_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The audit-MINOR-1 regression, calendar twin: a hot
+        ``is_trading_day`` loop (that surface's budget exhausted) must
+        STILL burn-in-validate the process's first ``is_weekend`` — a wrong
+        kernel verdict ships the PYTHON value and latches, never serving
+        the kernel value unvalidated."""
+        self._arm(monkeypatch, burn_in_remaining=1)
+        nse_module._set_rust_calendar_for_tests(
+            _fake_kernel(is_trading_day=True, is_weekend=False)  # weekend wrong on purpose
+        )
+        # The hot-loop shape: is_trading_day calls only, exhausting THAT budget.
+        assert is_trading_day(self.REGULAR_MON) is True
+        assert nse_module._CAL_BURN_IN_REMAINING["is_trading_day"] == 0
+        # is_weekend still owes its own burn-in: the wrong kernel verdict is
+        # caught, the Python verdict ships, the kernel latches.
+        with capture_logs() as logs:
+            assert is_weekend(self.SATURDAY) is True
+        assert [r["event"] for r in logs] == ["calendar.kernel_autoreverted"]
+        assert nse_module._CAL_DISABLED_REASON[0] == "is_weekend"
+
+    def test_reset_seam_restores_a_fresh_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm(monkeypatch, burn_in_remaining=0)
+        nse_module._set_rust_calendar_for_tests(_fake_kernel())
+        nse_module._disable_rust_calendar("test", rust="r", python="p")
+        nse_module._reset_rust_calendar_for_tests()
+        assert nse_module._CAL_DISABLED_REASON[0] is None
+        assert all(
+            v == nse_module.CALENDAR_BURN_IN_SAMPLES
+            for v in nse_module._CAL_BURN_IN_REMAINING.values()
+        )
+        assert nse_module._CAL_KERNEL_RESOLVED[0] is False

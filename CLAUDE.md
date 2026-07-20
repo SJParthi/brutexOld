@@ -18,7 +18,24 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+_Last updated: 2026-07-11 (DEC-ORCH-CALENDAR-RUST-CONVERT-001 +
+DEC-AUDIT-CHAIN-PARITY-GOLDEN-001 + DEC-CALENDAR-VERDICT-GOLDEN-001 +
+DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727a/#1727b / ADR-0019,
+branch `integration/rekey-1466-fno-math-040` — the slice-9
+orchestrator/NSE-calendar Rust conversion: the audit-chain +
+calendar-verdict + rate-math kernels land on `rust/fno-math` (crate
+0.3.0 → 0.4.0 — the ONE slice-9 wheel-surface bump; on a main that folds
+`fno_math.__version__` into `indicator_version` per
+DEC-SWEEP-RUN-IDENTITY-COMPLETE-001, landing this bump RE-KEYS every new
+sweep's run identity — announced, never silent), parity-gated by the two
+frozen goldens (audit-chain bytes + the 2,557-day calendar verdict table);
+the ratified dead-scaffolding deletion executed
+(state/pipeline/retry/store/adaptive_rate_limiter deleted, quota_tracker
+trimmed to its live exceptions — DEC-ORCH-DEAD-SCAFFOLD-DELETE-001). ENGINE
+semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/
+rate change. This header carries the pointer, never the story — the full
+record lives in the §1 Active-branch blurb + MIGRATION.md #1727a/#1727b.)
+Earlier: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
 MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
 overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
 the overfit gate config the sweep RECORDED at launch (both grid launchers
@@ -3917,7 +3934,64 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-s2-results-v2`
+- **Active branch:** `integration/rekey-1466-fno-math-040`
+  (PR #1466 re-forwarded as the Event-D integration branch; authored on
+  `claude/orch-calendar-rust-verdict`) (**DEC-ORCH-CALENDAR-RUST-CONVERT-001 +
+  DEC-AUDIT-CHAIN-PARITY-GOLDEN-001 + DEC-CALENDAR-VERDICT-GOLDEN-001, MIGRATION.md #1727 / ADR-0019** —
+  the entry number is coordinator-ASSIGNED from the reservation map (2026-07-11; gaps are legal, next free #1728) —
+  the slice-9 orchestrator/NSE-calendar Rust CONVERSION program, parity-gated by two frozen goldens.
+  AUTHORITY: the slice's judged keep-Python verdict was OVERRIDDEN by the operator the same day
+  (2026-07-11, relayed + ratified via the coordinator) under the program principle **"Rust EVERYWHERE
+  means LIVE code → Rust; DEAD/dormant code → DELETED, never blind-converted"** (umbrella:
+  DEC-RUST-FIRST-MANDATE-001 #1713, at ship time QUEUED on Slice-1's PR, not yet merged). HONEST
+  (Golden Rule #10): expected speed payoff ≈0 for every conversion in scope (fsync-/vendor-/memo-bound) —
+  the conversion is for the operator's Rust-everywhere uniformity decree, not speed. SCOPE (ADR-0019):
+  CONVERT the orchestrator SHA-256 audit chain + the NSE-calendar VERDICT LOGIC (calendar DATA does NOT
+  move — the D8-COMPATIBLE reading, operator-authorized: data stays in `brutex.calendars` and crosses the
+  FFI as config/day-ordinal parameters; no chrono in trading-core, fno-math is the wheel home), then the
+  rate-limiter TOKEN MATH last (bit-exact IEEE bucket arithmetic; §2 Rule 6 inviolable — every
+  ceiling/floor/governor VALUE + AIMD behavior byte-identical, convert the MATH never the caps); DELETE
+  the grep-proven-dead tail in later commits of this same PR (state/retry/pipeline scaffolding, store.py,
+  quota_tracker, adaptive_rate_limiter — keep-frozen-containers for live SHAPE consumers per the
+  DEC-EXECUTION-TRIO-DELETE-001 pattern, exact keep-set from a deletion-phase grep-proof pass); Bloom
+  STAYS (already Rust where it counts). LAWS: goldens-first (a port flips ON only when it reproduces the
+  frozen goldens BIT-FOR-BIT) · default-OFF env flag + burn-in self-check + RETAINED Python oracle (the
+  #1531–#1532 pattern, ADAPTED: that pattern shipped default-ON — this slice ships default-OFF, the burn-in
+  machinery is what carries over) · the ESCALATION clause (unreproducible bytes/verdicts/f64 bits escalate to the
+  coordinator — a divergent port is NEVER shipped). SHIPPED IN THIS PASS (zero brutex/ source lines):
+  NEW `tests/golden/test_audit_chain_parity_golden.py` (+ generator + 2 SHA-256-manifested fixtures,
+  NEVER regenerated — a REAL 10-entry AuditWriter chain over the CPython float-repr/json.dumps hazard
+  classes + the scalar unit-vector table; writer-equivalence reproduces the fixture bytes exactly) and
+  NEW `tests/golden/test_calendar_verdict_table_golden.py` (+ harness + generator + fixture — the full
+  2020-2026 2,557-day verdict table + out-of-coverage abstain-triage strips + every scalar family incl.
+  every Muhurat/Budget-weekend forced exit + the strict-`>` boundaries + observed-overlay vectors + the
+  exchange-law NSE==BSE and coverage-span tripwires + the two frozen WARN event names; regen env-guarded
+  AND requiring its own ledgered calendar-data DEC); ADR-0019 records the ratified principle, the hazard
+  map, the D8 accommodation + baked-data refusal, and follow-ups F1–F5 (incl. the kernel-track deletion
+  request for the dead fno-math compat TradingCalendar). The retry.py phantom-docstring fix is
+  DELIBERATELY SKIPPED (retry.py is in the ratified deletion scope — recorded in ADR-0019 §6). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; both new suites ride the existing
+  golden job — 493 passed; ruff/ruff-format/`mypy --strict` clean, pyright 0 errors.
+  **PHASE 2a LANDED (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727b — the entry renumbered
+  1727 → 1727a when the deletion record took 1727b, the 613a/613b both-suffixed convention):** the
+  ratified dead-scaffolding DELETION executed after the 2b-1 Rust ports — every zero-production-caller
+  grep-proof re-run at head 4037789 and held; `state.py`/`pipeline.py`/`retry.py`/`store.py`/
+  `adaptive_rate_limiter.py` DELETED (2,717 source lines + 11 test files ≈6,185 lines) with the LIVE
+  shapes moved verbatim to NEW stdlib-only `brutex/orchestrator/events.py` (IngestPhase ·
+  PipelineEventKind · PipelineEvent · EventSubscriber · WorkItemState — the last a deliberate
+  one-symbol widening: it types `PipelineEvent.item_state`, which the dashboard reads);
+  `quota_tracker.py` TRIMMED in place 544→137 (the load-bearing `DailyQuotaExceeded`/
+  `QuotaInvariantError` keep their byte-stable import path; the dormant tracker machinery deleted
+  behind the NEW structural `QuotaGate` Protocol on the ONE `RateController(quota_tracker=)` re-wire
+  seam — explicitly superseding DEC-QUOTA-VERDICT-MOOT-001 #1591's KEEP-DORMANT clause for this module
+  only, its exception-sets-not-narrowed pins PRESERVED); `__init__.py` rewritten same-commit; the
+  ci.yml per-PR BLOCKING mutmut gate RETARGETED state.py → `brutex/data/parser.py` on MEASURED runs
+  (33 mutants / 100.00% killed / 72 s; the partition.py candidate measured 109 / 240 s — too
+  budget-close); the deleted modules' ci.yml gates replaced by events.py + trimmed-quota_tracker
+  gates (both 100.00% line+branch); mutation.yml loop pairs −3; bench-m4pro.yml's stale
+  test_store_o1.py token removed; docs/ENV_VARS/STANDARDS rows reconciled. ZERO production behavior
+  change; §2 Rule 6 values byte-untouched; rust/ untouched by this phase.)
+  Earlier: `integration/club-s2-results-v2`
   (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
   overfit-recount recovery channel, folded onto the CLUB S2 members
   (#1848–#1850) on this same branch. THE TRUE FAILURE MODE (stated
@@ -11759,7 +11833,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-s2-results-v2`
+- **Active feature branch:** `integration/rekey-1466-fno-math-040`
+  (PR #1466 re-forwarded as the Event-D integration branch; authored on
+  `claude/orch-calendar-rust-verdict`)
+  (DEC-ORCH-CALENDAR-RUST-CONVERT-001 + DEC-AUDIT-CHAIN-PARITY-GOLDEN-001 +
+  DEC-CALENDAR-VERDICT-GOLDEN-001, MIGRATION.md #1727 / ADR-0019 — the slice-9
+  orchestrator/NSE-calendar Rust CONVERSION program, parity-gated by the two
+  frozen goldens shipped in this pass (audit-chain byte layout + the 2,557-day
+  calendar verdict table); operator-overridden from the judged keep-Python
+  verdict under the ratified "live → Rust, dead → DELETED" principle; the
+  audit + calendar Rust ports landed as phase 2b-1 and the dead-scaffolding
+  DELETION landed as phase 2a (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+  MIGRATION.md #1727b — state/pipeline/retry/store/adaptive_rate_limiter
+  deleted, live shapes kept in `orchestrator/events.py` + the `QuotaGate`
+  Protocol, the blocking mutmut gate retargeted to `data/parser.py`);
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `integration/club-s2-results-v2`
   (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
   overfit-recount recovery channel: the recount recovers the RECORDED
   overfit gate config (mint on both launchers' START records; the tolerant
@@ -13011,8 +13100,8 @@ hostile-review pass._
   export rows memo (repeat click 206 DuckDB statements → 0, bytes identical)
   + span-bounded IEP reads, and the /db candles %CHNG baseline file bound
   (72 files bound twice per click → 2); healthy-lake payloads byte-identical;
-  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
-  see §1 + MIGRATION.md #1719 for the full blurb)
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1's Earlier chain +
+  MIGRATION.md #1719 for the full blurb)
   Earlier: `claude/nightly-id-deflake`
   (DEC-NIGHTLY-ID-FLAKY-TEST-001, MIGRATION.md #1737 — the nightly-id CI de-flake:
   the uniqueness assertion over `mint_nightly_id`'s 24-bit entropy suffix is made
@@ -13393,7 +13482,12 @@ bruteX/
 │   ├── notifications/
 │   ├── observability/
 │   ├── options/                    ← expiry/strike/lot-size rules (lake)
-│   ├── orchestrator/               ← FSM + audit + rate limiter
+│   ├── orchestrator/               ← audit chain + rate limiter +
+│   │                                 live pipeline event shapes (the dead
+│   │                                 FSM/retry/pipeline/store/
+│   │                                 adaptive_rate_limiter scaffolding was
+│   │                                 DELETED + quota_tracker TRIMMED to its
+│   │                                 live exceptions — MIGRATION.md #1727b)
 │   ├── ranking/                    ← composite ranking + rejection gates
 │   ├── strategies/                 ← 52-vocabulary engine (Phase 3)
 │   └── vocabulary/                 ← 52-condition evaluator (→ trading_core)

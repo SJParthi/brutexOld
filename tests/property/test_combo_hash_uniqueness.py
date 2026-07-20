@@ -1,9 +1,10 @@
 """Hypothesis property tests for ``brutex.strategies.combo.combo_hash``.
 
 Closes the gap identified in the 2026-05-25 honest-audit
-(STANDARDS_100PCT_HONEST_AUDIT row 13): the existing
-``test_dedup_hash_properties.py`` exercises the orchestrator's
-SHA256 ``_content_hash`` (WorkItem ingest dedup) but **never touches
+(STANDARDS_100PCT_HONEST_AUDIT row 13): the then-existing
+``test_dedup_hash_properties.py`` (since DELETED with the orchestrator
+FSM scaffolding — MIGRATION.md #1727) exercised the orchestrator's
+SHA256 ``_content_hash`` (WorkItem ingest dedup) but **never touched
 the actual 9-field BLAKE3 combo identity hash** mandated by
 ``TRACK1_BACKTEST_SPEC.md`` §"Identity (hash inputs)" / FR-BF-003 /
 NFR-UNIQ-001.

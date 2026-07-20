@@ -34,8 +34,7 @@ from brutex.notifications.telegram import (
     TelegramNotifier,
     TelegramSeverity,
 )
-from brutex.orchestrator.pipeline import PipelineEvent, PipelineEventKind
-from brutex.orchestrator.state import IngestPhase
+from brutex.orchestrator.events import IngestPhase, PipelineEvent, PipelineEventKind
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers

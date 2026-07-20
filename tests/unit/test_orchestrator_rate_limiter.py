@@ -9,9 +9,11 @@ of the timing the caller reports.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+import types
+from collections.abc import Callable, Iterator
 
 import pytest
+from brutex.orchestrator import rate_limiter as rate_limiter_module
 from brutex.orchestrator.rate_limiter import (
     _ACQUIRE_LOOP_CAP,
     _LEGACY_HARD_CAP_RPS,
@@ -25,6 +27,7 @@ from brutex.orchestrator.rate_limiter import (
     RateLimiterError,
     RateLimiterEvent,
 )
+from structlog.testing import capture_logs
 
 # ────────────────────────────────────────────────────────────────────────
 # Fake clock & sleep helpers — deterministic test infrastructure
@@ -1041,16 +1044,45 @@ class TestThreadSafety:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Bucket ↔ DailyQuotaTracker integration (DEC-P0-030, PR #50c)
+# Bucket ↔ QuotaGate integration (DEC-P0-030, PR #50c; retyped onto the
+# structural QuotaGate Protocol by DEC-ORCH-DEAD-SCAFFOLD-DELETE-001 —
+# the deleted DailyQuotaTracker is replaced by an in-memory fake gate)
 # ────────────────────────────────────────────────────────────────────────
+
+
+class _FakeQuotaGate:
+    """A minimal in-memory :class:`QuotaGate` double.
+
+    Exactly the deleted ``DailyQuotaTracker``'s consumed surface: the
+    bucket calls ONLY ``acquire_or_raise()`` (rate_limiter.py's quota-gate
+    branch); the count/remaining reads let the tests assert increments.
+    """
+
+    def __init__(self, *, daily_limit: int) -> None:
+        self.daily_limit = daily_limit
+        self._used = 0
+
+    def acquire_or_raise(self) -> int:
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
+
+        if self._used >= self.daily_limit:
+            raise DailyQuotaExceeded(f"daily_limit={self.daily_limit} already reached")
+        self._used += 1
+        return self._used
+
+    def current_count(self) -> int:
+        return self._used
+
+    def remaining(self) -> int:
+        return max(0, self.daily_limit - self._used)
 
 
 class TestQuotaTrackerIntegration:
     """Verify the optional ``quota_tracker`` field composes correctly.
 
     Closes Agent 1 §G None-safety, Agent 3 A1/A2/B1/B2 ordering, Agent 2
-    §B no-silent-bypass (via explicit test that None is the test-only
-    legacy path).
+    §B no-silent-bypass (via explicit test that None is the production
+    bucket-only path).
     """
 
     def test_quota_tracker_none_is_legacy_path(self) -> None:
@@ -1071,141 +1103,74 @@ class TestQuotaTrackerIntegration:
         wait = bucket.acquire()
         assert wait == 0.0  # first token from burst, no wait
 
-    def test_quota_tracker_set_increments_on_acquire(self, tmp_path: object) -> None:
+    def test_quota_tracker_set_increments_on_acquire(self) -> None:
         """When quota_tracker is set, every successful bucket acquire
         triggers exactly one quota increment.
         """
-        from datetime import datetime as _datetime
-        from pathlib import Path
-        from zoneinfo import ZoneInfo
-
-        from brutex.orchestrator.quota_tracker import DailyQuotaTracker
-
         clock = FakeClock()
-        sleep = clock.sleep
-
-        ist = ZoneInfo("Asia/Kolkata")
-        ist_now = _datetime(2026, 5, 18, 9, 15, tzinfo=ist)
-
-        def ist_clock() -> _datetime:
-            return ist_now
-
-        tracker = DailyQuotaTracker(
-            daily_limit=10,
-            store_path=Path(str(tmp_path)) / "quota.lmdb",
-            clock=ist_clock,
+        gate = _FakeQuotaGate(daily_limit=10)
+        bucket = AdaptiveTokenBucket(
+            initial_rps=10.0,
+            downshift_rps=5.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+            quota_tracker=gate,
         )
-        try:
-            bucket = AdaptiveTokenBucket(
-                initial_rps=10.0,
-                downshift_rps=5.0,
-                burst=5,
-                clock=clock.now,
-                sleep=sleep,
-                quota_tracker=tracker,
-            )
-            assert tracker.current_count() == 0
-            bucket.acquire()
-            assert tracker.current_count() == 1
-            bucket.acquire()
-            bucket.acquire()
-            assert tracker.current_count() == 3
-        finally:
-            tracker.close()
+        assert gate.current_count() == 0
+        bucket.acquire()
+        assert gate.current_count() == 1
+        bucket.acquire()
+        bucket.acquire()
+        assert gate.current_count() == 3
 
-    def test_quota_exceeded_bubbles_up_from_acquire(self, tmp_path: object) -> None:
-        """When the quota tracker raises DailyQuotaExceeded, it bubbles
-        up from bucket.acquire() — the adapter maps this to Outcome.FATAL
-        (no auto-retry).
+    def test_quota_exceeded_bubbles_up_from_acquire(self) -> None:
+        """When the quota gate raises DailyQuotaExceeded, it bubbles
+        up from bucket.acquire() — the halt chain maps this to a
+        pull-wide stop (no auto-retry).
         """
-        from datetime import datetime as _datetime
-        from pathlib import Path
-        from zoneinfo import ZoneInfo
-
-        from brutex.orchestrator.quota_tracker import (
-            DailyQuotaExceeded,
-            DailyQuotaTracker,
-        )
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 
         clock = FakeClock()
-        sleep = clock.sleep
-
-        ist = ZoneInfo("Asia/Kolkata")
-        ist_now = _datetime(2026, 5, 18, 9, 15, tzinfo=ist)
-
-        def ist_clock() -> _datetime:
-            return ist_now
-
-        tracker = DailyQuotaTracker(
-            daily_limit=3,
-            store_path=Path(str(tmp_path)) / "quota.lmdb",
-            clock=ist_clock,
+        bucket = AdaptiveTokenBucket(
+            initial_rps=10.0,
+            downshift_rps=5.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+            quota_tracker=_FakeQuotaGate(daily_limit=3),
         )
-        try:
-            bucket = AdaptiveTokenBucket(
-                initial_rps=10.0,
-                downshift_rps=5.0,
-                burst=5,
-                clock=clock.now,
-                sleep=sleep,
-                quota_tracker=tracker,
-            )
+        bucket.acquire()
+        bucket.acquire()
+        bucket.acquire()
+        with pytest.raises(DailyQuotaExceeded):
             bucket.acquire()
-            bucket.acquire()
-            bucket.acquire()
-            with pytest.raises(DailyQuotaExceeded):
-                bucket.acquire()
-        finally:
-            tracker.close()
 
-    def test_record_success_unchanged_on_quota_raise(self, tmp_path: object) -> None:
+    def test_record_success_unchanged_on_quota_raise(self) -> None:
         """Agent 3 A2/I1: bucket's _last_success_at MUST remain
         unchanged when quota raises. The adapter caller controls
         record_success(); the bucket itself does not call it inside
         acquire().
         """
-        from datetime import datetime as _datetime
-        from pathlib import Path
-        from zoneinfo import ZoneInfo
-
-        from brutex.orchestrator.quota_tracker import (
-            DailyQuotaExceeded,
-            DailyQuotaTracker,
-        )
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 
         clock = FakeClock()
-        sleep = clock.sleep
-
-        ist = ZoneInfo("Asia/Kolkata")
-        ist_now = _datetime(2026, 5, 18, 9, 15, tzinfo=ist)
-
-        def ist_clock() -> _datetime:
-            return ist_now
-
-        tracker = DailyQuotaTracker(
-            daily_limit=1,
-            store_path=Path(str(tmp_path)) / "quota.lmdb",
-            clock=ist_clock,
+        bucket = AdaptiveTokenBucket(
+            initial_rps=10.0,
+            downshift_rps=5.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+            quota_tracker=_FakeQuotaGate(daily_limit=1),
         )
-        try:
-            bucket = AdaptiveTokenBucket(
-                initial_rps=10.0,
-                downshift_rps=5.0,
-                burst=5,
-                clock=clock.now,
-                sleep=sleep,
-                quota_tracker=tracker,
-            )
+        bucket.acquire()
+        success_at_before = bucket._last_success_at
+        with pytest.raises(DailyQuotaExceeded):
             bucket.acquire()
-            success_at_before = bucket._last_success_at
-            with pytest.raises(DailyQuotaExceeded):
-                bucket.acquire()
-            # _last_success_at MUST be unchanged — bucket.acquire() does not
-            # update it on quota failure (adapter caller controls success
-            # recording via the separate record_success() method).
-            assert bucket._last_success_at == success_at_before
-        finally:
-            tracker.close()
+        # _last_success_at MUST be unchanged — bucket.acquire() does not
+        # update it on quota failure (adapter caller controls success
+        # recording via the separate record_success() method).
+        assert bucket._last_success_at == success_at_before
 
 
 class TestStartEmpty:
@@ -1388,3 +1353,319 @@ class TestLast429SentinelInvariants:
         clock.advance(1.0)
         b.acquire()  # recovery gate: now - (-inf) = +inf >= upshift_recovery → open
         assert b.current_rps() == b.initial_rps
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Rust rate-math kernel seam (DEC-RATE-MATH-RUST-001, ADR-0019)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRustRateMathSeam:
+    """The flag-gated Rust dispatch: flag arms, kernel resolution, burn-in +
+    autorevert latch, and both-arms f64-byte identity."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_seam(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        """Every test starts and ends with a fresh-process seam view."""
+        monkeypatch.delenv(rate_limiter_module.RUST_RATE_MATH_ENV, raising=False)
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        yield
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+
+    def _arm(self, monkeypatch: pytest.MonkeyPatch, *, burn_in_remaining: int = 16) -> None:
+        monkeypatch.setenv(rate_limiter_module.RUST_RATE_MATH_ENV, "1")
+        rate_limiter_module._reset_rust_rate_math_for_tests(burn_in_remaining=burn_in_remaining)
+
+    @staticmethod
+    def _fake_kernel(
+        refill: float = 999.0,
+        consume: tuple[float, float] = (999.0, 999.0),
+        more_wait: float = 999.0,
+        set_rate: tuple[float, float] = (999.0, 999.0),
+    ) -> rate_limiter_module._RustRateKernel:
+        return rate_limiter_module._RustRateKernel(
+            refill_fn=lambda *a: refill,
+            consume_fn=lambda *a: consume,
+            more_wait_fn=lambda *a: more_wait,
+            set_rate_fn=lambda *a: set_rate,
+        )
+
+    # ── flag arms ────────────────────────────────────────────────────────
+
+    def test_flag_default_off_resolves_no_kernel(self) -> None:
+        assert rate_limiter_module._rust_rate_kernel() is None
+
+    def test_flag_falsy_off_silent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(rate_limiter_module.RUST_RATE_MATH_ENV, "off")
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        with capture_logs() as logs:
+            assert rate_limiter_module._rust_rate_kernel() is None
+        assert logs == []
+
+    def test_flag_junk_warns_once_and_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(rate_limiter_module.RUST_RATE_MATH_ENV, "flase")
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        with capture_logs() as logs:
+            assert rate_limiter_module._rust_flag_enabled() is False
+            assert rate_limiter_module._rust_flag_enabled() is False  # memo: warn once
+        assert [r["event"] for r in logs] == ["rate_math.rust_flag_unrecognised"]
+
+    # ── kernel resolution arms ───────────────────────────────────────────
+
+    def test_flag_on_resolves_the_real_kernel_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        kernel = rate_limiter_module._rust_rate_kernel()
+        assert kernel is not None
+        # Memoized: a second call returns the SAME resolved object.
+        assert rate_limiter_module._rust_rate_kernel() is kernel
+
+    def test_wheel_missing_warns_once_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+    ) -> None:
+        self._arm(monkeypatch)
+
+        def _no_wheel() -> object:
+            raise ImportError("no fno_math")
+
+        monkeypatch.setattr(rate_limiter_module, "_import_fno_math", _no_wheel)
+        with capture_logs() as logs:
+            assert rate_limiter_module._rust_rate_kernel() is None
+        assert [r["event"] for r in logs] == ["rate_math.rust_kernel_unavailable"]
+        assert logs[0]["reason"] == "wheel_missing"
+        # The bucket still paces from the Python oracle.
+        b = AdaptiveTokenBucket(clock=clock.now, sleep=clock.sleep)
+        assert b.acquire() == 0.0
+
+    @pytest.mark.parametrize(
+        "stale_ns",
+        [
+            {},
+            {"bucket_refill": lambda *a: 0.0},
+            {
+                "bucket_refill": lambda *a: 0.0,
+                "bucket_consume": lambda *a: (0.0, 0.0),
+            },
+            {
+                "bucket_refill": lambda *a: 0.0,
+                "bucket_consume": lambda *a: (0.0, 0.0),
+                "bucket_more_wait": lambda *a: 0.0,
+            },
+            {
+                "bucket_refill": lambda *a: 0.0,
+                "bucket_consume": lambda *a: (0.0, 0.0),
+                "bucket_more_wait": lambda *a: 0.0,
+                "bucket_set_rate_state": "not-callable",
+            },
+        ],
+        ids=["empty", "refill-only", "no-more-wait", "no-set-rate", "set-rate-not-callable"],
+    )
+    def test_wheel_stale_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, stale_ns: dict[str, object]
+    ) -> None:
+        self._arm(monkeypatch)
+        monkeypatch.setattr(
+            rate_limiter_module, "_import_fno_math", lambda: types.SimpleNamespace(**stale_ns)
+        )
+        with capture_logs() as logs:
+            assert rate_limiter_module._rust_rate_kernel() is None
+        assert [r["event"] for r in logs] == ["rate_math.rust_kernel_unavailable"]
+        assert logs[0]["reason"] == "wheel_stale"
+
+    # ── dispatch parity (the real kernel) ────────────────────────────────
+
+    def test_flag_on_all_four_surfaces_match_the_python_oracle_bytes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every dispatch surface serves f64-byte-identical values to the
+        retained Python expressions — probed DIRECTLY so the retry-wait
+        surface (naturally reachable only under a concurrent downshift) is
+        exercised too."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch)
+        vectors: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
+        for tokens, burst, rps, elapsed in [
+            (0.0, 5.0, 3.0, 0.5),
+            (4.0, 5.0, 3.0, 1.0),
+            (2.0, 5.0, 8.0, 1e-9),
+            (0.9999999999999999, 5.0, 1.5, 0.25),
+        ]:
+            vectors.append(
+                (
+                    (rate_limiter_module._bucket_refill(tokens, burst, rps, elapsed),),
+                    (rate_limiter_module._py_bucket_refill(tokens, burst, rps, elapsed),),
+                )
+            )
+        for tokens, rps in [(1.0, 3.0), (0.25, 3.0), (5.0, 8.0), (1.0 - 1e-12, 1.5)]:
+            vectors.append(
+                (
+                    rate_limiter_module._bucket_consume(tokens, rps),
+                    rate_limiter_module._py_bucket_consume(tokens, rps),
+                )
+            )
+        for tokens, rps, eps in [(0.25, 3.0, 1e-9), (1.0 - 1e-12, 3.0, 1e-9), (0.5, 2.0, 0.25)]:
+            vectors.append(
+                (
+                    (rate_limiter_module._bucket_more_wait(tokens, rps, eps),),
+                    (rate_limiter_module._py_bucket_more_wait(tokens, rps, eps),),
+                )
+            )
+        for new_rps in [8.0, 3.0, 1.5, 5e-324]:
+            vectors.append(
+                (
+                    rate_limiter_module._bucket_set_rate_state(new_rps),
+                    rate_limiter_module._py_bucket_set_rate_state(new_rps),
+                )
+            )
+        for served, oracle in vectors:
+            assert rate_limiter_module._f64_bytes(served) == rate_limiter_module._f64_bytes(oracle)
+        # None of the double-computes diverged — the kernel is still live.
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] is None
+
+    def test_flag_on_bucket_end_to_end_matches_flag_off_twin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full acquire/set_rate/refill sequence produces IDENTICAL waits,
+        tokens and rates under both arms (the AIMD ladder untouched)."""
+        pytest.importorskip("fno_math")
+
+        def _run() -> list[float]:
+            c = FakeClock()
+            b = AdaptiveTokenBucket(
+                initial_rps=8.0, downshift_rps=4.0, start_empty=True, clock=c.now, sleep=c.sleep
+            )
+            out: list[float] = []
+            out.append(b.acquire())  # empty bucket → real wait
+            b.record_success()
+            b.set_rate(3.0)  # drain-to-empty + downshift moves
+            out.append(b.downshift_rps)
+            out.append(b.acquire())
+            c.advance(2.0)
+            out.append(b.acquire())  # refilled — free token
+            out.append(b.available_tokens())
+            out.append(b.current_rps())
+            return out
+
+        self._arm(monkeypatch)
+        rust_arm = _run()
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] is None
+        monkeypatch.delenv(rate_limiter_module.RUST_RATE_MATH_ENV)
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        python_arm = _run()
+        assert rate_limiter_module._f64_bytes(tuple(rust_arm)) == rate_limiter_module._f64_bytes(
+            tuple(python_arm)
+        )
+
+    # ── burn-in + autorevert ─────────────────────────────────────────────
+
+    def test_burn_in_consumes_independent_per_surface_budgets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each surface owns its OWN burn-in budget (slice-9 refuter
+        round-2 NIT, the audit MINOR-1 pattern — a shared budget let a hot
+        refill/consume loop exhaust the window before ``set_rate`` was
+        ever validated)."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=2)
+        rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5)
+        rate_limiter_module._bucket_refill(4.0, 5.0, 3.0, 1.0)
+        rate_limiter_module._bucket_refill(2.0, 5.0, 8.0, 1e-9)  # exhausted — clamps at 0
+        rate_limiter_module._bucket_consume(1.0, 3.0)
+        assert rate_limiter_module._RUST_BURN_IN_REMAINING == {
+            "bucket_refill": 0,
+            "bucket_consume": 1,
+            "bucket_more_wait": 2,
+            "bucket_set_rate_state": 2,
+        }
+
+    def test_hot_surface_exhaustion_still_validates_a_rarer_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The audit-MINOR-1 regression, rate twin: a refill-heavy process
+        (that surface's budget exhausted) must STILL burn-in-validate its
+        first ``set_rate`` — a wrong kernel post-state ships the PYTHON
+        values and latches, never serving the kernel value unvalidated."""
+        pytest.importorskip("fno_math")
+        self._arm(monkeypatch, burn_in_remaining=1)
+        rate_limiter_module._set_rust_kernel_for_tests(
+            rate_limiter_module._RustRateKernel(
+                refill_fn=rate_limiter_module._py_bucket_refill,  # correct — passes burn-in
+                consume_fn=lambda *a: (999.0, 999.0),
+                more_wait_fn=lambda *a: 999.0,
+                set_rate_fn=lambda *a: (999.0, 999.0),  # wrong on purpose
+            )
+        )
+        # The hot-loop shape: refill calls only, exhausting THAT budget.
+        rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5)
+        assert rate_limiter_module._RUST_BURN_IN_REMAINING["bucket_refill"] == 0
+        # set_rate still owes its own burn-in: the wrong kernel post-state
+        # is caught, the Python values ship, the kernel latches.
+        with capture_logs() as logs:
+            served = rate_limiter_module._bucket_set_rate_state(8.0)
+        assert served == rate_limiter_module._py_bucket_set_rate_state(8.0)
+        assert [r["event"] for r in logs] == ["rate_math.kernel_autoreverted"]
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
+
+    def test_burn_in_mismatch_ships_python_latches_and_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._arm(monkeypatch)
+        rate_limiter_module._set_rust_kernel_for_tests(self._fake_kernel())
+        with capture_logs() as logs:
+            served = rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5)
+        assert served == rate_limiter_module._py_bucket_refill(0.0, 5.0, 3.0, 0.5)
+        assert [r["event"] for r in logs] == ["rate_math.kernel_autoreverted"]
+        assert logs[0]["reason"] == "burn_in_mismatch"
+        assert logs[0]["surface"] == "bucket_refill"
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] == "burn_in_mismatch"
+        # Latched: every later call short-circuits to the oracle (no kernel).
+        assert rate_limiter_module._rust_rate_kernel() is None
+        assert rate_limiter_module._bucket_consume(0.25, 3.0) == (
+            rate_limiter_module._py_bucket_consume(0.25, 3.0)
+        )
+        # The latch logs ONCE — a second disable call is a no-op.
+        with capture_logs() as logs:
+            rate_limiter_module._disable_rust_kernel("again")
+        assert logs == []
+
+    def test_burn_in_signed_zero_mismatch_is_caught_by_the_byte_comparator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``-0.0 == 0.0`` under ``==`` — the byte comparator must still latch."""
+        self._arm(monkeypatch)
+        rate_limiter_module._set_rust_kernel_for_tests(
+            self._fake_kernel(set_rate=(-0.0, 4.0))  # oracle drains to +0.0
+        )
+        with capture_logs() as logs:
+            served = rate_limiter_module._bucket_set_rate_state(8.0)
+        assert served == (0.0, 4.0)
+        assert rate_limiter_module._f64_bytes((served[0],)) == rate_limiter_module._f64_bytes(
+            (0.0,)
+        )
+        assert [r["event"] for r in logs] == ["rate_math.kernel_autoreverted"]
+
+    def test_post_burn_in_rust_value_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With the budget exhausted the kernel values serve directly —
+        proven with a fake kernel whose values are distinguishable."""
+        self._arm(monkeypatch, burn_in_remaining=0)
+        rate_limiter_module._set_rust_kernel_for_tests(
+            self._fake_kernel(refill=7.0, consume=(6.0, 0.5), more_wait=0.75, set_rate=(0.0, 2.5))
+        )
+        assert rate_limiter_module._bucket_refill(0.0, 5.0, 3.0, 0.5) == 7.0
+        assert rate_limiter_module._bucket_consume(1.0, 3.0) == (6.0, 0.5)
+        assert rate_limiter_module._bucket_more_wait(0.25, 3.0, 1e-9) == 0.75
+        assert rate_limiter_module._bucket_set_rate_state(8.0) == (0.0, 2.5)
+
+    # ── seam plumbing ────────────────────────────────────────────────────
+
+    def test_reset_seam_restores_a_fresh_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm(monkeypatch, burn_in_remaining=0)
+        rate_limiter_module._set_rust_kernel_for_tests(self._fake_kernel())
+        rate_limiter_module._disable_rust_kernel("test")
+        rate_limiter_module._reset_rust_rate_math_for_tests()
+        assert rate_limiter_module._RUST_DISABLED_REASON[0] is None
+        assert all(
+            remaining == rate_limiter_module.RATE_MATH_BURN_IN_SAMPLES
+            for remaining in rate_limiter_module._RUST_BURN_IN_REMAINING.values()
+        )
+        assert rate_limiter_module._RUST_KERNEL_RESOLVED[0] is False

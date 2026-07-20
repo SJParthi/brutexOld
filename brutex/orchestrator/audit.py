@@ -71,14 +71,23 @@ import contextlib
 import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 from types import TracebackType
-from typing import IO, Any, ClassVar, Final, Protocol, Self, runtime_checkable
+from typing import IO, Any, ClassVar, Final, Protocol, Self, cast, runtime_checkable
 
 from brutex.models import BruteXError
+
+# NOTE (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630): this module is
+# deliberately free of the process logging stack — the hash-chained audit
+# records are DIRECT file appends so no logging configuration can ever
+# filter or reformat them (pinned by tests/unit/test_cli_sweep_log_level.py
+# ::TestAuditChainIsNotStructlog). The Rust-seam observability events
+# (seam STATE, never audit records) route through the sibling
+# ``brutex.orchestrator.audit_seam_log`` via a late-bound function-local
+# import inside :func:`_warn_rust_once` / :func:`_disable_rust_kernel`.
 
 # ────────────────────────────────────────────────────────────────────────
 # Constants
@@ -209,6 +218,255 @@ def _canonical_json(obj: Any) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Rust audit-chain kernel seam (DEC-AUDIT-CHAIN-RUST-PORT-001, ADR-0019)
+# ────────────────────────────────────────────────────────────────────────
+#
+# Default-OFF flag-gated dispatch of the SERIALIZATION + HASH layer
+# (``compute_hash`` / ``to_json_line``) to the ``fno_math`` Rust kernel,
+# parity-gated on the frozen ``tests/golden/fixtures/audit_chain_parity_*``
+# fixtures. The #1531/#1532 rollout pattern: memoized flag + kernel
+# resolution, a 16-sample per-process BURN-IN double-compute against the
+# retained Python bodies (mismatch → ship the PYTHON bytes + latch the
+# kernel off + ONE ``audit.kernel_autoreverted`` ERROR), and a LOUD
+# warn-once fallback for every out-of-model payload
+# (``audit.rust_envelope_fallback``) — the Python bodies are the oracle and
+# are NEVER deleted, so wheel state can never change chain bytes or error
+# behaviour. All file I/O / fsync / locking / torn-tail semantics are
+# untouched — only the two pure byte producers dispatch.
+
+#: The env flag (default OFF). Truthy = ``1/true/yes/on``; falsy =
+#: ``0/false/no/off``; unset/empty = OFF; anything else = OFF with one
+#: ``audit.rust_flag_unrecognised`` warning.
+RUST_AUDIT_CHAIN_ENV: Final[str] = "BRUTEX_RUST_AUDIT_CHAIN"
+
+#: Rust-served computations PER SURFACE (``compute_hash`` and
+#: ``to_json_line`` each carry their OWN budget) that are double-computed
+#: against the Python oracle per process (the burn-in). Independent
+#: counters (slice-9 review, audit MINOR-1): a flag-ON ``verify_chain`` of
+#: ≥16 entries exercises only the HASH surface — under a shared budget it
+#: would exhaust the burn-in before the same process's first ``append``
+#: ever validated the LINE surface (the verify-heavy-then-write shape,
+#: e.g. a nightly verify → pull), leaving ``to_json_line`` Rust-DIRECT
+#: without a single in-process oracle compare.
+AUDIT_BURN_IN_SAMPLES: Final[int] = 16
+
+#: The env-flag vocabulary — a DELIBERATE local copy of the sweep flags'
+#: ``_TRUTHY`` / ``_FALSY`` literal sets: the COMMON classifier lives in
+#: ``brutex.engine.sweep_lookahead``, but the engine package imports THIS
+#: module (``engine.sweep_run`` → ``orchestrator.audit``), so importing the
+#: engine from here would create an orchestrator ⇄ engine package cycle
+#: (the CodeQL ``py/cyclic-import`` class). Layering wins over §11 COMMON
+#: here — noted, not silent.
+_RUST_FLAG_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+_RUST_FLAG_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
+
+
+@dataclass(frozen=True, slots=True)
+class _RustAuditKernel:
+    """The resolved Rust kernel surface — hash fn + line fn + envelope type.
+
+    Held in the process memo so the seam resolves ``fno_math`` exactly once;
+    tests inject a fake instance through :func:`_set_rust_kernel_for_tests`.
+    """
+
+    hash_fn: Callable[..., str]
+    line_fn: Callable[..., str]
+    envelope_error: type[BaseException]
+
+
+#: Kernel memo: ``[resolved?]`` + the resolved value (two cells so the
+#: sentinel needs no ``object()`` type gymnastics). Single-cell mutable
+#: module state — the same documented exception to the
+#: no-global-mutable-state rule as ``brutex.engine.rust_metrics``.
+_RUST_KERNEL_RESOLVED: Final[list[bool]] = [False]
+_RUST_KERNEL_VALUE: Final[list[_RustAuditKernel | None]] = [None]
+
+#: Per-surface burn-in budgets + the autorevert latch (reason once
+#: latched, else None). Mutated WITHOUT a lock (slice-9 review, audit
+#: NIT-3 — deliberate): the single-writer contract holds per AuditWriter,
+#: and two concurrent in-process writers racing a decrement are
+#: GIL-benign — worst case one extra double-compute or a duplicate
+#: autorevert ERROR log, NEVER wrong bytes (the compare-and-ship-python
+#: settle is per-call deterministic).
+_RUST_BURN_IN_REMAINING: Final[dict[str, int]] = {
+    "compute_hash": AUDIT_BURN_IN_SAMPLES,
+    "to_json_line": AUDIT_BURN_IN_SAMPLES,
+}
+_RUST_DISABLED_REASON: Final[list[str | None]] = [None]
+
+#: Warn-once memo — LOG-VOLUME state only; results never depend on it.
+_RUST_WARN_MEMO: Final[set[str]] = set()
+
+
+def _warn_rust_once(event: str, **context: object) -> None:
+    """Log *event* at WARNING once per process (per event + reason key).
+
+    Late-bound sink: the logging import happens only when a seam event
+    actually fires, keeping this module's import graph (and source text)
+    free of the process logging stack per the #1630 pin (see the module
+    NOTE above). The warn-once memo gates the import cost.
+    """
+    key = f"{event}:{context.get('reason', '')}"
+    if key in _RUST_WARN_MEMO:
+        return
+    _RUST_WARN_MEMO.add(key)
+    # suppress(Exception): this fires INSIDE compute_hash/to_json_line/
+    # verify_chain — a raising process-logging processor must never fail an
+    # append/verify for a LOGGING reason (the #1630 "logging can't touch
+    # audit records" guarantee, extended to the seam by the slice-9 review,
+    # audit MINOR-2). The record bytes never depended on this call.
+    with contextlib.suppress(Exception):
+        from brutex.orchestrator import audit_seam_log
+
+        audit_seam_log.warn(event, **context)
+
+
+def _rust_flag_enabled() -> bool:
+    """Resolve the default-OFF ``BRUTEX_RUST_AUDIT_CHAIN`` flag (fail-safe OFF).
+
+    A junk (unrecognised, non-empty) value warns once and stays OFF — an
+    operator's mistyped intent is never silently ignored.
+    """
+    raw = os.environ.get(RUST_AUDIT_CHAIN_ENV, "")
+    value = raw.strip().lower()
+    if value in _RUST_FLAG_TRUTHY:
+        return True
+    if value and value not in _RUST_FLAG_FALSY:
+        # repr(): the raw env string is operator-controlled but free-form —
+        # a newline-bearing value must not forge log lines (slice-9 review,
+        # edge NIT-3; the repo's repr() log-injection convention).
+        _warn_rust_once("audit.rust_flag_unrecognised", value=repr(raw))
+    return False
+
+
+def _import_fno_math() -> Any:
+    """Import indirection for the kernel wheel (monkeypatched by tests)."""
+    import fno_math
+
+    return fno_math
+
+
+def _resolve_rust_kernel() -> _RustAuditKernel | None:
+    """Resolve the Rust kernel once per process — ``None`` = the Python arm.
+
+    A wheel that is absent, or too old to carry the slice-9 symbols, warns
+    ONCE (``audit.rust_kernel_unavailable``) and permanently falls back —
+    never a crash (the #1531 wheel-state law).
+    """
+    if not _rust_flag_enabled():
+        return None
+    try:
+        fno_math = _import_fno_math()
+    except ImportError:
+        _warn_rust_once("audit.rust_kernel_unavailable", reason="wheel_missing")
+        return None
+    hash_fn = getattr(fno_math, "audit_entry_hash", None)
+    line_fn = getattr(fno_math, "audit_entry_line", None)
+    envelope_error = getattr(fno_math, "AuditEnvelopeError", None)
+    if (
+        not callable(hash_fn)
+        or not callable(line_fn)
+        or not isinstance(envelope_error, type)
+        or not issubclass(envelope_error, BaseException)
+    ):
+        _warn_rust_once("audit.rust_kernel_unavailable", reason="wheel_stale")
+        return None
+    return _RustAuditKernel(
+        hash_fn=cast("Callable[..., str]", hash_fn),
+        line_fn=cast("Callable[..., str]", line_fn),
+        envelope_error=envelope_error,
+    )
+
+
+def _rust_audit_kernel() -> _RustAuditKernel | None:
+    """The memoized kernel handle; ``None`` while OFF/unavailable/latched."""
+    if _RUST_DISABLED_REASON[0] is not None:
+        return None
+    if not _RUST_KERNEL_RESOLVED[0]:
+        _RUST_KERNEL_VALUE[0] = _resolve_rust_kernel()
+        _RUST_KERNEL_RESOLVED[0] = True
+    return _RUST_KERNEL_VALUE[0]
+
+
+def _disable_rust_kernel(reason: str, **context: object) -> None:
+    """Latch the kernel OFF for the process (the burn-in autorevert).
+
+    The first call logs ``audit.kernel_autoreverted`` at ERROR — a genuine
+    kernel-wrongness signal, never throttled; repeats are no-ops.
+    """
+    if _RUST_DISABLED_REASON[0] is None:
+        _RUST_DISABLED_REASON[0] = reason
+        # suppress(Exception): the latch above is ALREADY set — a raising
+        # process-logging processor loses the ERROR line but can never fail
+        # the append that triggered the autorevert (audit MINOR-2; the
+        # caller ships the Python value regardless).
+        with contextlib.suppress(Exception):
+            from brutex.orchestrator import audit_seam_log
+
+            audit_seam_log.error("audit.kernel_autoreverted", reason=reason, **context)
+
+
+def _set_rust_kernel_for_tests(kernel: _RustAuditKernel | None) -> None:
+    """Inject a resolved kernel (test isolation ONLY — the fake-kernel seam)."""
+    _RUST_KERNEL_VALUE[0] = kernel
+    _RUST_KERNEL_RESOLVED[0] = True
+
+
+def _reset_rust_audit_for_tests(*, burn_in_remaining: int = AUDIT_BURN_IN_SAMPLES) -> None:
+    """Restore a fresh-process seam view (test isolation ONLY)."""
+    _RUST_KERNEL_RESOLVED[0] = False
+    _RUST_KERNEL_VALUE[0] = None
+    for surface in _RUST_BURN_IN_REMAINING:
+        _RUST_BURN_IN_REMAINING[surface] = burn_in_remaining
+    _RUST_DISABLED_REASON[0] = None
+    _RUST_WARN_MEMO.clear()
+
+
+def _rust_serialize(kernel: _RustAuditKernel, surface: str, call: Callable[[], str]) -> str | None:
+    """Run one kernel serialization; ``None`` ⇒ the caller uses the oracle.
+
+    The fallback catch is NARROW: the kernel's own envelope refusal, plus the
+    two PyO3 argument-conversion shapes an out-of-model ENTRY field produces
+    (``OverflowError`` — a seq outside i64 on a tampered line;
+    ``UnicodeEncodeError`` — a lone-surrogate free-form field, which the
+    Python oracle then re-raises exactly as today's ``.encode`` does). Any
+    other exception type propagates (a genuine code bug never hides).
+    """
+    try:
+        return call()
+    except kernel.envelope_error:
+        _warn_rust_once("audit.rust_envelope_fallback", reason=surface)
+        return None
+    except (OverflowError, UnicodeEncodeError):
+        _warn_rust_once("audit.rust_conversion_fallback", reason=surface)
+        return None
+
+
+def _settle_rust_result(surface: str, rust_value: str, python_thunk: Callable[[], str]) -> str:
+    """Serve a kernel result through the burn-in double-compute window.
+
+    Post burn-in (for *surface* — each surface owns its OWN budget, so a
+    verify-heavy process cannot exhaust the append surface's window): the
+    kernel value serves directly. During burn-in the Python oracle also
+    runs and the two strings are compared EXACTLY — a mismatch ships the
+    PYTHON value (correctness first), latches the kernel off, and logs ONE
+    ``audit.kernel_autoreverted`` ERROR. The thunk cannot raise here: a
+    payload the kernel accepted is in-model, so the oracle's only raise arm
+    (non-finite floats) is structurally unreachable.
+    """
+    if _RUST_BURN_IN_REMAINING[surface] <= 0:
+        return rust_value
+    python_value = python_thunk()
+    if rust_value != python_value:
+        _disable_rust_kernel(
+            "burn_in_mismatch", surface=surface, rust=rust_value, python=python_value
+        )
+        return python_value
+    _RUST_BURN_IN_REMAINING[surface] -= 1
+    return rust_value
+
+
+# ────────────────────────────────────────────────────────────────────────
 # AuditEntry dataclass
 # ────────────────────────────────────────────────────────────────────────
 
@@ -265,8 +523,38 @@ class AuditEntry:
         """Compute what the ``entry_hash`` should be based on all other fields.
 
         Does NOT mutate ``self`` — returns a new hex string the caller
-        can compare.
+        can compare. Under ``BRUTEX_RUST_AUDIT_CHAIN`` (default OFF) the
+        byte production dispatches to the ``fno_math`` kernel through the
+        burn-in seam (DEC-AUDIT-CHAIN-RUST-PORT-001); every refusal path and
+        the OFF arm serve from the verbatim Python body
+        (:meth:`_compute_hash_python`) — bit-identical by construction.
         """
+        kernel = _rust_audit_kernel()
+        # isinstance(ts_utc, float): an out-of-contract INT ``ts_utc`` (the
+        # field is typed float; append/from_json_line always produce float)
+        # would render "1700000000" via Python str() but "1700000000.0" via
+        # the kernel's f64 repr — route it to the oracle instead of relying
+        # on the burn-in to catch it (slice-9 review, audit NIT-1).
+        if kernel is not None and isinstance(self.ts_utc, float):
+            rust_value = _rust_serialize(
+                kernel,
+                "compute_hash",
+                lambda: kernel.hash_fn(
+                    self.seq,
+                    self.prev_hash,
+                    self.ts_utc,
+                    self.actor,
+                    self.action,
+                    self.subject,
+                    self.payload,
+                ),
+            )
+            if rust_value is not None:
+                return _settle_rust_result("compute_hash", rust_value, self._compute_hash_python)
+        return self._compute_hash_python()
+
+    def _compute_hash_python(self) -> str:
+        """The retained Python oracle body of :meth:`compute_hash` — verbatim."""
         h = hashlib.sha256()
         h.update(str(self.seq).encode("utf-8"))
         h.update(b"|")
@@ -284,7 +572,37 @@ class AuditEntry:
         return h.hexdigest()
 
     def to_json_line(self) -> str:
-        """Serialise to a single JSONL line (no trailing newline)."""
+        """Serialise to a single JSONL line (no trailing newline).
+
+        Same dispatch discipline as :meth:`compute_hash`: the Rust arm is
+        flag-gated + burn-in-checked, and a non-finite payload refuses at the
+        KERNEL envelope → the Python oracle raises today's exact
+        :class:`AuditPayloadError` BEFORE any caller write — the
+        raise-before-write law is preserved on both arms.
+        """
+        kernel = _rust_audit_kernel()
+        # Same int-``ts_utc`` oracle routing as compute_hash (audit NIT-1).
+        if kernel is not None and isinstance(self.ts_utc, float):
+            rust_value = _rust_serialize(
+                kernel,
+                "to_json_line",
+                lambda: kernel.line_fn(
+                    self.seq,
+                    self.prev_hash,
+                    self.ts_utc,
+                    self.actor,
+                    self.action,
+                    self.subject,
+                    self.payload,
+                    self.entry_hash,
+                ),
+            )
+            if rust_value is not None:
+                return _settle_rust_result("to_json_line", rust_value, self._to_json_line_python)
+        return self._to_json_line_python()
+
+    def _to_json_line_python(self) -> str:
+        """The retained Python oracle body of :meth:`to_json_line` — verbatim."""
         return _canonical_json(
             {
                 "seq": self.seq,

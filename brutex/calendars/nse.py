@@ -59,11 +59,13 @@ out-of-coverage weekday via the checked variants, and the synthetic generator
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
-from typing import Final
+from typing import Any, Final, NoReturn, cast
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -532,6 +534,378 @@ def is_holiday_data_available(d: date) -> bool:
     return HOLIDAY_COVERAGE_FIRST_YEAR <= d.year <= HOLIDAY_COVERAGE_LAST_YEAR
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Rust calendar-verdict kernel seam (DEC-CALENDAR-VERDICT-RUST-001, ADR-0019)
+# ────────────────────────────────────────────────────────────────────────
+#
+# Default-OFF flag-gated dispatch of the VERDICT LOGIC to the ``fno_math``
+# ``CalendarVerdictEngine`` — the calendar DATA does NOT move (ADR-0012 D8):
+# the engine is built ONCE per process FROM the live module constants above
+# (holiday ordinals + Muhurat / special-weekend sessions + coverage span +
+# session bounds), so a data edit here reaches the Rust arm automatically.
+# All raising (``HolidayDataUnavailableError`` / ``ValueError``) and every
+# structlog WARN stay Python, driven by returned verdict codes through the
+# SAME helpers the Python bodies use — messages/fields cannot drift. The
+# #1531/#1532 rollout pattern: 16-verdict per-process burn-in double-compute
+# against the retained ``_py_*`` oracle bodies, autorevert latch
+# (``calendar.kernel_autoreverted``), warn-once wheel-unavailable fallback.
+# The env-flag vocabulary is a DELIBERATE local copy of the sweep flags'
+# truthy/falsy sets: this package imports only stdlib + structlog (leaf
+# layering — importing ``brutex.engine`` here would invert the layering and
+# risk a package cycle), noted per §11 COMMON.
+
+#: The env flag (default OFF). Truthy = ``1/true/yes/on``; falsy =
+#: ``0/false/no/off``; unset/empty = OFF; junk = OFF with one warning.
+RUST_CALENDAR_ENV: Final[str] = "BRUTEX_RUST_CALENDAR"
+
+#: Rust-served verdicts PER SURFACE (each dispatched calendar function
+#: carries its OWN budget — see :data:`_CAL_SURFACES`) double-computed
+#: against the Python oracle bodies per process (the burn-in; the
+#: 2,557-day flag-ON golden replay is the stronger CI proof — this is the
+#: uniform runtime belt). Independent counters (slice-9 refuter round-2
+#: NIT, the audit.py MINOR-1 pattern): a hot ``is_trading_day`` loop must
+#: not exhaust the window before the same process's first
+#: ``forced_exit_seconds_for_session`` / ``daily_derive_cutoff`` call ever
+#: gets an in-process oracle compare.
+CALENDAR_BURN_IN_SAMPLES: Final[int] = 16
+
+_CAL_FLAG_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+_CAL_FLAG_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
+
+#: The engine's exchange selector codes (exchange STRING validation stays
+#: Python via :func:`_resolve_holiday_set`, run eagerly BEFORE any Rust call).
+_SEL_BY_EXCHANGE: Final[dict[str | None, int]] = {None: 0, "NSE": 1, "BSE": 2}
+
+#: The engine's checked-triage verdict codes (2 = the Python-side raise).
+_VERDICT_TRUE: Final[int] = 1
+_VERDICT_RAISE: Final[int] = 2
+
+#: The engine's session-type codes → the Python enum.
+_SESSION_TYPE_BY_CODE: Final[dict[int, SessionType]] = {
+    0: SessionType.REGULAR,
+    1: SessionType.MUHURAT,
+}
+
+#: The burn-in "the Python arm raised / would raise" comparison sentinel.
+_RAISES: Final[object] = object()
+
+#: The PyO3 ``i64`` argument bound. A ``tf_minutes`` beyond it cannot cross
+#: the FFI (PyO3 raises ``OverflowError`` at argument conversion, where the
+#: Python oracle computes a bool/int fine) — the two scalar wrappers that
+#: forward ``tf_minutes`` route such inputs straight to the Python oracle
+#: instead (slice-9 review, edge MINOR-1/NIT-2; unreachable from the engine,
+#: whose timeframes are the 1..375 vocabulary — defensive parity only).
+_RUST_TF_MAX: Final[int] = 2**63 - 1
+
+#: The PyO3 ``u32`` argument bound for :func:`is_forced_exit_bar`'s resolved
+#: ``boundary`` (seconds-since-midnight IST). A boundary outside ``[0, 2³²−1]``
+#: cannot cross the FFI (the kernel takes ``boundary_s: u32`` — PyO3 raises
+#: ``OverflowError`` at conversion where the Python oracle computes a bool
+#: fine), so the wrapper routes it to the oracle — the exact mirror of the
+#: ``_RUST_TF_MAX`` guard (slice-9 refuter round-1 R2-NIT; unreachable from
+#: the engine, whose boundaries are seconds-of-day < 86_400 — defensive
+#: parity only).
+_RUST_BOUNDARY_MAX: Final[int] = 2**32 - 1
+
+
+@dataclass(frozen=True)
+class _RustCalendarKernel:
+    """The resolved Rust surface: the verdict engine + the 4 scalar fns.
+
+    All-or-nothing resolution — a wheel missing ANY symbol falls back whole
+    (never a half-Rust calendar). Tests inject fakes via
+    :func:`_set_rust_calendar_for_tests`.
+    """
+
+    engine: Any
+    expected_bars: Callable[[int], int]
+    forced_exit_bar: Callable[[int, int, int], int]
+    forced_exit_seconds: Callable[[int], int]
+    last_bar_complete: Callable[[int, int], bool]
+
+
+#: Kernel memo + per-surface burn-in budgets + autorevert latch +
+#: warn-once memo — single-cell mutable module state, the same documented
+#: exception to the no-global-mutable-state rule as
+#: ``brutex.engine.rust_metrics``.
+_CAL_KERNEL_RESOLVED: Final[list[bool]] = [False]
+_CAL_KERNEL_VALUE: Final[list[_RustCalendarKernel | None]] = [None]
+
+#: Every dispatched surface name — the burn-in dict's key vocabulary. A
+#: dispatch site MUST use one of these (an unregistered surface fails
+#: LOUDLY with a ``KeyError`` at the first burn-in probe, never a silent
+#: shared budget — the audit.py per-surface-dict pattern).
+_CAL_SURFACES: Final[tuple[str, ...]] = (
+    "is_holiday",
+    "is_holiday_checked",
+    "is_weekend",
+    "is_trading_day",
+    "is_trading_day_checked",
+    "has_muhurat_session",
+    "get_session",
+    "get_session_checked",
+    "previous_trading_session",
+    "daily_derive_cutoff",
+    "session_last_bar_complete",
+    "trading_days_between",
+    "trading_days_between_checked",
+    "expected_bars_per_day_for_tf",
+    "is_forced_exit_bar",
+    "forced_exit_seconds_for_session",
+    "is_special_weekend_session",
+)
+_CAL_BURN_IN_REMAINING: Final[dict[str, int]] = dict.fromkeys(
+    _CAL_SURFACES, CALENDAR_BURN_IN_SAMPLES
+)
+_CAL_DISABLED_REASON: Final[list[str | None]] = [None]
+_CAL_WARN_MEMO: Final[set[str]] = set()
+
+
+def _cal_warn_once(event: str, **context: object) -> None:
+    """Log *event* at WARNING once per process (per event + reason key)."""
+    key = f"{event}:{context.get('reason', '')}"
+    if key in _CAL_WARN_MEMO:
+        return
+    _CAL_WARN_MEMO.add(key)
+    _LOG.warning(event, **context)
+
+
+def _cal_flag_enabled() -> bool:
+    """Resolve the default-OFF ``BRUTEX_RUST_CALENDAR`` flag (fail-safe OFF)."""
+    raw = os.environ.get(RUST_CALENDAR_ENV, "")
+    value = raw.strip().lower()
+    if value in _CAL_FLAG_TRUTHY:
+        return True
+    if value and value not in _CAL_FLAG_FALSY:
+        # repr(): a newline-bearing env value must not forge log lines
+        # (slice-9 review, edge NIT-3 — the repr() log-injection convention).
+        _cal_warn_once("calendar.rust_flag_unrecognised", value=repr(raw))
+    return False
+
+
+def _import_fno_math() -> Any:
+    """Import indirection for the kernel wheel (monkeypatched by tests)."""
+    import fno_math
+
+    return fno_math
+
+
+def _seconds_of_day(t: time) -> int:
+    """``time`` → whole seconds-of-day (session times carry no microseconds)."""
+    return t.hour * _SECONDS_PER_HOUR + t.minute * _SECONDS_PER_MINUTE + t.second
+
+
+def _time_of_seconds(seconds: int) -> time:
+    """Whole seconds-of-day → ``time`` (the engine-session decode)."""
+    return time(seconds // _SECONDS_PER_HOUR, (seconds // _SECONDS_PER_MINUTE) % 60, seconds % 60)
+
+
+def _build_rust_calendar() -> _RustCalendarKernel | None:
+    """Build the engine from the LIVE module constants — once per process.
+
+    ``None`` when the flag is off, the wheel is absent, or the wheel predates
+    the slice-9 symbols (one ``calendar.rust_kernel_unavailable`` WARNING —
+    never a crash; the #1531 wheel-state law). Construction cost: ~110
+    holiday ordinals + 6 + 3 session tuples — trivial.
+    """
+    if not _cal_flag_enabled():
+        return None
+    try:
+        fno_math = _import_fno_math()
+    except ImportError:
+        _cal_warn_once("calendar.rust_kernel_unavailable", reason="wheel_missing")
+        return None
+    engine_cls = getattr(fno_math, "CalendarVerdictEngine", None)
+    expected_bars = getattr(fno_math, "expected_bars_per_day_for_tf", None)
+    forced_exit_bar = getattr(fno_math, "is_forced_exit_bar_s", None)
+    forced_exit_seconds = getattr(fno_math, "forced_exit_seconds_s", None)
+    last_bar = getattr(fno_math, "session_last_bar_complete_s", None)
+    if (
+        engine_cls is None
+        or not callable(expected_bars)
+        or not callable(forced_exit_bar)
+        or not callable(forced_exit_seconds)
+        or not callable(last_bar)
+    ):
+        _cal_warn_once("calendar.rust_kernel_unavailable", reason="wheel_stale")
+        return None
+    engine = engine_cls(
+        sorted(d.toordinal() for d in _COMMON_HOLIDAYS),
+        sorted(d.toordinal() for d in NSE_ONLY_HOLIDAYS),
+        sorted(d.toordinal() for d in BSE_ONLY_HOLIDAYS),
+        sorted(
+            (d.toordinal(), _seconds_of_day(o), _seconds_of_day(c))
+            for d, (o, c) in MUHURAT_SESSIONS.items()
+        ),
+        sorted(
+            (d.toordinal(), _seconds_of_day(o), _seconds_of_day(c))
+            for d, (o, c) in SPECIAL_WEEKEND_TRADING_SESSIONS.items()
+        ),
+        HOLIDAY_COVERAGE_FIRST_YEAR,
+        HOLIDAY_COVERAGE_LAST_YEAR,
+        _seconds_of_day(SESSION_OPEN_IST),
+        _seconds_of_day(SESSION_CLOSE_IST),
+    )
+    return _RustCalendarKernel(
+        engine=engine,
+        expected_bars=cast("Callable[[int], int]", expected_bars),
+        forced_exit_bar=cast("Callable[[int, int, int], int]", forced_exit_bar),
+        forced_exit_seconds=cast("Callable[[int], int]", forced_exit_seconds),
+        last_bar_complete=cast("Callable[[int, int], bool]", last_bar),
+    )
+
+
+def _rust_calendar() -> _RustCalendarKernel | None:
+    """The memoized kernel handle; ``None`` while OFF/unavailable/latched."""
+    if _CAL_DISABLED_REASON[0] is not None:
+        return None
+    if not _CAL_KERNEL_RESOLVED[0]:
+        _CAL_KERNEL_VALUE[0] = _build_rust_calendar()
+        _CAL_KERNEL_RESOLVED[0] = True
+    return _CAL_KERNEL_VALUE[0]
+
+
+def _disable_rust_calendar(surface: str, *, rust: str, python: str) -> None:
+    """Latch the kernel OFF for the process (the burn-in autorevert).
+
+    First call logs ``calendar.kernel_autoreverted`` at ERROR; repeats no-op.
+    """
+    if _CAL_DISABLED_REASON[0] is None:
+        _CAL_DISABLED_REASON[0] = surface
+        _LOG.error("calendar.kernel_autoreverted", surface=surface, rust=rust, python=python)
+
+
+def _set_rust_calendar_for_tests(kernel: _RustCalendarKernel | None) -> None:
+    """Inject a resolved kernel (test isolation ONLY — the fake-kernel seam)."""
+    _CAL_KERNEL_VALUE[0] = kernel
+    _CAL_KERNEL_RESOLVED[0] = True
+
+
+def _reset_rust_calendar_for_tests(*, burn_in_remaining: int = CALENDAR_BURN_IN_SAMPLES) -> None:
+    """Restore a fresh-process seam view (test isolation ONLY)."""
+    _CAL_KERNEL_RESOLVED[0] = False
+    _CAL_KERNEL_VALUE[0] = None
+    for surface in _CAL_BURN_IN_REMAINING:
+        _CAL_BURN_IN_REMAINING[surface] = burn_in_remaining
+    _CAL_DISABLED_REASON[0] = None
+    _CAL_WARN_MEMO.clear()
+
+
+def _warn_unavailable(d: date) -> None:
+    """The ONE ``calendar.holiday_data_unavailable`` WARN site — both arms."""
+    _LOG.warning(
+        "calendar.holiday_data_unavailable",
+        requested_date=d.isoformat(),
+        covered_first_year=HOLIDAY_COVERAGE_FIRST_YEAR,
+        covered_last_year=HOLIDAY_COVERAGE_LAST_YEAR,
+    )
+
+
+def _raise_unavailable(d: date) -> NoReturn:
+    """The ONE out-of-coverage WARN + raise site — shared by BOTH arms.
+
+    Verbatim the historical :func:`is_holiday_checked` refusal (the WARN
+    event name + fields and the exception message are frozen by the calendar
+    verdict golden), so the Rust dispatch's verdict-code-2 arm and the Python
+    oracle can never emit divergent observability.
+    """
+    _warn_unavailable(d)
+    raise HolidayDataUnavailableError(
+        f"no published NSE/BSE holiday data for {d.isoformat()}: covered span is "
+        f"{HOLIDAY_COVERAGE_FIRST_YEAR}-{HOLIDAY_COVERAGE_LAST_YEAR} (inclusive)"
+    )
+
+
+def _warn_prev_session_exhausted(requested: date, probe: date) -> None:
+    """The ONE coverage-exhausted abstain WARN — shared by BOTH arms."""
+    _LOG.warning(
+        "calendar.previous_session_coverage_exhausted",
+        requested_date=requested.isoformat(),
+        probe_date=probe.isoformat(),
+        covered_first_year=HOLIDAY_COVERAGE_FIRST_YEAR,
+        covered_last_year=HOLIDAY_COVERAGE_LAST_YEAR,
+    )
+
+
+def _session_from_code(d: date, type_code: int, open_s: int, close_s: int) -> TradingSession:
+    """Decode an engine session tuple into the Python :class:`TradingSession`."""
+    return TradingSession(
+        date=d,
+        session_type=_SESSION_TYPE_BY_CODE[type_code],
+        open_time_ist=_time_of_seconds(open_s),
+        close_time_ist=_time_of_seconds(close_s),
+    )
+
+
+def _cal_burnin_pending(surface: str) -> bool:
+    """``True`` while this process still owes *surface* burn-in compares.
+
+    Per-surface budgets (the audit.py dict pattern): a hot surface can
+    never exhaust a rarer surface's window. An unregistered surface name
+    raises ``KeyError`` — fail-loud, never a silent shared budget.
+    """
+    return _CAL_BURN_IN_REMAINING[surface] > 0
+
+
+def _cal_consume_burnin(surface: str) -> None:
+    """Consume one *surface* burn-in sample after a PASSED compare (clamped)."""
+    if _CAL_BURN_IN_REMAINING[surface] > 0:
+        _CAL_BURN_IN_REMAINING[surface] -= 1
+
+
+def _serve_value[T](surface: str, rust_value: T, python_thunk: Callable[[], T]) -> T:
+    """Serve a NON-raising Rust verdict through the burn-in window.
+
+    Post burn-in (for *surface* — each surface owns its OWN budget, so a
+    hot ``is_trading_day`` loop cannot exhaust a rarer surface's window)
+    the (already-decoded) Rust value serves directly. During burn-in the
+    Python oracle also runs and is compared by ``==``; a mismatch ships
+    the PYTHON value, latches the kernel and logs ONE
+    ``calendar.kernel_autoreverted`` ERROR; a match serves the Python object
+    (identical by the compare) and consumes one sample.
+    """
+    if not _cal_burnin_pending(surface):
+        return rust_value
+    python_value = python_thunk()
+    if rust_value != python_value:
+        _disable_rust_calendar(surface, rust=repr(rust_value), python=repr(python_value))
+        return python_value
+    _cal_consume_burnin(surface)
+    return python_value
+
+
+def _serve_checked[T](
+    surface: str, rust_outcome: T | object, python_thunk: Callable[[], T], raise_date: date
+) -> T:
+    """Serve a RAISING (checked) Rust verdict through the burn-in window.
+
+    *rust_outcome* is the decoded value or the :data:`_RAISES` sentinel.
+    During burn-in the Python oracle runs FIRST and its outcome — value or
+    :class:`HolidayDataUnavailableError` — is replayed EXACTLY (so the WARN
+    is emitted once, by the oracle, with today's fields); a code mismatch
+    latches the kernel. Post burn-in a :data:`_RAISES` verdict routes
+    through the shared :func:`_raise_unavailable` (same WARN + message).
+    """
+    if _cal_burnin_pending(surface):
+        try:
+            python_value = python_thunk()
+        except HolidayDataUnavailableError:
+            if rust_outcome is _RAISES:
+                _cal_consume_burnin(surface)
+            else:
+                _disable_rust_calendar(surface, rust=repr(rust_outcome), python="raises")
+            raise
+        if rust_outcome is _RAISES or rust_outcome != python_value:
+            _disable_rust_calendar(surface, rust=repr(rust_outcome), python=repr(python_value))
+        else:
+            _cal_consume_burnin(surface)
+        return python_value
+    if rust_outcome is _RAISES:
+        _raise_unavailable(raise_date)
+    # The sentinel arm returned above; every remaining outcome is a _T.
+    return rust_outcome  # type: ignore[return-value]
+
+
 def holidays_for_exchange(exchange: str) -> frozenset[date]:
     """Return the holiday set for one exchange (DEC-CALENDAR-EXCHANGE-SPLIT-001).
 
@@ -601,7 +975,12 @@ def is_holiday(d: date, *, exchange: str | None = None) -> bool:
     ValueError
         If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"``.
     """
-    return d in _resolve_holiday_set(exchange)
+    holidays = _resolve_holiday_set(exchange)  # eager validation, both arms
+    kernel = _rust_calendar()
+    if kernel is not None:
+        rust_value = bool(kernel.engine.is_holiday(d.toordinal(), _SEL_BY_EXCHANGE[exchange]))
+        return _serve_value("is_holiday", rust_value, lambda: d in holidays)
+    return d in holidays
 
 
 def is_holiday_checked(d: date, *, exchange: str | None = None) -> bool:
@@ -631,18 +1010,23 @@ def is_holiday_checked(d: date, *, exchange: str | None = None) -> bool:
         If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (raised
         before the coverage check — an invalid exchange never resolves).
     """
+    _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
+    kernel = _rust_calendar()
+    if kernel is not None:
+        code = int(kernel.engine.is_holiday_checked(d.toordinal(), _SEL_BY_EXCHANGE[exchange]))
+        outcome: bool | object = _RAISES if code == _VERDICT_RAISE else code == _VERDICT_TRUE
+        return _serve_checked(
+            "is_holiday_checked", outcome, lambda: _py_is_holiday_checked(d, exchange), d
+        )
+    return _py_is_holiday_checked(d, exchange)
+
+
+def _py_is_holiday_checked(d: date, exchange: str | None) -> bool:
+    """The retained Python oracle body of :func:`is_holiday_checked` — verbatim
+    (the WARN + raise moved into the shared :func:`_raise_unavailable`)."""
     holidays = _resolve_holiday_set(exchange)
     if not is_holiday_data_available(d):
-        _LOG.warning(
-            "calendar.holiday_data_unavailable",
-            requested_date=d.isoformat(),
-            covered_first_year=HOLIDAY_COVERAGE_FIRST_YEAR,
-            covered_last_year=HOLIDAY_COVERAGE_LAST_YEAR,
-        )
-        raise HolidayDataUnavailableError(
-            f"no published NSE/BSE holiday data for {d.isoformat()}: covered span is "
-            f"{HOLIDAY_COVERAGE_FIRST_YEAR}-{HOLIDAY_COVERAGE_LAST_YEAR} (inclusive)"
-        )
+        _raise_unavailable(d)
     return d in holidays
 
 
@@ -652,6 +1036,10 @@ _SATURDAY_WEEKDAY: Final[int] = 5
 
 def is_weekend(d: date) -> bool:
     """Return True if ``d`` is Saturday or Sunday."""
+    kernel = _rust_calendar()
+    if kernel is not None:
+        rust_value = bool(kernel.engine.is_weekend(d.toordinal()))
+        return _serve_value("is_weekend", rust_value, lambda: d.weekday() >= _SATURDAY_WEEKDAY)
     return d.weekday() >= _SATURDAY_WEEKDAY
 
 
@@ -679,9 +1067,22 @@ def is_trading_day(d: date, *, exchange: str | None = None) -> bool:
         eagerly, before any date-path short-circuit).
     """
     _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
-    if is_special_weekend_session(d):
+    kernel = _rust_calendar()
+    if kernel is not None:
+        rust_value = bool(kernel.engine.is_trading_day(d.toordinal(), _SEL_BY_EXCHANGE[exchange]))
+        return _serve_value("is_trading_day", rust_value, lambda: _py_is_trading_day(d, exchange))
+    return _py_is_trading_day(d, exchange)
+
+
+def _py_is_trading_day(d: date, exchange: str | None) -> bool:
+    """The retained Python oracle body of :func:`is_trading_day` — verbatim.
+
+    Deliberately probes the DATA (not the dispatched public functions), so
+    the oracle chain stays pure-Python end to end under the burn-in.
+    """
+    if d in SPECIAL_WEEKEND_TRADING_SESSIONS:
         return True
-    return not is_weekend(d) and not is_holiday(d, exchange=exchange)
+    return d.weekday() < _SATURDAY_WEEKDAY and d not in _resolve_holiday_set(exchange)
 
 
 def is_trading_day_checked(d: date, *, exchange: str | None = None) -> bool:
@@ -720,19 +1121,35 @@ def is_trading_day_checked(d: date, *, exchange: str | None = None) -> bool:
         eagerly, before any date-path short-circuit).
     """
     _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
-    if is_special_weekend_session(d):
+    kernel = _rust_calendar()
+    if kernel is not None:
+        code = int(kernel.engine.is_trading_day_checked(d.toordinal(), _SEL_BY_EXCHANGE[exchange]))
+        outcome: bool | object = _RAISES if code == _VERDICT_RAISE else code == _VERDICT_TRUE
+        return _serve_checked(
+            "is_trading_day_checked", outcome, lambda: _py_is_trading_day_checked(d, exchange), d
+        )
+    return _py_is_trading_day_checked(d, exchange)
+
+
+def _py_is_trading_day_checked(d: date, exchange: str | None) -> bool:
+    """The retained Python oracle body of :func:`is_trading_day_checked`."""
+    if d in SPECIAL_WEEKEND_TRADING_SESSIONS:
         return True
-    if is_weekend(d):
+    if d.weekday() >= _SATURDAY_WEEKDAY:
         # A weekend is non-trading independent of the holiday list — no
         # missing data is consulted, so this answer is honest even out of span.
         return False
-    # A weekday: the verdict turns on the holiday list. ``is_holiday_checked``
+    # A weekday: the verdict turns on the holiday list. The checked probe
     # raises for an out-of-coverage date rather than guess "not a holiday".
-    return not is_holiday_checked(d, exchange=exchange)
+    return not _py_is_holiday_checked(d, exchange)
 
 
 def has_muhurat_session(d: date) -> bool:
     """Return True if ``d`` has a Diwali muhurat session (~1 hour, excluded from Sharpe denominator)."""
+    kernel = _rust_calendar()
+    if kernel is not None:
+        rust_value = bool(kernel.engine.has_muhurat(d.toordinal()))
+        return _serve_value("has_muhurat_session", rust_value, lambda: d in MUHURAT_SESSIONS)
     return d in MUHURAT_SESSIONS
 
 
@@ -820,7 +1237,18 @@ def get_session(d: date, *, exchange: str | None = None) -> TradingSession | Non
         eagerly, before any date-path short-circuit).
     """
     _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
-    if has_muhurat_session(d):
+    kernel = _rust_calendar()
+    if kernel is not None:
+        raw = kernel.engine.get_session(d.toordinal(), _SEL_BY_EXCHANGE[exchange])
+        rust_session = None if raw is None else _session_from_code(d, *raw)
+        return _serve_value("get_session", rust_session, lambda: _py_get_session(d, exchange))
+    return _py_get_session(d, exchange)
+
+
+def _py_get_session(d: date, exchange: str | None) -> TradingSession | None:
+    """The retained Python oracle body of :func:`get_session` — verbatim
+    (data probes inlined so the oracle chain never re-dispatches)."""
+    if d in MUHURAT_SESSIONS:
         open_t, close_t = MUHURAT_SESSIONS[d]
         return TradingSession(
             date=d,
@@ -828,7 +1256,7 @@ def get_session(d: date, *, exchange: str | None = None) -> TradingSession | Non
             open_time_ist=open_t,
             close_time_ist=close_t,
         )
-    if is_special_weekend_session(d):
+    if d in SPECIAL_WEEKEND_TRADING_SESSIONS:
         open_t, close_t = SPECIAL_WEEKEND_TRADING_SESSIONS[d]
         return TradingSession(
             date=d,
@@ -844,7 +1272,7 @@ def get_session(d: date, *, exchange: str | None = None) -> TradingSession | Non
             open_time_ist=open_t,
             close_time_ist=close_t,
         )
-    if not is_trading_day(d, exchange=exchange):
+    if not _py_is_trading_day(d, exchange):
         return None
     return TradingSession(
         date=d,
@@ -900,7 +1328,27 @@ def get_session_checked(d: date, *, exchange: str | None = None) -> TradingSessi
         eagerly, before any date-path short-circuit).
     """
     _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
-    if has_muhurat_session(d):
+    kernel = _rust_calendar()
+    if kernel is not None:
+        verdict, type_code, open_s, close_s = kernel.engine.get_session_checked(
+            d.toordinal(), _SEL_BY_EXCHANGE[exchange]
+        )
+        outcome: TradingSession | None | object
+        if verdict == _VERDICT_RAISE:
+            outcome = _RAISES
+        elif verdict == _VERDICT_TRUE:
+            outcome = _session_from_code(d, type_code, open_s, close_s)
+        else:
+            outcome = None
+        return _serve_checked(
+            "get_session_checked", outcome, lambda: _py_get_session_checked(d, exchange), d
+        )
+    return _py_get_session_checked(d, exchange)
+
+
+def _py_get_session_checked(d: date, exchange: str | None) -> TradingSession | None:
+    """The retained Python oracle body of :func:`get_session_checked`."""
+    if d in MUHURAT_SESSIONS:
         open_t, close_t = MUHURAT_SESSIONS[d]
         return TradingSession(
             date=d,
@@ -908,7 +1356,7 @@ def get_session_checked(d: date, *, exchange: str | None = None) -> TradingSessi
             open_time_ist=open_t,
             close_time_ist=close_t,
         )
-    if is_special_weekend_session(d):
+    if d in SPECIAL_WEEKEND_TRADING_SESSIONS:
         open_t, close_t = SPECIAL_WEEKEND_TRADING_SESSIONS[d]
         return TradingSession(
             date=d,
@@ -924,7 +1372,7 @@ def get_session_checked(d: date, *, exchange: str | None = None) -> TradingSessi
             open_time_ist=open_t,
             close_time_ist=close_t,
         )
-    if not is_trading_day_checked(d, exchange=exchange):
+    if not _py_is_trading_day_checked(d, exchange):
         return None
     return TradingSession(
         date=d,
@@ -982,8 +1430,23 @@ def daily_derive_cutoff(now_ist: datetime) -> date:
     nothing) — so the boot-safe unguarded variant is deliberate. Pure O(1);
     *now_ist* must be the current IST wall-clock instant.
     """
+    kernel = _rust_calendar()
+    if kernel is not None:
+        today = now_ist.date()
+        now_us = _seconds_of_day(now_ist.time()) * 1_000_000 + now_ist.microsecond
+        cutoff = date.fromordinal(
+            int(kernel.engine.daily_derive_cutoff(today.toordinal(), now_us, 0))
+        )
+        return _serve_value("daily_derive_cutoff", cutoff, lambda: _py_daily_derive_cutoff(now_ist))
+    return _py_daily_derive_cutoff(now_ist)
+
+
+def _py_daily_derive_cutoff(now_ist: datetime) -> date:
+    """The retained Python oracle body of :func:`daily_derive_cutoff` —
+    verbatim (probing the pure ``_py_get_session`` so the oracle chain never
+    re-dispatches)."""
     today = now_ist.date()
-    session = get_session(today)
+    session = _py_get_session(today, None)
     if session is None or now_ist.time() > session.close_time_ist:
         return today + timedelta(days=1)
     return today
@@ -1020,6 +1483,28 @@ def session_last_bar_complete(session: TradingSession, last_bar_ist: datetime) -
     hardcoded 15:30. Grounding proves the CLOSE EDGE only, never session
     density (interior gaps stay the pull-side detectors' job). Pure O(1).
     """
+    kernel = _rust_calendar()
+    if kernel is not None and last_bar_ist.date() == session.date:
+        # The seconds-of-day port is valid ONLY for same-date pairs (and is
+        # microsecond-exact there for whole-second closes: last+1min >= close
+        # ⟺ last_s+60 >= close_s — sub-second parts cannot flip a >= against
+        # a whole-second boundary). Cross-date inputs stay on the Python
+        # datetime arm below.
+        rust_value = bool(
+            kernel.last_bar_complete(
+                _seconds_of_day(session.close_time_ist), _seconds_of_day(last_bar_ist.time())
+            )
+        )
+        return _serve_value(
+            "session_last_bar_complete",
+            rust_value,
+            lambda: _py_session_last_bar_complete(session, last_bar_ist),
+        )
+    return _py_session_last_bar_complete(session, last_bar_ist)
+
+
+def _py_session_last_bar_complete(session: TradingSession, last_bar_ist: datetime) -> bool:
+    """The retained Python oracle body of :func:`session_last_bar_complete`."""
     close_dt = datetime.combine(session.date, session.close_time_ist, tzinfo=last_bar_ist.tzinfo)
     return last_bar_ist + timedelta(minutes=1) >= close_dt
 
@@ -1095,10 +1580,26 @@ def trading_days_between(start: date, end: date, *, exchange: str | None = None)
         eagerly, even for an empty range).
     """
     _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
+    kernel = _rust_calendar()
+    if kernel is not None:
+        ordinals = kernel.engine.trading_days_between(
+            start.toordinal(), end.toordinal(), _SEL_BY_EXCHANGE[exchange]
+        )
+        rust_days = [date.fromordinal(int(o)) for o in ordinals]
+        return _serve_value(
+            "trading_days_between",
+            rust_days,
+            lambda: _py_trading_days_between(start, end, exchange),
+        )
+    return _py_trading_days_between(start, end, exchange)
+
+
+def _py_trading_days_between(start: date, end: date, exchange: str | None) -> list[date]:
+    """The retained Python oracle body of :func:`trading_days_between`."""
     days: list[date] = []
     d = start
     while d <= end:
-        if is_trading_day(d, exchange=exchange):
+        if _py_is_trading_day(d, exchange):
             days.append(d)
         d += timedelta(days=1)
     return days
@@ -1138,10 +1639,33 @@ def trading_days_between_checked(
         eagerly, even for an empty range).
     """
     _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
+    kernel = _rust_calendar()
+    if kernel is not None:
+        verdict, ordinals, offending = kernel.engine.trading_days_between_checked(
+            start.toordinal(), end.toordinal(), _SEL_BY_EXCHANGE[exchange]
+        )
+        outcome: list[date] | object
+        raise_date = end
+        if verdict == _VERDICT_RAISE:
+            outcome = _RAISES
+            raise_date = date.fromordinal(int(offending))
+        else:
+            outcome = [date.fromordinal(int(o)) for o in ordinals]
+        return _serve_checked(
+            "trading_days_between_checked",
+            outcome,
+            lambda: _py_trading_days_between_checked(start, end, exchange),
+            raise_date,
+        )
+    return _py_trading_days_between_checked(start, end, exchange)
+
+
+def _py_trading_days_between_checked(start: date, end: date, exchange: str | None) -> list[date]:
+    """The retained Python oracle body of :func:`trading_days_between_checked`."""
     days: list[date] = []
     d = start
     while d <= end:
-        if is_trading_day_checked(d, exchange=exchange):
+        if _py_is_trading_day_checked(d, exchange):
             days.append(d)
         d += timedelta(days=1)
     return days
@@ -1209,19 +1733,48 @@ def previous_trading_session(
         eagerly, before any date-path work).
     """
     _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
+    kernel = _rust_calendar()
+    if kernel is not None:
+        verdict, ordinal = kernel.engine.previous_trading_session(
+            d.toordinal(), _SEL_BY_EXCHANGE[exchange], sorted(o.toordinal() for o in observed)
+        )
+        rust_value = date.fromordinal(int(ordinal)) if verdict == _VERDICT_TRUE else None
+        if _cal_burnin_pending("previous_trading_session"):
+            # The Python oracle emits the abstain WARN itself (once, with
+            # today's exact fields), so its outcome is served directly.
+            python_value = _py_previous_trading_session(d, exchange, observed)
+            if rust_value != python_value:
+                _disable_rust_calendar(
+                    "previous_trading_session", rust=repr(rust_value), python=repr(python_value)
+                )
+            else:
+                _cal_consume_burnin("previous_trading_session")
+            return python_value
+        if verdict != _VERDICT_TRUE:
+            # Observability identity with the Python walk: the raising probe
+            # emits ITS holiday_data_unavailable WARN (inside the checked
+            # probe) before the walk's own exhausted WARN — replay both.
+            probe = date.fromordinal(int(ordinal))
+            _warn_unavailable(probe)
+            _warn_prev_session_exhausted(d, probe)
+            return None
+        return rust_value
+    return _py_previous_trading_session(d, exchange, observed)
+
+
+def _py_previous_trading_session(
+    d: date, exchange: str | None, observed: AbstractSet[date]
+) -> date | None:
+    """The retained Python oracle body of :func:`previous_trading_session` —
+    verbatim (the abstain WARN moved into the shared
+    :func:`_warn_prev_session_exhausted`)."""
     probe = d - timedelta(days=1)
     while True:
         try:
-            if is_trading_day_checked(probe, exchange=exchange) and probe not in observed:
+            if _py_is_trading_day_checked(probe, exchange) and probe not in observed:
                 return probe
         except HolidayDataUnavailableError:
-            _LOG.warning(
-                "calendar.previous_session_coverage_exhausted",
-                requested_date=d.isoformat(),
-                probe_date=probe.isoformat(),
-                covered_first_year=HOLIDAY_COVERAGE_FIRST_YEAR,
-                covered_last_year=HOLIDAY_COVERAGE_LAST_YEAR,
-            )
+            _warn_prev_session_exhausted(d, probe)
             return None
         probe -= timedelta(days=1)
 
@@ -1262,6 +1815,22 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     """
     if tf_minutes < 1:
         raise ValueError(f"expected_bars_per_day_for_tf.tf_minutes must be >= 1, got {tf_minutes}")
+    kernel = _rust_calendar()
+    # tf > i64: PyO3 would raise OverflowError at conversion where the
+    # oracle returns 1 — route to the oracle (edge NIT-2; engine-unreachable).
+    if kernel is not None and tf_minutes <= _RUST_TF_MAX:
+        rust_value = int(kernel.expected_bars(tf_minutes))
+        return _serve_value(
+            "expected_bars_per_day_for_tf",
+            rust_value,
+            lambda: _py_expected_bars_per_day(tf_minutes),
+        )
+    return _py_expected_bars_per_day(tf_minutes)
+
+
+def _py_expected_bars_per_day(tf_minutes: int) -> int:
+    """The retained Python oracle body of :func:`expected_bars_per_day_for_tf`
+    (the ``tf < 1`` raise stays in the public wrapper, shared by both arms)."""
     if tf_minutes >= SESSION_DURATION_MINUTES:
         return 1
     return -(-SESSION_DURATION_MINUTES // tf_minutes)
@@ -1352,6 +1921,28 @@ def is_forced_exit_bar(t: time, tf_minutes: int, forced_exit_seconds: int | None
     if tf_minutes < 1:
         raise ValueError(f"is_forced_exit_bar.tf_minutes must be >= 1, got {tf_minutes}")
     boundary = _FORCED_EXIT_SECONDS if forced_exit_seconds is None else forced_exit_seconds
+    kernel = _rust_calendar()
+    # tf ≤ i64 crosses the FFI (the kernel's SATURATING close arithmetic
+    # keeps parity for the whole i64 domain — a saturated close is still
+    # strictly > every boundary, matching Python's bigint result); tf > i64
+    # routes to the oracle before PyO3 can raise OverflowError (edge
+    # MINOR-1/NIT-2; engine-unreachable — tf is the 1..375 vocabulary).
+    # The boundary guard is the u32 mirror of the same law (refuter-round-1
+    # R2-NIT): a boundary outside [0, u32::MAX] would OverflowError at the
+    # PyO3 seam where the oracle returns a bool — route it to the oracle too.
+    if kernel is not None and tf_minutes <= _RUST_TF_MAX and 0 <= boundary <= _RUST_BOUNDARY_MAX:
+        rust_value = int(kernel.forced_exit_bar(_seconds_of_day(t), tf_minutes, boundary)) == 1
+        return _serve_value(
+            "is_forced_exit_bar",
+            rust_value,
+            lambda: _py_is_forced_exit_bar(t, tf_minutes, boundary),
+        )
+    return _py_is_forced_exit_bar(t, tf_minutes, boundary)
+
+
+def _py_is_forced_exit_bar(t: time, tf_minutes: int, boundary: int) -> bool:
+    """The retained Python oracle body of :func:`is_forced_exit_bar` (the
+    ``tf < 1`` raise + boundary resolution stay in the public wrapper)."""
     open_seconds = t.hour * _SECONDS_PER_HOUR + t.minute * _SECONDS_PER_MINUTE + t.second
     close_seconds = open_seconds + tf_minutes * _SECONDS_PER_MINUTE
     return close_seconds > boundary
@@ -1388,6 +1979,19 @@ def forced_exit_seconds_for_session(session: TradingSession) -> int:
     (15:20 IST); for a short / half-day / Muhurat session it scales with the
     actual close − 10min.
     """
+    kernel = _rust_calendar()
+    if kernel is not None:
+        rust_value = int(kernel.forced_exit_seconds(_seconds_of_day(session.close_time_ist)))
+        return _serve_value(
+            "forced_exit_seconds_for_session",
+            rust_value,
+            lambda: _py_forced_exit_seconds_for_session(session),
+        )
+    return _py_forced_exit_seconds_for_session(session)
+
+
+def _py_forced_exit_seconds_for_session(session: TradingSession) -> int:
+    """The retained Python oracle body of :func:`forced_exit_seconds_for_session`."""
     forced = forced_exit_time_for_session(session)
     return forced.hour * _SECONDS_PER_HOUR + forced.minute * _SECONDS_PER_MINUTE + forced.second
 
@@ -1645,4 +2249,12 @@ def is_special_weekend_session(d: date) -> bool:
     weekend filter in :func:`is_trading_day` would silently drop those
     bars.
     """
+    kernel = _rust_calendar()
+    if kernel is not None:
+        rust_value = bool(kernel.engine.is_special_weekend(d.toordinal()))
+        return _serve_value(
+            "is_special_weekend_session",
+            rust_value,
+            lambda: d in SPECIAL_WEEKEND_TRADING_SESSIONS,
+        )
     return d in SPECIAL_WEEKEND_TRADING_SESSIONS

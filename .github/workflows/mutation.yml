@@ -10,7 +10,7 @@
 #    the tests don't actually cover that logic branch. Runs on EVERY
 #    trigger (push to main, weekly schedule, manual dispatch).
 #
-# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 6-shard matrix,
+# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 12-shard matrix,
 #    engine-critical scope defined ONCE in rust/fno-math/.cargo/mutants.toml.
 #    Schedule + workflow_dispatch ONLY (see the job-level `if:` comment).
 #
@@ -141,10 +141,14 @@ jobs:
     # DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 Slice-0 tree — the fold/combine
     # decomposition grew the -003-era 354: origin/main measures 355, +18
     # from the decomposition, +4 from the n_trades guard; +23 x ~2.3 s
-    # ~= +53 s, absorbed by the margin below); remaining 8 loop modules =
-    # 932 (state 58 + retry 77 +
+    # ~= +53 s, absorbed by the margin below); remaining loop modules at the
+    # -003 measurement = 932 (state 58 + retry 77 +
     # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
-    # parser 33 + spec 91).
+    # parser 33 + spec 91) — since REDUCED by 281 (state 58 + retry 77 +
+    # store 146): those three modules were DELETED as dead scaffolding
+    # (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727), so the loop
+    # below carries 5 of those pairs = 651 mutants and the timing margin
+    # only WIDENS relative to the (284 + 377 + 932) nominal below.
     # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
     # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
     # Nominal: (284 + 377 + 932) x ~2.3 s ~= 61 min; + rate_common 369
@@ -309,8 +313,9 @@ jobs:
           # DISJOINT path sets, so no mutant result is lost — each pass has
           # its own survivors check.
           mv .mutmut-cache .mutmut-cache-math
-          # 2. Orchestration / data plumbing (the FSM, retry classifier, audit
-          #    chain, rate limiter, store, partition/parser) — one pass per
+          # 2. Orchestration / data plumbing (the audit chain, rate limiter,
+          #    partition/parser; the FSM/retry/store pairs were deleted with
+          #    their modules — MIGRATION.md #1727) — one pass per
           #    module against its dedicated unit test file, all driven to
           #    ZERO survivors by DEC-MUTATION-RUNTIME-001 (the measured 223
           #    survivors of the per-module enumeration were killed by
@@ -463,7 +468,8 @@ jobs:
           #     sits < 1.5x a legit pass) into explicit loud refusals at the
           #     start of the pass; a mid-pass swing INSIDE the (1.2, 20) s
           #     regime remains the accepted, disclosed residual.
-          # The 10 proven pairs (incl. data/lake_stats_manifest.py, merged in
+          # The proven pairs — 10 at the -003 measurement, 7 after the #1727
+          # scaffolding deletion (incl. data/lake_stats_manifest.py, merged in
           # from DEC-LAKE-STATS-MANIFEST-001 — see its rationale block above)
           # keep their exact historical runner + no
           # --test-time-base (minimal diff — their verified interplay is
@@ -481,10 +487,10 @@ jobs:
           # — post-round-3 on the F1-restructured audit.py, byte-identical to
           # this tree; MIGRATION.md #1597) but silently defeatable by future test insertion or
           # a new spin loop without a fail-fast twin. Pre-decided dial: if a
-          # rehearsal/scheduled run ever wedges on one of the 9 pairs again, give
-          # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
-          # measured CI baseline. rate_common runs LAST so a survivor there never
-          # masks the 10 proven modules.
+          # rehearsal/scheduled run ever wedges on one of the proven pairs again,
+          # give THAT pair the same wrap (a one-token 3rd-field pair edit) sized
+          # to its measured CI baseline. rate_common runs LAST so a survivor
+          # there never masks the proven modules.
           # RECORDED DECISION (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 fixer round 1):
           # the compute.py pair deliberately stays the single unit file — the
           # Slice-0 byte-parity golden (tests/golden/test_compute_fold_combine_parity.py,
@@ -501,11 +507,8 @@ jobs:
           # on every push via ci.yml's normal test tiers.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
-            "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
-            "brutex/orchestrator/retry.py:tests/unit/test_orchestrator_retry.py:" \
             "brutex/orchestrator/audit.py:tests/unit/test_orchestrator_audit.py:" \
             "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py:" \
-            "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py:" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/data/lake_rust_locks.py:tests/unit/test_lake_rust_locks.py:" \
@@ -735,9 +738,10 @@ jobs:
             });
 
   # ─────────────────────────────────────────────────────────────────
-  # Rust mutation — cargo-mutants over rust/fno-math/ (6-shard matrix)
+  # Rust mutation — cargo-mutants over rust/fno-math/ (12-shard matrix)
   #
-  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
+  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs
+  # + the slice-9 audit_chain.rs / calendar_verdict.rs / rate_math.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
@@ -745,7 +749,7 @@ jobs:
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
-    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/6)"
+    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/12)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003):
@@ -759,7 +763,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     defaults:
       run:
         working-directory: rust/fno-math
@@ -797,34 +801,46 @@ jobs:
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-mutants@27.1.0
-      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
+      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/12)
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs + mask_word.rs +
-          #   stats/*.rs = 692 mutants measured 2026-07-17 (`cargo mutants
-          #   --list | wc -l` on the DEC-ENUM-KERNEL-U128-001 x slice-6
-          #   (DEC-METRICS-RUST-STATS-001) MERGED tree: 358 metrics +
-          #   155 trade_sim + 81 stats/cpcv + 79 python + 10 mask_word + 9 lib;
-          #   the 2026-07-08 post-merge HEAD measured 599 — the race-6 merge
-          #   folded main's width-generic u128 trade_sim kernel, trade_sim
-          #   124->167; the pre-merge 2026-07-07 measurement was 556).
+          #   stats/*.rs + the slice-9 audit_chain.rs + calendar_verdict.rs +
+          #   rate_math.rs (the union of both landed scope expansions).
+          #   Component measurements (each `cargo mutants --list | wc -l` on
+          #   its OWN tree — the merged union tree is not yet re-measured):
+          #   692 measured 2026-07-17 on the DEC-ENUM-KERNEL-U128-001 x
+          #   slice-6 (DEC-METRICS-RUST-STATS-001) MERGED tree (358 metrics +
+          #   155 trade_sim + 81 stats/cpcv + 79 python + 10 mask_word +
+          #   9 lib), and 1,149 measured 2026-07-11 on the slice-9
+          #   phase-2b-2 tree (adds audit_chain 120 + calendar_verdict 352 +
+          #   rate_math 78 over its 599-mutant base). Component-sum estimate
+          #   for the union tree: 692 + 550 = ~1,242 (arithmetic over the two
+          #   recorded measures, NOT a fresh measurement — re-measure at the
+          #   first scheduled run).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1597
-          #   pre-decided +1-shard dial, taken when the 599 re-measure pushed the
-          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin):
-          #   ceil(692/6)=116 mutants x 29-40 s/mutant serial (CI per-lane measured
-          #   4-9 s build + 25-31 s test) ~= 56-77 min + ~5.5 min baseline/setup
-          #   ~= 62-83 min nominal, ~100 at +20% on the worst end -> >= 20 min
-          #   margin per shard.
+          #   wall-clock parallelism = this 12-way shard matrix (6->12 = the
+          #   slice-9 re-shard, DEC-ORCH-CALENDAR-RUST-CONVERT-001 / MIGRATION
+          #   #1727a fix round 1, taken when the examine_globs expansion grew
+          #   the crate well past the budget the 6-shard matrix was derived
+          #   for): at the union-tree component-sum estimate ~1,242 mutants
+          #   (692 measured 2026-07-17 + the slice-9 +550 measured 2026-07-11
+          #   — see the scope note above), ceil(1242/12)=104 mutants/shard,
+          #   at or near the measured ceil(599/6)=100/shard 6-shard envelope
+          #   (54-72 min nominal, ~86 at +20% worst end under the SAME
+          #   29-40 s/mutant serial cost), so the per-shard budget stays in
+          #   the #1597-measured worst-case band -> >= ~30 min margin per
+          #   shard under the 120-min cap; re-derive on the first scheduled
+          #   run's measured figure.
           cargo mutants \
             --in-place \
-            --shard ${{ matrix.shard }}/6 \
+            --shard ${{ matrix.shard }}/12 \
             --test-tool cargo \
             --no-shuffle \
             --timeout 300 \

@@ -48,8 +48,7 @@ from brutex.observability.standard_monitor import (
     _publish_telegram,
 )
 from brutex.observability.watchdog import WorkerEvent, WorkerState
-from brutex.orchestrator.pipeline import PipelineEvent, PipelineEventKind
-from brutex.orchestrator.state import IngestPhase
+from brutex.orchestrator.events import IngestPhase, PipelineEvent, PipelineEventKind
 
 # MarkdownV2 reserved set (mirrors sweep_alerts._MDV2_SPECIALS — re-stated
 # here so a silent narrowing of the common helper fails these tests).

@@ -113,13 +113,12 @@ CLAUDE.md §6 (verified Groww facts).
 
 **Honest envelope (Golden Rule #10):** the legacy
 `brutex.orchestrator.adaptive_rate_limiter` (the retired [3..5] r/s design)
-still reads the vendor-neutral `BRUTEX_RATE_MIN_RPS` / `_MAX_RPS` /
-`_INITIAL_RPS` / `_STEP_DOWN_HITS` / `_STEP_DOWN_WINDOW` /
-`_STEP_UP_CLEAN_WINDOW` / `_RECHECK_INTERVAL` vars
-(`adaptive_rate_limiter.py:59-65`), and `brutex.wipe`
-reads `BRUTEX_TOKEN_PATH` (`wipe.py:42`) — these are residue **NOT on the
-live Groww pull path** (which uses `rate_common` above). Retiring/renaming that
-module is a tracked follow-up (DEC-DHAN-DOC-RECONCILE-001). A live pull needs
+that once read the vendor-neutral `BRUTEX_RATE_*` vars was DELETED as dead
+scaffolding (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727 — closing
+the DEC-DHAN-DOC-RECONCILE-001 retire-that-module follow-up); those env vars
+are now read by NOTHING. `brutex.wipe` reads `BRUTEX_TOKEN_PATH`
+(`wipe.py:42`) — residue **NOT on the live Groww pull path** (which uses
+`rate_common` above). A live pull needs
 usable AWS credentials (profile/role) + the seeded SSM parameters — no
 `BRUTEX_*` secret env vars.
 

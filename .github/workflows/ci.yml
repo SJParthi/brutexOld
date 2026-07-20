@@ -1015,6 +1015,18 @@ jobs:
           else
             echo "(brutex.strategies.combo_rust test file not present yet — gate inactive)"
           fi
+          # brutex.strategies.sweep — a CURATED three-file suite (the sweep-grid
+          # unit file + the differently-stemmed ComboCache unit file + the
+          # integration sweep suite together read 100.00% line+branch; no single
+          # stem-matched file reaches 100% standalone — measured 92.35% —
+          # so the module is on COVERAGE_DISCOVERY_EXCLUDE with this static
+          # gate as its real per-module 100% teeth;
+          # DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727).
+          if compgen -G "tests/unit/test_strategies_sweep_grid.py" > /dev/null; then
+            pytest --cov=brutex.strategies.sweep --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_sweep_grid.py tests/unit/test_strategies_combo_cache.py tests/integration/test_strategies_sweep.py
+          else
+            echo "(brutex.strategies.sweep test file not present yet — gate inactive)"
+          fi
           # 16e · brutex.vocabulary.conflicts (12 stmts, 4 branches, 65 tests)
           if compgen -G "tests/unit/test_vocabulary.py" > /dev/null; then
             pytest --cov=brutex.vocabulary.conflicts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_vocabulary.py
@@ -1191,12 +1203,13 @@ jobs:
             echo "(brutex.orchestrator.replay test file not present yet — gate inactive)"
           fi
           # DEC-ORCH-LAZY-BLOOM-001 (2026-06-08, MIGRATION entry #589): the
-          # lazy fastbloom_rs import also unblocks three more orchestrator
-          # modules that reach 100% line+branch standalone with their
-          # dedicated test files. (The remaining six — state / store /
-          # pipeline / rate_limiter / quota_tracker / bloom — carried
-          # residual standalone-coverage gaps; CLOSED by
-          # DEC-ORCH-STRICT-GATES-001 below.)
+          # lazy fastbloom_rs import also unblocked the remaining orchestrator
+          # modules' standalone 100% gates (DEC-ORCH-STRICT-GATES-001 below).
+          # DEC-ORCH-DEAD-SCAFFOLD-DELETE-001 (MIGRATION.md #1727 deletion
+          # record): the dead scaffolding modules' gates (state / store /
+          # pipeline / retry / adaptive_rate_limiter) were REMOVED with their
+          # modules; the surviving live shapes are gated below as
+          # brutex.orchestrator.events + the trimmed quota_tracker.
           # DEC-AUDIT-TORN-TAIL-001 (MIGRATION.md #1042): the torn-tail
           # auto-resume recovery (_truncate_torn_tail + the resume-path
           # truncate call) is exercised by the dedicated cross-chain
@@ -1216,58 +1229,42 @@ jobs:
           else
             echo "(brutex.orchestrator.audit test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_orchestrator_retry.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.retry --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_retry.py
-          else
-            echo "(brutex.orchestrator.retry test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_adaptive_rate_limiter.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.adaptive_rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_adaptive_rate_limiter.py
-          else
-            echo "(brutex.orchestrator.adaptive_rate_limiter test file not present yet — gate inactive)"
-          fi
           # DEC-ORCH-STRICT-GATES-001 (2026-06-10, MIGRATION entry #613):
-          # the final six orchestrator modules promoted from
-          # global-coverage-only to strict standalone per-module 100%
-          # gates. Each dedicated unit file got surgical gap-closing
-          # tests (state: exhaustive-fallback raise; store: closed-store
-          # guards + decode corruption + flush — which exposed and fixed
-          # a latent lmdb sync() TypeError; pipeline: PhaseResult
-          # properties + IterationLimitError + subscribe; rate_limiter:
+          # the orchestrator modules were promoted from global-coverage-only
+          # to strict standalone per-module 100% gates (rate_limiter:
           # upshift arm + pending_events + loop-cap + zero-downshift;
-          # quota_tracker: decode-guard matrix + default path +
-          # threshold edge days; bloom: saturated/log-collapse
-          # estimator clips). Every gate below verified locally at
-          # 100.00% line+branch on Python 3.12. With these, ALL
-          # brutex.orchestrator.* submodules with dedicated test files
+          # bloom: saturated/log-collapse estimator clips). With these,
+          # ALL brutex.orchestrator.* submodules with dedicated test files
           # are strict-gated — the entry #261 operator-accepted ABI3
-          # limit is fully retired.
-          if compgen -G "tests/unit/test_orchestrator_state.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.state --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_state.py
+          # limit is fully retired. (The state/store/pipeline gate blocks
+          # that DEC established were removed with their modules —
+          # DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727.)
+          # events.py — the verbatim-moved LIVE shapes of the deleted
+          # state.py/pipeline.py scaffolding (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001).
+          if compgen -G "tests/unit/test_orchestrator_events.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.events --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_events.py
           else
-            echo "(brutex.orchestrator.state test file not present yet — gate inactive)"
+            echo "(brutex.orchestrator.events test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_orchestrator_store.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.store --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_store.py
+          # audit_seam_log.py — the slice-9 audit-chain Rust-port seam
+          # (DEC-ORCH-CALENDAR-RUST-CONVERT-001, MIGRATION.md #1727);
+          # static gate added post-refuter per workspace-health disclosure.
+          if compgen -G "tests/unit/test_orchestrator_audit_seam_log.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.audit_seam_log --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit_seam_log.py
           else
-            echo "(brutex.orchestrator.store test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_orchestrator_pipeline.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.pipeline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_pipeline.py
-          else
-            echo "(brutex.orchestrator.pipeline test file not present yet — gate inactive)"
+            echo "(brutex.orchestrator.audit_seam_log test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_orchestrator_rate_limiter.py" > /dev/null; then
             pytest --cov=brutex.orchestrator.rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_rate_limiter.py
           else
             echo "(brutex.orchestrator.rate_limiter test file not present yet — gate inactive)"
           fi
-          # quota_tracker composes TWO files: the dedicated unit file plus
-          # the DEC-QUOTA-ENV-SINGLE-OPEN-001 regression file, which owns
-          # the process-shared env-registry paths (registry hit + ref-
-          # counted release) — composed, not duplicated (Golden Rule COMMON).
-          if compgen -G "tests/unit/test_quota_tracker.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.quota_tracker --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_quota_tracker.py tests/unit/test_bugfix_quota_env_share.py
+          # quota_tracker was TRIMMED to the live exception types + the
+          # QuotaGate re-wire Protocol (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+          # MIGRATION.md #1727 — the dormant tracker machinery deleted); its
+          # covering suite is the DEC-QUOTA-VERDICT-MOOT-001 pin file.
+          if compgen -G "tests/unit/test_quota_verdict_moot.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.quota_tracker --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_quota_verdict_moot.py
           else
             echo "(brutex.orchestrator.quota_tracker test file not present yet — gate inactive)"
           fi
@@ -1506,12 +1503,12 @@ jobs:
             echo "(brutex.strategies.library.buy_and_hold test file not present yet — gate inactive)"
           fi
           # NOTE 2026-06-08 (DEC-ORCH-LAZY-BLOOM-001, MIGRATION entry #589):
-          # brutex.orchestrator.retry is NO LONGER excluded — the lazy
-          # fastbloom_rs import (bloom.py::_load_rust_bloom) removed the
-          # ABI3 single-init blocker, and retry's strict 100% gate is now
-          # ACTIVE above (next to the re-enabled replay / audit /
-          # adaptive_rate_limiter gates). This note is retained as the
-          # historical record of why it was previously deferred.
+          # brutex.orchestrator.retry's exclusion was lifted by the lazy
+          # fastbloom_rs import (bloom.py::_load_rust_bloom). The module —
+          # and its gate — have since been DELETED as dead scaffolding
+          # (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727); the
+          # live Groww retry ladder is adapters/groww/errors.is_retryable
+          # + the client max_attempts. Note retained as historical record.
           # DEC-COV-BACKFILL-001 (entry #257, 2026-05-27): 3-module
           # backfill ratchet — modules previously 95-99% pushed to 100%
           # via surgical test additions + 1 dead-code removal + 1 defensive
@@ -3502,9 +3499,11 @@ jobs:
           # draft of this PR proposed -ll (medium+) but that is WEAKER than
           # -l (-ll ignores low-severity findings). Bandit semantics:
           # -l reports low+, -ll reports medium+, -lll reports high+.
-          # The 4 legitimate low-severity exceptions (S104 × 2 in
-          # brutex/config/ports.py, S105 in brutex/notifications/telegram.py,
-          # S311 in brutex/orchestrator/retry.py) carry per-line `# nosec`
+          # The 3 legitimate low-severity exceptions (S104 × 2 in
+          # brutex/config/ports.py, S105 in brutex/notifications/telegram.py;
+          # the historical 4th, S311 in the deleted
+          # brutex/orchestrator/retry.py, is gone — MIGRATION.md #1727)
+          # carry per-line `# nosec`
           # tags so bandit at -l skips them. New S104 sites in brutex/ trip
           # at the ruff layer (S-rules un-ignored at project level per
           # pyproject.toml comment).
@@ -4476,15 +4475,21 @@ jobs:
   # Python mutation testing (mutmut) — per-PR on critical modules
   #
   # HONEST ENVELOPE (Golden Rule #10, R2-CI-3c): this per-PR gate covers
-  # EXACTLY TWO modules — brutex/orchestrator/state.py (FSM, ≥98% floor,
-  # 300 s budget) and brutex/money.py (2dp money display, ≥99% floor,
+  # EXACTLY TWO modules — brutex/data/parser.py (the vendor candle-payload
+  # parser, ≥98% floor, 300 s budget; RETARGETED from the deleted
+  # brutex/orchestrator/state.py by DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+  # MIGRATION.md #1727 — measured 2026-07-11: 33 mutants, 100.00% killed,
+  # 72 s wall on mutmut 2.5.1, comfortably inside the 300 s budget; the
+  # larger candidate brutex/data/partition.py measured 109 mutants / 240 s —
+  # too close to the budget on 2-core runners) and brutex/money.py (2dp
+  # money display, ≥99% floor,
   # 240 s budget). It is deliberately NOT the whole-package mutation pass:
-  # state.py 300 s + money.py 240 s + the two Rust-wheel builds (fno-math +
+  # parser.py 300 s + money.py 240 s + the two Rust-wheel builds (fno-math +
   # trading-core) + `.[dev]` install already sit close to the 20-minute job
   # budget, so the per-PR set is kept to these two safety-critical math
   # modules to avoid a timeout (a timeout would REGRESS this gate to red-on-
   # infra, not a real mutation failure). The BROAD per-module mutation pass
-  # (Python state.py + Rust fno-math + Rust trading-core, ≥85% each) lives in
+  # (Python per-module loop + Rust fno-math + Rust trading-core, ≥85% each) lives in
   # .github/workflows/mutation.yml and runs on schedule / workflow_dispatch /
   # push-to-main with issue-alert-on-failure. Do NOT add modules here without
   # first proving the additional mutmut run fits inside timeout-minutes.
@@ -4526,18 +4531,23 @@ jobs:
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
         run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
-      - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
+      - name: mutmut on parser.py (vendor candle parser) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
           # 5-minute budget per module; DEC-P0-001 (2026-05-17) removed
           # blanket `|| true`. mutmut run exits with the count of survivors
           # which can be non-zero on success; we let the run finish even
           # if survivors exist, then enforce a survivor-budget gate.
+          # RETARGETED state.py → parser.py (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+          # MIGRATION.md #1727): state.py was deleted as dead scaffolding;
+          # parser.py is the safety-critical vendor-payload → bar parse,
+          # already a weekly zero-survivor pair in mutation.yml, and the
+          # measured run (33 mutants, 72 s, 100.00% kill) fits the budget.
           set +e
           timeout 300 mutmut run \
-            --paths-to-mutate brutex/orchestrator/state.py \
+            --paths-to-mutate brutex/data/parser.py \
             --tests-dir tests/unit \
-            --runner "pytest -x tests/unit/test_orchestrator_state.py"
+            --runner "pytest -x tests/unit/test_data_parser.py"
           run_rc=$?
           set -e
           if [ $run_rc -eq 124 ]; then
@@ -4559,12 +4569,11 @@ jobs:
           # Enforce ≥98% mutation score per operator decree 2026-05-17 + DEC-P0-009.
           # Progression: 85% (original Golden Rule #12) → 96% (operator 2026-05-17
           # "minimum 96 percentage dude") → 98% (operator 2026-05-17 "100 percentage
-          # would be fine"). state.py currently hits 100.00% (54+2-suspicious killed
-          # of 56 testable). 98% floor leaves 1 mutant of headroom for tooling
-          # quirks; the 23 StrEnum None-mutation excluded pragmas document the only
-          # tolerated permanent exclusion.
+          # would be fine"). parser.py measured 100.00% (33/33 killed,
+          # 2026-07-11 retarget run). 98% floor leaves headroom for tooling
+          # quirks only.
           # Operator decree 2026-05-17 (DEC-P0-003): no downgrade — 100% standards
-          # held. If state.py current score is below 85%, write more tests until
+          # held. If parser.py current score is below 85%, write more tests until
           # the gate passes. Do NOT relax this threshold without explicit operator
           # approval. The earlier DEC-P0-002 60% interim was REVERTED at operator
           # direction; mutation row in STANDARDS_100PCT.md §1 is therefore RESTORED
@@ -4594,7 +4603,7 @@ jobs:
           # invokes the SAME script — no duplicated parser block (jscpd-clean).
           cat > /tmp/check_mutation_score.py <<'PY'
           import os, sys, xml.etree.ElementTree as ET
-          mod = os.environ.get("MUT_MODULE", "state.py")
+          mod = os.environ.get("MUT_MODULE", "parser.py")
           xml = os.environ.get("MUT_XML", "mutmut-results.xml")
           floor = float(os.environ.get("MUT_FLOOR", "0.98"))
           try:
@@ -4628,7 +4637,7 @@ jobs:
           # Strip the 10-space CI-yml indent that bash heredoc preserves
           # (it would still cause IndentationError when python parses).
           sed -i 's/^          //' /tmp/check_mutation_score.py
-          MUT_MODULE="state.py" MUT_XML="mutmut-results.xml" python3 /tmp/check_mutation_score.py
+          MUT_MODULE="parser.py" MUT_XML="mutmut-results.xml" python3 /tmp/check_mutation_score.py
 
       - name: mutmut on money.py (2dp money display) (blocking — DEC-MUTATION-MONEY-001)
         run: |

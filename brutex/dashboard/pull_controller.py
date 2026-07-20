@@ -1000,8 +1000,8 @@ def _build_live_controller() -> RateController:
     :class:`SessionRateController` (DEC-DHAN-PERSIST-RATE-001) so the learned rate
     carries over instead of every pull restarting at the 8 r/s ceiling.
 
-    The controller is built with **NO** :class:`~brutex.orchestrator.quota_tracker.\
-DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
+    The controller is built with **NO** quota gate
+    (``quota_tracker=None`` — DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     ``get_historical_candles`` has **no daily quota** (operator-confirmed 2026-06-13),
     so the dashboard pull no longer imposes the phantom 100,000/day cap that
     DEC-AUTO-RESUME-QUOTA-001 had wired — that cap would have wrongly HALTED a large
@@ -1010,12 +1010,14 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     ``quota_tracker=None``). The per-minute 500/min governor + the adaptive per-second
     bucket remain the live pacing gates. Consequence: the controller's
     :meth:`~brutex.adapters.rate_common.RateController.quota_exhausted` is always
-    ``False`` (no tracker), so the auto-resume ``stop_quota`` branch is DORMANT for the
+    ``False`` (no gate), so the auto-resume ``stop_quota`` branch is DORMANT for the
     dashboard pull (it never burns a non-existent quota). The once-separate read-only
     ``/api/v1/quota`` endpoint + the /universe gauge are DELETED
     (DEC-QUOTA-VERDICT-MOOT-001 — nothing ever injected a tracker, so they only ever
-    served the hidden ``-1`` sentinel); the inertness is AST-pinned in
-    ``tests/unit/test_quota_verdict_moot.py``.
+    served the hidden ``-1`` sentinel); the inertness is pinned in
+    ``tests/unit/test_quota_verdict_moot.py`` (structurally since the dormant
+    tracker class was itself DELETED behind the ``QuotaGate`` Protocol —
+    DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727).
     """
     from brutex.adapters.groww.constants import (
         GROWW_RATE_LIMIT_PER_MIN,
@@ -1026,7 +1028,7 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
 
     # Operator-confirmed Groww backtesting limits (DEC-GROWW-NO-DAILY-QUOTA-001):
     # 500 req/min (the HARD per-minute governor, DEC-GROWW-RATE-PERMIN-001) AND NO
-    # daily quota — so NO DailyQuotaTracker is wired here, matching the CLI Groww
+    # daily quota — so NO quota gate is wired here, matching the CLI Groww
     # spot path (cli.py also builds the controller with quota_tracker=None). The
     # phantom 100,000/day cap would have wrongly HALTED a large multi-day backfill,
     # since Groww backtesting has no daily quota (operator-confirmed 2026-06-13).

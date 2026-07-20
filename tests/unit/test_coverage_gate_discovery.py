@@ -248,6 +248,14 @@ class TestDiscoverTouchedModules:
         #     100% gate is the dedicated static per-module gate in ci.yml (the
         #     three-file suite at --cov-fail-under=100) + the whole-package
         #     floor (DEC-RESILIENCE-STREAKS-001).
+        #   * brutex/strategies/sweep.py — ComboSweep/ComboCache, covered by the
+        #     curated trio test_strategies_sweep_grid.py +
+        #     test_strategies_combo_cache.py (differently-stemmed ComboCache
+        #     paths) + tests/integration/test_strategies_sweep.py; 92.35%
+        #     standalone against its stem matches, 100.00% with the trio; gated
+        #     by the dedicated static per-module gate (that exact trio) + the
+        #     whole-package floor (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+        #     MIGRATION.md #1727).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -261,6 +269,7 @@ class TestDiscoverTouchedModules:
                     "brutex/engine/sweep_driver.py",
                     "brutex/engine/resilience_streaks.py",
                     "brutex/engine/results_depth_pass.py",
+                    "brutex/strategies/sweep.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE

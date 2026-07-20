@@ -11,10 +11,10 @@ documentation-only one.
 
 This module is the single seam that bridges:
 
-* The :mod:`brutex.orchestrator.pipeline` ``EventSubscriber`` protocol
-  (``Callable[[PipelineEvent], None]``) — pipeline.py already emits
+* The :mod:`brutex.orchestrator.events` ``EventSubscriber`` protocol
+  (``Callable[[PipelineEvent], None]``) — the live pipeline event shapes:
   PHASE_START / PHASE_PROGRESS / PHASE_COMPLETE / PHASE_HALTED /
-  ITEM_COMPLETE / RUN_START / RUN_COMPLETE events.
+  ITEM_COMPLETE / RUN_START / RUN_COMPLETE.
 
 * The :class:`brutex.notifications.telegram.TelegramNotifier`
   ``publish(TelegramEvent)`` API.
@@ -33,7 +33,7 @@ in the audit log + dashboard.
 * **Subscriber factory.** :func:`make_pipeline_event_subscriber`
   returns an ``EventSubscriber`` callable that performs the
   PipelineEvent → TelegramEvent mapping. Caller plugs it into
-  :class:`PhaseRunner` via ``subscribers=[...]``.
+  any pipeline event producer's subscriber list.
 * **Graceful no-op when disabled.** If the notifier is ``None``
   (Telegram off), the subscriber is a literal no-op — zero overhead,
   zero errors.
@@ -42,11 +42,11 @@ in the audit log + dashboard.
 
 ## Why this is the right seam (Golden Rule #11 COMMON discipline)
 
-The pipeline emits events via a Sequence[EventSubscriber]. The
-dashboard subscribes (DEC-DASHBOARD-LIVE-1). The audit log subscribes
-(future PR). Adding a third subscriber requires NO change to
-``pipeline.py``. This is the same DI-friendly pattern the spec
-mandates — one source of truth (the event stream), many sinks.
+Producers emit events via a Sequence[EventSubscriber]. The
+dashboard subscribes (DEC-DASHBOARD-LIVE-1). Adding another subscriber
+requires NO change to the event shapes in
+:mod:`brutex.orchestrator.events`. This is the same DI-friendly pattern
+the spec mandates — one source of truth (the event stream), many sinks.
 
 ## Decision: DEC-TELEGRAM-WIRING-001 (MIGRATION entry #238).
 """
@@ -66,7 +66,7 @@ from brutex.notifications.telegram import (
     TelegramNotifier,
     TelegramSeverity,
 )
-from brutex.orchestrator.pipeline import (
+from brutex.orchestrator.events import (
     EventSubscriber,
     PipelineEvent,
     PipelineEventKind,
@@ -275,13 +275,10 @@ def make_pipeline_event_subscriber(
         from brutex.notifications.wiring import (
             make_pipeline_event_subscriber,
         )
-        runner = PhaseRunner(
-            ...,
-            subscribers=[
-                dashboard_subscriber,
-                make_pipeline_event_subscriber(),
-            ],
-        )
+        subscribers = [
+            dashboard_subscriber,
+            make_pipeline_event_subscriber(),
+        ]
 
     Parameters
     ----------

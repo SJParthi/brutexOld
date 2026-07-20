@@ -319,7 +319,7 @@ jobs:
           # physically unsatisfiable across a cache cliff; hash/compute-dominated
           # + fixed-window paths (Bloom probe, blake3 digest, BOS/CHoCH ring)
           # hold the true 1.1x.
-          pytest tests/bench/test_store_o1.py tests/bench/test_option_dedup_o1.py \
+          pytest tests/bench/test_option_dedup_o1.py \
             tests/bench/test_lmdb_membership_o1.py tests/bench/test_rate_limiter_o1.py \
             tests/bench/test_summary_cache_o1.py \
             tests/bench/test_bar_lookup_o1.py tests/bench/test_indicator_lookup_o1.py \

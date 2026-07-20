@@ -192,6 +192,10 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # 1685 = DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 (Slice 0 of the Rust sweep-core
     # conversion): its recorded compute.py pair-scope decision comment above
     # the mutmut pair list cites THAT decision's entry, not this one.
+    # 1727 = the slice-9 program entry pair
+    # (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, #1727b): the deleted
+    # state/retry/store loop pairs' tombstone comments cite THAT deletion
+    # record, not this one.
     # 1750 = DEC-RANKING-MUTATION-ZERO-SURVIVOR-001 (2026-07-11): the pass-1
     # runner-list rationale comment (tests/unit/test_ranking_gate_reasons.py
     # MUST stay in the runner) cites THAT decision's entry, not this one.
@@ -202,7 +206,7 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # feed/replay.py pair's rationale comment (the R6a warn-drain mutant +
     # the 3-file discovery-set field) cites THAT decision's entry, not this
     # one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797}),
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1727, 1750, 1774, 1797}),
     # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16): render_shard's
     # docstring cites THAT decision's entry for its Rust-seam routing note,
     # not this one.

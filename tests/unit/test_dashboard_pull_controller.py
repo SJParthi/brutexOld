@@ -1048,7 +1048,7 @@ class TestSessionRateController:
 
     def test_default_factory_builds_a_real_controller(self) -> None:
         # DEC-GROWW-NO-DAILY-QUOTA-001: the dashboard controller is built with NO
-        # DailyQuotaTracker (Groww backtesting has no daily quota, operator-confirmed),
+        # quota gate (Groww backtesting has no daily quota, operator-confirmed),
         # matching the CLI Groww path — so it never halts on a phantom daily cap, while
         # the 500/min per-minute governor stays wired. This is THE production inertness
         # pin the quota-verdict MOOT decision rests on (DEC-QUOTA-VERDICT-MOOT-001,

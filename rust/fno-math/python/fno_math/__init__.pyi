@@ -20,21 +20,35 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 __all__ = [
+    "AuditEnvelopeError",
+    "CalendarVerdictEngine",
     "ResidentBars",
     "ResidentBarsU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
     "add_u64",
+    "audit_entry_hash",
+    "audit_entry_line",
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
+    "bucket_consume",
+    "bucket_more_wait",
+    "bucket_refill",
+    "bucket_set_rate_state",
+    "canonical_json",
     "count_supermask_u64s",
     "count_supermask_u128s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
+    "expected_bars_per_day_for_tf",
+    "forced_exit_seconds_s",
+    "is_forced_exit_bar_s",
     "popcount_bytes",
+    "py_float_repr",
+    "session_last_bar_complete_s",
     "stats_cpcv_pass_count",
 ]
 
@@ -55,6 +69,168 @@ def _assert_compiled_surface(
     expected: Sequence[str] = ...,
 ) -> None:
     """Raise an actionable ``ImportError`` if ``compiled`` misses an expected symbol."""
+    ...
+
+class AuditEnvelopeError(Exception):
+    """A value is outside the Rust audit-chain kernel's bounded model.
+
+    DEC-AUDIT-CHAIN-RUST-PORT-001 (slice 9, ADR-0019): raised by
+    ``audit_entry_hash`` / ``audit_entry_line`` / ``py_float_repr`` /
+    ``canonical_json`` on ANY out-of-model input (non-finite float, int
+    outside i64, non-str dict key, subclassed container, lone-surrogate
+    string, unsupported type, ``|`` in a free-form field). The Python seam
+    in ``brutex.orchestrator.audit`` catches it and falls back LOUDLY to
+    the retained Python oracle — the type never escapes the seam.
+    """
+
+def audit_entry_hash(
+    seq: int,
+    prev_hash: str,
+    ts_utc: float,
+    actor: str,
+    action: str,
+    subject: str,
+    payload: object,
+) -> str:
+    """``AuditEntry.compute_hash``'s Rust twin — SHA-256 hexdigest of the
+    ``|``-joined preimage over the bounded value model.
+
+    Raises ``AuditEnvelopeError`` on any out-of-model value; ``OverflowError``
+    for ``seq`` outside i64 (PyO3 conversion).
+    """
+    ...
+
+def audit_entry_line(
+    seq: int,
+    prev_hash: str,
+    ts_utc: float,
+    actor: str,
+    action: str,
+    subject: str,
+    payload: object,
+    entry_hash: str,
+) -> str:
+    """``AuditEntry.to_json_line``'s Rust twin — the canonical 8-key JSON
+    line (no trailing newline), byte-equal to the Python writer.
+
+    Raises ``AuditEnvelopeError`` / ``OverflowError`` as ``audit_entry_hash``.
+    """
+    ...
+
+def py_float_repr(x: float) -> str:
+    """CPython ``repr(float)`` / ``str(float)`` — shortest round-trip digits
+    + the pystrtod format-code-'r' notation. Raises ``AuditEnvelopeError``
+    on a non-finite input.
+    """
+    ...
+
+def canonical_json(payload: object) -> str:
+    """``brutex.orchestrator.audit._canonical_json``'s Rust twin (json.dumps
+    ``sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    allow_nan=False``). Raises ``AuditEnvelopeError`` out of model.
+    """
+    ...
+
+class CalendarVerdictEngine:
+    """Frozen NSE/BSE calendar-verdict engine (DEC-CALENDAR-VERDICT-RUST-001).
+
+    Built once per process by ``brutex.calendars.nse`` from the live module
+    constants — calendar DATA stays in Python (ADR-0012 D8) and crosses here
+    as ``date.toordinal()`` ordinals + seconds-of-day. ``sel``: 0 = ALL
+    (``exchange=None``), 1 = NSE, 2 = BSE — exchange STRING validation stays
+    Python. ``*_checked`` verdicts: 0 = False/None, 1 = True/Some, 2 = RAISE
+    (the Python seam raises ``HolidayDataUnavailableError``).
+    """
+
+    def __init__(
+        self,
+        common_holidays: list[int],
+        nse_only: list[int],
+        bse_only: list[int],
+        muhurat: list[tuple[int, int, int]],
+        special_weekend: list[tuple[int, int, int]],
+        coverage_first_year: int,
+        coverage_last_year: int,
+        session_open_s: int,
+        session_close_s: int,
+    ) -> None: ...
+    def is_holiday(self, ordinal: int, sel: int) -> bool: ...
+    def is_holiday_checked(self, ordinal: int, sel: int) -> int: ...
+    def is_weekend(self, ordinal: int) -> bool: ...
+    def is_trading_day(self, ordinal: int, sel: int) -> bool: ...
+    def is_trading_day_checked(self, ordinal: int, sel: int) -> int: ...
+    def has_muhurat(self, ordinal: int) -> bool: ...
+    def is_special_weekend(self, ordinal: int) -> bool: ...
+    def get_session(self, ordinal: int, sel: int) -> tuple[int, int, int] | None:
+        """``(session_type, open_s, close_s)`` — type 0 REGULAR / 1 MUHURAT."""
+        ...
+
+    def get_session_checked(self, ordinal: int, sel: int) -> tuple[int, int, int, int]:
+        """``(verdict, session_type, open_s, close_s)`` — verdict 0/1/2."""
+        ...
+
+    def previous_trading_session(
+        self, ordinal: int, sel: int, observed: list[int]
+    ) -> tuple[int, int]:
+        """``(1, prev_ordinal)`` or ``(2, probe_ordinal_that_raised)``."""
+        ...
+
+    def trading_days_between(self, start: int, end: int, sel: int) -> list[int]: ...
+    def trading_days_between_checked(
+        self, start: int, end: int, sel: int
+    ) -> tuple[int, list[int], int]:
+        """``(verdict, day_ordinals, offending_ordinal)`` — verdict 1/2."""
+        ...
+
+    def daily_derive_cutoff(self, ordinal: int, now_us: int, sel: int) -> int:
+        """The cutoff ORDINAL (strict ``>`` at close; ``now_us`` =
+        microseconds-of-day)."""
+        ...
+
+def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
+    """``ceil(375 / tf)``; ``tf >= 375`` → 1; ``tf < 1`` → ``-1`` (the
+    Python wrapper raises ``ValueError`` before calling)."""
+    ...
+
+def is_forced_exit_bar_s(open_s: int, tf_minutes: int, boundary_s: int) -> int:
+    """1/0 verdict of the strict-``>`` forced-exit law over seconds-of-day;
+    ``tf < 1`` → ``-1`` (the Python wrapper raises before calling)."""
+    ...
+
+def forced_exit_seconds_s(close_s: int) -> int:
+    """Session close − 600 s (saturating) — the forced-exit boundary."""
+    ...
+
+def session_last_bar_complete_s(close_s: int, last_bar_s: int) -> bool:
+    """``last_bar + 1 minute >= close`` over SAME-DATE seconds-of-day."""
+    ...
+
+def bucket_refill(tokens: float, burst: float, rps: float, elapsed: float) -> float:
+    """``AdaptiveTokenBucket._refill_locked``'s token expression
+    (DEC-RATE-MATH-RUST-001): ``tokens`` unchanged when ``elapsed <= 0``,
+    else ``min(burst, tokens + elapsed * rps)`` with CPython min-order
+    semantics — bit-exact IEEE f64; no cap/ladder VALUE lives Rust-side.
+    """
+    ...
+
+def bucket_consume(tokens: float, rps: float) -> tuple[float, float]:
+    """``acquire``'s consume step → ``(new_tokens, wait_seconds)``:
+    ``tokens >= 1.0`` consumes one token (wait 0.0), else quotes
+    ``(1.0 - tokens) / rps`` with tokens unchanged.
+    """
+    ...
+
+def bucket_more_wait(tokens: float, rps: float, eps: float) -> float:
+    """The acquire retry-loop wait step:
+    ``max((1.0 - tokens) / rps, eps)`` with CPython max-order semantics.
+    """
+    ...
+
+def bucket_set_rate_state(new_rps: float) -> tuple[float, float]:
+    """``set_rate``'s post-state → ``(0.0, new_rps / 2.0)`` — the
+    drain-to-empty law (DEC-DHAN-RATE-SINGLE-BUCKET-001); validation and
+    every state write stay Python.
+    """
     ...
 
 def add_u64(a: int, b: int) -> int:

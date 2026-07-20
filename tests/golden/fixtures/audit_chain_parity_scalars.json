@@ -1,0 +1,290 @@
+{
+ "note": "Unit-vector contract for a future non-Python audit-chain port (DEC-AUDIT-CHAIN-PARITY-GOLDEN-001). NEVER regenerated — the byte semantics are shared by existing on-disk operator chains.",
+ "hash_preimage": "sha256(str(seq) | prev_hash | str(ts_utc) | actor | action | subject | canonical_json(payload)) — '|' is a literal delimiter byte; str(float) is CPython shortest-round-trip; canonical_json is json.dumps(sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)",
+ "entries": [
+  {
+   "seq": 0,
+   "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+   "ts_utc": 1700000000.0,
+   "actor": "brutex",
+   "action": "RUN_START",
+   "subject": "run:parity-golden",
+   "payload": {},
+   "expected_entry_hash": "c3a174797bd48b5eebf27de1d65b58c9f4432c839f4af083e56812010b7e5f79",
+   "expected_line": "{\"action\":\"RUN_START\",\"actor\":\"brutex\",\"entry_hash\":\"c3a174797bd48b5eebf27de1d65b58c9f4432c839f4af083e56812010b7e5f79\",\"payload\":{},\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"seq\":0,\"subject\":\"run:parity-golden\",\"ts_utc\":1700000000.0}"
+  },
+  {
+   "seq": 1,
+   "prev_hash": "c3a174797bd48b5eebf27de1d65b58c9f4432c839f4af083e56812010b7e5f79",
+   "ts_utc": 1718000000.123456,
+   "actor": "brutex",
+   "action": "PHASE_START",
+   "subject": "phase:A_FRACTION_TS",
+   "payload": {
+    "note": "fraction ts"
+   },
+   "expected_entry_hash": "b51bf598e3fd8b923f22f70e8728299165f6cbdabb412b1d77ab3b3d9cefd82d",
+   "expected_line": "{\"action\":\"PHASE_START\",\"actor\":\"brutex\",\"entry_hash\":\"b51bf598e3fd8b923f22f70e8728299165f6cbdabb412b1d77ab3b3d9cefd82d\",\"payload\":{\"note\":\"fraction ts\"},\"prev_hash\":\"c3a174797bd48b5eebf27de1d65b58c9f4432c839f4af083e56812010b7e5f79\",\"seq\":1,\"subject\":\"phase:A_FRACTION_TS\",\"ts_utc\":1718000000.123456}"
+  },
+  {
+   "seq": 2,
+   "prev_hash": "b51bf598e3fd8b923f22f70e8728299165f6cbdabb412b1d77ab3b3d9cefd82d",
+   "ts_utc": 1700000000.1,
+   "actor": "brutex",
+   "action": "FLOAT_ZOO",
+   "subject": "zoo:floats",
+   "payload": {
+    "a": 0.1,
+    "big_int": 1152921504606846976,
+    "neg_zero": -0.0,
+    "plain": 1.5,
+    "sci16": 1e+16,
+    "sci17": 1e+17,
+    "subnormal": 5e-324
+   },
+   "expected_entry_hash": "8271b0c097e3efcf5f578c326a6cd915c38b4a9efd8cc9ce00ba60c80f9aa512",
+   "expected_line": "{\"action\":\"FLOAT_ZOO\",\"actor\":\"brutex\",\"entry_hash\":\"8271b0c097e3efcf5f578c326a6cd915c38b4a9efd8cc9ce00ba60c80f9aa512\",\"payload\":{\"a\":0.1,\"big_int\":1152921504606846976,\"neg_zero\":-0.0,\"plain\":1.5,\"sci16\":1e+16,\"sci17\":1e+17,\"subnormal\":5e-324},\"prev_hash\":\"b51bf598e3fd8b923f22f70e8728299165f6cbdabb412b1d77ab3b3d9cefd82d\",\"seq\":2,\"subject\":\"zoo:floats\",\"ts_utc\":1700000000.1}"
+  },
+  {
+   "seq": 3,
+   "prev_hash": "8271b0c097e3efcf5f578c326a6cd915c38b4a9efd8cc9ce00ba60c80f9aa512",
+   "ts_utc": 1700000001.5,
+   "actor": "brutex",
+   "action": "UNICODE_PAYLOAD",
+   "subject": "NSE-M&M",
+   "payload": {
+    "combining": "é",
+    "currency": "₹1,00,000.50",
+    "name": "M&M"
+   },
+   "expected_entry_hash": "bbed0dad433a9a3fcf451b350c98da476d82ba0a2f809e128a0d7ee2c2176321",
+   "expected_line": "{\"action\":\"UNICODE_PAYLOAD\",\"actor\":\"brutex\",\"entry_hash\":\"bbed0dad433a9a3fcf451b350c98da476d82ba0a2f809e128a0d7ee2c2176321\",\"payload\":{\"combining\":\"é\",\"currency\":\"₹1,00,000.50\",\"name\":\"M&M\"},\"prev_hash\":\"8271b0c097e3efcf5f578c326a6cd915c38b4a9efd8cc9ce00ba60c80f9aa512\",\"seq\":3,\"subject\":\"NSE-M&M\",\"ts_utc\":1700000001.5}"
+  },
+  {
+   "seq": 4,
+   "prev_hash": "bbed0dad433a9a3fcf451b350c98da476d82ba0a2f809e128a0d7ee2c2176321",
+   "ts_utc": 1700000002.25,
+   "actor": "brutex",
+   "action": "KEY_SORT",
+   "subject": "sort:case",
+   "payload": {
+    "A": 3,
+    "a": 2,
+    "b": 1
+   },
+   "expected_entry_hash": "02276fee4386b78b78895175f0b5dd97428f8e4eb06b2c7d8d00a4eec8596c4d",
+   "expected_line": "{\"action\":\"KEY_SORT\",\"actor\":\"brutex\",\"entry_hash\":\"02276fee4386b78b78895175f0b5dd97428f8e4eb06b2c7d8d00a4eec8596c4d\",\"payload\":{\"A\":3,\"a\":2,\"b\":1},\"prev_hash\":\"bbed0dad433a9a3fcf451b350c98da476d82ba0a2f809e128a0d7ee2c2176321\",\"seq\":4,\"subject\":\"sort:case\",\"ts_utc\":1700000002.25}"
+  },
+  {
+   "seq": 5,
+   "prev_hash": "02276fee4386b78b78895175f0b5dd97428f8e4eb06b2c7d8d00a4eec8596c4d",
+   "ts_utc": 1700000003.0,
+   "actor": "brutex",
+   "action": "NESTED",
+   "subject": "nest:deep",
+   "payload": {
+    "b": null,
+    "outer": {
+     "a": [
+      3,
+      1,
+      2
+     ],
+     "flags": [
+      true,
+      false,
+      null
+     ],
+     "z": 1
+    }
+   },
+   "expected_entry_hash": "95b5097e9c9773d1c1971096699d8f081ac5927fac9c35d076fd6b3ea6b285ae",
+   "expected_line": "{\"action\":\"NESTED\",\"actor\":\"brutex\",\"entry_hash\":\"95b5097e9c9773d1c1971096699d8f081ac5927fac9c35d076fd6b3ea6b285ae\",\"payload\":{\"b\":null,\"outer\":{\"a\":[3,1,2],\"flags\":[true,false,null],\"z\":1}},\"prev_hash\":\"02276fee4386b78b78895175f0b5dd97428f8e4eb06b2c7d8d00a4eec8596c4d\",\"seq\":5,\"subject\":\"nest:deep\",\"ts_utc\":1700000003.0}"
+  },
+  {
+   "seq": 6,
+   "prev_hash": "95b5097e9c9773d1c1971096699d8f081ac5927fac9c35d076fd6b3ea6b285ae",
+   "ts_utc": 1700000004.75,
+   "actor": "brutex",
+   "action": "EDGE\"QUOTE",
+   "subject": "sub\nject\twith tab",
+   "payload": {
+    "esc": "line\nbreak\ttab\"quote"
+   },
+   "expected_entry_hash": "5d3e394ff7eeebdb8010a369b647ad57ffe8541c7290d4e1073297f59dd09501",
+   "expected_line": "{\"action\":\"EDGE\\\"QUOTE\",\"actor\":\"brutex\",\"entry_hash\":\"5d3e394ff7eeebdb8010a369b647ad57ffe8541c7290d4e1073297f59dd09501\",\"payload\":{\"esc\":\"line\\nbreak\\ttab\\\"quote\"},\"prev_hash\":\"95b5097e9c9773d1c1971096699d8f081ac5927fac9c35d076fd6b3ea6b285ae\",\"seq\":6,\"subject\":\"sub\\nject\\twith tab\",\"ts_utc\":1700000004.75}"
+  },
+  {
+   "seq": 7,
+   "prev_hash": "5d3e394ff7eeebdb8010a369b647ad57ffe8541c7290d4e1073297f59dd09501",
+   "ts_utc": 1700000005.5,
+   "actor": "brutex",
+   "action": "SMALL_FLOATS",
+   "subject": "zoo:small",
+   "payload": {
+    "fixed15": 1000000000000000.0,
+    "fixed4": 0.0001,
+    "neg": -1.5,
+    "tiny": 1e-05
+   },
+   "expected_entry_hash": "ea0c4d8072823361bea4dcf56f657928da011929bdc4d225c7bcae52e880978a",
+   "expected_line": "{\"action\":\"SMALL_FLOATS\",\"actor\":\"brutex\",\"entry_hash\":\"ea0c4d8072823361bea4dcf56f657928da011929bdc4d225c7bcae52e880978a\",\"payload\":{\"fixed15\":1000000000000000.0,\"fixed4\":0.0001,\"neg\":-1.5,\"tiny\":1e-05},\"prev_hash\":\"5d3e394ff7eeebdb8010a369b647ad57ffe8541c7290d4e1073297f59dd09501\",\"seq\":7,\"subject\":\"zoo:small\",\"ts_utc\":1700000005.5}"
+  },
+  {
+   "seq": 8,
+   "prev_hash": "ea0c4d8072823361bea4dcf56f657928da011929bdc4d225c7bcae52e880978a",
+   "ts_utc": 1700000006.125,
+   "actor": "brutex",
+   "action": "INT_BOUNDS",
+   "subject": "zoo:ints",
+   "payload": {
+    "i53": 9007199254740992,
+    "i53p1": 9007199254740993,
+    "imax64": 9223372036854775807
+   },
+   "expected_entry_hash": "90f8f9080da9c4db0124182e7fcea59ca8a153b4dbcb1cbb4adf9c14247222c1",
+   "expected_line": "{\"action\":\"INT_BOUNDS\",\"actor\":\"brutex\",\"entry_hash\":\"90f8f9080da9c4db0124182e7fcea59ca8a153b4dbcb1cbb4adf9c14247222c1\",\"payload\":{\"i53\":9007199254740992,\"i53p1\":9007199254740993,\"imax64\":9223372036854775807},\"prev_hash\":\"ea0c4d8072823361bea4dcf56f657928da011929bdc4d225c7bcae52e880978a\",\"seq\":8,\"subject\":\"zoo:ints\",\"ts_utc\":1700000006.125}"
+  },
+  {
+   "seq": 9,
+   "prev_hash": "90f8f9080da9c4db0124182e7fcea59ca8a153b4dbcb1cbb4adf9c14247222c1",
+   "ts_utc": 1700000007.0,
+   "actor": "brutex",
+   "action": "RUN_COMPLETE",
+   "subject": "run:parity-golden",
+   "payload": {
+    "total": 9
+   },
+   "expected_entry_hash": "af3e038ce75a6437a93ba6da659394785d97ab8c91018dbb4c650821f9ccc475",
+   "expected_line": "{\"action\":\"RUN_COMPLETE\",\"actor\":\"brutex\",\"entry_hash\":\"af3e038ce75a6437a93ba6da659394785d97ab8c91018dbb4c650821f9ccc475\",\"payload\":{\"total\":9},\"prev_hash\":\"90f8f9080da9c4db0124182e7fcea59ca8a153b4dbcb1cbb4adf9c14247222c1\",\"seq\":9,\"subject\":\"run:parity-golden\",\"ts_utc\":1700000007.0}"
+  }
+ ],
+ "standalone_entries": [
+  {
+   "seq": 0,
+   "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+   "ts_utc": 1700000042.5,
+   "actor": "ac\ntor\"\twith specials",
+   "action": "STANDALONE",
+   "subject": "actor:specials",
+   "payload": {
+    "k": "v"
+   },
+   "expected_entry_hash": "322baaac144846273ee096ddc303cafb4c71d286c0e9bf24102b5e70f7688902",
+   "expected_line": "{\"action\":\"STANDALONE\",\"actor\":\"ac\\ntor\\\"\\twith specials\",\"entry_hash\":\"322baaac144846273ee096ddc303cafb4c71d286c0e9bf24102b5e70f7688902\",\"payload\":{\"k\":\"v\"},\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"seq\":0,\"subject\":\"actor:specials\",\"ts_utc\":1700000042.5}"
+  }
+ ],
+ "float_repr_vectors": [
+  {
+   "value": 0.0,
+   "expected_str": "0.0"
+  },
+  {
+   "value": -0.0,
+   "expected_str": "-0.0"
+  },
+  {
+   "value": 0.1,
+   "expected_str": "0.1"
+  },
+  {
+   "value": 1.5,
+   "expected_str": "1.5"
+  },
+  {
+   "value": 1000000000000000.0,
+   "expected_str": "1000000000000000.0"
+  },
+  {
+   "value": 1e+16,
+   "expected_str": "1e+16"
+  },
+  {
+   "value": 1e+17,
+   "expected_str": "1e+17"
+  },
+  {
+   "value": 0.0001,
+   "expected_str": "0.0001"
+  },
+  {
+   "value": 1e-05,
+   "expected_str": "1e-05"
+  },
+  {
+   "value": 5e-324,
+   "expected_str": "5e-324"
+  },
+  {
+   "value": 1700000000.0,
+   "expected_str": "1700000000.0"
+  },
+  {
+   "value": 1718000000.123456,
+   "expected_str": "1718000000.123456"
+  },
+  {
+   "value": 1700000006.125,
+   "expected_str": "1700000006.125"
+  },
+  {
+   "value": 0.6666666666666666,
+   "expected_str": "0.6666666666666666"
+  }
+ ],
+ "canonical_json_vectors": [
+  {
+   "payload": {},
+   "expected_json": "{}"
+  },
+  {
+   "payload": {
+    "b": 1,
+    "a": 2,
+    "A": 3
+   },
+   "expected_json": "{\"A\":3,\"a\":2,\"b\":1}"
+  },
+  {
+   "payload": {
+    "outer": {
+     "z": 1,
+     "a": [
+      3,
+      1,
+      2
+     ]
+    },
+    "flags": [
+     true,
+     false,
+     null
+    ]
+   },
+   "expected_json": "{\"flags\":[true,false,null],\"outer\":{\"a\":[3,1,2],\"z\":1}}"
+  },
+  {
+   "payload": {
+    "currency": "₹",
+    "name": "M&M",
+    "combining": "é"
+   },
+   "expected_json": "{\"combining\":\"é\",\"currency\":\"₹\",\"name\":\"M&M\"}"
+  },
+  {
+   "payload": {
+    "neg_zero": -0.0,
+    "sci": 1e+16,
+    "sub": 5e-324,
+    "big": 1152921504606846976
+   },
+   "expected_json": "{\"big\":1152921504606846976,\"neg_zero\":-0.0,\"sci\":1e+16,\"sub\":5e-324}"
+  },
+  {
+   "payload": {
+    "esc": "line\nbreak\ttab\"quote"
+   },
+   "expected_json": "{\"esc\":\"line\\nbreak\\ttab\\\"quote\"}"
+  }
+ ]
+}
