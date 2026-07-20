@@ -5,19 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BruteX — Fetch windows</title>
 <style>
-  :root {
-    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
-    --border: #1E222D; --border-strong: #2B313F;
-    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
-    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
-    --red: #FF5C5C;
-    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
-    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
-    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
-    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
-    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
-  }
+  /* Design tokens + the header/brandmark/logo/topnav skins + the table/chip/
+     tab-bar/skeleton components come from the TWO shared sheets linked below
+     (bx-theme.css, then bx-design.css) — the page's former inline :root token
+     fork is DELETED after a var-census proved every var() this page still uses
+     (--bg / --surface / --surface-2 / --surface-3 / --border / --border-strong
+     / --text / --text-bright / --muted / --green / --red / --blue / --yellow /
+     --font-num / --z-sticky and the bxFadeInDown/bxFadeInUp keyframes) resolves
+     via the linked sheets (Golden Rule #11 COMMON — one token source). Only
+     page-LAYOUT rules stay inline. */
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); height: 100%; }
   body {
@@ -28,31 +24,13 @@
       radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
       var(--bg);
   }
-  @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1);} 50% { opacity: .5; transform: scale(.9);} }
-  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
-  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
-  .topnav a:hover { color:var(--text-bright); }
-  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
-
-  header {
-    display:flex; align-items:center; gap:14px; padding:16px 24px;
-    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
-  }
-  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
-    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .sub { color:var(--muted); font-size:12px; }
-  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
-  .topnav a { color:var(--blue); text-decoration:none; }
-  .topnav .sep { color:var(--border-strong); }
   .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
   .live .dot { width:9px; height:9px; border-radius:50%; background:var(--green);
     box-shadow:0 0 12px var(--green); animation: pulse 1.6s ease-in-out infinite; }
 
   .subnav { display:flex; gap:10px; padding:12px 24px; border-bottom:1px solid var(--border);
-    animation: fadeInDown .6s .04s ease both; flex-wrap:wrap; }
+    animation: bxFadeInDown .6s .04s ease both; flex-wrap:wrap; }
   .subnav a { font-size:13px; text-decoration:none; color:var(--muted); padding:6px 12px;
     border:1px solid var(--border-strong); border-radius:999px; transition:.16s; }
   .subnav a:hover { border-color:var(--blue); color:var(--text); }
@@ -61,7 +39,7 @@
   .subnav a.hub { margin-left:auto; color:var(--blue); border-color:var(--blue); }
 
   .band { display:flex; align-items:center; gap:28px; padding:16px 24px; flex-wrap:wrap;
-    border-bottom:1px solid var(--border); animation: fadeInDown .6s .06s ease both; }
+    border-bottom:1px solid var(--border); animation: bxFadeInDown .6s .06s ease both; }
   .kpi { display:flex; flex-direction:column; gap:2px; }
   .kpi .v { font-size:24px; font-weight:800; color:var(--text-bright); font-variant-numeric:tabular-nums; }
   .kpi .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
@@ -69,18 +47,17 @@
   .kpi .v.bad { color:var(--red); }
   #status { margin-left:auto; font-size:12px; color:var(--muted); }
 
-  .panelwrap { flex:1; padding:14px 24px 24px; animation: fadeInUp .5s ease both; min-height:0; display:flex; }
+  .panelwrap { flex:1; padding:14px 24px 24px; animation: bxFadeInUp .5s ease both; min-height:0; display:flex; }
   #panel { flex:1; overflow:auto; background:var(--surface); border:1px solid var(--border); border-radius:14px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
-    font-weight:700; text-align:left; padding:10px 14px; z-index:1; font-size:11px;
-    text-transform:uppercase; letter-spacing:.5px; }
-  tbody td { padding:9px 14px; border-top:1px solid var(--border); }
-  tbody tr:hover { background:var(--surface-2); }
+  /* Table skin: bx-design.css .bx-table --dense --zebra + .num own the grid now
+     (the local table/thead/tbody duplicates are removed; #panel carries
+     .bx-tablewrap so the uppercase thead sticks inside the scroller). */
   .sym { font-weight:700; color:var(--text-bright); }
-  .err { color:var(--red); font-family:"SF Mono",Menlo,Consolas,monospace; font-size:11.5px; }
+  .err { color:var(--red); font-family:var(--font-num); font-size:11.5px; }
   .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
-  .num { font-variant-numeric:tabular-nums; }
+  /* Muted detail beside a status chip (the honesty label + the x/3 streak +
+     the quiet retry-depth states) — tokenized (was the inline #9aa4b2 hex). */
+  .wlbl { color:var(--muted); font-weight:400; }
 
   /* Row pager (DEC-WINDOWS-COUNTS-ONLY-001 — the db.html .pager idiom). */
   .pager { display:flex; align-items:center; gap:14px; padding:10px 24px;
@@ -105,6 +82,7 @@
   }
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
+<link rel="stylesheet" href="/static/bx-design.css">
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <!-- The ONE shared poll-discipline core (DEC-FRONTEND-LATENCY-HARDENING-001,
@@ -162,18 +140,21 @@
          ledger can never melt the page. PLANNED rows ship only on the explicit
          Planned chip; the FAILED KPI counts ONE row per aborted series' failing
          cursor — the verdict banner's pending count is the full deferred set. -->
-    <div class="subnav" style="border:none;padding:0;" id="mktfilter">
-      <a href="#" data-mkt="" class="active">All</a>
-      <a href="#" data-mkt="spot">📈 Spot</a>
-      <a href="#" data-mkt="options">⛓️ Options</a>
-      <a href="#" data-mkt="futures">🔮 Futures</a>
+    <!-- Segmented filter-tab bars (bx-design.css .bx-tabbar/.bx-tab — replaces
+         the inline border:none .subnav overrides; SAME ids + data-* hooks, the
+         chips stay server-driven re-fetch triggers through wireChips below). -->
+    <div class="bx-tabbar" id="mktfilter" role="tablist" aria-label="Market filter">
+      <a href="#" role="tab" aria-selected="true" data-mkt="" class="bx-tab on active">All</a>
+      <a href="#" role="tab" aria-selected="false" data-mkt="spot" class="bx-tab">📈 Spot</a>
+      <a href="#" role="tab" aria-selected="false" data-mkt="options" class="bx-tab">⛓️ Options</a>
+      <a href="#" role="tab" aria-selected="false" data-mkt="futures" class="bx-tab">🔮 Futures</a>
     </div>
-    <div class="subnav" style="border:none;padding:0;" id="stfilter">
-      <a href="#" data-st="" class="active">Active</a>
-      <a href="#" data-st="FAILED">FAILED</a>
-      <a href="#" data-st="EMPTY">EMPTY</a>
-      <a href="#" data-st="PLANNED">Planned</a>
-      <a href="#" data-st="SUCCESS">SUCCESS</a>
+    <div class="bx-tabbar" id="stfilter" role="tablist" aria-label="Status filter">
+      <a href="#" role="tab" aria-selected="true" data-st="" class="bx-tab on active">Active</a>
+      <a href="#" role="tab" aria-selected="false" data-st="FAILED" class="bx-tab">FAILED</a>
+      <a href="#" role="tab" aria-selected="false" data-st="EMPTY" class="bx-tab">EMPTY</a>
+      <a href="#" role="tab" aria-selected="false" data-st="PLANNED" class="bx-tab">Planned</a>
+      <a href="#" role="tab" aria-selected="false" data-st="SUCCESS" class="bx-tab">SUCCESS</a>
     </div>
     <span id="status"></span>
   </div>
@@ -208,7 +189,17 @@
   </details>
 
   <div class="panelwrap">
-    <div id="panel"><div class="empty">loading…</div></div>
+    <!-- First paint = .bx-skel shimmer ghosts (bx-design.css), resolved by the
+         first poll tick — replaces the bare "loading…" string. #panel carries
+         .bx-tablewrap so the shared sticky-thead scroller skin applies. -->
+    <div id="panel" class="bx-tablewrap">
+      <div class="bx-skel-grid" aria-hidden="true">
+        <div class="bx-skel bx-skel-row"></div>
+        <div class="bx-skel bx-skel-row"></div>
+        <div class="bx-skel bx-skel-row"></div>
+        <div class="bx-skel bx-skel-row"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Row pager (DEC-WINDOWS-COUNTS-ONLY-001): the page requests a SANE page
@@ -255,7 +246,17 @@ function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 
 function winStatus(r) {
   const v = String(r.status == null ? "" : r.status).toUpperCase();
-  const color = v === "SUCCESS" ? "#34d399" : v === "FAILED" ? "#f87171" : "#9aa4b2";
+  /* 5-state severity chip (bx-design.css .bx-chip.solid — tokenized classes,
+     never a hardcoded hex): SUCCESS→ok · FAILED→bad · EMPTY→warn ·
+     SKIPPED→muted · PLANNED→info. The old 3-bucket colored-text ternary
+     collapsed EMPTY/SKIPPED/PLANNED into one flat gray span. */
+  const sev = v === "SUCCESS" ? "ok"
+    : v === "FAILED" ? "bad"
+    : v === "EMPTY" ? "warn"
+    : v === "PLANNED" ? "info"
+    : "muted"; /* SKIPPED + any unknown status stay neutral */
+  const chipOpen = '<span class="bx-chip bx-chip--sm solid ' + sev + '"';
+  const chipRest = ">" + esc(v || "—") + "</span>";
   /* Honesty label (empty-vs-failed, server-derived `status_label` — ONE common
      backend function feeds both payload paths): EMPTY/SKIPPED spell out
      "vendor confirmed no trades (N clean attempt(s)[ — settled])" and FAILED
@@ -265,8 +266,16 @@ function winStatus(r) {
      twice); a SUCCESS/PLANNED label equals the status, so nothing doubles. */
   const label = r.status_label == null ? "" : String(r.status_label);
   if (label && label !== v) {
-    return '<span style="color:' + color + ';font-weight:700;">' + esc(v || "—") + "</span>"
-      + ' <span style="color:#9aa4b2;font-weight:400;">' + esc(label) + "</span>";
+    /* Depth title (values ALREADY served on every row — `empty_streak` +
+       `empty_threshold`): this branch REPLACES the visible x/3 span, so the
+       streak-vs-threshold depth stays hover-inspectable on the chip; wording
+       mirrors the winhelp legend, never the visible label text. */
+    const streakTitle = (v === "EMPTY" || v === "SKIPPED") && r.empty_streak != null
+      ? ' title="clean-empty streak ' + esc(r.empty_streak) + "/" + esc(emptyThreshold)
+        + ' — a 429/timeout preserves the streak, only a SUCCESS resets it"'
+      : "";
+    return chipOpen + streakTitle + chipRest
+      + ' <span class="wlbl">' + esc(label) + "</span>";
   }
   /* Fallback (an older payload without status_label): EMPTY rows keep the
      genuine clean-empty streak vs the promotion threshold (window_ledger R1):
@@ -274,9 +283,9 @@ function winStatus(r) {
      not evidence of data), only a SUCCESS resets it, so "attempts 2, EMPTY 2/3"
      is by-design retrying, not a stuck row. */
   const streak = v === "EMPTY" && r.empty_streak != null
-    ? ' <span style="color:#9aa4b2;font-weight:400;">' + esc(r.empty_streak) + "/" + esc(emptyThreshold) + "</span>"
+    ? ' <span class="wlbl">' + esc(r.empty_streak) + "/" + esc(emptyThreshold) + "</span>"
     : "";
-  return '<span style="color:' + color + ';font-weight:700;">' + esc(v || "—") + "</span>" + streak;
+  return chipOpen + chipRest + streak;
 }
 
 /* In-pull re-fetch depth of the LAST pull (DEC-WINDOW-INPULL-FETCHES-001;
@@ -295,14 +304,16 @@ function winStatus(r) {
    counted here (see the winhelp legend). */
 function winFetches(r) {
   const n = Number(r.in_pull_fetches || 0);
-  if (n <= 0) return '<span style="color:#787B86;">—</span>';
-  if (n === 1) return '<span style="color:#9aa4b2;">1</span>';
+  /* The quiet states carry their legend meanings on hover too (depth-only
+     titles — never a repeat of the visible glyph). */
+  if (n <= 0) return '<span class="wlbl" title="a planned window not yet fetched this pull">—</span>';
+  if (n === 1) return '<span class="wlbl" title="clean first-try: recorded on the first in-pull fetch">1</span>';
   const kind = r.status === "FAILED"
     ? "transient 429/timeout re-attempts"
     : r.status === "EMPTY"
     ? "empty re-fetches"
     : "empty/transient re-fetches";
-  return '<span style="color:#FFB74D;font-weight:700;" title="re-fetched ' + esc(n)
+  return '<span class="bx-chip bx-chip--sm warn" title="re-fetched ' + esc(n)
     + '× within this pull (in-pull retry depth: ' + esc(kind) + ')">↻ ' + esc(n) + "</span>";
 }
 
@@ -359,7 +370,14 @@ function wireChips(boxId, key, setter) {
     a.addEventListener("click", ev => {
       ev.preventDefault();
       setter(a.dataset[key]);
-      document.querySelectorAll("#" + boxId + " a").forEach(x => x.classList.toggle("active", x === a));
+      /* .bx-tab selected state keys off .on / aria-selected (bx-design.css);
+         the legacy "active" token stays toggled as a stable hook. */
+      document.querySelectorAll("#" + boxId + " a").forEach(x => {
+        const on = x === a;
+        x.classList.toggle("active", on);
+        x.classList.toggle("on", on);
+        x.setAttribute("aria-selected", on ? "true" : "false");
+      });
       winOffset = 0; // a fresh filter selection starts at page 1
       lastPayloadKey = null; // manual filter flip: force the next render, never a stale skip
       repoll();
@@ -369,13 +387,24 @@ function wireChips(boxId, key, setter) {
 wireChips("mktfilter", "mkt", v => { marketFilter = v; });
 wireChips("stfilter", "st", v => { statusFilter = v; });
 
+/* Row depth-title (design-system re-author): `first_seen_at` /
+   `last_attempt_at` are ALREADY served on every row (db_view._window_row,
+   IST-formatted per the store-UTC/display-IST law) but were never surfaced —
+   title-only depth on the symbol cell; never repeats a visible cell value. */
+function winDepthTitle(r) {
+  const seen = r.first_seen_at ? "first seen " + r.first_seen_at + " IST" : "";
+  const att = r.last_attempt_at ? "last attempt " + r.last_attempt_at + " IST" : "";
+  const t = seen && att ? seen + " · " + att : (seen || att);
+  return t ? ' title="' + esc(t) + '"' : "";
+}
+
 /* One esc()'d row-string builder shared by the full rebuild AND the in-place
    tbody patch below (the db.html gridRowsHtml split, DEC-DASHBOARD-JS-PERF-001
    idiom) — every payload value stays escaped exactly as before. */
 function windowsRowsHtml(rows) {
   return rows.map(r =>
     "<tr>"
-    + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
+    + "<td" + winDepthTitle(r) + '><span class="sym">' + esc(r.symbol) + "</span></td>"
     + "<td>" + esc(r.market) + "</td>"
     + "<td>" + esc(r.interval) + "</td>"
     + "<td>" + esc(r.window_start || "") + "</td>"
@@ -384,7 +413,7 @@ function windowsRowsHtml(rows) {
     + '<td class="num">' + esc(num(r.bars)) + "</td>"
     + '<td class="num">' + esc(num(r.attempts)) + "</td>"
     + '<td class="num">' + winFetches(r) + "</td>"
-    + "<td>" + esc(r.last_error || "") + "</td>"
+    + '<td class="err">' + esc(r.last_error || "") + "</td>"
     + "</tr>"
   ).join("");
 }
@@ -410,7 +439,7 @@ function renderWindows(rows) {
     return;
   }
   panel.innerHTML =
-    "<table><thead><tr>"
+    '<table class="bx-table bx-table--dense bx-table--zebra bx-thead-sticky"><thead><tr>'
     + "<th>Symbol</th><th>Market</th><th>Interval</th><th>Window start</th><th>Window end</th>"
     + "<th>Status</th><th>Bars</th>"
     + '<th title="number of PULLS that touched this window (one per re-pull)">Attempts</th>'
