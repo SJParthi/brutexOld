@@ -91,6 +91,7 @@ pl = pytest.importorskip("polars")
 
 from brutex.data import lake_rust_render as lrr  # noqa: E402
 from brutex.data import option_parquet_writer as opw  # noqa: E402
+from brutex.data.lake_write_epoch import EPOCH_RELPATH  # noqa: E402
 from brutex.data.models import OptionBar  # noqa: E402
 from brutex.data.option_parquet_writer import (  # noqa: E402
     OptionParquetWriter,
@@ -633,18 +634,23 @@ class TestWholePathWriteParity:
 
 
 def _tree_state(root: Path) -> dict[str, str]:
-    """Recursive relpath → sha256 (the heal-suite idiom), MINUS ``.locks/``.
+    """Recursive relpath → sha256 (the heal-suite idiom), MINUS apparatus.
 
     The flock sidecar names are ``sha256(<absolute dest>)`` — path-derived,
     so two twin lakes at different tmp roots legitimately carry different
     (empty) lock filenames; comparing them would fail on apparatus, not
-    data. Everything else — options tree, quarantine before-images, the
-    heal sentinel — is compared byte-for-byte.
+    data. The write-epoch marker (``EPOCH_RELPATH`` —
+    DEC-LAKE-HEAL-STARTUP-EPOCH-001) is likewise apparatus, not data: every
+    bump writes a FRESH ``time_ns-pid-counter`` opaque token, so two twin
+    heal runs can never carry equal marker bytes BY DESIGN, and the token is
+    contractually outside byte-identity (never in run identity / partition
+    bytes / ``data_snapshot_hash``). Everything else — options tree,
+    quarantine before-images, the heal sentinel — is compared byte-for-byte.
     """
     out: dict[str, str] = {}
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
         rel = path.relative_to(root).as_posix()
-        if rel.startswith(".locks/"):
+        if rel.startswith(".locks/") or rel == EPOCH_RELPATH:
             continue
         out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
     return out
