@@ -52,6 +52,22 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u64s_nthreads",
         "metrics_fold_recency",
         "metrics_fold_trades",
+        # DEC-OPTCOST-TAILS-RUST-001 (MIGRATION.md #2054, renumbered from #1962) — the 11 optcost
+        # tail-kernel pyfunctions (a deliberate, reviewed surface addition;
+        # fenced additive entries — the facade rebuilds ``__all__`` from
+        # ``fno_math.__all__``, so the shim's append-only optcost symbols
+        # reach this frozen contract by construction).
+        "optcost_atm_offset",
+        "optcost_grid_around_atm",
+        "optcost_history_lookup",
+        "optcost_moneyness_classify",
+        "optcost_next_monthly_expiry",
+        "optcost_next_weekly_expiry",
+        "optcost_offset_strike",
+        "optcost_regime_rate",
+        "optcost_round_to_atm",
+        "optcost_strike_offset_from_atm",
+        "optcost_strike_step",
         "popcount_bytes",
         "stats_cpcv_pass_count",
         # DEC-METRICS-RUST-STATS-002 — the stats-tail kernels (a deliberate,

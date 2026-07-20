@@ -933,7 +933,7 @@ def _smoke(ctx: _Ctx, imports: str = "import trading_core, fno_math") -> int:
 
 
 def _required_specs() -> tuple[WheelSpec, ...]:
-    """The REQUIRED subset of :data:`WHEEL_SET` (repair-rebuild candidates)."""
+    """The REQUIRED subset of ``WHEEL_SET`` (the §4.6 repair-probe candidates)."""
     return tuple(s for s in WHEEL_SET if s.required)
 
 

@@ -1358,6 +1358,30 @@ jobs:
           else
             echo "(brutex.feed_rust test file not present yet — gate inactive)"
           fi
+          # 19c3 · brutex.optcost_rust (DEC-OPTCOST-TAILS-RUST-001) — the
+          #        flag-gated options-cost tail seam facade (default OFF).
+          #        The gate's 100% guarantee rests on this job's HARD
+          #        fno_math wheel install (the exit-1 step above), which
+          #        makes the wheel-gated differential classes always run
+          #        beside the wheel-free fake-kernel suite. The fake subset
+          #        ALSO measures 100.00% on its own since the round-1 review
+          #        closed its 5-line kernel-OK/oracle-arm gap, but that
+          #        wheel-free property is UNENFORCED — never rely on it when
+          #        re-wiring this stanza (round-1 coverage finding).
+          #        The SIX call-site module gates in this job
+          #        (brutex.costs.constants · brutex.data.moneyness ·
+          #        brutex.options.{expiry_calendar, lot_size_history,
+          #        strike_grid, strike_rules}) share the same coupling:
+          #        each gained a flag-ON branch whose coverage rests on the
+          #        hard wheel install too — wheel absent ⇒ the importorskip
+          #        ON test skips ⇒ the gated line goes uncovered ⇒ the gate
+          #        FAILS under --cov-fail-under=100. Fail-closed, never a
+          #        false green (round-2 coverage note).
+          if compgen -G "tests/unit/test_optcost_rust.py" > /dev/null; then
+            pytest --cov=brutex.optcost_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_optcost_rust.py
+          else
+            echo "(brutex.optcost_rust test file not present yet — gate inactive)"
+          fi
           # 19d · brutex.costs.types (95 stmts, 14 branches, 75 tests —
           #       incl. the DEC-ETC-REGIME-HISTORY-001 UnverifiedCostRegimeError
           #       direct-construction tests, REQUIRED here because this gate

@@ -7061,7 +7061,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             )
 
         def _work() -> dict[str, Any]:
-            """Compute the missing-sessions payload off the memoised rows."""
+            """Serve the payload from the generation-keyed cache (threadpool worker).
+
+            The cache hit is O(1) per write generation; a miss/dirty poll pays
+            one ``_recompute`` scan, then projects the requested filter window.
+            """
             rows = _missing_sessions_cache.get_or_compute(
                 "coverage_missing_sessions",
                 generation=_summary_cache.generation,

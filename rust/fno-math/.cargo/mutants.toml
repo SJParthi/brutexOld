@@ -22,14 +22,21 @@
 #                      Added EXPLICITLY — this file is an allowlist, so a new
 #                      module is NOT covered "automatically" (the #1614
 #                      unwired-gate lesson).
-# 680 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from
-# this dir with the slice-6 stats scope added: metrics 358 + trade_sim 167 +
-# python 65 + lib 9 + stats/cpcv 81 — the prior 599 was the 2026-07-08
-# pre-slice-6 measurement). The +81 (+13.5%) growth stays inside the 6-shard
-# matrix budget: the #1597 rehearsal's worst fno-math shard ran 65 min vs the
-# 120-min cap, and 680/6 ≈ 113 mutants/shard vs the prior 100 — an ~13% load
-# rise on a 55-min margin; re-shard only if a scheduled run approaches the
-# cap (the pre-decided +1-shard dial).
+# 1177 mutants measured 2026-07-18 (`cargo mutants --list | wc -l`,
+# cargo-mutants 27.1.0 — the mutation.yml-pinned version — run from this dir
+# with the optcost scope added: metrics 358 + trade_sim 165 + python 65 +
+# lib 9 + stats/cpcv 81 + optcost 499 [mod 82 + regime 45 + moneyness 110 +
+# lots 40 + expiry 115 + strike 107]. The prior recorded 680 was the
+# 2026-07-11 measurement; the SAME pre-optcost files measure 678 under
+# today's 27.1.0 binary — a 2-mutant trade_sim tool-build drift (167→165),
+# disclosed not papered over). The +499 (+73%) growth does NOT fit the
+# 6-shard budget: 1177/6 ≈ 196 mutants/shard vs the prior 113 would put the
+# #1597-derived worst-shard estimate past the 120-min cap (65 min actual at
+# 113/shard ⇒ ~0.575 min/mutant worst-shard ⇒ ~113 min actual, ~135 min at
+# the +20% band) — so the matrix takes the pre-decided dial TWICE (6→8):
+# 1177/8 ≈ 147/shard ⇒ ~85 min actual / ~102 min at +20%, restoring the
+# documented >= 18-min margin posture (see mutation.yml's fno-math shard
+# block).
 # Measurement history, kept honest (convergence round 1 — the counts here must
 # describe the SHIPPED tree, Golden Rule #1): the below_parallel_threshold
 # extraction + .max() reshapes brought the pre-extraction 576 down to 556
@@ -41,6 +48,15 @@
 # u128'` 5/5 + `-F 'MaskWord for u64|below_parallel_threshold'` 10/10). The
 # mutation.yml shard-budget bands absorb future small drift; this growth was
 # NOT small (+7.7%), so the matrix took the #1597 pre-decided +1 shard (5→6).
+#
+#   src/optcost/*.rs — options-cost tail kernels (DEC-OPTCOST-TAILS-RUST-001):
+#                      regime-rate lookup / moneyness / strike-lot-expiry
+#                      decision math consumed by the default-OFF
+#                      BRUTEX_OPTCOST_TAILS_RUST seam (a silent mutant here
+#                      would flip a cost-refusal code or a strike/lot/expiry
+#                      decision). Added EXPLICITLY — this file is an
+#                      allowlist, so a new module is NOT covered
+#                      "automatically" (the #1614 unwired-gate lesson).
 #
 # DELIBERATELY OUT (documented, not silent — Golden Rule #10):
 #   compat/*    — 299 mutants; TickVault-compat surface (config defaults, NSE
@@ -66,10 +82,21 @@
 # the pre-hoist tree, trade_sim 167 / python 65). The hoist moved the
 # MaskWord-impl mutants out of trade_sim (167→155) into mask_word; the
 # u128 count twins + generic-core delegators grew python.rs 65→79.
-# 692/6 ≈ 116 mutants/shard stays inside the 6-shard matrix budget (see
-# mutation.yml's shard arithmetic — ≥ ~20 min margin at +20% on the worst
-# end); the #1597 pre-decided +1-shard dial stands if a scheduled run
+# 692/6 ≈ 116 mutants/shard stayed inside the then-6-shard matrix budget;
+# the #1597 pre-decided +1-shard dial stands if a scheduled run
 # approaches the cap.
+#
+# DEC-OPTCOST-TAILS-RUST-001 merge-reconcile (2026-07-19, over main tip
+# 4c11f7aaf — MIGRATION.md #2054, renumbered from #1962): the optcost scope UNIONS with the
+# DEC-ENUM-KERNEL-U128-001 × slice-6 tree above. Re-measured on the MERGED
+# tree under the CI-pinned cargo-mutants 27.1.0 (`cargo mutants --list |
+# wc -l` from this dir): 1191 total = the 692 above + optcost 499
+# (expiry 115 + moneyness 110 + strike 107 + mod 82 + regime 45 +
+# lots 40 — the per-file split identical to the lane's pre-merge #1957-numbered entry (now #2054, via #1962)
+# census; the pre-merge lane total 1177 = 678 pre-optcost + 499, now
+# superseded by 692 + 499). 1191/8 ≈ 149 mutants/shard on the 8-shard
+# matrix (the #1597 +1-shard dial taken TWICE — see mutation.yml's shard
+# arithmetic; ~86 min actual / ~103 min at +20% vs the 120-min cap).
 examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",
@@ -77,4 +104,5 @@ examine_globs = [
     "src/lib.rs",
     "src/mask_word.rs",
     "src/stats/*.rs",
+    "src/optcost/*.rs",
 ]
