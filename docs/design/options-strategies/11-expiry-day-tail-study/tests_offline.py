@@ -1,6 +1,6 @@
 """Offline, deterministic tests for ``bhavcopy_tail_study.py``.
 
-Run:  python -m pytest docs/research/expiry_day_option_selling/tests_offline.py
+Run:  python -m pytest docs/design/options-strategies/11-expiry-day-tail-study/tests_offline.py
 
 Self-contained BY DESIGN: lives beside the harness (NOT under the repo's
 ``tests/`` tree) so the repo coverage/mutation gates are not dragged in,

@@ -83,7 +83,7 @@ so the pessimistic tail is a **floor** on the true adverse tail
 ## Run commands (operator box, open egress)
 
 ```bash
-cd docs/research/expiry_day_option_selling
+cd docs/design/options-strategies/11-expiry-day-tail-study
 
 # 1. MANDATORY first-run probes — one file per format era, eyeball the rows:
 python bhavcopy_tail_study.py --smoke 2024-06-06     # old-format era
@@ -131,7 +131,7 @@ gross of costs (see README)*.
 ## Offline tests (this container / any box, no network)
 
 ```bash
-python -m pytest docs/research/expiry_day_option_selling/tests_offline.py
+python -m pytest docs/design/options-strategies/11-expiry-day-tail-study/tests_offline.py
 ```
 
 39 tests: both format parsers over byte-realistic synthetic zips (built
@@ -148,8 +148,9 @@ untouched.
 
 ## Posture
 
-Standalone research tooling under `docs/research/` (house precedent:
-`docs/groww/probe/postclose_settle_probe.py`). Stdlib-only, imports
+Standalone research tooling under the docs tree
+(`docs/design/options-strategies/11-expiry-day-tail-study/`; house
+precedent: `docs/groww/probe/postclose_settle_probe.py`). Stdlib-only, imports
 nothing from `brutex/` (repo values copied with file:line citations),
 `ruff check` + `ruff format` + `mypy --strict` clean, no pandas
 (repo-wide ban). It never writes into the repo — cache and results land

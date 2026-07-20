@@ -2,7 +2,7 @@
 
 > **Status:** FINAL (research output only; no repo source modified; no
 > decision ID minted — the companion harness + this document live under
-> `docs/research/expiry_day_option_selling/`).
+> `docs/design/options-strategies/11-expiry-day-tail-study/`).
 > **Evidence verified as of 2026-07-18; document finalized 2026-07-20.**
 > File:line citations were verified against `/home/user/bruteX` @ branch
 > `claude/rust-slice-t10-lake-keys` on 2026-07-18; the harness citations
@@ -164,6 +164,8 @@ marked). Full detail in the feasibility dossier; consolidated here.
 ---
 
 ## 4. Fill realism under DEC-FILL-WORST-CASE-ONLY-001 (#1825)
+
+> See also: [08 — Seller Blow-Ups and Tail Events](../08-seller-blowups-and-tail-events.md) (what the worst days did to short premium — the tail catalogue this chapter's fill law must reproduce).
 
 ### 4.1 The mechanism (code-cited)
 
@@ -456,6 +458,8 @@ Acceptance rule for §6 (pre-registered): the study's verdict keys on the
 ---
 
 ## 7. External evidence (compiled 2026-07-18; every claim carries its source URL; figures are as reported by the cited source and should be re-verified against primaries before being quoted as fact)
+
+> See also: [10 — Seller Edge & Execution Evidence](../10-seller-edge-and-execution-evidence.md) (the variance-risk-premium evidence review + defense-time fill realism — the edge-side complement to this section's tail-side evidence).
 
 ### 7.1 SEBI retail F&O loss studies — the base rate
 

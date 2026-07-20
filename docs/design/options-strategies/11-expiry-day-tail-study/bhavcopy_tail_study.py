@@ -40,8 +40,10 @@ Honest limits (Golden Rule #10)
 
 Standalone-tool posture
 -----------------------
-This file lives under ``docs/research/`` (the house research-probe
-precedent — see ``docs/groww/probe/postclose_settle_probe.py``): it is
+This file lives under the docs tree
+(``docs/design/options-strategies/11-expiry-day-tail-study/``; the house
+research-probe precedent — see
+``docs/groww/probe/postclose_settle_probe.py``): it is
 stdlib-only, imports NOTHING from ``brutex/`` (values copied with
 file:line citations instead), and is deliberately outside the repo's
 coverage/mutation gates. Its offline test suite is
