@@ -53,22 +53,37 @@ _MC_ENV = "BRUTEX_SWEEP_MC_PERMUTATIONS"
 
 def _trading_bars() -> list[CandleBar]:
     """The proven trade-PRODUCING fixture (the results-depth wiring suite's
-    12-day upward-drift bars, verbatim shape) — finalists survive the hard
-    gates, so the Stage-4 cascade genuinely runs and writes its manifest."""
+    12-day GAP-UP drift bars, verbatim shape — RE-SYNCED to that named source
+    at the #1467 fold: under the woven DEC-FILL-WORST-CASE-ONLY-001 law a
+    worst-case entry fills at the bar HIGH, so the member's old ±0.5-pad
+    drift SL'd every entry on its own bar and persisted ZERO finalists —
+    no cascade, no manifest; narrow gap-up bars rank at sl=80/tp=50) —
+    finalists survive the hard gates, so the Stage-4 cascade genuinely runs
+    and writes its manifest."""
     out: list[CandleBar] = []
+    cycle = 0
     for d in range(12):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar (below-EMA bits fire)
+                o = price
+                close, hi, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                close, hi, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                close, hi, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
+                    open=Decimal(str(round(o, 2))),
                     high=Decimal(str(round(hi, 2))),
                     low=Decimal(str(round(lo, 2))),
                     close=Decimal(str(round(close, 2))),
