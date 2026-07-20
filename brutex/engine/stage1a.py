@@ -175,7 +175,7 @@ _BATCH_FRACTAL_K: Final[int] = 2
 
 
 def _fib_dependent_bits() -> int:
-    """Build the u128 mask of the Group-4 Fib-proximity bits (19-29).
+    """Build the u128 mask of the Fib-proximity bits (19-29 + 69-71).
 
     These bits depend on the SWEPT Fib anchor (DEC-NIFTY-FIB-AXIS-001). They are
     cleared on a day whose Fib anchor is cold (no prior daily candle for prev-day;
@@ -201,6 +201,14 @@ def _fib_dependent_bits() -> int:
         B.BIT_NEAR_FIB_1618,
         B.BIT_NEAR_FIB_200,
         B.BIT_NEAR_FIB_2618,
+        # Fibonacci Extended (bits 69-71, DEC-FIB-TEMPLATE-EXPRESS-001): the
+        # bullish 23.6/78.6 rungs + the 424 extension read the SAME swept-anchor
+        # FibLevels, so they ride the identical fib-cold / anchor-cold clears.
+        # The Swing-Proximity bits 72/73 are deliberately NOT here — they read
+        # MarketStructureState (None-abstain), exactly like BOS/CHoCH 56-59.
+        B.BIT_NEAR_FIB_BULL_236,
+        B.BIT_NEAR_FIB_BULL_786,
+        B.BIT_NEAR_FIB_424,
     )
     mask = 0
     for bit in fib_bits:
@@ -971,6 +979,7 @@ class Stage1AMatrixBuilder:
             pdh_pdl_bps=self._proximity.pdh_pdl_proximity_bps,
             fib_bps=self._proximity.fib_proximity_bps,
             gap_mid_bps=self._proximity.gap_mid_proximity_bps,
+            swing_bps=self._proximity.swing_proximity_bps,
             prior_n=self._prior_n,
             fractal_k=_BATCH_FRACTAL_K,
             apply_1day_mask=self._apply_1day_mask,
@@ -1088,6 +1097,15 @@ class Stage1AMatrixBuilder:
             choch_bullish=choch_bull,
             choch_bearish=choch_bear,
         )
+        # Swing-Proximity levels (bits 72/73, DEC-FIB-TEMPLATE-EXPRESS-001):
+        # read strictly POST-update from the SAME look-ahead-clean state via
+        # the PyO3 getters — at bar N the fields can only hold highs/lows of
+        # bars <= N-k. ``None`` until the first k-confirmed swing exists; the
+        # contract-roll hard reset (`_roll_to_new_contract` recreates
+        # ``self._structure``) returns them to ``None`` — no level ever
+        # crosses a roll basis gap (the D11 law holds for swings for free).
+        last_swing_high = self._structure.last_swing_high
+        last_swing_low = self._structure.last_swing_low
 
         # ── Group 14: SuperTrend position (bits 64/65) ──
         # The integer TR/Wilder-ATR/band-ratchet/flip law runs IN RUST
@@ -1131,6 +1149,8 @@ class Stage1AMatrixBuilder:
             # session's first TF bar — which MINTS the level from its own
             # extremes (X2) — evaluates with NO level; later bars carry it.
             gap_mid_paisa=None if first_bar_of_day else self._gap_mid_paisa,
+            last_swing_high_paisa=last_swing_high,
+            last_swing_low_paisa=last_swing_low,
         )
 
         mask = evaluate_atoms(snapshot, self._proximity, self._prior_history)

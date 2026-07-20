@@ -236,7 +236,11 @@ class TestReadableMask:
         # rejected list to the accepted boundary set.
         assert _row(mask_bits=mask).mask_bits == mask
 
-    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 69])
+    # The out-of-range probe moved 1 << 69 -> 1 << 74 at the fib-template
+    # express re-stack (DEC-FIB-TEMPLATE-EXPRESS-001; TOTAL_CONDITIONS 69 -> 74
+    # on the woven train — bits 69-73 are declared REAL conditions, so 74 is
+    # the new first-undeclared bit).
+    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 74])
     def test_mask_bits_out_of_range_rejected(self, bad: int) -> None:
         with pytest.raises(ResultsStoreError, match="mask_bits"):
             _row(mask_bits=bad)

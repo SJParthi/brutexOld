@@ -55,10 +55,12 @@ _VECTORS_PATH = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 # tombstoned VWAP bits (52/53) carry no row. Old digest (the 60->66 reshape's
 # 22 x 62 table):
 # ea1671b986d5a95dfd304432d8d0e8c6c90c261c59e68c1264067728973df126.
-# TRAIN-FOLD NOTE (DEC-GAP-MIDPOINT-CONDITIONS-001): the gap trio 66-68 is
-# IMPLEMENTED on this tree — the CSV + this digest re-lock at the train's
-# Regen phase (22 x 67 = 1474 rows); until then the pin matches the kept
-# ST-era CSV.
+# TRAIN-FOLD NOTE (DEC-GAP-MIDPOINT-CONDITIONS-001 +
+# DEC-FIB-TEMPLATE-EXPRESS-001): the gap trio 66-68 AND the express bits
+# 69-73 are IMPLEMENTED on this tree — the CSV + this digest re-lock at the
+# train's Regen phase (cases x the 72 implemented bits; the row law derives
+# mechanically from the woven IMPLEMENTED_MASK + the generator's selected
+# cases); until then the pin matches the kept ST-era CSV.
 _EXPECTED_SHA256 = "c044cb2cee17d5be14bf5589312ce3ffc7a034e3247670d0baeea31dc6cb5dcc"
 
 

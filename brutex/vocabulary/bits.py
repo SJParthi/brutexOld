@@ -8,7 +8,7 @@ truth — by ``scripts/codegen_vocab.py`` (DEC-VOCAB-U128-CODEGEN-001). The Rust
 twin ``rust/trading-core/src/bits.rs`` is generated from the same manifest, so
 BruteX (PyO3) and TickVault (native) share an identical bit layout.
 
-The strategy mask is a u128 (ADR-0012 D4); bits 0..68
+The strategy mask is a u128 (ADR-0012 D4); bits 0..73
 are the live conditions. Never renumber a bit (grow-only, DEC-PLUGIN-001):
 new conditions append at the next free bit. LAYOUT-ONLY bits
 (``implemented=false``, ``reserved=false``) declare a position but the
@@ -72,11 +72,14 @@ __all__ = [
     "BIT_NEAR_FIB_200",
     "BIT_NEAR_FIB_236",
     "BIT_NEAR_FIB_382",
+    "BIT_NEAR_FIB_424",
     "BIT_NEAR_FIB_618",
     "BIT_NEAR_FIB_786",
     "BIT_NEAR_FIB_1272",
     "BIT_NEAR_FIB_1618",
     "BIT_NEAR_FIB_2618",
+    "BIT_NEAR_FIB_BULL_236",
+    "BIT_NEAR_FIB_BULL_786",
     "BIT_NEAR_GAP_MID",
     "BIT_NEAR_PDH",
     "BIT_NEAR_PDL",
@@ -89,6 +92,8 @@ __all__ = [
     "BIT_NEAR_PIVOT_S2",
     "BIT_NEAR_PIVOT_S3",
     "BIT_NEAR_PIVOT_S5",
+    "BIT_NEAR_SWING_HIGH",
+    "BIT_NEAR_SWING_LOW",
     "BIT_OUTSIDE_DAY",
     "BIT_PRIOR_ALTERNATING",
     "BIT_PRIOR_N_BEARISH",
@@ -186,9 +191,16 @@ BIT_CLOSE_BELOW_SUPERTREND: Final[int] = 65
 BIT_CLOSE_ABOVE_GAP_MID: Final[int] = 66
 BIT_CLOSE_BELOW_GAP_MID: Final[int] = 67
 BIT_NEAR_GAP_MID: Final[int] = 68
+# ────── Fibonacci Extended ──────
+BIT_NEAR_FIB_BULL_236: Final[int] = 69
+BIT_NEAR_FIB_BULL_786: Final[int] = 70
+BIT_NEAR_FIB_424: Final[int] = 71
+# ────── Swing Proximity ──────
+BIT_NEAR_SWING_HIGH: Final[int] = 72
+BIT_NEAR_SWING_LOW: Final[int] = 73
 
 # ────── Metadata ──────
-TOTAL_CONDITIONS: Final[int] = 69
+TOTAL_CONDITIONS: Final[int] = 74
 #: The strategy-mask width in bits (u128 — ADR-0012 D4).
 MASK_WIDTH: Final[int] = 128
 
@@ -196,7 +208,7 @@ MASK_WIDTH: Final[int] = 128
 #: bits (``implemented=false``) are 0 here; the evaluator emits 0 for them.
 #: RETIRED (tombstone, never gets math): bit 52 ``BIT_CLOSE_ABOVE_VWAP``.
 #: RETIRED (tombstone, never gets math): bit 53 ``BIT_CLOSE_BELOW_VWAP``.
-IMPLEMENTED_MASK: Final[int] = 590282299559823540223
+IMPLEMENTED_MASK: Final[int] = 18889452420679698743295
 
 #: Bitmask of the RETIRED tombstone bits (``reserved = true`` in the manifest).
 #: Positions held forever (grow-only law), evaluator emits 0, NO later PR ever
@@ -219,7 +231,7 @@ RETIRED_MASK: Final[int] = 13510798882111488
 #:   bit 67 ``BIT_CLOSE_BELOW_GAP_MID``
 #:   bit 68 ``BIT_NEAR_GAP_MID``
 #: Test-pinned exactly in ``tests/unit/test_vocabulary.py``.
-APPLIES_TO_1DAY_MASK: Final[int] = 73773201613165428735
+APPLIES_TO_1DAY_MASK: Final[int] = 18372943322733040631807
 
 NAME_TO_BIT: Final[dict[str, int]] = {
     "close_above_ema20": BIT_CLOSE_ABOVE_EMA20,
@@ -291,6 +303,11 @@ NAME_TO_BIT: Final[dict[str, int]] = {
     "close_above_gap_mid": BIT_CLOSE_ABOVE_GAP_MID,
     "close_below_gap_mid": BIT_CLOSE_BELOW_GAP_MID,
     "near_gap_mid": BIT_NEAR_GAP_MID,
+    "near_fib_bull_236": BIT_NEAR_FIB_BULL_236,
+    "near_fib_bull_786": BIT_NEAR_FIB_BULL_786,
+    "near_fib_424": BIT_NEAR_FIB_424,
+    "near_swing_high": BIT_NEAR_SWING_HIGH,
+    "near_swing_low": BIT_NEAR_SWING_LOW,
 }
 
 BIT_TO_NAME: Final[dict[int, str]] = {v: k for k, v in NAME_TO_BIT.items()}
@@ -316,6 +333,8 @@ GROUP_RANGES: Final[tuple[tuple[str, range], ...]] = (
     ("Central Pivot Range", range(60, 64)),
     ("Supertrend", range(64, 66)),
     ("Gap Midpoint", range(66, 69)),
+    ("Fibonacci Extended", range(69, 72)),
+    ("Swing Proximity", range(72, 74)),
 )
 
 

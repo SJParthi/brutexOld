@@ -385,6 +385,17 @@ class TestCascadeTupleSpec:
         spec = _spec(proximity_bps=(10, 20, 30))
         assert spec.proximity_bps == (10, 20, 30)
 
+    def test_negative_swing_band_raises(self) -> None:
+        # DEC-FIB-TEMPLATE-EXPRESS-001: the swing band is a bps count.
+        with pytest.raises(cw.CascadeWireError, match="swing_proximity_bps must be >= 0"):
+            _spec(proximity_bps=(10, 20, 30), swing_proximity_bps=-1)
+
+    def test_none_proximity_with_non_default_swing_raises(self) -> None:
+        # A None proximity has no swing knob to sweep — the default-omit
+        # bijection would otherwise silently drop the swept band from identity.
+        with pytest.raises(cw.CascadeWireError, match="must be the default"):
+            _spec(proximity_bps=None, swing_proximity_bps=25)
+
     @pytest.mark.parametrize("bad", ["abc", "A" * 64, "f" * 63])
     def test_malformed_run_id_raises(self, bad: str) -> None:
         with pytest.raises(cw.CascadeWireError, match="lowercase hex"):
@@ -1510,6 +1521,11 @@ class TestStage3CellRecord:
         cell = _stage3_cell(proximity_bps=(5, 10, 25), k=0)
         assert cell.proximity_bps == (5, 10, 25)
         assert cell.k == 0
+
+    def test_negative_swing_band_raises(self) -> None:
+        # DEC-FIB-TEMPLATE-EXPRESS-001: the swing band is a bps count.
+        with pytest.raises(cw.CascadeWireError, match="swing_proximity_bps must be >= 0"):
+            _stage3_cell(proximity_bps=(5, 10, 25), swing_proximity_bps=-1)
 
 
 class TestStage3ManifestRecord:

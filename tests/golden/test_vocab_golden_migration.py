@@ -33,7 +33,16 @@ train):** the gap-midpoint bits 66-68 were APPENDED with exactly two per-case
 input keys drawn from a SEPARATE second RNG stream — the pre-existing
 invariants above still hold verbatim over the pre-existing fields/bits (the
 appended keys are enumerated and excluded from the input hash; the gap bits
-are the one sanctioned firing class at or above 66).
+were, pre-express, the highest sanctioned firing class).
+
+**DEC-FIB-TEMPLATE-EXPRESS-001 (the 69→74 express, woven at the vocab
+train):** the fib-template express bits 69-73 were APPENDED implemented; the
+400 seeded cases keep their key set BYTE-IDENTICALLY (no swing keys — readers
+default them) and the DETERMINISTIC express cases (ids >= 400) carry the new
+swing inputs, drawn from NO RNG — so both frozen streams above are untouched
+and the seeded-corpus invariants are scoped via ``_migration_cases()``
+(ids < 400). Bits 69-71 derive from the frozen prev-day anchors, so they may
+legitimately fire on seeded cases too; everything >= 74 stays inert.
 
 Each companion is a committed copy of its era's masks: the ``note`` field
 records the provenance prose and ``source_fixture_sha256`` the source
@@ -144,11 +153,23 @@ def _old_by_id() -> dict[int, dict[str, Any]]:
     return {c["id"]: c for c in _OLD["cases"]}
 
 
+def _migration_cases() -> list[dict[str, Any]]:
+    """The 400 seeded migration-invariant cases (ids 0-399).
+
+    DEC-FIB-TEMPLATE-EXPRESS-001 appended DETERMINISTIC express cases at
+    ids >= 400 (they carry NEW swing inputs, so no pre-reshape companion row
+    can exist for them); the migration invariant is scoped to the frozen
+    seeded corpus the companion fixture describes.
+    """
+    return [c for c in _NEW["cases"] if c["id"] < 400]
+
+
 def test_companion_covers_the_full_corpus() -> None:
-    """One companion row per new-fixture case — same ids, both 400 strong."""
+    """One companion row per seeded case — same ids, both 400 strong."""
     assert _OLD["schema"] == "vocab-golden-migration-v2-masks"
-    assert len(_OLD["cases"]) == len(_NEW["cases"]) == 400
-    assert {c["id"] for c in _OLD["cases"]} == {c["id"] for c in _NEW["cases"]}
+    migration = _migration_cases()
+    assert len(_OLD["cases"]) == len(migration) == 400
+    assert {c["id"] for c in _OLD["cases"]} == {c["id"] for c in migration}
 
 
 def test_companion_records_the_pre_reshape_whole_file_sha() -> None:
@@ -166,9 +187,17 @@ def test_companion_records_the_pre_reshape_whole_file_sha() -> None:
 
 
 def test_inputs_are_byte_identical_to_the_pre_reshape_fixture() -> None:
-    """The RNG-burn proof: every case's input fields carry the OLD fixture's SHA."""
+    """The RNG-burn proof: every seeded case's input fields carry the OLD SHA.
+
+    Strongest form under DEC-FIB-TEMPLATE-EXPRESS-001: the 400 seeded cases
+    carry NO swing keys at all (readers default them), so the hash covers the
+    LITERAL historical key set — any added/renamed/reordered input key fails
+    here, including a swing key accidentally leaking into a seeded case.
+    """
     old = _old_by_id()
-    mismatches = [c["id"] for c in _NEW["cases"] if _input_sha(c) != old[c["id"]]["inputs_sha256"]]
+    mismatches = [
+        c["id"] for c in _migration_cases() if _input_sha(c) != old[c["id"]]["inputs_sha256"]
+    ]
     assert not mismatches, f"case INPUTS drifted from the frozen pre-reshape corpus: {mismatches}"
 
 
@@ -183,7 +212,7 @@ def test_pre_existing_bits_are_back_compat_and_tombstones_cleared() -> None:
     old = _old_by_id()
     violations: list[str] = []
     tombstones_cleared = 0
-    for case in _NEW["cases"]:
+    for case in _migration_cases():
         new_mask = int(case["expected_mask"], 16)
         old_mask = int(old[case["id"]]["old_mask"], 16)
         if new_mask & _LOW60 != old_mask & ~_TOMBSTONE_MASK:
@@ -195,26 +224,40 @@ def test_pre_existing_bits_are_back_compat_and_tombstones_cleared() -> None:
     assert tombstones_cleared > 0
 
 
-def test_no_bit_at_or_above_69_is_ever_set() -> None:
-    """The reserved headroom (bits >= 69) stays inert.
+#: The five DEC-FIB-TEMPLATE-EXPRESS-001 express bits (69-73) — the newest
+#: sanctioned high-bit firing class on the woven train (beside the SuperTrend
+#: pair 64/65 and the gap trio 66-68); everything >= 74 must stay inert.
+_EXPRESS_HIGH_MASK = 0b11111 << 69
+
+
+def test_no_bit_at_or_above_74_is_ever_set() -> None:
+    """The reserved headroom (bits >= 74) stays inert.
 
     DELIBERATE law changes: the vocab-66 SuperTrend implemented-flip
     (crate 0.5.0) retired the former ``>> 64 == 0`` law — bits 64/65 MAY now
     fire (their exact justification is
-    :func:`test_new_supertrend_bits_are_exactly_the_independent_arithmetic`) —
-    and DEC-GAP-MIDPOINT-CONDITIONS-001 retired ``>> 66 == 0`` — the
-    IMPLEMENTED gap trio 66-68 MAY fire (its VERBATIM-carried level is
-    exercised by the vocab golden + Python↔Rust parity suites); everything at
-    or above the declared 69-bit layout must never fire.
+    :func:`test_new_supertrend_bits_are_exactly_the_independent_arithmetic`);
+    DEC-GAP-MIDPOINT-CONDITIONS-001 retired ``>> 66 == 0`` — the IMPLEMENTED
+    gap trio 66-68 MAY fire (its VERBATIM-carried level is exercised by the
+    vocab golden + Python<->Rust parity suites); and
+    DEC-FIB-TEMPLATE-EXPRESS-001 retired ``>> 69 == 0`` — the express bits
+    69-73 MAY fire (69-71 derive from the frozen anchors, so they fire on
+    seeded cases too; 72/73 need the express cases' swing inputs). Everything
+    at or above the declared 74-bit layout must never fire.
     """
     gap_fired = 0
+    seen_express = 0
     for case in _NEW["cases"]:
         mask = int(case["expected_mask"], 16)
-        assert mask >> 69 == 0, f"case {case['id']}: bit >= 69 fired ({mask:#034x})"
+        assert mask >> 74 == 0, f"case {case['id']}: bit >= 74 fired ({mask:#034x})"
         if mask & _GAP_MASK:
             gap_fired += 1
-    # Anti-vacuity: the gap trio genuinely fires somewhere in the corpus.
+        seen_express |= mask & _EXPRESS_HIGH_MASK
+    # Anti-vacuity: the gap trio genuinely fires somewhere in the corpus, and
+    # every express bit fires somewhere (both-ways coverage guaranteed by the
+    # deterministic express cases at ids >= 400).
     assert gap_fired > 0
+    assert seen_express == _EXPRESS_HIGH_MASK
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -245,11 +288,17 @@ def _old_v3_by_id() -> dict[int, dict[str, Any]]:
     return {c["id"]: c for c in _OLD_V3["cases"]}
 
 
-def test_v3_companion_covers_the_full_corpus() -> None:
-    """One v3-companion row per new-fixture case — same ids, both 400 strong."""
+def test_v3_companion_covers_the_seeded_corpus() -> None:
+    """One v3-companion row per SEEDED case — same ids, both 400 strong.
+
+    The DEC-FIB-TEMPLATE-EXPRESS-001 deterministic express cases (ids >= 400)
+    post-date the v3 companion, so the invariant is scoped to the frozen
+    seeded corpus exactly like the v2 chain (``_migration_cases``).
+    """
+    migration = _migration_cases()
     assert _OLD_V3["schema"] == "vocab-golden-migration-v3-masks"
-    assert len(_OLD_V3["cases"]) == len(_NEW["cases"]) == 400
-    assert {c["id"] for c in _OLD_V3["cases"]} == {c["id"] for c in _NEW["cases"]}
+    assert len(_OLD_V3["cases"]) == len(migration) == 400
+    assert {c["id"] for c in _OLD_V3["cases"]} == {c["id"] for c in migration}
 
 
 def test_v3_companion_records_the_pre_flip_whole_file_sha() -> None:
@@ -268,22 +317,28 @@ def test_v3_companion_records_the_pre_flip_whole_file_sha() -> None:
 
 
 def test_v3_inputs_are_byte_identical_to_the_pre_flip_fixture() -> None:
-    """The appended-draw proof: stripping the NEW field recovers the v3 inputs."""
+    """The appended-draw proof: stripping the NEW fields recovers the v3 inputs."""
     old = _old_v3_by_id()
-    mismatches = [c["id"] for c in _NEW["cases"] if _input_sha(c) != old[c["id"]]["inputs_sha256"]]
+    mismatches = [
+        c["id"] for c in _migration_cases() if _input_sha(c) != old[c["id"]]["inputs_sha256"]
+    ]
     assert not mismatches, f"case INPUTS drifted from the frozen v3 corpus: {mismatches}"
 
 
-def test_every_case_carries_the_new_supertrend_field() -> None:
-    """v4 shape: every case has ``supertrend_x2_paisa`` (int or None)."""
-    for case in _NEW["cases"]:
+def test_every_seeded_case_carries_the_new_supertrend_field() -> None:
+    """v4 shape: every SEEDED case has ``supertrend_x2_paisa`` (int or None).
+
+    (The DEC-FIB-TEMPLATE-EXPRESS-001 express cases at ids >= 400 omit the
+    key by design — readers default it exactly like the Rust serde twin.)
+    """
+    for case in _migration_cases():
         assert "supertrend_x2_paisa" in case, f"case {case['id']} lacks the v4 field"
         value = case["supertrend_x2_paisa"]
         assert value is None or isinstance(value, int)
 
 
 def test_pre_flip_bits_are_back_compat_across_the_supertrend_flip() -> None:
-    """The v3→v4 back-compat harness: bits 0-63 bit-identical per case.
+    """The v3→v4 back-compat harness: bits 0-63 bit-identical per seeded case.
 
     ``new & ((1<<64)-1) == old`` over the frozen inputs — every settled
     condition (the 62 v3-active bits AND the inert tombstones/CPR span)
@@ -291,7 +346,7 @@ def test_pre_flip_bits_are_back_compat_across_the_supertrend_flip() -> None:
     """
     old = _old_v3_by_id()
     violations: list[str] = []
-    for case in _NEW["cases"]:
+    for case in _migration_cases():
         new_mask = int(case["expected_mask"], 16)
         old_mask = int(old[case["id"]]["old_mask"], 16)
         if new_mask & _LOW64 != old_mask:
@@ -305,7 +360,8 @@ def test_new_supertrend_bits_are_exactly_the_independent_arithmetic() -> None:
     fired = [0, 0]
     none_cases = 0
     equality_cases = 0
-    for case in _NEW["cases"]:
+    migration = _migration_cases()
+    for case in migration:
         mask = int(case["expected_mask"], 16)
         got = mask & (0b11 << 64)
         expected = _independent_supertrend_bits(case)
@@ -322,7 +378,7 @@ def test_new_supertrend_bits_are_exactly_the_independent_arithmetic() -> None:
     )
     # Anti-vacuity: both bits fire somewhere AND are clear somewhere, and the
     # None (warm-up) + exact-equality both-clear arms are genuinely present.
-    n = len(_NEW["cases"])
+    n = len(migration)
     assert all(0 < f < n for f in fired), f"degenerate SuperTrend coverage: {fired}"
     assert none_cases > 0, "no warm-up (None) SuperTrend case in the corpus"
     assert equality_cases > 0, "no exact-equality SuperTrend case in the corpus"

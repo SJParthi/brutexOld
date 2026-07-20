@@ -255,6 +255,7 @@ mod tests {
             pdh_pdl_proximity_bps: 10,
             fib_proximity_bps: 25,
             gap_mid_proximity_bps: crate::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS,
+            swing_proximity_bps: 10,
         }
     }
 
@@ -319,6 +320,8 @@ mod tests {
             market_structure: MarketStructureSignal::default(),
             supertrend_x2_paisa: None,
             gap_mid_paisa: None,
+            last_swing_high_paisa: None,
+            last_swing_low_paisa: None,
         }
     }
 
@@ -367,9 +370,11 @@ mod tests {
 
     #[test]
     fn new_rejects_a_reserved_bit() {
-        // Bit 69 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 69
-        // since DEC-GAP-MIDPOINT-CONDITIONS-001 appended the gap trio at 66-68).
-        let reserved = 1u128 << 69;
+        // Bit 74 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 74;
+        // DEC-FIB-TEMPLATE-EXPRESS-001 appended the fib/swing bits 69-73 on the
+        // gap-midpoint re-stack — bits 64-73 are all IMPLEMENTED, so 74 is the
+        // first reserved position).
+        let reserved = 1u128 << 74;
         let err = StrategySpec::new(reserved, Direction::Long, proximity(), 1, 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
         // Bits 52/53 (VWAP) are TOMBSTONED — refused too (the wipe).
@@ -416,6 +421,7 @@ mod tests {
                 pdh_pdl_proximity_bps: 10,
                 fib_proximity_bps: 25,
                 gap_mid_proximity_bps: crate::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS,
+                swing_proximity_bps: 10,
             },
             2,
             1,

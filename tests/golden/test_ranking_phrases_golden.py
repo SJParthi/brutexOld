@@ -1,6 +1,6 @@
 """Golden byte-lock of the R33 phrase table (DEC-SWEEP-RESULTS-DEPTH-001, WP3).
 
-The 69 plain-English phrases are hand-written ONCE and reviewed in PR (R33's
+The 74 plain-English phrases are hand-written ONCE and reviewed in PR (R33's
 "written+reviewed once" law) — this digest makes any wording edit a
 DELIBERATE golden re-lock, never a silent drift.
 
@@ -33,7 +33,16 @@ from brutex.ranking.phrases import PHRASE_TABLE, reason_for_mask
 # (bits 66-68) were APPENDED after the ST rows — pre-existing rows
 # byte-identical. Pre-gap (ST-era) digest:
 # b4d8249ad59ef0f02d0355f5250ceb03bb8d58ee9f6cbdcbe549bfd27258b746.
-_GOLDEN_TABLE_SHA256 = "7083320aec5c8726e6f5ffedab41780b57ca815103e68e51219ffb35952900ab"
+# RE-LOCKED again at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935, the
+# fib-template express woven at the train fold): the 5 express rows —
+# bull-236/786 retracements, the two-sided 424 extension, near-swing
+# high/low (bits 69-73) — were APPENDED after the gap rows; the member's 3
+# reserved gap-placeholder rows were DROPPED verbatim per the re-stack
+# obligation (the REAL gap conditions hold 66-68). Every pre-existing row
+# byte-identical (the 69-row prefix hashes to the pre-express gap-era
+# digest). Pre-express (gap-era) digest:
+# 7083320aec5c8726e6f5ffedab41780b57ca815103e68e51219ffb35952900ab.
+_GOLDEN_TABLE_SHA256 = "e37de1cf9b15863344b481679877560b05073e0b16494e0516e10ac51eea075b"
 
 
 def test_phrase_table_digest_locked() -> None:

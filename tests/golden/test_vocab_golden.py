@@ -85,16 +85,27 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
             choch_bullish=ms["choch_bullish"],
             choch_bearish=ms["choch_bearish"],
         ),
-        supertrend_x2_paisa=case["supertrend_x2_paisa"],
-        # Group-15 gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) —
-        # carried VERBATIM like the VWAP.
-        gap_mid_paisa=case["gap_mid_paisa"],
+        # The vocab-66 SuperTrend column (v4) + the Group-15 gap-midpoint
+        # level (DEC-GAP-MIDPOINT-CONDITIONS-001) — carried VERBATIM like
+        # the VWAP on the 400 seeded cases; the DETERMINISTIC express
+        # cases (ids >= 400, DEC-FIB-TEMPLATE-EXPRESS-001) omit them, so
+        # readers default them exactly like the Rust twin's serde
+        # defaults (None -> the bits stay clear).
+        supertrend_x2_paisa=case.get("supertrend_x2_paisa"),
+        gap_mid_paisa=case.get("gap_mid_paisa"),
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — the swing anchors (bits 72/73).
+        # The 400 migration-invariant cases carry NO swing keys
+        # (byte-frozen input discipline); readers default them to
+        # None / 10 exactly like the Rust twin's serde defaults.
+        last_swing_high_paisa=case.get("last_swing_high_paisa"),
+        last_swing_low_paisa=case.get("last_swing_low_paisa"),
     )
     proximity = ProximityParams(
         pivot_proximity_bps=case["proximity"]["pivot_bps"],
         pdh_pdl_proximity_bps=case["proximity"]["pdh_pdl_bps"],
         fib_proximity_bps=case["proximity"]["fib_bps"],
-        gap_mid_proximity_bps=case["proximity"]["gap_mid_bps"],
+        gap_mid_proximity_bps=case["proximity"].get("gap_mid_bps", 10),
+        swing_proximity_bps=case["proximity"].get("swing_bps", 10),
     )
     prior = PriorBarHistory(prior_n=case["prior"]["prior_n"], flags=list(case["prior"]["flags"]))
     return snapshot, proximity, prior
@@ -135,8 +146,10 @@ def test_layout_only_bits_are_always_clear() -> None:
     """Every non-implemented / reserved bit must be 0 in EVERY golden case.
 
     The reshape guarantee: the RETIRED VWAP tombstones (52/53) and every
-    reserved bit >= 66 are NEVER set by the evaluator (the SuperTrend bits
-    64/65 left this set at the vocab-66 implemented-flip, crate 0.5.0).
+    reserved bit >= 74 are NEVER set by the evaluator (the SuperTrend bits
+    64/65 left this set at the vocab-66 implemented-flip, the gap trio 66-68
+    at the re-stack and the express bits 69-73 at
+    DEC-FIB-TEMPLATE-EXPRESS-001).
     """
     for case in _CASES:
         mask = _expected(case)

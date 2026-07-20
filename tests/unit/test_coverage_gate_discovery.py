@@ -248,6 +248,14 @@ class TestDiscoverTouchedModules:
         #     100% gate is the dedicated static per-module gate in ci.yml (the
         #     three-file suite at --cov-fail-under=100) + the whole-package
         #     floor (DEC-RESILIENCE-STREAKS-001).
+        #   * brutex/engine/combo_mask.py — the combo/mask primitive layer whose
+        #     ResidentBars fno_math-fallback + u128 two-limb legs are exercised by
+        #     test_engine_rust_trade_sim.py and the sign-bit battery, NOT by its
+        #     stem files (test_engine_combo_mask.py + test_combo_mask_doctests.py
+        #     top out below 100% standalone — measured at the merge base too);
+        #     100.00% under the static whole-engine gate + the whole-package floor
+        #     (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 — first discovered
+        #     when the express change touched VOCAB_BITS).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -261,6 +269,7 @@ class TestDiscoverTouchedModules:
                     "brutex/engine/sweep_driver.py",
                     "brutex/engine/resilience_streaks.py",
                     "brutex/engine/results_depth_pass.py",
+                    "brutex/engine/combo_mask.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE

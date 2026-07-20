@@ -58,18 +58,20 @@ def test_default_is_ascending_and_unique() -> None:
     assert len(bits) == len(set(bits))
 
 
-def test_default_length_is_the_67_active_bits() -> None:
-    """The 69-condition layout carries 67 ACTIVE bits — the default grid.
+def test_default_length_is_the_72_active_bits() -> None:
+    """The 74-condition layout carries 72 ACTIVE bits — the default grid.
 
     (The pre-reshape dense-``IMPLEMENTED_MASK`` era swept all 60; the 60→66
     reshape swept 62; the vocab-66 SuperTrend implemented-flip made it 64;
     DEC-GAP-MIDPOINT-CONDITIONS-001 appended the implemented gap trio at
-    bits 66-68 — C(67, k) now — only the tombstones (52/53) are excluded.)
+    bits 66-68 — 67; and DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935)
+    appended the five implemented express bits 69-73 — C(72, k) now. Only
+    the tombstones (52/53) are excluded.)
     """
     bits = cli.default_condition_bits()
-    assert IMPLEMENTED_MASK == ((1 << 69) - 1) ^ (1 << 52) ^ (1 << 53)
-    assert len(bits) == 67
-    assert bits == [*range(52), *range(54, 69)]
+    assert IMPLEMENTED_MASK == ((1 << 74) - 1) ^ (1 << 52) ^ (1 << 53)
+    assert len(bits) == 72
+    assert bits == [*range(52), *range(54, 74)]
 
 
 def test_default_excludes_layout_only_bits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,7 +164,7 @@ def test_default_bits_low_k_within_cap() -> None:
 
 
 def test_default_bits_k3_within_cap() -> None:
-    """k=3 over the 64 active bits is C(64,3)=41,664 — still under the 100k cap."""
+    """k=3 over the 72 active bits is C(72,3)=59,640 — still under the 100k cap."""
     n = len(cli.default_condition_bits())
     assert comb(n, 3) <= DEFAULT_MAX_COMBOS
     grid = _grid(k_values=[3])
@@ -170,10 +172,10 @@ def test_default_bits_k3_within_cap() -> None:
 
 
 def test_default_bits_k4_hits_loud_refusal_cap() -> None:
-    """k=4 over the 64 active bits is C(64,4)=635,376 > 100k → loud refusal.
+    """k=4 over the 72 active bits is C(72,4)=1,028,790 > 100k → loud refusal.
 
     The broadened default does NOT weaken the safety envelope: the exact same
-    cap that refused C(52,4)=270,725 at n=52 refuses C(64,4) at n=64. The
+    cap that refused C(52,4)=270,725 at n=52 refuses C(72,4) at n=72. The
     refusal is a clear, raise-explicitly ValueError, never a silent blowup.
     """
     n = len(cli.default_condition_bits())

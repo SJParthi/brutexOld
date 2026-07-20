@@ -1213,6 +1213,10 @@ def plan_expected_stores(
                     pivot_proximity_bps=cell.proximity_bps[0],
                     pdh_pdl_proximity_bps=cell.proximity_bps[1],
                     fib_proximity_bps=cell.proximity_bps[2],
+                    # DEC-FIB-TEMPLATE-EXPRESS-001: an absent manifest key
+                    # round-trips the default-10 fourth field, so a swung
+                    # cell's run_id re-derives at its ORIGINATING band.
+                    swing_proximity_bps=cell.swing_proximity_bps,
                 )
             ),
             # The refined cell's Fib anchor (DEC-NIFTY-FIB-AXIS-001) — round-tripped

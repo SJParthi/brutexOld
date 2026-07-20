@@ -142,6 +142,15 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         # the near band (the same convention as the PDH/PDL family, where
         # close_above_pdh and near_pdh co-fire legally).
         (BIT_CLOSE_ABOVE_GAP_MID, BIT_CLOSE_BELOW_GAP_MID),
+        # DEC-FIB-TEMPLATE-EXPRESS-001 (bits 69-73): deliberately NO new
+        # pairs — none exist. The bullish 23.6/78.6 retracements (69/70) are
+        # DISTINCT levels from the bearish ladder (proximity to one never
+        # excludes another under a wide band); the two-sided 424 bit (71) is
+        # a single OR'd bit; near-swing high/low (72/73) coincide only
+        # degenerately (a tight structure where both confirmed levels sit
+        # inside one band — legal, not impossible). conflicts.py needs no
+        # functional change here: bits 69-73 add no pairs (the re-stacked
+        # gap-midpoint (66,67) pair is already registered above).
     }
 )
 

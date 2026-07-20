@@ -276,6 +276,7 @@ def test_hostile_fractal_k_raises_value_error_never_aborts(hostile_k: int) -> No
             inputs.pivot_bps,
             inputs.pdh_pdl_bps,
             inputs.fib_bps,
+            inputs.swing_bps,
             inputs.prior_n,
             inputs.anchor_dependent_mask,
             inputs.fib_dependent_mask,
@@ -542,6 +543,19 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
             out: tuple[bool, bool, bool, bool] = self._inner.update(*args)
             return out
 
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — push() reads the confirmed-swing
+        # getters strictly POST-update for bits 72/73; delegate to the real
+        # pyclass so the spy stays behaviour-transparent.
+        @property
+        def last_swing_high(self) -> int | None:
+            value: int | None = self._inner.last_swing_high
+            return value
+
+        @property
+        def last_swing_low(self) -> int | None:
+            value: int | None = self._inner.last_swing_low
+            return value
+
     monkeypatch.setattr(trading_core, "evaluate_with_levels", _recording_eval)
     monkeypatch.setattr(trading_core, "MarketStructureState", _RecordingStructure)
 
@@ -552,8 +566,9 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
     push_constructions = constructions[0]
     assert len(eval_calls) == len(bars)
 
-    # …and the prepass columns must equal them field-for-field (the narrowed
-    # 21-arg ABI: pivot_levels sits at index 7 — the vwap arg is gone).
+    # …and the prepass columns must equal them field-for-field (the 24-arg
+    # ABI: pivot_levels sits at index 7 — the vwap arg is gone; the express
+    # swing pair + band ride appended-last, DEC-FIB-TEMPLATE-EXPRESS-001).
     constructions[0] = 0
     inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
     assert push_constructions == 1 + sum(inputs.contract_reset)
@@ -569,7 +584,7 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
         assert args[6] == inputs.ema200_paisa[i]
         d = inputs.day_index[i]
         assert args[7] == inputs.day_pivot_levels[12 * d : 12 * (d + 1)]
-        assert args[8] == inputs.day_fib_levels[15 * d : 15 * (d + 1)]
+        assert args[8] == inputs.day_fib_levels[19 * d : 19 * (d + 1)]
         assert args[12] == inputs.pivot_bps
         assert args[13] == inputs.pdh_pdl_bps
         assert args[14] == inputs.fib_bps
@@ -580,7 +595,7 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
     assert inputs.day_index[0] == 0
     assert inputs.day_index[-1] == n_days - 1
     assert len(inputs.day_pivot_levels) == 12 * n_days
-    assert len(inputs.day_fib_levels) == 15 * n_days
+    assert len(inputs.day_fib_levels) == 19 * n_days
     assert len(inputs.day_has_fib) == n_days
     # The roll fires exactly once, on the Muhurat day's first bar (bar 6).
     assert [i for i, r in enumerate(inputs.contract_reset) if r] == [6]

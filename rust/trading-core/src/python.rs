@@ -37,19 +37,30 @@ use crate::spec::{Direction, StrategySpec};
 const PIVOT_LEVELS_LEN: usize = 12;
 /// Number of `fib_levels` entries [`evaluate_with_levels`] expects.
 ///
-/// FROZEN evaluator ABI — deliberately DISTINCT from [`FIB_COMPUTE_LIST_LEN`]:
-/// before DEC-FIB-BULLISH-RETRACE-001 both surfaces happened to be 15-tuples
-/// (an accidental pun, two different lists); only the COMPUTE projection grew
-/// when the four `retrace_bull_*` fields landed. The evaluator never reads
-/// the bull fields, so this stays 15.
-const FIB_LEVELS_LEN: usize = 15;
+/// Evaluator ABI — grew 15 → 19 under DEC-FIB-TEMPLATE-EXPRESS-001 with the
+/// four new slots APPENDED in the PINNED order
+/// `[…the original 15…, retrace_bull_23, retrace_bull_78, ext_up_424,
+/// ext_down_424]` (indices 15..=18; the first 15 slots are byte-identical).
+/// Deliberately DISTINCT from [`FIB_COMPUTE_LIST_LEN`]: before
+/// DEC-FIB-BULLISH-RETRACE-001 both surfaces happened to be 15-tuples (an
+/// accidental pun, two different lists); the compute projection grew to 19
+/// first, and the two constants are numerically equal AGAIN since
+/// DEC-FIB-TEMPLATE-EXPRESS-001 — STILL two different lists with different
+/// slot orders (slot 0 here is `retrace@pdh`; slot 0 there is `retrace_23`;
+/// this list carries NO bull_38/62) — never merge them (the
+/// `fib_abi_and_compute_projections_are_distinct` test has the teeth).
+const FIB_LEVELS_LEN: usize = 19;
 /// Number of entries [`py_compute_fib_levels`] returns (the compute-FFI
 /// projection of [`FibLevels`]).
 ///
 /// The original 15 (`retrace_23..ext_down_424`, order UNTOUCHED) plus the four
 /// `retrace_bull_23/38/62/78` APPENDED last (DEC-FIB-BULLISH-RETRACE-001).
-/// Deliberately DISTINCT from the frozen [`FIB_LEVELS_LEN`] evaluator ABI —
-/// see its doc comment.
+/// Deliberately DISTINCT from the [`FIB_LEVELS_LEN`] evaluator ABI — the two
+/// are numerically equal AGAIN since DEC-FIB-TEMPLATE-EXPRESS-001 (both 19)
+/// yet remain two DIFFERENT lists with different slot orders (this one starts
+/// `[retrace_23, retrace_38, …]` with the 424s at slots 9/14 and the whole
+/// bull quartet appended; the evaluator list starts `[retrace@pdh, …]` with
+/// bull_23/78 + the 424s appended and NO bull_38/62) — never merge them.
 const FIB_COMPUTE_LIST_LEN: usize = 19;
 
 /// Overflow-safe magnitude ceiling for a previous-day anchor (paisa).
@@ -203,6 +214,7 @@ fn check_evaluate_inputs(
     pdh_pdl_bps: i64,
     fib_bps: i64,
     gap_mid_bps: i64,
+    swing_bps: i64,
 ) -> Result<(), String> {
     // 1. Every per-bar price + optional EMA + `pdc` (the ONLY level the evaluator
     //    MULTIPLIES — `pdc * 50` in Group 9) must sit in the bar range so the
@@ -235,6 +247,7 @@ fn check_evaluate_inputs(
         ("pdh_pdl_bps", pdh_pdl_bps),
         ("fib_bps", fib_bps),
         ("gap_mid_bps", gap_mid_bps),
+        ("swing_bps", swing_bps),
     ] {
         if !(0..=MAX_BPS).contains(&bps) {
             return Err(format!(
@@ -283,6 +296,7 @@ fn check_evaluate_inputs(
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
     supertrend_x2_paisa = None,
     gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
+    last_swing_high_paisa = None, last_swing_low_paisa = None, swing_bps = 10,
 ))]
 fn evaluate_from_raw(
     tod_seconds: u32,
@@ -310,6 +324,9 @@ fn evaluate_from_raw(
     supertrend_x2_paisa: Option<i64>,
     gap_mid_paisa: Option<i64>,
     gap_mid_bps: i64,
+    last_swing_high_paisa: Option<i64>,
+    last_swing_low_paisa: Option<i64>,
+    swing_bps: i64,
 ) -> PyResult<u128> {
     // Thin PyO3 wrapper: all logic + validation lives in the pure `_impl` (unit
     // tested without a libpython link), the boundary only maps `Err(String)` to a
@@ -342,6 +359,9 @@ fn evaluate_from_raw(
         supertrend_x2_paisa,
         gap_mid_paisa,
         gap_mid_bps,
+        last_swing_high_paisa,
+        last_swing_low_paisa,
+        swing_bps,
     )
     .map_err(PyValueError::new_err)
 }
@@ -375,6 +395,9 @@ fn evaluate_from_raw_impl(
     supertrend_x2_paisa: Option<i64>,
     gap_mid_paisa: Option<i64>,
     gap_mid_bps: i64,
+    last_swing_high_paisa: Option<i64>,
+    last_swing_low_paisa: Option<i64>,
+    swing_bps: i64,
 ) -> Result<u128, String> {
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
@@ -411,7 +434,22 @@ fn evaluate_from_raw_impl(
         pdh_pdl_bps,
         fib_bps,
         gap_mid_bps,
+        swing_bps,
     )?;
+    // The caller-supplied swing LEVELS are subtracted in `is_near` — take the
+    // same garbage-level bound as the pre-built-levels path
+    // (DEC-FIB-TEMPLATE-EXPRESS-001).
+    for v in [last_swing_high_paisa, last_swing_low_paisa]
+        .into_iter()
+        .flatten()
+    {
+        if !bar_in_range(v) {
+            return Err(format!(
+                "level magnitude {v} out of the overflow-safe range \
+                 [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+            ));
+        }
+    }
     let pivots = compute_pivot_levels(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa);
     let fib = compute_fib_levels(prev_pdh_paisa, prev_pdl_paisa);
     let snapshot = IndicatorSnapshot {
@@ -436,12 +474,15 @@ fn evaluate_from_raw_impl(
         // lives upstream), so the four-way golden bit-identity holds for the
         // Group-15 bits too (DEC-GAP-MIDPOINT-CONDITIONS-001).
         gap_mid_paisa,
+        last_swing_high_paisa,
+        last_swing_low_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
         pdh_pdl_proximity_bps: pdh_pdl_bps,
         fib_proximity_bps: fib_bps,
         gap_mid_proximity_bps: gap_mid_bps,
+        swing_proximity_bps: swing_bps,
     };
     let prior = PriorBarHistory {
         prior_n,
@@ -454,8 +495,14 @@ fn evaluate_from_raw_impl(
 /// recompute) — BruteX's `evaluate_atoms` delegation target.
 ///
 /// `pivot_levels` (len 12) = `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]`.
-/// `fib_levels` (len 15) = `[retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl,
-/// up127, up162, up200, up262, dn127, dn162, dn200, dn262]`.
+/// `fib_levels` (len 19) = `[retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl,
+/// up127, up162, up200, up262, dn127, dn162, dn200, dn262, bull23, bull78,
+/// up424, dn424]` (the four DEC-FIB-TEMPLATE-EXPRESS-001 slots appended last).
+/// `last_swing_high_paisa` / `last_swing_low_paisa` are the engine-resolved
+/// swing LEVELS for the near-swing bits 72/73 (from the SAME look-ahead-clean
+/// `MarketStructureState`; `None` — the default — keeps both bits dark) and
+/// `swing_bps` is their swept proximity band (default 10; appended-last args
+/// so every pre-existing 21-arg caller keeps working).
 /// The four `bos_*`/`choch_*` booleans are the engine-resolved Group-12
 /// market-structure flags (bits 56-59), produced by the stateful look-ahead-clean
 /// `MarketStructureState` and passed verbatim like the resolved `PriorBarHistory`
@@ -464,7 +511,7 @@ fn evaluate_from_raw_impl(
 /// the Python evaluator for ANY snapshot — including hand-built levels with
 /// `pdc == 0` (the gap conditions' own `pdc > 0` guard handles that).
 ///
-/// The length guards (12 / 15) are validated FIRST (a mismatch would otherwise
+/// The length guards (12 / 19) are validated FIRST (a mismatch would otherwise
 /// index out of bounds → SIGABRT), then every caller-supplied level AND every
 /// per-bar input + bps is bounded ([`check_evaluate_inputs`]) so a garbage value
 /// raises a clean `ValueError` instead of overflowing/`.abs()`-panicking the inner
@@ -482,6 +529,7 @@ fn evaluate_from_raw_impl(
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
     supertrend_x2_paisa = None,
     gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
+    last_swing_high_paisa = None, last_swing_low_paisa = None, swing_bps = 10,
 ))]
 fn evaluate_with_levels(
     tod_seconds: u32,
@@ -508,6 +556,9 @@ fn evaluate_with_levels(
     supertrend_x2_paisa: Option<i64>,
     gap_mid_paisa: Option<i64>,
     gap_mid_bps: i64,
+    last_swing_high_paisa: Option<i64>,
+    last_swing_low_paisa: Option<i64>,
+    swing_bps: i64,
 ) -> PyResult<u128> {
     // Thin PyO3 wrapper — the length-validation + the level-indexing it guards
     // live in the pure `_impl` (unit-tested without a libpython link). The
@@ -540,6 +591,9 @@ fn evaluate_with_levels(
         supertrend_x2_paisa,
         gap_mid_paisa,
         gap_mid_bps,
+        last_swing_high_paisa,
+        last_swing_low_paisa,
+        swing_bps,
     )
     .map_err(PyValueError::new_err)
 }
@@ -572,6 +626,9 @@ fn evaluate_with_levels_impl(
     supertrend_x2_paisa: Option<i64>,
     gap_mid_paisa: Option<i64>,
     gap_mid_bps: i64,
+    last_swing_high_paisa: Option<i64>,
+    last_swing_low_paisa: Option<i64>,
+    swing_bps: i64,
 ) -> Result<u128, String> {
     if pivot_levels.len() != PIVOT_LEVELS_LEN {
         return Err(format!(
@@ -608,6 +665,19 @@ fn evaluate_with_levels_impl(
             "gap_mid_paisa magnitude {v} out of the overflow-safe range \
              [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
         ));
+    // The caller-supplied swing LEVELS take the SAME garbage-level bound (they
+    // are subtracted in `is_near` exactly like the fib/pivot lists — never the
+    // compare-only carve-out; DEC-FIB-TEMPLATE-EXPRESS-001).
+    for v in [last_swing_high_paisa, last_swing_low_paisa]
+        .into_iter()
+        .flatten()
+    {
+        if !bar_in_range(v) {
+            return Err(format!(
+                "level magnitude {v} out of the overflow-safe range \
+                 [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+            ));
+        }
     }
     // Bound the per-bar inputs + bps the evaluator multiplies/subtracts/`.abs()`es
     // (`pdc` = pivot_levels[9] is already bar-bounded above).
@@ -626,6 +696,7 @@ fn evaluate_with_levels_impl(
         pdh_pdl_bps,
         fib_bps,
         gap_mid_bps,
+        swing_bps,
     )?;
     let pivots = PivotLevels {
         p_paisa: pivot_levels[0],
@@ -663,14 +734,15 @@ fn evaluate_with_levels_impl(
         pdh_paisa: 0,
         pdl_paisa: 0,
         range_paisa: 0,
-        ext_up_424_paisa: 0,
-        ext_down_424_paisa: 0,
-        // The bullish retracement ladder is never read by the conditions
-        // (DEC-FIB-BULLISH-RETRACE-001) — zeroed like the other unread fields.
-        retrace_bull_23_paisa: 0,
+        // DEC-FIB-TEMPLATE-EXPRESS-001: the four appended ABI slots (bits
+        // 69-71 read these); bull_38/62 STAY zero-filled — the evaluator
+        // never reads them (numerically coincident with bearish 62/38).
+        retrace_bull_23_paisa: fib_levels[15],
+        retrace_bull_78_paisa: fib_levels[16],
+        ext_up_424_paisa: fib_levels[17],
+        ext_down_424_paisa: fib_levels[18],
         retrace_bull_38_paisa: 0,
         retrace_bull_62_paisa: 0,
-        retrace_bull_78_paisa: 0,
     };
     let snapshot = IndicatorSnapshot {
         tod_seconds,
@@ -690,12 +762,15 @@ fn evaluate_with_levels_impl(
         // snapshot field's docs); `None` = warm-up / unwired ⇒ bits 64-65 clear.
         supertrend_x2_paisa,
         gap_mid_paisa,
+        last_swing_high_paisa,
+        last_swing_low_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
         pdh_pdl_proximity_bps: pdh_pdl_bps,
         fib_proximity_bps: fib_bps,
         gap_mid_proximity_bps: gap_mid_bps,
+        swing_proximity_bps: swing_bps,
     };
     let prior = PriorBarHistory {
         prior_n,
@@ -732,6 +807,7 @@ fn evaluate_with_levels_impl(
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
     supertrend_x2_paisa = None,
     gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
+    last_swing_high_paisa = None, last_swing_low_paisa = None, swing_bps = 10,
 ))]
 fn evaluate_spec(
     condition_mask_hex: &str,
@@ -760,6 +836,9 @@ fn evaluate_spec(
     supertrend_x2_paisa: Option<i64>,
     gap_mid_paisa: Option<i64>,
     gap_mid_bps: i64,
+    last_swing_high_paisa: Option<i64>,
+    last_swing_low_paisa: Option<i64>,
+    swing_bps: i64,
 ) -> PyResult<(u128, bool, u8)> {
     // Thin PyO3 wrapper: all logic + validation in the pure `_impl` (unit-tested
     // without a libpython link); the boundary maps `Err(String)` to a clean
@@ -793,6 +872,9 @@ fn evaluate_spec(
         supertrend_x2_paisa,
         gap_mid_paisa,
         gap_mid_bps,
+        last_swing_high_paisa,
+        last_swing_low_paisa,
+        swing_bps,
     )
     .map_err(PyValueError::new_err)
 }
@@ -827,6 +909,9 @@ fn evaluate_spec_impl(
     supertrend_x2_paisa: Option<i64>,
     gap_mid_paisa: Option<i64>,
     gap_mid_bps: i64,
+    last_swing_high_paisa: Option<i64>,
+    last_swing_low_paisa: Option<i64>,
+    swing_bps: i64,
 ) -> Result<(u128, bool, u8), String> {
     // Parse + validate the spec axes BEFORE the (more expensive) bar evaluate.
     let condition_mask = u128::from_str_radix(condition_mask_hex, 16)
@@ -864,6 +949,9 @@ fn evaluate_spec_impl(
         supertrend_x2_paisa,
         gap_mid_paisa,
         gap_mid_bps,
+        last_swing_high_paisa,
+        last_swing_low_paisa,
+        swing_bps,
     )?;
     let fires = (bar_bits & condition_mask) == condition_mask;
     Ok((bar_bits, fires, dir.as_u8()))
@@ -959,6 +1047,10 @@ fn spec_canonical_bytes_impl(
             // — any value here leaves the bytes untouched; the default keeps
             // the struct meaningful (DEC-GAP-MIDPOINT-CONDITIONS-001).
             gap_mid_proximity_bps: DEFAULT_GAP_MID_PROXIMITY_BPS,
+            // The spec axis carries NO swing knob (the FROZEN 57-byte
+            // canonical encode never carries the field) — always the
+            // production default (DEC-FIB-TEMPLATE-EXPRESS-001).
+            swing_proximity_bps: crate::evaluator::default_swing_proximity_bps(),
         },
         prior_n_usize,
         symbol_id,
@@ -1671,6 +1763,7 @@ fn check_stage1a_batch_values(
             inp.pdh_pdl_bps,
             inp.fib_bps,
             inp.gap_mid_bps,
+            inp.swing_bps,
         )?;
     }
     Ok(())
@@ -1699,7 +1792,7 @@ fn check_stage1a_batch_values(
     open_paisa, high_paisa, low_paisa, close_paisa,
     tod_seconds, contract_reset, day_index,
     ema20_paisa, ema200_paisa, day_pivot_levels, day_fib_levels, day_has_pivot, day_has_fib,
-    pivot_bps, pdh_pdl_bps, fib_bps, prior_n,
+    pivot_bps, pdh_pdl_bps, fib_bps, swing_bps, prior_n,
     anchor_dependent_mask, fib_dependent_mask, applies_to_1day_mask,
     apply_1day_mask, fractal_k = 2, supertrend_x2_paisa = None,
     apply_1day_mask, fractal_k = 2,
@@ -1723,6 +1816,7 @@ fn stage1a_bar_bits_batch(
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    swing_bps: i64,
     prior_n: usize,
     anchor_dependent_mask: u128,
     fib_dependent_mask: u128,
@@ -1772,6 +1866,7 @@ fn stage1a_bar_bits_batch(
         pivot_bps,
         pdh_pdl_bps,
         fib_bps,
+        swing_bps,
         prior_n,
         fractal_k,
         apply_1day_mask,

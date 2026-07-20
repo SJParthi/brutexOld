@@ -18,7 +18,20 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 —
+_Last updated: 2026-07-17 (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 —
+the fib-template EXPRESS: five new vocabulary bits 69-73 (bullish 23.6/78.6
+retracements · the two-sided 424% extension · near-swing high/low) on the u128
+mask, TOTAL_CONDITIONS 66→74 with the reserved gap placeholders 66-68 (dropped
+at the re-stack onto the #1901 gap branch), crate 0.4.0→0.4.1 (new runs re-key;
+the frozen sweep goldens' hardcoded "ind-v1" context keeps them stable —
+verified UNMODIFIED), the NEW default-omitted `swing_proximity_bps` identity
+knob (absent ⟺ 10 at every emission site via the ONE `swing_params_fragment`),
+and the KEEP-GOLDEN extension-constant ruling with the LOUD 424@5bps corner.
+VOCAB-CLASS DRAFT HOLD — operator review required. ENGINE surface UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1935 — this header carries the pointer, never the
+story.)
+Earlier: 2026-07-17 (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 —
 the sweep vocabulary GROWS 66 → 69: Group 15 "Gap Midpoint" (bits 66-68
 `close_above_gap_mid` / `close_below_gap_mid` / `near_gap_mid`) — the per-TF
 SESSION-EDGE gap-midpoint level `(X1+X2)/2` (X1 = the prior session's LAST
@@ -3966,7 +3979,70 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/gap-midpoint-conditions` (**DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901** —
+- **Active branch:** `claude/fib-template-express`
+  (**DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935** — the fib-template
+  EXPRESS, STACKED on PR #1574's `claude/vocab-66-reshape` head 696bf036a
+  (the diff shrinks as predecessors land; queue order #1574 → vocab-66 PR-B →
+  gap #1901 → this; VOCAB-CLASS DRAFT HOLD — no ready-for-review / auto-merge
+  without explicit operator consent): FIVE new conditions on the u128 mask —
+  69 `near_fib_bull_236` + 70 `near_fib_bull_786` (the PDL-anchored bullish
+  retracements, DEC-FIB-BULLISH-RETRACE-001 fields; bull 38/62 stay
+  evaluator-dark — they numerically pun with bearish 62/38) · 71
+  `near_fib_424` (up-OR-down, the bits-26-29 pair convention; range==0 fires
+  like every sibling extension bit) · 72/73 `near_swing_high`/`near_swing_low`
+  (the last k-confirmed swing levels read from the SAME look-ahead-clean
+  `MarketStructureState` that feeds BOS/CHoCH, strictly POST-update; None ⇒
+  never fires — never fabricated; a contract-roll hard reset returns them to
+  None). TOTAL_CONDITIONS 66→74; bits 66-68 are reserved `placeholder_gap_*`
+  rows for DEC-GAP-MIDPOINT-CONDITIONS-001 (#1901) — the RE-STACK OBLIGATION:
+  dropped verbatim at the re-stack, NEVER implemented here (they join
+  RETIRED_MASK for display + are refused by StrategySpec). Bands: 69-71 reuse
+  the swept `fib_proximity_bps` (zero new identity surface); 72/73 ride the
+  NEW `ProximityParams.swing_proximity_bps` (default 10, appended-last),
+  DEFAULT-OMITTED from run identity via the ONE COMMON
+  `vocabulary.swing_params_fragment` at ALL FOUR emission sites
+  (`canonical_trade_params` · `_grid_descriptor` · `_tuple_cache_params` ·
+  `_tuple_digest`) — absent ⟺ 10, so every pre-express identity/checkpoint/
+  store address is BYTE-STABLE at defaults (frozen identity goldens pass
+  UNMODIFIED) while a swept cell re-keys grid + cache + store; the frozen
+  `proximity_bps` 3-list never grows to 4; the spec axis carries NO swing
+  knob (the 57-byte canonical encode ungrown, cargo-pinned). ABI growth
+  appended-last everywhere: FIB_LEVELS_LEN 15→19 (distinct from
+  FIB_COMPUTE_LIST_LEN — both 19, different slot sets, the §4.2 constant-pun
+  discipline pinned), the three evaluate FFI entries + the batch kernel gain
+  the swing pair + band with pyo3 defaults, FIB_ROW_LEN 15→19. Crate
+  0.4.0→0.4.1 — `_indicator_version` moves ⇒ every NEW run re-keys (Golden
+  Rule #4, deliberate); the frozen sweep-run goldens pass byte-UNMODIFIED
+  (the "ind-v1" hardcoded context — the proof, executed). KEEP-GOLDEN
+  constants: the vendor's 2-decimal extension constants are NOT adopted
+  (1.27/1.62/2.62 chart-proven exact; 4.24 presumed) — the golden-ratio set
+  stays with the honest-limits corner LOUD in fib_levels.py: at the tightest
+  5 bps band the 424 divergence exceeds tolerance when range/close > 12.5%
+  (reachable — NIFTY 2020-03-13), never at 10 bps in the 2020→today window;
+  a vendor-2dp table would be its own DEC. ANCHOR LAW stays OPEN (two
+  hypotheses carried, neither encoded; the five bits are anchor-agnostic by
+  construction — fib bits read FibLevels fields under the swept `fib_anchor`
+  axis already in run identity; the reserved follow-up
+  DEC-FIB-ANCHOR-TRAILING-WINDOW-001 gates on decisive evidence). GOLDENS:
+  vocab_golden_vectors.json v4 — 400 byte-frozen-input seeded cases (the
+  migration invariant holds; swing draws ride a secondary RNG stream,
+  excluded from the input SHA) + 8 deterministic express cases, both-ways
+  coverage over every implemented bit; truth table re-locked (26×67 = 1742
+  rows); the phrase table grows to 74 rows + digest re-lock; the express
+  unit matrix / params-emit pins / three-way FFI hypothesis differential /
+  the dedicated bits-72/73 suffix-independence property (anti-vacuous fire
+  tooth, both kernels) land; P-06 + suffix-independence suites pass
+  UNMODIFIED; the u128 sweep pin RE-DERIVED (express bits fire on real
+  feeds ⇒ the wide kernel is construction-resident; the lazy promotion path
+  stays covered by its unit suite); FIVE hand-applied evaluator mutants
+  verified KILLED (OR→AND bit 71 · swing hi↔lo swap · is_near ≤→< ·
+  fire-on-None · bull-slot swap). TickVault ABI notice (DEC-SHARED-CORE-001):
+  ProximityParams +1 field · IndicatorSnapshot +2 Option fields ·
+  evaluate_with_levels args appended-last · fib list 15→19 (a 15-caller gets
+  the loud length error). ENGINE surface UNCHANGED — NIFTY/BANKNIFTY/SENSEX
+  spot; F&O lake REFERENCE_ONLY; no lake/schema/scope/rate change; no new
+  I/O.)
+  Earlier: `claude/gap-midpoint-conditions` (**DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901** —
   the sweep vocabulary GROWS 66 → 69: Group 15 "Gap Midpoint" — bits 66 `close_above_gap_mid` /
   67 `close_below_gap_mid` / 68 `near_gap_mid` — the per-TF SESSION-EDGE gap-midpoint level
   `(X1+X2)/2` decoded from the ES Trading Academy spreadsheet (the same academy whose charts ground
@@ -12054,7 +12130,16 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/gap-midpoint-conditions`
+- **Active feature branch:** `claude/fib-template-express`
+  (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 — the fib-template
+  express: five bits 69-73 (bull 236/786 · two-sided 424 · near-swing
+  high/low) on the u128 mask, TOTAL_CONDITIONS 66→74 with reserved gap
+  placeholders 66-68 (dropped at the re-stack onto #1901), crate 0.4.1
+  re-key window, the default-omitted `swing_proximity_bps` identity knob,
+  KEEP-GOLDEN extension constants with the loud 424@5bps corner; stacked on
+  PR #1574; VOCAB-CLASS DRAFT HOLD; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1935 for the full blurb)
+  Earlier: `claude/gap-midpoint-conditions`
   (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 — the sweep vocabulary
   GROWS 66 → 69: Group 15 "Gap Midpoint" bits 66-68 (`close_above_gap_mid` /
   `close_below_gap_mid` / `near_gap_mid`) — the per-TF session-edge

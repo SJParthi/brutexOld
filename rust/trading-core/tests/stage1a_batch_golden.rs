@@ -58,6 +58,7 @@ struct Config {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    swing_bps: i64,
     prior_n: usize,
     fractal_k: usize,
     apply_1day_mask: bool,
@@ -118,6 +119,7 @@ fn inputs<'a>(f: &'a Fixture) -> Stage1aBatchInputs<'a> {
         pivot_bps: f.config.pivot_bps,
         pdh_pdl_bps: f.config.pdh_pdl_bps,
         fib_bps: f.config.fib_bps,
+        swing_bps: f.config.swing_bps,
         prior_n: f.config.prior_n,
         fractal_k: f.config.fractal_k,
         apply_1day_mask: f.config.apply_1day_mask,
@@ -245,7 +247,7 @@ struct StreamSpec {
     days: Vec<DaySpec>,
     bars: Vec<BarSpec>,
     prior_n: usize,
-    bps: (i64, i64, i64),
+    bps: (i64, i64, i64, i64),
     apply_1day: bool,
 }
 
@@ -257,7 +259,7 @@ fn stream_spec() -> impl Strategy<Value = StreamSpec> {
         any::<bool>(), // has_pivot
         any::<bool>(), // has_fib
         proptest::array::uniform12(level.clone()),
-        proptest::array::uniform15(level),
+        proptest::array::uniform19(level),
     );
     let bar = (
         price.clone(),   // open
@@ -273,7 +275,7 @@ fn stream_spec() -> impl Strategy<Value = StreamSpec> {
         proptest::collection::vec(day, 1..4),
         proptest::collection::vec(bar, 12),
         1usize..=4,
-        (0i64..200, 0i64..200, 0i64..200),
+        (0i64..200, 0i64..200, 0i64..200, 0i64..200),
         any::<bool>(),
     )
         .prop_map(|(days, bars, prior_n, bps, apply_1day)| StreamSpec {
@@ -348,6 +350,7 @@ proptest! {
             pivot_bps: spec.bps.0,
             pdh_pdl_bps: spec.bps.1,
             fib_bps: spec.bps.2,
+            swing_bps: spec.bps.3,
             prior_n: spec.prior_n,
             fractal_k: 2,
             apply_1day_mask: spec.apply_1day,

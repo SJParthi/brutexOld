@@ -317,13 +317,16 @@ the result row (`exit_mask_u16`).
 
 ---
 
-## 16. Post-Lock Growth (bits 52-68) — manifest-governed
+## 16. Post-Lock Growth (bits 52-73) — manifest-governed
 
 The vocabulary grew past the 2026-05-15 lock under the grow-only law
 (append at the next free bit; never renumber; a bit is
 `implemented=true` only WITH its real, tested, look-ahead-clean math).
 The manifest `rust/trading-core/conditions.toml` is the single source
-of truth; the evaluator's boolean branches stay hand-written.
+of truth (codegen → `src/bits.rs` + `brutex/vocabulary/bits.py`; the
+mask is **u128** since DEC-VOCAB-U128-CODEGEN-001); the evaluator's
+boolean branches stay hand-written. The declared width is **74 bits**
+since **DEC-FIB-TEMPLATE-EXPRESS-001** (MIGRATION.md #1935).
 
 | Group | Bits | Conditions | Decision |
 |---|---|---|---|
@@ -333,6 +336,8 @@ of truth; the evaluator's boolean branches stay hand-written.
 | 13 — Central Pivot Range | 60-63 | `above_cpr_tc`, `below_cpr_bc`, `inside_cpr`, `narrow_cpr_day` | DEC-CPR-CONDITIONS-001 / DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804-#1805 |
 | 14 — Supertrend | 64-65 | `close_above_supertrend`, `close_below_supertrend` — declared LAYOUT-ONLY (`implemented = false`; math in a later PR) | DEC-SUPERTREND-LAYOUT-001, MIGRATION.md #1806 |
 | 15 — Gap Midpoint | 66-68 | `close_above_gap_mid`, `close_below_gap_mid`, `near_gap_mid` | DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 |
+| 16 — Fibonacci Extended | 69-71 | `near_fib_bull_236`, `near_fib_bull_786`, `near_fib_424` | DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 |
+| 17 — Swing Proximity | 72-73 | `near_swing_high`, `near_swing_low` | DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 |
 
 ### Group 15 — Gap Midpoint (bits 66-68), the per-TF session-edge level
 
@@ -376,3 +381,26 @@ Semantics (the binding laws, each test-pinned):
   the forced-exit law, entry masks gated on bits 66-68 are
   structurally ZERO-TRADE on TF=180/240 (and partially inert on
   TF=120) — the bits stay evaluable there; accepted + pinned.
+
+### Groups 16-17 — Fibonacci Extended + Swing Proximity (bits 69-73), the fib-template express
+
+Five conditions added by **DEC-FIB-TEMPLATE-EXPRESS-001** (MIGRATION.md
+#1935) on top of the live Gap Midpoint group (the member's reserved
+`placeholder_gap_66..68` rows were dropped verbatim at the re-stack onto
+the gap branch, per that DEC's own re-stack obligation — bits 66-68 are
+the REAL gap conditions above, never placeholders):
+
+| Bit | Name | Group | Semantics | Band |
+|---|---|---|---|---|
+| 69 | `near_fib_bull_236` | Fibonacci Extended | close within tolerance of the bullish 23.6% retracement (PDL-anchored) | `fib_proximity_bps` |
+| 70 | `near_fib_bull_786` | Fibonacci Extended | close within tolerance of the bullish 78.6% retracement (PDL-anchored) | `fib_proximity_bps` |
+| 71 | `near_fib_424` | Fibonacci Extended | close within tolerance of the 424% extension (up OR down variant — the bits-26-29 pair convention) | `fib_proximity_bps` |
+| 72 | `near_swing_high` | Swing Proximity | close within tolerance of the last k-confirmed swing high (`None` ⇒ never fires) | `swing_proximity_bps` (default 10, default-omitted from run identity) |
+| 73 | `near_swing_low` | Swing Proximity | close within tolerance of the last k-confirmed swing low (`None` ⇒ never fires) | `swing_proximity_bps` |
+
+The swing anchors are read from the SAME look-ahead-clean
+`trading_core.MarketStructureState` that resolves the BOS/CHoCH flags
+(bits 56-59) — a swing confirms only k bars later, so at bar N the levels
+can only be highs/lows of bars ≤ N−k (the P-06 family + the dedicated
+suffix-independence property pin it). Bits 69-71 reuse the swept Group-4
+`fib_proximity_bps` band and clear with the fib family on anchor-cold days.

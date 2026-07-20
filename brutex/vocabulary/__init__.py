@@ -67,16 +67,19 @@ from brutex.vocabulary.describe import (
     matched_condition_names,
 )
 from brutex.vocabulary.evaluator import (
+    DEFAULT_SWING_PROXIMITY_BPS,
     IndicatorSnapshot,
     PriorBarHistory,
     ProximityParams,
     evaluate_atoms,
+    swing_params_fragment,
 )
 
 __all__ = [
     "ALL_CONDITION_NAMES",
     "BIT_TO_NAME",
     "CONFLICT_PAIRS",
+    "DEFAULT_SWING_PROXIMITY_BPS",
     "GROUP_RANGES",
     "NAME_TO_BIT",
     "RETIRED_SUFFIX",
@@ -91,4 +94,5 @@ __all__ = [
     "evaluate_atoms",
     "has_conflict",
     "matched_condition_names",
+    "swing_params_fragment",
 ]

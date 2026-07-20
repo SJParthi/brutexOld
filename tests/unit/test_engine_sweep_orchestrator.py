@@ -694,6 +694,28 @@ class TestTupleDigestGateSelectionIdentity:
         # A disabled Stage-3 pass leaves its knobs INERT → no re-key.
         assert _tuple_digest(_tuple(), _grid(stage3_top_k=999)) == d0
 
+    def test_swing_band_default_omit_and_rekey(self) -> None:
+        """DEC-FIB-TEMPLATE-EXPRESS-001: the store address folds the swept
+        swing band DEFAULT-OMITTED — an explicit default-10 band is
+        byte-stable against the implicit one (no on-disk store re-keys),
+        while a swept 25-bps cell maps to a DIFFERENT Parquet address (two
+        tuples differing only by the band evaluate different bits 72/73)."""
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+        from brutex.vocabulary import ProximityParams
+
+        base_prox = ProximityParams(pivot_proximity_bps=12)
+        d_implicit = _tuple_digest(_tuple(proximity=base_prox), _grid())
+        d_explicit = _tuple_digest(
+            _tuple(proximity=ProximityParams(pivot_proximity_bps=12, swing_proximity_bps=10)),
+            _grid(),
+        )
+        d_swept = _tuple_digest(
+            _tuple(proximity=ProximityParams(pivot_proximity_bps=12, swing_proximity_bps=25)),
+            _grid(),
+        )
+        assert d_implicit == d_explicit
+        assert d_swept != d_implicit
+
     def test_non_default_selection_rekeys_pairwise_distinct(self) -> None:
         from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
         from brutex.engine.sweep_orchestrator import _tuple_digest

@@ -1,6 +1,6 @@
 """Unit suite for :mod:`brutex.ranking.phrases` (DEC-SWEEP-RESULTS-DEPTH-001, WP3).
 
-Pins the 69-entry table's structural invariants (bit==index, names cross-pinned
+Pins the 74-entry table's structural invariants (bit==index, names cross-pinned
 against the generated vocabulary), every :func:`check_phrase_invariants` raise
 branch via tampered tables, the mechanical assembly for k=1/3/5 masks, the
 honest-empty mask-0 answer, the reserved-headroom ignore contract and the
@@ -24,7 +24,7 @@ from brutex.vocabulary.describe import matched_condition_names
 
 class TestTableInvariants:
     def test_exactly_one_entry_per_condition_bit(self) -> None:
-        assert len(PHRASE_TABLE) == TOTAL_CONDITIONS == 69
+        assert len(PHRASE_TABLE) == TOTAL_CONDITIONS == 74
 
     def test_bit_equals_index(self) -> None:
         for index, entry in enumerate(PHRASE_TABLE):
@@ -38,7 +38,7 @@ class TestTableInvariants:
     def test_every_plain_phrase_is_nonblank_and_distinct(self) -> None:
         plains = [entry.plain for entry in PHRASE_TABLE]
         assert all(plain.strip() for plain in plains)
-        # 69 conditions ⇒ 69 distinct meanings — a copy-paste dup is a bug.
+        # 74 conditions ⇒ 74 distinct meanings — a copy-paste dup is a bug.
         assert len(set(plains)) == len(plains)
 
     def test_shipped_table_passes_the_checker(self) -> None:
@@ -47,7 +47,7 @@ class TestTableInvariants:
 
 class TestCheckerRaiseBranches:
     def test_wrong_length_rejected(self) -> None:
-        with pytest.raises(AssertionError, match="exactly 69 entries"):
+        with pytest.raises(AssertionError, match="exactly 74 entries"):
             check_phrase_invariants(PHRASE_TABLE[:-1])
 
     def test_bit_not_index_rejected(self) -> None:
@@ -56,18 +56,18 @@ class TestCheckerRaiseBranches:
             check_phrase_invariants(tampered)
 
     def test_wrong_name_rejected(self) -> None:
-        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(68, "not_a_condition", "words"))
+        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(73, "not_a_condition", "words"))
         with pytest.raises(AssertionError, match="does not resolve to bit"):
             check_phrase_invariants(tampered)
 
     def test_swapped_name_rejected(self) -> None:
         # A REAL vocabulary name on the WRONG bit must also fail the cross-pin.
-        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(68, "close_above_ema20", "words"))
+        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(73, "close_above_ema20", "words"))
         with pytest.raises(AssertionError, match="does not resolve to bit"):
             check_phrase_invariants(tampered)
 
     def test_blank_plain_rejected(self) -> None:
-        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(68, "near_gap_mid", "   "))
+        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(73, "near_swing_low", "   "))
         with pytest.raises(AssertionError, match="blank plain phrase"):
             check_phrase_invariants(tampered)
 

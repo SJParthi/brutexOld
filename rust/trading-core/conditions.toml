@@ -648,3 +648,60 @@ group = "Gap Midpoint"
 description = "close within tolerance of the session-edge gap-midpoint level"
 applies_to_1day = false
 implemented = true
+
+# ─────────────────── Group: Fibonacci Extended (bits 69-71) ─────────────────────
+# DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935): the vendor fib-template
+# expressibility bits. Bits 69/70 read the PDL-anchored BULLISH retracement
+# ladder (DEC-FIB-BULLISH-RETRACE-001 fields — only the asymmetric 23.6/78.6
+# pair adds NEW price levels; bull 38/62 numerically coincide with bearish
+# 62/38 because .382 + .618 = 1.000 exactly in IEEE). Bit 71 reads the 424%
+# extensions (up OR down — the exact OR convention of bits 26-29). All three
+# share the swept `fib_proximity_bps` band (family-scoped, never per-bit) and
+# ride the Group-4 anchor-dependent + fib-cold clears.
+[[condition]]
+bit = 69
+name = "near_fib_bull_236"
+group = "Fibonacci Extended"
+description = "close within tolerance of the bullish 23.6% retracement (PDL-anchored)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 70
+name = "near_fib_bull_786"
+group = "Fibonacci Extended"
+description = "close within tolerance of the bullish 78.6% retracement (PDL-anchored)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 71
+name = "near_fib_424"
+group = "Fibonacci Extended"
+description = "close within tolerance of the 424% extension (up or down variant)"
+applies_to_1day = true
+implemented = true
+
+# ───────────────────── Group: Swing Proximity (bits 72-73) ──────────────────────
+# DEC-FIB-TEMPLATE-EXPRESS-001: "is price AT the structure level" — the
+# retest/approach half the break-EVENT bits 56-59 cannot express. Read the
+# last k-confirmed swing levels from the SAME look-ahead-clean
+# MarketStructureState that resolves BOS/CHoCH (a swing is confirmed only k
+# bars later, all at index <= N); None (no confirmed swing yet, or a
+# contract-roll hard reset) means the bit simply does not fire. Band: the NEW
+# swept `swing_proximity_bps` (default 10 — family-scoped like its siblings).
+[[condition]]
+bit = 72
+name = "near_swing_high"
+group = "Swing Proximity"
+description = "close within tolerance of the last confirmed swing high"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 73
+name = "near_swing_low"
+group = "Swing Proximity"
+description = "close within tolerance of the last confirmed swing low"
+applies_to_1day = true
+implemented = true

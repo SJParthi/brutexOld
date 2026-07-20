@@ -31,15 +31,16 @@ def _manifest() -> cg.Manifest:
 def test_manifest_loads_and_is_valid() -> None:
     m = _manifest()
     assert m.mask_width == 128
-    assert m.total_conditions == 69
-    # Bits are dense 0..68.
-    assert sorted(c.bit for c in m.conditions) == list(range(69))
-    # IMPLEMENTED_MASK = bits 0..51 + 54..68: the VWAP pair 52/53 is TOMBSTONED
+    assert m.total_conditions == 74
+    # Bits are dense 0..73.
+    assert sorted(c.bit for c in m.conditions) == list(range(74))
+    # IMPLEMENTED_MASK = bits 0..51 + 54..73: the VWAP pair 52/53 is TOMBSTONED
     # (the VWAP/volume wipe — reserved=true, implemented=false, positions held
     # forever); CPR (60..63), the Supertrend pair (64/65 — the vocab-66
-    # implemented-flip, crate 0.5.0) and the gap-midpoint trio (66..68,
-    # DEC-GAP-MIDPOINT-CONDITIONS-001) are implemented.
-    assert m.implemented_mask == ((1 << 69) - 1) ^ (1 << 52) ^ (1 << 53)
+    # implemented-flip, crate 0.5.0), the gap-midpoint trio (66..68,
+    # DEC-GAP-MIDPOINT-CONDITIONS-001) and the fib-template express bits
+    # (69..73, DEC-FIB-TEMPLATE-EXPRESS-001) are implemented.
+    assert m.implemented_mask == ((1 << 74) - 1) ^ (1 << 52) ^ (1 << 53)
     # RETIRED_MASK = exactly the tombstoned VWAP pair, disjoint from IMPLEMENTED.
     assert m.retired_mask == (1 << 52) | (1 << 53)
     assert m.retired_mask & m.implemented_mask == 0
@@ -139,12 +140,14 @@ def test_render_rust_has_banner_and_constants() -> None:
     assert "pub const BIT_ABOVE_CPR_TC: u32 = 60;" in rs
     assert "pub const BIT_CLOSE_ABOVE_SUPERTREND: u32 = 64;" in rs
     assert "pub const BIT_CLOSE_ABOVE_GAP_MID: u32 = 66;" in rs
-    assert "pub const TOTAL_CONDITIONS: u32 = 69;" in rs
+    assert "pub const BIT_NEAR_SWING_LOW: u32 = 73;" in rs
+    assert "pub const TOTAL_CONDITIONS: u32 = 74;" in rs
     assert "pub const MASK_WIDTH: u32 = 128;" in rs
-    assert "pub const IMPLEMENTED_MASK: u128 = 590282299559823540223;" in rs
+    assert "pub const IMPLEMENTED_MASK: u128 = 18889452420679698743295;" in rs
     # TOMB-04: the RETIRED tombstones render distinctly; NO LAYOUT-ONLY bit
     # exists on today's manifest (the SuperTrend pair left that class at the
-    # vocab-66 implemented-flip), so the layout-only suffix renders nowhere.
+    # vocab-66 implemented-flip; the gap trio + the express bits landed
+    # implemented), so the layout-only suffix renders nowhere.
     assert "(RETIRED — reserved=true, position held forever, never gets math)" in rs
     assert "(LAYOUT ONLY — implemented=false, math lands in a later PR)" not in rs
     assert "fn bit_positions_are_dense()" in rs
@@ -156,14 +159,16 @@ def test_render_python_has_banner_and_constants() -> None:
     assert "BIT_CLOSE_ABOVE_VWAP: Final[int] = 52" in py
     assert "BIT_NARROW_CPR_DAY: Final[int] = 63" in py
     assert "BIT_NEAR_GAP_MID: Final[int] = 68" in py
-    assert "TOTAL_CONDITIONS: Final[int] = 69" in py
+    assert "BIT_NEAR_SWING_LOW: Final[int] = 73" in py
+    assert "TOTAL_CONDITIONS: Final[int] = 74" in py
     assert "MASK_WIDTH: Final[int] = 128" in py
-    assert "IMPLEMENTED_MASK: Final[int] = 590282299559823540223" in py
+    assert "IMPLEMENTED_MASK: Final[int] = 18889452420679698743295" in py
     # TOMB-01: the tombstone mask is emitted so renderers can suffix retired
     # bits without a hand-kept copy (0x30000000000000 = bits 52|53).
     assert f"RETIRED_MASK: Final[int] = {(1 << 52) | (1 << 53)}" in py
     # TOMB-04: RETIRED renders distinctly; no LAYOUT-ONLY bit exists on
-    # today's manifest (the vocab-66 SuperTrend implemented-flip).
+    # today's manifest (the vocab-66 SuperTrend implemented-flip + the
+    # implemented gap/express appends).
     assert "RETIRED (tombstone, never gets math): bit 52" in py
     assert "LAYOUT-ONLY (math in a later PR): bit 64" not in py
     assert '"close_above_vwap": BIT_CLOSE_ABOVE_VWAP,' in py
@@ -238,6 +243,6 @@ def test_main_write_mode(
     monkeypatch.setattr(cg, "PY_BITS", tmp_path / "bits.py")
     assert cg.main([]) == 0
     out = capsys.readouterr().out
-    assert "69 conditions" in out
+    assert "74 conditions" in out
     assert (tmp_path / "bits.rs").exists()
     assert (tmp_path / "bits.py").exists()

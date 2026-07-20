@@ -43,8 +43,11 @@ Vocabulary conditions like:
 - `close > fib_ext_127_up` — above bullish extension
 - `close < fib_ext_127_down` — below bearish extension
 
-(The shared condition evaluator reads only the BEARISH retracements +
-extensions; the bullish retracement fields are not in any vocabulary bit.)
+(The shared condition evaluator reads the BEARISH retracements + the
+127/162/200/262 extensions, and — since DEC-FIB-TEMPLATE-EXPRESS-001 — the
+bullish 23.6/78.6 retracements (bits 69/70) and the 424 extensions (bit 71).
+The bullish 38/62 fields remain evaluator-dark: they numerically coincide
+with bearish 62/38.)
 
 ## Verification status (Golden Rule #10 — honest envelope)
 
@@ -70,6 +73,40 @@ NOT screenshot-verified: the bullish 23/38/62 retracements are
 formula-derived (``pdl + ratio * range``, kernel-frozen goldens in
 ``tests/unit/test_fib_levels.py``) — no operator chart shows those three
 rungs, so they carry formula provenance only.
+
+## Extension-constant divergence (DEC-FIB-TEMPLATE-EXPRESS-001 — KEEP GOLDEN)
+
+The vendor (ES Trading Academy — the SAME v11 charts cited above) draws its
+extension rungs from TWO-DECIMAL constants: 1.27 / 1.62 / 2.62 are PROVEN
+paisa-exact on SENSEX chart evidence (the golden constants below miss the
+vendor-drawn level by ~0.97 pt on that anchor); 2.00 is exact under BOTH
+readings; **4.24 is rules-text-only (presumed, itself unverified)**. This
+kernel deliberately KEEPS the golden-ratio set (multipliers 0.272 / 0.618 /
+1.000 / 1.618 / 3.236 ≙ the 127/162/200/262/424 labels in
+``FIB_RATIOS_EXTENSION``): none of the chart-verified pins above ever
+exercised 127/162/262 (the only extension pins are the two 200% checks, and
+200% = 1.000 exactly under both readings), and a constant swap would silently
+move bits 26-29's levels for every existing consumer + re-shape the frozen
+400-case vocab fixture for reasons the vendor evidence does not compel.
+
+Materiality: divergence per level = ``Δ·range`` with Δ = 0.002
+(127/162/262) or 0.004 (424, presumed), vs the proximity tolerance
+``close·bps/10⁴`` over the swept band {5, 10, 25, 50}. Typical sessions:
+immaterial (a NIFTY 100-400 pt range diverges 0.2-1.6 pt vs a 12.5 pt
+5 bps tolerance at 25k). **The LOUD corner:** the divergence exceeds the
+tolerance when ``range/close > bps/(10⁴·Δ)`` — for the 424 constant at the
+tightest 5 bps band the threshold is 12.5% and IS reachable (NIFTY
+2020-03-13: range ≈ 1,604 pt ≈ 16.1% of close ≈ 9,955 — the vendor-2dp 4.24
+level and the golden 4.236 level sit ≈ 6.4 pt apart against a ≈ 4.95 pt
+tolerance), so ``near_fib_424`` (bit 71) can classify differently from the
+vendor-drawn level on those COVID-crash-adjacent anchors at 5 bps only. At
+10 bps the threshold is 25% — never reached in the 2020→today window. This
+is a vendor-FIDELITY divergence, not a correctness defect: bits 26-29 + 71
+fire on the GOLDEN levels, self-consistent against this kernel everywhere.
+Chart-exact vendor matching would be its own DEC (a cited two-decimal
+constant table on the DEC-ETC-REGIME-HISTORY-001 refusal discipline; a
+#1681-style default-omitted dual-constant axis is the named future lever,
+gated on a real vendor 127/162/262 print) — never a quiet edit here.
 
 ## Money representation
 

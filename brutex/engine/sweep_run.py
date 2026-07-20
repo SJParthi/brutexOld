@@ -169,7 +169,7 @@ from brutex.strategies.types import (
     price_source_params_fragment,
 )
 from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
-from brutex.vocabulary import ProximityParams, has_conflict
+from brutex.vocabulary import ProximityParams, has_conflict, swing_params_fragment
 
 if TYPE_CHECKING:
     # Annotation-only imports — kept out of the runtime import graph so the
@@ -858,6 +858,12 @@ def canonical_trade_params(
     # DEFAULT-OMIT the price-source axis (Override 1) via the ONE COMMON fragment
     # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical identity.
     params.update(price_source_params_fragment(vwap_source, ema_source))
+    # DEFAULT-OMIT the swept swing band (DEC-FIB-TEMPLATE-EXPRESS-001) via the
+    # ONE COMMON fragment: the ``proximity_bps`` 3-list layout above is FROZEN
+    # (never grows to 4 — that would re-key every existing non-None-proximity
+    # run); a non-default ``swing_proximity_bps`` adds exactly ONE top-level
+    # key, absent ⟺ the default 10 (clean bijection).
+    params.update(swing_params_fragment(proximity))
     if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
         params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
     # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model, and the

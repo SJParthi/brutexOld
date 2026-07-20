@@ -142,11 +142,12 @@ def generate() -> dict[str, object]:
         # per-bar `supertrend_x2_paisa` column joins the batch ABI (the
         # 26-bar day script warms the ATR-10 state at bar 9 of each roll
         # segment, so the frozen corpus genuinely exercises bits 64/65 both
-        # ways + the warm-up restart at each D11 roll). v2 was the 60→66
-        # reshape — the five retired VWAP-feed columns (typical_paisa /
-        # volume / pre_open / session_key / session_day) are GONE from the
-        # batch ABI; masks may carry the CPR bits 60-63 and never the
-        # tombstones 52/53.
+        # ways) — composed at the train fold with
+        # DEC-FIB-TEMPLATE-EXPRESS-001: the fib day rows widen 15→19
+        # (bull_23/bull_78/ext_up_424/ext_down_424 appended), the config
+        # gains ``swing_bps`` and the masks may carry the express bits 69-73
+        # (72/73 from the kernel's own MarketStructureState swing reads) and
+        # the gap bits 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001 X1 day tables).
         "schema": "stage1a-batch-golden-v3",
         "columns": {
             "open_paisa": inputs.open_paisa,
@@ -170,6 +171,7 @@ def generate() -> dict[str, object]:
             "pivot_bps": inputs.pivot_bps,
             "pdh_pdl_bps": inputs.pdh_pdl_bps,
             "fib_bps": inputs.fib_bps,
+            "swing_bps": inputs.swing_bps,
             "prior_n": inputs.prior_n,
             "fractal_k": inputs.fractal_k,
             "apply_1day_mask": inputs.apply_1day_mask,

@@ -18,6 +18,21 @@ int64 paisa. Run with ``python scripts/gen_vocab_golden_vectors.py`` to (re)writ
 coverage verdict passes), or with ``--check`` to fail if the on-disk fixture is
 stale versus a fresh in-memory generation (the truth-table staleness pattern).
 
+## The fib-template express extension (DEC-FIB-TEMPLATE-EXPRESS-001)
+
+Version 4 adds bits 69-73 (near_fib_bull_236 / near_fib_bull_786 /
+near_fib_424 / near_swing_high / near_swing_low). The FROZEN-INPUT migration
+discipline is preserved the STRONGEST possible way: the 400 seeded cases carry
+EXACTLY their historical key set (no swing keys at all — readers default
+``last_swing_*`` to None and ``swing_bps`` to 10), so every input byte is
+identical to the version-3 fixture and only ``expected_mask`` moved (bits
+69-71 derive from the prev-day anchors already frozen in each case). The
+swing bits 72/73 — which NEED new inputs — are exercised by the DETERMINISTIC
+express cases (ids >= 400, no RNG) which carry the full new key set
+(``last_swing_high_paisa`` / ``last_swing_low_paisa`` /
+``proximity.swing_bps``) including exact band-edge hits and the
+one-past-the-edge misses.
+
 ## The 60→66 reshape migration invariant (frozen inputs)
 
 The vocab reshape (VWAP bits 52/53 tombstoned; CPR bits 60-63 implemented;
@@ -334,6 +349,175 @@ def _append_supertrend(
     return case
 
 
+def _express_case(
+    case_id: int,
+    *,
+    close: int,
+    swing_high: int | None,
+    swing_low: int | None,
+    swing_bps: int,
+    label: str,
+) -> dict[str, Any]:
+    """One DETERMINISTIC fib-template express case (DEC-FIB-TEMPLATE-EXPRESS-001).
+
+    No RNG — the express cases (ids >= 400) never perturb the frozen seeded
+    stream of the 400 migration-invariant cases. They carry the FULL new key
+    set (``last_swing_high_paisa`` / ``last_swing_low_paisa`` /
+    ``proximity.swing_bps``) so the swing bits 72/73 — which require new
+    inputs — are frozen both ways, band-edge included.
+    """
+    pdh, pdl, pdc = _EXPRESS_PDH, _EXPRESS_PDL, _EXPRESS_PDC
+    day = datetime(2024, 1, 2).date()
+    pivots = compute_pivot_levels(day, pdh, pdl, pdc)
+    fib = compute_fib_levels(day, pdh, pdl)
+    ts = datetime(2024, 1, 2, 10, 30, tzinfo=IST)
+    open_p = close - 1_000
+    hi = max(open_p, close) + 2_000
+    lo = min(open_p, close) - 2_000
+    prox = ProximityParams(
+        pivot_proximity_bps=10,
+        pdh_pdl_proximity_bps=10,
+        fib_proximity_bps=10,
+        swing_proximity_bps=swing_bps,
+    )
+    prior = PriorBarHistory(prior_n=3, flags=[])
+    snap = IndicatorSnapshot(
+        timestamp_ist=ts,
+        open_paisa=open_p,
+        high_paisa=hi,
+        low_paisa=lo,
+        close_paisa=close,
+        ema20_paisa=None,
+        ema200_paisa=None,
+        pivots=pivots,
+        fib=fib,
+        day_high_paisa=hi,
+        day_low_paisa=lo,
+        open_of_day_paisa=pdc,
+        market_structure=MarketStructureSignal(
+            bos_bullish=False, bos_bearish=False, choch_bullish=False, choch_bearish=False
+        ),
+        last_swing_high_paisa=swing_high,
+        last_swing_low_paisa=swing_low,
+    )
+    mask = evaluate_atoms(snap, prox, prior)
+    return {
+        "id": case_id,
+        "express_label": label,
+        "timestamp_ist": ts.isoformat(),
+        "open_paisa": open_p,
+        "high_paisa": hi,
+        "low_paisa": lo,
+        "close_paisa": close,
+        "ema20_paisa": None,
+        "ema200_paisa": None,
+        "prev_pdh_paisa": pdh,
+        "prev_pdl_paisa": pdl,
+        "prev_pdc_paisa": pdc,
+        "day_high_paisa": hi,
+        "day_low_paisa": lo,
+        "open_of_day_paisa": pdc,
+        "last_swing_high_paisa": swing_high,
+        "last_swing_low_paisa": swing_low,
+        "proximity": {
+            "pivot_bps": 10,
+            "pdh_pdl_bps": 10,
+            "fib_bps": 10,
+            "swing_bps": swing_bps,
+        },
+        "prior": {"prior_n": 3, "flags": []},
+        "market_structure": {
+            "bos_bullish": False,
+            "bos_bearish": False,
+            "choch_bullish": False,
+            "choch_bearish": False,
+        },
+        "expected_mask": f"{mask:0{_MASK_HEX_WIDTH}x}",
+    }
+
+
+#: The express anchor (paisa): pdh 24_500.00 / pdl 24_000.00 → range 50_000
+#: paisa, so bull_23 = 2_411_800, bull_78 = 2_439_300, ext_up_424 = 2_611_800,
+#: ext_down_424 = 2_238_200 — all strictly positive.
+_EXPRESS_PDH = 2_450_000
+_EXPRESS_PDL = 2_400_000
+_EXPRESS_PDC = 2_430_000
+
+
+def _express_cases() -> list[dict[str, Any]]:
+    """The deterministic express corpus (ids 400+): bits 69-73 both ways."""
+    day = datetime(2024, 1, 2).date()
+    fib = compute_fib_levels(day, _EXPRESS_PDH, _EXPRESS_PDL)
+    mid = _EXPRESS_PDC  # 2_430_000; the 10-bps tolerance at this close = 2_430
+    tol = (mid * 10) // 10_000
+    return [
+        _express_case(
+            400,
+            close=fib.retrace_bull_23_paisa,
+            swing_high=None,
+            swing_low=None,
+            swing_bps=10,
+            label="close exactly at retrace_bull_23 -> bit 69",
+        ),
+        _express_case(
+            401,
+            close=fib.retrace_bull_78_paisa,
+            swing_high=None,
+            swing_low=None,
+            swing_bps=10,
+            label="close exactly at retrace_bull_78 -> bit 70",
+        ),
+        _express_case(
+            402,
+            close=fib.ext_up_424_paisa,
+            swing_high=None,
+            swing_low=None,
+            swing_bps=10,
+            label="close exactly at ext_up_424 -> bit 71 (up arm)",
+        ),
+        _express_case(
+            403,
+            close=fib.ext_down_424_paisa,
+            swing_high=None,
+            swing_low=None,
+            swing_bps=10,
+            label="close exactly at ext_down_424 -> bit 71 (down arm)",
+        ),
+        _express_case(
+            404,
+            close=mid,
+            swing_high=mid,
+            swing_low=mid - 200_000,
+            swing_bps=10,
+            label="swing_high exact hit -> bit 72; swing_low far -> 73 clear",
+        ),
+        _express_case(
+            405,
+            close=mid,
+            swing_high=mid + 200_000,
+            swing_low=mid - tol,
+            swing_bps=10,
+            label="swing_low at the EXACT band edge -> bit 73 (<= law)",
+        ),
+        _express_case(
+            406,
+            close=mid,
+            swing_high=mid + tol + 1,
+            swing_low=mid - tol - 1,
+            swing_bps=10,
+            label="both swings one paisa PAST the band edge -> 72/73 clear",
+        ),
+        _express_case(
+            407,
+            close=mid,
+            swing_high=None,
+            swing_low=None,
+            swing_bps=25,
+            label="no confirmed swing (None) -> 72/73 can never fire",
+        ),
+    ]
+
+
 def generate() -> dict[str, Any]:
     """Build the full deterministic fixture payload."""
     rng = random.Random(_SEED)  # noqa: S311 — deterministic fixture generation, not crypto
@@ -346,8 +530,14 @@ def generate() -> dict[str, Any]:
     # AFTER the whole historical sequence (GOLD-02 — appending them inside
     # pass 1 would shift every later case's draws).
     cases = [_append_supertrend(rng, case, snap, prox, prior) for case, snap, prox, prior in built]
-    # Coverage audit over the 67 ACTIVE bits (IMPLEMENTED_MASK = bits 0-51 +
-    # 54-68): every IMPLEMENTED bit must be set in >=1 case AND clear in >=1
+    # Pass 3: the DETERMINISTIC fib-template express cases (ids >= 400,
+    # DEC-FIB-TEMPLATE-EXPRESS-001) — appended strictly AFTER the gap
+    # second-stream arm and the SuperTrend append. They draw from NO RNG
+    # (never perturbing either frozen stream) and carry the swing keys the
+    # 400 seeded cases deliberately omit.
+    cases.extend(_express_cases())
+    # Coverage audit over the 72 ACTIVE bits (IMPLEMENTED_MASK = bits 0-51 +
+    # 54-73): every IMPLEMENTED bit must be set in >=1 case AND clear in >=1
     # case, so the oracle exercises every condition the evaluator actually
     # computes both ways. The CPR bits 60-63 derive from the prev-day anchors
     # (60-62 partition every warm case; 63 fires whenever pdc sits close
@@ -375,10 +565,16 @@ def generate() -> dict[str, Any]:
         # strictly after every pre-existing draw so the version-3-era input
         # fields are byte-identical on seed-identical cases and bits 0-63 of
         # every mask are unchanged (the migration invariant, pinned against
-        # the ``vocab_golden_migration_v3_masks.json`` companion). Version 3
-        # was the 60→66 reshape (VWAP 52/53 tombstoned — ``vwap_paisa`` an
-        # inert RNG-burn record — CPR 60-63 implemented); version 2 the
-        # u64→u128 hex-string move.
+        # the ``vocab_golden_migration_v3_masks.json`` companion) — PLUS, on
+        # the re-stacked train, the Group-15 gap fields drawn from the
+        # SEPARATE gap stream (DEC-GAP-MIDPOINT-CONDITIONS-001) and the
+        # fib-template express extension (DEC-FIB-TEMPLATE-EXPRESS-001):
+        # bits 69-73 implemented, the 400 seeded cases keep their key set
+        # byte-identically (no swing keys — readers default them) and the
+        # DETERMINISTIC express cases (ids >= 400) carry the new swing
+        # inputs. Version 3 was the 60→66 reshape (VWAP 52/53 tombstoned —
+        # ``vwap_paisa`` an inert RNG-burn record — CPR 60-63 implemented);
+        # version 2 the u64→u128 hex-string move.
         "version": 4,
         "generated_from": "brutex.vocabulary.evaluator.evaluate_atoms",
         "seed": _SEED,

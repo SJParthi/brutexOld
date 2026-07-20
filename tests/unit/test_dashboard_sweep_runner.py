@@ -179,46 +179,48 @@ def test_non_integer_k_raises() -> None:
         resolve_sweep_request(k="1,abc", today=_TODAY)
 
 
-@pytest.mark.parametrize("bad", ["0", "67", "-1"])
+@pytest.mark.parametrize("bad", ["0", "68", "-1"])
 def test_out_of_range_k_raises(bad: str) -> None:
     with pytest.raises(ValueError, match="k must be a whole number"):
         resolve_sweep_request(k=bad, today=_TODAY)
 
 
 def test_k_bound_is_the_implemented_condition_count() -> None:
-    """``_MAX_K`` tracks the IMPLEMENTED count (62) — never the declared layout.
+    """``_MAX_K`` tracks the IMPLEMENTED count (67) — never the declared layout.
 
     G-RETROT-08: the route sweeps ``default_condition_bits()`` (every
-    IMPLEMENTED bit — 64 on the 66-declared layout: only the tombstoned VWAP
-    pair 52/53 is out since the vocab-66 SuperTrend implemented-flip, crate
-    0.5.0), so a ``k`` above 64 can never form a combo (``C(64, 65) = 0`` —
-    an empty-grid illusion, not a sweep). Pinned against ``IMPLEMENTED_MASK``
-    so vocab growth moves the bound automatically
+    IMPLEMENTED bit — 72 on the 74-declared layout: only the tombstoned VWAP
+    pair 52/53 is out — the vocab-66 SuperTrend implemented-flip made 64/65
+    live, DEC-GAP-MIDPOINT-CONDITIONS-001 implemented the gap trio 66-68 and
+    DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935) implemented the five
+    express bits 69-73 — so a ``k`` above 72 can never form a combo
+    (``C(72, 73) = 0`` — an empty-grid illusion, not a sweep). Pinned against
+    ``IMPLEMENTED_MASK`` so vocab growth moves the bound automatically
     (DEC-VOCAB-U128-CODEGEN-001).
 
     Round-12 update (merged from main's club O): mid-band ``k`` values are
     now legitimately refused by the SEPARATE ``max_combos`` guard —
-    ``C(64,53)`` alone enumerates ~2.9e11 masks, far past the engine's
+    ``C(72,53)`` alone enumerates ~1.2e17 masks, far past the engine's
     100,000-mask ceiling — sized off the IMPLEMENTED count (``_MAX_K``),
     never the declared layout width (the guard mirrors the engine's real
-    ``C(64, k)`` grid; ``C(66, k)`` would wrongly refuse k=61..64). The
-    range check itself still owns the ``[1, 64]`` boundary.
+    ``C(72, k)`` grid; ``C(74, k)`` would wrongly refuse k=69..72). The
+    range check itself still owns the ``[1, 72]`` boundary.
     """
     from brutex.cli import default_condition_bits
     from brutex.dashboard.sweep_runner import _MAX_K
     from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
-    assert _MAX_K == IMPLEMENTED_MASK.bit_count() == 64
+    assert _MAX_K == IMPLEMENTED_MASK.bit_count() == 72
     assert len(default_condition_bits()) == _MAX_K
-    # Range boundary: 65 (past the implemented count) is RANGE-refused.
-    with pytest.raises(ValueError, match="k must be a whole number 1..64"):
-        resolve_sweep_request(k="65", today=_TODAY)
-    # Round-12 guard: a mid-band k enumerates > 100,000 masks over the 64-bit
+    # Range boundary: 73 (past the implemented count) is RANGE-refused.
+    with pytest.raises(ValueError, match="k must be a whole number 1..72"):
+        resolve_sweep_request(k="73", today=_TODAY)
+    # Round-12 guard: a mid-band k enumerates > 100,000 masks over the 72-bit
     # implemented set — refused by the max_combos guard, never the range message.
     with pytest.raises(ValueError, match="max_combos"):
         resolve_sweep_request(k="53", today=_TODAY)
-    # The top boundary k=64 forms exactly C(64,64) = 1 mask — accepted.
-    assert resolve_sweep_request(k="64", today=_TODAY).k == "64"
+    # The top boundary k=72 forms exactly C(72,72) = 1 mask — accepted.
+    assert resolve_sweep_request(k="72", today=_TODAY).k == "72"
 
 
 def test_non_integer_sl_leg_raises() -> None:

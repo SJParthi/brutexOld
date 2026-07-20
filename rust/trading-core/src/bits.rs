@@ -6,7 +6,7 @@
 //!
 //! A bit-for-bit twin of `brutex/vocabulary/bits.py` (both generated from
 //! `conditions.toml`). The strategy mask is a u128 (DEC-VOCAB-U128-CODEGEN-001
-//! / ADR-0012 D4); bits 0..=68 are the live
+//! / ADR-0012 D4); bits 0..=73 are the live
 //! conditions, the rest are reserved. Never renumber a bit (grow-only,
 //! DEC-PLUGIN-001).
 
@@ -163,9 +163,21 @@ pub const BIT_CLOSE_ABOVE_GAP_MID: u32 = 66;
 pub const BIT_CLOSE_BELOW_GAP_MID: u32 = 67;
 /// close within tolerance of the session-edge gap-midpoint level
 pub const BIT_NEAR_GAP_MID: u32 = 68;
+// Fibonacci Extended
+/// close within tolerance of the bullish 23.6% retracement (PDL-anchored)
+pub const BIT_NEAR_FIB_BULL_236: u32 = 69;
+/// close within tolerance of the bullish 78.6% retracement (PDL-anchored)
+pub const BIT_NEAR_FIB_BULL_786: u32 = 70;
+/// close within tolerance of the 424% extension (up or down variant)
+pub const BIT_NEAR_FIB_424: u32 = 71;
+// Swing Proximity
+/// close within tolerance of the last confirmed swing high
+pub const BIT_NEAR_SWING_HIGH: u32 = 72;
+/// close within tolerance of the last confirmed swing low
+pub const BIT_NEAR_SWING_LOW: u32 = 73;
 
 /// The number of atomic conditions (dense bits 0..=TOTAL-1).
-pub const TOTAL_CONDITIONS: u32 = 69;
+pub const TOTAL_CONDITIONS: u32 = 74;
 
 /// The strategy-mask width in bits (u128 — ADR-0012 D4).
 pub const MASK_WIDTH: u32 = 128;
@@ -177,14 +189,14 @@ pub const MASK_WIDTH: u32 = 128;
 /// position forever and never get math (the grow-only law).
 /// RETIRED: bit 52 `BIT_CLOSE_ABOVE_VWAP`.
 /// RETIRED: bit 53 `BIT_CLOSE_BELOW_VWAP`.
-pub const IMPLEMENTED_MASK: u128 = 590282299559823540223;
+pub const IMPLEMENTED_MASK: u128 = 18889452420679698743295;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The 69 bit positions must form a dense
-    /// 0..=68 range, no gaps, no dupes.
+    /// The 74 bit positions must form a dense
+    /// 0..=73 range, no gaps, no dupes.
     #[test]
     fn bit_positions_are_dense() {
         let all = [
@@ -257,6 +269,11 @@ mod tests {
             BIT_CLOSE_ABOVE_GAP_MID,
             BIT_CLOSE_BELOW_GAP_MID,
             BIT_NEAR_GAP_MID,
+            BIT_NEAR_FIB_BULL_236,
+            BIT_NEAR_FIB_BULL_786,
+            BIT_NEAR_FIB_424,
+            BIT_NEAR_SWING_HIGH,
+            BIT_NEAR_SWING_LOW,
         ];
         assert_eq!(all.len(), TOTAL_CONDITIONS as usize);
         let mut sorted = all;

@@ -54,11 +54,12 @@ class TestDescribeMask:
         assert describe_mask(0) == []
 
     def test_reserved_bits_are_ignored(self) -> None:
-        # bit 69 is reserved u128 headroom (>= TOTAL_CONDITIONS) → ignored;
-        # only bit 0 decodes. (bit 66 became a REAL condition —
-        # close_above_gap_mid — in the 66→69 growth, so the headroom probe
-        # moved to 69.)
-        assert describe_mask(_mask(0, 69)) == [MaskGroup("EMA Position", ("close_above_ema20",))]
+        # bit 74 is reserved u128 headroom (>= TOTAL_CONDITIONS) → ignored;
+        # only bit 0 decodes. (bits 66-68 are REAL gap-midpoint conditions on
+        # the re-stacked train and bits 69-73 became REAL conditions in the
+        # fib-template express — DEC-FIB-TEMPLATE-EXPRESS-001 — so the
+        # headroom probe moved to 74.)
+        assert describe_mask(_mask(0, 74)) == [MaskGroup("EMA Position", ("close_above_ema20",))]
 
 
 class TestMatchedConditionNames:
@@ -108,7 +109,10 @@ class TestTombstoneRendering:
             if condition_display_name(bit).endswith(RETIRED_SUFFIX)
         }
         assert suffixed == {bit for bit in range(TOTAL_CONDITIONS) if (RETIRED_MASK >> bit) & 1}
-        assert suffixed == {BIT_CLOSE_ABOVE_VWAP, BIT_CLOSE_BELOW_VWAP}
+        # The VWAP tombstone pair + the three DEC-FIB-TEMPLATE-EXPRESS-001 gap
+        # placeholders (bits 66-68 — reserved=true, dropped at the re-stack
+        # onto the gap-midpoint branch, NEVER implemented here).
+        assert suffixed == {BIT_CLOSE_ABOVE_VWAP, BIT_CLOSE_BELOW_VWAP, 66, 67, 68}
         # Sanity: disjoint from the implemented set (a live bit never suffixed).
         assert not any((IMPLEMENTED_MASK >> bit) & 1 for bit in suffixed)
 

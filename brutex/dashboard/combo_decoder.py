@@ -139,6 +139,13 @@ _CONDITION_LABELS: Final[dict[str, tuple[str, str]]] = {
     "close_above_gap_mid": ("close>gap-mid", "price above the opening-gap midpoint"),
     "close_below_gap_mid": ("close<gap-mid", "price below the opening-gap midpoint"),
     "near_gap_mid": ("near gap-mid", "at the opening-gap midpoint"),
+    # ── Fibonacci Extended + Swing Proximity (DEC-FIB-TEMPLATE-EXPRESS-001,
+    # bits 69-73) ──
+    "near_fib_bull_236": ("bull Fib 23.6%", "at the bullish 23.6% pullback zone"),
+    "near_fib_bull_786": ("bull Fib 78.6%", "at the bullish 78.6% pullback zone"),
+    "near_fib_424": ("Fib 424% ext", "at the far 424% breakout target"),
+    "near_swing_high": ("near swing high", "retesting the last swing high"),
+    "near_swing_low": ("near swing low", "retesting the last swing low"),
 }
 
 #: Readable grouping order for composing a sentence: trend → level →
@@ -196,6 +203,13 @@ _LEVEL_NAMES: Final[frozenset[str]] = frozenset(
         "close_above_gap_mid",
         "close_below_gap_mid",
         "near_gap_mid",
+        # DEC-FIB-TEMPLATE-EXPRESS-001: the express fib/swing proximity
+        # bits (69-73) are all level conditions.
+        "near_fib_bull_236",
+        "near_fib_bull_786",
+        "near_fib_424",
+        "near_swing_high",
+        "near_swing_low",
     }
 )
 _STRUCTURE_NAMES: Final[frozenset[str]] = frozenset(
