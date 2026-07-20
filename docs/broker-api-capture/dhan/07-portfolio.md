@@ -81,7 +81,7 @@ curl --request GET \
 ```
 [
     {
-    "dhanClientId": "1000000009",  
+    "dhanClientId": "1000000009",
     "tradingSymbol": "TCS",
     "securityId": "11536",
     "positionType": "LONG",
@@ -164,10 +164,10 @@ curl --request POST \
 ```
 {
     "dhanClientId": "1000000009",
-    "fromProductType":"INTRADAY",  
+    "fromProductType":"INTRADAY",
     "exchangeSegment":"NSE_EQ",
     "positionType":"LONG",
-    "securityId":"11536",  
+    "securityId":"11536",
     "tradingSymbol":"",
     "convertQty":"40",
     "toProductType":"CNC"

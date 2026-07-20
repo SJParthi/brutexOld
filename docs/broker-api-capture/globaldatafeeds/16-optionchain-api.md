@@ -38,17 +38,17 @@ SubscribeOptionChain : Returns data of entire OptionChain for requested underlyi
 
 ```javascript
 function SubscribeOptionChain()
-{	
-     var request = 	 
+{
+     var request =
 		{
 			MessageType: "SubscribeOptionChain",
-			Exchange: "NFO",					
-			Product: "NIFTY",					
-			Expiry:"17OCT2024",					
-			// OptionType:"CE",					
-			StrikePrice: 25000, 				
-			Depth: 5 							
-		       // Unsubscribe: false                  
+			Exchange: "NFO",
+			Product: "NIFTY",
+			Expiry:"17OCT2024",
+			// OptionType:"CE",
+			StrikePrice: 25000,
+			Depth: 5
+		       // Unsubscribe: false
 		};
      doSend(request);
 }

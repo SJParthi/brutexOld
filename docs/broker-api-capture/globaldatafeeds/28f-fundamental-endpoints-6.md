@@ -30,7 +30,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -105,13 +105,13 @@ paths:
                         A ,718,249,465,4,"02-25-2025","02-25-2025 21:02:32","02-25-2025 21:02:32"
                         B ,1564,591,915,58,"02-25-2025","02-25-2025 21:02:32","02-25-2025 21:02:32"
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
           </div>
-          
+
       tags:
         - Other Data APIs
         - Corporate Data
@@ -294,7 +294,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -513,13 +513,13 @@ paths:
                         543108,UTCRFS2RQP  ,F ,420.22,466.91,-10,1,0,True,"02-25-2025","02-25-2025 21:02:33","02-25-2025 21:02:33"
                         542817,NIEHSPI     ,B ,32.18,35.75,-9.99,987,0.34,True,"02-25-2025","02-25-2025 21:02:33","02-25-2025 21:02:33"
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
           </div>
-          
+
       tags:
         - Other Data APIs
         - Corporate Data
@@ -724,7 +724,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -754,7 +754,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                        
+        Response
         |
 
         | :------------ |
@@ -766,11 +766,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetIndexHighlightsResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetIndexHighlightsResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetIndexHighlightsResponse_CSV.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetIndexHighlightsResponse_CSV.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be

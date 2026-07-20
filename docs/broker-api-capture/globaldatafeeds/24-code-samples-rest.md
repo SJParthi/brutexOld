@@ -40,14 +40,14 @@ Note the code below in file at the top :
 
 ```python
 """
-GFDL TODO - please enter below the endpoint received from GFDL team. 
-If you dont have one, please contact us on sales@globaldatafeeds.in 
-"""  
+GFDL TODO - please enter below the endpoint received from GFDL team.
+If you dont have one, please contact us on sales@globaldatafeeds.in
+"""
 endpoint = "http://endpoint:port/"
 
 """
-//GFDL TODO - please enter below the API Key received from GFDL team. 
-If you dont have one, please contact us on sales@globaldatafeeds.in 
+//GFDL TODO - please enter below the API Key received from GFDL team.
+If you dont have one, please contact us on sales@globaldatafeeds.in
 """
 accesskey = "Enter Your API Key Here"
 ```
@@ -73,27 +73,27 @@ accesskey = "Enter Your API Key Here"
 				4. 	GetLastQuoteShort : returns single record of realtime data of single symbol. Contains limited fields in response
 				5. 	GetLastQuoteShortWithClose : returns single record of realtime data of single symbol. Contains limited fields in response
 				6.	If you want to get data of multiple symbols, you will need to send 1 request each - for each symbol
-				
+
                 //This example shows how to request data using Continuous Format
-                //Similarly, you can send NIFTY-II (Near month), NIFTY-III (Far month). 
+                //Similarly, you can send NIFTY-II (Near month), NIFTY-III (Far month).
                 //Below Symbol is Continuous Format of NIFTY Futures. It will never expire. So no change in code will be necessary.
                 //You can use same naming convention for Futures of Instruments from NFO, CDS, MCX,BFO Exchanges
                 //CDS Examples : USDINR-I, USDINR-II, USDINR-III
                 //MCX Examples : NATURALGAS-I, NATURALGAS-II, NATURALGAS-III
                 //BFO Examples : BANKEX-I,BANKEX-II,BANKEX-III
-                
-                //Similarly, you can send NIFTY20AUGFUT (near month), NIFTY20SEPFUT (far month). 
+
+                //Similarly, you can send NIFTY20AUGFUT (near month), NIFTY20SEPFUT (far month).
                 //You can use same naming convention for Futures of Instruments from NFO, CDS, MCX,BFO Exchanges
                 //NFO Options Examples : NIFTY02JUL2010000CE, RELIANCE30JUL201700CE
                 //CDS Futures Examples : USDINR20JULFUT, USDINR20AUGFUT, USDINR20SEPFUT
                 //CDS Options Examples : USDINR29JUL2075.5CE, EURINR29JUL2080CE
                 //MCX Options Examples : CRUDEOIL20JULFUT, CRUDEOIL20AUGFUT, CRUDEOIL20SEPFUT
-                //MCX Options Examples : CRUDEOIL20JUL2050PE, GOLD20JUL43700PE	
+                //MCX Options Examples : CRUDEOIL20JUL2050PE, GOLD20JUL43700PE
                 //BFO  Futures Examples : BANKEX24JUN24FUT, BANKEX2JUL24FUT
-                //BFO  Options Examples : BANKEX14JUN2457300PE, BANKEX14JUN2457300CE	
+                //BFO  Options Examples : BANKEX14JUN2457300PE, BANKEX14JUN2457300CE
                 //Important : Replace it with appropriate expiry date if this contract is expired
 
-                //Similarly, you can send FUTIDX_NIFTY_27AUG2020_XX_0 (near month), FUTIDX_NIFTY_24SEP2020_XX_0 (far month). 
+                //Similarly, you can send FUTIDX_NIFTY_27AUG2020_XX_0 (near month), FUTIDX_NIFTY_24SEP2020_XX_0 (far month).
                 //You can use same naming convention for Futures of Instruments from NFO, CDS, MCX,BFO Exchanges
                 //NFO Options Examples : OPTIDX_NIFTY_02JUL2020_CE_10000, OPTSTK_RELIANCE_30JUL2020_CE_1700
                 //CDS Futures Examples : FUTCUR_USDINR_26JUN2020_XX_0, FUTCUR_USDINR_29JUL2020_XX_0, FUTCUR_USDINR_27AUG2020_XX_0
@@ -108,14 +108,14 @@ accesskey = "Enter Your API Key Here"
                 //Use NSE_IDX as Exchange
                 //Please note that Indices Symbols have white space. For example, between NIFTY & 50, NIFTY & BANK above
 
-                Requesting realtime data of NSE Stocks 
+                Requesting realtime data of NSE Stocks
                 ------------------------------------------
                 //For EQ Series, use InstrumentIdentifier value BAJAJ-AUTO, RELIANCE, AXISBANK, LT, etc..
-                //To subscribe to realtime data of any other series, append the series name to symbol name 
+                //To subscribe to realtime data of any other series, append the series name to symbol name
                 //for example, to request data of RELIANCE CAPITAL from BE Series, use RELCAPITAL.BE
                 //EQ Series Symbols are mentioned without any suffix
 
-                // Please see symbol naming conventions here : 
+                // Please see symbol naming conventions here :
                 // https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/documentation-support/symbol-naming-convention/
 	*/
 ///////////////////////////////////////////////////////////////////////////
@@ -127,9 +127,9 @@ async def GetLastQuote():
     print("----------------------------------------------------")
     ExchangeName = "NFO"
     InstIdentifier = "NIFTY-I"
-    isShortIdentifier = "false"         #GFDL : When using contractwise symbol like NIFTY20JULFUT, 
-                                        #this argument must be sent with value "true" 
-    xml="false"                                        
+    isShortIdentifier = "false"         #GFDL : When using contractwise symbol like NIFTY20JULFUT,
+                                        #this argument must be sent with value "true"
+    xml="false"
     response = ""
     count = 0
     maxcount = 10                       #Change this number to see more updates. By default, sample will print 10 updates and stop

@@ -87,7 +87,7 @@ Nothing. This function authenticates the user and sends response accordingly
  function Authenticate()
   {
      writeToScreen("Authenticate");
-    var message = 
+    var message =
     {
        MessageType: "Authenticate",
        Password: accessKey

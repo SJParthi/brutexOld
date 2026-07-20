@@ -137,7 +137,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -197,8 +197,8 @@ paths:
 
         "02-27-2025 08:45:00",MANAPPURAM
 
-              Note: 
-              1. The file containing above values in CSV format will be returned. 
+              Note:
+              1. The file containing above values in CSV format will be returned.
               2. To see it working, copy-paste the request in browser.
             </Tab>
           </Tabs>
@@ -298,7 +298,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -373,8 +373,8 @@ paths:
               Date,ScripId,ScripName,Open,High,Low,Close,PrevClose,LastTradedPrice,NoOfTrades,Turnover,DelQty,DelQtyPer,Series,AverageTradedPrice,TradedQty
         "02-27-2025",RELIANCE,,1212.8,1215,1200.65,1207.1,1204,1208,236188,138836.37,7994875,69.46,EQ,1206.31,11509215
 
-              Note: 
-              1. The file containing above values in CSV format will be returned. 
+              Note:
+              1. The file containing above values in CSV format will be returned.
               2. To see it working, copy-paste the request in browser.
             </Tab>
           </Tabs>
@@ -479,7 +479,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -543,8 +543,8 @@ paths:
               Date,ScripId,ScripName,Close,PrevClose,UnderlyingLogReturn,PrevVolatility,Volatity,AnnualVolatality
         "02-27-2025",RELIANCE,,1207.1,1204,0.0026,0.0134,0.0133,0.2541
 
-              Note: 
-              1. The file containing above values in CSV format will be returned. 
+              Note:
+              1. The file containing above values in CSV format will be returned.
               2. To see it working, copy-paste the request in browser.
             </Tab>
           </Tabs>
@@ -643,7 +643,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -708,8 +708,8 @@ paths:
         "01-23-2026",RELIANCE,Reliance Industries
         Ltd,"01-23-2026",0,1386.1,A,135324.72634,1875533.04
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
@@ -892,7 +892,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -992,8 +992,8 @@ paths:
 
         "07-03-2025",ABMINTLLTD.BE,ABM INTERNATIONAL LTD,BE,L
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
@@ -1293,8 +1293,8 @@ paths:
         BSE,,RELIANCE,,RELIANCE,,,RELIANCE,,0.0,RELIANCE,,,1.0,RELIANCE
         INDUSTRIES LTD.,500325,1427.65,1713.15,INE002A01018,1608.95,1115.55,A
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>

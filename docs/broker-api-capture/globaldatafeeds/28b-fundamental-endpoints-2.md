@@ -37,7 +37,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -71,37 +71,37 @@ paths:
         10px; border-radius: 5px;">
             <Tabs style="background-color:lightgrey;">
             <Tab title="JSON">
-                {  
-                    "Value": [  
-                    {  
-                    "Year": 2024,  
-                    "Instrument": "INDRANIB",  
-                    "NatureOfReport": "Standalone",  
-                    "ResultsType": "ProfitLoss",  
-                    "ResultPeriod": "QD"  
-                    },  
-                    {  
-                    "Year": 2024,  
-                    "Instrument": "INDRANIB",  
-                    "NatureOfReport": "Standalone",  
-                    "ResultsType": "ProfitLoss",  
-                    "ResultPeriod": "M9"  
-                    },  
-                    {  
-                    "Year": 2024,  
-                    "Instrument": "INDRANIB",  
-                    "NatureOfReport": "Consolidated",  
-                    "ResultsType": "ProfitLoss",  
-                    "ResultPeriod": "QD"  
-                    },  
-                    {  
-                    "Year": 2024,  
-                    "Instrument": "INDRANIB",  
-                    "NatureOfReport": "Consolidated",  
-                    "ResultsType": "ProfitLoss",  
-                    "ResultPeriod": "M9"  
-                    }  
-                    ]  
+                {
+                    "Value": [
+                    {
+                    "Year": 2024,
+                    "Instrument": "INDRANIB",
+                    "NatureOfReport": "Standalone",
+                    "ResultsType": "ProfitLoss",
+                    "ResultPeriod": "QD"
+                    },
+                    {
+                    "Year": 2024,
+                    "Instrument": "INDRANIB",
+                    "NatureOfReport": "Standalone",
+                    "ResultsType": "ProfitLoss",
+                    "ResultPeriod": "M9"
+                    },
+                    {
+                    "Year": 2024,
+                    "Instrument": "INDRANIB",
+                    "NatureOfReport": "Consolidated",
+                    "ResultsType": "ProfitLoss",
+                    "ResultPeriod": "QD"
+                    },
+                    {
+                    "Year": 2024,
+                    "Instrument": "INDRANIB",
+                    "NatureOfReport": "Consolidated",
+                    "ResultsType": "ProfitLoss",
+                    "ResultPeriod": "M9"
+                    }
+                    ]
                     }
             </Tab>
             <Tab title="XML">
@@ -115,21 +115,21 @@ paths:
                 &lt;/FinResultsQueryResponse&gt;
             </Tab>
             <Tab title="CSV">
-                Year,InstrumentIdentifier,NatureOfReport,ResultsType,ResultPeriod  
-                2024,INDRANIB,Standalone,ProfitLoss,QD  
-                2024,INDRANIB,Standalone,ProfitLoss,M9  
-                2024,INDRANIB,Consolidated,ProfitLoss,QD  
+                Year,InstrumentIdentifier,NatureOfReport,ResultsType,ResultPeriod
+                2024,INDRANIB,Standalone,ProfitLoss,QD
+                2024,INDRANIB,Standalone,ProfitLoss,M9
+                2024,INDRANIB,Consolidated,ProfitLoss,QD
                 2024,INDRANIB,Consolidated,ProfitLoss,M9
             </Tab>
             <Tab title="CsvContent">
-                Year,InstrumentIdentifier,NatureOfReport,ResultsType,ResultPeriod  
-                2024,INDRANIB,Standalone,ProfitLoss,QD  
-                2024,INDRANIB,Standalone,ProfitLoss,M9  
-                2024,INDRANIB,Consolidated,ProfitLoss,QD  
+                Year,InstrumentIdentifier,NatureOfReport,ResultsType,ResultPeriod
+                2024,INDRANIB,Standalone,ProfitLoss,QD
+                2024,INDRANIB,Standalone,ProfitLoss,M9
+                2024,INDRANIB,Consolidated,ProfitLoss,QD
                 2024,INDRANIB,Consolidated,ProfitLoss,M9
-                
-                Note: 
-                1. The file containing above values in CSV format will be returned. 
+
+                Note:
+                1. The file containing above values in CSV format will be returned.
                 2. To see it working, copy-paste the request in browser.
             </Tab>
           </Tabs>
@@ -324,7 +324,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -338,7 +338,7 @@ paths:
 
 
         To use this function, you will need year, name of the company and other
-        details related to Financial Result which you can obtain from 
+        details related to Financial Result which you can obtain from
         [GetFinancialResultsItems](/getfinancialresultsitems-15575584e0)
         function.
 
@@ -401,7 +401,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                         
+        Response
         |
 
         | :------------ |
@@ -413,11 +413,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetFinancialResultsResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetFinancialResultsResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetFinancialResultsResponse_CSV.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetFinancialResultsResponse_CSV.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be
@@ -453,7 +453,7 @@ paths:
           in: query
           description: |-
             please enter the financial year.
-            Example : 2024 for  FY-2024-2025. 
+            Example : 2024 for  FY-2024-2025.
           required: true
           example: 2024
           schema:
@@ -623,7 +623,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -696,9 +696,9 @@ paths:
             <Tab title="CsvContent">
                 Year,LastQ,MarketCap,EODClosePrice,Week52High,Week52Low,EPS,PeRatio,BookValuePerShare,DividendYield,EBIT,InterestCoverageRatio,FaceValue,PriceSalesRatio,ProfitAfterTax,EnterpriseValue,Debt
         2024,QM,1304121.56,3604.45,4585.9,3060.25,134.19,26.858792846497767,261.75690607734805,119296.9801217939,661270000000,83.07412060301507,1,5.110412260500384,487970000000,12957795600000,0
-                
-                Note: 
-                1. The file containing above values in CSV format will be returned. 
+
+                Note:
+                1. The file containing above values in CSV format will be returned.
                 2. To see it working, copy-paste the request in browser.
             </Tab>
           </Tabs>
@@ -872,7 +872,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -973,9 +973,9 @@ paths:
         Consulting,INE467B01029,"05-07-2025 16:56:40","05-07-2025 16:56:52"
 
 
-        Note: 
+        Note:
 
-        1. The file containing above values in CSV format will be returned. 
+        1. The file containing above values in CSV format will be returned.
 
         2. To see it working, copy-paste the request in browser.
           </Tab>
@@ -1215,7 +1215,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1294,9 +1294,9 @@ paths:
         IN0103,Metals & Mining
 
 
-        Note: 
+        Note:
 
-        1. The file containing above values in CSV format will be returned. 
+        1. The file containing above values in CSV format will be returned.
 
         2. To see it working, copy-paste the request in browser.
           </Tab>
@@ -1374,7 +1374,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1453,9 +1453,9 @@ paths:
         IN03,Energy
 
 
-        Note: 
+        Note:
 
-        1. The file containing above values in CSV format will be returned. 
+        1. The file containing above values in CSV format will be returned.
 
         2. To see it working, copy-paste the request in browser.
           </Tab>
@@ -1533,7 +1533,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1615,9 +1615,9 @@ paths:
         IN010203,Cement & Cement Products
 
 
-        Note: 
+        Note:
 
-        1. The file containing above values in CSV format will be returned. 
+        1. The file containing above values in CSV format will be returned.
 
         2. To see it working, copy-paste the request in browser.
           </Tab>
@@ -1695,7 +1695,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1772,9 +1772,9 @@ paths:
         IN010101003,Carbon Black
 
 
-        Note: 
+        Note:
 
-        1. The file containing above values in CSV format will be returned. 
+        1. The file containing above values in CSV format will be returned.
 
         2. To see it working, copy-paste the request in browser.
           </Tab>

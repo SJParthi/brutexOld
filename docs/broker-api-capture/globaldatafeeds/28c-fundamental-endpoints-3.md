@@ -35,7 +35,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -140,9 +140,9 @@ paths:
             1740594600,RETAIL
             1740594600,SUDTIND-B
             1740594600,UGARSUGAR
-            
-            Note: 
-            1. The file containing above values in CSV format will be returned. 
+
+            Note:
+            1. The file containing above values in CSV format will be returned.
             2. To see it working, copy-paste the request in browser.
               </Tab>
             </Tabs>
@@ -317,7 +317,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -349,7 +349,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                            
+        Response
         |
 
         | :------------ |
@@ -361,11 +361,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetSHPResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetSHPResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetSHPResponse_CSV.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetSHPResponse_CSV.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be
@@ -536,7 +536,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -624,8 +624,8 @@ paths:
 
         Others,0,February 2025
 
-            Note: 
-            1. The file containing above values in CSV format will be returned. 
+            Note:
+            1. The file containing above values in CSV format will be returned.
             2. To see it working, copy-paste the request in browser.
               </Tab>
             </Tabs>
@@ -806,7 +806,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -866,13 +866,13 @@ paths:
                         Date,Symbol,ScripCode,ScripName,ISIN,MarketCap,ReceivedAt,SavedAt
                         "02-27-2025 00:00:00",5PAISA,540776,5paisa Capital Limited,INE618L01018,1107.98,"02-27-2025 21:00:08","02-27-2025 21:00:09"
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
           </div>
-          
+
       tags:
         - Corporate Data APIs (RESTful)/Market Capitalization
         - Corporate Data
@@ -1061,7 +1061,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1116,8 +1116,8 @@ paths:
                         Date,MarketCapVal,ReceivedAt,SavedAt
                     "06-12-2025",44958383,"06-12-2025","06-13-2025"
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
@@ -1210,7 +1210,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1345,8 +1345,8 @@ paths:
         Ltd,542667,2024,https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=4a500ec6-35ae-4cec-9795-eb285f87f44a.pdf,,"03-06-2025
         21:00:04","03-06-2025 21:00:04"
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
