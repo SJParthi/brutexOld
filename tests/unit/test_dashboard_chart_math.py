@@ -556,6 +556,32 @@ class TestAxisTickPures:
         assert _node_call("C.equityDomain(C.equitySeries([]))") is None
 
 
+#: The six Batch B+C createElementNS renderers + their BXChart export keys —
+#: ADDITIVE for a later wiring PR (strategy.html's marker-legend comment:
+#: bx-strategy-panel.js does not draw the axis/last-price/hover chrome yet).
+_BROWSER_ONLY_RENDERERS = (
+    ("bxSvgTitleNode", "svgTitleNode"),
+    ("bxAxisTextNode", "axisTextNode"),
+    ("bxPriceAxisNodes", "priceAxisNodes"),
+    ("bxTimeAxisNodes", "timeAxisNodes"),
+    ("bxLastPriceNodes", "lastPriceNodes"),
+    ("bxEquityAxisNodes", "equityAxisNodes"),
+)
+
+
+class TestBrowserOnlyRendererPins:
+    """The TestAxisTickPures envelope's SOURCE-STRING PIN: the six
+    document-bound (browser-only) renderers cannot be node-executed here,
+    so their definition + BXChart namespace export are asserted against the
+    shipped source — deleting or renaming one fails its matching case."""
+
+    @pytest.mark.parametrize(("fn_name", "export_key"), _BROWSER_ONLY_RENDERERS)
+    def test_renderer_defined_and_exported(self, fn_name: str, export_key: str) -> None:
+        src = _CHART_JS.read_text(encoding="utf-8")
+        assert f"function {fn_name}(" in src, f"{fn_name} definition missing"
+        assert f"{export_key}: {fn_name}" in src, f"{fn_name} BXChart export missing"
+
+
 class TestHoverTitlePures:
     """Static-hover title builders: the bar's/trade's OWN stored values at
     full precision — no mousemove work, capped at TITLE_TEXT_CAP (500)."""
