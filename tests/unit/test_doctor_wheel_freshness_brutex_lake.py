@@ -27,7 +27,7 @@ it; ``.github/workflows/lake-rust-parity.yml`` is the lane that does):
 Symbol-pin note (round-2 review fold F2-2): the lake shim deliberately
 carries NO ``_EXPECTED_COMPILED_SYMBOLS`` constant (it stays minimal) — the
 fingerprint symbols are pinned against ``sorted(brutex_lake.__all__)``,
-which equals the 19-symbol ``EXPECTED_BUILD.json`` set ({17 non-dunder
+which equals the 30-symbol ``EXPECTED_BUILD.json`` set ({28 non-dunder
 kernel fns} + ``SOURCE_DIGEST`` + ``__version__``).
 
 HONEST envelope (pinned in the source too): the freshness (version+symbol)
@@ -149,12 +149,12 @@ class TestRepoFingerprint:
         assert isinstance(symbols, list)
         assert symbols == sorted(symbols), "fingerprint symbols must be sorted"
 
-    def test_fingerprint_carries_the_19_symbol_surface(self) -> None:
-        # 17 non-dunder kernel fns + SOURCE_DIGEST + __version__
+    def test_fingerprint_carries_the_30_symbol_surface(self) -> None:
+        # 28 non-dunder kernel fns + SOURCE_DIGEST + __version__
         # (DEC-BRUTEX-LAKE-BOX-WHEEL-001; __source_digest__ is deliberately
         # NOT listed — dunder-invisible to the doctor's symbol check).
         symbols = _fingerprint_payload()["symbols"]
-        assert len(symbols) == 19
+        assert len(symbols) == 30
         assert "SOURCE_DIGEST" in symbols
         assert "__version__" in symbols
         assert "__source_digest__" not in symbols

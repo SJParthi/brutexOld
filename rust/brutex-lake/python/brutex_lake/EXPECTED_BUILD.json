@@ -20,6 +20,17 @@
     "render_parquet_from_ipc",
     "render_stats_shard_json",
     "resample_1m_ipc",
-    "resample_all_ipc"
+    "resample_all_ipc",
+    "resample_daily_ipc",
+    "resample_session_ipc",
+    "waved_endgame_witness",
+    "waved_has_stored_1m_bars",
+    "waved_heal_batch",
+    "waved_heal_engaged_kinds",
+    "waved_lake_content_token",
+    "waved_month_partition_files",
+    "waved_read_1m_ipc",
+    "waved_reconcile_file",
+    "waved_scan_lake"
   ]
 }
