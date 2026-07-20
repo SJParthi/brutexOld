@@ -96,15 +96,39 @@ fuzz_target!(|data: &[u8]| {
         assert!((k as i64) > prev && k < n, "kept rows ascending + in range");
         prev = k as i64;
     }
+    // 9-int warn events (DEC-BADTICK-HEAD-SEED-001 / DEC-BADTICK-HILO-
+    // SCREEN-001): NON-decreasing anchors (a session's SKIP +
+    // MAJORITY_DROPPED share one) + the per-kind payload laws — the exact
+    // invariants `feed_rust.validate_scan` re-checks at the FFI boundary.
     let mut prev_emit: i64 = -1;
-    for &(emit, sfr, skipped, fpr, fsr) in &out.warn_events {
-        assert!((emit as i64) > prev_emit, "warn anchors ascending");
-        assert!(emit <= n && sfr < n && skipped >= 1 && fpr < fsr && fsr < n);
+    for &(kind, emit, sfr, a, b, c, d, e, f) in &out.warn_events {
+        assert!((emit as i64) >= prev_emit, "warn anchors decreased");
+        assert!(emit <= n && sfr < n);
+        match kind {
+            brutex_feed::EVENT_KIND_SKIP => {
+                let (skipped, first_ref, first_skip, first_reason, n_high, n_low) =
+                    (a, b, c, d, e, f);
+                assert!(skipped >= 1, "skipped floor");
+                assert!(first_ref < n && first_skip < n, "offender range");
+                assert!(first_reason <= brutex_feed::REASON_LOW, "reason range");
+                assert!(n_high + n_low <= skipped, "reason tally");
+            }
+            brutex_feed::EVENT_KIND_HEAD_UNCONFIRMED => {
+                assert!(a < b && b < n, "head pair range");
+                assert_eq!((c, d, e, f), (0, 0, 0, 0), "head padding");
+            }
+            brutex_feed::EVENT_KIND_MAJORITY_DROPPED => {
+                let (skipped, kept_in_session) = (a, b);
+                assert!(skipped >= 1 && skipped > kept_in_session, "majority law");
+                assert_eq!((c, d, e, f), (0, 0, 0, 0), "majority padding");
+            }
+            other => panic!("unknown event kind {other}"),
+        }
         prev_emit = emit as i64;
     }
     if let Some((row, field)) = out.positivity_stop {
         assert!(row < n && field <= 3);
         assert!(out.kept_rows.iter().all(|&k| k < row));
-        assert!(out.warn_events.iter().all(|&(emit, ..)| emit < row));
+        assert!(out.warn_events.iter().all(|&(_, emit, ..)| emit < row));
     }
 });

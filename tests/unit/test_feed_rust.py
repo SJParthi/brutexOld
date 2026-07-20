@@ -154,11 +154,31 @@ class TestResolveFeedKernel:
 
 
 # ── validate_scan — the refuse-poison gate, every arm ───────────────────────
+#
+# Events are the 9-int decision-plane records (DEC-BADTICK-HEAD-SEED-001 +
+# DEC-BADTICK-HILO-SCREEN-001): (kind, emit_at_row, session_first_row, a, b,
+# c, d, e, f) — SKIP(0) carries (skipped, first_ref_row, first_skip_row,
+# first_reason, n_high, n_low); HEAD_UNCONFIRMED(1) (row_0, row_1, 0...);
+# MAJORITY_DROPPED(2) (skipped, kept_in_session, 0...).
+
+
+def _skip(
+    emit: int,
+    sfr: int = 0,
+    *,
+    skipped: int = 1,
+    ref: int = 0,
+    skip: int = 1,
+    reason: int = 0,
+    n_high: int = 0,
+    n_low: int = 0,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (0, emit, sfr, skipped, ref, skip, reason, n_high, n_low)
 
 
 def _ok_result() -> ScanResult:
-    """A well-formed clean-scan result over n_rows=4 (one finish event)."""
-    return ([0, 2, 3], [(4, 0, 1, 0, 1)], None)
+    """A well-formed clean-scan result over n_rows=4 (one finish SKIP event)."""
+    return ([0, 2, 3], [_skip(4)], None)
 
 
 class TestValidateScan:
@@ -181,13 +201,38 @@ class TestValidateScan:
 
     def test_valid_with_stop(self) -> None:
         # Kept + warn strictly before the stop row; no finish event.
-        assert validate_scan(([0, 1], [(1, 0, 2, 0, 0 + 1)], (3, 2)), 4) is True
+        assert validate_scan(([0], [_skip(2, skip=1)], (3, 2)), 4) is True
 
     def test_valid_empty(self) -> None:
         assert validate_scan(([], [], None), 0) is True
 
     def test_valid_boundary_flush_at_kept_row(self) -> None:
-        assert validate_scan(([0, 2], [(2, 0, 1, 0, 1)], None), 3) is True
+        assert validate_scan(([0, 2], [_skip(2)], None), 3) is True
+
+    def test_valid_head_vote_ref_after_skip(self) -> None:
+        # The head-median law: the reference row may lie AFTER the skip row
+        # (a poison FIRST bar judged against the median at row 2) — the old
+        # `first_prev_row < first_skip_row` ordering constraint is GONE, and
+        # ref == skip is equally legal (the median bar judged against its
+        # own high/low).
+        assert validate_scan(([1, 2, 3], [_skip(4, ref=2, skip=0)], None), 4) is True
+        assert (
+            validate_scan(([0, 2, 3], [_skip(4, ref=1, skip=1, reason=1, n_high=1)], None), 4)
+            is True
+        )
+
+    def test_valid_shared_anchor_skip_then_majority(self) -> None:
+        # A session's SKIP + MAJORITY_DROPPED share ONE anchor (non-decreasing
+        # law, not strictly-ascending).
+        result = (
+            [1],
+            [_skip(3, skipped=2), (2, 3, 0, 2, 1, 0, 0, 0, 0)],
+            None,
+        )
+        assert validate_scan(result, 3) is True
+
+    def test_valid_head_unconfirmed(self) -> None:
+        assert validate_scan(([0, 1], [(1, 2, 0, 0, 1, 0, 0, 0, 0)], None), 2) is True
 
     def test_result_shape_not_tuple(self) -> None:
         self._refused([[], [], None], 4, "result_shape")
@@ -199,7 +244,7 @@ class TestValidateScan:
         self._refused(((0, 1), [], None), 4, "column_shape")
 
     def test_column_shape_warns_not_list(self) -> None:
-        self._refused(([], ((4, 0, 1, 0, 1),), None), 4, "column_shape")
+        self._refused(([], (_skip(4),), None), 4, "column_shape")
 
     def test_stop_shape(self) -> None:
         self._refused(([], [], [2, 1]), 4, "stop_shape")
@@ -237,52 +282,88 @@ class TestValidateScan:
         self._refused(([2], [], (2, 0)), 4, "kept_order")
 
     def test_event_shape(self) -> None:
-        self._refused(([], [[4, 0, 1, 0, 1]], None), 4, "event_shape")
-        self._refused(([], [(4, 0, 1, 0)], None), 4, "event_shape")
+        self._refused(([], [list(_skip(4))], None), 4, "event_shape")
+        self._refused(([], [(4, 0, 1, 0, 1)], None), 4, "event_shape")  # the retired 5-int shape
+        self._refused(([], [(*_skip(4), 0)], None), 4, "event_shape")
 
     def test_event_types(self) -> None:
-        self._refused(([], [(4, 0, 1.0, 0, 1)], None), 4, "event_types")
+        self._refused(([], [(0, 4, 0, 1.0, 0, 1, 0, 0, 0)], None), 4, "event_types")
 
-    def test_event_order_not_ascending(self) -> None:
-        self._refused(([0, 2], [(2, 0, 1, 0, 1), (2, 0, 1, 0, 1)], None), 4, "event_order")
+    def test_event_order_decreasing_refused(self) -> None:
+        self._refused(([0, 2], [_skip(3), _skip(2)], None), 4, "event_order")
 
     def test_event_negative_emit_refused(self) -> None:
-        self._refused(([], [(-1, 0, 1, 0, 1)], None), 4, "event_order")
+        self._refused(([], [_skip(-1)], None), 4, "event_order")
 
     def test_event_past_finish_anchor(self) -> None:
         # emit_at_row may equal n_rows (finish) but never exceed it.
-        assert validate_scan(([], [(4, 0, 1, 0, 1)], None), 4) is True
-        self._refused(([], [(5, 0, 1, 0, 1)], None), 4, "event_order")
+        assert validate_scan(([], [_skip(4)], None), 4) is True
+        self._refused(([], [_skip(5)], None), 4, "event_order")
 
     def test_event_at_or_after_stop_row(self) -> None:
         # With a stop, NO event may anchor at/after the stop row — a finish
         # event (emit == n_rows) is structurally impossible under a stop.
-        self._refused(([0], [(3, 0, 1, 0, 1)], (3, 0)), 4, "event_order")
-        self._refused(([0], [(4, 0, 1, 0, 1)], (3, 0)), 4, "event_order")
+        self._refused(([0], [_skip(3)], (3, 0)), 4, "event_order")
+        self._refused(([0], [_skip(4)], (3, 0)), 4, "event_order")
+
+    def test_event_kind_unknown_refused(self) -> None:
+        self._refused(([], [(3, 4, 0, 1, 0, 1, 0, 0, 0)], None), 4, "event_kind")
 
     def test_session_first_range(self) -> None:
-        self._refused(([], [(4, 4, 1, 0, 1)], None), 4, "session_first_range")
-        self._refused(([], [(4, -1, 1, 0, 1)], None), 4, "session_first_range")
+        self._refused(([], [_skip(4, sfr=4)], None), 4, "session_first_range")
+        self._refused(([], [_skip(4, sfr=-1)], None), 4, "session_first_range")
 
     def test_skipped_floor(self) -> None:
-        self._refused(([], [(4, 0, 0, 0, 1)], None), 4, "skipped_floor")
+        self._refused(([], [_skip(4, skipped=0)], None), 4, "skipped_floor")
 
     def test_offender_range(self) -> None:
-        self._refused(([], [(4, 0, 1, 1, 1)], None), 4, "offender_range")  # prev !< skip
-        self._refused(([], [(4, 0, 1, 0, 4)], None), 4, "offender_range")  # skip >= n
-        self._refused(([], [(4, 0, 1, -1, 1)], None), 4, "offender_range")  # negative
+        self._refused(([], [_skip(4, skip=4)], None), 4, "offender_range")  # skip >= n
+        self._refused(([], [_skip(4, ref=4)], None), 4, "offender_range")  # ref >= n
+        self._refused(([], [_skip(4, ref=-1)], None), 4, "offender_range")  # negative
+        self._refused(([], [_skip(4, skip=-1)], None), 4, "offender_range")
+
+    def test_reason_range(self) -> None:
+        self._refused(([], [_skip(4, reason=3)], None), 4, "reason_range")
+        self._refused(([], [_skip(4, reason=-1)], None), 4, "reason_range")
+
+    def test_reason_tally(self) -> None:
+        # n_high + n_low can never exceed the skipped count; negatives refuse.
+        self._refused(([], [_skip(4, skipped=1, n_high=1, n_low=1)], None), 4, "reason_tally")
+        self._refused(([], [_skip(4, n_high=-1)], None), 4, "reason_tally")
+        self._refused(([], [_skip(4, n_low=-1)], None), 4, "reason_tally")
+
+    def test_head_pair_range(self) -> None:
+        self._refused(([], [(1, 4, 0, 1, 1, 0, 0, 0, 0)], None), 4, "head_pair_range")  # a == b
+        self._refused(([], [(1, 4, 0, 2, 1, 0, 0, 0, 0)], None), 4, "head_pair_range")  # a > b
+        self._refused(([], [(1, 4, 0, 0, 4, 0, 0, 0, 0)], None), 4, "head_pair_range")  # b >= n
+        self._refused(([], [(1, 4, 0, -1, 1, 0, 0, 0, 0)], None), 4, "head_pair_range")
+
+    def test_head_padding(self) -> None:
+        self._refused(([], [(1, 4, 0, 0, 1, 1, 0, 0, 0)], None), 4, "head_padding")
+
+    def test_majority_law(self) -> None:
+        self._refused(([], [(2, 4, 0, 0, 0, 0, 0, 0, 0)], None), 4, "majority_law")  # skipped 0
+        self._refused(([], [(2, 4, 0, 2, 2, 0, 0, 0, 0)], None), 4, "majority_law")  # not strict
+        self._refused(([], [(2, 4, 0, 2, -1, 0, 0, 0, 0)], None), 4, "majority_law")  # kept < 0
+
+    def test_majority_padding(self) -> None:
+        self._refused(([], [(2, 4, 0, 2, 1, 0, 0, 1, 0)], None), 4, "majority_padding")
 
     def test_session_first_at_or_after_stop_row(self) -> None:
         # Round-1 review tightening: under a stop at row 3, an event whose
         # session_first_row is AT the stop row (in [0, n_rows) but not
         # strictly before the truncation point) is kernel-impossible and
         # must refuse — kills the row_bound -> n_rows reversion mutant.
-        self._refused(([0], [(2, 3, 1, 0, 1)], (3, 0)), 5, "session_first_range")
+        self._refused(([0], [_skip(2, sfr=3)], (3, 0)), 5, "session_first_range")
 
     def test_offender_at_or_after_stop_row(self) -> None:
         # Same tightening for the offender coordinates: first_skip_row at
         # the stop row refuses even though it is < n_rows.
-        self._refused(([0], [(2, 0, 1, 0, 3)], (3, 0)), 5, "offender_range")
+        self._refused(([0], [_skip(2, skip=3)], (3, 0)), 5, "offender_range")
+        self._refused(([0], [_skip(2, ref=3)], (3, 0)), 5, "offender_range")
+
+    def test_head_pair_at_or_after_stop_row(self) -> None:
+        self._refused(([0], [(1, 2, 0, 1, 3, 0, 0, 0, 0)], (3, 0)), 5, "head_pair_range")
 
 
 # ── Leaf discipline + vocabulary mirror pins ────────────────────────────────
@@ -319,6 +400,29 @@ class TestLeafDiscipline:
         assert feed_rust._TRUTHY == sweep_lookahead._TRUTHY  # pyright: ignore[reportPrivateUsage]
         assert feed_rust._FALSY == sweep_lookahead._FALSY  # pyright: ignore[reportPrivateUsage]
 
+    def test_event_vocabulary_mirrors_bad_tick(self) -> None:
+        # The leaf may not IMPORT brutex.data (see the allowlist pin), so its
+        # event-kind / reason-bound literals are mirror-PINNED against the
+        # canonical bad_tick vocabulary — the two decision planes must speak
+        # ONE event language (DEC-BADTICK-HEAD-SEED-001 +
+        # DEC-BADTICK-HILO-SCREEN-001).
+        from typing import get_args
+
+        from brutex.data import bad_tick
+
+        assert feed_rust._EVENT_KIND_SKIP == bad_tick.EVENT_KIND_SKIP  # pyright: ignore[reportPrivateUsage]
+        assert (
+            feed_rust._EVENT_KIND_HEAD_UNCONFIRMED  # pyright: ignore[reportPrivateUsage]
+            == bad_tick.EVENT_KIND_HEAD_UNCONFIRMED
+        )
+        assert (
+            feed_rust._EVENT_KIND_MAJORITY_DROPPED  # pyright: ignore[reportPrivateUsage]
+            == bad_tick.EVENT_KIND_MAJORITY_DROPPED
+        )
+        assert feed_rust._MAX_REASON_INDEX == bad_tick.REASON_LOW  # pyright: ignore[reportPrivateUsage]
+        assert len(get_args(bad_tick.ScreenWarnEvent)) == feed_rust._EVENT_ARITY  # pyright: ignore[reportPrivateUsage]
+        assert len(get_args(feed_rust.ScanEvent)) == feed_rust._EVENT_ARITY  # pyright: ignore[reportPrivateUsage]
+
 
 # ── Wheel-gated FFI pins ────────────────────────────────────────────────────
 
@@ -335,24 +439,29 @@ class TestKernelFfi:
 
     def test_result_is_integers_only(self, kernel_module: object) -> None:
         # Walk a REAL kernel result with a warn event AND a stop: every leaf
-        # is an int — no float, no string, no timestamp ever crosses.
-        ts = [1_704_167_100_000_000 + k * 60_000_000 for k in range(4)]
+        # is an int — no float, no string, no timestamp ever crosses. Day 1
+        # carries a post-head skip (its SKIP event flushes at the day-2
+        # boundary, row 4 — BEFORE the stop); day 2's second row stops the
+        # scan on a negative open (stop suppresses any later flush).
+        day1 = 1_704_167_100_000_000  # 2024-01-02 03:45 UTC
+        day2 = day1 + 86_400_000_000
+        ts = [day1 + k * 60_000_000 for k in range(4)] + [day2, day2 + 60_000_000]
         result = kernel_module.scan_bars(  # type: ignore[attr-defined]
             ts,
-            [100.0, 100.0, 100.0, -1.0],
-            [101.0, 101.0, 101.0, 1.0],
-            [99.0, 99.0, 99.0, 1.0],
-            [100.0, 1000.0, 100.5, 1.0],
+            [100.0, 100.0, 100.0, 100.0, 50.0, -1.0],
+            [101.0, 101.0, 101.0, 1001.0, 51.0, 1.0],
+            [99.0, 99.0, 99.0, 999.0, 49.0, 1.0],
+            [100.0, 100.0, 100.0, 1000.0, 50.0, 1.0],
             True,
             4.0,
         )
         kept, warns, stop = result
+        assert warns, "the fixture must exercise the warn-event leaves"
         leaves: list[object] = list(kept)
         for event in warns:
             leaves.extend(event)
         assert stop is not None
         leaves.extend(stop)
-        assert leaves, "the walked result must not be trivially empty"
         for leaf in leaves:
             assert type(leaf) is int, repr(leaf)
 

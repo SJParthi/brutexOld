@@ -1,12 +1,17 @@
 //! Property invariants + determinism for the pure decision core
-//! (DEC-FEED-RUST-CORE-001). These are the SHAPE laws the Python seam's
-//! refuse-poison `validate_scan` gate re-checks at the FFI boundary — proven
-//! here to hold for every well-formed input, so a validate refusal in
-//! production can only ever mean a stale/corrupt wheel, never a healthy one.
+//! (DEC-FEED-RUST-CORE-001; re-derived for the DEC-BADTICK-HEAD-SEED-001 +
+//! DEC-BADTICK-HILO-SCREEN-001 event vocabulary). These are the SHAPE laws
+//! the Python seam's refuse-poison `validate_scan` gate re-checks at the FFI
+//! boundary — proven here to hold for every well-formed input, so a validate
+//! refusal in production can only ever mean a stale/corrupt wheel, never a
+//! healthy one.
 
 use proptest::prelude::*;
 
-use brutex_feed::{MAX_SAFE_TS_US, ScanOutcome, scan_bars};
+use brutex_feed::{
+    EVENT_KIND_HEAD_UNCONFIRMED, EVENT_KIND_MAJORITY_DROPPED, EVENT_KIND_SKIP, MAX_SAFE_TS_US,
+    REASON_LOW, ScanOutcome, scan_bars,
+};
 
 /// A finance-plausible close plus the hostile specials the kernel must stay
 /// total over (NaN / ±inf / subnormal / negative / zeros).
@@ -60,18 +65,34 @@ fn assert_shape_invariants(out: &ScanOutcome, n: usize) {
         assert!(k < n, "kept row out of range");
         prev = k as i64;
     }
-    // Warn events: strictly ascending anchors; coordinates in range;
-    // skipped >= 1; first_prev_row < first_skip_row.
+    // Warn events (9-int): NON-decreasing anchors (a session's SKIP +
+    // MAJORITY_DROPPED share one); coordinates in range; per-kind payload
+    // laws — the exact invariants `feed_rust.validate_scan` re-checks.
     let mut prev_emit: i64 = -1;
-    for &(emit, sfr, skipped, fpr, fsr) in &out.warn_events {
-        assert!(
-            (emit as i64) > prev_emit,
-            "warn anchors not strictly ascending"
-        );
+    for &(kind, emit, sfr, a, b, c, d, e, f) in &out.warn_events {
+        assert!((emit as i64) >= prev_emit, "warn anchors decreased");
         assert!(emit <= n);
         assert!(sfr < n);
-        assert!(skipped >= 1);
-        assert!(fpr < fsr && fsr < n);
+        match kind {
+            EVENT_KIND_SKIP => {
+                let (skipped, first_ref, first_skip, first_reason, n_high, n_low) =
+                    (a, b, c, d, e, f);
+                assert!(skipped >= 1, "skipped floor");
+                assert!(first_ref < n && first_skip < n, "offender range");
+                assert!(first_reason <= REASON_LOW, "reason range");
+                assert!(n_high + n_low <= skipped, "reason tally");
+            }
+            EVENT_KIND_HEAD_UNCONFIRMED => {
+                assert!(a < b && b < n, "head pair range");
+                assert_eq!((c, d, e, f), (0, 0, 0, 0), "head padding");
+            }
+            EVENT_KIND_MAJORITY_DROPPED => {
+                let (skipped, kept_in_session) = (a, b);
+                assert!(skipped >= 1 && skipped > kept_in_session, "majority law");
+                assert_eq!((c, d, e, f), (0, 0, 0, 0), "majority padding");
+            }
+            other => panic!("unknown event kind {other}"),
+        }
         prev_emit = emit as i64;
     }
     if let Some((row, field)) = out.positivity_stop {
@@ -79,14 +100,19 @@ fn assert_shape_invariants(out: &ScanOutcome, n: usize) {
         assert!(field <= 3);
         // Stop truncation: nothing recorded at/after the stop row, no finish.
         assert!(out.kept_rows.iter().all(|&k| k < row));
-        assert!(out.warn_events.iter().all(|&(emit, ..)| emit < row));
+        assert!(out.warn_events.iter().all(|&(_, emit, ..)| emit < row));
     }
-    // Per-session consistency: kept ∪ skipped account for every scanned row —
-    // the skip total equals rows-before-the-frontier minus kept rows.
+    // Row accounting: every scanned row is either kept (mask true — incl.
+    // non-finite-close + pending-head rows) or counted in exactly one SKIP
+    // event. Exact on a clean scan; an un-flushed tail under a stop may
+    // hold suppressed skips, so the invariant is an inequality there.
     let frontier = out.positivity_stop.map_or(n, |(row, _)| row);
-    let total_skipped: usize = out.warn_events.iter().map(|&(_, _, s, ..)| s).sum();
-    // Rows at/after an un-flushed tail may hold skips a stop suppressed, so
-    // the invariant is an inequality under a stop and exact on a clean scan.
+    let total_skipped: usize = out
+        .warn_events
+        .iter()
+        .filter(|&&(kind, ..)| kind == EVENT_KIND_SKIP)
+        .map(|&(_, _, _, s, ..)| s)
+        .sum();
     if out.positivity_stop.is_none() {
         assert_eq!(
             out.kept_rows.len() + total_skipped,
@@ -135,6 +161,32 @@ proptest! {
         // among the rows the forward scan could reach (lazy gate).
         if scan_bars(&ts, &o, &h, &l, &c, true, 4.0).expect("well-formed").is_none() {
             prop_assert!(ts.iter().any(|&t| !(0..MAX_SAFE_TS_US).contains(&t)));
+        }
+    }
+
+    #[test]
+    fn skip_offenders_and_head_pairs_cross_consistent((ts, o, h, l, c) in bars()) {
+        // Cross-consistency between the mask and the events: a SKIP event's
+        // first_skip_row is a genuinely DROPPED row (never in kept_rows),
+        // its first_ref_row a genuinely KEPT one (the reference is a
+        // kept-or-median close — the median bar itself can be dropped only
+        // by its own high/low, in which case a DIFFERENT row is the first
+        // offender ⇒ ref may be masked; so ref∈kept is only asserted for
+        // close-attributed offenders whose ref precedes the skip — the
+        // last-kept-baseline shape), and a HEAD_UNCONFIRMED pair is kept on
+        // both sides. (A "hi/lo never widens the kept COUNT" claim is
+        // deliberately NOT made — a hi/lo skip suppresses a baseline
+        // advance, which can SAVE later rows: the hand-verified
+        // [100,100,100,350(h=2000),80,80] shape keeps 5 vs close-only's 4.)
+        if let Some(out) = scan_bars(&ts, &o, &h, &l, &c, true, 4.0).expect("well-formed") {
+            let kept: std::collections::HashSet<usize> = out.kept_rows.iter().copied().collect();
+            for &(kind, _, _, a, b, cc, _, _, _) in &out.warn_events {
+                if kind == EVENT_KIND_SKIP {
+                    prop_assert!(!kept.contains(&cc), "first_skip_row must be dropped");
+                } else if kind == EVENT_KIND_HEAD_UNCONFIRMED {
+                    prop_assert!(kept.contains(&a) && kept.contains(&b), "head pair kept");
+                }
+            }
         }
     }
 }

@@ -63,14 +63,27 @@ _WARNED: Final[set[str]] = set()
 #: Structural arities of the kernel result (the frozen FFI shape).
 _RESULT_ARITY: Final[int] = 3
 _STOP_ARITY: Final[int] = 2
-_EVENT_ARITY: Final[int] = 5
+_EVENT_ARITY: Final[int] = 9
 
 #: Highest positivity-stop field index (0/1/2/3 = open/high/low/close).
 _MAX_FIELD_INDEX: Final[int] = 3
 
-#: One kernel warn event: ``(emit_at_row, session_first_row, skipped,
-#: first_prev_row, first_skip_row)`` — integer row coordinates only.
-ScanEvent = tuple[int, int, int, int, int]
+#: Warn-event kind + skip-reason vocabularies — LOCAL literal twins of
+#: ``bad_tick.EVENT_KIND_*`` / ``bad_tick.REASON_*`` (leaf discipline — this
+#: module must not import ``brutex.data``; mirror-pinned by a test).
+_EVENT_KIND_SKIP: Final[int] = 0
+_EVENT_KIND_HEAD_UNCONFIRMED: Final[int] = 1
+_EVENT_KIND_MAJORITY_DROPPED: Final[int] = 2
+_MAX_REASON_INDEX: Final[int] = 2
+
+#: One kernel warn event — the 9-int decision-plane record shared with
+#: ``bad_tick.BadTickScreen.screen_mask`` (``ScreenWarnEvent``):
+#: ``(kind, emit_at_row, session_first_row, a, b, c, d, e, f)`` where kind
+#: 0=SKIP carries ``(skipped, first_ref_row, first_skip_row, first_reason,
+#: n_high, n_low)``, 1=HEAD_UNCONFIRMED ``(head_row_0, head_row_1, 0, 0, 0,
+#: 0)``, 2=MAJORITY_DROPPED ``(skipped, kept_in_session, 0, 0, 0, 0)`` —
+#: integer row coordinates/counts only.
+ScanEvent = tuple[int, int, int, int, int, int, int, int, int]
 
 #: The kernel's outcome: ``(kept_rows, warn_events, positivity_stop)``.
 ScanResult = tuple[list[int], list[ScanEvent], tuple[int, int] | None]
@@ -190,16 +203,22 @@ def validate_scan(result: object, n_rows: int) -> bool:
 
     * the result is a 3-tuple ``(kept_rows, warn_events, positivity_stop)``;
     * ``kept_rows`` — ints, strictly ascending, each in ``[0, n_rows)``;
-    * ``warn_events`` — 5-int tuples, strictly ascending by ``emit_at_row``
-      with ``emit_at_row <= n_rows``, ``session_first_row in [0, n_rows)``,
-      ``skipped >= 1``, ``0 <= first_prev_row < first_skip_row < n_rows``;
+    * ``warn_events`` — 9-int tuples (:data:`ScanEvent`), NON-DECREASING by
+      ``emit_at_row`` (one session's SKIP + MAJORITY_DROPPED events share an
+      anchor) with ``emit_at_row <= n_rows``, ``kind`` in the 3-member
+      vocabulary, ``session_first_row in [0, n_rows)``, and the per-kind
+      payload laws — SKIP: ``skipped >= 1``, ``first_ref_row`` /
+      ``first_skip_row`` in ``[0, n_rows)`` (the head-vote reference row may
+      lie AFTER the skip row — no ordering constraint), ``first_reason`` in
+      ``[0, 2]``, ``n_high + n_low <= skipped``; HEAD_UNCONFIRMED:
+      ``0 <= head_row_0 < head_row_1 < n_rows`` + zero padding;
+      MAJORITY_DROPPED: ``skipped >= 1``, ``skipped > kept_in_session`` (the
+      strict-majority law) + zero padding;
     * ``positivity_stop`` — ``None`` or ``(row, field)`` with
       ``row in [0, n_rows)`` and ``field in [0, 3]``; when present, every
-      kept row AND every warn anchor is strictly before ``row`` (no boundary
-      flush at the stop row, no finish event) — and every event's
-      ``session_first_row`` / ``first_prev_row`` / ``first_skip_row`` is
-      likewise strictly before ``row`` (the scan truncated there, so no
-      recorded coordinate can reference the stop row or beyond).
+      warn anchor AND every event row coordinate is strictly before ``row``
+      (no boundary flush at the stop row, no finish event) and every kept
+      row is strictly before ``row`` (the scan truncated there).
 
     Negative or out-of-range indices are refused OUTRIGHT — a negative index
     would silently wrap Python list selection. Any violation emits one
@@ -222,9 +241,8 @@ def validate_scan(result: object, n_rows: int) -> bool:
             return _invalid(n_rows, "stop_types")
         if not (0 <= stop_row < n_rows and 0 <= stop_field <= _MAX_FIELD_INDEX):
             return _invalid(n_rows, "stop_range")
-        # Stop truncation law: nothing recorded at/after the stop row —
-        # kept rows, warn anchors, AND every event row coordinate
-        # (session_first_row / first_prev_row / first_skip_row).
+        # Stop truncation law: no warn anchor or event row coordinate at or
+        # after the stop row; kept rows strictly before it.
         kept_bound = stop_row
         emit_bound = stop_row
         row_bound = stop_row
@@ -235,21 +253,43 @@ def validate_scan(result: object, n_rows: int) -> bool:
         if idx <= prev_kept or idx >= kept_bound:
             return _invalid(n_rows, "kept_order")
         prev_kept = idx
-    prev_emit = -1
+    # Starts at 0 (not -1): anchors are NON-decreasing — `emit < prev_emit`
+    # refuses a NEGATIVE first anchor outright while still admitting a
+    # legitimate first anchor of 0 (0 < 0 is False).
+    prev_emit = 0
     for event in warns:
         if not (isinstance(event, tuple) and len(event) == _EVENT_ARITY):
             return _invalid(n_rows, "event_shape")
-        emit, session_first, skipped, first_prev, first_skip = event
         if not all(isinstance(v, int) for v in event):
             return _invalid(n_rows, "event_types")
-        if emit <= prev_emit or emit >= emit_bound:
+        kind, emit, session_first, a, b, c, d, e, f = event
+        if emit < prev_emit or emit >= emit_bound:
             return _invalid(n_rows, "event_order")
         if not 0 <= session_first < row_bound:
             return _invalid(n_rows, "session_first_range")
-        if skipped < 1:
-            return _invalid(n_rows, "skipped_floor")
-        if not 0 <= first_prev < first_skip < row_bound:
-            return _invalid(n_rows, "offender_range")
+        if kind == _EVENT_KIND_SKIP:
+            skipped, first_ref, first_skip, first_reason, n_high, n_low = a, b, c, d, e, f
+            if skipped < 1:
+                return _invalid(n_rows, "skipped_floor")
+            if not (0 <= first_ref < row_bound and 0 <= first_skip < row_bound):
+                return _invalid(n_rows, "offender_range")
+            if not 0 <= first_reason <= _MAX_REASON_INDEX:
+                return _invalid(n_rows, "reason_range")
+            if n_high < 0 or n_low < 0 or n_high + n_low > skipped:
+                return _invalid(n_rows, "reason_tally")
+        elif kind == _EVENT_KIND_HEAD_UNCONFIRMED:
+            if not 0 <= a < b < row_bound:
+                return _invalid(n_rows, "head_pair_range")
+            if (c, d, e, f) != (0, 0, 0, 0):
+                return _invalid(n_rows, "head_padding")
+        elif kind == _EVENT_KIND_MAJORITY_DROPPED:
+            skipped, kept_in_session = a, b
+            if skipped < 1 or kept_in_session < 0 or skipped <= kept_in_session:
+                return _invalid(n_rows, "majority_law")
+            if (c, d, e, f) != (0, 0, 0, 0):
+                return _invalid(n_rows, "majority_padding")
+        else:
+            return _invalid(n_rows, "event_kind")
         prev_emit = emit
     return True
 

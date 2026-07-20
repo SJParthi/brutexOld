@@ -26,7 +26,11 @@
 
 pub mod scan;
 
-pub use scan::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US, ScanOutcome, WarnEvent, scan_bars};
+pub use scan::{
+    DAY_US, EVENT_KIND_HEAD_UNCONFIRMED, EVENT_KIND_MAJORITY_DROPPED, EVENT_KIND_SKIP,
+    HEAD_CONFIRM_BARS, IST_OFFSET_US, MAX_SAFE_TS_US, REASON_CLOSE, REASON_HIGH, REASON_LOW,
+    ScanOutcome, WarnEvent, scan_bars,
+};
 
 /// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
 /// baked at build time by `build.rs` under the shared FRAMING v1 of

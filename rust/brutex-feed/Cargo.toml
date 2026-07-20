@@ -16,7 +16,7 @@
 
 [package]
 name = "brutex-feed"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93.1"
 description = "Engine read-boundary decision kernel (positivity + bad-tick scan) for BruteX"
