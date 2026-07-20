@@ -264,8 +264,10 @@ class TestWinRateSafeLaw:
 
     def test_registered_appended_last(self) -> None:
         # Stage C appended the two recency presets AFTER win_rate_safe (each
-        # generation strictly after the previous — the appended-LAST law).
-        assert PRESET_NAMES[-3:] == (PRESET_WIN_RATE_SAFE, "recent", "recent_decay")
+        # generation strictly after the previous — the appended-LAST law);
+        # DEC-ALPHA-BUYHOLD-METRIC-001 then appended "alpha" LAST (the
+        # 2026-07-20 train-b wave-2b fold reconciliation of this pin).
+        assert PRESET_NAMES[-4:] == (PRESET_WIN_RATE_SAFE, "recent", "recent_decay", "alpha")
         assert PRESETS[PRESET_WIN_RATE_SAFE].key is win_rate_safe_key
 
 
