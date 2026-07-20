@@ -2,8 +2,10 @@
 
 DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). Pure production
 predicates re-used verbatim: price sanity (:func:`count_price_violations`),
-the bounded bad-tick screen (:func:`is_bad_tick`, the #1616 disclosed escapes
-named), the DEC-SPOT-PRICE-2DP-001 tick grid, the real per-date NSE session
+the bounded bad-tick screen (the production
+:meth:`~brutex.data.bad_tick.BadTickScreen.screen_mask` decision plane —
+DEC-BADTICK-HEAD-SEED-001 + DEC-BADTICK-HILO-SCREEN-001 — with the #1616
+sub-4x escape named), the DEC-SPOT-PRICE-2DP-001 tick grid, the real per-date NSE session
 window, the interior session-hole census (:func:`interior_gap_runs` — the NEW
 lake-wide driver, inventory GAP 3), the VIX silent-empty detector, and the
 completeness scoreboard folds.
@@ -104,29 +106,29 @@ def _tick_grid_violations(frame: pl.DataFrame) -> int:
 
 
 def _bad_tick_flags(frame_ist: pl.DataFrame, *, max_ratio: float) -> list[str]:
-    """Per-IST-session bad-tick scan reusing the production predicate.
+    """Per-IST-session bad-tick scan DELEGATING to the production screen.
 
-    Mirrors :class:`~brutex.data.bad_tick.BadTickScreen` semantics as a scan:
-    first bar of each session exempt; a flagged bar never advances the
-    baseline. The #1616 disclosed escapes (sub-4x, 2-bar ×10 shapes) stand.
+    Compose-never-reimplement: the decision plane is
+    :meth:`~brutex.data.bad_tick.BadTickScreen.screen_mask` — the SAME
+    head-median-confirm + baseline-band + high/low out-of-band law the engine
+    read boundary and both resample seams run (DEC-BADTICK-HEAD-SEED-001 +
+    DEC-BADTICK-HILO-SCREEN-001) — so this audit can never drift from the
+    production kept set (the pre-port inline mirror carried the RETIRED
+    first-bar-seats-baseline law and would have read a poisoned session HEAD
+    as clean). Every masked (dropped) row is flagged.
     """
-    from brutex.data.bad_tick import is_bad_tick
+    from brutex.data.bad_tick import BadTickScreen
 
-    flagged: list[str] = []
     ordered = frame_ist.sort("ts_utc")
-    prev_close: float | None = None
-    prev_date: date | None = None
-    for row in ordered.iter_rows(named=True):
-        d = row["ist_date"]
-        close = float(row["close"])
-        if d != prev_date:
-            prev_date, prev_close = d, close
-            continue
-        if prev_close is not None and is_bad_tick(prev_close, close, max_ratio=max_ratio):
-            flagged.append(f"{row['ts_utc'].isoformat()} close={close} prev={prev_close}")
-            continue  # a skipped spike never advances the baseline
-        prev_close = close
-    return flagged
+    ist_dates = ordered.get_column("ist_date").to_list()
+    closes = [float(v) for v in ordered.get_column("close").to_list()]
+    highs = [float(v) for v in ordered.get_column("high").to_list()]
+    lows = [float(v) for v in ordered.get_column("low").to_list()]
+    keep, _events = BadTickScreen(max_ratio=max_ratio).screen_mask(
+        ist_dates, closes, highs=highs, lows=lows
+    )
+    ts_list = ordered.get_column("ts_utc").to_list()
+    return [f"{ts_list[i].isoformat()} close={closes[i]}" for i in range(len(keep)) if not keep[i]]
 
 
 def _session_window_violations(frame_ist: pl.DataFrame) -> tuple[list[str], int]:
@@ -293,7 +295,8 @@ def _run_body(
             "max_ratio": BAD_TICK_MAX_RATIO,
         },
         limits=[
-            "heuristic 4x screen — the #1616 disclosed escapes (sub-4x, 2-bar x10 shapes) stand"
+            "heuristic 4x screen — the #1616 sub-4x escape + the 2-bar unconfirmable-head"
+            " and corrupt-head-majority shapes (DEC-BADTICK-HEAD-SEED-001) stand"
         ],
         repro=_repro(ctx),
     )
