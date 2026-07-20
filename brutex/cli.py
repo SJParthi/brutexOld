@@ -5441,7 +5441,7 @@ def _run_dhan_fetch(  # pragma: no cover — real-run: needs AWS SSM creds + the
     """Execute the REAL Dhan pull (spot or rolling-ATM options); return the exit code.
 
     The live-credential boundary — ``# pragma: no cover`` (needs real AWS SSM + the
-    ``dhanhq`` SDK), mirroring the spot precedents (``build_dhan_spot_adapter`` / the
+    ``dhanhq`` SDK), mirroring the spot precedents (``build_dhan_spot_clients`` / the
     dashboard route's production seam). Held under ``keep_awake``; a ``rolling-options``
     dataset drives the ROLLING-ATM ingest (ATM±N per bar, NOT per-contract), ``spot`` the
     3-index series. Both nest under ``feeds/dhan/`` (Groww bytes untouched).

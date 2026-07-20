@@ -12,8 +12,14 @@ def test_window_days_for_1minute_is_90() -> None:
     assert window_days_for_interval("1minute") == 90
 
 
+def test_window_days_for_1day_is_365_defensive_tile() -> None:
+    # DEC-DHAN-NATIVE-DAILY-001: the daily endpoint's range cap is
+    # UNDOCUMENTED/UNVERIFIED — a DEFENSIVE 365-day tile, never a vendor claim.
+    assert window_days_for_interval("1day") == 365
+
+
 def test_window_days_for_unknown_interval_fails_loud() -> None:
-    with pytest.raises(ValueError, match="unsupported Dhan spot interval"):
+    with pytest.raises(ValueError, match="unsupported Dhan interval"):
         window_days_for_interval("5minute")
 
 

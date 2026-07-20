@@ -35,6 +35,7 @@ from brutex.dashboard.app import (
 from brutex.dashboard.dhan_pull import (
     DhanPullReport,
     DhanPullRequest,
+    DhanSpotClients,
     default_dhan_spot_pull,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -107,16 +108,28 @@ def _no_filter(bars: list[CandleBar]) -> SimpleNamespace:
     return SimpleNamespace(kept=list(bars))
 
 
+class _FakeDailyClient:
+    """A daily-fetch client that COUNTS calls — the native-daily stage's spy twin."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def daily_candles(self, *, security_id: int, from_date: str, to_date: str) -> dict[str, object]:
+        _ = (security_id, from_date, to_date)
+        self.calls += 1
+        return {}  # honest no-data — the daily stage succeeds with zero bars
+
+
 class _FakeDhanPull:
     """An injected ``dhan_spot_pull`` seam that DELEGATES to the REAL production
-    ``default_dhan_spot_pull`` with a SPY ``adapter_factory`` + a SPY ``materialize``.
+    ``default_dhan_spot_pull`` with a SPY ``clients_factory`` + a SPY ``materialize``.
 
     So the route → production → dry-run short-circuit chain runs end-to-end OFFLINE:
     on ``dry_run`` the real seam resolves the securityId map and returns a zero-outcome
-    report WITHOUT building an adapter (``adapter_built`` stays ``False``), issuing a
-    vendor call (``client.calls`` stays 0), materialising, or writing. No AWS is ever
-    touched — the spy ``adapter_factory`` stands in for the real SSM/``dhanhq`` build,
-    which is never invoked on the dry-run path.
+    report WITHOUT building the client pair (``adapter_built`` stays ``False``), issuing
+    a vendor call (``client.calls`` + ``daily.calls`` stay 0), materialising, or writing.
+    No AWS is ever touched — the spy ``clients_factory`` stands in for the real
+    SSM/``dhanhq`` build, which is never invoked on the dry-run path.
     """
 
     def __init__(self) -> None:
@@ -125,11 +138,12 @@ class _FakeDhanPull:
         self.adapter_built = False
         self.materialize_calls = 0
         self.client = _FakeAdapter()
+        self.daily = _FakeDailyClient()
 
-    def _spy_factory(self, **kwargs: Any) -> _FakeAdapter:
+    def _spy_factory(self, **kwargs: Any) -> DhanSpotClients:
         _ = kwargs  # security_ids=...
         self.adapter_built = True
-        return self.client
+        return DhanSpotClients(fetch=self.client, daily=self.daily)
 
     def _spy_materialize(self, **kwargs: Any) -> MaterializeResult:
         _ = kwargs
@@ -141,7 +155,7 @@ class _FakeDhanPull:
         try:
             return default_dhan_spot_pull(
                 request,
-                adapter_factory=self._spy_factory,
+                clients_factory=self._spy_factory,
                 materialize=self._spy_materialize,
             )
         finally:

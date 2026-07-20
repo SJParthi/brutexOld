@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Final
 
 from brutex.adapters.dhan.errors import DhanVendorDriftError
 from brutex.data.candle_fields import (
@@ -44,6 +46,13 @@ from brutex.data.candle_fields import (
     assemble_candle,
 )
 from brutex.data.models import CandleBar
+
+#: The FIXED IST offset (+05:30, no DST) — the EXACT mirror of the midnight-IST
+#: daily-anchor law in ``brutex/data/spot_daily_resample.py`` (``_IST = timezone(
+#: timedelta(hours=5, minutes=30))``), test-PINNED equal to that module's ``_IST``
+#: (``test_ist_constant_pinned_to_spot_daily_resample``) so the native daily bars
+#: land byte-compatible with the derived-1day convention.
+_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
 
 #: The four required OHLC price columns.
 _OHLC_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close")
@@ -164,10 +173,55 @@ def parse_candle_columns(
     return bars
 
 
+def parse_daily_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]:
+    """Parse a Dhan DAILY candle payload into midnight-IST-stamped rows.
+
+    DEC-DHAN-NATIVE-DAILY-001 (implementing DEC-SCOPE-MINIMAL-CORE-001). The
+    daily endpoint (``POST /v2/charts/historical``) returns the SAME parallel
+    column-array shape as intraday, so the column extraction / length checks /
+    field assembly all ride :func:`parse_candle_columns` verbatim — always with
+    the intraday index ``drop_volume=True`` handling mirrored (an index carries
+    no traded volume; what a daily IDX volume array holds is UNDOCUMENTED and
+    never read; an ABSENT volume array is tolerated).
+
+    TIMESTAMP NORMALIZATION (the critical convention): what instant the daily
+    endpoint's epoch stamps represent is AMBIGUOUS/UNVERIFIED (session open?
+    midnight of which zone? — no doc statement; a probe gate). The stored
+    ``1day`` partition MUST be byte-compatible with what readers expect from the
+    derived-1day law, so each parsed bar's epoch is normalized to its IST DATE
+    (``.astimezone(IST).date()``) and then re-stamped to the midnight-IST
+    instant of that date stored UTC — EXACTLY the convention
+    ``brutex/data/spot_daily_resample.py`` mints (00:00 IST ⇔ 18:30 UTC of the
+    prior calendar day; the ``_IST`` offset above is the test-pinned twin of
+    its ``_IST`` law). Any TWO raw bars normalizing to the SAME IST date keep
+    the FIRST occurrence (the lake's keep-first law applied at parse time —
+    deterministic, never a mis-paired duplicate), counted nowhere: the shape is
+    vendor-anomalous and the keep-first sink would drop the duplicate anyway.
+
+    Returns one midnight-IST-stamped :class:`CandleBar` per non-empty daily
+    candle, in input order; ``[]`` on an empty payload (honest no-data).
+    Raises exactly what :func:`parse_candle_columns` raises.
+    """
+    bars = parse_candle_columns(payload, drop_volume=True)
+    stamped: list[CandleBar] = []
+    seen_dates: set[datetime] = set()
+    for bar in bars:
+        ist_date = bar.timestamp.astimezone(_IST).date()
+        midnight_ist_utc = datetime(
+            ist_date.year, ist_date.month, ist_date.day, tzinfo=_IST
+        ).astimezone(UTC)
+        if midnight_ist_utc in seen_dates:
+            continue  # keep-first — a duplicate-date daily row is vendor-anomalous
+        seen_dates.add(midnight_ist_utc)
+        stamped.append(replace(bar, timestamp=midnight_ist_utc))
+    return stamped
+
+
 __all__ = [
     "CandleParseError",
     "DhanVendorDriftError",
     "EmptyCandleRow",
     "parse_candle_columns",
+    "parse_daily_candle_columns",
     "parse_epoch_utc",
 ]

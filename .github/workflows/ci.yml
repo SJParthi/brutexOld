@@ -718,6 +718,20 @@ jobs:
           else
             echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
           fi
+          # DEC-DHAN-NATIVE-DAILY-001: the NATIVE 1-day spot ingest (daily
+          # endpoint, fixed 2020-01-01 project floor) + the read-only
+          # daily-vs-derived consistency observer — each 100% line+branch,
+          # fake-driven (no dhanhq/network).
+          if compgen -G "tests/unit/test_dhan_daily_ingest.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.daily_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_daily_ingest.py
+          else
+            echo "(brutex.adapters.dhan.daily_ingest test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_daily_consistency.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.daily_consistency --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_daily_consistency.py
+          else
+            echo "(brutex.adapters.dhan.daily_consistency test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_credentials_dhan_aws.py" > /dev/null; then
             pytest --cov=brutex.config.credentials_dhan_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials_dhan_aws.py
           else

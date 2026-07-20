@@ -23,8 +23,14 @@ expired options only). These pins make the ABSENCE structural:
    ``brutex/dashboard/dhan_pull.py`` must still import
    ``materialize_lake_timeframes``, define ``run_dhan_prebuild``, and reference
    it from ``default_dhan_spot_pull``; a REAL spot prebuild over seeded 1-minute
-   bars must still materialise intraday derived TFs (deliberately 1-day-AGNOSTIC
-   — no claim either way about the daily anchor on the Dhan tree).
+   bars must still materialise intraday derived TFs. Since
+   DEC-DHAN-NATIVE-DAILY-001 (MIGRATION.md #1867) the intraday-only law is
+   STRUCTURAL: ``run_dhan_prebuild`` exposes NO ``include_daily`` parameter
+   (``include_daily=False`` is hardcoded at its materialize call site — the
+   Dhan ``1day`` partition holds NATIVE vendor daily bars, never a 1-minute
+   derivation), so these pins assert the kwarg's ABSENCE + the no-``1day``
+   derivation instead of the base branch's 1-day-AGNOSTIC
+   ``include_daily=False`` call.
 4. **Lock isolation pin** — the spot prebuild's derive lock keys on the DHAN
    FEED root (``feeds/dhan/.locks/derive.lock``), never the primary lake root
    (a primary-root key would serialize Groww + Dhan prebuilds on one lock).
@@ -41,6 +47,7 @@ handler + the cli Dhan arms are the net for the route-level shapes).
 from __future__ import annotations
 
 import ast
+import inspect
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -258,22 +265,40 @@ def _seed_dhan_spot_1m(dhan_root: Path, *, symbol: str = "NIFTY", n_bars: int = 
     sink.append(exchange="NSE", segment="INDEX", symbol=symbol, interval="1minute", bars=bars)
 
 
+def test_spot_prebuild_signature_has_no_include_daily_parameter() -> None:
+    """DEC-DHAN-NATIVE-DAILY-001 (MIGRATION.md #1867) made the intraday-only
+    flip STRUCTURAL: ``run_dhan_prebuild`` must expose NO ``include_daily``
+    parameter (the False is hardcoded at the materialize call site, so no
+    caller can ever re-derive the native-daily ``1day`` partition). This pin
+    fails loudly if the kwarg silently comes back."""
+    params = inspect.signature(run_dhan_prebuild).parameters
+    assert "include_daily" not in params, (
+        "run_dhan_prebuild grew an include_daily parameter back — the "
+        "DEC-DHAN-NATIVE-DAILY-001 structural intraday-only contract is broken"
+    )
+
+
 def test_spot_prebuild_still_materialises_intraday_tfs_for_real(tmp_path: Path) -> None:
     """The REAL (un-faked) spot prebuild over seeded 1-minute bars still derives
-    intraday TFs under the Dhan feed root — deliberately 1-day-AGNOSTIC (no
-    assertion either way about the daily anchor)."""
+    intraday TFs under the Dhan feed root — and NEVER a derived ``1day``
+    (structural intraday-only, DEC-DHAN-NATIVE-DAILY-001: the ``1day``
+    partition is native vendor daily, so the prebuild must not create it
+    from 1-minute)."""
     dhan_root = tmp_path / "feeds" / "dhan"
     _seed_dhan_spot_1m(dhan_root)
     outcome = run_dhan_prebuild(
         dhan_root=dhan_root,
         targets=[DhanPrebuildTarget(exchange="NSE", symbol="NIFTY")],
-        include_daily=False,  # 1-day-agnostic: pin ONLY the intraday derivation
     )
     assert outcome.failed == {}
     assert outcome.materialized.get("NIFTY", 0) > 0
     symbol_dir = dhan_root / "bars" / "NSE" / "INDEX" / "NIFTY"
     derived_dirs = {d.name for d in symbol_dir.iterdir() if d.is_dir()} - {"1minute"}
     assert "5minute" in derived_dirs, f"no intraday derived TF appeared: {derived_dirs}"
+    assert "1day" not in derived_dirs, (
+        "the Dhan prebuild derived a 1day partition from 1-minute — the "
+        "native-daily law (DEC-DHAN-NATIVE-DAILY-001) forbids it"
+    )
 
 
 # ── 4. lock isolation: the derive lock keys on the DHAN FEED root ─────────────
@@ -288,7 +313,6 @@ def test_spot_prebuild_derive_lock_keys_on_dhan_feed_root(tmp_path: Path) -> Non
     run_dhan_prebuild(
         dhan_root=dhan_root,
         targets=[DhanPrebuildTarget(exchange="NSE", symbol="NIFTY")],
-        include_daily=False,
     )
     assert (dhan_root / ".locks" / "derive.lock").is_file()
     assert not (tmp_path / ".locks").exists(), (

@@ -211,3 +211,93 @@ def test_client_self_predicates_are_false() -> None:
     assert client_self_paces(client) is False
     assert client_self_reports_rate_limits(client) is False
     assert client_self_reports_successes(client) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# daily_candles — the NATIVE-daily twin on the SAME _call funnel
+# (DEC-DHAN-NATIVE-DAILY-001, implementing DEC-SCOPE-MINIMAL-CORE-001)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeDailySdk:
+    """A fake SDK exposing ONLY ``historical_daily_data`` — records kwargs verbatim."""
+
+    def __init__(self, *responses: object) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def historical_daily_data(self, **kwargs: object) -> Mapping[str, object]:
+        self.calls.append(kwargs)
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response  # type: ignore[return-value]
+
+
+def _daily_client(sdks_by_token: dict[str, _FakeDailySdk], *tokens: str) -> DhanClient:
+    refresher = DhanSdkRefresher(
+        client_id="C1",
+        token_reread=_Reread(*tokens),
+        sdk_factory=lambda _cid, tok: sdks_by_token[tok],  # type: ignore[arg-type,return-value]
+        clock=lambda: _NOW,
+        sleep=lambda _s: None,
+    )
+    return DhanClient(refresher=refresher)
+
+
+def test_daily_candles_success_and_exact_sdk_kwargs() -> None:
+    sdk = _FakeDailySdk(_SUCCESS)
+    client = _daily_client({"A": sdk}, "A")
+    data = client.daily_candles(security_id=13, from_date="2022-06-01", to_date="2022-06-30")
+    assert data == {"open": [1.0]}
+    # The SDK call shape: index defaults, oi=False ALWAYS, expiry_code NEVER passed.
+    assert sdk.calls == [
+        {
+            "security_id": 13,
+            "exchange_segment": "IDX_I",
+            "instrument_type": "INDEX",
+            "from_date": "2022-06-01",
+            "to_date": "2022-06-30",
+            "oi": False,
+        }
+    ]
+
+
+def test_daily_candles_rides_the_same_dh901_reread_funnel() -> None:
+    # A DH-901 on token A heals via the read-only SSM re-read (token B) — the SAME
+    # _call funnel the intraday path uses; the daily retry lands on the new SDK.
+    sdks = {"A": _FakeDailySdk(_DH901), "B": _FakeDailySdk(_SUCCESS)}
+    client = _daily_client(sdks, "A", "B")
+    data = client.daily_candles(security_id=13, from_date="a", to_date="b")
+    assert data == {"open": [1.0]}
+    assert len(sdks["A"].calls) == 1
+    assert len(sdks["B"].calls) == 1
+
+
+class _FakeRollingSdk:
+    """A fake SDK exposing ONLY ``expired_options_data`` — records the body verbatim."""
+
+    def __init__(self, *responses: object) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def expired_options_data(self, **kwargs: object) -> Mapping[str, object]:
+        self.calls.append(kwargs)
+        return self._responses.pop(0)  # type: ignore[return-value]
+
+
+def test_rolling_option_data_rides_the_same_call_funnel() -> None:
+    # The rolling-ATM twin: the VERBATIM camelCase body reaches the SDK unchanged
+    # through the SAME bounded-retry `_call` funnel (coverage for the delegator).
+    sdk = _FakeRollingSdk(_SUCCESS)
+    refresher = DhanSdkRefresher(
+        client_id="C1",
+        token_reread=_Reread("A"),
+        sdk_factory=lambda _cid, _tok: sdk,  # type: ignore[arg-type,return-value]
+        clock=lambda: _NOW,
+        sleep=lambda _s: None,
+    )
+    client = DhanClient(refresher=refresher)
+    body = {"exchangeSegment": "IDX_I", "interval": "1"}
+    assert client.rolling_option_data(body=body) == {"open": [1.0]}
+    assert sdk.calls == [body]
