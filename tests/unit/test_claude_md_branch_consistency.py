@@ -204,7 +204,7 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # one.
     # 1963 = DEC-EXEC-RUST-CORE-001's exec mutmut-pair rationale comment
     # (slice 7 / P8, club R1 fold; renumbered #1960 -> #1963 at the
-    # 2026-07-19 refresh reconcile, then #1963 -> #1978 at the 2026-07-20
+    # 2026-07-19 refresh reconcile, then #1963 -> #1979 at the 2026-07-20
     # merge-forward — main took #1963 for DEC-EXTREME-EVENT-DOC-HONESTY-001).
     # mutation.yml still cites the OLD #1963 because the 2026-07-20
     # merge-forward prep was barred from editing anything under .github/;

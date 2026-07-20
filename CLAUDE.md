@@ -3991,7 +3991,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-exec-costs-slice7` (**DEC-EXEC-RUST-CORE-001,
-  MIGRATION.md #1978** — renumbered #1724 → #1960 → #1963 → #1978 across the
+  MIGRATION.md #1979** — renumbered #1724 → #1960 → #1963 → #1979 across the
   2026-07-19/2026-07-20 club-R1 merge-reconciles (the first hop over main tip
   184a48a4 — main took #1724 for DEC-SWEEP-RUN-IDENTITY-COMPLETE-001; the
   second at the same-day refresh over main tip ace41c7e — main's lap-8
@@ -4001,7 +4001,8 @@ hostile-review pass._
   merge-forward over main tip 2bf9235c — main had meanwhile taken #1963 for
   DEC-EXTREME-EVENT-DOC-HONESTY-001 and #1962 landed as
   DEC-RUST-CALENDAR-LEAVES-001, so the entry PARKED at the tail-contiguous
-  free #1978 over the live ceiling #1977, a merge-forward PREP parking
+  free #1979 (the P-1 pre-push re-check — main took #1978 for
+  DEC-DOCTEST-STDOUT-ISOLATION-001 in flight), a merge-forward PREP parking
   re-confirmed at the pre-land census allocation; DEC-IDs are the stable
   handles per DEC-LEDGER-RENUMBER-001), and RE-EXPRESSED on main's landed
   DEC-FILL-WORST-CASE-ONLY-001 (#1825) law at the same reconcile — the
@@ -4054,7 +4055,7 @@ hostile-review pass._
   DEC-EXEC-COSTS-MUTMUT-001 futures_costs zero-survivor pair, and the
   measured payoff figure replacing UNKNOWN-expected-small — are all four
   REQUIRED pre-flip gates before DEC-EXEC-RUST-FLIP-001 may flip the
-  default (MIGRATION.md #1978).
+  default (MIGRATION.md #1979).
   REVIEW ROUND 1 folded (5-reviewer panel, same branch pre-merge): the
   `bench(...)` interior commit subject reworded via commit-tree (trees
   byte-identical; conv-commits green over all 9); the calculator ternary
@@ -12111,12 +12112,13 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-exec-costs-slice7`
-  (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1978 — renumbered
-  #1724 → #1960 → #1963 → #1978 across the 2026-07-19/2026-07-20 club-R1
+  (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979 — renumbered
+  #1724 → #1960 → #1963 → #1979 across the 2026-07-19/2026-07-20 club-R1
   merge-reconciles (main's lap-8 took #1960; #1962 skipped, later landed as
   DEC-RUST-CALENDAR-LEAVES-001; main took #1963 for
-  DEC-EXTREME-EVENT-DOC-HONESTY-001 at the 2026-07-20 merge-forward, so the
-  entry parked at the tail-contiguous free #1978), re-expressed on the landed
+  DEC-EXTREME-EVENT-DOC-HONESTY-001 at the 2026-07-20 merge-forward and
+  #1978 for DEC-DOCTEST-STDOUT-ISOLATION-001 in flight, so the entry parked
+  at the tail-contiguous free #1979), re-expressed on the landed
   DEC-FILL-WORST-CASE-ONLY-001 law — slice 7 / P8 of the Rust
   conversion program: the options/futures execution + costs integer cores in
   `rust/fno-math/src/exec/` behind the default-OFF `BRUTEX_EXEC_RUST` seam,

@@ -1,5 +1,5 @@
 //! Options post-I/O materialize tail (DEC-EXEC-RUST-CORE-001, MIGRATION.md
-//! #1978) — the verdict core of `brutex.options.executor.materialize_trade`
+//! #1979) — the verdict core of `brutex.options.executor.materialize_trade`
 //! AFTER `source.load_pair` returned a bar pair.
 //!
 //! Gates 1–3 of the PINNED reject order (lot_size → cost_regime → no_data)

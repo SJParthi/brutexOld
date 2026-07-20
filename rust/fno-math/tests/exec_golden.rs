@@ -1,5 +1,5 @@
 //! The cross-language bit-identity proof for the exec integer cores
-//! (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1978 — the `vocab_golden_vectors`
+//! (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979 — the `vocab_golden_vectors`
 //! discipline).
 //!
 //! Reads the SAME language-neutral oracle the Python golden test reads

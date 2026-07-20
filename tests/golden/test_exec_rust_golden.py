@@ -1,6 +1,6 @@
 """Golden cross-language oracle for the exec integer cores (dual-arm).
 
-DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1978), the ``vocab_golden_vectors``
+DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1979), the ``vocab_golden_vectors``
 discipline: a frozen ``input → value`` answer-key
 (``fixtures/exec_costs_golden_vectors.json``, produced by
 ``scripts/gen_exec_costs_golden.py``, regeneration refused without

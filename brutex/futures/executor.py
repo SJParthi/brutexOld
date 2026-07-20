@@ -640,7 +640,7 @@ def _materialize_tail_rust(
     ``None`` means "not served": the verbatim Python tail below reproduces
     the exact behaviour (including any raise) from its own natural site —
     so ANY prep or kernel fallback is behaviour-neutral (default-OFF —
-    MIGRATION.md #1978). The stale gate is UNCONDITIONAL on both arms
+    MIGRATION.md #1979). The stale gate is UNCONDITIONAL on both arms
     (DEC-FILL-WORST-CASE-ONLY-001 — the opt-in knob is deleted) and the
     fills anchor on the fill bars' adverse EXTREMES. A served ``trade``
     verdict is re-materialized through the EXISTING frozen

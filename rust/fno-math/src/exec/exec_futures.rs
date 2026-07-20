@@ -1,5 +1,5 @@
 //! Futures post-I/O materialize tail (DEC-EXEC-RUST-CORE-001, MIGRATION.md
-//! #1978) — the verdict core of
+//! #1979) — the verdict core of
 //! `brutex.futures.executor.materialize_futures_trade` AFTER
 //! `source.load_window` returned a bar window.
 //!

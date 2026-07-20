@@ -1,4 +1,4 @@
-//! THE Rust money law module (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1978).
+//! THE Rust money law module (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979).
 //!
 //! Exact-integer twins of `brutex.costs.calculator._round_levy_paisa` /
 //! `_round_levy_rupee` (the permanent ADVERSE ceiling levy rounding,

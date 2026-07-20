@@ -1,4 +1,4 @@
-//! Options/futures execution integer cores — DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1978).
+//! Options/futures execution integer cores — DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1979).
 //!
 //! Slice 7 / P8 of the Rust conversion program: everything from the moment
 //! prices are **integer paisa** — the worst-case fill law

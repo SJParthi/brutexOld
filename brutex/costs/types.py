@@ -418,7 +418,7 @@ class ChargeStack(NamedTuple):
     """The 17 integer outputs of one round-trip charge-stack computation.
 
     Field ORDER is pinned — it mirrors the Rust ``exec::ChargeStack`` struct
-    (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1978) field-for-field, and both
+    (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) field-for-field, and both
     project 1:1 onto the numeric fields of
     :class:`~brutex.costs.types.TradeCostBreakdown` /
     :class:`~brutex.costs.futures_costs.FuturesCostBreakdown`. All values are
