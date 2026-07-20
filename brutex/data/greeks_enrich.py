@@ -1401,9 +1401,7 @@ def _compute_bar(
             # A caller-contract reject the served_iv clamp cannot screen — a
             # non-positive / non-finite strike or forward (a corrupt
             # resolved_strike). Stamped BAD_INPUT, quarantined to this bar.
-            return _finish_bar(
-                screened, GreeksBatchOutcome(result=None, invalid_input=str(exc))
-            )
+            return _finish_bar(screened, GreeksBatchOutcome(result=None, invalid_input=str(exc)))
         # A ``None`` here is defensive: the kernel's price-from-sigma path
         # returns a value for every in-clamp sigma (no root to fail) — only a
         # stubbed kernel exercises it; ``_finish_bar`` stamps the honest
