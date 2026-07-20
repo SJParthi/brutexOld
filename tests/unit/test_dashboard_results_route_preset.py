@@ -119,7 +119,12 @@ class TestPresetParam:
         assert resp.status_code == 200
         payload = resp.json()
         assert payload["preset"] == "min_dd_first"
-        assert payload["preset_inert_axes"] == ["composite_score", "max_consecutive_losses"]
+        # net_after_cost_paisa joins PRESET_INERT_AXES as a DISCLOSED-INERT axis per DEC-OPTIONS-EXEC-FEEDBACK-001 (#1990) — brutex/dashboard/sweep_results_view.py PRESET_INERT_AXES; expected list was stale (last touched pre-PR-B, the source addition d1ecdd681 postdates it — a stale-miss). Dynamic activation deferred to DEC-NETCOST-RESULTS-JOIN-001.
+        assert payload["preset_inert_axes"] == [
+            "composite_score",
+            "max_consecutive_losses",
+            "net_after_cost_paisa",
+        ]
         assert [r["max_drawdown_pct"] for r in payload["rows"]] == [2.0, 25.0]
 
     def test_invalid_preset_is_a_clean_400_naming_valid_values(self, client: TestClient) -> None:
