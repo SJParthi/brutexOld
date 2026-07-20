@@ -811,7 +811,7 @@ jobs:
           #   the 2026-07-08 post-merge HEAD measured 599 — the race-6 merge
           #   folded main's width-generic u128 trade_sim kernel, trade_sim
           #   124->167; the pre-merge 2026-07-07 measurement was 556); +
-          #   optcost/*.rs (DEC-OPTCOST-TAILS-RUST-001 #1962) = 1191 total
+          #   optcost/*.rs (DEC-OPTCOST-TAILS-RUST-001 #1979) = 1191 total
           #   re-measured 2026-07-19 on the merge-reconciled tree under the
           #   pinned 27.1.0 (692 + optcost 499 — per-file split in
           #   rust/fno-math/.cargo/mutants.toml).
@@ -827,7 +827,7 @@ jobs:
           #   (CI per-lane measured 4-9 s build + 25-31 s test) ~= 56-77 min +
           #   ~5.5 min baseline/setup ~= 62-83 min nominal, ~100 at +20% on the
           #   worst end -> >= 20 min margin per shard).
-          # - 6->8 shards (DEC-OPTCOST-TAILS-RUST-001 #1962, merge-reconciled
+          # - 6->8 shards (DEC-OPTCOST-TAILS-RUST-001 #1979, merge-reconciled
           #   2026-07-19): the optcost scope (src/optcost/*.rs) grew the census
           #   to 1191 measured on the merge-reconciled tree under the pinned
           #   27.1.0 (`cargo mutants --list | wc -l`; = 692 + optcost 499, the

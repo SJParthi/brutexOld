@@ -74,11 +74,23 @@ def client(store: InstrumentStore) -> Iterator[TestClient]:
 _CAPTURED: dict[str, Any] = {}
 
 
-def _fake_run_sweep_from_request(request: Any, *, lake_root: Path, results_root: Path) -> int:
-    """Offline stand-in for the grid sweep (no lake, returns at once)."""
+def _fake_run_sweep_from_request(
+    request: Any,
+    *,
+    lake_root: Path,
+    results_root: Path,
+    on_summary: Any = None,
+) -> int:
+    """Offline stand-in for the grid sweep (no lake, returns at once).
+
+    Accepts the additive ``on_summary`` seam (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 /
+    G5b) so the dashboard job's ``_work`` capture-and-note path drives cleanly; a
+    clean run reports no summary, so the finish note stays "done".
+    """
     _CAPTURED["request"] = request
     _CAPTURED["lake_root"] = lake_root
     _CAPTURED["results_root"] = results_root
+    _CAPTURED["on_summary"] = on_summary
     return 0
 
 
@@ -112,6 +124,52 @@ def test_default_params_start_job(client: TestClient, monkeypatch: pytest.Monkey
     # The background body received the resolved request + the lake-relative roots.
     assert _CAPTURED["request"].symbols == "NIFTY,BANKNIFTY"
     assert _CAPTURED["results_root"] == _CAPTURED["lake_root"] / "sweeps"
+    # A clean run captures no summary → the finish note stays "done".
+    assert _wait_for_job(client)["detail"] == "done"
+
+
+def test_failed_tuples_surface_in_the_finish_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G5b: a sweep that SKIPPED failed tuples renders an honest finish note.
+
+    The job stays "done" (the results ARE on disk — a warn-flavoured completion
+    is more honest than a failure), but the finish detail now NAMES the skipped
+    count instead of a bare "done" — driven by the ``on_summary`` capture in the
+    dashboard ``_work``. The CLI/cron int exit code is unchanged upstream.
+    """
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
+
+    def _fake_with_failures(
+        request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None
+    ) -> int:
+        summary = SupervisedGridSummary(
+            sweep_id="x",
+            tuples_total=5,
+            tuples_run=3,
+            tuples_skipped_no_bars=0,
+            skipped_cache=0,
+            skipped_resume=0,
+            enumerated=10,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=10,
+            ranked=3,
+            persisted=3,
+            tuples_failed=2,
+            tuples_quarantined_prior=1,
+        )
+        if on_summary is not None:
+            on_summary(summary)
+        return 4  # sweep_all_exit_code(tuples_failed>0) — a non-zero cron-red exit
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_with_failures)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    snap = _wait_for_job(client)
+    assert snap["state"] == "done"  # results on disk — not a failure
+    assert "2 tuple(s) FAILED" in snap["detail"]
+    assert "1 tuple(s) quarantined from a prior run" in snap["detail"]
 
 
 def test_nonzero_exit_code_surfaces_a_failure_not_a_false_done(
@@ -124,7 +182,7 @@ def test_nonzero_exit_code_surfaces_a_failure_not_a_false_done(
     guards) reported the SAME "done" finish detail as full success. Must
     now surface a named failure in the finish detail instead."""
 
-    def _fails(request: Any, *, lake_root: Path, results_root: Path) -> int:
+    def _fails(request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None) -> int:
         return 1
 
     monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
@@ -147,7 +205,7 @@ def test_nonzero_exit_code_does_not_mark_cache_dirty(
     cache = SummaryCache()
     monkeypatch.setattr(cache, "mark_dirty", lambda: mark_dirty_calls.append(1))
 
-    def _fails(request: Any, *, lake_root: Path, results_root: Path) -> int:
+    def _fails(request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None) -> int:
         return 1
 
     monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
@@ -289,7 +347,9 @@ def test_second_click_while_running_is_a_noop(
     started = __import__("threading").Event()
     release = __import__("threading").Event()
 
-    def _blocking(request: Any, *, lake_root: Path, results_root: Path) -> int:
+    def _blocking(
+        request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None
+    ) -> int:
         started.set()
         release.wait(timeout=10.0)
         return 0

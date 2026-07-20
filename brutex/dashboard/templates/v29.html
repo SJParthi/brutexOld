@@ -2444,7 +2444,7 @@
       <input id="swEnd" type="date">
     </label>
     <label>K-DEPTH
-      <input id="swK" type="number" min="1" max="5" placeholder="default">
+      <input id="swK" type="number" min="1" max="5" placeholder="extinction (default)" title="blank = Apriori-to-extinction default; a number = classic fixed-K sweep">
     </label>
     <label>DIRECTIONS
       <select id="swDirections">
@@ -2479,7 +2479,7 @@
          checkpoint), so a cancelled run is a clean resumable checkpoint. -->
     <button class="oc-cascade-btn" id="stop-sweep" type="button" hidden>⏹ Stop</button>
     <button class="oc-cascade-btn" id="run-cascade" type="button">🪜 Run cascade</button>
-    <span class="oc-disabled-note" id="ocPreflight">estimator not wired yet — lands at merge-integration (P1); every time estimate is PROVISIONAL until the smoke run calibrates it (R23)</span>
+    <span class="oc-disabled-note" id="ocPreflight">exploration: Apriori-to-extinction (default) — each cell's k-ladder runs until no combo survives min-hits; a level exceeding the mask·bar budget (BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS) refuses loudly and that cell's tuples at and above it are marked FAILED (raise the budget and re-run to explore deeper — the checkpoint re-runs exactly those). Enter an explicit K for the legacy fixed-K sweep (byte-identical to previous behavior). No time estimate is shown: extinction depth is data-dependent — every figure would be modeled, not measured; the run's audit artifacts carry the real per-level counts + timings.</span>
   </div>
   <div class="oc-msg" id="sweep-msg"></div>
   <div id="sweep-bar" style="display:none;margin-top:10px;height:8px;border-radius:4px;background:#1b2030;overflow:hidden;">
@@ -3020,6 +3020,10 @@
           <input id="scMinWin" type="number" step="any" placeholder="any"></div>
         <div class="ctl"><label for="scMinPf">Min PF</label>
           <input id="scMinPf" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scMinTrades">Min trades</label>
+          <input id="scMinTrades" type="number" step="1" placeholder="any"></div>
+        <div class="ctl"><label for="scMinDsr" title="floors the stored per-tuple DSR (tuple-N — an inflating under-count; DEC-RESULTS-TRUST-HONESTY-001)">Min DSR (tuple-N)</label>
+          <input id="scMinDsr" type="number" step="any" placeholder="any"></div>
         <div class="ctl"><label for="scMaxDd">Max |DD| (paisa)</label>
           <input id="scMaxDd" type="number" step="any" placeholder="any"></div>
         <div class="ctl"><label for="scVixLo">VIX band ≥</label>
@@ -3188,9 +3192,14 @@
       <div class="story-cell"><div class="k">Win rate</div><div class="v" id="stWinRate" data-explain="win_rate">—</div></div>
       <div class="story-cell"><div class="k">Profit factor</div><div class="v" id="stPf" data-explain="profit_factor">—</div></div>
       <div class="story-cell"><div class="k">Trades</div><div class="v" id="stTrades" data-explain="trades">—</div></div>
+      <!-- DEC-RESULTS-TRUST-HONESTY-001 (B1, audit BLOCKER 1): the STORED
+           buy-&-hold benchmark of THIS run (R27 baseline artifact) — served
+           verbatim, never recomputed; awaiting/corrupt reads the honest detail. -->
+      <div class="story-cell"><div class="k">Benchmark — buy &amp; hold</div><div class="v" id="stBench">—</div></div>
     </div>
     <!-- R31: the per-combo VIX regime band, rendered on the card -->
     <div class="vixband" id="stVixBand" data-explain="vix_band">no VIX band</div>
+    <div class="note" id="stBenchDetail">benchmark: awaiting stored baseline artifact (R27)</div>
     <div class="note" id="stArith"></div>
   </section>
 

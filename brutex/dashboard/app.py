@@ -49,6 +49,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TypeVar
 from urllib.parse import urlsplit
 
+if TYPE_CHECKING:
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
+
 import structlog
 
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
@@ -299,6 +302,8 @@ from brutex.dashboard.sweep_results_view import (
     build_sweep_leaderboard,
     load_cascade_join_file,
     load_sweep_scan,
+    parse_filter_float,
+    parse_filter_int,
     resolve_preset_param,
     store_error_payload,
 )
@@ -308,7 +313,17 @@ from brutex.dashboard.sweep_runner import (
     resolve_oneclick_sweep_plan,
     resolve_sweep_request,
     run_sweep_from_request,
+    sweep_finish_note,
     sweep_progress_file,
+)
+from brutex.dashboard.sweep_temporal_view import (
+    TEMPORAL_HORIZONS,
+    build_sidecar_index,
+    is_valid_run_id,
+    sidecar_horizon_payload,
+    stamp_stat_token,
+    stored_horizon_payload,
+    sweep_runs_token,
 )
 from brutex.dashboard.universe_cache import (
     STORE_FAULT_TYPES,
@@ -4755,9 +4770,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # LAST step) leaves a persistent sentinel the next run's
                 # step-D3 owed catchup completes. Best-effort + kill-switch
                 # coherent (mark_owed_for_pull marks nothing under
-                # BRUTEX_CROSSVERIFY=off / junk env — one WARN, never a
-                # failed pull); the runner clears the marker at the day's
-                # completed material verdict.
+                # BRUTEX_CROSSVERIFY=off / BRUTEX_CROSSVERIFY_PUBLISH=off /
+                # junk env — one WARN, never a failed pull); the runner
+                # clears the marker at the day's completed material verdict.
+                # HONEST (round-1 review MINOR-2): a launch that crosses
+                # midnight leaves THIS launch_day's marker while the tail
+                # runs config.day = the NEW day — benign + convergent: the
+                # tail clears nothing for launch_day, and the NEXT run's D3
+                # completes it idempotently (zero double-puts).
                 from brutex.crossverify.owed import mark_owed_for_pull
 
                 mark_owed_for_pull(lake_root, launch_day, source="dashboard-pipeline")
@@ -8883,26 +8903,43 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: run the grid sweep; the live tick streams to the progress file.
 
-            A round-12 adversarial-refuter review found this returned the
-            bare exit code with no check — ``BackgroundPullJob`` silently
-            discards a non-zero int, so a genuine internal
-            ``cmd_sweep_all`` failure (e.g. the engine's own
-            ``max_combos``/grid-size construction guards, ADR-0007
-            condition 3) reported the SAME "done" finish detail as full
-            success, with ``on_success``/``mark_dirty`` firing on a run
-            that did nothing — the exact failure mode rounds 5-8 already
-            fixed for the multi-exchange one-click route's own ``_work``,
-            left open here. Mirrors that fix: a non-zero exit becomes a
-            named ``{"note": ...}`` finish detail (the SAME
-            ``BackgroundPullJob``/``_finish_detail`` contract), and
-            ``on_success`` (below) only fires on a REAL success.
+            Captures the run's ``SupervisedGridSummary`` (G5b) and returns a
+            Mapping carrying an honest ``"note"`` (rendered by
+            :func:`~brutex.dashboard.sweep_runner.sweep_finish_note`), so
+            ``_finish_detail`` surfaces the failed / quarantined-prior tuple
+            counts instead of a bare "done". The int exit code (the nightly/cron
+            red contract) is unchanged upstream — only the RENDER is richer.
+
+            Round-12 adversarial-refuter fold (club O): a genuine internal
+            ``cmd_sweep_all`` failure (e.g. the engine's own ``max_combos``/grid
+            construction guards, ADR-0007 condition 3) that captured NO summary
+            surfaces a named ``cmd_sweep_all FAILED (exit N)`` note — never a
+            false "done" — and ``on_success``/``mark_dirty`` (below) only fires
+            on a REAL success (``exit == 0``), the rounds 5-8 law the
+            multi-exchange one-click route's own ``_work`` already carries.
             """
             nonlocal sweep_succeeded
-            code = run_sweep_from_request(request, lake_root=lake, results_root=results_root)
-            if code != 0:
-                return {"note": f"sweep {request.symbols}: cmd_sweep_all FAILED (exit {code})"}
-            sweep_succeeded = True
-            return 0
+            captured: list[SupervisedGridSummary] = []
+            exit_code = run_sweep_from_request(
+                request,
+                lake_root=lake,
+                results_root=results_root,
+                on_summary=captured.append,
+            )
+            summary = captured[0] if captured else None
+            if exit_code == 0:
+                sweep_succeeded = True
+            elif summary is None:
+                return {"note": f"sweep {request.symbols}: cmd_sweep_all FAILED (exit {exit_code})"}
+            return {
+                "note": sweep_finish_note(
+                    exit_code=exit_code,
+                    tuples_failed=(summary.tuples_failed if summary is not None else None),
+                    tuples_quarantined_prior=(
+                        summary.tuples_quarantined_prior if summary is not None else None
+                    ),
+                )
+            }
 
         def _on_success() -> None:
             """Bump the write-generation iff the sweep genuinely succeeded (rounds 5-8 law)."""
@@ -9279,6 +9316,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         top: int = Query(
             default=SWEEP_LEADERBOARD_DEFAULT_TOP_N, ge=1, le=SWEEP_LEADERBOARD_MAX_TOP_N
         ),
+        min_trades: str | None = Query(default=None),
+        min_pf: str | None = Query(default=None),
+        min_dsr: str | None = Query(default=None),
+        max_abs_dd_pct: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/sweep/leaderboard — the ranked brute-force sweep winners (DEC-DASHBOARD-RESULTS-PAGE-001).
 
@@ -9319,6 +9360,19 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             ``brutex.ranking`` (this route only validates + threads the token).
         top
             Leaderboard depth (1..500; default 50).
+        min_trades, min_pf, min_dsr, max_abs_dd_pct
+            OPTIONAL serving-side floors (DEC-RESULTS-TRUST-HONESTY-001 ·
+            B2a) — operator CONTROLS over a board that is ALREADY
+            MIN_TRADES=30 pre-gated by construction, not a missing gate.
+            Accepted as raw strings and parsed EAGERLY through the view's
+            fail-loud parsers (junk / non-finite / negative → a clean 400
+            naming the parameter — the ``preset`` refusal law; FastAPI's own
+            type coercion would 422, so the parse is explicit). Absent/blank
+            = inactive = the byte-identical legacy payload (pinned).
+            ``min_dsr`` floors the TUPLE-scoped ``deflated_sharpe`` (labeled
+            so on the page); ``min_cpcv`` is honestly NOT offered — no
+            per-row CPCV value is persisted anywhere this view can read, and
+            fabricating one is refused (Golden Rule #1).
 
         **Store-fault degrade (DEC-SWEEP-RESULTS-DEPTH-001, C3):** a typed
         :class:`~brutex.engine.results_store.ResultsStoreError` escaping the
@@ -9359,6 +9413,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         # values; None/blank resolves to None = the byte-identical legacy path.
         try:
             resolved_preset = resolve_preset_param(preset)
+            # B2a serving-side floors — parsed EAGERLY (before any threadpool
+            # hop / cache-key build) through the view's fail-loud parsers.
+            f_min_trades = parse_filter_int("min_trades", min_trades)
+            f_min_pf = parse_filter_float("min_pf", min_pf)
+            f_min_dsr = parse_filter_float("min_dsr", min_dsr)
+            f_max_abs_dd_pct = parse_filter_float("max_abs_dd_pct", max_abs_dd_pct)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -9375,6 +9435,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 rank_by=rank_by,
                 top_n=top,
                 preset=resolved_preset,
+                min_trades=f_min_trades,
+                min_pf=f_min_pf,
+                min_dsr=f_min_dsr,
+                max_abs_dd_pct=f_max_abs_dd_pct,
             )
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
@@ -9431,11 +9495,19 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # RESOLVED preset token rides too — a preset-ranked payload must
             # never share a slot with the default ordering, and blank/absent
             # share ONE slot because both resolve to None).
+            # The RESOLVED B2a filter floors ride the key too
+            # (DEC-RESULTS-TRUST-HONESTY-001: parsed values, so "30" and
+            # " 30 " share one slot; absent floors read the stable empty
+            # token = the legacy slot).
             lb_key = (
                 f"sweep_leaderboard|i={(instrument or '').casefold()}"
                 f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
                 f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
                 f"|casc={casc_rev or 'outage'}|comp={comp_rev or 'outage'}"
+                f"|mt={'' if f_min_trades is None else f_min_trades}"
+                f"|mp={'' if f_min_pf is None else f_min_pf!r}"
+                f"|md={'' if f_min_dsr is None else f_min_dsr!r}"
+                f"|xd={'' if f_max_abs_dd_pct is None else f_max_abs_dd_pct!r}"
             )
 
             def _fresh() -> dict[str, Any]:
@@ -9449,6 +9521,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     preset=resolved_preset,
                     cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
                     composite=load_composite_index(sweeps_root),
+                    min_trades=f_min_trades,
+                    min_pf=f_min_pf,
+                    min_dsr=f_min_dsr,
+                    max_abs_dd_pct=f_max_abs_dd_pct,
                 ).to_dict()
 
             if rev is None:
@@ -9513,6 +9589,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     preset=resolved_preset,
                     cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
                     composite=composite_index,
+                    min_trades=f_min_trades,
+                    min_pf=f_min_pf,
+                    min_dsr=f_min_dsr,
+                    max_abs_dd_pct=f_max_abs_dd_pct,
                 ).to_dict(),
                 mru_prefix=lb_key,
             )
@@ -9527,6 +9607,131 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # never reaches the wire — store_error_payload logs the full detail
             # server-side and serves only the stable generic markers.
             return JSONResponse(store_error_payload(exc))
+
+    @app.get("/api/v1/sweep/temporal")
+    async def api_sweep_temporal(
+        run_id: str = Query(min_length=1),
+        horizon: str = Query(min_length=1),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/temporal — one combo's per-period drill (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+
+        The ``/results`` row expander's ONE endpoint: ``quarter``/``month``
+        serve the row's STORED per-period columns (the rank-time finalist fold
+        — ``[n_trades, net_pnl_paisa, wins, max_dd_paisa]`` cells; ``quarter``
+        additionally derives the half-year n/pnl/wins roll-up server-side,
+        half-year max-DD honestly absent); ``day``/``week`` aggregate the
+        #1275 results-depth TRADES sidecars (IST exit-date / ISO-week
+        ``[n, pnl, wins]`` buckets — no DD at that granularity). The dashboard
+        NEVER re-simulates (graft 11): a pre-extension row reads ``status:
+        "absent"`` and missing depth artifacts read ``status: "awaiting"`` —
+        never a 500, never a fabricated bucket.
+
+        Validation is EAGER and disk-free: an unknown ``horizon`` or a
+        non-64-lowercase-hex ``run_id`` is a clean 400 with ZERO disk touches
+        (spy-pinned by test — a hostile run_id never reaches a path build).
+
+        Caching (the ``api_sweep_leaderboard`` two-level precedent, same
+        :class:`MoversSnapshotCache` instance): ``quarter``/``month`` key on
+        the ``sweep_results_revision`` content token (scan + run_id row index
+        computed once per revision — a repeat drill click is O(1)); ``day``/
+        ``week`` key on the ``sweep_runs`` tree token PLUS the served stamp's
+        own ``mtime_ns:size`` stat token (a rebuilt sidecar invalidates).
+        Honest envelope (Golden Rule #10): the FIRST ``day``/``week`` drill
+        per token pays the O(run dirs × stamps) index walk + an O(trades of
+        ONE combo) streamed fold; a probe outage (token ``None``) computes
+        fresh and caches NOTHING (never a stale serve, never a poisoned key).
+        """
+        if horizon not in TEMPORAL_HORIZONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown horizon {horizon!r} — one of: {', '.join(TEMPORAL_HORIZONS)}",
+            )
+        if not is_valid_run_id(run_id):
+            raise HTTPException(
+                status_code=400,
+                detail="run_id must be a 64-character lowercase-hex run identity",
+            )
+        store = _require_store()
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
+            # No lake root wired → the honest absent shape (never a 500),
+            # mirroring the /api/v1/sweep/leaderboard no-lake degrade.
+            return JSONResponse(
+                {
+                    "status": "absent",
+                    "run_id": run_id,
+                    "horizon": horizon,
+                    "detail": "no lake root wired — start the dashboard with a lake",
+                }
+            )
+        lake_root = store_path.parent
+
+        def _resolve() -> dict[str, Any]:
+            """Cache-or-compute the drill payload on a threadpool worker."""
+            if horizon in ("quarter", "month"):
+                rev = sweep_results_revision(lake_root)
+
+                def _fresh_stored() -> dict[str, Any]:
+                    scan = load_sweep_scan(lake_root)
+                    row = next((r for r in scan.rows if r.run_id == run_id), None)
+                    return stored_horizon_payload(row, run_id=run_id, horizon=horizon)
+
+                if rev is None:
+                    return _fresh_stored()
+                scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_scan|rev={rev}",
+                    generation=0,
+                    compute=lambda: load_sweep_scan(lake_root),
+                )
+                row_index = _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_temporal_index|rev={rev}",
+                    generation=0,
+                    compute=lambda: {r.run_id: r for r in scan.rows},
+                )
+                return _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_temporal|rev={rev}|run={run_id}|h={horizon}",
+                    generation=0,
+                    compute=lambda: stored_horizon_payload(
+                        row_index.get(run_id), run_id=run_id, horizon=horizon
+                    ),
+                )
+            token = sweep_runs_token(lake_root)
+            if token is None:
+                # No freshness signal → compute fresh, cache nothing (the
+                # lake_revision "None = no signal" doctrine).
+                return sidecar_horizon_payload(
+                    build_sidecar_index(lake_root).get(run_id), run_id=run_id, horizon=horizon
+                )
+            index = _sweep_leaderboard_cache.get_or_compute(
+                f"sweep_runs_index|tok={token}",
+                generation=0,
+                compute=lambda: build_sidecar_index(lake_root),
+            )
+            paths = index.get(run_id)
+            if paths is None:
+                return sidecar_horizon_payload(None, run_id=run_id, horizon=horizon)
+            stamp_tok = stamp_stat_token(paths)
+            return _sweep_leaderboard_cache.get_or_compute(
+                f"sweep_temporal|tok={token}|stamp={stamp_tok}|run={run_id}|h={horizon}",
+                generation=0,
+                compute=lambda: sidecar_horizon_payload(paths, run_id=run_id, horizon=horizon),
+            )
+
+        try:
+            return JSONResponse(await _run_lake(_resolve))
+        except ResultsStoreError as exc:
+            # The C3 degrade posture, endpoint-shaped: store_error_payload logs
+            # the full detail server-side; only its stable sanitized marker
+            # reaches the wire (never str(exc), never a 500).
+            degraded = store_error_payload(exc)
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "run_id": run_id,
+                    "horizon": horizon,
+                    "detail": degraded["error"],
+                }
+            )
 
     # ── One-click artifact routes (DEC-OPERATOR-PAGE-REAL-001) ──────────
     # The ONE integration-adapter surface over the sweep-oneclick artifact
@@ -9795,6 +10000,73 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 coordinate=f"oc_top100|{rid}|fx={fixture_active}",
                 probe=probe,
                 key=key,
+                compute=_fresh,
+            )
+
+        return JSONResponse(await _run_lake(_resolve))
+
+    @app.get("/api/v1/oneclick/baseline")
+    async def api_oneclick_baseline(
+        run_id: str | None = Query(default=None),
+        instrument: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/baseline — one run's STORED buy-&-hold series (R27).
+
+        DEC-RESULTS-TRUST-HONESTY-001 (B1, audit BLOCKER 1): the baselines the
+        results-depth pass already computes + stores
+        (``sweep_runs/<run_id>/baseline-<instrument>.json``, filename resolved
+        via the top100.json object root's ``baselines`` map) finally get a
+        serving route. STORED bytes only — a missing/interim/damaged artifact
+        chain reads a loud ``awaiting``/``corrupt`` payload, never a 500 and
+        never a recomputed series; the filename ref is validated as ONE safe
+        path segment before any disk touch (a tampered map cannot traverse).
+        ``instrument`` may be omitted when exactly one baseline is stored.
+        Cached on the run-dir + top100 stat tokens (the sibling-route law).
+        """
+        rid = _oneclick_require_run_id(run_id)
+        wanted = instrument.strip() if instrument is not None and instrument.strip() else None
+
+        def _resolve() -> dict[str, Any]:
+            """Resolve the baseline payload off the event loop (stat-token cached)."""
+            root, fixture_root = _oneclick_roots()
+            fixture_active = fixture_root is not None
+            if root is None:
+                return oneclick_view.build_baseline_payload(
+                    rid,
+                    oneclick_artifacts.BaselineResult(
+                        "awaiting",
+                        wanted,
+                        None,
+                        None,
+                        (),
+                        "no lake configured — awaiting real run artifact",
+                        None,
+                    ),
+                    fixture_root_active=fixture_active,
+                )
+            run_dir = oneclick_artifacts.runs_root(root) / rid
+            # The compute depends on top100.json (the baselines map) AND the
+            # baseline file; the run DIR stat moves on any atomic replace
+            # inside it (os.replace updates the directory mtime), so the pair
+            # (top100 rev, run-dir rev) is a sound invalidation token.
+            top100_rev = oneclick_artifacts.artifact_revision(
+                run_dir / oneclick_artifacts.TOP100_FILENAME
+            )
+            dir_rev = oneclick_artifacts.artifact_revision(run_dir)
+
+            def _fresh() -> dict[str, Any]:
+                return oneclick_view.build_baseline_payload(
+                    rid,
+                    oneclick_artifacts.load_baseline_result(run_dir, wanted),
+                    fixture_root_active=fixture_active,
+                )
+
+            if top100_rev is None or dir_rev is None:
+                return _fresh()
+            return _oneclick_cache.get_or_compute(
+                f"oc_baseline|{rid}|i={wanted or ''}|t100={top100_rev}|dir={dir_rev}"
+                f"|fx={fixture_active}",
+                generation=0,
                 compute=_fresh,
             )
 

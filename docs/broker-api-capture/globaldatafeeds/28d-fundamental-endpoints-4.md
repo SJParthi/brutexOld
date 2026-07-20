@@ -32,7 +32,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -116,7 +116,7 @@ paths:
 
         RELIANCE,500325,RELIANCE INDUSTRIES LTD.,INE002A01018," Maker Chambers
         IV   3rd Floor 222  Nariman Point ,Mumbai, 400021,
-        Maharashtra","022-3555 5000,",investor.relations@ril.com,Savithri 
+        Maharashtra","022-3555 5000,",investor.relations@ril.com,Savithri
         Parekh,Company Secretary & Compliance Officer,"04-08-2025
         16:14:30","04-08-2025 16:14:30"
           </Tab>
@@ -126,14 +126,14 @@ paths:
 
         RELIANCE,500325,RELIANCE INDUSTRIES LTD.,INE002A01018," Maker Chambers
         IV   3rd Floor 222  Nariman Point ,Mumbai, 400021,
-        Maharashtra","022-3555 5000,",investor.relations@ril.com,Savithri 
+        Maharashtra","022-3555 5000,",investor.relations@ril.com,Savithri
         Parekh,Company Secretary & Compliance Officer,"04-08-2025
         16:14:30","04-08-2025 16:14:30"
 
 
-        Note: 
+        Note:
 
-        1. The file containing above values in CSV format will be returned. 
+        1. The file containing above values in CSV format will be returned.
 
         2. To see it working, copy-paste the request in browser.
           </Tab>
@@ -332,7 +332,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -361,33 +361,33 @@ paths:
         10px; border-radius: 5px;">
             <Tabs style="background-color:lightgrey;">
                     <Tab title="JSON">
-                        {  
-                            "Value": [  
-                            {  
-                            "DealDate": "02-27-2025",  
-                            "ScripCode": 544072,  
-                            "ScripId": "AIKPIPES",  
-                            "ClientName": "SATYA PRAKASH MITTAL",  
-                            "DealType": "S",  
-                            "Qty": 44800,  
-                            "QtyPct": 0.704070407040704,  
-                            "Price": 81.4,  
-                            "ReceivedAt": "02-27-2025 21:00:02",  
-                            "SavedAt": "02-27-2025 21:00:02"  
-                            },  
-                            {  
-                            "DealDate": "02-27-2025",  
-                            "ScripCode": 544072,  
-                            "ScripId": "AIKPIPES",  
-                            "ClientName": "NEELAM MITTAL",  
-                            "DealType": "B",  
-                            "Qty": 44800,  
-                            "QtyPct": 0.704070407040704,  
-                            "Price": 81.4,  
-                            "ReceivedAt": "02-27-2025 21:00:02",  
-                            "SavedAt": "02-27-2025 21:00:02"  
-                            }  
-                            ]  
+                        {
+                            "Value": [
+                            {
+                            "DealDate": "02-27-2025",
+                            "ScripCode": 544072,
+                            "ScripId": "AIKPIPES",
+                            "ClientName": "SATYA PRAKASH MITTAL",
+                            "DealType": "S",
+                            "Qty": 44800,
+                            "QtyPct": 0.704070407040704,
+                            "Price": 81.4,
+                            "ReceivedAt": "02-27-2025 21:00:02",
+                            "SavedAt": "02-27-2025 21:00:02"
+                            },
+                            {
+                            "DealDate": "02-27-2025",
+                            "ScripCode": 544072,
+                            "ScripId": "AIKPIPES",
+                            "ClientName": "NEELAM MITTAL",
+                            "DealType": "B",
+                            "Qty": 44800,
+                            "QtyPct": 0.704070407040704,
+                            "Price": 81.4,
+                            "ReceivedAt": "02-27-2025 21:00:02",
+                            "SavedAt": "02-27-2025 21:00:02"
+                            }
+                            ]
                             }
                     </Tab>
                     <Tab title="XML">
@@ -399,17 +399,17 @@ paths:
                         &lt;/BulkDeals&gt;
                     </Tab>
                     <Tab title="CSV">
-                        DealDate,ScripCode,ScripName,ClientName,DealType,Qty,QtyPct,Price,ReceivedAt,SavedAt  
-                        "02-27-2025",544072,AIKPIPES,SATYA PRAKASH MITTAL,S,44800.0,0.704070407040704,81.4,"02-27-2025 21:00:02","02-27-2025 21:00:02"  
+                        DealDate,ScripCode,ScripName,ClientName,DealType,Qty,QtyPct,Price,ReceivedAt,SavedAt
+                        "02-27-2025",544072,AIKPIPES,SATYA PRAKASH MITTAL,S,44800.0,0.704070407040704,81.4,"02-27-2025 21:00:02","02-27-2025 21:00:02"
                         "02-27-2025",544072,AIKPIPES,NEELAM MITTAL,B,44800.0,0.704070407040704,81.4,"02-27-2025 21:00:02","02-27-2025 21:00:02"
                     </Tab>
                     <Tab title="CsvContent">
-                        DealDate,ScripCode,ScripName,ClientName,DealType,Qty,QtyPct,Price,ReceivedAt,SavedAt  
-                        "02-27-2025",544072,AIKPIPES,SATYA PRAKASH MITTAL,S,44800.0,0.704070407040704,81.4,"02-27-2025 21:00:02","02-27-2025 21:00:02"  
+                        DealDate,ScripCode,ScripName,ClientName,DealType,Qty,QtyPct,Price,ReceivedAt,SavedAt
+                        "02-27-2025",544072,AIKPIPES,SATYA PRAKASH MITTAL,S,44800.0,0.704070407040704,81.4,"02-27-2025 21:00:02","02-27-2025 21:00:02"
                         "02-27-2025",544072,AIKPIPES,NEELAM MITTAL,B,44800.0,0.704070407040704,81.4,"02-27-2025 21:00:02","02-27-2025 21:00:02"
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
@@ -606,7 +606,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -712,13 +712,13 @@ paths:
                         "03-28-2025",543320,Zomato Limited,GOLDMAN SACHS (SINGAPORE) PTE.- ODI,B,6007412.0,0.06225071212171468,199.5,"04-03-2025 21:01:06","04-03-2025 21:01:06"
                         "03-28-2025",543320,Zomato Limited,KADENSA MASTER FUND,S,6007412.0,0.06225071212171468,199.5,"04-03-2025 21:01:06","04-03-2025 21:01:06"
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
           </div>
-          
+
       tags:
         - Corporate Data APIs (RESTful)/Bulk / Block Deals
         - Corporate Data
@@ -842,7 +842,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -868,7 +868,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                        
+        Response
         |
 
         | :------------ |
@@ -880,11 +880,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetDeliveryVolumesResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetDeliveryVolumesResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetDeliveryVolumesResponse_CSV.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetDeliveryVolumesResponse_CSV.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be
@@ -1079,7 +1079,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th March 2026**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th March 2026**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1419,13 +1419,13 @@ paths:
         "05-22-2026
         20:12:02",TOTAL,447772,447772,8677258,8677258,4552468,4619504,4552468,4619504,3953451,2429231,3953451,2429231,24679684,24679684,0,Neutral,0,Neutral,67036,67036,0,0,0,Neutral,-1524220,-1524220,0,0,0,Neutral
 
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
             </Tabs>
           </div>
-          
+
       tags:
         - Corporate Data APIs (RESTful)/FII DII Activity
       parameters:

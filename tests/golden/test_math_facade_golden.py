@@ -50,7 +50,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u128s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
-        # DEC-OPTCOST-TAILS-RUST-001 (MIGRATION.md #1962) — the 11 optcost
+        # DEC-OPTCOST-TAILS-RUST-001 (MIGRATION.md #1979) — the 11 optcost
         # tail-kernel pyfunctions (a deliberate, reviewed surface addition;
         # fenced additive entries — the facade rebuilds ``__all__`` from
         # ``fno_math.__all__``, so the shim's append-only optcost symbols
