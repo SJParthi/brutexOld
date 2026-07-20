@@ -290,3 +290,68 @@ class TestTickSizeNormalisation:
     def test_valid_set_is_frozen(self) -> None:
         assert Decimal("0.05") in VALID_TICK_SIZES_RUPEES
         assert Decimal("5.00") in VALID_TICK_SIZES_RUPEES
+
+
+# ────────────────────────────────────────────────────────────────────────
+# The BRUTEX_CORE_RUST_MODELS seam wiring (slice T35 PR-2)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestModelsRustSeamWiring:
+    """Flag-OFF is the verbatim Python law with the crate UNTOUCHED; flag-ON
+    delegates to :mod:`brutex.models_rust` (the full facade battery lives in
+    ``tests/unit/test_models_rust.py`` — these are the stem-matched wiring
+    pins for the models.py gate)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex import models_rust
+
+        monkeypatch.delenv(models_rust.MODELS_RUST_ENV, raising=False)
+        models_rust.reset_models_rust_for_tests()
+
+    def test_flag_off_never_imports_or_calls_the_crate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+        import types
+
+        bomb = types.ModuleType("brutex_core")
+
+        def _boom(_kind: str, _payload: str) -> str:
+            raise AssertionError("the crate must not be called flag-OFF")
+
+        bomb.models_normalise_tick_size_str = _boom  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "brutex_core", bomb)
+        assert normalise_tick_size(Decimal("0.05")) == Decimal("0.05")
+        assert normalise_tick_size(5) == Decimal("0.05")
+        with pytest.raises(TickSizeFormatError):
+            normalise_tick_size(0.07)
+
+    def test_public_law_equals_extracted_oracle_flag_off(self) -> None:
+        from brutex.models import (
+            _normalise_tick_size_python,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        for raw in (Decimal("0.05"), 5, 5.0, "0.10", 1.0, 100):
+            assert normalise_tick_size(raw) == _normalise_tick_size_python(raw)
+
+    def test_flag_on_routes_through_the_facade(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+        import types
+
+        from brutex import models_rust
+
+        calls: list[tuple[str, str]] = []
+        crate = types.ModuleType("brutex_core")
+
+        def _spy(kind: str, payload: str) -> str:
+            calls.append((kind, payload))
+            return "0.05"
+
+        crate.models_normalise_tick_size_str = _spy  # type: ignore[attr-defined]
+        crate.__version__ = "0.0-fake"  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "brutex_core", crate)
+        monkeypatch.setenv(models_rust.MODELS_RUST_ENV, "1")
+        assert normalise_tick_size(Decimal("0.05")) == Decimal("0.05")
+        assert calls == [("decimal", "0.05")]

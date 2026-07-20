@@ -19,7 +19,7 @@ build-backend = "maturin"
 
 [project]
 name = "brutex-core"
-version = "0.3.0"
+version = "0.4.0"
 description = "BruteX root-leaf Rust seams — the DEC-MONEY-2DP-001 money laws as exact decimal-string arithmetic, byte-locked to the CPython Decimal oracle (slice T35)."
 readme = "README.md"
 license = { text = "Proprietary" }

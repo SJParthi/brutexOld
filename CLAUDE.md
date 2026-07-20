@@ -212,6 +212,32 @@ Muhurat-crossing weekly-anchor grids (#1626) — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. This header carries pointers, never
 the story; each member's full record lives in its MIGRATION.md entry + the
 vehicle PR body.)
+Earlier: 2026-07-18 (DEC-CORE-RUST-MODELS-001, MIGRATION.md #2052
+(renumbered #1944 → #1966 → #2052 — the last hop at the 2026-07-20 train-b
+tier-2 fold, #1966 taken on main by DEC-GDF-TRUEDATA-DOCS-001, census band
+2050+ per DEC-LEDGER-RENUMBER-001; the DEC-ID is
+the stable handle), branch `claude/rust-slice-t35-models` — slice T35 PR-2:
+`brutex/models.py` onto `rust/brutex-core` — the reasoned TYPE-PORT NO-GO
+(the StrEnum taxonomies / the `Instrument` dataclass protocol / the
+`BruteXError` exception root stay Python — ~105 importers; the verdict
+MECHANIZED as the 38-pin frozen type contract
+`tests/unit/test_models_type_contract.py`, not merely narrated) + the
+module's ONE convertible law `normalise_tick_size` seamed default-OFF
+behind `BRUTEX_CORE_RUST_MODELS` (crate 0.3.0→0.4.0; the money_rust facade
+template; flag OFF = the verbatim oracle, byte-identical + crate-untouched,
+bomb-spy-pinned) with the 3-arm LIVE-ORACLE literal golden (64 literals
+captured from the EXECUTED Python oracle — the oracle is the ARBITER,
+never an assumed rounding mode; the arbiter arm never skips; the crate arm
+runs all 64 through the PUBLIC path flag-ON against the real wheel and
+matches — the ELIGIBLE subset genuinely engages the crate,
+ineligibility-gated cells route to the oracle BY DESIGN; the observed-tie
+divergence from money's HALF_UP
+recorded as observation). "Expected payoff ≈ 0 — conversion is for
+uniformity, not speed" (the ADR-0020 banner verbatim); ships INERT — a
+default flip needs its own DEC. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no lake/schema/scope/vocab/rate change. This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #2052.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -4579,6 +4605,78 @@ hostile-review pass._
   #1960 · #1896/#1898) + the vehicle PR body, which also carries the #1358
   triage verdict, the #1618 delete-proof, and the #1399 screen-family
   deferral record.)
+  Earlier: `claude/rust-slice-t35-models` (**DEC-CORE-RUST-MODELS-001,
+  MIGRATION.md #2052 (renumbered #1944 → #1966 → #2052 — the last hop at the
+  2026-07-20 train-b tier-2 fold, #1966 taken on main by
+  DEC-GDF-TRUEDATA-DOCS-001, census band 2050+ per
+  DEC-LEDGER-RENUMBER-001; the DEC-ID is the stable handle)** — slice T35
+  PR-2: `brutex/models.py` onto `rust/brutex-core`, rebased onto main tip
+  3ee742b32. **THE DESIGN VERDICT (the PR's core deliverable):** the TYPE
+  surface of models.py — the four `StrEnum` taxonomies
+  `Exchange`/`Segment`/`InstrumentType`/`OptionSide`, the frozen-slots
+  `Instrument` dataclass, the `BruteXError` exception root — is a reasoned
+  **NO-GO for the pyclass hoist**, decided on evidence (~105 importers;
+  StrEnum str-subclass semantics unreplicable in pyo3 — `isinstance(m, str)`
+  flips False, `json.dumps` raises, DuckDB binding breaks BY CONSTRUCTION;
+  the `dataclasses.replace`/protocol dependence on `Instrument`; hoisting
+  the exception ROOT of the codebase into a compiled wheel = blast radius
+  for zero payoff; the optional-wheel contradiction — TYPES cannot degrade,
+  so a hoist either hard-requires the wheel package-wide or forks two class
+  identities across spawn-worker boundaries) and MECHANIZED as the frozen
+  type contract (`tests/unit/test_models_type_contract.py`, 38 pins) so any
+  future hoist attempt must consciously confront it; run identity VERIFIED
+  untouched (spec.py imports nothing from models.py). What SHIPS is the
+  module's ONE pure function law: `normalise_tick_size` behind the
+  default-OFF `BRUTEX_CORE_RUST_MODELS` seam (crate 0.3.0→0.4.0) — the
+  money_rust facade template verbatim (eligibility gate incl. the
+  context-hazard arm — since the REFUTER-r1 fold ALSO guarding the ambient
+  ROUNDING mode: `!= ROUND_HALF_EVEN` ⇒ oracle-routed (pre-fix an ambient
+  ROUND_UP context made `Decimal('0.104999')` a steady-state flag-ON/OFF
+  divergence — the crate's pinned HALF_EVEN accepted the member '0.10'
+  where the oracle's ambient-mode quantize raised; nil live risk — default
+  context everywhere, seam default-OFF/inert; regression-pinned:
+  the counterexample verbatim + the all-modes hazard parametrization + the
+  ON≡OFF-under-ROUND_UP matrix, `TestAmbientRoundingGuard`, 12 tests —
+  battery 365 → 377, `models_rust.py` 100.00% at 168/66),
+  import/API handshake, refuse-poison gate mirror-pinned
+  to `VALID_TICK_SIZES_RUPEES`, 16-call outcome burn-in + ship-the-oracle
+  autorevert, panic belt + escape set; the `tick_refuse:*` protocol keeps
+  every `TickSizeFormatError` message byte 100% Python-owned;
+  `TickSizeFormatError` dependency-injected — no import cycle); the crate
+  owns the paise `[1,1000)` range decision + the 2dp HALF_EVEN quantize
+  (deliberately NOT money.rs's HALF_UP — negative-pinned in-crate) + the
+  frozen 7-member set membership; models.py itself is the Slice-0
+  extraction ONLY (`_normalise_tick_size_python` = the live parity oracle;
+  enums/Instrument/errors byte-untouched). **THE GOLDEN LAW:** the 3-arm
+  live-oracle literal golden (`tests/golden/test_models_tick_size_golden.py`,
+  193 tests) — 64 literals captured from the EXECUTED Python oracle (the
+  oracle is the ARBITER, never an assumed rounding mode; the arbiter arm
+  never skips; the crate arm runs all 64 through the PUBLIC path flag-ON
+  against the real wheel and matches — the ELIGIBLE subset genuinely
+  engages the crate, ineligibility-gated cells route to the oracle BY
+  DESIGN; the observed-tie
+  divergence from money's HALF_UP recorded as observation; the 3
+  raw-`decimal.InvalidOperation` escapes type-pinned). CI:
+  core-rust-parity.yml models legs (flag-OFF coverage leg + the family
+  re-run VERBATIM under the flag) + the mutation.yml models_rust
+  zero-survivor mutmut pair + the facade census pin. GATES (executed;
+  coverage RE-MEASURED 2026-07-18 on head de11b9c46): cargo
+  fmt/clippy `-D warnings --locked`/test `--release --locked` 62 green; the
+  377-test models battery green flag-OFF AND flag-ON; `models_rust.py`
+  100.00% line+branch (168/66) + `models.py` 100.00% (102/24); FIVE
+  hand-applied mutants executed killed; ruff/ruff-format clean; `mypy
+  --strict` 0 new; pyright 0 errors on touched files. HONEST:
+  `normalise_tick_size` has ZERO production consumers outside models.py —
+  the seam buys ADR-0020 uniformity for literally no runtime ("expected
+  payoff ≈ 0 — conversion is for uniformity, not speed", the banner
+  verbatim); ships INERT — a default flip needs its own DEC; the fail-safe
+  seam masks a value-arm-degrading wheel on the flag-ON legs (a degrade
+  serves the correct oracle value without latching) — the refuse-prefix
+  direct-call pin + the 10 cargo unit tests + the in-lane wheel probe are
+  the crate-value teeth. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+  change; no new routes; ONE new env var, default OFF. The full record
+  lives in MIGRATION.md #2052.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -12377,6 +12475,28 @@ hostile-review pass._
   + #1579, #1590 closed-as-superseded — see §1 + the member MIGRATION.md
   entries #1941 · #1744-#1746 · #1961 · #1626 · #1960 · #1896/#1898 for the
   full blurbs)
+  Earlier: `claude/rust-slice-t35-models`
+  (DEC-CORE-RUST-MODELS-001, MIGRATION.md #2052 — renumbered #1944 → #1966 → #2052 at the 2026-07-20
+  train-b tier-2 fold,
+  renumber-at-fold per DEC-LEDGER-RENUMBER-001; the DEC-ID is the stable
+  handle — slice T35 PR-2: `brutex/models.py` onto `rust/brutex-core` — the
+  reasoned TYPE-PORT NO-GO (the StrEnum / `Instrument` dataclass /
+  `BruteXError` root surfaces stay Python — ~105 importers; mechanized as
+  the 38-pin frozen type contract instead of a port) + the module's ONE
+  convertible law `normalise_tick_size` seamed default-OFF behind
+  `BRUTEX_CORE_RUST_MODELS` (crate 0.3.0→0.4.0; the money_rust facade
+  template; flag OFF = the verbatim oracle, byte-identical +
+  crate-untouched, bomb-spy-pinned) with the 3-arm live-oracle literal
+  golden (64 literals from the EXECUTED Python oracle — the oracle is the
+  arbiter; the crate arm runs all 64 through the PUBLIC path flag-ON
+  against the real wheel and matches — the ELIGIBLE subset genuinely
+  engages the crate, ineligibility-gated cells route to the oracle BY
+  DESIGN; the observed-tie
+  divergence from money's HALF_UP recorded as observation);
+  core-rust-parity.yml + mutation.yml wired; expected payoff ≈ 0 —
+  uniformity, not speed; ships INERT — a default flip needs its own DEC;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #2052 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
