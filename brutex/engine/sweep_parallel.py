@@ -141,7 +141,7 @@ the flag, not a real production limitation.
   completes, so unlike ``fetch_pipeline`` (which only WARNs) this driver surfaces
   a :class:`SweepStallError` so a sweep can never hang forever. The wait budget is
   HEAVY-GRID-AWARE (DEC-SWEEP-STALL-OOM-GUARDS-001): a single legitimately-slow
-  ``k=5`` 1-minute tuple (``C(60,5) = 5.46M`` masks × hundreds of thousands of
+  ``k=5`` 1-minute tuple (``C(62,5) = 6.47M`` masks × hundreds of thousands of
   bars) runs FAR longer than a flat 300 s with no sub-tuple progress reported, so
   the parent scales the stall deadline by the MAX per-tuple ``mask·bar`` work of
   the in-flight set (a tuple that legitimately needs *N* minutes gets a

@@ -6,7 +6,7 @@
 //!
 //! A bit-for-bit twin of `brutex/vocabulary/bits.py` (both generated from
 //! `conditions.toml`). The strategy mask is a u128 (DEC-VOCAB-U128-CODEGEN-001
-//! / ADR-0012 D4); bits 0..=59 are the live
+//! / ADR-0012 D4); bits 0..=65 are the live
 //! conditions, the rest are reserved. Never renumber a bit (grow-only,
 //! DEC-PLUGIN-001).
 
@@ -124,9 +124,9 @@ pub const BIT_INSIDE_DAY: u32 = 50;
 /// today's range engulfs the previous-day range
 pub const BIT_OUTSIDE_DAY: u32 = 51;
 // VWAP Position
-/// close strictly above the session-anchored intraday VWAP (futures)
+/// TOMBSTONE (VWAP wipe — spot-only engine, no volume): was close strictly above the session-anchored intraday VWAP; position held, evaluator emits 0  (RETIRED — reserved=true, position held forever, never gets math)
 pub const BIT_CLOSE_ABOVE_VWAP: u32 = 52;
-/// close strictly below the session-anchored intraday VWAP (futures)
+/// TOMBSTONE (VWAP wipe — spot-only engine, no volume): was close strictly below the session-anchored intraday VWAP; position held, evaluator emits 0  (RETIRED — reserved=true, position held forever, never gets math)
 pub const BIT_CLOSE_BELOW_VWAP: u32 = 53;
 // Pivot Proximity Extended
 /// close within tolerance of resistance R5
@@ -142,24 +142,44 @@ pub const BIT_BOS_BEARISH: u32 = 57;
 pub const BIT_CHOCH_BULLISH: u32 = 58;
 /// bearish change of character (trend flips down after a higher-high sequence)
 pub const BIT_CHOCH_BEARISH: u32 = 59;
+// Central Pivot Range
+/// close strictly above the CPR top central (TC) level
+pub const BIT_ABOVE_CPR_TC: u32 = 60;
+/// close strictly below the CPR bottom central (BC) level
+pub const BIT_BELOW_CPR_BC: u32 = 61;
+/// close inside the CPR band (BC <= close <= TC, inclusive)
+pub const BIT_INSIDE_CPR: u32 = 62;
+/// narrow-CPR day: (TC - BC) is at or under 30 bps of the pivot P (trending-day setup)
+pub const BIT_NARROW_CPR_DAY: u32 = 63;
+// Supertrend
+/// declared, not yet implemented: close strictly above the Supertrend line (math lands in a later PR)  (LAYOUT ONLY — implemented=false, math lands in a later PR)
+pub const BIT_CLOSE_ABOVE_SUPERTREND: u32 = 64;
+/// declared, not yet implemented: close strictly below the Supertrend line (math lands in a later PR)  (LAYOUT ONLY — implemented=false, math lands in a later PR)
+pub const BIT_CLOSE_BELOW_SUPERTREND: u32 = 65;
 
 /// The number of atomic conditions (dense bits 0..=TOTAL-1).
-pub const TOTAL_CONDITIONS: u32 = 60;
+pub const TOTAL_CONDITIONS: u32 = 66;
 
 /// The strategy-mask width in bits (u128 — ADR-0012 D4).
 pub const MASK_WIDTH: u32 = 128;
 
 /// Bitmask of the conditions whose evaluator computes a real boolean.
-/// LAYOUT-ONLY bits (`implemented=false` in the manifest) are 0 here and
-/// the evaluator emits 0 for them until a PR supplies the math.
-pub const IMPLEMENTED_MASK: u128 = 1152921504606846975;
+/// Non-implemented bits are 0 here and the evaluator emits 0 for them:
+/// LAYOUT-ONLY bits (`implemented=false`) await their math in a later PR,
+/// while RETIRED bits (`reserved=true`) are tombstones that hold their
+/// position forever and never get math (the grow-only law).
+/// RETIRED: bit 52 `BIT_CLOSE_ABOVE_VWAP`.
+/// RETIRED: bit 53 `BIT_CLOSE_BELOW_VWAP`.
+/// LAYOUT-ONLY: bit 64 `BIT_CLOSE_ABOVE_SUPERTREND`.
+/// LAYOUT-ONLY: bit 65 `BIT_CLOSE_BELOW_SUPERTREND`.
+pub const IMPLEMENTED_MASK: u128 = 18433233274827440127;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The 60 bit positions must form a dense
-    /// 0..=59 range, no gaps, no dupes.
+    /// The 66 bit positions must form a dense
+    /// 0..=65 range, no gaps, no dupes.
     #[test]
     fn bit_positions_are_dense() {
         let all = [
@@ -223,6 +243,12 @@ mod tests {
             BIT_BOS_BEARISH,
             BIT_CHOCH_BULLISH,
             BIT_CHOCH_BEARISH,
+            BIT_ABOVE_CPR_TC,
+            BIT_BELOW_CPR_BC,
+            BIT_INSIDE_CPR,
+            BIT_NARROW_CPR_DAY,
+            BIT_CLOSE_ABOVE_SUPERTREND,
+            BIT_CLOSE_BELOW_SUPERTREND,
         ];
         assert_eq!(all.len(), TOTAL_CONDITIONS as usize);
         let mut sorted = all;

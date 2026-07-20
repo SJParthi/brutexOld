@@ -243,7 +243,7 @@ class SweepGridConfig:
         How many of the chosen conditions each combo requires; non-empty, each in
         ``[0, n_unique]`` where ``n_unique = len(set(condition_bits))``.
     condition_bits
-        The condition bit positions (of the 60-condition vocabulary) to
+        The condition bit positions (of the declared condition vocabulary) to
         brute-force over; non-empty, de-duplicated for the ``k`` bound + the
         mask enumeration.
     stop_losses, take_profits
@@ -458,7 +458,7 @@ class SweepGridConfig:
             if not getattr(self, name):
                 raise ValueError(f"SweepGridConfig.{name} must be non-empty")
 
-        # Validate every condition bit is in the u64 vocabulary range AT CONFIG
+        # Validate every condition bit is in the u128 mask range AT CONFIG
         # TIME (DEC-SWEEP-DEDUP-LMDB-001): the shared axis otherwise fails LATE
         # as a bare ValueError from the lazy enumeration inside one tuple's
         # ``SweepRunConfig`` — which the grid loop does NOT catch (only

@@ -1,21 +1,20 @@
 //! Evaluate-time indicators the condition vocabulary consumes: Standard Pivot
-//! Points (now incl. R5/S5), Static Daily Fibonacci levels, the EMA 20/200
-//! recurrence (DEC-EMA-RUST-PORT-001), the session-anchored intraday futures
-//! VWAP state (PR-2 — DEC-NIFTY-INDICATORS-001), the BOS/CHoCH market-structure
-//! state (DEC-NIFTY-BOS-CHOCH-001), and the eval-path per-bar METADATA
-//! derivation + near-month roll decision (PR-3 — DEC-NIFTY-ROLL-METADATA-001 —
-//! `metadata`). EMA, VWAP, and market structure are STATE objects whose resolved
-//! (paisa) values are fed into the snapshot; the evaluator still consumes
-//! precomputed `ema20`/`ema200` paisa (BruteX's `_ema_to_paisa` snaps the Rust
-//! EMA's `f64` rupees to paisa), so porting the EMA recurrence here completes
-//! the all-Rust shared indicator core.
+//! Points (incl. R5/S5) + the Central Pivot Range (bits 60-63), Static Daily
+//! Fibonacci levels, the EMA 20/200 recurrence (DEC-EMA-RUST-PORT-001), the
+//! BOS/CHoCH market-structure state (DEC-NIFTY-BOS-CHOCH-001), and the
+//! eval-path per-bar METADATA derivation + near-month roll decision (PR-3 —
+//! DEC-NIFTY-ROLL-METADATA-001 — `metadata`). EMA and market structure are
+//! STATE objects whose resolved (paisa) values are fed into the snapshot; the
+//! evaluator still consumes precomputed `ema20`/`ema200` paisa (BruteX's
+//! `_ema_to_paisa` snaps the Rust EMA's `f64` rupees to paisa). The former
+//! session-VWAP state (`vwap`) was DELETED with the bits 52-53 tombstone (the
+//! VWAP/volume wipe — the spot-only engine has no traded volume).
 
 pub mod ema;
 pub mod fib;
 pub mod market_structure;
 pub mod metadata;
 pub mod pivots;
-pub mod vwap;
 
 /// Round-half-to-even (banker's rounding) to `i64` — the exact match for
 /// Python's built-in `round()` used by `_round_half_even` in

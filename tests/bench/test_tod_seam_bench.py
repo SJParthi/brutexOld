@@ -13,7 +13,8 @@ a sub-ns inline baseline on a fast box cannot make the bound vacuous.
 It does NOT claim the FFI call is free (it is an extra crossing per bar — ~2 of
 them on the Stage-1A path, stated in the ledger), only that the overhead is a
 small bounded constant, far below anything that could move a real sweep whose
-per-bar cost is dominated by the evaluate/VWAP kernels.
+per-bar cost is dominated by the evaluate/market-structure kernels (and,
+before its bits-52/53 retirement, the VWAP state).
 """
 
 from __future__ import annotations

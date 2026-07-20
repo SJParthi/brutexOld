@@ -43,7 +43,7 @@ Vocabulary conditions like:
 - `close > fib_ext_127_up` — above bullish extension
 - `close < fib_ext_127_down` — below bearish extension
 
-(The 52->60-condition evaluator reads only the BEARISH retracements +
+(The shared condition evaluator reads only the BEARISH retracements +
 extensions; the bullish retracement fields are not in any vocabulary bit.)
 
 ## Verification status (Golden Rule #10 — honest envelope)

@@ -9,10 +9,14 @@
 //! The vocabulary mask is a `u128` (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4 —
 //! the DEC-PLUGIN-001-gated u64→u128 widening for headroom). The bit LAYOUT
 //! ([`bits`]) is GENERATED from `conditions.toml` by `scripts/codegen_vocab.py`
-//! (the same manifest emits the Python twin). Bits 52..=55 (VWAP/R5-S5) became
+//! (the same manifest emits the Python twin). Bits 54..=55 (R5/S5) became
 //! `implemented=true` in PR-2; bits 56..=59 (BOS/CHoCH) became `implemented=true`
 //! in DEC-NIFTY-BOS-CHOCH-001 (the stateful look-ahead-clean
-//! [`MarketStructureState`] resolves the four booleans the evaluator reads).
+//! [`MarketStructureState`] resolves the four booleans the evaluator reads);
+//! bits 60..=63 (Central Pivot Range) are implemented off the same prev-day
+//! pivot anchor. Bits 52..=53 (VWAP) are TOMBSTONED (`implemented=false`,
+//! positions held forever — the VWAP/volume wipe) and bits 64..=65
+//! (Supertrend) are declared LAYOUT-ONLY awaiting their math.
 //!
 //! The pure-Rust core ([`evaluate_atoms`] + the [`indicators`]) is dependency-free
 //! and is proven identical to the Python source against the language-neutral
@@ -50,8 +54,9 @@ pub use indicators::metadata::{
     BarMetadata, derive_bar_metadata, minute_of_session, resolve_near_month, seconds_of_day,
     weekday_from_ordinal,
 };
-pub use indicators::pivots::{PivotLevels, compute_pivot_levels};
-pub use indicators::vwap::VwapState;
+pub use indicators::pivots::{
+    CprLevels, NARROW_CPR_WIDTH_BPS, PivotLevels, compute_cpr_levels, compute_pivot_levels,
+};
 pub use spec::{Direction, SPEC_SCHEMA_VERSION, Signal, StrategySpec, evaluate};
 
 /// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),

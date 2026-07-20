@@ -464,6 +464,21 @@ class CascadeManifest:
         spot-only manifests AND for pre-carriage manifests
         (backward-compatible parse; a futures pool replayed without a
         schedule is loudly SKIPPED, see :func:`run_cascade_over_specs`).
+    indicator_version
+        Optional recorded VOCABULARY/evaluator identity (REPL-01) — the
+        ``indicator_version`` run-identity string (CLAUDE.md §2 Rule 4) the
+        sweep that wrote this manifest ran under. ``None`` for LEGACY
+        manifests written before the vocabulary gate — the replay then
+        REFUSES (a pre-reshape manifest replayed through a reshaped evaluator
+        would re-simulate old winners into zero-trade FAILs and OVERWRITE the
+        one-per-root report with wrong-provenance verdicts), never a silent
+        replay.
+    code_commit_sha
+        Optional recorded code identity (REPL-01) — the sweep's
+        ``code_commit_sha``. Same legacy/refusal semantics as
+        ``indicator_version``; the replay's byte-identity contract only holds
+        in the SAME code environment (the ``sweep-verify --recount``
+        context-gate law).
     """
 
     version: int
@@ -474,6 +489,8 @@ class CascadeManifest:
     stage3: Stage3ManifestRecord | None = None
     leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None
     roll_schedules: tuple[tuple[str, tuple[int, ...]], ...] | None = None
+    indicator_version: str | None = None
+    code_commit_sha: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1398,6 +1415,14 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         "proximity_bps": None if spec.proximity_bps is None else list(spec.proximity_bps),
         "start_equity_paisa": spec.start_equity_paisa,
         "winners": [[run_id, mask] for run_id, mask in spec.winners],
+        # ADDITIVE lossless twin (G-SIGNBI-02): each winner mask as the
+        # ``mask:%032x`` u128 hex string. The bare JSON ints above stay the
+        # authoritative parse for legacy readers (Python round-trips arbitrary
+        # ints exactly), but a non-Python / IEEE-double consumer corrupts a
+        # mask past 2**53 — bit 63 (``narrow_cpr_day``) is a valid mask bit
+        # today. The parser cross-checks the two forms when both are present
+        # (a diverging hand-edit is a corrupt manifest, never a silent pick).
+        "winners_hex": [[run_id, f"{mask:032x}"] for run_id, mask in spec.winners],
         "fib_anchor": spec.fib_anchor.value,
         # DEC-FILL-WORST-CASE-ONLY-001: the manifest carries the UNCONDITIONAL
         # "fill_mode": "worst_case" key (the canonical-params law's manifest
@@ -1438,6 +1463,19 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
             None if proximity is None else (int(proximity[0]), int(proximity[1]), int(proximity[2]))
         )
         winners = tuple((str(run_id), int(mask)) for run_id, mask in raw["winners"])
+        # Cross-check the additive hex twin when present (absent on manifests
+        # written before G-SIGNBI-02 — the ints alone stay authoritative).
+        winners_hex_raw = raw.get("winners_hex")
+        if winners_hex_raw is not None:
+            winners_hex = tuple(
+                (str(run_id), int(str(mask_hex), 16)) for run_id, mask_hex in winners_hex_raw
+            )
+            if winners_hex != winners:
+                raise ValueError(
+                    "winners_hex does not match winners — the manifest is corrupt "
+                    "(the two forms are written from the SAME masks; a divergence "
+                    "means a hand-edit or a lossy rewrite); re-run `brutex sweep-all`"
+                )
         return CascadeTupleSpec(
             instrument=str(raw["instrument"]),
             tf_label=str(raw["tf_label"]),
@@ -1681,6 +1719,10 @@ def manifest_to_json(manifest: CascadeManifest) -> bytes:
             if manifest.roll_schedules is None
             else [[instrument, list(schedule)] for instrument, schedule in manifest.roll_schedules]
         ),
+        # REPL-01 vocabulary identity (additive at MANIFEST_VERSION — absent
+        # keys parse to None on legacy manifests; old readers ignore them).
+        "indicator_version": manifest.indicator_version,
+        "code_commit_sha": manifest.code_commit_sha,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
         "utf-8"
@@ -1734,6 +1776,16 @@ def manifest_from_json(data: bytes) -> CascadeManifest:
             # `roll_schedules` is absent from pre-carriage manifests → None
             # (the same additive-at-version-1 pattern as stage3).
             roll_schedules=_roll_schedules_from_payload(payload.get("roll_schedules")),
+            # REPL-01: absent on manifests written before the vocabulary gate
+            # → None (the replay then refuses as LEGACY, never silently runs).
+            indicator_version=(
+                None
+                if payload.get("indicator_version") is None
+                else str(payload["indicator_version"])
+            ),
+            code_commit_sha=(
+                None if payload.get("code_commit_sha") is None else str(payload["code_commit_sha"])
+            ),
         )
     except (KeyError, TypeError) as exc:
         raise CascadeWireError(f"cascade manifest missing/invalid field: {exc}") from exc
@@ -2316,6 +2368,8 @@ def run_and_write_from_specs(
     stage3: Stage3ManifestRecord | None = None,
     leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
+    indicator_version: str | None = None,
+    code_commit_sha: str | None = None,
 ) -> CascadeWireReport:
     """AUTOMATIC path: run the cascade + write the manifest AND the report.
 
@@ -2340,11 +2394,23 @@ def run_and_write_from_specs(
     deliberately unstamped (DEC-VIX-STAMP-WIRE-001 round-6 — see
     :func:`build_candidate_input`); no stamper seam exists here.
 
+    ``indicator_version`` / ``code_commit_sha`` are the sweep's RECORDED
+    run-identity strings (REPL-01 — the launcher threads its grid's values so
+    the manifest records exactly the environment the winners were minted
+    under); when a caller omits them (``None``) they default to the CURRENT
+    environment via :mod:`brutex.engine.run_environment` — a manifest is
+    never written vocabulary-blind again.
+
     Returns
     -------
     CascadeWireReport
         The aggregate cascade report (also written to disk).
     """
+    from brutex.engine.run_environment import (
+        current_code_commit_sha,
+        current_indicator_version,
+    )
+
     manifest = CascadeManifest(
         version=MANIFEST_VERSION,
         sweep_id=sweep_id,
@@ -2353,6 +2419,10 @@ def run_and_write_from_specs(
         specs=tuple(specs),
         stage3=stage3,
         leaderboard_trials=leaderboard_trials,
+        indicator_version=(
+            current_indicator_version() if indicator_version is None else indicator_version
+        ),
+        code_commit_sha=(current_code_commit_sha() if code_commit_sha is None else code_commit_sha),
         roll_schedules=(
             None
             if roll_schedule_by_instrument is None
@@ -2422,13 +2492,32 @@ def run_and_write_from_manifest(
     ``cascade_wire.replay_unstamped`` WARN — honest back-compat, never a
     broken lake.
 
+    REPL-01 vocabulary gate (checked FIRST, before any stamp/bars work): the
+    replay re-simulates the manifest's winners through the CURRENT evaluator,
+    so a manifest recorded under a DIFFERENT vocabulary/code identity (e.g. a
+    pre-reshape root whose winners carry since-retired bits — the evaluator
+    now emits 0 for them, so every candidate re-scores to a zero-trade FAIL)
+    must never overwrite + re-stamp the one-per-root
+    ``cascade-report.json``. The manifest's recorded ``indicator_version`` +
+    ``code_commit_sha`` must BOTH equal the current environment (the
+    ``sweep-verify --recount`` context-gate law — deliberately NO escape
+    hatch: a replay under changed context is not a reproduction); a LEGACY
+    manifest with neither recorded is WARNED then REFUSED — never silently
+    replayed. Remediation in both cases: re-run ``brutex sweep-all`` to mint
+    a fresh manifest + report under the current vocabulary.
+
     Raises
     ------
     CascadeWireError
         If no manifest exists under *results_root*, it is malformed, its
-        stamp is torn/mismatched, or the lake bars drifted from the stamped
-        ``data_snapshot_hash``.
+        recorded vocabulary identity is absent (LEGACY) or does not match the
+        current environment, its stamp is torn/mismatched, or the lake bars
+        drifted from the stamped ``data_snapshot_hash``.
     """
+    from brutex.engine.run_environment import (
+        current_code_commit_sha,
+        current_indicator_version,
+    )
     from brutex.observability.stage_stamp import (
         SNAPSHOT_EXTRA_KEY,
         StampVerdict,
@@ -2436,6 +2525,45 @@ def run_and_write_from_manifest(
     )
 
     manifest = load_manifest(results_root)
+    if manifest.indicator_version is None or manifest.code_commit_sha is None:
+        _LOG.warning(
+            "cascade_wire.replay_legacy_no_vocab_identity",
+            results_root=str(results_root),
+            sweep_id=manifest.sweep_id,
+        )
+        raise CascadeWireError(
+            "cascade replay REFUSED: this manifest records no vocabulary identity "
+            "(indicator_version/code_commit_sha) — it was written before the REPL-01 "
+            "replay gate, so the condition vocabulary it swept under cannot be "
+            "verified against the current evaluator. Replaying it could re-simulate "
+            "its winners under a DIFFERENT vocabulary (a since-retired bit re-scores "
+            "every candidate to a zero-trade FAIL) and OVERWRITE cascade-report.json "
+            "with wrong-provenance verdicts. Re-run `brutex sweep-all` to mint a "
+            "fresh manifest + report under the current vocabulary (the existing "
+            "report is left untouched)"
+        )
+    current_indicator = current_indicator_version()
+    current_sha = current_code_commit_sha()
+    vocab_mismatches = [
+        f"{name}: recorded {recorded!r} vs current {current!r}"
+        for name, recorded, current in (
+            ("indicator_version", manifest.indicator_version, current_indicator),
+            ("code_commit_sha", manifest.code_commit_sha, current_sha),
+        )
+        if recorded != current
+    ]
+    if vocab_mismatches:
+        raise CascadeWireError(
+            "cascade replay REFUSED: the recorded vocabulary/code identity does not "
+            "match the current environment — " + "; ".join(vocab_mismatches) + ". "
+            "A replay under a changed evaluator is not a reproduction (the winners "
+            "were ranked under the RECORDED vocabulary; re-scoring them under the "
+            "current one would overwrite cascade-report.json with wrong-provenance "
+            "verdicts — e.g. a vocabulary reshape retires bits and re-scores old "
+            "winners to zero-trade FAILs). Re-run `brutex sweep-all` to mint a fresh "
+            "manifest + report under the current vocabulary (the existing report is "
+            "left untouched)"
+        )
     verdict, stamp = validate_stage_stamp(
         manifest_path(results_root),
         expected_stage=CASCADE_MANIFEST_STAGE,

@@ -1,12 +1,13 @@
 #![no_main]
-//! Fuzz target for the 60-condition u128 evaluator
+//! Fuzz target for the u128 condition evaluator
 //! `trading_core::evaluate_atoms` (`src/evaluator.rs`) — the bit-identical
 //! Stage-3 vocabulary core shared by BruteX (PyO3) and TickVault (native).
 //!
-//! Reconciled to the u64→u128 widening (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012
-//! D4) + the PR-2/PR-2b snapshot growth: `vwap_paisa` (bits 52-53) and the
-//! resolved `market_structure` flags (bits 56-59) are now part of
-//! `IndicatorSnapshot`, and all 60 bits (0..=59) can fire.
+//! Reconciled to the 66-bit reshape: the VWAP bits 52-53 are TOMBSTONED (the
+//! snapshot's `vwap_paisa` input was DELETED with the VWAP/volume wipe), the
+//! Central Pivot Range bits 60-63 are implemented off the SAME prev-day pivot
+//! anchor, and the Supertrend bits 64-65 are declared layout-only. Every
+//! IMPLEMENTED bit (0..=51, 54..=63) can fire.
 //!
 //! On arbitrary bytes it builds a STRUCTURALLY VALID, in-domain bar snapshot
 //! (see the domain note in `fuzz_pivot_fib.rs`: prices capped at `MAX_PAISA`,
@@ -14,14 +15,17 @@
 //! prev-day OHLC, proximity bps in `[0, 10000]`) and asserts the evaluator:
 //!
 //! 1. **Never panics / overflows** — all internal products
-//!    (`close·bps`, `body·10`, `(c−day_low)·3`, `pdc·50`, …) stay far below
-//!    `i64::MAX` within the realistic envelope.
-//! 2. **Only sets bits 0..=59** — bits 60-127 are always clear (reserved).
+//!    (`close·bps`, `body·10`, `(c−day_low)·3`, `pdc·50`, the i128 narrow-CPR
+//!    width test, …) stay in range within the realistic envelope.
+//! 2. **Only sets IMPLEMENTED bits** — the tombstoned VWAP pair (52-53), the
+//!    declared-only Supertrend pair (64-65) and the reserved headroom
+//!    (66-127) are always clear.
 //! 3. **Honours every mutually-exclusive condition pair** — a bar cannot be
-//!    both above and below the same level (EMA20/EMA200/VWAP/PDH/PDL), both
+//!    both above and below the same level (EMA20/EMA200/PDH/PDL), both
 //!    bullish and bearish, both a gap-up and a gap-down day, in both the
 //!    upper and lower third, etc. The four time-of-day buckets are an
-//!    `else if` chain → at most one fires.
+//!    `else if` chain → at most one fires; the three CPR position bits
+//!    (60-62) form an exact partition — exactly ONE fires.
 //! 4. **Mirrors the resolved market-structure flags exactly** — the Group-12
 //!    bits (56-59) are a pure pass-through of `snapshot.market_structure`
 //!    (the stateful machine resolves them upstream; the evaluator must never
@@ -149,7 +153,6 @@ fuzz_target!(|data: &[u8]| {
         close_paisa: close,
         ema20_paisa: r.opt_price(),
         ema200_paisa: r.opt_price(),
-        vwap_paisa: r.opt_price(),
         pivots,
         fib,
         day_high_paisa: day_high,
@@ -171,8 +174,14 @@ fuzz_target!(|data: &[u8]| {
     // ── 1. Never panics / overflows ──
     let mask = evaluate_atoms(&snapshot, &params, &prior);
 
-    // ── 2. Only bits 0..=59 may be set ──
-    assert_eq!(mask >> 60, 0, "evaluator set a reserved bit (>= 60)");
+    // ── 2. Only IMPLEMENTED bits may be set ──
+    assert_eq!(
+        mask & !trading_core::bits::IMPLEMENTED_MASK,
+        0,
+        "evaluator set a non-implemented bit (tombstone 52-53 / Supertrend 64-65 / reserved >= 66)"
+    );
+    // The tombstoned VWAP positions specifically (the wipe's permanent pin).
+    assert_eq!(mask & (0b11 << 52), 0, "a tombstoned VWAP bit fired");
 
     // ── 3. Mutually-exclusive condition pairs ──
     assert!(
@@ -186,10 +195,6 @@ fuzz_target!(|data: &[u8]| {
     assert!(
         !(has(mask, bits::BIT_EMA20_ABOVE_EMA200) && has(mask, bits::BIT_EMA20_BELOW_EMA200)),
         "EMA20 cannot be both above and below EMA200"
-    );
-    assert!(
-        !(has(mask, bits::BIT_CLOSE_ABOVE_VWAP) && has(mask, bits::BIT_CLOSE_BELOW_VWAP)),
-        "close cannot be both above and below VWAP"
     );
     assert!(
         !(has(mask, bits::BIT_CLOSE_ABOVE_PDH) && has(mask, bits::BIT_CLOSE_BELOW_PDH)),
@@ -216,13 +221,18 @@ fuzz_target!(|data: &[u8]| {
         "close cannot be in both the upper and lower third"
     );
 
-    // A warm-up (None) VWAP must fire NEITHER Group-10 bit.
-    if snapshot.vwap_paisa.is_none() {
-        assert!(
-            !has(mask, bits::BIT_CLOSE_ABOVE_VWAP) && !has(mask, bits::BIT_CLOSE_BELOW_VWAP),
-            "VWAP bits must not fire during warm-up (vwap_paisa = None)"
-        );
-    }
+    // The three CPR position bits (60-62) form an EXACT PARTITION: the
+    // canonicalized band (tc >= bc) makes any close strictly above TC,
+    // strictly below BC, or inside the inclusive band — exactly one fires.
+    let cpr_pos = [
+        bits::BIT_ABOVE_CPR_TC,
+        bits::BIT_BELOW_CPR_BC,
+        bits::BIT_INSIDE_CPR,
+    ]
+    .iter()
+    .filter(|&&b| has(mask, b))
+    .count();
+    assert_eq!(cpr_pos, 1, "exactly one CPR position bit must fire");
 
     // Time-of-day buckets are an else-if chain → at most one is set.
     let tod_set = [

@@ -179,34 +179,45 @@ def test_non_integer_k_raises() -> None:
         resolve_sweep_request(k="1,abc", today=_TODAY)
 
 
-@pytest.mark.parametrize("bad", ["0", "61", "-1"])
+@pytest.mark.parametrize("bad", ["0", "67", "-1"])
 def test_out_of_range_k_raises(bad: str) -> None:
     with pytest.raises(ValueError, match="k must be a whole number"):
         resolve_sweep_request(k=bad, today=_TODAY)
 
 
-def test_k_bound_is_the_full_60_vocabulary() -> None:
-    """``_MAX_K`` tracks ``TOTAL_CONDITIONS`` (60) — the pre-fix 52 rejected 53..60.
+def test_k_bound_is_the_implemented_condition_count() -> None:
+    """``_MAX_K`` tracks the IMPLEMENTED count (62) — never the declared layout.
 
-    Pinned against the engine's own default condition set so a future vocab
-    growth moves the dashboard bound automatically (DEC-VOCAB-U128-CODEGEN-001;
-    the drift class the 60-vocab doc sweep exists to kill).
+    G-RETROT-08: the route sweeps ``default_condition_bits()`` (every
+    IMPLEMENTED bit — 62 on the 66-declared layout: the reshape tombstoned
+    VWAP 52/53 and declared SuperTrend 64/65 layout-only), so a ``k`` above 62
+    can never form a combo (``C(62, 63) = 0`` — an empty-grid illusion, not a
+    sweep). Pinned against ``IMPLEMENTED_MASK`` so vocab growth moves the
+    bound automatically (DEC-VOCAB-U128-CODEGEN-001).
 
-    Round-12 update: ``k=53..60`` are now legitimately refused by the
-    SEPARATE ``max_combos`` guard (a round-12 adversarial-refuter fix) —
-    ``C(60,53)`` alone enumerates ~386M masks, far past the engine's
-    100,000-mask ceiling. The original assertion here proved the RANGE
-    check no longer artificially caps at the stale 52 — that is now proven
-    by asserting the refusal comes from the max_combos guard, never the
-    OLD "k must be a whole number 1..52" range message.
+    Round-12 update (merged from main's club O): mid-band ``k`` values are
+    now legitimately refused by the SEPARATE ``max_combos`` guard —
+    ``C(62,53)`` alone enumerates ~1.1e10 masks, far past the engine's
+    100,000-mask ceiling — sized off the IMPLEMENTED count (``_MAX_K``),
+    never the declared layout width (the guard mirrors the engine's real
+    ``C(62, k)`` grid; ``C(66, k)`` would wrongly refuse k=59..62). The
+    range check itself still owns the ``[1, 62]`` boundary.
     """
     from brutex.cli import default_condition_bits
     from brutex.dashboard.sweep_runner import _MAX_K
-    from brutex.vocabulary.bits import TOTAL_CONDITIONS
+    from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
-    assert _MAX_K == TOTAL_CONDITIONS == len(default_condition_bits()) == 60
+    assert _MAX_K == IMPLEMENTED_MASK.bit_count() == 62
+    assert len(default_condition_bits()) == _MAX_K
+    # Range boundary: 63 (past the implemented count) is RANGE-refused.
+    with pytest.raises(ValueError, match="k must be a whole number 1..62"):
+        resolve_sweep_request(k="63", today=_TODAY)
+    # Round-12 guard: a mid-band k enumerates > 100,000 masks over the 62-bit
+    # implemented set — refused by the max_combos guard, never the range message.
     with pytest.raises(ValueError, match="max_combos"):
-        resolve_sweep_request(k="53,60", today=_TODAY)
+        resolve_sweep_request(k="53", today=_TODAY)
+    # The top boundary k=62 forms exactly C(62,62) = 1 mask — accepted.
+    assert resolve_sweep_request(k="62", today=_TODAY).k == "62"
 
 
 def test_non_integer_sl_leg_raises() -> None:
@@ -930,7 +941,7 @@ def test_oneclick_preflight_for_plan_aggregates_across_groups(tmp_path: Path) ->
 
 
 def test_oneclick_preflight_for_plan_effective_condition_count_is_min_across_groups(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Round-3 adversarial finding: every real fan-out shares one ``segment``
     across groups, so the ``min()`` aggregation in ``oneclick_preflight_for_plan``
@@ -938,7 +949,19 @@ def test_oneclick_preflight_for_plan_effective_condition_count_is_min_across_gro
     a plan with two groups on DIFFERING segments directly (bypassing
     ``resolve_oneclick_sweep_plan``, which only accepts one ``segment`` for
     the whole plan) to pin that the aggregate is the worst-case (smallest)
-    effective condition count, not the largest."""
+    effective condition count, not the largest.
+
+    66-declared-layout note (DEC-VOCAB-66-RESHAPE-IMPL-001 merge reconcile):
+    the VWAP bits are TOMBSTONED, so no REAL segment differentiates
+    effective-vs-nominal any more — the segment-sensitive annotation is
+    monkeypatched back in so the ``min()`` aggregation law itself stays
+    pinned against a genuine cross-group difference."""
+    from brutex.engine import sweep_estimator
+
+    def _fake(*, segment: str, n: int = sweep_estimator.SWEPT_CONDITIONS) -> tuple[int, int]:
+        return (n, n - 2) if segment.upper() == "INDEX" else (n, n)
+
+    monkeypatch.setattr(sweep_estimator, "effective_condition_count", _fake)
     index_request = SweepRunRequest(
         symbols="NIFTY",
         intervals=DEFAULT_INTERVALS,

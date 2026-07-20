@@ -1,16 +1,18 @@
 """Stage-1A bitset-matrix builder — the adapter that drives ``evaluate_atoms``.
 
 Per ``docs/TRACK1_BACKTEST_SPEC.md`` the brute-force funnel's first stage
-precomputes, for one ``(instrument, interval)``, the 60 atomic conditions on
-**every** bar so the downstream supermask kernel
+precomputes, for one ``(instrument, interval)``, the 62 ACTIVE atomic
+conditions (of the 66-bit layout — the VWAP bits 52/53 are RETIRED tombstones,
+the SuperTrend bits 64/65 declared layout-only) on **every** bar so the
+downstream supermask kernel
 (:func:`brutex.engine.combo_mask.count_supermasks`) can count mask hits over a
-resident ``u64[N]`` bitset (u64-limb: bits 0..59 fit u64 today; the u128 mask
+resident ``u64[N]`` bitset (u64-limb: bits 0..63 fit u64 today; the u128 mask
 law + fallback live in ``combo_mask.py``). This module is **that producer**: it walks an
 iterable of :class:`~brutex.data.models.CandleBar` in chronological order,
 constructs one :class:`~brutex.vocabulary.evaluator.IndicatorSnapshot` per bar,
 and calls the **existing**, unit-tested
 :func:`~brutex.vocabulary.evaluator.evaluate_atoms` (it does **not** reimplement
-the 60 conditions — DEC-ENGINE-DRIVER-001 / ``docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md``).
+the conditions — DEC-ENGINE-DRIVER-001 / ``docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md``).
 
 What this module owns is the **adapter layer** between the lake's bar
 representation and the evaluator's snapshot contract:
@@ -79,7 +81,7 @@ import fno_math
 import structlog
 import trading_core
 
-from brutex.calendars.nse import IST, has_muhurat_session, is_pre_open
+from brutex.calendars.nse import IST, has_muhurat_session
 from brutex.indicators.day_extremes import DayExtremesState
 from brutex.indicators.ema import EMAState, compute_ema
 from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
@@ -142,17 +144,16 @@ _DEFAULT_PRIOR_N: Final[int] = 3
 #: snap rule has one definition (CLAUDE.md §11 COMMON).
 _HLC3_DIVISOR: Final[Decimal] = Decimal(3)
 
-#: Engine-injected contract/session key fed to :class:`VwapState`. The SPOT
-#: path (``roll_schedule=None``) feeds this CONSTANT key, so :class:`VwapState`
-#: resets only on the IST-date change (its ``session_day`` argument) —
-#: byte-identical to the pre-B2 behaviour for the continuous spot-index series.
-#: B2 is CLOSED (DEC-STAGE1A-ROLL-RESET-001): the futures track passes a
-#: ``roll_schedule`` of owning-expiry day-ordinals and the per-bar key becomes
-#: the owning contract's expiry ordinal — a key CHANGE is a roll boundary and
-#: triggers the TOTAL per-contract hard reset (:meth:`_roll_to_new_contract`),
-#: never only the VWAP key (ADR-0012 D11: every session/level indicator
-#: recomputes per-contract). A 2020+ date ordinal (≈ 737,000+) can never
-#: collide with this constant 0 (also the Rust cold-sentinel key).
+#: Engine-injected contract/session key for the roll-boundary detection. The
+#: SPOT path (``roll_schedule=None``) uses this CONSTANT key, so no roll
+#: boundary ever fires for the continuous spot-index series. B2 is CLOSED
+#: (DEC-STAGE1A-ROLL-RESET-001): the futures track passes a ``roll_schedule``
+#: of owning-expiry day-ordinals and the per-bar key becomes the owning
+#: contract's expiry ordinal — a key CHANGE is a roll boundary and triggers
+#: the TOTAL per-contract hard reset (:meth:`_roll_to_new_contract`; ADR-0012
+#: D11: every session/level indicator recomputes per-contract). A 2020+ date
+#: ordinal (≈ 737,000+) can never collide with this constant 0. (The former
+#: consumer :class:`VwapState` was RETIRED with the bits-52/53 tombstone.)
 _DEFAULT_SESSION_KEY: Final[int] = 0
 
 #: Fractal half-window handed to the batch Rust kernel
@@ -198,17 +199,20 @@ def _fib_dependent_bits() -> int:
 
 
 def _pivot_dependent_bits() -> int:
-    """Build the u128 mask of the prev-day pivot/PDH/day-type bits.
+    """Build the u128 mask of the prev-day pivot/PDH/day-type/CPR bits.
 
-    Groups 2 (pivot proximity, 6-12), 3 (PDH/PDL, 13-18) and 9 (day type, 48-51)
-    are anchored to the PRIOR completed IST day and are INDEPENDENT of the swept
-    Fib anchor (the Fib axis moves ONLY the Group-4 levels, R-2). They are cleared
-    only when there is no prior day at all (the first day of the stream).
+    Groups 2 (pivot proximity, 6-12), 3 (PDH/PDL, 13-18), 9 (day type, 48-51)
+    and 13 (Central Pivot Range, 60-63) are anchored to the PRIOR completed IST
+    day and are INDEPENDENT of the swept Fib anchor (the Fib axis moves ONLY
+    the Group-4 levels, R-2). They are cleared only when there is no prior day
+    at all (the first day of the stream) — the CPR comparison bits would
+    otherwise fire against the zero placeholder anchors exactly like
+    ``close_above_pdh``.
 
     Returns
     -------
     int
-        u128 bitmask with every prev-day pivot/PDH/day-type bit set.
+        u128 bitmask with every prev-day pivot/PDH/day-type/CPR bit set.
     """
     pivot_bits = (
         # Group 2 — pivot proximity (bits 6-12).
@@ -231,6 +235,12 @@ def _pivot_dependent_bits() -> int:
         B.BIT_GAP_DOWN_DAY,
         B.BIT_INSIDE_DAY,
         B.BIT_OUTSIDE_DAY,
+        # Group 13 — Central Pivot Range (bits 60-63): TC/BC derive from the
+        # SAME prev-day pivot anchor, so they ride the same first-day clear.
+        B.BIT_ABOVE_CPR_TC,
+        B.BIT_BELOW_CPR_BC,
+        B.BIT_INSIDE_CPR,
+        B.BIT_NARROW_CPR_DAY,
     )
     mask = 0
     for bit in pivot_bits:
@@ -545,12 +555,13 @@ class Stage1AMatrixBuilder:
         feeds the constant :data:`_DEFAULT_SESSION_KEY`, byte-identical to the
         pre-B2 builder.
     apply_1day_mask
-        D12 honesty flag for a volume-bearing futures ``1day`` grid: when True
-        the FINAL mask is ANDed with
+        D12 honesty flag for a futures ``1day`` grid: when True the FINAL
+        mask is ANDed with
         :data:`brutex.vocabulary.bits.APPLIES_TO_1DAY_MASK` (clears exactly
-        the time-of-day bits 44-47 + the VWAP-position bits 52-53). Default
-        False — spot is deliberately NOT flipped (its 1day ToD-bit behaviour
-        is unaudited; the spot-side unification is a named follow-up).
+        the time-of-day bits 44-47; the RETIRED VWAP tombstones 52-53 are
+        also outside the mask but never fire anyway). Default False — spot
+        is deliberately NOT flipped (its 1day ToD-bit behaviour is
+        unaudited; the spot-side unification is a named follow-up).
 
     Raises
     ------
@@ -606,16 +617,15 @@ class Stage1AMatrixBuilder:
         self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
         self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
         self._day_extremes = DayExtremesState()
-        # Session-anchored intraday VWAP (Group 10, bits 52-53) and BOS/CHoCH market
-        # structure (Group 12, bits 56-59) are the SHARED Rust ``trading_core`` state
-        # objects — the per-bar compute (the VWAP ``cum(price·vol)/cum(vol)`` math and
-        # the look-ahead-clean fractal-swing BOS/CHoCH logic) runs IN RUST, never
-        # re-implemented in Python, so the backtest is bit-identical to TickVault's
-        # native path (DEC-STAGE1A-WIRE-VWAP-BOS-001 — the Rust pyclasses ported in
-        # this PR; same delegation pattern as the EMA recurrence DEC-EMA-RUST-PORT-001).
-        # VWAP resets at each new IST trading day via its ``session_day`` argument; the
-        # market-structure state is continuous (look-ahead-clean, non-repainting).
-        self._vwap = trading_core.VwapState()
+        # BOS/CHoCH market structure (Group 12, bits 56-59) is the SHARED Rust
+        # ``trading_core`` state object — the per-bar compute (the
+        # look-ahead-clean fractal-swing BOS/CHoCH logic) runs IN RUST, never
+        # re-implemented in Python, so the backtest is bit-identical to
+        # TickVault's native path (DEC-STAGE1A-WIRE-VWAP-BOS-001; same
+        # delegation pattern as the EMA recurrence DEC-EMA-RUST-PORT-001. The
+        # sibling ``VwapState`` was RETIRED with the bits-52/53 tombstone —
+        # the spot-only engine has no traded volume). The market-structure
+        # state is continuous (look-ahead-clean, non-repainting).
         self._structure = trading_core.MarketStructureState()
         self._current_day: date | None = None
         # OHLC of the IST day currently being walked (None before the 1st bar).
@@ -720,12 +730,7 @@ class Stage1AMatrixBuilder:
         high_col: list[int] = []
         low_col: list[int] = []
         close_col: list[int] = []
-        typical_col: list[int] = []
-        volume_col: list[int] = []
         tod_col: list[int] = []
-        pre_open_col: list[bool] = []
-        session_key_col: list[int] = []
-        session_day_col: list[int] = []
         reset_col: list[bool] = []
         day_index_col: list[int] = []
         day_pivot_levels: list[int] = []
@@ -746,11 +751,10 @@ class Stage1AMatrixBuilder:
             close_paisa = _price_to_paisa(bar.close)
 
             # ── push() step 3: the per-bar roll key (verbatim, plus the
-            # contract_reset flag recorded from the SAME cursor) ──
+            # contract_reset flag recorded from the SAME cursor; spot has no
+            # per-bar key — no roll boundary can ever fire) ──
             contract_reset = False
-            if self._roll_schedule is None:
-                session_key = _DEFAULT_SESSION_KEY  # spot: byte-identical constant 0
-            else:
+            if self._roll_schedule is not None:
                 day_ordinal = bar_day.toordinal()
                 while (
                     self._roll_cursor < len(self._roll_schedule)
@@ -805,20 +809,10 @@ class Stage1AMatrixBuilder:
             # `float(bar.close)` verbatim.
             closes_f64.append(_reduce_ema_source_float(self._ema_source, bar))
 
-            # push() step-7 expressions (verbatim seams): tod via the shared
-            # Rust seam, typical via the SAME `_reduce_vwap_source_paisa` seam
-            # as push() (the HLC3 default is the ONE _price_to_paisa HLC3 snap
-            # verbatim — DEC-NIFTY-PRICE-SOURCE-AXIS-001).
+            # push() step-7 expression (verbatim seam): tod via the shared
+            # Rust seam (Group-8 ToD bits).
             tod_seconds = int(
                 trading_core.seconds_of_day(ts_ist.hour, ts_ist.minute, ts_ist.second)
-            )
-            typical_paisa = _reduce_vwap_source_paisa(
-                self._vwap_source,
-                bar,
-                open_paisa=open_paisa,
-                high_paisa=high_paisa,
-                low_paisa=low_paisa,
-                close_paisa=close_paisa,
             )
 
             if contract_reset:
@@ -827,12 +821,7 @@ class Stage1AMatrixBuilder:
             high_col.append(high_paisa)
             low_col.append(low_paisa)
             close_col.append(close_paisa)
-            typical_col.append(typical_paisa)
-            volume_col.append(bar.volume)
             tod_col.append(tod_seconds)
-            pre_open_col.append(is_pre_open(ts_ist.time()))
-            session_key_col.append(session_key)
-            session_day_col.append(bar_day.toordinal())
             reset_col.append(contract_reset)
             day_index_col.append(len(day_has_pivot) - 1)
 
@@ -854,12 +843,7 @@ class Stage1AMatrixBuilder:
             high_paisa=high_col,
             low_paisa=low_col,
             close_paisa=close_col,
-            typical_paisa=typical_col,
-            volume=volume_col,
             tod_seconds=tod_col,
-            pre_open=pre_open_col,
-            session_key=session_key_col,
-            session_day=session_day_col,
             contract_reset=reset_col,
             day_index=day_index_col,
             ema20_paisa=ema20_col,
@@ -897,10 +881,12 @@ class Stage1AMatrixBuilder:
         Returns
         -------
         int
-            The u128 condition mask (bits 0-59) for this bar — including the
-            Group-10 VWAP-position bits (52-53) and the Group-12 BOS/CHoCH bits
-            (56-59), now populated from the running ``trading_core.VwapState`` /
-            ``trading_core.MarketStructureState`` (DEC-STAGE1A-WIRE-VWAP-BOS-001).
+            The u128 condition mask (the 66-bit layout, 62 active bits) for
+            this bar — including the Group-12 BOS/CHoCH bits (56-59),
+            populated from the running ``trading_core.MarketStructureState``
+            (DEC-STAGE1A-WIRE-VWAP-BOS-001), and the Group-13 CPR bits
+            (60-63), computed in-core from the prev-day pivot anchor. The
+            RETIRED VWAP tombstones (52/53) never fire.
         """
         ts_ist = bar.timestamp.astimezone(IST)
         bar_day = ts_ist.date()
@@ -915,10 +901,10 @@ class Stage1AMatrixBuilder:
         # the stream contract; <= C ≈ 80 total advances). Runs BEFORE the day
         # rollover so the contract reset composes with `_roll_to_new_day` (a
         # boundary can only fall on an IST-day change — ownership is
-        # date-granular).
-        if self._roll_schedule is None:
-            session_key = _DEFAULT_SESSION_KEY  # spot: byte-identical constant 0
-        else:
+        # date-granular). The spot path (``roll_schedule=None``) has no
+        # per-bar key — no roll boundary can ever fire (the constant
+        # :data:`_DEFAULT_SESSION_KEY` documents the retired VwapState feed).
+        if self._roll_schedule is not None:
             day_ordinal = bar_day.toordinal()
             while (
                 self._roll_cursor < len(self._roll_schedule)
@@ -957,41 +943,6 @@ class Stage1AMatrixBuilder:
 
         day_high_paisa, day_low_paisa = self._day_extremes.update(
             ts_ist=ts_ist, high_paisa=high_paisa, low_paisa=low_paisa
-        )
-
-        # ── Group 10: session-anchored VWAP (bits 52-53) ──
-        # The ONLY arithmetic here is the typical price = HLC3 = (high + low + close)
-        # / 3, ``round_money``-snapped to the 2-dp tick grid via the SAME
-        # :func:`_price_to_paisa` seam as OHLC/EMA (one snap definition, CLAUDE.md §11
-        # COMMON, equal to the dashboard's turnover proxy). The VWAP itself — the
-        # ``cum(price·vol)/cum(vol)`` accumulation, the 09:15 reset, the 09:00-09:15
-        # auction exclusion — is computed IN RUST by ``trading_core.VwapState`` (this
-        # builder only feeds the bar in and reads the resolved level out). ``None``
-        # during warm-up → the bits do not fire. O(1) per bar, O(1) Rust-side state.
-        # tod_seconds comes from the SAME shared Rust seam the vocabulary
-        # evaluator uses (DEC-TOD-SECONDS-RUST-SEAM-001) — no inline `h*3600`
-        # arithmetic on the eval path. KNOWN deferred debt: the evaluator
-        # re-derives the same value for this bar (+1 crossing) — threading one
-        # value through is a larger refactor, out of scope here.
-        tod_seconds = int(trading_core.seconds_of_day(ts_ist.hour, ts_ist.minute, ts_ist.second))
-        # Swept VWAP price-source scalar (default HLC3 == today's typical price
-        # verbatim, so the (HLC3, CLOSE) baseline is byte-identical — Override 1 /
-        # the golden). Only bits 52-53 (VWAP position) move with it.
-        typical_paisa = _reduce_vwap_source_paisa(
-            self._vwap_source,
-            bar,
-            open_paisa=open_paisa,
-            high_paisa=high_paisa,
-            low_paisa=low_paisa,
-            close_paisa=close_paisa,
-        )
-        vwap_paisa = self._vwap.update(
-            typical_paisa,
-            bar.volume,
-            is_pre_open(ts_ist.time()),
-            session_key,
-            bar_day.toordinal(),
-            tod_seconds,
         )
 
         # ── Group 12: BOS/CHoCH market structure (bits 56-59) ──
@@ -1037,7 +988,6 @@ class Stage1AMatrixBuilder:
             day_high_paisa=day_high_paisa,
             day_low_paisa=day_low_paisa,
             open_of_day_paisa=today_ohlc.open_paisa,
-            vwap_paisa=vwap_paisa,
             market_structure=market_structure,
         )
 
@@ -1055,11 +1005,11 @@ class Stage1AMatrixBuilder:
             mask &= _NON_FIB_MASK
 
         if self._apply_1day_mask:
-            # D12 honesty for a volume-bearing 1day grid (ADR-0012 /
-            # DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): each 1day bar is its own
-            # VWAP session, so the intraday-only bits — time-of-day 44-47 +
-            # VWAP-position 52-53 — are HONESTLY cleared via the vocabulary's
-            # own APPLIES_TO_1DAY_MASK (one bit-set source of truth).
+            # D12 honesty for a 1day grid (ADR-0012 /
+            # DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the intraday-only bits —
+            # time-of-day 44-47 (plus the already-inert VWAP tombstones
+            # 52-53) — are HONESTLY cleared via the vocabulary's own
+            # APPLIES_TO_1DAY_MASK (one bit-set source of truth).
             mask &= B.APPLIES_TO_1DAY_MASK
 
         # Record this bar's flag AFTER evaluation (close == open → bearish).
@@ -1070,9 +1020,8 @@ class Stage1AMatrixBuilder:
         """ADR-0012 D11 hard reset — the roll boundary is a per-contract series restart.
 
         "Every session/level indicator recomputes per-contract"
-        (``futures_roll.py`` roll policy). VWAP would also reset via its own
-        key-change branch (``vwap.rs``, pinned by the twin-state golden); it is
-        recreated anyway so the invariant "post-roll state == fresh-builder
+        (``futures_roll.py`` roll policy). Every stateful member is recreated
+        so the invariant "post-roll state == fresh-builder
         state" is EXACT rather than argued — the roll-segmentation equivalence
         oracle depends on it. Clearing ``_current_day`` / ``_today_ohlc``
         forces the EXISTING day-rollover branch to seed a pristine day-1 state
@@ -1082,7 +1031,6 @@ class Stage1AMatrixBuilder:
         semantics, reusing the machinery — a level is never compared across
         the basis gap, DEC-STAGE1A-ROLL-RESET-001).
         """
-        self._vwap = trading_core.VwapState()
         self._structure = trading_core.MarketStructureState()  # no FFI reset() exists
         self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
         self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
@@ -1386,10 +1334,11 @@ def apply_1day_mask_for(instrument: str, tf_label: str) -> bool:
     fields, so the flag needs NO ``canonical_trade_params`` key (no
     double-carry). True iff *instrument* is the pinned NIFTY-futures series
     alias (:data:`brutex.universe.NIFTY_FUTURES_SERIES_SYMBOL`) AND *tf_label*
-    is the lake ``"1day"`` interval — futures 1day partitions carry REAL
-    volume, so bits 52/53 would otherwise fire each 1day bar against its own
-    single-bar VWAP session (a live D12 violation). Spot is deliberately NOT
-    flipped (named follow-up — DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001).
+    is the lake ``"1day"`` interval — the intraday-only time-of-day bits
+    44-47 would otherwise fire on midnight-stamped 1day bars (a live D12
+    violation; the historical VWAP-position half of this rationale retired
+    with the bits-52/53 tombstone). Spot is deliberately NOT flipped (named
+    follow-up — DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001).
 
     HONEST limit (Golden Rule #10, review round-8 finding 1): the ``1day``
     grid this mask makes honest is structurally TRADE-less under the

@@ -44,7 +44,7 @@ duplicate guard.
 ## Scope law (CLAUDE.md §2 Rule 3)
 
 India VIX is **REFERENCE ONLY**: the stamp is a downstream filter surface,
-NEVER part of the 60-condition vocabulary, NEVER a rankable field, NEVER in
+NEVER part of the condition vocabulary, NEVER a rankable field, NEVER in
 the BLAKE3 run identity. A missing VIX bar stamps ``None`` — never a
 fabricated, interpolated, or carried-forward level.
 """

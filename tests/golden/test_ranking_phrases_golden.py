@@ -1,6 +1,6 @@
 """Golden byte-lock of the R33 phrase table (DEC-SWEEP-RESULTS-DEPTH-001, WP3).
 
-The 60 plain-English phrases are hand-written ONCE and reviewed in PR (R33's
+The 66 plain-English phrases are hand-written ONCE and reviewed in PR (R33's
 "written+reviewed once" law) — this digest makes any wording edit a
 DELIBERATE golden re-lock, never a silent drift.
 
@@ -21,7 +21,11 @@ import hashlib
 from brutex.ranking.phrases import PHRASE_TABLE, reason_for_mask
 
 #: Locked golden digest of the canonical ``bit|name|plain`` serialization.
-_GOLDEN_TABLE_SHA256 = "92f9df06fa5b2b5aa7401505e664630ad22b56b2f53e982b611bc4a766346e79"
+# DELIBERATE RE-LOCK (the 60→66 vocab reshape): 6 new rows (CPR 60-63 +
+# the declared-only SuperTrend 64-65) + the two VWAP rows reworded to the
+# honest RETIRED prose (bit positions unchanged). Old digest:
+# 92f9df06fa5b2b5aa7401505e664630ad22b56b2f53e982b611bc4a766346e79.
+_GOLDEN_TABLE_SHA256 = "221e39fef632f95cb3b5b4c206970c0f837249471adda8ecf9e4012139a45883"
 
 
 def test_phrase_table_digest_locked() -> None:
@@ -37,9 +41,17 @@ def test_r33_reference_assembly_locked() -> None:
     # PDH-cross + above-R2 + above-VWAP as one dual-language sentence pair.
     mask = (1 << 13) | (1 << 8) | (1 << 52)
     reason = reason_for_mask(mask)
-    assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap"
+    # DELIBERATE RE-PIN (the retired-suffix authority fix): the technical
+    # leg now routes through describe.condition_display_name, so the
+    # tombstoned bit 52 reads "close_above_vwap (retired)" — matching
+    # matched_condition_names exactly (one vocabulary, two surfaces).
+    # Old pinned string: "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap".
+    assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap (retired)"
+    # The VWAP member (a RETIRED tombstone an OLD artifact's mask may carry)
+    # renders the retired prose — never silently skipped, never live-sounding.
     assert reason.plain == (
         "price was near resistance level R2"
         "; and the candle closed above yesterday's high"
-        "; and price was above the session's volume-weighted average price (VWAP)"
+        "; and price was above the session's volume-weighted average price (VWAP; "
+        "retired condition — never fires on current runs)"
     )

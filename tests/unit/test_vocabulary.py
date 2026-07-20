@@ -1,7 +1,9 @@
 """Per-bit unit tests for `brutex.vocabulary.evaluator`.
 
-Tests every one of the 52 atomic conditions in isolation:
-- 9 indicator groups
+Tests every ACTIVE atomic condition in isolation (62 active of the
+66-declared layout — the RETIRED VWAP tombstones 52/53 and the declared-only
+SuperTrend bits 64/65 are pinned inert instead):
+- the manifest's indicator groups (``bits.GROUP_RANGES``)
 - Each bit verified to fire / not-fire on hand-built scenarios
 - Look-ahead invariant
 - Conflict-pair generator pruning
@@ -14,11 +16,12 @@ IndicatorSnapshot — no real data required.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import ClassVar
 from zoneinfo import ZoneInfo
 
 import pytest
 from brutex.indicators.fib_levels import compute_fib_levels
-from brutex.indicators.pivots import compute_pivot_levels
+from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 from brutex.vocabulary import (
     IndicatorSnapshot,
     PriorBarHistory,
@@ -475,8 +478,16 @@ class TestConflicts:
 
     def test_all_conflict_pairs_documented(self) -> None:
         # 24 original − 2 buggy (bullish/bearish-doji, removed in
-        # DEC-STAGE1B-CONFLICT-FIX-001) + 4 verified candle conflicts = 26.
-        assert len(CONFLICT_PAIRS) == 26
+        # DEC-STAGE1B-CONFLICT-FIX-001) + 4 verified candle conflicts +
+        # 3 CPR partition pairs (the 60→66 reshape — bits 60/61/62 are an
+        # exact partition, evaluator.rs:422-431) = 29.
+        assert len(CONFLICT_PAIRS) == 29
+
+    def test_cpr_partition_pairs_present(self) -> None:
+        # The three CPR position bits are pairwise mutually exclusive.
+        assert (B.BIT_ABOVE_CPR_TC, B.BIT_BELOW_CPR_BC) in CONFLICT_PAIRS
+        assert (B.BIT_ABOVE_CPR_TC, B.BIT_INSIDE_CPR) in CONFLICT_PAIRS
+        assert (B.BIT_BELOW_CPR_BC, B.BIT_INSIDE_CPR) in CONFLICT_PAIRS
 
 
 # ────── Look-ahead invariant ──────
@@ -864,22 +875,29 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
     """Pin the EXACT intraday-only bit set masked out on 1day (ADR-0012 D12).
 
     ``IMPLEMENTED_MASK & ~APPLIES_TO_1DAY_MASK`` must equal exactly the four
-    Time-of-Day bits 44-47 PLUS the two VWAP-position bits 52-53 — built from
-    the named BIT_* constants, never magic numbers — so the bits.py comment
-    (which historically claimed only VWAP was cleared) can never drift from
-    the constant again (DEC-CORP-ACTION-GATE-001 doc-drift fold).
+    Time-of-Day bits 44-47 — built from the named BIT_* constants, never magic
+    numbers — so the bits.py comment can never drift from the constant again
+    (DEC-CORP-ACTION-GATE-001 doc-drift fold). The tombstoned VWAP bits 52-53
+    left IMPLEMENTED_MASK with the 66-bit reshape (they stay outside
+    APPLIES_TO_1DAY_MASK too, pinned below), so the implemented∖1day residue
+    is the ToD quartet alone.
     """
     expected_cleared = (
         (1 << B.BIT_EARLY_MORNING)
         | (1 << B.BIT_MID_MORNING)
         | (1 << B.BIT_MIDDAY)
         | (1 << B.BIT_AFTERNOON)
-        | (1 << B.BIT_CLOSE_ABOVE_VWAP)
-        | (1 << B.BIT_CLOSE_BELOW_VWAP)
     )
     assert expected_cleared == B.IMPLEMENTED_MASK & ~B.APPLIES_TO_1DAY_MASK
-    # And 1day never enables a bit the evaluator does not implement.
-    assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == 0
+    # The tombstoned VWAP pair sits outside BOTH masks (never 1day-enabled).
+    assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_ABOVE_VWAP) == 0
+    assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_BELOW_VWAP) == 0
+    # The ONLY 1day-applicable bits the evaluator does not implement are the
+    # two declared-only Supertrend positions (their AND-mask membership is
+    # inert until the math lands — the evaluator never sets them).
+    assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == (
+        (1 << B.BIT_CLOSE_ABOVE_SUPERTREND) | (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -963,7 +981,6 @@ def test_evaluate_atoms_delegates_to_the_shared_projections() -> None:
         s.close_paisa,
         s.ema20_paisa,
         s.ema200_paisa,
-        s.vwap_paisa,
         pivot_levels_list(s.pivots),
         fib_levels_list(s.fib),
         s.day_high_paisa,
@@ -980,3 +997,212 @@ def test_evaluate_atoms_delegates_to_the_shared_projections() -> None:
         s.market_structure.choch_bearish,
     )
     assert via_shim == via_raw
+
+
+# ────── Group 13: Central Pivot Range (bits 60-63) — the hand-derived battery ──────
+#
+# G-CPRCOR / the 60→66 reshape: every expected TC/BC below is computed BY HAND
+# with literal integers in the comments — NEVER by calling the production
+# helper (`pivots.rs::compute_cpr_levels` has no Python binding by design; the
+# arithmetic is restated so a shared bug cannot self-certify). Semantics under
+# pin: BC = round_half_even((pdh+pdl)/2); TC = 2·P − BC; canonicalised
+# tc = max, bc = min; bit 60 strict `close > tc`; bit 61 strict `close < bc`;
+# bit 62 inclusive `bc <= close <= tc`; bit 63 (`narrow_cpr_day`) iff
+# `p > 0` and `(tc − bc) · 10_000 <= p · NARROW_CPR_WIDTH_BPS` — the LOCKED
+# **P-relative** denominator (never close-relative).
+
+
+def _pivots_with_literals(*, p: int, pdh: int, pdl: int, pdc: int) -> PivotLevels:
+    """A PivotLevels with hand-set P/PDH/PDL literals (CPR reads only those).
+
+    The R/S rungs are parked far away (±10⁹ paisa) so no `near_*` bit can
+    interfere with the asserted CPR nibble.
+    """
+    far = 1_000_000_000
+    return PivotLevels(
+        trading_day=datetime(2026, 5, 13, tzinfo=IST).date(),
+        pdh_paisa=pdh,
+        pdl_paisa=pdl,
+        pdc_paisa=pdc,
+        r5_paisa=far + 50,
+        r4_paisa=far + 40,
+        r3_paisa=far + 30,
+        r2_paisa=far + 20,
+        r1_paisa=far + 10,
+        p_paisa=p,
+        s1_paisa=-far - 10,
+        s2_paisa=-far - 20,
+        s3_paisa=-far - 30,
+        s4_paisa=-far - 40,
+        s5_paisa=-far - 50,
+    )
+
+
+def _cpr_nibble(*, p: int, pdh: int, pdl: int, pdc: int, close: int) -> int:
+    """Evaluate one bar against hand-set pivot literals; return bits 60-63."""
+    ts = datetime(2026, 5, 13, 10, 30, tzinfo=IST)
+    snap = IndicatorSnapshot(
+        timestamp_ist=ts,
+        open_paisa=close,
+        high_paisa=close,
+        low_paisa=close,
+        close_paisa=close,
+        ema20_paisa=None,
+        ema200_paisa=None,
+        pivots=_pivots_with_literals(p=p, pdh=pdh, pdl=pdl, pdc=pdc),
+        fib=compute_fib_levels(ts.date(), max(pdh, pdl + 1), pdl),
+        day_high_paisa=close,
+        day_low_paisa=close,
+        open_of_day_paisa=close,
+    )
+    mask = evaluate_atoms(snap, _default_proximity(), _empty_history())
+    return (mask >> 60) & 0xF
+
+
+_ABOVE = 0b0001  # bit 60
+_BELOW = 0b0010  # bit 61
+_INSIDE = 0b0100  # bit 62
+_NARROW = 0b1000  # bit 63
+
+
+class TestGroup13_CPRHandBattery:
+    """Hand-computed CPR boundary cases (exact literal arithmetic per case)."""
+
+    # Base anchors: P = 1_000_000; pdh = 1_040_000, pdl = 940_000
+    #   BC = rhe((1_040_000 + 940_000) / 2) = rhe(990_000.0) = 990_000
+    #   TC = 2·1_000_000 − 990_000 = 1_010_000  (tc > bc — not inverted)
+    #   width = 20_000; 20_000·10_000 = 200_000_000 > 1_000_000·30 = 30_000_000
+    #   → NOT narrow.
+    _BASE: ClassVar[dict[str, int]] = {
+        "p": 1_000_000,
+        "pdh": 1_040_000,
+        "pdl": 940_000,
+        "pdc": 1_020_000,
+    }
+
+    def test_above_tc_by_one_paisa(self) -> None:
+        """close = 1_010_001 = TC + 1 → above only (strict >)."""
+        assert _cpr_nibble(**self._BASE, close=1_010_001) == _ABOVE
+
+    def test_exactly_at_tc_is_inside_not_above(self) -> None:
+        """close = 1_010_000 = TC exactly → inside (inclusive), never above."""
+        assert _cpr_nibble(**self._BASE, close=1_010_000) == _INSIDE
+
+    def test_below_bc_by_one_paisa(self) -> None:
+        """close = 989_999 = BC − 1 → below only (strict <)."""
+        assert _cpr_nibble(**self._BASE, close=989_999) == _BELOW
+
+    def test_exactly_at_bc_is_inside_not_below(self) -> None:
+        """close = 990_000 = BC exactly → inside (inclusive), never below."""
+        assert _cpr_nibble(**self._BASE, close=990_000) == _INSIDE
+
+    def test_inverted_raw_pair_is_canonicalised(self) -> None:
+        """Raw TC < BC day: the pair canonicalises tc = max, bc = min.
+
+        P = 1_000_000; pdh = 1_060_000, pdl = 1_000_000:
+          BC_raw = rhe(2_060_000 / 2) = 1_030_000
+          TC_raw = 2_000_000 − 1_030_000 = 970_000  → INVERTED (tc_raw < bc_raw)
+          canonical tc = 1_030_000, bc = 970_000; width = 60_000 (not narrow:
+          600_000_000 > 30_000_000).
+        The three probes pin the CANONICAL boundaries specifically — under an
+        un-canonicalised implementation `close > 970_000` would read "above".
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_060_000, "pdl": 1_000_000, "pdc": 940_000}
+        assert _cpr_nibble(**anchors, close=1_000_000) == _INSIDE  # between raw pair
+        assert _cpr_nibble(**anchors, close=1_030_001) == _ABOVE  # > canonical tc (= raw BC)
+        assert _cpr_nibble(**anchors, close=969_999) == _BELOW  # < canonical bc (= raw TC)
+
+    def test_narrow_exactly_at_30_bps_fires(self) -> None:
+        """The <= tie: width·10_000 == p·30 exactly → narrow FIRES.
+
+        P = 1_000_000; pdh = 1_048_500, pdl = 948_500:
+          BC = rhe(1_997_000 / 2) = 998_500; TC = 2_000_000 − 998_500 = 1_001_500
+          width = 3_000; 3_000·10_000 = 30_000_000 == 1_000_000·30 → fires.
+        P-relative denominator law: the compare is against P (1_000_000), never
+        the close.
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_048_500, "pdl": 948_500, "pdc": 1_003_000}
+        assert _cpr_nibble(**anchors, close=1_000_000) == _INSIDE | _NARROW
+
+    def test_narrow_just_over_30_bps_clears(self) -> None:
+        """The minimal reachable just-over width → narrow CLEAR.
+
+        width = TC − BC = 2·(P − BC) is structurally EVEN, so "30 bps + 1
+        paisa" is unreachable; the minimal just-over is +2.
+        P = 1_000_000; pdh = 1_048_499, pdl = 948_499:
+          BC = rhe(1_996_998 / 2) = 998_499; TC = 2_000_000 − 998_499 = 1_001_501
+          width = 3_002; 3_002·10_000 = 30_020_000 > 30_000_000 → clear.
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_048_499, "pdl": 948_499, "pdc": 1_003_002}
+        assert _cpr_nibble(**anchors, close=1_000_000) == _INSIDE
+
+    def test_p_zero_degenerate_clears_narrow_only(self) -> None:
+        """p == 0 (all-zero placeholder anchors): the p > 0 guard clears ONLY
+        narrow; the position comparisons still fire against the zero levels
+        (close = 50 > tc = 0 → above) — exactly why the CPR bits ride the
+        Stage-1A anchor-dependent clear upstream (the cold-anchor regression
+        in test_engine_stage1a.py pins that clear end-to-end)."""
+        assert _cpr_nibble(p=0, pdh=0, pdl=0, pdc=0, close=50) == _ABOVE
+
+    def test_flat_prev_day_zero_width_is_narrow_by_design(self) -> None:
+        """G-CPRCOR-05: a flat prev day (H == L == C) → width 0 → narrow fires
+        trivially (0 <= threshold) — pinned as INTENDED (a zero-width coil IS
+        maximally narrow; noted for the DEC record).
+
+        pdh = pdl = pdc = 1_000_000 → P = 1_000_000, BC = 1_000_000,
+        TC = 1_000_000, width = 0. close = 1_000_000 → inside + narrow.
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_000_000, "pdl": 1_000_000, "pdc": 1_000_000}
+        assert _cpr_nibble(**anchors, close=1_000_000) == _INSIDE | _NARROW
+
+    def test_bc_half_tie_rounds_half_even(self) -> None:
+        """G-CPRCOR-06: an odd pdh+pdl makes BC a .5 tie — round HALF EVEN.
+
+        pdh = 1_000_000, pdl = 999_997 → sum = 1_999_997; /2 = 999_998.5 →
+        RHE → 999_998 (the even neighbour; HALF-UP would give 999_999).
+        P: pdc = 1_000_003 → (1_999_997 + 1_000_003)/3 = 1_000_000 exact.
+        TC = 2_000_000 − 999_998 = 1_000_002; width = 4 → narrow (40_000 <=
+        30_000_000). The two probes discriminate RHE from HALF-UP: under
+        HALF-UP (BC = 999_999) the close = 999_998 probe would read BELOW.
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_000_000, "pdl": 999_997, "pdc": 1_000_003}
+        assert _cpr_nibble(**anchors, close=999_998) == _INSIDE | _NARROW  # == BC (RHE)
+        assert _cpr_nibble(**anchors, close=999_997) == _BELOW | _NARROW  # BC − 1
+
+    def test_real_nifty_scale_anchor(self) -> None:
+        """A real NIFTY-scale prev day (₹24,000s) — full hand derivation.
+
+        pdh = 2_430_000, pdl = 2_400_000, pdc = 2_412_000:
+          P  = rhe((2_430_000 + 2_400_000 + 2_412_000) / 3)
+             = rhe(7_242_000 / 3) = rhe(2_414_000.0) = 2_414_000
+          BC_raw = rhe(4_830_000 / 2) = 2_415_000
+          TC_raw = 2·2_414_000 − 2_415_000 = 2_413_000 → INVERTED
+          canonical tc = 2_415_000, bc = 2_413_000; width = 2_000
+          narrow: 2_000·10_000 = 20_000_000 <= 2_414_000·30 = 72_420_000 → fires.
+        """
+        anchors = {"p": 2_414_000, "pdh": 2_430_000, "pdl": 2_400_000, "pdc": 2_412_000}
+        assert _cpr_nibble(**anchors, close=2_414_000) == _INSIDE | _NARROW
+        assert _cpr_nibble(**anchors, close=2_415_001) == _ABOVE | _NARROW
+        assert _cpr_nibble(**anchors, close=2_412_999) == _BELOW | _NARROW
+
+    def test_position_bits_partition_every_warm_case(self) -> None:
+        """Exactly ONE of above/below/inside per evaluation (the conflicts-table
+        justification for the (60,61)/(60,62)/(61,62) pairs)."""
+        for close in (989_999, 990_000, 1_000_000, 1_010_000, 1_010_001):
+            nibble = _cpr_nibble(**self._BASE, close=close)
+            position = nibble & (_ABOVE | _BELOW | _INSIDE)
+            assert bin(position).count("1") == 1
+
+
+def test_narrow_cpr_width_bps_cross_pin() -> None:
+    """DRIFT PIN: ``trading_core.NARROW_CPR_WIDTH_BPS`` is LOCKED at 30.
+
+    The authoritative narrow-CPR threshold (supersedes an earlier 50 lock).
+    The constant sits inside ``indicator_version``-governed behaviour — it
+    moves bit 63 on every bar, hence run identity — so a silent change is
+    FORBIDDEN: any re-lock is a deliberate, decision-ID'd act that must
+    update this pin, the hand battery above and the golden fixtures together.
+    """
+    import trading_core
+
+    assert trading_core.NARROW_CPR_WIDTH_BPS == 30

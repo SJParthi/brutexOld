@@ -13,18 +13,28 @@ from brutex.engine.estimator_calibration import UNCALIBRATED, EstimatorCalibrati
 from brutex.engine.sweep_estimator import (
     CALIBRATED_BASIS,
     PROVISIONAL_BASIS,
+    SWEPT_CONDITIONS,
     VWAP_DEAD_BITS,
     axes_product,
     count_true_trials,
     effective_condition_count,
     estimate_sweep_cost,
 )
-from brutex.vocabulary.bits import TOTAL_CONDITIONS
+from brutex.vocabulary.bits import IMPLEMENTED_MASK
+
+
+def test_swept_conditions_is_the_implemented_count() -> None:
+    """The estimator sizes ``C(n, k)`` off the IMPLEMENTED count (62 on the
+    66-declared layout) — ``conditions=None`` resolves to
+    ``default_condition_bits()`` == every implemented bit, so the declared
+    width would overstate every projection
+    (DEC-VOCAB-66-RESHAPE-IMPL-001 merge reconcile)."""
+    assert SWEPT_CONDITIONS == IMPLEMENTED_MASK.bit_count() == 62
 
 
 def test_count_true_trials_matches_hand_computed_combinatorics() -> None:
-    # C(60,1) + C(60,2) = 60 + 1770 = 1830.
-    assert count_true_trials([1, 2], other_axes_product=1) == 1830
+    # C(62,1) + C(62,2) = 62 + 1891 = 1953 (the IMPLEMENTED 62-bit set).
+    assert count_true_trials([1, 2], other_axes_product=1) == 1953
 
 
 def test_count_true_trials_scales_with_other_axes() -> None:
@@ -57,24 +67,36 @@ def test_count_true_trials_custom_n() -> None:
     assert count_true_trials([1], other_axes_product=1, n=5) == 5
 
 
-def test_effective_condition_count_index_segment_drops_vwap_bits() -> None:
+def test_effective_condition_count_index_segment_tombstoned_bits_subtract_zero() -> None:
+    """The dead-bit annotation subtracts only dead bits STILL IMPLEMENTED.
+
+    On the 66-declared layout the VWAP bits 52/53 are TOMBSTONED (outside
+    ``IMPLEMENTED_MASK`` — never swept on ANY segment), so the INDEX-segment
+    subtraction is zero: effective == nominal. This pin also kills the
+    drop-the-intersection mutant (a bare ``len(VWAP_DEAD_BITS)`` subtraction
+    would report 60 — double-counting bits the sweep never enumerates)."""
+    assert (
+        VWAP_DEAD_BITS
+        & frozenset(i for i in range(IMPLEMENTED_MASK.bit_length()) if IMPLEMENTED_MASK >> i & 1)
+        == frozenset()
+    )
     nominal, effective = effective_condition_count(segment="INDEX")
-    assert nominal == TOTAL_CONDITIONS
-    assert effective == TOTAL_CONDITIONS - len(VWAP_DEAD_BITS)
+    assert (nominal, effective) == (SWEPT_CONDITIONS, SWEPT_CONDITIONS)
 
 
 def test_effective_condition_count_index_segment_is_case_insensitive() -> None:
-    nominal, effective = effective_condition_count(segment="index")
-    assert (nominal, effective) == (TOTAL_CONDITIONS, TOTAL_CONDITIONS - 2)
+    assert effective_condition_count(segment="index") == effective_condition_count(segment="INDEX")
 
 
 def test_effective_condition_count_non_index_segment_is_unreduced() -> None:
     nominal, effective = effective_condition_count(segment="FNO")
-    assert nominal == effective == TOTAL_CONDITIONS
+    assert nominal == effective == SWEPT_CONDITIONS
 
 
 def test_effective_condition_count_custom_n() -> None:
-    assert effective_condition_count(segment="INDEX", n=10) == (10, 8)
+    # The subtraction is the ∩-implemented dead-bit count (currently 0),
+    # regardless of the caller's nominal n.
+    assert effective_condition_count(segment="INDEX", n=10) == (10, 10)
 
 
 def test_vwap_dead_bits_are_52_and_53() -> None:
@@ -89,13 +111,13 @@ def test_axes_product_no_axes_is_one() -> None:
     assert axes_product() == 1
 
 
-@pytest.mark.parametrize(
-    ("segment", "expect_effective_lt_nominal"),
-    [("INDEX", True), ("FNO", False)],
-)
-def test_estimate_sweep_cost_annotates_condition_counts(
-    segment: str, expect_effective_lt_nominal: bool
-) -> None:
+@pytest.mark.parametrize("segment", ["INDEX", "FNO"])
+def test_estimate_sweep_cost_annotates_condition_counts(segment: str) -> None:
+    # Tombstoned VWAP bits are outside the implemented set, so the annotation
+    # reads effective == nominal on EVERY segment on this layout (the
+    # mechanism self-revives if a volume-dependent implemented bit lands —
+    # the lt-arm is driven via a monkeypatched annotation in the preflight
+    # suite, which owns the clamp-row display law).
     estimate = estimate_sweep_cost(
         k_values=[1, 2],
         other_axes_product=3,
@@ -104,10 +126,8 @@ def test_estimate_sweep_cost_annotates_condition_counts(
         segment=segment,
         calibration=UNCALIBRATED,
     )
-    if expect_effective_lt_nominal:
-        assert estimate.effective_condition_count < estimate.nominal_condition_count
-    else:
-        assert estimate.effective_condition_count == estimate.nominal_condition_count
+    assert estimate.effective_condition_count == estimate.nominal_condition_count
+    assert estimate.nominal_condition_count == SWEPT_CONDITIONS
 
 
 def test_estimate_sweep_cost_uses_provisional_basis_when_uncalibrated() -> None:

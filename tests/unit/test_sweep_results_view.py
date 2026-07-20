@@ -216,6 +216,44 @@ def test_conditions_decoded_from_mask(tmp_path: Path) -> None:
     assert by_mask[0b11] != ""  # two condition names, joined
 
 
+def test_pre_reshape_mask_conditions_read_retired(tmp_path: Path) -> None:
+    """TOMB-01 — a persisted pre-reshape mask carrying the tombstoned VWAP bit
+    52 renders "close_above_vwap (retired)" on /results, never the plain name
+    (the dead condition must not present as live); a live-bit sibling row is
+    suffix-free."""
+    _write_store(
+        tmp_path,
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        rows=[_row(seed=1, mask_bits=(1 << 52) | 1), _row(seed=2, mask_bits=0b11)],
+    )
+    board = build_sweep_leaderboard(tmp_path)
+    by_mask = {r["mask_bits"]: r["conditions"] for r in board.rows}
+    assert "close_above_vwap (retired)" in by_mask[(1 << 52) | 1]
+    assert "(retired)" not in by_mask[0b11]
+
+
+def test_mask_hex_field_is_lossless(tmp_path: Path) -> None:
+    """G-SIGNBI-01 — every row carries the additive 32-hex ``mask_hex`` beside
+    the raw ``mask_bits`` number (which a double-based JSON consumer corrupts
+    past 2**53 — bit 63 is a valid mask bit today); round-trips exactly."""
+    mask = (1 << 63) | (1 << 60) | 0b101
+    _write_store(
+        tmp_path,
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        rows=[_row(seed=1, mask_bits=mask)],
+    )
+    board = build_sweep_leaderboard(tmp_path)
+    row = board.rows[0]
+    assert row["mask_bits"] == mask  # back-compat raw number kept
+    assert row["mask_hex"] == f"{mask:032x}"
+    assert int(row["mask_hex"], 16) == mask
+    assert len(row["mask_hex"]) == 32
+
+
 def test_top_n_clamped(tmp_path: Path) -> None:
     """``top_n`` is clamped into [1, MAX_TOP_N]."""
     _write_store(

@@ -25,12 +25,7 @@ struct Columns {
     high_paisa: Vec<i64>,
     low_paisa: Vec<i64>,
     close_paisa: Vec<i64>,
-    typical_paisa: Vec<i64>,
-    volume: Vec<i64>,
     tod_seconds: Vec<u32>,
-    pre_open: Vec<bool>,
-    session_key: Vec<u64>,
-    session_day: Vec<i64>,
     contract_reset: Vec<bool>,
     day_index: Vec<u32>,
     ema20_paisa: Vec<Option<i64>>,
@@ -78,7 +73,7 @@ fn load_fixture() -> Fixture {
         .join("stage1a_batch_golden.json");
     let text = fs::read_to_string(&path).expect("fixture readable");
     let fixture: Fixture = serde_json::from_str(&text).expect("fixture parses");
-    assert_eq!(fixture.schema, "stage1a-batch-golden-v1");
+    assert_eq!(fixture.schema, "stage1a-batch-golden-v2");
     fixture
 }
 
@@ -88,12 +83,7 @@ fn inputs<'a>(f: &'a Fixture) -> Stage1aBatchInputs<'a> {
         high_paisa: &f.columns.high_paisa,
         low_paisa: &f.columns.low_paisa,
         close_paisa: &f.columns.close_paisa,
-        typical_paisa: &f.columns.typical_paisa,
-        volume: &f.columns.volume,
         tod_seconds: &f.columns.tod_seconds,
-        pre_open: &f.columns.pre_open,
-        session_key: &f.columns.session_key,
-        session_day: &f.columns.session_day,
         contract_reset: &f.columns.contract_reset,
         day_index: &f.columns.day_index,
         ema20_paisa: &f.columns.ema20_paisa,
@@ -187,12 +177,7 @@ fn golden_prefix_replay_is_suffix_independent() {
             high_paisa: &f.columns.high_paisa[..k],
             low_paisa: &f.columns.low_paisa[..k],
             close_paisa: &f.columns.close_paisa[..k],
-            typical_paisa: &f.columns.typical_paisa[..k],
-            volume: &f.columns.volume[..k],
             tod_seconds: &f.columns.tod_seconds[..k],
-            pre_open: &f.columns.pre_open[..k],
-            session_key: &f.columns.session_key[..k],
-            session_day: &f.columns.session_day[..k],
             contract_reset: &f.columns.contract_reset[..k],
             day_index: &f.columns.day_index[..k],
             ema20_paisa: &f.columns.ema20_paisa[..k],
@@ -279,12 +264,7 @@ proptest! {
         let mut high = Vec::new();
         let mut low = Vec::new();
         let mut close = Vec::new();
-        let mut typical = Vec::new();
-        let mut volume = Vec::new();
         let mut tod = Vec::new();
-        let mut pre_open = Vec::new();
-        let mut session_key = Vec::new();
-        let mut session_day = Vec::new();
         let mut contract_reset = Vec::new();
         let mut day_index = Vec::new();
         let mut day_pivots = Vec::new();
@@ -300,7 +280,7 @@ proptest! {
             day_pivots.extend_from_slice(pivot_row);
             day_fibs.extend_from_slice(fib_row);
             for b in 0..*n_bars {
-                let (o, a, bb, c, v, t, po, cr) =
+                let (o, a, bb, c, _v, t, _po, cr) =
                     spec.bars[(bar_cursor + b) % spec.bars.len()];
                 let hi = o.max(a).max(bb).max(c);
                 let lo = o.min(a).min(bb).min(c);
@@ -308,12 +288,7 @@ proptest! {
                 high.push(hi);
                 low.push(lo);
                 close.push(c);
-                typical.push((hi + lo + c) / 3);
-                volume.push(v);
                 tod.push(t);
-                pre_open.push(po);
-                session_key.push(d as u64);
-                session_day.push(738_000 + d as i64);
                 // A reset only makes sense on a day's FIRST bar (the prepass
                 // law); elsewhere it is structurally absent.
                 contract_reset.push(b == 0 && d > 0 && cr);
@@ -326,12 +301,7 @@ proptest! {
             high_paisa: &high,
             low_paisa: &low,
             close_paisa: &close,
-            typical_paisa: &typical,
-            volume: &volume,
             tod_seconds: &tod,
-            pre_open: &pre_open,
-            session_key: &session_key,
-            session_day: &session_day,
             contract_reset: &contract_reset,
             day_index: &day_index,
             ema20_paisa: &vec![None; open.len()],

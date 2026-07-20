@@ -12,9 +12,14 @@ produced by ``scripts/gen_vocab_golden_vectors.py``) that:
 The fixture is language-neutral (raw int64-paisa inputs). Since
 DEC-VOCAB-U128-CODEGEN-001 the mask is a **u128** serialised as a hex STRING
 (``expected_mask``) so a bit >= 53 keeps full precision across JSON doubles, and
-the "both ways" coverage gate is partitioned over the IMPLEMENTED bits only — the
-LAYOUT-ONLY bits (VWAP/R5-S5/BOS/CHoCH, ``implemented=false``) are proven inert
-by :func:`test_layout_only_bits_are_always_clear`.
+the "both ways" coverage gate is partitioned over the IMPLEMENTED bits only —
+the NON-implemented bits (the RETIRED VWAP tombstones 52/53 + the declared-only
+SuperTrend bits 64/65, ``implemented=false``) are proven inert by
+:func:`test_layout_only_bits_are_always_clear`. Version 3 is the 60→66 reshape
+(``vwap_paisa`` survives as an INERT RNG-burn record — no longer an evaluator
+input; the frozen-input migration invariant lives in
+``test_vocab_golden_migration.py``); the fixture bytes are SHA-pinned + proven
+byte-identical to a fresh generation (GOLD-06).
 """
 
 from __future__ import annotations
@@ -55,6 +60,8 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
     )
     fib = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
     ms = case["market_structure"]
+    # NOTE: the case's ``vwap_paisa`` field is deliberately NOT consumed —
+    # it is the inert RNG-burn record of the retired bits-52/53 draw.
     snapshot = IndicatorSnapshot(
         timestamp_ist=ts,
         open_paisa=case["open_paisa"],
@@ -63,7 +70,6 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
         close_paisa=case["close_paisa"],
         ema20_paisa=case["ema20_paisa"],
         ema200_paisa=case["ema200_paisa"],
-        vwap_paisa=case["vwap_paisa"],
         pivots=pivots,
         fib=fib,
         day_high_paisa=case["day_high_paisa"],
@@ -119,8 +125,9 @@ def test_fixture_exercises_all_implemented_bits_both_ways() -> None:
 def test_layout_only_bits_are_always_clear() -> None:
     """Every non-implemented / reserved bit must be 0 in EVERY golden case.
 
-    The honest PR-1 guarantee: the new VWAP/R5-S5/BOS/CHoCH bits are declared in
-    the layout but the evaluator never sets them (their math lands in PR-2).
+    The reshape guarantee: the RETIRED VWAP tombstones (52/53), the
+    declared-only SuperTrend bits (64/65) and every reserved bit >= 66 are
+    NEVER set by the evaluator.
     """
     for case in _CASES:
         mask = _expected(case)
@@ -131,14 +138,43 @@ def test_layout_only_bits_are_always_clear() -> None:
 
 def test_fixture_metadata_is_consistent() -> None:
     """Guard the fixture header against silent corruption / regeneration drift."""
-    assert _DATA["version"] == 2
+    assert _DATA["version"] == 3
     assert _DATA["total_conditions"] == TOTAL_CONDITIONS
     assert int(_DATA["implemented_mask"], 16) == IMPLEMENTED_MASK
     assert int(_DATA["full_mask"], 16) == (1 << TOTAL_CONDITIONS) - 1
     assert _DATA["n_cases"] == len(_CASES)
     assert len({case["id"] for case in _CASES}) == len(_CASES)
     assert _DATA["generated_from"] == "brutex.vocabulary.evaluator.evaluate_atoms"
+    assert int(_DATA["bits_stray_nonimplemented"], 16) == 0
     # Every case carries a 32-nibble hex mask string (u128), not a JSON number.
     for case in _CASES:
         assert isinstance(case["expected_mask"], str)
         assert len(case["expected_mask"]) == 32
+
+
+#: SHA-256 of the frozen fixture bytes (GOLD-06 — the README "SHA-256
+#: manifest" drift guard). Regenerate with
+#: ``python scripts/gen_vocab_golden_vectors.py`` then update this.
+_EXPECTED_SHA256 = "0f0f5f85b29941beff20ec71a7e4942bce681d80e3c8f3c313e28da2445057a0"
+
+
+def test_fixture_sha256_matches_pinned_manifest() -> None:
+    """Byte-for-byte no-drift gate on the golden fixture file (GOLD-06)."""
+    import hashlib
+
+    digest = hashlib.sha256(_FIXTURE.read_bytes()).hexdigest()
+    assert digest == _EXPECTED_SHA256
+
+
+def test_fixture_is_byte_identical_to_a_fresh_generation() -> None:
+    """The staleness gate (GOLD-06): re-running the generator reproduces the
+    committed bytes exactly (the truth-table ``--check`` pattern, in-suite —
+    this test needs the wheel, which this golden suite already requires)."""
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from scripts import gen_vocab_golden_vectors as gen
+
+    assert _FIXTURE.read_text(encoding="utf-8") == gen.render(gen.generate())

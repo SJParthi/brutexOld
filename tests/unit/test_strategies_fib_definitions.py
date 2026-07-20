@@ -19,7 +19,7 @@ from brutex.indicators.prev_day_ohlc import DailyCandle
 from brutex.strategies import fib_definitions as F
 from brutex.strategies.errors import StrategyRegistrationError
 from brutex.vocabulary.bits import (
-    BIT_CLOSE_ABOVE_VWAP,
+    BIT_ABOVE_CPR_TC,
     BIT_EMA20_ABOVE_EMA200,
     BIT_NEAR_FIB_50,
     IMPLEMENTED_MASK,
@@ -122,6 +122,39 @@ def test_definition_rejects_unknown_condition_scope() -> None:
 def test_definition_accepts_known_condition_scope() -> None:
     d = _defn(condition_scope=frozenset({"near_fib_50", "ema20_above_ema200"}))
     assert d.condition_scope == frozenset({"near_fib_50", "ema20_above_ema200"})
+
+
+def test_definition_rejects_retired_condition_scope() -> None:
+    """A KNOWN-but-RETIRED name (VWAP tombstone bit 52) is refused at construction.
+
+    Pre-fix, ``close_above_vwap`` passed the NAME_TO_BIT membership check and
+    ``candidate_mask`` then violated its own "always a subset of
+    IMPLEMENTED_MASK" contract. The refusal names the entry, its bit and its
+    RETIRED status (the ``parse_condition_ids`` wording family).
+    """
+    with pytest.raises(ValueError, match=r"'close_above_vwap' \(bit 52\) is RETIRED"):
+        _defn(condition_scope=frozenset({"close_above_vwap", "near_fib_50"}))
+
+
+def test_definition_rejects_layout_only_condition_scope() -> None:
+    """A declared-only LAYOUT bit (SuperTrend 64) is refused with its status named."""
+    with pytest.raises(
+        ValueError,
+        match=r"'close_above_supertrend' \(bit 64\) is declared but NOT YET implemented",
+    ):
+        _defn(condition_scope=frozenset({"close_above_supertrend"}))
+
+
+def test_definition_accepts_live_cpr_scope_and_mask_stays_implemented_subset() -> None:
+    """Live names (incl. sign-bit narrow_cpr_day 63 + above_cpr_tc 60) construct,
+
+    and the explicit-scope ``candidate_mask`` honours its documented
+    IMPLEMENTED_MASK-subset invariant.
+    """
+    d = _defn(condition_scope=frozenset({"narrow_cpr_day", "above_cpr_tc", "near_fib_50"}))
+    mask = d.candidate_mask
+    assert mask == (1 << 63) | (1 << BIT_ABOVE_CPR_TC) | (1 << BIT_NEAR_FIB_50)
+    assert mask & ~IMPLEMENTED_MASK == 0
 
 
 # ─────────────────────────── directions (swept dimension) ───────────────────────────
@@ -403,7 +436,7 @@ def test_weekly_static_cold_start_returns_none() -> None:
 
 # ─────────────────────────── decoder bridge (Simple + Pro) ───────────────────────────
 def test_render_definition_default_timeframe_long() -> None:
-    mask = (1 << BIT_NEAR_FIB_50) | (1 << BIT_EMA20_ABOVE_EMA200) | (1 << BIT_CLOSE_ABOVE_VWAP)
+    mask = (1 << BIT_NEAR_FIB_50) | (1 << BIT_EMA20_ABOVE_EMA200) | (1 << BIT_ABOVE_CPR_TC)
     exp = F.render_definition(F.PREV_DAY, mask, F.Direction.LONG)
     assert exp.direction_label == "Buy"
     assert exp.simple_sentence  # non-empty

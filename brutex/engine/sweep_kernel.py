@@ -3,7 +3,7 @@
 The grid orchestrator (:func:`brutex.engine.sweep_orchestrator.run_sweep_grid`)
 walks the outer product ``instrument × timeframe × direction × K × stop-loss ×
 take-profit × proximity``. The Stage-1A ``bar_bits`` truth-matrix
-(:func:`brutex.engine.stage1a.build_bar_bits`) — the expensive per-bar 60-condition
+(:func:`brutex.engine.stage1a.build_bar_bits`) — the expensive per-bar full-vocabulary
 evaluation — depends ONLY on ``(bars, proximity, prior_n)``, so it is **identical**
 for every ``(direction, K, sl, tp)`` tuple that shares one ``(instrument, tf,
 proximity)``. The single-slice runner rebuilds it from scratch on every tuple and
@@ -79,7 +79,7 @@ class ResidentSweepKernel:
     """Stage-1A ``bar_bits`` + resident bar buffer for ONE ``(instrument, tf, proximity, prior_n)``.
 
     Build it once, then reuse it across every ``(direction, K, sl, tp)`` sub-sweep
-    and every mask batch that shares this bar window: the Stage-1A 60-condition
+    and every mask batch that shares this bar window: the Stage-1A full-vocabulary
     evaluation and the Python→Rust marshal of the bar window are each paid once,
     not once per tuple / once per batch.
 

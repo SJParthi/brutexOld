@@ -96,6 +96,18 @@ class Manifest:
         """Bitmask of the bits valid on the 1day timeframe (ADR-0012 D12)."""
         return sum(1 << c.bit for c in self.conditions if c.applies_to_1day)
 
+    @property
+    def retired_mask(self) -> int:
+        """Bitmask of the RETIRED tombstone bits (``reserved = true``).
+
+        Positions held forever, evaluator emits 0, NO later PR ever supplies
+        math. Disjoint from ``implemented_mask`` by the manifest law (a
+        reserved bit is never implemented); the remaining declared-but-
+        unimplemented bits (``implemented = false``, ``reserved = false``)
+        are LAYOUT-ONLY, not retired.
+        """
+        return sum(1 << c.bit for c in self.conditions if c.reserved)
+
 
 class ManifestError(Exception):
     """Raised when the manifest violates an invariant (dense bits, dup name…)."""
@@ -188,7 +200,12 @@ def render_rust(manifest: Manifest) -> str:
         if c.group != cur_group:
             cur_group = c.group
             lines.append(f"// {c.group}")
-        suffix = "" if c.implemented else "  (LAYOUT ONLY — implemented=false)"
+        if c.implemented:
+            suffix = ""
+        elif c.reserved:
+            suffix = "  (RETIRED — reserved=true, position held forever, never gets math)"
+        else:
+            suffix = "  (LAYOUT ONLY — implemented=false, math lands in a later PR)"
         lines.append(f"/// {c.description}{suffix}")
         lines.append(f"pub const BIT_{c.name.upper()}: u32 = {c.bit};")
     lines.append("")
@@ -199,8 +216,15 @@ def render_rust(manifest: Manifest) -> str:
     lines.append(f"pub const MASK_WIDTH: u32 = {manifest.mask_width};")
     lines.append("")
     lines.append("/// Bitmask of the conditions whose evaluator computes a real boolean.")
-    lines.append("/// LAYOUT-ONLY bits (`implemented=false` in the manifest) are 0 here and")
-    lines.append("/// the evaluator emits 0 for them until a PR supplies the math.")
+    lines.append("/// Non-implemented bits are 0 here and the evaluator emits 0 for them:")
+    lines.append("/// LAYOUT-ONLY bits (`implemented=false`) await their math in a later PR,")
+    lines.append("/// while RETIRED bits (`reserved=true`) are tombstones that hold their")
+    lines.append("/// position forever and never get math (the grow-only law).")
+    for c in manifest.conditions:
+        if c.reserved:
+            lines.append(f"/// RETIRED: bit {c.bit} `BIT_{c.name.upper()}`.")
+        elif not c.implemented:
+            lines.append(f"/// LAYOUT-ONLY: bit {c.bit} `BIT_{c.name.upper()}`.")
     lines.append(f"pub const IMPLEMENTED_MASK: u128 = {manifest.implemented_mask};")
     lines.append("")
     lines.append("#[cfg(test)]")
@@ -242,8 +266,10 @@ def render_python(manifest: Manifest) -> str:
     )
     lines.append("are the live conditions. Never renumber a bit (grow-only, DEC-PLUGIN-001):")
     lines.append("new conditions append at the next free bit. LAYOUT-ONLY bits")
-    lines.append("(``implemented=false`` in the manifest) declare a position but the evaluator")
-    lines.append("emits 0 for them until a later PR supplies the math.")
+    lines.append("(``implemented=false``, ``reserved=false``) declare a position but the")
+    lines.append("evaluator emits 0 for them until a later PR supplies the math; RETIRED bits")
+    lines.append("(``reserved=true``) are tombstones — the position is held forever, the")
+    lines.append("evaluator emits 0, and NO later PR ever supplies math for them.")
     lines.append('"""')
     lines.append("")
     lines.append("from __future__ import annotations")
@@ -263,6 +289,7 @@ def render_python(manifest: Manifest) -> str:
         "IMPLEMENTED_MASK",
         "MASK_WIDTH",
         "NAME_TO_BIT",
+        "RETIRED_MASK",
         "TOTAL_CONDITIONS",
     ]
     lines.append("__all__ = [")
@@ -284,14 +311,36 @@ def render_python(manifest: Manifest) -> str:
     lines.append("")
     lines.append("#: Bitmask of conditions whose evaluator computes a real boolean. LAYOUT-ONLY")
     lines.append("#: bits (``implemented=false``) are 0 here; the evaluator emits 0 for them.")
+    for c in manifest.conditions:
+        if c.reserved:
+            lines.append(
+                f"#: RETIRED (tombstone, never gets math): bit {c.bit} ``BIT_{c.name.upper()}``."
+            )
+        elif not c.implemented:
+            lines.append(
+                f"#: LAYOUT-ONLY (math in a later PR): bit {c.bit} ``BIT_{c.name.upper()}``."
+            )
     lines.append(f"IMPLEMENTED_MASK: Final[int] = {manifest.implemented_mask}")
     lines.append("")
+    lines.append("#: Bitmask of the RETIRED tombstone bits (``reserved = true`` in the manifest).")
+    lines.append("#: Positions held forever (grow-only law), evaluator emits 0, NO later PR ever")
+    lines.append("#: supplies math. Disjoint from ``IMPLEMENTED_MASK``; the declared-but-")
+    lines.append("#: unimplemented remainder (``implemented = false``, ``reserved = false``) is")
+    lines.append("#: LAYOUT-ONLY, not retired. Python-only export (no Rust consumer exists yet;")
+    lines.append("#: the manifest stays the single source — TOMB-01 renderer support).")
+    lines.append(f"RETIRED_MASK: Final[int] = {manifest.retired_mask}")
+    lines.append("")
+    # The cleared-bit prose is DERIVED from the manifest (never a hand-kept
+    # literal list, so it can never go stale again): enumerate every condition
+    # whose ``applies_to_1day`` is false, in bit order.
+    cleared = [c for c in manifest.conditions if not c.applies_to_1day]
     lines.append("#: Bitmask of conditions valid on the 1day timeframe (ADR-0012 D12). Relative")
-    lines.append("#: to ``IMPLEMENTED_MASK`` it clears the SIX intraday-only bits: the four")
-    lines.append("#: Time-of-Day bits 44-47 (``BIT_EARLY_MORNING`` / ``BIT_MID_MORNING`` /")
-    lines.append("#: ``BIT_MIDDAY`` / ``BIT_AFTERNOON`` — a 1day bar has no time-of-day bucket)")
-    lines.append("#: AND the two VWAP-position bits 52-53 (``BIT_CLOSE_ABOVE_VWAP`` /")
-    lines.append("#: ``BIT_CLOSE_BELOW_VWAP`` — the session-anchored VWAP is intraday-only).")
+    lines.append(
+        f"#: to the FULL declared layout it clears the {len(cleared)} intraday-only bit(s)"
+    )
+    lines.append("#: (derived from the manifest's ``applies_to_1day = false`` rows):")
+    for c in cleared:
+        lines.append(f"#:   bit {c.bit} ``BIT_{c.name.upper()}``")
     lines.append("#: Test-pinned exactly in ``tests/unit/test_vocabulary.py``.")
     lines.append(f"APPLIES_TO_1DAY_MASK: Final[int] = {manifest.applies_1day_mask}")
     lines.append("")

@@ -1,7 +1,64 @@
 //! Standard (Floor Trader) Pivot Points — a bit-for-bit port of
-//! `brutex/indicators/pivots.py::compute_pivot_levels`.
+//! `brutex/indicators/pivots.py::compute_pivot_levels` — plus the Central
+//! Pivot Range (CPR) derived from the SAME prev-day OHLC anchor
+//! (vocabulary bits 60-63).
 
 use crate::indicators::round_half_even;
+
+/// Narrow-CPR width threshold in basis points of the pivot P: bit 63
+/// (`narrow_cpr_day`) fires iff `(TC − BC) / P <= NARROW_CPR_WIDTH_BPS / 10_000`
+/// (evaluated in exact integer form — see `evaluator.rs` Group 13).
+///
+/// NO vendor standard exists for "narrow": practitioners scatter across
+/// 0.2%–0.5% of price with 0.3% the most-cited figure; **30 bps** was chosen by
+/// the design authority (a looser threshold risks the bit firing near-always on
+/// index days). A future DEC may override it — the switch is this ONE named
+/// compile-time constant (e.g. a one-line 30 ↔ 50 change), which re-keys runs
+/// through `indicator_version` like any other math change. `pub` so the Python
+/// side can cross-pin the value.
+pub const NARROW_CPR_WIDTH_BPS: i64 = 30;
+
+/// The canonicalized Central Pivot Range pair (int64 paisa): `tc_paisa >=
+/// bc_paisa` ALWAYS (see [`compute_cpr_levels`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CprLevels {
+    /// Top central (the larger of the raw TC/BC pair after canonicalization).
+    pub tc_paisa: i64,
+    /// Bottom central (the smaller of the raw pair).
+    pub bc_paisa: i64,
+}
+
+/// Compute the Central Pivot Range from the ROUNDED pivot `P` plus the RAW
+/// previous-day high/low (int64 paisa) — the Ochoa / PivotBoss standard
+/// (verified 2026-07-15 against PivotBoss + Zerodha Varsity):
+///
+/// * `BC = (PDH + PDL) / 2` — rounded half-even, the SAME rounding the pivot
+///   `P` itself uses ([`compute_pivot_levels`] / `round_half_even`);
+/// * `TC = 2·P − BC` — pure integer arithmetic on the two rounded values
+///   (`P` is passed in as the already-rounded `PivotLevels::p_paisa`, NEVER
+///   re-derived from rounded R/S rungs — that would compound rounding).
+///
+/// The raw `(tc, bc)` pair INVERTS (`tc_raw < bc_raw`) whenever the prev-day
+/// close sits below the (PDH+PDL)/2 midpoint — roughly half of real days — so
+/// the pair is CANONICALIZED here: `tc = max(tc_raw, bc_raw)`,
+/// `bc = min(tc_raw, bc_raw)` (pinned by `cpr_canonicalizes_the_inverted_pair`).
+///
+/// Domain (mirrors [`compute_pivot_levels`]'s honest envelope): the arithmetic
+/// is overflow-free for every boundary-validated caller — the FFI paths bound
+/// the anchors (`|x| <= i64::MAX / 8`) so `pdh + pdl` and `2·p − bc` stay far
+/// inside `i64`; an absurd unvalidated native magnitude panics via the release
+/// `overflow-checks` rather than silently wrapping (finance-safety, `lib.rs`).
+#[must_use]
+pub fn compute_cpr_levels(p_paisa: i64, pdh_paisa: i64, pdl_paisa: i64) -> CprLevels {
+    // Float only here: the midpoint of the two anchors, rounded to whole paisa
+    // exactly like the pivot P (round-half-even == Python round()).
+    let bc_raw = round_half_even((pdh_paisa + pdl_paisa) as f64 / 2.0);
+    let tc_raw = 2 * p_paisa - bc_raw;
+    CprLevels {
+        tc_paisa: tc_raw.max(bc_raw),
+        bc_paisa: tc_raw.min(bc_raw),
+    }
+}
 
 /// The 11 pivot levels (P, R1-R5, S1-S5) + the previous-day OHLC anchors, all
 /// int64 paisa. R5/S5 extend the same linear floor-trader ladder
@@ -107,5 +164,68 @@ mod tests {
         assert!(pv.r4_paisa > pv.r3_paisa);
         assert!(pv.s5_paisa < pv.s4_paisa);
         assert!(pv.s4_paisa < pv.s3_paisa);
+    }
+
+    // ── Central Pivot Range (bits 60-63 support) ───────────────────────────
+
+    #[test]
+    fn cpr_exact_values_on_the_nifty_anchor() {
+        // Hand-derived from the NIFTY 14-May-2026 anchor above:
+        //   P  = round((2_377_715 + 2_342_650 + 2_368_965) / 3)
+        //      = round(7_089_330 / 3) = 2_363_110
+        //   BC = round((2_377_715 + 2_342_650) / 2) = round(4_720_365 / 2)
+        //      = round(2_360_182.5) → half-even → 2_360_182
+        //   TC = 2·2_363_110 − 2_360_182 = 2_366_038  (tc_raw > bc_raw: no swap)
+        let pv = compute_pivot_levels(PDH, PDL, PDC);
+        assert_eq!(pv.p_paisa, 2_363_110);
+        let cpr = compute_cpr_levels(pv.p_paisa, PDH, PDL);
+        assert_eq!(cpr.bc_paisa, 2_360_182);
+        assert_eq!(cpr.tc_paisa, 2_366_038);
+    }
+
+    #[test]
+    fn cpr_canonicalizes_the_inverted_pair() {
+        // A prev-day close BELOW the (PDH+PDL)/2 midpoint inverts the raw pair
+        // (tc_raw < bc_raw) — roughly half of real days. PDC near PDL:
+        //   P  = round((2_377_715 + 2_342_650 + 2_343_000) / 3) = round(7_063_365/3)
+        //      = 2_354_455
+        //   BC_raw = 2_360_182 (midpoint, unchanged)
+        //   TC_raw = 2·2_354_455 − 2_360_182 = 2_348_728 < BC_raw → SWAP.
+        let pdc_low = 2_343_000;
+        let pv = compute_pivot_levels(PDH, PDL, pdc_low);
+        assert_eq!(pv.p_paisa, 2_354_455);
+        let cpr = compute_cpr_levels(pv.p_paisa, PDH, PDL);
+        assert_eq!(cpr.tc_paisa, 2_360_182, "canonical TC = the larger raw leg");
+        assert_eq!(
+            cpr.bc_paisa, 2_348_728,
+            "canonical BC = the smaller raw leg"
+        );
+        assert!(cpr.tc_paisa >= cpr.bc_paisa);
+    }
+
+    #[test]
+    fn cpr_bc_rounding_is_half_even_like_the_pivot_p() {
+        // An odd PDH+PDL sum lands BC on an exact .5 paisa tie — the rounding
+        // must be half-EVEN (Python round()), not half-up: 4_720_365 / 2
+        // = 2_360_182.5 → 2_360_182 (even), never 2_360_183.
+        let cpr = compute_cpr_levels(2_363_110, PDH, PDL);
+        assert_eq!(cpr.bc_paisa, 2_360_182);
+    }
+
+    #[test]
+    fn cpr_degenerate_flat_anchor_collapses_to_a_point() {
+        // PDH == PDL == PDC: P == BC == TC (width 0 — the narrow-CPR extreme).
+        let pv = compute_pivot_levels(1_000_000, 1_000_000, 1_000_000);
+        let cpr = compute_cpr_levels(pv.p_paisa, 1_000_000, 1_000_000);
+        assert_eq!(cpr.tc_paisa, 1_000_000);
+        assert_eq!(cpr.bc_paisa, 1_000_000);
+    }
+
+    #[test]
+    fn narrow_cpr_width_constant_is_the_designed_30_bps() {
+        // The ONE named switch (a future DEC may flip it 30 ↔ 50); the exact
+        // consumption law `(tc − bc)·10_000 <= p·NARROW_CPR_WIDTH_BPS` lives in
+        // `evaluator.rs` Group 13 and is property-pinned in tests/proptests.rs.
+        assert_eq!(NARROW_CPR_WIDTH_BPS, 30);
     }
 }

@@ -29,15 +29,20 @@ from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
 # ── default_condition_bits: correctness ─────────────────────────────────
 
 
-def test_default_includes_new_bits_52_to_59() -> None:
-    """The default sweeps bits 52..59 (VWAP / pivot R5-S5 / BOS-CHoCH).
+def test_default_includes_active_bits_and_excludes_dead_ones() -> None:
+    """The default sweeps the ACTIVE bits 54..63 and NEVER the dead ones.
 
-    Fail-before/pass-after: with the old ``range(52)`` default, none of
-    52..59 was present; the fix derives the default from the vocabulary.
+    The 60→66 reshape: pivot R5/S5 (54/55), BOS/CHoCH (56-59) and the new
+    CPR bits (60-63) are swept by default; the RETIRED VWAP tombstones
+    (52/53) and the declared-only SuperTrend bits (64/65) are excluded —
+    a default sweep must never burn combos on a condition that can never
+    fire.
     """
     bits = cli.default_condition_bits()
-    for new_bit in range(52, 60):
-        assert new_bit in bits, f"bit {new_bit} must be swept by default"
+    for active_bit in range(54, 64):
+        assert active_bit in bits, f"bit {active_bit} must be swept by default"
+    for dead_bit in (52, 53, 64, 65):
+        assert dead_bit not in bits, f"dead bit {dead_bit} must NOT be swept"
 
 
 def test_default_covers_every_implemented_bit() -> None:
@@ -53,13 +58,16 @@ def test_default_is_ascending_and_unique() -> None:
     assert len(bits) == len(set(bits))
 
 
-def test_default_length_matches_total_conditions_when_all_implemented() -> None:
-    """Today every one of the ``TOTAL_CONDITIONS`` bits is implemented."""
+def test_default_length_is_the_62_active_bits() -> None:
+    """The 66-condition layout carries 62 ACTIVE bits — the default grid.
+
+    (The pre-reshape dense-``IMPLEMENTED_MASK`` era swept all 60; the default
+    grid is now C(62, k) — the tombstones/declared-only bits are excluded.)
+    """
     bits = cli.default_condition_bits()
-    # Guard: this equality only holds while IMPLEMENTED_MASK is dense.
-    assert IMPLEMENTED_MASK == (1 << TOTAL_CONDITIONS) - 1
-    assert len(bits) == TOTAL_CONDITIONS
-    assert bits == list(range(TOTAL_CONDITIONS))
+    assert IMPLEMENTED_MASK == ((1 << 64) - 1) ^ (1 << 52) ^ (1 << 53)
+    assert len(bits) == 62
+    assert bits == [*range(52), *range(54, 64)]
 
 
 def test_default_excludes_layout_only_bits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -80,18 +88,28 @@ def test_default_excludes_layout_only_bits(monkeypatch: pytest.MonkeyPatch) -> N
 # ── parser help strings track the count ─────────────────────────────────
 
 
-def test_parser_conditions_help_references_total_conditions() -> None:
-    """Both ``--conditions`` help strings carry the authoritative count."""
+def test_parser_conditions_help_references_the_implemented_count() -> None:
+    """Both ``--conditions`` help strings carry the honest ACTIVE count.
+
+    TOMB-03 companion: the default sweeps the IMPLEMENTED bits (62 on the
+    66-declared layout), so "all {TOTAL} implemented conditions" was a lie by
+    4 — every count is DERIVED (``IMPLEMENTED_MASK.bit_count()`` /
+    ``TOTAL_CONDITIONS``), never a hand-kept literal.
+    """
+    from brutex.vocabulary.bits import IMPLEMENTED_MASK
+
     parser = cli.build_parser()
     hits = 0
     for action in _walk_actions(parser):
         if "--conditions" in action.option_strings:
             hits += 1
             assert action.help is not None
-            assert str(TOTAL_CONDITIONS) in action.help
-            assert str(TOTAL_CONDITIONS - 1) in action.help
-            # The stale "0..51 / all 52" wording must be gone.
+            assert f"all {IMPLEMENTED_MASK.bit_count()} implemented conditions" in action.help
+            assert f"declares {TOTAL_CONDITIONS} bits" in action.help
+            # The stale "0..51 / all 52" wording must be gone — and the help
+            # must never claim the DECLARED count is all implemented.
             assert "0..51" not in action.help
+            assert f"all {TOTAL_CONDITIONS} implemented" not in action.help
     assert hits >= 1, "expected at least one --conditions argument"
 
 
@@ -142,7 +160,7 @@ def test_default_bits_low_k_within_cap() -> None:
 
 
 def test_default_bits_k3_within_cap() -> None:
-    """k=3 over all 60 bits is C(60,3)=34220, still under the 100k cap."""
+    """k=3 over the 62 active bits is C(62,3)=37,820 — still under the 100k cap."""
     n = len(cli.default_condition_bits())
     assert comb(n, 3) <= DEFAULT_MAX_COMBOS
     grid = _grid(k_values=[3])
@@ -150,12 +168,11 @@ def test_default_bits_k3_within_cap() -> None:
 
 
 def test_default_bits_k4_hits_loud_refusal_cap() -> None:
-    """k=4 over all 60 bits is C(60,4)=487635 > 100k → loud refusal.
+    """k=4 over the 62 active bits is C(62,4)=557,845 > 100k → loud refusal.
 
-    The broadened default (52→60) does NOT weaken the safety envelope: the
-    exact same cap that refused C(52,4)=270725 at n=52 refuses C(60,4) at
-    n=60. The refusal is a clear, raise-explicitly ValueError, never a
-    silent blowup.
+    The broadened default does NOT weaken the safety envelope: the exact same
+    cap that refused C(52,4)=270,725 at n=52 refuses C(62,4) at n=62. The
+    refusal is a clear, raise-explicitly ValueError, never a silent blowup.
     """
     n = len(cli.default_condition_bits())
     assert comb(n, 4) > DEFAULT_MAX_COMBOS

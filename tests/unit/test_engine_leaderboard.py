@@ -19,6 +19,7 @@ from brutex.ranking import RankedCombo
 from brutex.vocabulary.bits import (
     BIT_BAR_BULLISH,
     BIT_CLOSE_ABOVE_EMA20,
+    BIT_CLOSE_ABOVE_VWAP,
     BIT_NEAR_FIB_618,
 )
 
@@ -87,6 +88,17 @@ class TestExplainCombos:
 
     def test_empty_input_yields_empty(self) -> None:
         assert explain_combos([]) == []
+
+    def test_pre_reshape_tombstone_bit_reads_retired(self) -> None:
+        # TOMB-01 — a pre-reshape combo carrying the tombstoned VWAP bit 52
+        # renders "(retired)" on the CLI leaderboard, never as a live rule.
+        mask = (1 << BIT_CLOSE_ABOVE_VWAP) | (1 << BIT_CLOSE_ABOVE_EMA20)
+        explained = explain_combos([_ranked(mask)])
+        groups = {g.group: g.conditions for g in explained[0].groups}
+        assert groups["VWAP Position"] == ("close_above_vwap (retired)",)
+        assert groups["EMA Position"] == ("close_above_ema20",)  # live bit plain
+        rendered = render_leaderboard(explained)
+        assert "close_above_vwap (retired)" in rendered
 
 
 class TestRenderLeaderboard:

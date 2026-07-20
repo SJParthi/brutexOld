@@ -8,9 +8,12 @@ built through ONE ``Stage1AMatrixBuilder`` with a ``roll_schedule`` must be
         == concat(build_bar_bits(seg.bars) for seg in segments)``
 
 Validity of the oracle: a fresh builder's constant default session key is
-output-invariant (the VWAP reset predicate keys on key CHANGE, and within one
-segment the schedule key is one constant — pinned by the constant-key
-invariance test in ``tests/unit/test_engine_stage1a.py``), and the
+output-invariant (the roll-boundary reset predicate keys on session-key
+CHANGE — ``_roll_to_new_contract`` fires only when the per-bar schedule key
+moves — and within one segment the schedule key is one constant; pinned by
+the constant-key invariance test in ``tests/unit/test_engine_stage1a.py``;
+the key's former ``VwapState`` consumer was deleted with the bits-52/53
+tombstone — the key now gates ONLY the total hard reset), and the
 ``_roll_to_new_contract`` TOTAL hard reset restores the exact fresh-builder
 state. Any partial-reset mutant (an omitted member in the reset body — EMA,
 market structure, prior history, day extremes, daily history, anchors) breaks

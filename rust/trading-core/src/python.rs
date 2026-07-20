@@ -22,8 +22,7 @@ use crate::indicators::fib::{FibLevels, compute_fib_levels};
 use crate::indicators::market_structure::{
     MarketStructureSignal, MarketStructureState as CoreMarketStructureState,
 };
-use crate::indicators::pivots::{PivotLevels, compute_pivot_levels};
-use crate::indicators::vwap::VwapState as CoreVwapState;
+use crate::indicators::pivots::{NARROW_CPR_WIDTH_BPS, PivotLevels, compute_pivot_levels};
 use crate::spec::{Direction, StrategySpec};
 
 /// Number of `pivot_levels` entries [`evaluate_with_levels`] expects.
@@ -271,7 +270,7 @@ fn check_evaluate_inputs(
 )]
 #[pyo3(signature = (
     tod_seconds, open_paisa, high_paisa, low_paisa, close_paisa,
-    ema20_paisa, ema200_paisa, vwap_paisa, prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa,
+    ema20_paisa, ema200_paisa, prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
@@ -284,7 +283,6 @@ fn evaluate_from_raw(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
-    vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
     prev_pdc_paisa: i64,
@@ -312,7 +310,6 @@ fn evaluate_from_raw(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
-        vwap_paisa,
         prev_pdh_paisa,
         prev_pdl_paisa,
         prev_pdc_paisa,
@@ -348,7 +345,6 @@ fn evaluate_from_raw_impl(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
-    vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
     prev_pdc_paisa: i64,
@@ -365,16 +361,6 @@ fn evaluate_from_raw_impl(
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
     check_prev_day_ohlc(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa)?;
-    // `vwap_paisa` is only compared in the evaluator (never multiplied); bound it
-    // for hygiene alongside the EMAs.
-    if let Some(v) = vwap_paisa
-        && !bar_in_range(v)
-    {
-        return Err(format!(
-            "vwap_paisa magnitude {v} out of the overflow-safe range \
-             [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
-        ));
-    }
     // Also bound every per-bar input the EVALUATOR multiplies/subtracts/`.abs()`es
     // (close × bps, body × 10, (close − day_low) × 3, pdc × 50, …). The
     // recomputed pivot/fib R/S/retrace levels are bounded by the validated anchor
@@ -406,10 +392,6 @@ fn evaluate_from_raw_impl(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
-        // The recompute path now ALSO threads the session VWAP, so the four-way
-        // golden bit-identity (shim == with_levels == from_raw == oracle) holds
-        // for the Group-10 bits too (DEC-NIFTY-INDICATORS-001).
-        vwap_paisa,
         pivots,
         fib,
         day_high_paisa,
@@ -434,9 +416,8 @@ fn evaluate_from_raw_impl(
 ///
 /// `pivot_levels` (len 12) = `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]`.
 /// `fib_levels` (len 15) = `[retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl,
-/// up127, up162, up200, up262, dn127, dn162, dn200, dn262]`. `vwap_paisa` is the
-/// session VWAP (`None` during warm-up / on 1day — the Group-10 bits then do not
-/// fire). The four `bos_*`/`choch_*` booleans are the engine-resolved Group-12
+/// up127, up162, up200, up262, dn127, dn162, dn200, dn262]`.
+/// The four `bos_*`/`choch_*` booleans are the engine-resolved Group-12
 /// market-structure flags (bits 56-59), produced by the stateful look-ahead-clean
 /// `MarketStructureState` and passed verbatim like the resolved `PriorBarHistory`
 /// flags. The struct fields the conditions never read (pivot r4/s4, fib range/424)
@@ -456,7 +437,7 @@ fn evaluate_from_raw_impl(
 )]
 #[pyo3(signature = (
     tod_seconds, open_paisa, high_paisa, low_paisa, close_paisa,
-    ema20_paisa, ema200_paisa, vwap_paisa, pivot_levels, fib_levels,
+    ema20_paisa, ema200_paisa, pivot_levels, fib_levels,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
@@ -469,7 +450,6 @@ fn evaluate_with_levels(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
-    vwap_paisa: Option<i64>,
     pivot_levels: Vec<i64>,
     fib_levels: Vec<i64>,
     day_high_paisa: i64,
@@ -497,7 +477,6 @@ fn evaluate_with_levels(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
-        vwap_paisa,
         pivot_levels,
         fib_levels,
         day_high_paisa,
@@ -532,7 +511,6 @@ fn evaluate_with_levels_impl(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
-    vwap_paisa: Option<i64>,
     pivot_levels: Vec<i64>,
     fib_levels: Vec<i64>,
     day_high_paisa: i64,
@@ -569,18 +547,6 @@ fn evaluate_with_levels_impl(
                  [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
             ));
         }
-    }
-    // `vwap_paisa` is only COMPARED (`close > vwap` / `close < vwap`) in the
-    // evaluator — never multiplied or subtracted — so any i64 is overflow-safe;
-    // we still bound it for hygiene alongside the EMAs (a garbage value is a data
-    // bug, not a valid level).
-    if let Some(v) = vwap_paisa
-        && !bar_in_range(v)
-    {
-        return Err(format!(
-            "vwap_paisa magnitude {v} out of the overflow-safe range \
-             [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
-        ));
     }
     // Bound the per-bar inputs + bps the evaluator multiplies/subtracts/`.abs()`es
     // (`pdc` = pivot_levels[9] is already bar-bounded above).
@@ -652,7 +618,6 @@ fn evaluate_with_levels_impl(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
-        vwap_paisa,
         pivots,
         fib,
         day_high_paisa,
@@ -694,7 +659,7 @@ fn evaluate_with_levels_impl(
 #[pyo3(signature = (
     condition_mask_hex, direction, tod_seconds,
     open_paisa, high_paisa, low_paisa, close_paisa,
-    ema20_paisa, ema200_paisa, vwap_paisa, pivot_levels, fib_levels,
+    ema20_paisa, ema200_paisa, pivot_levels, fib_levels,
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
@@ -709,7 +674,6 @@ fn evaluate_spec(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
-    vwap_paisa: Option<i64>,
     pivot_levels: Vec<i64>,
     fib_levels: Vec<i64>,
     day_high_paisa: i64,
@@ -738,7 +702,6 @@ fn evaluate_spec(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
-        vwap_paisa,
         pivot_levels,
         fib_levels,
         day_high_paisa,
@@ -775,7 +738,6 @@ fn evaluate_spec_impl(
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
-    vwap_paisa: Option<i64>,
     pivot_levels: Vec<i64>,
     fib_levels: Vec<i64>,
     day_high_paisa: i64,
@@ -810,7 +772,6 @@ fn evaluate_spec_impl(
         close_paisa,
         ema20_paisa,
         ema200_paisa,
-        vwap_paisa,
         pivot_levels,
         fib_levels,
         day_high_paisa,
@@ -1269,117 +1230,6 @@ fn py_resolve_near_month(
     )
 }
 
-/// PyO3 handle over the native [`CoreVwapState`] — so BruteX's `stage1a` engine
-/// drives the SHARED Rust session-anchored VWAP per bar (the per-bar compute runs
-/// in Rust, never re-implemented in Python), giving the backtest the bit-identical
-/// VWAP TickVault's native `VwapState` produces (DEC-SHARED-CORE-001 / ADR-0012 D12).
-///
-/// Stateful by design (the running `i128` accumulators ARE the indicator) — held
-/// once per `(instrument, timeframe, contract)` and fed each bar via
-/// [`PyVwapState::update`]. Mirrors the streaming EMA seam, but as a class because
-/// the running sums cannot be a pure step function.
-/// Pure input guard for [`PyVwapState::update`] — `Result<_, String>` (no
-/// `PyErr`) so both branches are unit-covered without a libpython link
-/// (mirrors [`seconds_of_day_impl`]). Enforces:
-///
-/// * `typical_paisa ∈ [0, MAX_BAR_PAISA]` — non-negativity closes the twins'
-///   floor-vs-truncating-division domain hole (Rust i128 `/` truncates toward
-///   zero, Python `//` floors: a negative accumulated `cum_pv` would silently
-///   yield answers one paisa apart), and the ceiling keeps the i128
-///   accumulator provably overflow-free;
-/// * `volume ∈ [-MAX_BAR_PAISA, MAX_BAR_PAISA]` — a non-positive volume is a
-///   VALID skip signal in both twins (never accumulated), so only the
-///   magnitude is bounded.
-fn vwap_update_guard(typical_paisa: i64, volume: i64) -> Result<(), String> {
-    if typical_paisa < 0 {
-        return Err(format!(
-            "typical_paisa ({typical_paisa}) must be non-negative: the \
-             Python/Rust twin identity (truncating vs floor division) holds \
-             only for non-negative typical prices"
-        ));
-    }
-    for (name, value) in [("typical_paisa", typical_paisa), ("volume", volume)] {
-        if !bar_in_range(value) {
-            return Err(format!(
-                "{name} ({value}) out of the overflow-safe range \
-                 [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[pyclass(name = "VwapState", module = "trading_core")]
-struct PyVwapState {
-    inner: CoreVwapState,
-}
-
-#[pymethods]
-impl PyVwapState {
-    /// A fresh, cold (un-warmed) session-anchored VWAP accumulator.
-    #[new]
-    fn new() -> Self {
-        PyVwapState {
-            inner: CoreVwapState::new(),
-        }
-    }
-
-    /// Feed one bar; return the session VWAP in int64 paisa, or `None` while the
-    /// session has no usable (post-09:15, non-zero) volume yet.
-    ///
-    /// Delegates verbatim to the native [`CoreVwapState::update`] — the
-    /// `cum(price·vol)/cum(vol)` math, the 09:15 reset, the auction exclusion and
-    /// the contract-roll reset all execute in Rust. O(1) per bar.
-    ///
-    /// The two i64s that feed the native `i128` accumulators (`cum_pv +=
-    /// typical_paisa·volume`, `cum_vol += volume`) are validated against the
-    /// SAME `MAX_BAR_PAISA` magnitude every sibling FFI entry reuses, BEFORE
-    /// delegating — so a garbage `typical_paisa·volume` product raises a
-    /// catchable `ValueError` instead of overflowing `cum_pv` and tripping the
-    /// native add's `overflow-checks` panic → `abort` (SIGABRT) under
-    /// `panic = "abort"`. With both operands bounded by `MAX_BAR_PAISA`
-    /// (≈ 1.4·10¹⁴), one product is ≤ ≈ 2·10²⁸ and even billions of bars stay
-    /// far inside `i128::MAX` (≈ 1.7·10³⁸). Valid futures bars (paisa + lot
-    /// volume) sit orders of magnitude below the ceiling, so the golden
-    /// VWAP output is byte-unchanged.
-    ///
-    /// `typical_paisa` is additionally required NON-NEGATIVE: the bit-for-bit
-    /// twin identity that was documented against the now-DELETED Python
-    /// `VwapState` (`brutex/indicators/vwap.py`, removed by
-    /// DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001) held only for non-negative
-    /// operands (the native i128 `/` truncates toward zero; Python's `//`
-    /// floors — a negative `cum_pv` would have silently diverged by one
-    /// paisa). A negative typical is not a real price (HLC3 of positive
-    /// prices), so the guard REMAINS at this now-single-source boundary: it
-    /// raises `ValueError` exactly as both twins did while the twin lived,
-    /// keeping the domain hole CLOSED.
-    #[pyo3(signature = (typical_paisa, volume, is_pre_open, session_key, session_day, tod_seconds))]
-    fn update(
-        &mut self,
-        typical_paisa: i64,
-        volume: i64,
-        is_pre_open: bool,
-        session_key: u64,
-        session_day: i64,
-        tod_seconds: u32,
-    ) -> PyResult<Option<i64>> {
-        vwap_update_guard(typical_paisa, volume).map_err(PyValueError::new_err)?;
-        Ok(self.inner.update(
-            typical_paisa,
-            volume,
-            is_pre_open,
-            session_key,
-            session_day,
-            tod_seconds,
-        ))
-    }
-
-    /// The current session VWAP (paisa), or `None` if no volume has been counted.
-    fn current(&self) -> Option<i64> {
-        self.inner.current()
-    }
-}
-
 /// PyO3 handle over the native [`CoreMarketStructureState`] — so BruteX's `stage1a`
 /// engine drives the SHARED Rust BOS/CHoCH detector per bar (the look-ahead-clean
 /// fractal-swing compute runs in Rust, never re-implemented in Python), giving the
@@ -1519,10 +1369,7 @@ fn py_greeks(
 ///   product check. The running day extremes / open-of-day the batch core
 ///   derives are max/min folds of these SAME bar values, so bounding the bar
 ///   values bounds them; the bar's own high/low/open stand in for the
-///   day-extreme slots and the bar's day row supplies the REAL `pdc`;
-/// * every bar's VWAP operands ride [`vwap_update_guard`] (non-negative
-///   typical + `MAX_BAR_PAISA` magnitudes — the same i128-accumulator
-///   envelope the `VwapState` pyclass enforces).
+///   day-extreme slots and the bar's day row supplies the REAL `pdc`.
 ///
 /// Structure is validated FIRST (`stage1a_batch::validate_structure`) so the
 /// per-bar day-row indexing below can never go out of bounds; any `Err` maps
@@ -1582,14 +1429,13 @@ fn check_stage1a_batch_values(
             inp.pdh_pdl_bps,
             inp.fib_bps,
         )?;
-        vwap_update_guard(inp.typical_paisa[i], inp.volume[i])?;
     }
     Ok(())
 }
 
 /// Batch Stage-1A bar-bits — one call per `(instrument, tf)` build
 /// (DEC-STAGE1A-RUST-BATCH-001; the batch twin of the per-bar
-/// [`evaluate_with_levels`] + `VwapState.update` + `MarketStructureState.update`
+/// [`evaluate_with_levels`] + `MarketStructureState.update`
 /// FFI chain `Stage1AMatrixBuilder.push` drives today).
 ///
 /// The columns/tables are prepass-RESOLVED by
@@ -1604,11 +1450,11 @@ fn check_stage1a_batch_values(
 #[expect(
     clippy::too_many_arguments,
     reason = "flat column ABI for the batch Stage-1A binding \
-              (precedent: evaluate_with_levels carries 22)"
+              (precedent: evaluate_with_levels carries 21)"
 )]
 #[pyo3(signature = (
-    open_paisa, high_paisa, low_paisa, close_paisa, typical_paisa,
-    volume, tod_seconds, pre_open, session_key, session_day, contract_reset, day_index,
+    open_paisa, high_paisa, low_paisa, close_paisa,
+    tod_seconds, contract_reset, day_index,
     ema20_paisa, ema200_paisa, day_pivot_levels, day_fib_levels, day_has_pivot, day_has_fib,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n,
     anchor_dependent_mask, fib_dependent_mask, applies_to_1day_mask,
@@ -1619,12 +1465,7 @@ fn stage1a_bar_bits_batch(
     high_paisa: Vec<i64>,
     low_paisa: Vec<i64>,
     close_paisa: Vec<i64>,
-    typical_paisa: Vec<i64>,
-    volume: Vec<i64>,
     tod_seconds: Vec<u32>,
-    pre_open: Vec<bool>,
-    session_key: Vec<u64>,
-    session_day: Vec<i64>,
     contract_reset: Vec<bool>,
     day_index: Vec<u32>,
     ema20_paisa: Vec<Option<i64>>,
@@ -1651,12 +1492,7 @@ fn stage1a_bar_bits_batch(
         high_paisa: &high_paisa,
         low_paisa: &low_paisa,
         close_paisa: &close_paisa,
-        typical_paisa: &typical_paisa,
-        volume: &volume,
         tod_seconds: &tod_seconds,
-        pre_open: &pre_open,
-        session_key: &session_key,
-        session_day: &session_day,
         contract_reset: &contract_reset,
         day_index: &day_index,
         ema20_paisa: &ema20_paisa,
@@ -1730,6 +1566,7 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GREEKS_IV_CLAMP_MAX", IV_CLAMP_MAX)?;
     m.add("GREEKS_DELTA_ADMISSION_FLOOR", DELTA_ADMISSION_FLOOR)?;
     m.add("GREEKS_VEGA_ADMISSION_FLOOR", VEGA_ADMISSION_FLOOR)?;
+    m.add("NARROW_CPR_WIDTH_BPS", NARROW_CPR_WIDTH_BPS)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(total_conditions, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_from_raw, m)?)?;
@@ -1751,7 +1588,10 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stage1a_bar_bits_batch, m)?)?;
     // DEC-GREEKS-RUST-BATCH-001 additive registration (fenced block above).
     m.add_function(wrap_pyfunction!(py_greeks_batch, m)?)?;
-    m.add_class::<PyVwapState>()?;
+    // NOTE (merge-reconcile, DEC-VOCAB-66-RESHAPE-IMPL-001): main's
+    // `PyVwapState` registration is NOT taken — the class was DELETED with the
+    // bits-52/53 tombstone (the VWAP/volume wipe), so registering it would not
+    // compile. greeks_batch (DEC-GREEKS-RUST-BATCH-001) is kept intact.
     m.add_class::<PyMarketStructureState>()?;
     Ok(())
 }
@@ -1907,7 +1747,6 @@ mod tests {
             PDC, // open/high/low/close
             Some(PDC),
             Some(PDC), // ema20/ema200
-            Some(PDC), // vwap
             pdh,
             pdl,
             pdc,
@@ -1964,7 +1803,6 @@ mod tests {
             close,
             ema20,
             ema200,
-            None, // vwap (the Group-10 bits are not under test here)
             PDH,
             PDL,
             PDC, // VALID anchor
@@ -2076,60 +1914,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_impl_rejects_out_of_range_vwap() {
-        // A garbage session VWAP (PR-2) is rejected on BOTH the recompute path …
-        let big = MAX_BAR_PAISA + 1;
-        let err = evaluate_from_raw_impl(
-            10 * 3600,
-            PDC,
-            PDH,
-            PDL,
-            PDC,
-            None,
-            None,
-            Some(big), // vwap out of range
-            PDH,
-            PDL,
-            PDC,
-            PDH,
-            PDL,
-            PDC,
-            10,
-            10,
-            10,
-            0,
-            vec![],
-            MarketStructureSignal::default(),
-        )
-        .unwrap_err();
-        assert!(err.contains("vwap_paisa magnitude"), "got: {err}");
-        // … and the pre-built-levels path.
-        let err = evaluate_with_levels_impl(
-            10 * 3600,
-            PDC,
-            PDH,
-            PDL,
-            PDC,
-            None,
-            None,
-            Some(big), // vwap out of range
-            vec![0i64; PIVOT_LEVELS_LEN],
-            vec![0i64; FIB_LEVELS_LEN],
-            PDH,
-            PDL,
-            PDC,
-            10,
-            10,
-            10,
-            0,
-            vec![],
-            MarketStructureSignal::default(),
-        )
-        .unwrap_err();
-        assert!(err.contains("vwap_paisa magnitude"), "got: {err}");
-    }
-
-    #[test]
     fn raw_impl_rejects_close_times_bps_overflow() {
         // A big close (at the bar ceiling) × a big-but-in-cap bps overflows i64 —
         // the `checked_mul` guard rejects it (the close × bps DoS the reviewer
@@ -2228,7 +2012,6 @@ mod tests {
             PDC,
             Some(PDC),
             Some(PDC),
-            Some(PDC), // vwap_paisa
             pivots,
             fibs,
             PDH,
@@ -2293,7 +2076,6 @@ mod tests {
             0,
             None,
             None,
-            None, // vwap_paisa
             ok_p.clone(),
             ok_f.clone(),
             0,
@@ -2317,7 +2099,6 @@ mod tests {
             MAX_BAR_PAISA, // close
             None,
             None,
-            None, // vwap_paisa
             ok_p,
             ok_f,
             0,
@@ -2387,7 +2168,6 @@ mod tests {
                 PDC,
                 None,
                 None,
-                None,
                 PDH,
                 PDL,
                 PDC,
@@ -2410,7 +2190,6 @@ mod tests {
                 PDH,
                 PDL,
                 PDC,
-                None,
                 None,
                 None,
                 vec![PDC; PIVOT_LEVELS_LEN],
@@ -2459,7 +2238,6 @@ mod tests {
                 pdc,
                 Some(pdc),
                 Some(pdc),
-                Some(pdc), // vwap
                 pdh,
                 pdl,
                 pdc,
@@ -2496,7 +2274,6 @@ mod tests {
             PDC, // open/high/low/close
             Some(PDC),
             Some(PDC), // ema20/ema200
-            None,      // vwap
             // pivot_levels [p,r1,r2,r3,s1,s2,s3,pdh,pdl,pdc,r5,s5]
             vec![PDC, PDC, PDC, PDC, PDC, PDC, PDC, PDH, PDL, PDC, PDC, PDC],
             // fib_levels (15)
@@ -2546,9 +2323,13 @@ mod tests {
 
     #[test]
     fn spec_impl_rejects_a_reserved_bit() {
-        // Bit 60 is the first reserved/un-evaluated bit.
-        let reserved = 1u128 << 60;
-        let err = spec_eval(&format!("{reserved:032x}"), 0).unwrap_err();
+        // Bit 64 (Supertrend) is declared LAYOUT-ONLY (implemented=false).
+        let declared_only = 1u128 << 64;
+        let err = spec_eval(&format!("{declared_only:032x}"), 0).unwrap_err();
+        assert!(err.contains("unimplemented/reserved"), "got: {err}");
+        // The tombstoned VWAP bit 52 is equally refused (the wipe).
+        let tombstone = 1u128 << 52;
+        let err = spec_eval(&format!("{tombstone:032x}"), 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
     }
 
@@ -2569,7 +2350,6 @@ mod tests {
             PDH,
             PDL,
             PDC,
-            None,
             None,
             None,
             vec![0i64; 3], // wrong pivot_levels length
@@ -2776,33 +2556,6 @@ mod tests {
         assert!(is_expiry);
     }
 
-    // ── vwap_update_guard (the twins' non-negative-typical boundary) ───────
-
-    #[test]
-    fn vwap_update_guard_rejects_negative_typical() {
-        // The floor-vs-trunc domain hole: (-7, 1) then (0, 1) gave Rust -3 vs
-        // Python -4 pre-guard. Negative typical is now rejected OUTRIGHT.
-        let err = vwap_update_guard(-7, 1).unwrap_err();
-        assert!(err.contains("non-negative"), "got: {err}");
-        assert!(vwap_update_guard(-1, 1).is_err());
-        assert!(vwap_update_guard(i64::MIN, 1).is_err());
-    }
-
-    #[test]
-    fn vwap_update_guard_magnitude_ceiling_and_valid_domain() {
-        // Ceiling still enforced on both operands (the i128-overflow guard).
-        let t = vwap_update_guard(MAX_BAR_PAISA + 1, 1).unwrap_err();
-        assert!(t.contains("typical_paisa"), "got: {t}");
-        let v = vwap_update_guard(0, MAX_BAR_PAISA + 1).unwrap_err();
-        assert!(v.contains("volume"), "got: {v}");
-        assert!(vwap_update_guard(0, -(MAX_BAR_PAISA + 1)).is_err());
-        // Valid domain: zero typical, negative volume (a skip signal), ceiling.
-        assert!(vwap_update_guard(0, 0).is_ok());
-        assert!(vwap_update_guard(0, -5).is_ok());
-        assert!(vwap_update_guard(MAX_BAR_PAISA, MAX_BAR_PAISA).is_ok());
-        assert!(vwap_update_guard(24_000_00, 100).is_ok());
-    }
-
     // ── PyMarketStructureState swing-level getters ─────────────────────
     // (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 — the additive read-only
     // introspection the Python-side P-06 + golden-replay suites consume.)
@@ -2947,7 +2700,7 @@ mod tests {
             ).is_ok());
             // … and a full valid-anchor evaluate runs without panic.
             let mask = evaluate_from_raw_impl(
-                10 * 3600, open, high, low, close, Some(close), Some(close), Some(close),
+                10 * 3600, open, high, low, close, Some(close), Some(close),
                 1_010_000, 990_000, 1_000_000, day_high, day_low, open_of_day,
                 bps, bps, bps, 0, vec![],
                 MarketStructureSignal::default(),
@@ -3001,28 +2754,6 @@ mod tests {
             crate::indicators::metadata::resolve_near_month(739_798, 739_797, 739_825)
         );
         assert_eq!(rolled, 739_825);
-    }
-
-    #[test]
-    fn wrapper_vwap_state_plain_surface_delegates_byte_identically() {
-        // `PyVwapState::new` (returns Self) and `current` (returns Option<i64>)
-        // are PyErr-free and Rust-callable; `update` returns `PyResult` and is
-        // link-untestable (see the section header), so both states are warmed
-        // through the SAME native core math and `current` is pinned. Kills
-        // `current -> None | Some(0) | Some(1) | Some(-1)`.
-        let mut py_state = PyVwapState::new();
-        let mut core = CoreVwapState::new();
-        assert_eq!(
-            py_state.inner.update(10_000, 100, false, 1, 1, 34_200),
-            core.update(10_000, 100, false, 1, 1, 34_200)
-        );
-        assert_eq!(
-            py_state.inner.update(20_000, 300, false, 1, 1, 34_260),
-            core.update(20_000, 300, false, 1, 1, 34_260)
-        );
-        // (10_000·100 + 20_000·300) / 400 = 17_500 — outside every constant.
-        assert_eq!(py_state.current(), core.current());
-        assert_eq!(py_state.current(), Some(17_500));
     }
 
     #[test]
@@ -3108,12 +2839,7 @@ mod tests {
             high_paisa: &[high],
             low_paisa: &[low],
             close_paisa: &[close],
-            typical_paisa: &[close.max(0)],
-            volume: &[0], // zero volume: VWAP stays None (the per-bar impl parity)
             tod_seconds: &[tod],
-            pre_open: &[false],
-            session_key: &[0],
-            session_day: &[738_000],
             contract_reset: &[false],
             day_index: &[0],
             ema20_paisa: &[ema20],
@@ -3183,7 +2909,6 @@ mod tests {
                 close,
                 ema20,
                 ema200,
-                None, // zero volume in the batch fixture ⇒ VWAP None
                 pivot_row.to_vec(),
                 fib_row.to_vec(),
                 high,
@@ -3279,41 +3004,6 @@ mod tests {
     }
 
     #[test]
-    fn stage1a_batch_values_rejects_negative_typical_via_vwap_guard() {
-        let inputs = crate::stage1a_batch::Stage1aBatchInputs {
-            open_paisa: &[10_000],
-            high_paisa: &[10_100],
-            low_paisa: &[9_900],
-            close_paisa: &[10_050],
-            typical_paisa: &[-1],
-            volume: &[100],
-            tod_seconds: &[34_000],
-            pre_open: &[false],
-            session_key: &[0],
-            session_day: &[738_000],
-            contract_reset: &[false],
-            day_index: &[0],
-            ema20_paisa: &[None],
-            ema200_paisa: &[None],
-            day_pivot_levels: &[0; 12],
-            day_fib_levels: &[0; 15],
-            day_has_pivot: &[false],
-            day_has_fib: &[false],
-            pivot_bps: 10,
-            pdh_pdl_bps: 10,
-            fib_bps: 10,
-            prior_n: 3,
-            fractal_k: 2,
-            apply_1day_mask: false,
-            anchor_dependent_mask: 0,
-            fib_dependent_mask: 0,
-            applies_to_1day_mask: IMPLEMENTED_MASK,
-        };
-        let err = check_stage1a_batch_values(&inputs).unwrap_err();
-        assert!(err.contains("typical_paisa"), "got: {err}");
-    }
-
-    #[test]
     fn stage1a_batch_values_propagates_structural_errors() {
         // Structure runs FIRST — a day-index desync errs before any value
         // guard could index out of bounds.
@@ -3322,12 +3012,7 @@ mod tests {
             high_paisa: &[10_100],
             low_paisa: &[9_900],
             close_paisa: &[10_050],
-            typical_paisa: &[10_017],
-            volume: &[100],
             tod_seconds: &[34_000],
-            pre_open: &[false],
-            session_key: &[0],
-            session_day: &[738_000],
             contract_reset: &[false],
             day_index: &[7],
             ema20_paisa: &[None],
@@ -3366,12 +3051,7 @@ mod tests {
             high_paisa: &[10_100, 10_120],
             low_paisa: &[9_900, 9_920],
             close_paisa: &[10_050, 10_070],
-            typical_paisa: &[10_017, 10_037],
-            volume: &[100, 100],
             tod_seconds: &[34_000, 34_000],
-            pre_open: &[false, false],
-            session_key: &[0, 0],
-            session_day: &[738_000, 738_001],
             contract_reset: &[false, false],
             day_index: &[0, 1],
             ema20_paisa: &[None, None],

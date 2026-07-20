@@ -12,8 +12,10 @@ existing file without ``BRUTEX_REGEN_STAGE1A_BATCH_GOLDEN=1``.
 Feed: a 6-trading-day, 2-roll futures stream (three 2-day contracts with a
 basis bump per roll — a superset of the design's named 3-day/2-roll shape so
 WARM anchors, EMA(20) warm-up completion and the D11 hard reset are all
-inside the frozen corpus), 26 volume-bearing bars per day driving the VWAP +
-BOS/CHoCH state machines through real signal, with DIRECTION-VARIED opens
+inside the frozen corpus), 26 bars per day driving the
+BOS/CHoCH state machine through real signal (the VWAP state died with the
+bits-52/53 tombstone at crate 0.4.0 — the schema-v2 fixture drops the five
+retired columns), with DIRECTION-VARIED opens
 (prev-close continuation clamped into range; each day's first bar a doji) so
 the Group-6 prior-flag deque is genuinely exercised — refuter RF-B F1
 regenerated the fixture from this fixed derivation (the original collapsed
@@ -56,7 +58,8 @@ _DAYS: tuple[date, ...] = (
 )
 
 #: The (h, l, c) day script from the roll golden's B1 fire-test — fires the
-#: VWAP-position + BOS/CHoCH bits within one 26-bar day.
+#: BOS/CHoCH bits within one 26-bar day (it also fired the VWAP bits before
+#: their retirement).
 _HLC_SCRIPT: tuple[tuple[int, int, int], ...] = (
     (100, 90, 95),
     (95, 85, 90),
@@ -135,18 +138,17 @@ def generate() -> dict[str, object]:
     inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
     masks = Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
     return {
-        "schema": "stage1a-batch-golden-v1",
+        # v2: the 60→66 reshape — the five retired VWAP-feed columns
+        # (typical_paisa / volume / pre_open / session_key / session_day)
+        # are GONE from the batch ABI; masks may carry the CPR bits 60-63
+        # and never the tombstones 52/53.
+        "schema": "stage1a-batch-golden-v2",
         "columns": {
             "open_paisa": inputs.open_paisa,
             "high_paisa": inputs.high_paisa,
             "low_paisa": inputs.low_paisa,
             "close_paisa": inputs.close_paisa,
-            "typical_paisa": inputs.typical_paisa,
-            "volume": inputs.volume,
             "tod_seconds": inputs.tod_seconds,
-            "pre_open": inputs.pre_open,
-            "session_key": inputs.session_key,
-            "session_day": inputs.session_day,
             "contract_reset": inputs.contract_reset,
             "day_index": inputs.day_index,
             "ema20_paisa": inputs.ema20_paisa,

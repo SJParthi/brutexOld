@@ -3,7 +3,7 @@
 Two REAL end-to-end proofs on top of the unit/property/golden layers:
 
 * **Fire-test flag-ON twin** — the B1 engineered script that fires all six
-  resurrected bits (VWAP 52-53 + BOS/CHoCH 56-59) through the real ``push()``
+  stateful bits (BOS/CHoCH 56-59; the VWAP pair 52-53 retired) through the real ``push()``
   path fires them IDENTICALLY through the flag-ON batch arm.
 * **The G-5 second half** — a REAL 2-worker SPAWN ``run_parallel_grid`` with
   ``BRUTEX_SWEEP_RUST_STAGE1A=1`` produces a byte-identical results tree to
@@ -45,10 +45,11 @@ def _fresh_seam_state(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyp
     reset_observability_memo_for_tests()
 
 
-def test_fire_script_six_bits_fire_identically_flag_on(
+def test_fire_script_structure_bits_fire_identically_flag_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bits 52-53 + 56-59 fire at the SAME bars under the batch arm."""
+    """Bits 56-59 fire at the SAME bars under the batch arm; the RETIRED VWAP
+    tombstones (52/53) fire on NEITHER arm (the 60→66 reshape)."""
     from brutex.vocabulary import bits as B
 
     bars = [_bar(m, h, low, c) for m, (h, low, c) in enumerate(_HLC_SCRIPT)]
@@ -59,8 +60,6 @@ def test_fire_script_six_bits_fire_identically_flag_on(
     assert [e for e in logs if e.get("event") == "rust_stage1a.engaged"]
     assert batch_masks == push_masks
     for bit in (
-        B.BIT_CLOSE_ABOVE_VWAP,
-        B.BIT_CLOSE_BELOW_VWAP,
         B.BIT_BOS_BULLISH,
         B.BIT_BOS_BEARISH,
         B.BIT_CHOCH_BULLISH,
@@ -69,6 +68,8 @@ def test_fire_script_six_bits_fire_identically_flag_on(
         fired = _fired_bits(batch_masks, bit)
         assert fired, f"bit {bit} never fired on the batch arm"
         assert fired == _fired_bits(push_masks, bit)
+    tombstones = (1 << B.BIT_CLOSE_ABOVE_VWAP) | (1 << B.BIT_CLOSE_BELOW_VWAP)
+    assert all((m & tombstones) == 0 for m in batch_masks)
 
 
 @pytest.mark.slow

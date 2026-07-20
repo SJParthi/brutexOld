@@ -66,7 +66,7 @@ class UnderlyingSpec:
     ----------
     reference_only
         When True (India VIX), the instrument is fetched + stored but is
-        NEVER part of brute-force pattern combinations or the 52-condition
+        NEVER part of brute-force pattern combinations or the shared condition
         vocabulary. It is captured as ``vix_at_entry`` / ``vix_at_exit``
         snapshots on every trade for downstream filter analysis.
     """
@@ -269,7 +269,7 @@ def is_reference_only(instrument: Instrument) -> bool:
 
     DEC-NIFTY-TOTAL-MARKET-REFTAG-001 (Stage 2b PR-2): the explicit
     REFERENCE_ONLY tier — fetched + stored for context, but NEVER part of the
-    brute-force engine or the 52-condition vocabulary. Today this is exactly
+    brute-force engine or the shared condition vocabulary. Today this is exactly
     India VIX (the only ``UnderlyingSpec`` with ``reference_only=True``); the
     later Stage-2b sub-PRs widen it to the admitted non-F&O NIFTY-Total-Market
     constituents. This is the single, unified encoding of "reference-only" — it

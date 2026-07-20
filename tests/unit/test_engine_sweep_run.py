@@ -2392,9 +2392,10 @@ class TestResidentKernelRollScheduleMismatch:
     def test_kernel_built_with_other_1day_mask_flag_raises(self, tmp_path: Path) -> None:
         # The D12 twin (review round-1 finding 5): a hand-built kernel whose
         # ``apply_1day_mask`` flag disagrees with the tuple's derived flag
-        # carries bar_bits with the intraday-only bits (ToD 44-47 / VWAP
-        # 52-53) wrongly set/cleared — fail-fast, exactly like the schedule
-        # guard (unreachable via the production cache, whose key contains
+        # carries bar_bits with the intraday-only bits (ToD 44-47; the
+        # RETIRED VWAP tombstones 52/53 are always 0 regardless) wrongly
+        # set/cleared — fail-fast, exactly like the schedule guard
+        # (unreachable via the production cache, whose key contains
         # instrument+tf, the flag's only inputs).
         from brutex.engine.stage1a import apply_1day_mask_for
 

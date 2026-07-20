@@ -147,6 +147,43 @@ def test_parse_condition_ids_out_of_range() -> None:
         cli.parse_condition_ids("-1")
 
 
+def test_parse_condition_ids_refuses_a_retired_tombstone_bit() -> None:
+    """TOMB-03 — a saved pre-reshape script's ``--conditions 52`` is refused
+    LOUDLY, naming the bit, its name and its RETIRED status + the DEC family.
+
+    Fail-before/pass-after: pre-fix bits 52/53 (in-layout, evaluator emits a
+    constant 0) sailed into the grid — hours of silent dead compute the
+    results store would happily persist (it admits every declared bit)."""
+    with pytest.raises(cli.CliUserError) as excinfo:
+        cli.parse_condition_ids("0,52")
+    message = str(excinfo.value)
+    assert "bit 52" in message
+    assert "close_above_vwap" in message
+    assert "RETIRED" in message
+    assert "DEC-ENGINE-SPOT-ONLY-001" in message
+    with pytest.raises(cli.CliUserError, match="close_below_vwap.*RETIRED|RETIRED"):
+        cli.parse_condition_ids("53")
+
+
+def test_parse_condition_ids_refuses_a_declared_unimplemented_bit() -> None:
+    """G-U64U12-02/G-RETROT-03 — the layout-only SuperTrend bits (64/65) are
+    refused as declared-but-NOT-YET-implemented (never 'retired'), naming the
+    bit + name + the grow-only DEC family."""
+    with pytest.raises(cli.CliUserError) as excinfo:
+        cli.parse_condition_ids("64")
+    message = str(excinfo.value)
+    assert "bit 64" in message
+    assert "close_above_supertrend" in message
+    assert "NOT YET" in message and "RETIRED" not in message
+    assert "DEC-VOCAB-U128-CODEGEN-001" in message
+
+
+def test_parse_condition_ids_accepts_the_implemented_boundaries() -> None:
+    """Bits 59 (BOS/CHoCH edge) and 63 (narrow_cpr_day — the u64 sign bit)
+    are implemented and must stay accepted."""
+    assert cli.parse_condition_ids("59,63") == [59, 63]
+
+
 def test_sweep_bad_conditions_via_main(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """``sweep --conditions 0,notabit`` exits 1 cleanly; no lake is conjured."""
     lake = tmp_path / "lake"

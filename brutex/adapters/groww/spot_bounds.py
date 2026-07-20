@@ -28,7 +28,7 @@ alias is kept because the spine + ledger signatures still accept the opt-in map
 Scope (CLAUDE.md §3)
 --------------------
 This lives in the adapter/data layer and NEVER touches the brute-force engine or
-the 52-condition vocabulary.
+the shared condition vocabulary.
 """
 
 from __future__ import annotations

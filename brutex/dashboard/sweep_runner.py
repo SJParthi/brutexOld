@@ -98,7 +98,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.universe import ENGINE_SWEEP_SPOT_TRIPLES
-from brutex.vocabulary.bits import TOTAL_CONDITIONS
+from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -163,11 +163,14 @@ DEFAULT_START: Final[str] = "2020-01-01"
 
 #: Accepted direction tokens (upper-cased before the check).
 _DIRECTIONS: Final[frozenset[str]] = frozenset({"BUY", "SELL"})
-#: Max conditions-per-combo K — the engine bounds ``k`` by the unique condition
-#: count, which is the full 60-condition vocabulary by default (SweepGridConfig
-#: docstring; ``TOTAL_CONDITIONS`` is the one source of truth, so a future
-#: vocab growth moves this bound automatically — DEC-VOCAB-U128-CODEGEN-001).
-_MAX_K: Final[int] = TOTAL_CONDITIONS
+#: Max conditions-per-combo K — the route sweeps the DEFAULT condition set
+#: (``default_condition_bits()`` = every IMPLEMENTED bit), so ``k`` is bounded
+#: by the IMPLEMENTED count (62 on the 66-condition layout), not the declared
+#: layout width: a ``k`` above it can never form a combo (``C(62, 63) = 0`` —
+#: an empty-grid illusion, G-RETROT-08). ``IMPLEMENTED_MASK`` is the one
+#: source of truth, so vocab growth moves this bound automatically
+#: (DEC-VOCAB-U128-CODEGEN-001).
+_MAX_K: Final[int] = IMPLEMENTED_MASK.bit_count()
 
 #: ``symbol -> canonical exchange`` for the 3 brute-force spot indexes,
 #: derived from the ONE canonical
@@ -300,7 +303,7 @@ def _normalise_directions(value: str | None) -> str:
 
 
 def _normalise_k(value: str | None) -> str:
-    """Validate K: the ``extinction`` token OR ints in ``[1, TOTAL_CONDITIONS]``.
+    """Validate K: the ``extinction`` token OR ints in ``[1, _MAX_K]``.
 
     DEC-SWEEP-APRIORI-DEFAULT-001: a blank field falls to :data:`DEFAULT_K`
     (the extinction token — the CLI default), which flows verbatim through the
@@ -336,13 +339,15 @@ def _validate_k_against_max_combos(k_tokens: Sequence[str]) -> None:
     A round-12 adversarial-refuter review found the SAME "preflight says
     ok, engine construction says no" failure mode round 11 fixed for SL/TP
     also applies to ``k``: ``build_sweep_kwargs`` always passes
-    ``conditions=None`` (the full :data:`TOTAL_CONDITIONS`-bit vocabulary)
-    and ``max_combos=None`` (→ the engine's
+    ``conditions=None`` (the IMPLEMENTED condition set —
+    ``default_condition_bits()``, :data:`_MAX_K` = 62 bits on the
+    66-declared layout, NEVER the declared width) and ``max_combos=None``
+    (→ the engine's
     :data:`~brutex.engine.sweep_driver.DEFAULT_MAX_COMBOS` = 100,000), so
     :meth:`~brutex.engine.sweep_orchestrator.SweepGridConfig.__post_init__`
-    rejects any ``k`` whose ``C(TOTAL_CONDITIONS, k)`` mask count exceeds
-    that cap — e.g. ``k=4`` alone enumerates ``C(60,4) = 487,635`` masks.
-    ``_normalise_k`` only checked ``k`` was in the raw ``[1, 60]`` RANGE,
+    rejects any ``k`` whose ``C(_MAX_K, k)`` mask count exceeds
+    that cap — e.g. ``k=4`` alone enumerates ``C(62,4) = 557,845`` masks.
+    ``_normalise_k`` only checked ``k`` was in the raw ``[1, _MAX_K]`` RANGE,
     never against this cap, so a single-tuple launch (too small for the
     SLA wall-clock guard to ever catch) could preflight `ok: true` — the
     preflight's OWN estimator even correctly reports the true, over-cap
@@ -359,17 +364,17 @@ def _validate_k_against_max_combos(k_tokens: Sequence[str]) -> None:
     ValueError
         If any ``k`` enumerates more than
         :data:`~brutex.engine.sweep_driver.DEFAULT_MAX_COMBOS` masks over
-        the full :data:`TOTAL_CONDITIONS`-bit vocabulary.
+        the IMPLEMENTED condition set (:data:`_MAX_K` bits).
     """
     from brutex.engine.combo_mask import count_combos
     from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
 
     for token in k_tokens:
         k = int(token)
-        n_masks = count_combos(k, TOTAL_CONDITIONS)
+        n_masks = count_combos(k, _MAX_K)
         if n_masks > DEFAULT_MAX_COMBOS:
             raise ValueError(
-                f"k={k} enumerates {n_masks} masks (C({TOTAL_CONDITIONS},{k})) "
+                f"k={k} enumerates {n_masks} masks (C({_MAX_K},{k})) "
                 f"exceeding the engine's max_combos={DEFAULT_MAX_COMBOS} — the dashboard "
                 f"has no override for this ceiling; choose a smaller k"
             )
@@ -657,8 +662,8 @@ def build_sweep_kwargs(
 
     A pure 1:1 mapping (the request is already validated). The non-swept knobs
     are pinned to the INSTITUTIONAL dashboard defaults (R5, gap-hunt BLOCKER
-    #1): ``conditions=None`` (the full 60-condition vocabulary —
-    ``default_condition_bits()``), ``options_sim=False`` (signal-only —
+    #1): ``conditions=None`` (the full IMPLEMENTED condition vocabulary —
+    ``default_condition_bits()``, 62 bits on the 66-declared layout), ``options_sim=False`` (signal-only —
     options are R12, parked), ``overfit_gate=True`` + ``stage3_enable=True``
     (the 5 hard gates → composite ranking → Stage-3 CMA-ES refinement chain
     ON by default — EXCEPT when either SL/TP leg carries a ``none`` cell

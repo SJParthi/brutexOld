@@ -46,7 +46,7 @@ def test_dual_label_dict_covers_every_one_of_the_60_names() -> None:
     without a Pro+Simple label, this test FAILS — no silent gaps.
     """
     assert set(CONDITION_LABELS.keys()) == set(NAME_TO_BIT.keys())
-    assert len(CONDITION_LABELS) == TOTAL_CONDITIONS == 60
+    assert len(CONDITION_LABELS) == TOTAL_CONDITIONS == 66
 
 
 def test_every_label_is_a_nonempty_pro_and_simple_pair() -> None:
@@ -56,8 +56,8 @@ def test_every_label_is_a_nonempty_pro_and_simple_pair() -> None:
         assert simple.strip(), name
 
 
-def test_group_order_partitions_all_60_names_exactly() -> None:
-    """The four sentence groups partition all 60 names exactly once.
+def test_group_order_partitions_every_declared_name_exactly() -> None:
+    """The four sentence groups partition all 66 declared names exactly once.
 
     A name not in any group would be silently dropped from the sentence; this
     proves every condition contributes to the composed sentence.
@@ -85,13 +85,16 @@ def test_golden_operator_example() -> None:
     assert isinstance(exp, ComboExplanation)
     assert exp.direction_label == "Buy"
     assert exp.regime_label == "uptrend"
+    # The VWAP member renders its RETIRED label (bits 52/53 are tombstones;
+    # an OLD artifact's mask still decodes honestly, never live-sounding).
     assert exp.simple_sentence == (
-        "Buy on 15m when trend is up, price beats the day's average price, "
-        "at a ceiling (resistance), at the halfway bounce zone, "
+        "Buy on 15m when trend is up, price beats the day's average price "
+        "(retired condition), at a ceiling (resistance), at the halfway bounce zone, "
         "trend just flipped up and first hour (uptrend)."
     )
     assert exp.pro_sentence == (
-        "Buy 15m [uptrend]: EMA20>EMA200, close>VWAP, near R1, Fib 50%, CHoCH↑ and early morning."
+        "Buy 15m [uptrend]: EMA20>EMA200, close>VWAP (retired), near R1, Fib 50%, "
+        "CHoCH↑ and early morning."
     )
 
     # Per-condition labels — in ascending bit order.
@@ -103,8 +106,8 @@ def test_golden_operator_example() -> None:
         ConditionLabel(
             52,
             "close_above_vwap",
-            "close>VWAP",
-            "price beats the day's average price",
+            "close>VWAP (retired)",
+            "price beats the day's average price (retired condition)",
         ),
         ConditionLabel(58, "choch_bullish", "CHoCH↑", "trend just flipped up"),
     )

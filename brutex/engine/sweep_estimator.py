@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Final
 
 from brutex.engine.combo_mask import count_combos
 from brutex.engine.estimator_calibration import EstimatorCalibration
-from brutex.vocabulary.bits import TOTAL_CONDITIONS
+from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CALIBRATED_BASIS",
     "PROVISIONAL_BASIS",
+    "SWEPT_CONDITIONS",
     "VWAP_DEAD_BITS",
     "EstimatorEstimate",
     "count_true_trials",
@@ -60,15 +61,37 @@ CALIBRATED_BASIS: Final[str] = "calibrated"
 #: real smoke run calibrates it).
 PROVISIONAL_BASIS: Final[str] = "provisional"
 
+#: The number of IMPLEMENTED (sweepable) conditions — the estimator's default
+#: vocabulary size. A one-click launch always passes ``conditions=None``,
+#: which the engine resolves to ``default_condition_bits()`` == every
+#: IMPLEMENTED bit — 62 on the 66-declared layout
+#: (DEC-VOCAB-66-RESHAPE-IMPL-001): tombstoned/layout-only bits are NEVER
+#: swept, so sizing ``C(n, k)`` off the declared width would overstate every
+#: trial/ETA/byte projection. ``IMPLEMENTED_MASK`` is the one source of
+#: truth, so vocab growth moves this automatically
+#: (DEC-VOCAB-U128-CODEGEN-001).
+SWEPT_CONDITIONS: Final[int] = IMPLEMENTED_MASK.bit_count()
+
 #: The two VWAP-position vocabulary bits (`brutex.vocabulary.bits` 52/53) that
 #: are structurally DEAD (can never fire) on zero-volume INDEX-segment spot
-#: candles — gap-hunt finding #8 (VWAP dead-bits, "60 vs 58" effective
-#: condition count). EXCLUDE-vs-FLAG is an operator decision still queued
-#: (ruling #8) — this module DEFAULTS to flag-and-run: the nominal 60-bit
+#: candles — gap-hunt finding #8 (VWAP dead-bits, the original "60 vs 58"
+#: effective condition count). EXCLUDE-vs-FLAG was an operator decision still
+#: queued (ruling #8) — this module DEFAULTS to flag-and-run: the nominal
 #: vocabulary is NEVER reduced here (:func:`count_true_trials` always sweeps
 #: the FULL requested condition set), :func:`effective_condition_count`
 #: merely surfaces the honest effective-vs-nominal count for display.
+#: RESHAPE NOTE (DEC-VOCAB-66-RESHAPE-IMPL-001): bits 52/53 are now
+#: TOMBSTONED — outside :data:`IMPLEMENTED_MASK`, never swept on ANY
+#: segment — so the annotation subtracts only dead bits that are STILL
+#: IMPLEMENTED (currently none: effective == nominal everywhere). The
+#: mechanism is retained so a future volume-dependent implemented bit
+#: revives the honest INDEX-segment annotation automatically.
 VWAP_DEAD_BITS: Final[frozenset[int]] = frozenset({52, 53})
+
+#: The implemented bit POSITIONS (for the dead-bit ∩ implemented law above).
+_IMPLEMENTED_BIT_SET: Final[frozenset[int]] = frozenset(
+    i for i in range(IMPLEMENTED_MASK.bit_length()) if IMPLEMENTED_MASK >> i & 1
+)
 
 #: Segments whose spot candles are volume=0 by construction (index segment —
 #: gap-hunt finding #8's "zero-volume (INDEX-segment) selection").
@@ -128,7 +151,7 @@ class EstimatorEstimate:
         calibrated/provisional discriminator.
     nominal_condition_count
         The full vocabulary size the selection nominally sweeps (before any
-        dead-bit accounting) — normally :data:`~brutex.vocabulary.bits.TOTAL_CONDITIONS`.
+        dead-bit accounting) — normally :data:`SWEPT_CONDITIONS`.
     effective_condition_count
         The count of conditions that can ever actually FIRE for this
         selection — less than *nominal_condition_count* when the selection is
@@ -161,7 +184,7 @@ def count_true_trials(
     k_values: Sequence[int],
     *,
     other_axes_product: int,
-    n: int = TOTAL_CONDITIONS,
+    n: int = SWEPT_CONDITIONS,
 ) -> int:
     """Return the TRUE trial count for a selection — see the module docstring.
 
@@ -177,7 +200,8 @@ def count_true_trials(
         fib-anchors (i.e. :func:`~brutex.engine.sweep_orchestrator.count_sweep_tuples`'s
         full product with the ``k`` axis divided back out).
     n
-        The condition vocabulary size (default :data:`TOTAL_CONDITIONS`).
+        The condition vocabulary size (default :data:`SWEPT_CONDITIONS` —
+        the IMPLEMENTED count; tombstoned bits are never swept).
 
     Raises
     ------
@@ -192,24 +216,28 @@ def count_true_trials(
     return sum(count_combos(k, n) for k in k_values) * other_axes_product
 
 
-def effective_condition_count(*, segment: str, n: int = TOTAL_CONDITIONS) -> tuple[int, int]:
+def effective_condition_count(*, segment: str, n: int = SWEPT_CONDITIONS) -> tuple[int, int]:
     """Return ``(nominal, effective)`` condition counts for *segment* — gap-hunt #8.
 
-    ``effective < nominal`` iff *segment* is a zero-volume INDEX segment,
-    in which case the VWAP-position bits (:data:`VWAP_DEAD_BITS`) can never
-    fire and are honestly reported as dead — flag-and-run (the operator's
-    exclude-vs-flag decision is still open; this module never excludes them
-    from the swept vocabulary, only annotates).
+    ``effective < nominal`` iff *segment* is a zero-volume INDEX segment
+    AND some :data:`VWAP_DEAD_BITS` member is still IMPLEMENTED (sweepable):
+    such a bit can never fire on zero-volume data and is honestly reported
+    as dead — flag-and-run (this module never excludes it from the swept
+    vocabulary, only annotates). On the 66-declared layout the VWAP bits are
+    TOMBSTONED (outside :data:`~brutex.vocabulary.bits.IMPLEMENTED_MASK` —
+    never swept at all), so the subtraction is currently zero on every
+    segment; the mechanism self-revives if a volume-dependent bit ever
+    returns to the implemented set.
 
     Parameters
     ----------
     segment
         The lake segment of the launch (e.g. ``"INDEX"``, ``"FNO"``).
     n
-        The nominal vocabulary size (default :data:`TOTAL_CONDITIONS`).
+        The nominal vocabulary size (default :data:`SWEPT_CONDITIONS`).
     """
     if segment.upper() in _ZERO_VOLUME_SEGMENTS:
-        return n, n - len(VWAP_DEAD_BITS)
+        return n, n - len(VWAP_DEAD_BITS & _IMPLEMENTED_BIT_SET)
     return n, n
 
 
@@ -221,7 +249,7 @@ def estimate_sweep_cost(
     top: int,
     segment: str,
     calibration: EstimatorCalibration,
-    n: int = TOTAL_CONDITIONS,
+    n: int = SWEPT_CONDITIONS,
 ) -> EstimatorEstimate:
     """Compose the full R20 estimator verdict for one selection.
 
@@ -243,7 +271,8 @@ def estimate_sweep_cost(
     calibration
         The resolved calibration reading.
     n
-        The condition vocabulary size (default :data:`TOTAL_CONDITIONS`).
+        The condition vocabulary size (default :data:`SWEPT_CONDITIONS` —
+        the IMPLEMENTED count; tombstoned bits are never swept).
 
     Raises
     ------

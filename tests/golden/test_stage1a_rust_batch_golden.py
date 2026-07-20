@@ -82,7 +82,7 @@ def test_two_day_hand_derived_golden_flag_on() -> None:
     with capture_logs() as logs:
         masks = build_bar_bits([_DAY1, _DAY2])
     _assert_engaged(logs)
-    assert masks == [3298534883328, 303483462918144]  # the frozen literals
+    assert masks == [3298534883328, 10376597024924540928]  # the frozen literals
 
 
 def test_nifty_day_golden_manifest_flag_on() -> None:
@@ -104,8 +104,8 @@ def test_futures_roll_golden_fixture_flag_on() -> None:
         masks = build_bar_bits(_stitched_bars(), roll_schedule=_ROLL_SCHEDULE)
     _assert_engaged(logs)
     fixture = _load_fixture()
-    assert masks == fixture["masks"]  # the byte-untouched frozen matrix
-    n_pre = len(_HLC_SCRIPT)
+    assert masks == fixture["masks"]  # the frozen v2 matrix (3-day reshape regen)
+    n_pre = 2 * len(_HLC_SCRIPT)  # the pre-roll contract runs TWO script days
     assert masks[n_pre - 1] == _EXPECTED_LAST_PRE_ROLL_MASK
     assert masks[n_pre] == _EXPECTED_FIRST_POST_ROLL_MASK
 

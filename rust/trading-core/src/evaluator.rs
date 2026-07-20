@@ -4,9 +4,12 @@
 //! Pure function of its inputs (int64 paisa), no state, no allocation: the same
 //! code path serves the BruteX backtest (via PyO3, Phase 2) and the TickVault
 //! live tick path (native). Returns a `u128` mask (the mask is u128 for headroom
-//! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); all 60 IMPLEMENTED bits
-//! (0..=59) can now fire. PR-2 added the VWAP position (bits 52-53) and pivot
-//! R5/S5 proximity (bits 54-55) branches; DEC-NIFTY-BOS-CHOCH-001 added the
+//! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); every IMPLEMENTED bit
+//! (0..=51, 54..=63) can fire — bits 52-53 are the TOMBSTONED VWAP positions
+//! (the VWAP/volume wipe: the engine is spot-only and spot indices carry no
+//! volume, so the VWAP math was DELETED; the positions are held forever per
+//! the grow-only law and the evaluator emits 0 for them). PR-2 added the pivot
+//! R5/S5 proximity (bits 54-55) branch; DEC-NIFTY-BOS-CHOCH-001 added the
 //! BOS/CHoCH branch (bits 56-59) — the four booleans are RESOLVED upstream by the
 //! stateful, look-ahead-clean `indicators::market_structure::MarketStructureState`
 //! and threaded in via the snapshot exactly like the resolved `PriorBarHistory`
@@ -16,7 +19,7 @@
 use crate::bits;
 use crate::indicators::fib::FibLevels;
 use crate::indicators::market_structure::MarketStructureSignal;
-use crate::indicators::pivots::PivotLevels;
+use crate::indicators::pivots::{NARROW_CPR_WIDTH_BPS, PivotLevels, compute_cpr_levels};
 
 // Time-of-day cutoffs, in seconds since IST midnight (mirrors evaluator.py:116-120).
 const EARLY_MORNING_START: u32 = 9 * 3600 + 16 * 60; // 09:16
@@ -50,10 +53,6 @@ pub struct IndicatorSnapshot {
     pub close_paisa: i64,
     pub ema20_paisa: Option<i64>,
     pub ema200_paisa: Option<i64>,
-    /// Session-anchored intraday VWAP (paisa). `None` during the warm-up bar and
-    /// on the 1day timeframe (ADR-0012 D12 — VWAP is intraday-only/NA on 1day),
-    /// so the Group-10 bits simply do not fire.
-    pub vwap_paisa: Option<i64>,
     pub pivots: PivotLevels,
     pub fib: FibLevels,
     pub day_high_paisa: i64,
@@ -127,8 +126,11 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
 
 /// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
 ///
-/// All 60 IMPLEMENTED bits (0..=59) can fire; the BOS/CHoCH bits (56..=59) read
-/// the resolved `snapshot.market_structure` flags (DEC-NIFTY-BOS-CHOCH-001).
+/// Every IMPLEMENTED bit (0..=51, 54..=63) can fire — the tombstoned VWAP
+/// positions 52-53 are never set (their math was deleted; grow-only law). The
+/// BOS/CHoCH bits (56..=59) read the resolved `snapshot.market_structure`
+/// flags (DEC-NIFTY-BOS-CHOCH-001); the CPR bits (60..=63) derive from the
+/// SAME prev-day pivot anchor as Groups 2/3/9.
 #[must_use]
 pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
     let mut mask: u128 = 0;
@@ -367,22 +369,11 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
         mask |= bit(bits::BIT_OUTSIDE_DAY);
     }
 
-    // ── Group 10: VWAP Position (bits 52-53) ──
-    // Session-anchored intraday futures VWAP (ADR-0012 D12). `None` during the
-    // warm-up bar (no post-09:15 volume yet) AND on the 1day timeframe (a session
-    // VWAP is degenerate with one bar/session) — so the bit simply does not fire,
-    // mirroring the EMA warm-up `if let Some(..)` pattern. The running VWAP math
-    // (cum(price·vol)/cum(vol), reset at 09:15 IST, auction-volume excluded, i128
-    // accumulators, reset on contract roll) lives in the stateful
-    // `indicators::vwap::VwapState`; the evaluator only reads the resolved level.
-    if let Some(vwap) = s.vwap_paisa {
-        if close > vwap {
-            mask |= bit(bits::BIT_CLOSE_ABOVE_VWAP);
-        }
-        if close < vwap {
-            mask |= bit(bits::BIT_CLOSE_BELOW_VWAP);
-        }
-    }
+    // ── Group 10: VWAP Position (bits 52-53) — TOMBSTONED ──
+    // The VWAP/volume wipe: the engine is spot-only (DEC-ENGINE-SPOT-ONLY-001)
+    // and spot indices carry no traded volume, so the session-VWAP math was
+    // DELETED. Bits 52-53 keep their positions forever (grow-only law) and are
+    // NEVER set — `non_implemented_bits_are_always_clear` pins them clear.
 
     // ── Group 11: Pivot Proximity Extended (R5/S5, bits 54-55) ──
     // R5/S5 extend the standard floor-trader pivot ladder past R4/S4
@@ -414,6 +405,35 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     }
     if ms.choch_bearish {
         mask |= bit(bits::BIT_CHOCH_BEARISH);
+    }
+
+    // ── Group 13: Central Pivot Range (bits 60-63) ──
+    // CPR from the SAME prev-day OHLC anchor the pivots use (the Muhurat-safe
+    // #1616 anchor carries through automatically): BC = round_half_even((PDH +
+    // PDL)/2), TC = 2·P − BC on the ALREADY-ROUNDED pivot P (never re-derived
+    // from rounded R/S rungs), canonicalized tc >= bc — `compute_cpr_levels`.
+    // Bits 60/61 are strict, 62 is the inclusive band: with tc >= bc the three
+    // form an EXACT PARTITION of any close (property-pinned). Bit 63 fires iff
+    // the band is at or under NARROW_CPR_WIDTH_BPS of P — evaluated in i128 so
+    // the products are total for ANY i64 inputs (the from_raw anchor ceiling
+    // `i64::MAX / 8` would overflow the i64 `width * 10_000` product). A cold
+    // (no-prev-day) anchor is handled UPSTREAM by the anchor-dependent clear —
+    // exactly like the Group-3/9 comparison bits (never fabricated to output).
+    let cpr = compute_cpr_levels(pv.p_paisa, pv.pdh_paisa, pv.pdl_paisa);
+    if close > cpr.tc_paisa {
+        mask |= bit(bits::BIT_ABOVE_CPR_TC);
+    }
+    if close < cpr.bc_paisa {
+        mask |= bit(bits::BIT_BELOW_CPR_BC);
+    }
+    if close >= cpr.bc_paisa && close <= cpr.tc_paisa {
+        mask |= bit(bits::BIT_INSIDE_CPR);
+    }
+    if pv.p_paisa > 0
+        && (i128::from(cpr.tc_paisa) - i128::from(cpr.bc_paisa)) * 10_000
+            <= i128::from(pv.p_paisa) * i128::from(NARROW_CPR_WIDTH_BPS)
+    {
+        mask |= bit(bits::BIT_NARROW_CPR_DAY);
     }
 
     mask

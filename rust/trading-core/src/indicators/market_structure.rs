@@ -49,7 +49,7 @@
 //! references a swing whose confirmation would need a bar `> N`. The current
 //! bar's own level is NEVER treated as a confirmed swing — only a strictly
 //! past, fully-windowed bar is. This is structurally identical to the existing
-//! streaming indicators (`VwapState`, `DayExtremesState`): bars are fed once, in
+//! streaming indicators (e.g. `DayExtremesState`): bars are fed once, in
 //! arrival order, and nothing in the future is read.
 //!
 //! ## O(1) per bar (CLAUDE.md Rule #5)

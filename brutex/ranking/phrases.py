@@ -1,4 +1,4 @@
-"""The R33 dual-language trade-reason table — FIXED, hand-written, 60 entries.
+"""The R33 dual-language trade-reason table — FIXED, hand-written, 66 entries.
 
 DEC-SWEEP-RESULTS-DEPTH-001 (WP3). Every trade/combo shows WHY it entered in
 BOTH modes — technical (``PDH_CROSS_UP ∧ CLOSE>R2``-style condition names)
@@ -9,7 +9,7 @@ mask's fired-bit count (bench-pinned).
 
 ## The table's provenance + drift guards
 
-One frozen literal tuple of exactly ``TOTAL_CONDITIONS`` (60)
+One frozen literal tuple of exactly ``TOTAL_CONDITIONS`` (66)
 :class:`PhraseEntry` rows, ``bit == index``. Each ``plain`` phrase was
 hand-written ONCE from the condition's authoritative semantics — the
 ``description`` field of ``rust/trading-core/conditions.toml`` (the SINGLE
@@ -20,6 +20,17 @@ Import-time :func:`check_phrase_invariants` cross-pins every ``name``
 against the generated :data:`brutex.vocabulary.bits.NAME_TO_BIT` (the
 ``describe._check_group_invariants`` precedent), so a vocabulary
 renumber/rename can never silently desynchronise the phrases.
+
+## ONE vocabulary, two surfaces
+
+The technical leg must list exactly the names
+:mod:`brutex.vocabulary.describe` decodes, in the same order — so
+:func:`reason_for_mask` routes every fired bit's technical token through
+the ONE :func:`brutex.vocabulary.describe.condition_display_name`
+authority (a RETIRED tombstone bit reads ``"<name> (retired)"``, TOMB-01),
+never a second copy of the suffix rule. The TABLE keeps the RAW
+vocabulary names (the import-time ``NAME_TO_BIT`` cross-pin demands the
+exact generated token); the suffix is applied at assembly time.
 
 Bits at or above ``TOTAL_CONDITIONS`` (reserved u128 headroom) are IGNORED
 by :func:`reason_for_mask` — the :mod:`brutex.vocabulary.describe`
@@ -33,6 +44,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from brutex.vocabulary.bits import NAME_TO_BIT, TOTAL_CONDITIONS
+from brutex.vocabulary.describe import condition_display_name
 
 __all__ = [
     "PHRASE_TABLE",
@@ -59,7 +71,7 @@ class PhraseEntry:
     plain: str
 
 
-#: The FIXED 60-entry phrase table (R33) — ``bit == index``, import-validated.
+#: The FIXED 66-entry phrase table (R33) — ``bit == index``, import-validated.
 PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
     # ── EMA Position (bits 0-5) ──
     PhraseEntry(0, "close_above_ema20", "the candle closed above its 20-period average price"),
@@ -144,16 +156,21 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
     ),
     PhraseEntry(50, "inside_day", "the day's range stayed inside the previous day's range"),
     PhraseEntry(51, "outside_day", "the day's range engulfed the previous day's range"),
-    # ── VWAP Position (bits 52-53) ──
+    # ── VWAP Position (bits 52-53) — RETIRED tombstones: the positions are
+    # held forever but the evaluator never sets them (the VWAP/volume wipe;
+    # the spot-only engine has no traded volume). The phrases stay honest
+    # should an OLD artifact's mask carry them.
     PhraseEntry(
         52,
         "close_above_vwap",
-        "price was above the session's volume-weighted average price (VWAP)",
+        "price was above the session's volume-weighted average price (VWAP; retired "
+        "condition — never fires on current runs)",
     ),
     PhraseEntry(
         53,
         "close_below_vwap",
-        "price was below the session's volume-weighted average price (VWAP)",
+        "price was below the session's volume-weighted average price (VWAP; retired "
+        "condition — never fires on current runs)",
     ),
     # ── Pivot Proximity Extended (bits 54-55) ──
     PhraseEntry(54, "near_pivot_r5", "price was near resistance level R5"),
@@ -174,6 +191,34 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
         59,
         "choch_bearish",
         "the trend flipped downward after a rising sequence (bearish change of character)",
+    ),
+    # ── Central Pivot Range (bits 60-63) ──
+    PhraseEntry(60, "above_cpr_tc", "the candle closed above the Central Pivot Range's top (TC)"),
+    PhraseEntry(
+        61, "below_cpr_bc", "the candle closed below the Central Pivot Range's bottom (BC)"
+    ),
+    PhraseEntry(
+        62, "inside_cpr", "the candle closed inside the Central Pivot Range (between BC and TC)"
+    ),
+    PhraseEntry(
+        63,
+        "narrow_cpr_day",
+        "the day's Central Pivot Range was narrow (a tight coil, often before a big move)",
+    ),
+    # ── Supertrend (bits 64-65) — declared layout-only (implemented=false):
+    # the math lands in a later PR, so these bits never fire today. The
+    # phrases exist because the table must cover every declared bit.
+    PhraseEntry(
+        64,
+        "close_above_supertrend",
+        "the candle closed above the SuperTrend line (declared condition — math "
+        "not yet active, never fires on current runs)",
+    ),
+    PhraseEntry(
+        65,
+        "close_below_supertrend",
+        "the candle closed below the SuperTrend line (declared condition — math "
+        "not yet active, never fires on current runs)",
     ),
 )
 
@@ -235,9 +280,14 @@ _CONDITION_MASK: Final[int] = (1 << TOTAL_CONDITIONS) - 1
 def reason_for_mask(mask: int) -> ReasonText:
     """Assemble the dual-language reason for *mask* — pure lookup, O(k) fired bits.
 
-    ``technical`` joins the vocabulary names with ``" ∧ "`` in ascending bit
-    order; ``plain`` joins the hand-written phrases with ``"; and "`` (the
-    design B7 assembly law). Bits ``>= TOTAL_CONDITIONS`` are ignored
+    ``technical`` joins the vocabulary DISPLAY names with ``" ∧ "`` in
+    ascending bit order — each name via the ONE
+    :func:`brutex.vocabulary.describe.condition_display_name` authority, so
+    a RETIRED tombstone bit (e.g. the VWAP bits 52/53 an OLD artifact's mask
+    may carry) reads ``"<name> (retired)"`` exactly as
+    ``describe.matched_condition_names`` decodes it (one vocabulary, two
+    surfaces); ``plain`` joins the hand-written phrases with ``"; and "``
+    (the design B7 assembly law). Bits ``>= TOTAL_CONDITIONS`` are ignored
     (reserved headroom — the ``describe`` forward-compat contract); a mask
     with zero fired condition bits returns two empty strings.
 
@@ -254,7 +304,7 @@ def reason_for_mask(mask: int) -> ReasonText:
     while fired:
         bit = (fired & -fired).bit_length() - 1
         entry = PHRASE_TABLE[bit]
-        names.append(entry.name)
+        names.append(condition_display_name(bit))
         plains.append(entry.plain)
         fired &= fired - 1
     return ReasonText(technical=" ∧ ".join(names), plain="; and ".join(plains))

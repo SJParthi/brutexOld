@@ -21,7 +21,7 @@ Promoted invariants
 * **P-24** — the per-mask superset count is independent of bar/worker
   evaluation order and is additive across any partition of the bars
   (``count_supermasks`` Rust kernel == the pure-numpy reference).
-* **P-25** — the 52-condition vocabulary contains NO India-VIX bit
+* **P-25** — the shared condition vocabulary contains NO India-VIX bit
   (VIX is REFERENCE-ONLY per CLAUDE.md §2 Rule 3); it cannot leak into a
   pattern mask by construction.
 * **P-19** — the Parquet writer is deterministic: writing identical bars
@@ -255,12 +255,12 @@ def test_p_24_supermask_count_order_and_partition_invariant(
 
 
 # ────────────────────────────────────────────────────────────────────
-# P-25 — VIX never appears in the 52-condition vocabulary
+# P-25 — VIX never appears in the shared condition vocabulary
 # ────────────────────────────────────────────────────────────────────
 def test_p_25_vocabulary_has_no_vix_bit() -> None:
     """P-25: India-VIX is REFERENCE-ONLY (CLAUDE.md §2 Rule 3) — no atomic
     condition references it, so a generated pattern mask cannot leak VIX."""
-    assert TOTAL_CONDITIONS == 60  # grow-only: 52 + 8 new layout-only bits (ADR-0012 D4)
+    assert TOTAL_CONDITIONS == 66  # grow-only: 52 + 8 (ADR-0012 D4) + 6 (the 60→66 reshape)
     assert len(ALL_CONDITION_NAMES) == TOTAL_CONDITIONS
     assert set(NAME_TO_BIT) == set(ALL_CONDITION_NAMES)
     # The bit map is a dense 0..TOTAL-1 bijection.
