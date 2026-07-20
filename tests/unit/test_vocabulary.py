@@ -482,14 +482,26 @@ class TestConflicts:
         # DEC-STAGE1B-CONFLICT-FIX-001) + 4 verified candle conflicts +
         # 3 CPR partition pairs (the 60→66 reshape — bits 60/61/62 are an
         # exact partition) + 1 SuperTrend strict-inequality pair (64, 65)
-        # (the vocab-66 implemented-flip, crate 0.5.0) = 30.
-        assert len(CONFLICT_PAIRS) == 30
+        # (the vocab-66 implemented-flip, crate 0.5.0) + the Group-15
+        # gap-midpoint above/below pair (DEC-GAP-MIDPOINT-CONDITIONS-001)
+        # = 31.
+        assert len(CONFLICT_PAIRS) == 31
 
     def test_cpr_partition_pairs_present(self) -> None:
         # The three CPR position bits are pairwise mutually exclusive.
         assert (B.BIT_ABOVE_CPR_TC, B.BIT_BELOW_CPR_BC) in CONFLICT_PAIRS
         assert (B.BIT_ABOVE_CPR_TC, B.BIT_INSIDE_CPR) in CONFLICT_PAIRS
         assert (B.BIT_BELOW_CPR_BC, B.BIT_INSIDE_CPR) in CONFLICT_PAIRS
+
+    def test_gap_mid_above_below_is_a_registered_conflict(self) -> None:
+        # DEC-GAP-MIDPOINT-CONDITIONS-001: strictly-above and strictly-below
+        # the gap-midpoint level cannot co-fire; near_gap_mid is deliberately
+        # NOT conflicting with either (the PDH/PDL co-fire convention).
+        assert (B.BIT_CLOSE_ABOVE_GAP_MID, B.BIT_CLOSE_BELOW_GAP_MID) in CONFLICT_PAIRS
+        mask = (1 << B.BIT_CLOSE_ABOVE_GAP_MID) | (1 << B.BIT_CLOSE_BELOW_GAP_MID)
+        assert has_conflict(mask)
+        assert not has_conflict((1 << B.BIT_CLOSE_ABOVE_GAP_MID) | (1 << B.BIT_NEAR_GAP_MID))
+        assert not has_conflict((1 << B.BIT_CLOSE_BELOW_GAP_MID) | (1 << B.BIT_NEAR_GAP_MID))
 
 
 # ────── Look-ahead invariant ──────
@@ -877,18 +889,22 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
     """Pin the EXACT intraday-only bit set masked out on 1day (ADR-0012 D12).
 
     ``IMPLEMENTED_MASK & ~APPLIES_TO_1DAY_MASK`` must equal exactly the four
-    Time-of-Day bits 44-47 — built from the named BIT_* constants, never magic
+    Time-of-Day bits 44-47 PLUS the three Gap-Midpoint bits 66-68
+    (DEC-GAP-MIDPOINT-CONDITIONS-001 — the session-edge level degenerates when
+    the bar IS the session) — built from the named BIT_* constants, never magic
     numbers — so the bits.py comment can never drift from the constant again
     (DEC-CORP-ACTION-GATE-001 doc-drift fold). The tombstoned VWAP bits 52-53
     left IMPLEMENTED_MASK with the 66-bit reshape (they stay outside
-    APPLIES_TO_1DAY_MASK too, pinned below), so the implemented∖1day residue
-    is the ToD quartet alone.
+    APPLIES_TO_1DAY_MASK too, pinned below), so they are NOT in this residue.
     """
     expected_cleared = (
         (1 << B.BIT_EARLY_MORNING)
         | (1 << B.BIT_MID_MORNING)
         | (1 << B.BIT_MIDDAY)
         | (1 << B.BIT_AFTERNOON)
+        | (1 << B.BIT_CLOSE_ABOVE_GAP_MID)
+        | (1 << B.BIT_CLOSE_BELOW_GAP_MID)
+        | (1 << B.BIT_NEAR_GAP_MID)
     )
     assert expected_cleared == B.IMPLEMENTED_MASK & ~B.APPLIES_TO_1DAY_MASK
     # The tombstoned VWAP pair sits outside BOTH masks (never 1day-enabled).

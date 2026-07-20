@@ -142,6 +142,14 @@ impl StrategySpec {
     /// two runs that mean the same strategy hash identically (Golden Rule #4/#7).
     /// `prior_n` is encoded as a fixed `u64` (not the platform-sized `usize`) so
     /// the bytes are identical on a 32-bit and a 64-bit target.
+    ///
+    /// FROZEN at [`SPEC_SCHEMA_VERSION`] = 1: exactly THREE proximity bps are
+    /// encoded — `gap_mid_proximity_bps` (DEC-GAP-MIDPOINT-CONDITIONS-001) is
+    /// deliberately NOT here (every pre-gap run_id stays byte-identical);
+    /// BruteX carries a swept non-default value in run identity via the
+    /// default-omit `canonical_trade_params` key instead (the
+    /// DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override-1 pattern). Growing this
+    /// layout requires a coordinator-brokered `SPEC_SCHEMA_VERSION` bump.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + 16 + 1 + 24 + 8 + 4);
@@ -246,6 +254,7 @@ mod tests {
             pivot_proximity_bps: 50,
             pdh_pdl_proximity_bps: 10,
             fib_proximity_bps: 25,
+            gap_mid_proximity_bps: crate::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS,
         }
     }
 
@@ -309,6 +318,7 @@ mod tests {
             open_of_day_paisa: 1_000_000,
             market_structure: MarketStructureSignal::default(),
             supertrend_x2_paisa: None,
+            gap_mid_paisa: None,
         }
     }
 
@@ -357,8 +367,9 @@ mod tests {
 
     #[test]
     fn new_rejects_a_reserved_bit() {
-        // Bit 66 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 66).
-        let reserved = 1u128 << 66;
+        // Bit 69 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 69
+        // since DEC-GAP-MIDPOINT-CONDITIONS-001 appended the gap trio at 66-68).
+        let reserved = 1u128 << 69;
         let err = StrategySpec::new(reserved, Direction::Long, proximity(), 1, 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
         // Bits 52/53 (VWAP) are TOMBSTONED — refused too (the wipe).
@@ -404,6 +415,7 @@ mod tests {
                 pivot_proximity_bps: 51,
                 pdh_pdl_proximity_bps: 10,
                 fib_proximity_bps: 25,
+                gap_mid_proximity_bps: crate::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS,
             },
             2,
             1,
@@ -511,6 +523,33 @@ mod tests {
         let back: StrategySpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.condition_mask, mask);
         assert_eq!(back.canonical_bytes(), spec.canonical_bytes());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_pre_gap_spec_json_loads_the_default_gap_bps() {
+        // Back-compat law (DEC-GAP-MIDPOINT-CONDITIONS-001): a spec serialized
+        // BEFORE the gap_mid_proximity_bps field existed must deserialize with
+        // the 10-bps default — old TickVault spec JSON stays readable and
+        // evaluates exactly as it always did.
+        let pre_gap_json = r#"{
+            "condition_mask": "0000000000000000000000000000001f",
+            "direction": "Long",
+            "proximity": {
+                "pivot_proximity_bps": 50,
+                "pdh_pdl_proximity_bps": 10,
+                "fib_proximity_bps": 25
+            },
+            "prior_n": 3,
+            "symbol_id": 1
+        }"#;
+        let spec: StrategySpec = serde_json::from_str(pre_gap_json).expect("pre-gap JSON loads");
+        assert_eq!(
+            spec.proximity.gap_mid_proximity_bps,
+            crate::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS
+        );
+        // …and the FROZEN v1 encode is unaffected by the defaulted field.
+        assert_eq!(spec.canonical_bytes().len(), 57);
     }
 
     #[cfg(feature = "serde")]

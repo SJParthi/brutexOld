@@ -18,7 +18,26 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #1807 —
+_Last updated: 2026-07-17 (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 —
+the sweep vocabulary GROWS 66 → 69: Group 15 "Gap Midpoint" (bits 66-68
+`close_above_gap_mid` / `close_below_gap_mid` / `near_gap_mid`) — the per-TF
+SESSION-EDGE gap-midpoint level `(X1+X2)/2` (X1 = the prior session's LAST
+completed TF bar's extreme, X2 = today's FIRST; direction = the exact sign of
+open − pdc; round_half_even; zero gap ⇒ no level), armed FROM BAR 2 of each
+session (also the load-bearing 1day abstain), Muhurat X1-skip + contract-roll
+D11 reset; single-source math in the shared crate
+(`indicators/gap_mid.rs::compute_gap_mid` + the thin Python delegator); FFI
+appended-last WITH defaults on all three evaluator faces + the Rust Stage-1A
+batch twin in lockstep; crate 0.4.0 → 0.4.1 so every NEW run re-keys via
+indicator_version. ENGINE VOCABULARY GROWN 66→69 (additive on top of the
+#1804 reshape — every EXISTING mask's results BYTE-IDENTICAL, the frozen
+sweep-run goldens measured unchanged; bits 66-68 are the FIRST IMPLEMENTED
+bits ≥ 64, so this DEC lands AFTER PR #1574 AND the vocab-66 track's PR-B,
+which owns the u128-regime machinery); NIFTY/BANKNIFTY/SENSEX scope +
+rate/lake/schema untouched; TickVault coordination flagged per
+DEC-SHARED-CORE-001. The per-item record lives in the §1 Active-branch blurb
++ MIGRATION.md #1901 — this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #1807 —
 the SuperTrend conditions go LIVE on bits 64/65: the vocab-66 layout's reserved
 pair flips implemented (ATR-10/factor-3 Pine-v6-parity integer state in the
 shared trading-core crate; ×2-scaled paisa, 9 warm-up Nones, strict-inequality
@@ -3947,7 +3966,85 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/vocab66-supertrend-flip` (**DEC-SUPERTREND-CONDITIONS-001,
+- **Active branch:** `claude/gap-midpoint-conditions` (**DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901** —
+  the sweep vocabulary GROWS 66 → 69: Group 15 "Gap Midpoint" — bits 66 `close_above_gap_mid` /
+  67 `close_below_gap_mid` / 68 `near_gap_mid` — the per-TF SESSION-EDGE gap-midpoint level
+  `(X1+X2)/2` decoded from the ES Trading Academy spreadsheet (the same academy whose charts ground
+  the bullish fib ladder, DEC-FIB-BULLISH-RETRACE-001) and generalized per the operator steer: each
+  sweep TF anchors on its OWN session-edge candles — X1 = the prior session's LAST completed TF
+  bar's extreme, X2 = TODAY's FIRST completed TF bar's extreme; direction = the EXACT sign of
+  (open_of_day − pdc) — gap-UP mints the HIGHs' round_half_even midpoint, gap-DOWN the LOWs'; a
+  ZERO gap mints no level (all three bits dark all day); deliberately NO gap-size threshold (bits
+  48/49 already carry the 0.5% threshold and masks compose by AND — the sweep discovers
+  thresholding for free). LOOK-AHEAD LAW: the bits ARM FROM BAR 2 of each session (stricter than
+  the day-extremes convention — the first bar both defines X2 and would self-reference; the push()
+  day-roll branch IS the per-session ordinal, so a 1day-shaped stream stays dark BY THE ORDINAL —
+  the load-bearing 1day abstain, the D12 manifest mask being production-dormant on the spot-only
+  engine); a completed Muhurat session NEVER becomes X1 (the #1616 anchor law — the prior REGULAR
+  session's edge carries, discriminator-pinned); the three new Stage-1A members join the
+  `_roll_to_new_contract` D11 total-reset clear list (post-roll == fresh-builder, member-pinned);
+  a data-hole tail honestly yields X1 = the last STORED bar (data-as-is, self-heals via #1031).
+  SINGLE-SOURCE MATH (DEC-SHARED-CORE-001): NEW `rust/trading-core/src/indicators/gap_mid.rs`
+  `compute_gap_mid` + the thin `brutex/indicators/gap_mid.py` delegator (Python never
+  re-implements); evaluator branches hand-written; `IndicatorSnapshot.gap_mid_paisa` +
+  `ProximityParams.gap_mid_proximity_bps` (default 10) appended LAST; the FFI grown appended-last
+  WITH pyo3 defaults on ALL THREE faces (evaluate_with_levels / evaluate_from_raw / evaluate_spec)
+  + the NEW `compute_gap_mid` pyfunction — every legacy positional caller byte-compatible (bits
+  dark); `canonical_bytes` stays FROZEN at SPEC_SCHEMA_VERSION=1 (the
+  `gap_mid_bps_is_deliberately_not_encoded` golden); the Rust Stage-1A batch twin extended IN THE
+  SAME CHANGE (day-table X1 + in-core X2/arming/mint; the ALL-COLD default shape = byte-identical
+  legacy build; burn-in parity holds — the #1743 lockstep precedent); crate 0.4.0 → 0.4.1 moves
+  `_indicator_version()` so every NEW run re-keys (the 0.3.0→0.3.1 precedent); the conflicts pair
+  (above, below) registered 29→30; 3 phrases; combo-mask/decoder/display surfaces grown
+  (VOCAB_BITS 69 — the live bits now reach past u64, gap-bit masks route to the two-limb
+  reference; targeted ≥64 u128-path pins prove bits 66-68 through it). SEQUENCING: lands AFTER
+  PR #1574 (rebased onto its head) AND the vocab-66 track's PR-B, which owns the sweep_apriori
+  ≥64-guard resolution + the u128 M4-Pro throughput measurement — bits 66-68 are the first
+  IMPLEMENTED bits ≥ 64; the regime-enabling machinery is PR-B's, not this DEC's. GOLDEN
+  EVIDENCE: the 400-case vocab golden (the TickVault contract) regenerated ADDITIVELY via a second
+  rng stream — audited all 400 cases: every pre-existing field byte-identical (incl. the #1804 reshape's
+  burned inert vwap draw), low-66 mask bits byte-identical, 342/400 fire a gap bit, both-ways
+  coverage TRUE for all 65 ACTIVE bits — the #1804 migration harness AMENDED, not weakened
+  (input hash excludes exactly the two enumerated gap keys; the no-bit-≥64 gate names 66-68 as
+  the one sanctioned exception); the truth-table
+  CSV +66 rows + SHA re-pin; the banknifty-week Stage-1A golden AUDITED re-lock (XOR delta ==
+  exactly bit 66 on the 9 non-first bars of days 2-4); the futures-roll golden AUDITED re-lock
+  (bits 66/67 confined to the warm pre-roll day's non-first bars 27-51 — the anchor-cold
+  post-roll day carries no gap bit, the D11 reset); the frozen sweep-run goldens
+  `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` MEASURED UNCHANGED; the TF=3minute SPREADSHEET PARITY
+  GOLDEN (6 hand-derived cases — NIFTY/BANKNIFTY/SENSEX × up/down, mirroring the 6/6 upstream
+  verification, BOTH half-even tie arms — PLUS the mandated marginal/ambiguous-direction day);
+  arm-from-bar-2 over TF ∈ {3,5,15,30}; 1day/Muhurat/zero-gap/sub-threshold/truncated-bucket/
+  data-hole/first-day/roll/near-boundary pins; the disclosed coarse-TF trade-inertness PINNED
+  (TF=180/240 gap-gated masks structurally ZERO-TRADE under arm-from-bar-2 × the forced-exit law;
+  TF=120 partial — the contrast test proves a live mask); P-06 suffix-independence
+  UNMODIFIED-green + non-vacuity teeth; hypothesis properties (level-between / direction pair-flip
+  vs an independent stdlib recompute / zero-gap None / above-below exclusion e2e); mutants on the
+  arming boundary + the X1 swap hand-killed (13 + 50 failures). HONEST (Golden Rule #10): this is
+  an ENGINE-surface change — ENGINE VOCABULARY GROWN 66→69 (on the #1804 reshape), additive, deliberately NOT "engine
+  unchanged": every EXISTING mask's results are byte-identical (legacy callers dark via the FFI
+  defaults; goldens measured) and every NEW run re-keys via indicator_version; the DIRECTION LAW
+  is OUR INTERPRETATION pending the original GAP_CALC_SPEC.md sheet (inaccessible in the build
+  container — the coordinator's decoded 6/6-verified summary is the source; the marginal-day
+  golden pins the chosen law so an operator correction fails loudly); TickVault coordination
+  REQUIRED at PR time (manifest append + crate bump + vocab-golden regen + the carriage decision +
+  the TickVault-side capture obligation — the stateful X1/X2 capture + Muhurat law live in PYTHON
+  Stage-1A, not the crate); the `gap_mid_proximity_bps` knob is DORMANT (production grids sweep
+  `proximities=[None]`) and its default-omit `canonical_trade_params` run-identity carriage is the
+  MANDATORY named follow-up before any sweep surface exposes it; optional follow-ups: the R3=2H−L
+  pivot-variant bit (recommended against) + the VIX expected-move results LENS (display only,
+  never a bit). NIFTY/BANKNIFTY/SENSEX spot-only scope + rate caps + lake/schema/routes untouched.
+  GATES (the full battery on the REBASED tree): whole-engine ci.yml gate 100.00% line+branch
+  (TOTAL 10661/0/3010/0; 3780 passed); rust_stage1a (107/22) · conflicts (12/4) ·
+  indicators-gap_mid (6/0) · calendars-nse (204/52) standalone gates 100.00%; coverage-gate
+  discovery 5 touched modules at 100% (--base 696bf036a); tests/golden 557 passed ·
+  tests/property 539 passed (P-06 unmodified) · the vocab/FFI/lockstep family 459 passed · the
+  new ≥64 u128-path pins 6 passed; cargo fmt + clippy `-D warnings` clean; cargo test default
+  199 AND `--features python,serde` 279 passed; codegen/vocab-golden/truth-table `--check` modes
+  green; check_vocab_rust_parity 400/400 bit-identical; ruff/ruff-format clean; `mypy --strict
+  brutex` Success (466 files); pyright 0 errors on touched modules;
+  validate_ledger_numbering OK (1371 headers).)
+  Earlier: `claude/vocab66-supertrend-flip` (**DEC-SUPERTREND-CONDITIONS-001,
   MIGRATION.md #1807** — the SuperTrend implemented-flip, the "later stacked PR"
   DEC-SUPERTREND-LAYOUT-001 (#1806) reserved bits 64/65 for (stacked on PR #1574's
   head 696bf036a; the PR opens after #1574 lands): `close_above_supertrend` (64) /
@@ -11709,7 +11806,13 @@ hostile-review pass._
    REFERENCE_ONLY surface (lake ingest + the F&O candle lake untouched);
    the 60-condition vocabulary itself is UNCHANGED (data-independent —
    the volume-bearing VWAP bits 52/53 now permanently abstain on every
-   engine instrument, since no spot index carries volume); the futures
+   engine instrument, since no spot index carries volume) [the vocabulary
+   has SINCE grown under the grow-only law — the #1574 vocab-66 reshape
+   (60→66, DEC-VOCAB-66-RESHAPE-IMPL-001 #1804-#1806) then the Group-15
+   gap-midpoint bits 66-68 (66→69, DEC-GAP-MIDPOINT-CONDITIONS-001,
+   MIGRATION.md #1901; additive — existing masks byte-identical, new runs
+   re-key via indicator_version); the spot-only ENGINE scope this
+   retirement fixes is untouched]; the futures
    resolver / alias-aware loader / Stage-1A roll machinery / symbol_id 4
    are RETAINED as tested lake-tooling internals below the scope gate,
    reachable only via the loud, audit-stamped `--allow-out-of-scope` CLI
@@ -11951,7 +12054,27 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/vocab66-supertrend-flip`
+- **Active feature branch:** `claude/gap-midpoint-conditions`
+  (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 — the sweep vocabulary
+  GROWS 66 → 69: Group 15 "Gap Midpoint" bits 66-68 (`close_above_gap_mid` /
+  `close_below_gap_mid` / `near_gap_mid`) — the per-TF session-edge
+  gap-midpoint level `(X1+X2)/2` (X1 = the prior session's LAST completed TF
+  bar's extreme, X2 = today's FIRST; direction = the exact sign of open − pdc;
+  zero gap ⇒ dark); arm-from-bar-2 (also the load-bearing 1day abstain),
+  Muhurat X1-skip, contract-roll D11 reset; single-source math in
+  `rust/trading-core/src/indicators/gap_mid.rs` with the thin Python
+  delegator; the FFI appended-last WITH defaults on all three evaluator faces
+  + the Rust Stage-1A batch twin in lockstep; crate 0.4.0 → 0.4.1 re-keys
+  every NEW run via indicator_version; the TF=3minute spreadsheet parity
+  golden (6 cases + the marginal-direction day) + the full §3.7 battery green;
+  ENGINE VOCABULARY GROWN 66→69 (additive on the #1804 reshape — every
+  EXISTING mask's results byte-identical, the frozen sweep-run goldens
+  measured unchanged; bits 66-68 are the first IMPLEMENTED bits ≥ 64 — lands
+  AFTER PR #1574 and the vocab-66 track's PR-B, which owns the u128-regime
+  machinery); NIFTY/BANKNIFTY/SENSEX spot-only scope + rate/lake/schema
+  untouched; TickVault coordination flagged per DEC-SHARED-CORE-001; matches
+  §1's Active branch line)
+  Earlier: `claude/vocab66-supertrend-flip`
   (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #1807 — the SuperTrend
   implemented-flip: bits 64/65 LIVE (ATR-10/factor-3 Pine-parity ×2-paisa
   integer state, 9 warm-up Nones, strict flip, no session resets, D11 roll

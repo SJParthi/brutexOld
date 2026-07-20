@@ -61,7 +61,10 @@ def test_implemented_mask_exceeds_the_sign_bit_at_import() -> None:
     # get here; the mask itself now spans past bit 63's value.
     assert IMPLEMENTED_MASK > 2**63
     assert (IMPLEMENTED_MASK >> 63) & 1 == 1
-    assert TOTAL_CONDITIONS == 66
+    # DEC-GAP-MIDPOINT-CONDITIONS-001: 69 declared, and the IMPLEMENTED mask
+    # now genuinely occupies the second u64 limb (the gap trio 66-68).
+    assert TOTAL_CONDITIONS == 69
+    assert IMPLEMENTED_MASK >> 64 == 0b111 << 2
 
 
 def test_results_store_two_limb_round_trip(tmp_path: Path) -> None:

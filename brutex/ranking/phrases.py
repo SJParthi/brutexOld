@@ -1,4 +1,4 @@
-"""The R33 dual-language trade-reason table — FIXED, hand-written, 66 entries.
+"""The R33 dual-language trade-reason table — FIXED, hand-written, 69 entries.
 
 DEC-SWEEP-RESULTS-DEPTH-001 (WP3). Every trade/combo shows WHY it entered in
 BOTH modes — technical (``PDH_CROSS_UP ∧ CLOSE>R2``-style condition names)
@@ -9,7 +9,7 @@ mask's fired-bit count (bench-pinned).
 
 ## The table's provenance + drift guards
 
-One frozen literal tuple of exactly ``TOTAL_CONDITIONS`` (66)
+One frozen literal tuple of exactly ``TOTAL_CONDITIONS`` (69)
 :class:`PhraseEntry` rows, ``bit == index``. Each ``plain`` phrase was
 hand-written ONCE from the condition's authoritative semantics — the
 ``description`` field of ``rust/trading-core/conditions.toml`` (the SINGLE
@@ -216,6 +216,22 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
         65,
         "close_below_supertrend",
         "the candle closed below the SuperTrend line (a down-trend hold)",
+    ),
+    # ── Gap Midpoint (bits 66-68, DEC-GAP-MIDPOINT-CONDITIONS-001) ──
+    PhraseEntry(
+        66,
+        "close_above_gap_mid",
+        "price closed above the opening-gap midpoint (the session-edge reversal level)",
+    ),
+    PhraseEntry(
+        67,
+        "close_below_gap_mid",
+        "price closed below the opening-gap midpoint (the session-edge reversal level)",
+    ),
+    PhraseEntry(
+        68,
+        "near_gap_mid",
+        "price is sitting at the opening-gap midpoint (the session-edge reversal level)",
     ),
 )
 

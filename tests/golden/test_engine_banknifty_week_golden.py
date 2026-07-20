@@ -39,7 +39,14 @@ wider than the 10 bps ``near`` tolerance and the 0.5 % gap threshold, so:
   The 60→66 reshape adds the CPR pair: a FLAT prior day makes
   ``P = BC = TC =`` that single price (width 0), so today's higher close is
   strictly above TC ⇒ ``ABOVE_CPR_TC`` (60), and the zero width is trivially
-  ≤ 30 bps of P ⇒ ``NARROW_CPR_DAY`` (63).
+  ≤ 30 bps of P ⇒ ``NARROW_CPR_DAY`` (63);
+* **gap-midpoint** (``DEC-GAP-MIDPOINT-CONDITIONS-001``, hand-derived): on
+  day ``k ≥ 1`` X1 = the prior flat day's last bar = ``P_{k-1}``, X2 = today's
+  first flat bar = ``P_k``, gap-UP (``open P_k > pdc P_{k-1}``) ⇒ level =
+  ``(P_{k-1} + P_k) / 2 = P_k − ₹500`` — today's close ``P_k`` is strictly
+  ABOVE it ⇒ ``CLOSE_ABOVE_GAP_MID`` (66) on every bar EXCEPT the day's first
+  (the arm-from-bar-2 law leaves band 0 dark); ₹500 ≫ the 10 bps ``near``
+  tolerance (~₹51) ⇒ no ``NEAR_GAP_MID``.
 
 So bar ``i`` (day ``i // 4``, band ``i % 4``) is the closed form in
 :func:`_expected_mask`, asserted bar-for-bar AND pinned by SHA-256.
@@ -123,13 +130,18 @@ _BANDS = [
 _BARS_PER_DAY = len(_BANDS)
 
 #: SHA-256 of the frozen 16-mask matrix (the README "SHA-256 manifest" guard).
-# DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip — bars 9-11 gain the
-# hand-derived bit 65, bars 12-15 bit 64; see the closed form + the in-file
-# ×2-domain audit above). Old digests:
+# DELIBERATE RE-LOCK, composed at the vocab-train fold: the vocab-66
+# SuperTrend flip added the hand-derived bit 65 on bars 9-11 and bit 64 on
+# bars 12-15 (the in-file x2-domain audit), and DEC-GAP-MIDPOINT-CONDITIONS-001
+# added bit 66 on bars {5, 6, 7, 9, 10, 11, 13, 14, 15} — the non-first bars
+# of days 2-4 (the arm-from-bar-2 law; the gap-mid level is the flat midpoint
+# P_k − ₹500, see module docstring). Every pre-existing bit byte-identical.
+# Digest recomputed from the composed closed form (machine-checked against the
+# wheel replay by this suite). Old digests:
+# ST-era (vocab-66 flip): 3b56968a1807ca7ea2f29c089a90d3ff3a98f721e6c1f0ed523804a363f84a98;
 # 60→66 reshape: a925eb6be4a0dc8beac67ab435db0a87eb9e9d65a3c88ad03f73289a295183c3;
 # pre-reshape:  c5d1c3c2523c519a13d7c36f0be62539c80182cf44ba69a965897c0a2a63da5c.
-_EXPECTED_SHA256 = "3b56968a1807ca7ea2f29c089a90d3ff3a98f721e6c1f0ed523804a363f84a98"
-
+_EXPECTED_SHA256 = "60a8bacd3d5dc09e830792d806cbf22d0ffb30598aa7f37961a2ca0260bb597c"
 
 def _price(day_index: int) -> Decimal:
     """Well-separated flat-doji price for trading day ``day_index`` (BANKNIFTY scale)."""
@@ -160,7 +172,7 @@ def _feed() -> list[CandleBar]:
 
 
 def _expected_mask(i: int) -> int:
-    """Closed-form expected ``u64`` for bar ``i`` (see module docstring)."""
+    """Closed-form expected ``u128`` for bar ``i`` (see module docstring)."""
     day_index, band = divmod(i, _BARS_PER_DAY)
     mask = (1 << B.BIT_CLOSE_AT_DAY_HIGH) | (1 << B.BIT_CLOSE_AT_DAY_LOW)
     mask |= 1 << _BANDS[band][2]
@@ -173,6 +185,12 @@ def _expected_mask(i: int) -> int:
         # prev price ⇒ close (1000 pts higher) is strictly above TC (60),
         # and width 0 ≤ 30 bps of P ⇒ narrow (63) — the 60→66 reshape.
         mask |= (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_NARROW_CPR_DAY)
+        if band >= 1:
+            # DEC-GAP-MIDPOINT-CONDITIONS-001: the gap-mid level is the flat
+            # midpoint P_k − ₹500 (see module docstring); the close P_k is
+            # strictly above it from the SECOND bar of the day onward (the
+            # arm-from-bar-2 law keeps the day's first bar dark).
+            mask |= 1 << B.BIT_CLOSE_ABOVE_GAP_MID
     # Group 14 (the vocab-66 SuperTrend flip) — the hand-derived ×2-domain
     # walk in the module docstring: warm at bar 9 on the DOWN-seeded upper
     # band above the flat close (bars 9-11), the day-4 gap-up breaks the

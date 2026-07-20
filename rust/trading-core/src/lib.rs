@@ -50,6 +50,7 @@ pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluat
 pub use greeks::{GreeksOut, black76_price, greeks};
 pub use indicators::ema::{EmaState, compute_ema, ema_alpha, ema_seed, ema_step};
 pub use indicators::fib::{FibLevels, compute_fib_levels};
+pub use indicators::gap_mid::{GapDirection, compute_gap_mid};
 pub use indicators::market_structure::{MarketStructureSignal, MarketStructureState, Trend};
 pub use indicators::metadata::{
     BarMetadata, derive_bar_metadata, minute_of_session, resolve_near_month, seconds_of_day,

@@ -236,7 +236,7 @@ class TestReadableMask:
         # rejected list to the accepted boundary set.
         assert _row(mask_bits=mask).mask_bits == mask
 
-    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 66])
+    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 69])
     def test_mask_bits_out_of_range_rejected(self, bad: int) -> None:
         with pytest.raises(ResultsStoreError, match="mask_bits"):
             _row(mask_bits=bad)

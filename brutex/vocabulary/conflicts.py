@@ -34,6 +34,7 @@ from brutex.vocabulary.bits import (
     BIT_BELOW_CPR_BC,
     BIT_CLOSE_ABOVE_EMA20,
     BIT_CLOSE_ABOVE_EMA200,
+    BIT_CLOSE_ABOVE_GAP_MID,
     BIT_CLOSE_ABOVE_PDH,
     BIT_CLOSE_ABOVE_PDL,
     BIT_CLOSE_ABOVE_SUPERTREND,
@@ -41,6 +42,7 @@ from brutex.vocabulary.bits import (
     BIT_CLOSE_AT_DAY_LOW,
     BIT_CLOSE_BELOW_EMA20,
     BIT_CLOSE_BELOW_EMA200,
+    BIT_CLOSE_BELOW_GAP_MID,
     BIT_CLOSE_BELOW_PDH,
     BIT_CLOSE_BELOW_PDL,
     BIT_CLOSE_BELOW_SUPERTREND,
@@ -113,7 +115,7 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         # Group 9: Day type mutual exclusions
         (BIT_GAP_UP_DAY, BIT_GAP_DOWN_DAY),
         (BIT_INSIDE_DAY, BIT_OUTSIDE_DAY),
-        # Group 13: the CPR position bits form an EXACT partition by
+        # Group 15: the CPR position bits form an EXACT partition by
         # construction (evaluator.rs:422-431 — bit 60 strict `close > TC`,
         # bit 61 strict `close < BC`, bit 62 inclusive `BC <= close <= TC`
         # over the canonicalised `tc >= bc` pair of
@@ -133,6 +135,13 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         # layout-only declaration deliberately omitted the pair because an
         # unimplemented bit never fires).
         (BIT_CLOSE_ABOVE_SUPERTREND, BIT_CLOSE_BELOW_SUPERTREND),
+        # Group 15: Gap-midpoint direct opposition (DEC-GAP-MIDPOINT-CONDITIONS-001,
+        # the (GAP_UP_DAY, GAP_DOWN_DAY) precedent above). Strictly-above and
+        # strictly-below the level cannot co-fire; `near_gap_mid` is deliberately
+        # NOT conflicting with either — a close can be strictly above AND within
+        # the near band (the same convention as the PDH/PDL family, where
+        # close_above_pdh and near_pdh co-fire legally).
+        (BIT_CLOSE_ABOVE_GAP_MID, BIT_CLOSE_BELOW_GAP_MID),
     }
 )
 
@@ -141,7 +150,7 @@ def has_conflict(mask: int) -> bool:
     """Return True if `mask` contains any conflict pair.
 
     Args:
-        mask: u128 strategy mask (``TOTAL_CONDITIONS`` = 66 declared bits).
+        mask: u128 strategy mask (``TOTAL_CONDITIONS`` = 69 declared bits).
 
     Returns:
         True if mask has any conflict pair (i.e., the strategy is

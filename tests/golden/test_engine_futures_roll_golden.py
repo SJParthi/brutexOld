@@ -67,6 +67,15 @@ _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "futures_roll_golden.json"
 # v1 (52 masks, VWAP bits live):
 # 1210f918e909090190ffde9231879dbb3111aa539077cdbc6113c9e4baa458f4.
 _EXPECTED_SHA256 = "4da440f6425d8d1a89856c16da6a21e687c4cffb818153ee804ff6c0ce312b7e"
+# TRAIN-FOLD NOTE (DEC-GAP-MIDPOINT-CONDITIONS-001, woven onto the ST flip):
+# the gap-midpoint bits 66/67 additionally join the WARM pre-roll day 2's
+# non-first bars (bar 26 stays dark per the arm-from-bar-2 law; the
+# anchor-cold post-roll day 52-77 carries NO gap bit — the D11 reset; the
+# member's XOR audit: bit 67 on 18 bars, bit 66 on 7, vs its reshape base).
+# The fixture + this digest RE-LOCK at the train's Regen phase (the composed
+# ST+gap replay); until then the pin matches the kept ST-era fixture. The
+# member's gap-only (no-ST) digest was
+# 9c12a2b7b35c4f4bc87398997a8880a488f700f514953eb5df4e4e1252f0cba0.
 
 #: The pre-roll contract's TWO IST days (day 2 = the vendor June-2025
 #: monthly expiry — owned by the EXPIRING contract per the ``>=`` law; day 1
@@ -135,9 +144,13 @@ _CPR_POSITION_MASK = (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_BELOW_CPR_BC) | (1 
 
 #: LITERAL boundary masks — the last pre-roll bar (index 25) and the first
 #: post-roll bar (index 26). Re-pin via ``--update``.
-# The vocab-66 flip added EXACTLY bit 64 here (old literal
-# 1225564335183544321 + 2**64 — the hand-audit above).
-_EXPECTED_LAST_PRE_ROLL_MASK = 19672308408893095937
+# COMPOSED at the vocab-train fold: the vocab-66 flip added EXACTLY bit 64
+# here (old literal 1225564335183544321 + 2**64 — the ST hand-audit) and
+# DEC-GAP-MIDPOINT-CONDITIONS-001 added EXACTLY bit 66 (the member's audited
+# last-pre-roll delta, its literal 1225564335183544321 + 2**66) — the woven
+# tree carries BOTH: base + 2**64 + 2**66. Machine-checked at the train's
+# Regen replay.
+_EXPECTED_LAST_PRE_ROLL_MASK = 93459284703731302401
 _EXPECTED_FIRST_POST_ROLL_MASK = 21474836480
 
 

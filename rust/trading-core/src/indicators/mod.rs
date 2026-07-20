@@ -14,6 +14,7 @@
 
 pub mod ema;
 pub mod fib;
+pub mod gap_mid;
 pub mod market_structure;
 pub mod metadata;
 pub mod pivots;

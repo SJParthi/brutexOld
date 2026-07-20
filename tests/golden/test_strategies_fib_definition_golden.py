@@ -47,11 +47,13 @@ _GOLDEN_DECLARATION = {
     "forced_exit_ist": "15:20:00",
     "stop_loss_bps": None,
     "take_profit_bps": None,
-    # DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip, crate 0.5.0): the
-    # empty condition_scope means "every IMPLEMENTED bit", so the candidate
-    # mask follows IMPLEMENTED_MASK — bits 64/65 joined it
-    # (old: 0000000000000000ffcfffffffffffff).
-    "candidate_mask_hex": "0000000000000003ffcfffffffffffff",
+    # DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip, then
+    # DEC-GAP-MIDPOINT-CONDITIONS-001 at the train fold): the empty
+    # condition_scope means "every IMPLEMENTED bit", so the candidate mask
+    # follows IMPLEMENTED_MASK — bits 64/65 joined at the flip and the gap
+    # trio 66-68 joined at the gap append
+    # (old: 0000000000000003ffcfffffffffffff).
+    "candidate_mask_hex": "000000000000001fffcfffffffffffff",
     "spec_mask_hex": "00000000000000001000100000400010",
 }
 

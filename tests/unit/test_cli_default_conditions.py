@@ -58,17 +58,18 @@ def test_default_is_ascending_and_unique() -> None:
     assert len(bits) == len(set(bits))
 
 
-def test_default_length_is_the_64_active_bits() -> None:
-    """The 66-condition layout carries 64 ACTIVE bits — the default grid.
+def test_default_length_is_the_67_active_bits() -> None:
+    """The 69-condition layout carries 67 ACTIVE bits — the default grid.
 
     (The pre-reshape dense-``IMPLEMENTED_MASK`` era swept all 60; the 60→66
-    reshape swept 62; since the vocab-66 SuperTrend implemented-flip the
-    default grid is C(64, k) — only the tombstones are excluded.)
+    reshape swept 62; the vocab-66 SuperTrend implemented-flip made it 64;
+    DEC-GAP-MIDPOINT-CONDITIONS-001 appended the implemented gap trio at
+    bits 66-68 — C(67, k) now — only the tombstones (52/53) are excluded.)
     """
     bits = cli.default_condition_bits()
-    assert IMPLEMENTED_MASK == ((1 << 66) - 1) ^ (1 << 52) ^ (1 << 53)
-    assert len(bits) == 64
-    assert bits == [*range(52), *range(54, 66)]
+    assert IMPLEMENTED_MASK == ((1 << 69) - 1) ^ (1 << 52) ^ (1 << 53)
+    assert len(bits) == 67
+    assert bits == [*range(52), *range(54, 69)]
 
 
 def test_default_excludes_layout_only_bits(monkeypatch: pytest.MonkeyPatch) -> None:

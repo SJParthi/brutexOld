@@ -1202,3 +1202,432 @@ def test_collect_batch_inputs_beyond_schedule_raises_the_push_message() -> None:
     with pytest.raises(ValueError, match="beyond the last roll_schedule expiry") as push_exc:
         Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
     assert str(prepass_exc.value) == str(push_exc.value)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Group-15 session-edge gap-midpoint wiring (DEC-GAP-MIDPOINT-CONDITIONS-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# The STAGE-2 wiring pins: the X1/X2 capture + arm-from-bar-2 ordinal + the
+# per-day level mint through the shared Rust ``compute_gap_mid``. The full
+# §3.7 battery (the TF=3minute spreadsheet parity golden, the coarse-TF
+# zero-fill pin, the P-06 generator extension) lands with the test stage.
+
+from brutex.engine.stage1a import GAP_MID_DEPENDENT_MASK  # noqa: E402
+
+
+def _gap_bits(mask: int) -> tuple[bool, bool, bool]:
+    """(above, below, near) — the Group-15 bit triple of *mask*."""
+    return (
+        bool(mask >> B.BIT_CLOSE_ABOVE_GAP_MID & 1),
+        bool(mask >> B.BIT_CLOSE_BELOW_GAP_MID & 1),
+        bool(mask >> B.BIT_NEAR_GAP_MID & 1),
+    )
+
+
+def _gap_up_two_day_feed() -> list[CandleBar]:
+    """Day 1 flat-ish; day 2 gaps UP. Hand-derived level:
+
+    X1 = day 1's LAST bar (H 102.00 / L 98.00); X2 = day 2's FIRST bar
+    (H 112.00 / L 108.00); open-of-day 110.00 > pdc 100.00 ⇒ gap-UP ⇒
+    level = (10200 + 11200) / 2 = 10700 paisa = ₹107.00.
+    """
+    day1 = datetime(2024, 1, 2)
+    day2 = datetime(2024, 1, 3)
+    return [
+        _minute_bar(day1, 0, "100", "101", "99", "100"),
+        _minute_bar(day1, 1, "100", "102", "98", "100"),
+        _minute_bar(day2, 0, "110", "112", "108", "111"),
+        _minute_bar(day2, 1, "111", "113", "109", "112"),  # close 112 > 107
+        _minute_bar(day2, 2, "104", "105", "103", "104"),  # close 104 < 107
+        _minute_bar(day2, 3, "107", "107.50", "106.50", "107"),  # close == level
+    ]
+
+
+def test_gap_mid_arms_from_the_second_bar_and_fires_above_below_near() -> None:
+    """The headline wiring pin: arm-from-bar-2 + the hand-derived up-level.
+
+    Day 1 (no X1) is dark; day 2's FIRST bar — which mints the level from its
+    own extremes — is dark (the arm-from-bar-2 law); later bars compare their
+    close against the hand-derived ₹107.00 midpoint: strictly above, strictly
+    below, and exactly-at (near fires; the strict above/below do not).
+    """
+    masks = build_bar_bits(_gap_up_two_day_feed())
+    assert all(m & GAP_MID_DEPENDENT_MASK == 0 for m in masks[:2])  # no X1 yet
+    assert masks[2] & GAP_MID_DEPENDENT_MASK == 0  # first bar of day 2: dark
+    assert _gap_bits(masks[3]) == (True, False, False)  # 112.00 above 107.00
+    assert _gap_bits(masks[4]) == (False, True, False)  # 104.00 below 107.00
+    assert _gap_bits(masks[5]) == (False, False, True)  # exactly at the level
+
+
+def test_gap_down_day_uses_the_low_pair() -> None:
+    """Gap-DOWN mints from the LOWs: X1_lo 98.00 + X2_lo 88.00 ⇒ ₹93.00."""
+    day1 = datetime(2024, 1, 2)
+    day2 = datetime(2024, 1, 3)
+    masks = build_bar_bits(
+        [
+            _minute_bar(day1, 0, "100", "101", "99", "100"),
+            _minute_bar(day1, 1, "100", "102", "98", "100"),
+            # open 90.00 < pdc 100.00 ⇒ gap-DOWN; X2_lo = 88.00.
+            _minute_bar(day2, 0, "90", "91", "88", "90"),
+            _minute_bar(day2, 1, "92", "92.50", "91.50", "92"),  # close 92 > 93? NO: below
+            _minute_bar(day2, 2, "94", "94.50", "93.50", "94"),  # close 94 > 93 ⇒ above
+        ]
+    )
+    # level = (9800 + 8800) / 2 = 9300 paisa = ₹93.00.
+    assert _gap_bits(masks[3]) == (False, True, False)  # 92.00 below 93.00
+    assert _gap_bits(masks[4]) == (True, False, False)  # 94.00 above 93.00
+
+
+def test_zero_gap_day_has_no_level_all_day() -> None:
+    """``open_of_day == pdc`` exactly ⇒ the kernel returns None ⇒ dark all day."""
+    day1 = datetime(2024, 1, 2)
+    day2 = datetime(2024, 1, 3)
+    masks = build_bar_bits(
+        [
+            _minute_bar(day1, 0, "100", "101", "99", "100"),
+            # Day 2 opens EXACTLY at the prior close (100.00) — zero gap.
+            _minute_bar(day2, 0, "100", "103", "97", "102"),
+            _minute_bar(day2, 1, "102", "104", "101", "103"),
+            _minute_bar(day2, 2, "103", "105", "102", "104"),
+        ]
+    )
+    assert all(m & GAP_MID_DEPENDENT_MASK == 0 for m in masks)
+    # Teeth: the pivot anchors ARE warm on day 2 (only the gap level is absent).
+    assert any(m & ANCHOR_DEPENDENT_MASK for m in masks[1:])
+
+
+def test_one_day_shaped_stream_stays_dark_via_the_arming_ordinal() -> None:
+    """The load-bearing 1day abstain (design §3.2 mechanism correction).
+
+    On a 1day-shaped stream EVERY bar is its session's FIRST TF bar, so the
+    arm-from-bar-2 ordinal keeps bits 66-68 dark — the manifest
+    ``applies_to_1day`` flag is production-dormant on the spot-only engine,
+    so the ordinal delivers the abstain, NOT the mask.
+    """
+    bars = [
+        _minute_bar(datetime(2024, 1, 2 + i), 0, o, h, lo, c)
+        for i, (o, h, lo, c) in enumerate(
+            [
+                ("100", "101", "99", "100"),
+                ("110", "112", "108", "111"),  # gap-up vs 100
+                ("104", "105", "103", "104"),  # gap-down vs 111
+                ("115", "116", "114", "115"),  # gap-up vs 104
+            ]
+        )
+    ]
+    masks = build_bar_bits(bars)
+    assert all(m & GAP_MID_DEPENDENT_MASK == 0 for m in masks)
+    # Teeth: the day-type gap bits DO fire (anchors warm; only 66-68 abstain).
+    assert masks[1] & (1 << B.BIT_GAP_UP_DAY)
+    assert masks[2] & (1 << B.BIT_GAP_DOWN_DAY)
+
+
+def test_muhurat_session_never_becomes_x1() -> None:
+    """The #1616 skip law on the edge: the prior REGULAR session's last TF bar
+    serves as X1 across a Diwali Muhurat boundary.
+
+    Hand-derived discriminator: correct X1_hi = the regular session's last bar
+    high 106.00 ⇒ level = (10600 + 10900) / 2 = ₹107.50 ⇒ a 107.00 close reads
+    BELOW. A poisoned X1 (the Muhurat bar's high 104.50) would give
+    (10450 + 10900) / 2 = ₹106.75 ⇒ the same close would read ABOVE.
+    """
+    prev_reg, muhurat, next_reg = _date(2020, 11, 13), _date(2020, 11, 14), _date(2020, 11, 17)
+
+    def _two(d: _date, specs: list[tuple[str, str, str, str]]) -> list[CandleBar]:
+        return [
+            _minute_bar(datetime(d.year, d.month, d.day), m, o, h, lo, c)
+            for m, (o, h, lo, c) in enumerate(specs)
+        ]
+
+    bars = (
+        _two(prev_reg, [("100", "110", "90", "105"), ("105", "106", "104", "105")])
+        + _two(muhurat, [("104", "104.50", "103.50", "104.20")])
+        # open 108.00 > the REGULAR session's pdc 105.00 ⇒ gap-UP.
+        + _two(next_reg, [("108", "109", "107", "108"), ("107", "107.20", "106.80", "107")])
+    )
+    masks = build_bar_bits(bars)
+    assert _gap_bits(masks[-1]) == (False, True, False)  # 107.00 below 107.50
+
+
+def test_sub_threshold_gap_still_mints_a_level() -> None:
+    """The no-threshold direction law (design §3.1): a gap below the day-type
+    bits' 0.5% threshold still mints a gap-mid level — bits 66-68 and 48/49
+    legitimately disagree on sub-threshold days.
+    """
+    day1 = datetime(2024, 1, 2)
+    day2 = datetime(2024, 1, 3)
+    masks = build_bar_bits(
+        [
+            _minute_bar(day1, 0, "100", "100.10", "99.90", "100"),
+            # +3 paisa gap (< the 50-paisa 0.5% threshold of bits 48/49).
+            _minute_bar(day2, 0, "100.03", "100.20", "99.95", "100.10"),
+            # level = (10010 + 10020) / 2 = 10015; close 100.50 is above.
+            _minute_bar(day2, 1, "100.40", "100.60", "100.30", "100.50"),
+        ]
+    )
+    assert _gap_bits(masks[2]) == (True, False, False)
+    assert not masks[2] & (1 << B.BIT_GAP_UP_DAY)  # sub-threshold: 48 stays 0
+
+
+def test_contract_roll_clears_the_gap_mid_state_members() -> None:
+    """D11 total-reset membership: the three Group-15 members join the
+    ``_roll_to_new_contract`` enumerated clear list — post-roll state ==
+    fresh-builder state (the roll-segmentation equivalence oracle's premise).
+    """
+    builder = Stage1AMatrixBuilder(roll_schedule=_ROLL_SCHEDULE)
+    seg_a, _seg_b = _two_contract_stream()
+    for bar in seg_a:
+        builder.push(bar)
+    # Warm gap state exists pre-roll (segment A spans two days).
+    assert builder._session_edge is not None
+    assert builder._prev_session_edge is not None
+    builder._roll_to_new_contract()
+    fresh = Stage1AMatrixBuilder()
+    assert builder._session_edge is None is fresh._session_edge
+    assert builder._prev_session_edge is None is fresh._prev_session_edge
+    assert builder._gap_mid_paisa is None is fresh._gap_mid_paisa
+
+
+def test_collect_batch_inputs_emits_the_x1_day_tables() -> None:
+    """The prepass emits the Group-15 X1 day rows + the bps knob — the batch
+    core's mint inputs (the lockstep half of the wiring; a missing emission
+    would burn-in-mismatch and autorevert).
+    """
+    bars = _gap_up_two_day_feed()
+    inputs = Stage1AMatrixBuilder().collect_batch_inputs(bars)
+    assert inputs.day_has_x1 == [False, True]
+    assert inputs.day_x1_hi_paisa == [0, 10200]  # day 1's last bar H 102.00
+    assert inputs.day_x1_lo_paisa == [0, 9800]  # day 1's last bar L 98.00
+    assert inputs.gap_mid_bps == 10  # the ProximityParams default
+    # A custom bps knob threads through the SAME field.
+    from brutex.vocabulary.evaluator import ProximityParams
+
+    custom = Stage1AMatrixBuilder(
+        proximity=ProximityParams(gap_mid_proximity_bps=25)
+    ).collect_batch_inputs(bars)
+    assert custom.gap_mid_bps == 25
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Group-15 §3.7 battery (the test stage, DEC-GAP-MIDPOINT-CONDITIONS-001)
+# ────────────────────────────────────────────────────────────────────────
+
+from brutex.engine.combo_mask import mask_to_entry_signals  # noqa: E402
+from brutex.engine.trade_sim import simulate_trades  # noqa: E402
+from brutex.strategies.types import Side  # noqa: E402
+
+
+def _tf_bar(
+    day: datetime,
+    bucket: int,
+    tf_minutes: int,
+    o: str,
+    h: str,
+    lo: str,
+    c: str,
+) -> CandleBar:
+    """One TF bar at ``09:15 IST + tf_minutes * bucket`` on ``day``."""
+    return _minute_bar(day, tf_minutes * bucket, o, h, lo, c)
+
+
+@pytest.mark.parametrize("tf_minutes", [3, 5, 15, 30])
+def test_gap_mid_arms_from_bar_2_on_each_tf(tf_minutes: int) -> None:
+    """The arm-from-bar-2 law holds PER TIMEFRAME (design §3.3): on each of
+    several TF-shaped bar streams the Group-15 bits are 0 on the session's
+    first TF bar and can arm from the second — the per-TF generalization the
+    operator steer mandates (Stage-1A evaluates whatever TF bars the sweep
+    loads; the arming ordinal is bucket-grid-agnostic).
+    """
+    day1, day2 = datetime(2024, 1, 2), datetime(2024, 1, 3)
+    bars = [
+        _tf_bar(day1, 0, tf_minutes, "100", "101", "99", "100"),
+        _tf_bar(day1, 1, tf_minutes, "100", "102", "98", "100"),
+        # Gap-UP: open 110.00 > pdc 100.00; X1_hi 102.00 + X2_hi 112.00 ⇒ ₹107.00.
+        _tf_bar(day2, 0, tf_minutes, "110", "112", "108", "111"),
+        _tf_bar(day2, 1, tf_minutes, "111", "113", "109", "112"),  # 112.00 above
+        _tf_bar(day2, 2, tf_minutes, "104", "105", "103", "104"),  # 104.00 below
+    ]
+    masks = build_bar_bits(bars)
+    assert masks[2] & GAP_MID_DEPENDENT_MASK == 0  # session's FIRST TF bar: dark
+    assert _gap_bits(masks[3]) == (True, False, False)  # second TF bar: armed
+    assert _gap_bits(masks[4]) == (False, True, False)
+
+
+def test_first_stream_day_has_no_x1_and_stays_dark() -> None:
+    """The dedicated first-stream-day pin (§3.7): with no prior session there
+    is NO X1, so bits 66-68 stay 0 on every bar of the stream's first day —
+    including bars 2+ (the arming ordinal alone would have armed them)."""
+    day = datetime(2024, 1, 2)
+    bars = [
+        _minute_bar(day, 0, "100", "101", "99", "100"),
+        _minute_bar(day, 1, "110", "112", "108", "111"),
+        _minute_bar(day, 2, "104", "105", "103", "104"),
+    ]
+    builder = Stage1AMatrixBuilder()
+    masks = [builder.push(bar) for bar in bars]
+    assert all(m & GAP_MID_DEPENDENT_MASK == 0 for m in masks)
+    assert builder._prev_session_edge is None  # no prior session ⇒ no X1
+    assert builder._gap_mid_paisa is None
+
+
+def test_near_gap_mid_exact_bps_boundary() -> None:
+    """The ``is_near`` law at its EXACT edge (§3.7): near fires iff
+    ``|close − level| <= close * bps div 10_000`` — inclusive at equality,
+    off one paisa past it (default 10 bps).
+
+    Hand arithmetic: level = (X1_hi 998000 + X2_hi 1000000) / 2 = 999000
+    paisa (₹9990.00). Probe A closes at ₹10000.00: tol = 1000000·10 div
+    10000 = 1000 paisa and |close − level| = 1000 — EXACTLY at the edge ⇒
+    near fires (co-firing with strictly-above, the PDH/PDL convention).
+    Probe B closes ONE paisa further (₹10000.01): tol = 1000001·10 div
+    10000 = 1000 paisa still, but |close − level| = 1001 ⇒ near is off.
+    """
+    day1, day2 = datetime(2024, 1, 2), datetime(2024, 1, 3)
+    masks = build_bar_bits(
+        [
+            _minute_bar(day1, 0, "9900", "9905", "9895", "9900"),
+            _minute_bar(day1, 1, "9900", "9980", "9890", "9900"),  # X1_hi ₹9980
+            # open 10000.00 > pdc 9900.00 ⇒ gap-UP; X2_hi ₹10000.00.
+            _minute_bar(day2, 0, "10000", "10000", "9950", "9960"),
+            _minute_bar(day2, 1, "9995", "10005", "9990", "10000"),  # probe A
+            _minute_bar(day2, 2, "10000", "10005", "9995", "10000.01"),  # probe B
+        ]
+    )
+    assert _gap_bits(masks[3]) == (True, False, True)  # diff == tol: near fires
+    assert _gap_bits(masks[4]) == (True, False, False)  # diff == tol + 1: near off
+
+
+def test_truncated_final_bucket_tf_uses_the_last_stored_bucket_as_x1() -> None:
+    """The truncated-final-bucket pin (§3.7): on TF=30minute the session's
+    last 09:15-anchored bucket is 15:15 (covering 15:15-15:29 — TRUNCATED,
+    375 % 30 != 0) and it — not the last FULL bucket (14:45) — is X1.
+
+    Discriminator: the 14:45 bucket carries a HIGHER high (108.00) than the
+    15:15 bucket (105.00); the served level (₹108.50) comes from the 15:15
+    extreme — a last-FULL-bucket anchor would mint ₹110.00 and flip the
+    probe's verdict.
+    """
+    day1, day2 = datetime(2024, 1, 2), datetime(2024, 1, 3)
+    day1_bars = [
+        _tf_bar(day1, k, 30, "100", "102", "98", "100")
+        for k in range(11)  # 09:15 .. 14:15
+    ] + [
+        _tf_bar(day1, 11, 30, "100", "108", "98", "100"),  # 14:45 — last FULL bucket
+        _tf_bar(day1, 12, 30, "100", "105", "98", "100"),  # 15:15 — last STORED bucket
+    ]
+    ist_last = day1_bars[-1].timestamp.astimezone(IST)
+    assert (ist_last.hour, ist_last.minute) == (15, 15)
+    bars = [
+        *day1_bars,
+        # Gap-UP: open 110.00 > pdc 100.00; X2_hi 112.00.
+        _tf_bar(day2, 0, 30, "110", "112", "108", "111"),
+        _tf_bar(day2, 1, 30, "108", "110", "107", "109"),  # probe close ₹109.00
+    ]
+    builder = Stage1AMatrixBuilder()
+    for bar in bars[:-1]:
+        builder.push(bar)
+    # level = (10500 + 11200) / 2 = 10850 — from the 15:15 (truncated) bucket.
+    assert builder._gap_mid_paisa == 10850
+    masks = build_bar_bits(bars)
+    # close 109.00 is ABOVE ₹108.50; under the wrong (14:45) anchor the level
+    # would be (10800 + 11200) / 2 = ₹110.00 and the same close would read
+    # BELOW — the probe discriminates the bucket identity.
+    assert _gap_bits(masks[-1]) == (True, False, False)
+
+
+def test_data_hole_prior_session_tail_missing_x1_is_last_stored_bar() -> None:
+    """The honest data-hole limit (§3.3): when the prior session's TAIL is
+    missing from the lake (a #1031-class hole), X1 = the last STORED TF bar
+    of that session — data-as-is, no fabrication, no NSE-clock
+    reconstruction."""
+    day1, day2 = datetime(2024, 1, 2), datetime(2024, 1, 3)
+    bars = [
+        # Day 1 ends at 09:21 IST — the rest of the session is a lake hole.
+        _minute_bar(day1, 0, "100", "101", "99", "100"),
+        _minute_bar(day1, 3, "100", "102", "98", "100"),
+        _minute_bar(day1, 6, "101", "103", "100", "101"),  # last STORED bar
+        # Gap-UP: open 105.00 > pdc 101.00; X2_hi 107.00.
+        _minute_bar(day2, 0, "105", "107", "104", "106"),
+        _minute_bar(day2, 1, "106", "108", "105", "106"),  # probe close ₹106.00
+    ]
+    builder = Stage1AMatrixBuilder()
+    for bar in bars[:-1]:
+        builder.push(bar)
+    # level = (10300 + 10700) / 2 = 10500 — the 09:21 stored bar is X1.
+    assert builder._gap_mid_paisa == 10500
+    masks = build_bar_bits(bars)
+    assert _gap_bits(masks[-1]) == (True, False, False)  # 106.00 above 105.00
+
+
+# ── The disclosed coarse-TF trade-inertness (design §3.4, posture (a)) ──
+
+
+def _coarse_tf_gap_corpus(tf_minutes: int) -> list[CandleBar]:
+    """A three-day gap corpus on the 09:15-anchored ``tf_minutes`` grid.
+
+    Day 2 gaps UP (open 110.00 > pdc 100.00; level = (X1_hi 10200 + X2_hi
+    11600) / 2 = ₹109.00) and every armed day-2 bar closes at ₹115.00 —
+    strictly above — so a ``close_above_gap_mid``-gated mask genuinely
+    SIGNALS; whether a signal can ever FILL is exactly the per-TF structure
+    under test. Day 3 exists so a last-bar signal's next bar is a LATER
+    session (the overnight-gap drop, R2-OC-2), never merely end-of-stream.
+    """
+    day1, day2, day3 = (datetime(2024, 1, 2 + i) for i in range(3))
+    buckets = 375 // tf_minutes + (1 if 375 % tf_minutes else 0)
+    bars: list[CandleBar] = []
+    for k in range(buckets):
+        bars.append(_tf_bar(day1, k, tf_minutes, "100", "102", "98", "100"))
+    bars.append(_tf_bar(day2, 0, tf_minutes, "110", "116", "108", "115"))
+    for k in range(1, buckets):
+        bars.append(_tf_bar(day2, k, tf_minutes, "115", "117", "113", "115"))
+    for k in range(buckets):
+        bars.append(_tf_bar(day3, k, tf_minutes, "120", "122", "118", "120"))
+    return bars
+
+
+@pytest.mark.parametrize("tf_minutes", [180, 240])
+def test_gap_mid_gated_masks_are_zero_trade_on_coarse_tfs(tf_minutes: int) -> None:
+    """The §3.4 disclosed inertness, pinned deterministically: every mask
+    whose ENTRY is gated by bits 66-68 is structurally ZERO-TRADE on TF=180
+    and TF=240.
+
+    TF=240 has session buckets {09:15, 13:15} — the only armed bar (13:15)
+    is the session's LAST bar, so its fill bar is the next session (dropped).
+    TF=180 has {09:15, 12:15, 15:15} — a 12:15-armed signal fills into the
+    15:15 bar whose [15:15, 18:15) window reaches 15:20 (forced-exit bar ⇒
+    refused), and a 15:15-armed signal drops overnight. The bits stay
+    EVALUABLE (honest mask semantics; the signals genuinely fire — the
+    non-vacuity assert) — the sweep simply scores the mask zero-trade.
+    """
+    bars = _coarse_tf_gap_corpus(tf_minutes)
+    signals = mask_to_entry_signals(build_bar_bits(bars), 1 << B.BIT_CLOSE_ABOVE_GAP_MID)
+    assert any(signals)  # non-vacuous: the gap-gated mask DOES signal
+    trades = simulate_trades(
+        bars,
+        signals,
+        direction=Side.BUY,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=80,
+        take_profit_paisa=50,
+    )
+    assert trades == []  # …and can structurally never fill
+
+
+def test_gap_mid_gated_mask_can_trade_on_tf_120() -> None:
+    """The TF=120 contrast (partial inertness only): buckets {09:15, 11:15,
+    13:15, 15:15} — an 11:15-armed signal fills at the 13:15 bar (its
+    [13:15, 15:15) window never reaches 15:20 ⇒ not forced, same session),
+    so the zero-trade pins above are about the 180/240 session-bucket
+    structure, not a vacuously dead mask."""
+    bars = _coarse_tf_gap_corpus(120)
+    signals = mask_to_entry_signals(build_bar_bits(bars), 1 << B.BIT_CLOSE_ABOVE_GAP_MID)
+    trades = simulate_trades(
+        bars,
+        signals,
+        direction=Side.BUY,
+        tf_minutes=120,
+        stop_loss_paisa=80,
+        take_profit_paisa=50,
+    )
+    assert len(trades) >= 1

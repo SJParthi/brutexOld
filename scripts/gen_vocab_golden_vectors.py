@@ -76,6 +76,12 @@ _MASK_HEX_WIDTH = 32
 
 IST = timezone(timedelta(hours=5, minutes=30))
 _SEED = 20260603
+#: Seed for the SEPARATE Group-15 gap-midpoint stream (DEC-GAP-MIDPOINT-
+#: CONDITIONS-001). A second, independent ``random.Random`` keeps the original
+#: ``_SEED`` stream's draw sequence UNTOUCHED, so every pre-existing input field
+#: (and therefore every pre-existing bit 0..65 of ``expected_mask``) is
+#: byte-identical to the pre-gap fixture — the additive-only regen law.
+_GAP_SEED = 20260716
 _N_RANDOM = 400
 
 _OUT_PATH = Path(__file__).resolve().parents[1] / "tests/golden/fixtures/vocab_golden_vectors.json"
@@ -102,14 +108,19 @@ _PRIOR_FLAG_PATTERNS: tuple[tuple[bool, ...], ...] = (
 
 
 def _build_case(
-    rng: random.Random, case_id: int
+    rng: random.Random, gap_rng: random.Random, case_id: int
 ) -> tuple[dict[str, Any], IndicatorSnapshot, ProximityParams, PriorBarHistory]:
     """Build one deterministic case (version-3 draw stream, byte-frozen).
 
     Consumes EXACTLY the historical (version-3) per-case RNG draws — the
     version-4 SuperTrend draw does NOT live here (it would shift every later
     case's stream); :func:`_append_supertrend` draws it AFTER the whole
-    400-case historical stream (GOLD-02). Returns the case dict (mask not yet
+    400-case historical stream (GOLD-02). ``gap_rng`` is the SEPARATE
+    Group-15 stream (see ``_GAP_SEED``,
+    DEC-GAP-MIDPOINT-CONDITIONS-001) — the gap fields are drawn from it and
+    NEVER from the legacy stream (the BURNED retired-VWAP draw included), so
+    the legacy stream's sequence (and every pre-existing field) stays
+    byte-identical. Returns the case dict (mask not yet
     final) plus the rebuilt evaluator inputs for the second pass.
     """
     # Previous-day anchors (drive pivots + Fib + CPR); keep pdh > pdl, pdc inside.
@@ -206,10 +217,26 @@ def _build_case(
     tod = rng.choice(_TOD_SAMPLES)
     ts = datetime(2024, 1, 2, tod.hour, tod.minute, tzinfo=IST)
 
+    # Gap midpoint (Group 15, bits 66-68 — DEC-GAP-MIDPOINT-CONDITIONS-001):
+    # the resolved session-edge level, absent/exactly-at/around the close like
+    # the retired-VWAP distribution, drawn from the SEPARATE gap stream so every
+    # legacy field above is byte-identical to the pre-gap fixture. The
+    # exact-at-close arm guarantees near_gap_mid (68) fires across 400 cases.
+    gap_roll = gap_rng.random()
+    gap_mid: int | None
+    if gap_roll < 0.12:
+        gap_mid = None
+    elif gap_roll < 0.30:
+        gap_mid = close  # exactly at the close → near fires
+    else:
+        gap_mid = max(1, close + gap_rng.choice((-1, 1)) * gap_rng.randint(1, 40_000))
+    gap_mid_bps = gap_rng.choice(_PROXIMITY_BPS)
+
     prox = ProximityParams(
         pivot_proximity_bps=rng.choice(_PROXIMITY_BPS),
         pdh_pdl_proximity_bps=rng.choice(_PROXIMITY_BPS),
         fib_proximity_bps=rng.choice(_PROXIMITY_BPS),
+        gap_mid_proximity_bps=gap_mid_bps,
     )
     flags = rng.choice(_PRIOR_FLAG_PATTERNS)
     prior_n = len(flags) if flags else rng.choice((1, 2, 3, 4))
@@ -229,6 +256,7 @@ def _build_case(
         day_low_paisa=day_low,
         open_of_day_paisa=open_of_day,
         market_structure=market_structure,
+        gap_mid_paisa=gap_mid,
     )
     mask = evaluate_atoms(snap, prox, prior)
 
@@ -248,10 +276,12 @@ def _build_case(
         "day_high_paisa": day_high,
         "day_low_paisa": day_low,
         "open_of_day_paisa": open_of_day,
+        "gap_mid_paisa": gap_mid,
         "proximity": {
             "pivot_bps": prox.pivot_proximity_bps,
             "pdh_pdl_bps": prox.pdh_pdl_proximity_bps,
             "fib_bps": prox.fib_proximity_bps,
+            "gap_mid_bps": prox.gap_mid_proximity_bps,
         },
         "prior": {"prior_n": prior_n, "flags": list(flags)},
         "market_structure": {
@@ -307,14 +337,17 @@ def _append_supertrend(
 def generate() -> dict[str, Any]:
     """Build the full deterministic fixture payload."""
     rng = random.Random(_SEED)  # noqa: S311 — deterministic fixture generation, not crypto
-    # Pass 1: the byte-frozen historical (version-3) draw stream, untouched.
-    built = [_build_case(rng, i) for i in range(_N_RANDOM)]
+    # Pass 1: the byte-frozen historical (version-3) draw stream, untouched;
+    # the Group-15 gap fields draw from the SEPARATE gap stream
+    # (DEC-GAP-MIDPOINT-CONDITIONS-001) so the legacy stream never shifts.
+    gap_rng = random.Random(_GAP_SEED)  # noqa: S311 — the separate Group-15 stream
+    built = [_build_case(rng, gap_rng, i) for i in range(_N_RANDOM)]
     # Pass 2: the version-4 SuperTrend draws continue the SAME stream strictly
     # AFTER the whole historical sequence (GOLD-02 — appending them inside
     # pass 1 would shift every later case's draws).
     cases = [_append_supertrend(rng, case, snap, prox, prior) for case, snap, prox, prior in built]
-    # Coverage audit over the 64 ACTIVE bits (IMPLEMENTED_MASK = bits 0-51 +
-    # 54-65): every IMPLEMENTED bit must be set in >=1 case AND clear in >=1
+    # Coverage audit over the 67 ACTIVE bits (IMPLEMENTED_MASK = bits 0-51 +
+    # 54-68): every IMPLEMENTED bit must be set in >=1 case AND clear in >=1
     # case, so the oracle exercises every condition the evaluator actually
     # computes both ways. The CPR bits 60-63 derive from the prev-day anchors
     # (60-62 partition every warm case; 63 fires whenever pdc sits close
@@ -322,8 +355,10 @@ def generate() -> dict[str, Any]:
     # The SuperTrend bits 64/65 fire off the appended ``supertrend_x2_paisa``
     # draw (strict close×2-vs-line inequality; None/equality → both clear)
     # and joined the both-ways set at the vocab-66 implemented-flip. The
+    # gap-midpoint bits 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001) draw from the
+    # SEPARATE gap stream (absent / exactly-at-close / around-close). The
     # NON-implemented bits — the RETIRED VWAP tombstones 52/53 and every
-    # reserved bit >= 66 — are excluded from the both-ways gate and must
+    # reserved bit >= 69 — are excluded from the both-ways gate and must
     # NEVER be set in any case (the must-never-set gate below).
     set_seen = 0
     clr_seen = 0

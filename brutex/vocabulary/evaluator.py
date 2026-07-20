@@ -1,11 +1,13 @@
-"""The 66-condition evaluator — a thin marshalling shim over the shared Rust core.
+"""The 69-condition evaluator — a thin marshalling shim over the shared Rust core.
 
 Takes an `IndicatorSnapshot` (all per-bar indicator values) plus proximity
 parameters and prior-bar history, and returns a u128 bitmask where bit `i` is set
-iff condition `i` is true. The vocabulary currently declares bits 0..65 (66
-conditions — 64 ACTIVE: the VWAP bits 52/53 are RETIRED tombstones; the
+iff condition `i` is true. The vocabulary currently declares bits 0..68 (69
+conditions — 67 ACTIVE: the VWAP bits 52/53 are RETIRED tombstones; the
 SuperTrend bits 64/65 are IMPLEMENTED as of the vocab-66 SuperTrend flip,
-crate 0.5.0), with headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
+crate 0.5.0; DEC-GAP-MIDPOINT-CONDITIONS-001 appended the session-edge
+gap-midpoint bits 66-68), with headroom to bit 127
+(DEC-VOCAB-U128-CODEGEN-001).
 
 Per `docs/TRACK1_VOCABULARY.md` definitions. As of `DEC-SHARED-CORE-001`
 Phase 2b (`docs/MIGRATION.md` #441) the condition logic itself (52 then, 60,
@@ -91,6 +93,15 @@ class IndicatorSnapshot:
     # bits 64/65 BOTH clear. Defaulted so every pre-existing snapshot caller
     # keeps working unchanged (the Group-14 bits then simply do not fire).
     supertrend_x2_paisa: int | None = None
+    # Session-edge gap-midpoint level (Group 15, bits 66-68 —
+    # DEC-GAP-MIDPOINT-CONDITIONS-001), resolved upstream by the stateful
+    # Stage-1A X1/X2 capture + the shared Rust trading_core.compute_gap_mid and
+    # threaded in like the session VWAP. None on a zero-gap day, when X1/X2 are
+    # not captured (first stream day / post-roll / Muhurat-skipped prior
+    # session), on the session's FIRST TF bar (the arm-from-bar-2 law) and on
+    # the 1day timeframe — the Group-15 bits then simply do not fire. Defaulted
+    # to None so every pre-existing snapshot caller keeps working unchanged.
+    gap_mid_paisa: int | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +116,13 @@ class ProximityParams:
     pivot_proximity_bps: int = 10
     pdh_pdl_proximity_bps: int = 10
     fib_proximity_bps: int = 10
+    # Group-15 `near_gap_mid` tolerance (DEC-GAP-MIDPOINT-CONDITIONS-001),
+    # matching the sibling defaults. APPENDED LAST; deliberately NOT part of the
+    # frozen v1 `canonical_bytes` spec encode — a swept non-default value rides
+    # run identity via the default-omit `canonical_trade_params` key (the
+    # DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override-1 pattern; wiring lands with the
+    # Stage-1A state, not this field).
+    gap_mid_proximity_bps: int = 10
 
 
 @dataclass
@@ -129,7 +147,7 @@ class PriorBarHistory:
             self.flags = self.flags[-self.prior_n :]
 
 
-# ────── The 66-condition evaluator (delegates to the shared Rust core) ──────
+# ────── The 69-condition evaluator (delegates to the shared Rust core) ──────
 
 
 def pivot_levels_list(pivots: PivotLevels) -> list[int]:
@@ -212,7 +230,7 @@ def evaluate_atoms(
     proximity: ProximityParams,
     prior_history: PriorBarHistory,
 ) -> int:
-    """Evaluate the 64 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
+    """Evaluate the 67 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
 
     Marshals the pre-built indicator levels into the flat primitive ABI and
     delegates to `trading_core.evaluate_with_levels`. The pivot/fib levels are
@@ -228,13 +246,15 @@ def evaluate_atoms(
         prior_history: Rolling N-bar bullish/bearish flags for Group 6.
 
     Returns:
-        u128 bitmask over the 66-bit layout. The 64 IMPLEMENTED bits (0-51,
-        54-65) are set per condition (PR-2 added pivot R5/S5 bits 54-55;
+        u128 bitmask over the 69-bit layout. The 67 IMPLEMENTED bits (0-51,
+        54-68) are set per condition (PR-2 added pivot R5/S5 bits 54-55;
         DEC-NIFTY-BOS-CHOCH-001 added the BOS/CHoCH bits 56-59, resolved from
         ``snapshot.market_structure``; the CPR bits 60-63 are computed in-core
         from the snapshot's pivot levels; the SuperTrend bits 64/65 compare
         ``close × 2`` against ``snapshot.supertrend_x2_paisa`` strictly —
-        equality or a ``None`` line leaves both clear). The RETIRED VWAP
+        equality or a ``None`` line leaves both clear;
+        DEC-GAP-MIDPOINT-CONDITIONS-001 added the gap-midpoint bits 66-68,
+        resolved from ``snapshot.gap_mid_paisa``). The RETIRED VWAP
         tombstones (52/53) are never set.
 
     O(1) per bar: one cache-resident Rust call, no allocations beyond the two
@@ -277,5 +297,10 @@ def evaluate_atoms(
         snapshot.market_structure.choch_bullish,
         snapshot.market_structure.choch_bearish,
         snapshot.supertrend_x2_paisa,
+        # Group-15 gap-midpoint (appended-last FFI law,
+        # DEC-GAP-MIDPOINT-CONDITIONS-001): the resolved optional level +
+        # its proximity tolerance, threaded like the session VWAP.
+        snapshot.gap_mid_paisa,
+        proximity.gap_mid_proximity_bps,
     )
     return mask

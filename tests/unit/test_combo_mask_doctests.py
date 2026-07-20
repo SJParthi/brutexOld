@@ -28,7 +28,7 @@ def test_count_combos_examples_match_the_66_vocab() -> None:
     # vocabulary size so a future vocab change forces BOTH updates together.
     from brutex.engine.combo_mask import VOCAB_BITS, count_combos
 
-    assert VOCAB_BITS == 66
-    assert count_combos(1) == 66
-    assert count_combos(2) == 2145
-    assert count_combos(3) == 45760
+    assert VOCAB_BITS == 69
+    assert count_combos(1) == 69
+    assert count_combos(2) == 2346
+    assert count_combos(3) == 52394

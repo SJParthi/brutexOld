@@ -6,7 +6,7 @@
 //!
 //! A bit-for-bit twin of `brutex/vocabulary/bits.py` (both generated from
 //! `conditions.toml`). The strategy mask is a u128 (DEC-VOCAB-U128-CODEGEN-001
-//! / ADR-0012 D4); bits 0..=65 are the live
+//! / ADR-0012 D4); bits 0..=68 are the live
 //! conditions, the rest are reserved. Never renumber a bit (grow-only,
 //! DEC-PLUGIN-001).
 
@@ -156,9 +156,16 @@ pub const BIT_NARROW_CPR_DAY: u32 = 63;
 pub const BIT_CLOSE_ABOVE_SUPERTREND: u32 = 64;
 /// close strictly below the Supertrend line (ATR-10 Wilder, factor 3, hl2 source)
 pub const BIT_CLOSE_BELOW_SUPERTREND: u32 = 65;
+// Gap Midpoint
+/// close strictly above the session-edge gap-midpoint level
+pub const BIT_CLOSE_ABOVE_GAP_MID: u32 = 66;
+/// close strictly below the session-edge gap-midpoint level
+pub const BIT_CLOSE_BELOW_GAP_MID: u32 = 67;
+/// close within tolerance of the session-edge gap-midpoint level
+pub const BIT_NEAR_GAP_MID: u32 = 68;
 
 /// The number of atomic conditions (dense bits 0..=TOTAL-1).
-pub const TOTAL_CONDITIONS: u32 = 66;
+pub const TOTAL_CONDITIONS: u32 = 69;
 
 /// The strategy-mask width in bits (u128 — ADR-0012 D4).
 pub const MASK_WIDTH: u32 = 128;
@@ -170,14 +177,14 @@ pub const MASK_WIDTH: u32 = 128;
 /// position forever and never get math (the grow-only law).
 /// RETIRED: bit 52 `BIT_CLOSE_ABOVE_VWAP`.
 /// RETIRED: bit 53 `BIT_CLOSE_BELOW_VWAP`.
-pub const IMPLEMENTED_MASK: u128 = 73773465495956094975;
+pub const IMPLEMENTED_MASK: u128 = 590282299559823540223;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The 66 bit positions must form a dense
-    /// 0..=65 range, no gaps, no dupes.
+    /// The 69 bit positions must form a dense
+    /// 0..=68 range, no gaps, no dupes.
     #[test]
     fn bit_positions_are_dense() {
         let all = [
@@ -247,6 +254,9 @@ mod tests {
             BIT_NARROW_CPR_DAY,
             BIT_CLOSE_ABOVE_SUPERTREND,
             BIT_CLOSE_BELOW_SUPERTREND,
+            BIT_CLOSE_ABOVE_GAP_MID,
+            BIT_CLOSE_BELOW_GAP_MID,
+            BIT_NEAR_GAP_MID,
         ];
         assert_eq!(all.len(), TOTAL_CONDITIONS as usize);
         let mut sorted = all;

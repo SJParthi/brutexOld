@@ -86,11 +86,15 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
             choch_bearish=ms["choch_bearish"],
         ),
         supertrend_x2_paisa=case["supertrend_x2_paisa"],
+        # Group-15 gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) —
+        # carried VERBATIM like the VWAP.
+        gap_mid_paisa=case["gap_mid_paisa"],
     )
     proximity = ProximityParams(
         pivot_proximity_bps=case["proximity"]["pivot_bps"],
         pdh_pdl_proximity_bps=case["proximity"]["pdh_pdl_bps"],
         fib_proximity_bps=case["proximity"]["fib_bps"],
+        gap_mid_proximity_bps=case["proximity"]["gap_mid_bps"],
     )
     prior = PriorBarHistory(prior_n=case["prior"]["prior_n"], flags=list(case["prior"]["flags"]))
     return snapshot, proximity, prior

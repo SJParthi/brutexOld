@@ -79,16 +79,18 @@ pin) verify a >=64-bit grid is genuinely Rust-kernel-served WITHOUT
 monkeypatching — the #1549 ``rust_active`` observable shape, widened to name
 WHICH kernel serves (since the vocab-66 SuperTrend implemented-flip,
 DEC-SUPERTREND-CONDITIONS-001, the LIVE bits 64/65 fire on every warm
-non-equality bar, so warm production bar_bits genuinely span past u64 and the
->=64-bit paths are the PRODUCTION regime, not a test-only exercise).
+non-equality bar — and the LIVE gap-midpoint bits 66-68
+(DEC-GAP-MIDPOINT-CONDITIONS-001) fire on armed gap days — so warm production
+bar_bits genuinely span past u64 and the >=64-bit paths are the PRODUCTION
+regime, not a test-only exercise).
 
 ## Combo iteration
 
-For the 66-condition vocab and AND-mask of size K, the count is C(66,K):
+For the 69-condition vocab and AND-mask of size K, the count is C(69,K):
 
-    K=1   66
-    K=2   2,145
-    K=3   45,760
+    K=1   69
+    K=2   2,346
+    K=3   52,394
 
 This module exposes ``iter_masks_k_of_n(k, n)`` that yields every
 u128 mask with exactly K bits set. The implementation is currently
@@ -144,7 +146,7 @@ _LOG = structlog.get_logger("brutex.engine.combo_mask")
 # Constants
 # ─────────────────────────────────────────────────────────────────
 
-VOCAB_BITS: int = 66
+VOCAB_BITS: int = 69
 """Current condition vocabulary size (the dense bit count from
 ``rust/trading-core/conditions.toml`` / ``brutex.vocabulary.bits.TOTAL_CONDITIONS``).
 DEC-PLUGIN-001 / DEC-PLUGIN-002 govern add/remove (grow-only)."""
@@ -365,7 +367,7 @@ def evaluate_mask(bar_bits: int, required_mask: int) -> bool:
     Parameters
     ----------
     bar_bits : int
-        u128 truth-vector at one bar (all 66 layout conditions evaluated).
+        u128 truth-vector at one bar (all 69 layout conditions evaluated).
     required_mask : int
         u128 strategy mask. A bit set here means the condition is
         required to fire.
@@ -561,9 +563,10 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     # call to the u128 twin kernel — never the numpy oracle (LOUD-FAIL law).
     # Since the vocab-66 SuperTrend implemented-flip
     # (DEC-SUPERTREND-CONDITIONS-001) the LIVE bits 64/65 fire on every warm
-    # non-equality bar, so warm production bar_bits exceed u64 and the
-    # >=64-bit branch is the PRODUCTION norm; the u64 path still serves
-    # cold/narrow windows and u64-fit batches.
+    # non-equality bar — and the LIVE gap-midpoint bits 66-68
+    # (DEC-GAP-MIDPOINT-CONDITIONS-001) fire on armed gap days — so warm
+    # production bar_bits exceed u64 and the >=64-bit branch is the PRODUCTION
+    # norm; the u64 path still serves cold/narrow windows and u64-fit batches.
     if _any_wide(masks) or _any_wide(bar_bits):
         wide_kernel = getattr(fno_math, "count_supermasks_u128s", None)
         if wide_kernel is None:
@@ -825,7 +828,7 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     k : int
         Number of required bits. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 66).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 69).
 
     Returns
     -------
@@ -837,11 +840,11 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     >>> count_combos(0)
     1
     >>> count_combos(1)
-    66
+    69
     >>> count_combos(2)
-    2145
+    2346
     >>> count_combos(3)
-    45760
+    52394
     >>> count_combos(0, n=5)
     1
     >>> count_combos(3, n=5)
@@ -886,7 +889,7 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
     k : int
         Number of bits to set in each yielded mask. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 66).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 69).
 
     Yields
     ------
@@ -928,7 +931,7 @@ def iter_masks_k_of_bits(bits: Sequence[int], k: int) -> Iterator[int]:
 
     Generalises :func:`iter_masks_k_of_n` — which enumerates over the first ``n``
     *contiguous* bits ``0..n-1`` — to an **arbitrary subset** of condition bits, so
-    a sweep can brute-force over a chosen handful of the 66 conditions (e.g. only
+    a sweep can brute-force over a chosen handful of the 69 conditions (e.g. only
     the pivot + Fibonacci bits), ``k`` at a time, instead of a contiguous prefix.
     Positions are de-duplicated and sorted ascending, so the iteration order is
     deterministic (lexicographic on the sorted positions) and the total count is

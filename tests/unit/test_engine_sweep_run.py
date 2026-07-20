@@ -2919,7 +2919,10 @@ class TestU128EnvelopeThroughSweep:
         # and — since the vocab-66 SuperTrend implemented-flip (crate 0.5.0)
         # — the LIVE bits 64/65 fire too (the up-trend stream warms the
         # ATR-10 state at bar 9), so the resident bar_bits are ALREADY
-        # u128-wide: the sim builds the u128 sibling kernel at CONSTRUCTION
+        # u128-wide (and per DEC-GAP-MIDPOINT-CONDITIONS-001 the IMPLEMENTED
+        # gap-midpoint bits 66-68 fire on this fixture too — `_trending_bars`
+        # restarts every day at 100.0 while the prior day closes higher):
+        # the sim builds the u128 sibling kernel at CONSTRUCTION
         # (`_rust_is_wide`), the per-call PROMOTION arm is structurally
         # bypassed (zero `wide_kernel_promoted` events here — that arm keeps
         # its dedicated coverage in test_engine_rust_trade_sim.py over
@@ -2928,6 +2931,8 @@ class TestU128EnvelopeThroughSweep:
         # zero-trade stores (the vacuous-equality trap).
         bars = _trending_bars()
         cfg = _make_config(condition_bits=[1, 64, 65], k=1, min_hits=0)
+        # The premise made explicit: the bar_bits genuinely widen the window.
+        assert any(b > (1 << 64) - 1 for b in build_bar_bits(bars))
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
         # Never a fallback: the wide masks ride the construction-wide kernel.

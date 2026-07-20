@@ -30,8 +30,9 @@
 
 use proptest::prelude::*;
 use trading_core::{
-    FibLevels, IndicatorSnapshot, MarketStructureSignal, PivotLevels, PriorBarHistory,
-    ProximityParams, bits, compute_fib_levels, compute_pivot_levels, evaluate_atoms,
+    FibLevels, GapDirection, IndicatorSnapshot, MarketStructureSignal, PivotLevels,
+    PriorBarHistory, ProximityParams, bits, compute_fib_levels, compute_gap_mid,
+    compute_pivot_levels, evaluate_atoms,
 };
 
 /// Upper bound for generated paisa magnitudes (₹10 billion). See module docs:
@@ -67,10 +68,11 @@ fn arb_prev_day() -> impl Strategy<Value = (i64, i64, i64)> {
 
 /// Proximity tolerances spanning 0 bps (degenerate, only exact hits) … 2 %.
 fn arb_proximity() -> impl Strategy<Value = ProximityParams> {
-    (0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c)| ProximityParams {
+    (0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c, d)| ProximityParams {
         pivot_proximity_bps: a,
         pdh_pdl_proximity_bps: b,
         fib_proximity_bps: c,
+        gap_mid_proximity_bps: d,
     })
 }
 
@@ -230,6 +232,13 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 // The resolved SuperTrend ×2 line (Group 14) — boundary-aware
                 // around this candle's close (see `arb_supertrend`).
                 arb_supertrend(close),
+                // The resolved Group-15 gap-midpoint level
+                // (DEC-GAP-MIDPOINT-CONDITIONS-001) — around/at/absent like the
+                // EMAs (the stateful X1/X2 RESOLUTION is proven by the
+                // stage1a_batch tests; the evaluator's job here is the pure
+                // above/below/near verdict), so bits 66-68 are exercised both
+                // ways by the property suite.
+                arb_ema(close),
             )
         })
         .prop_map(
@@ -245,6 +254,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 prior,
                 market_structure,
                 supertrend_x2_paisa,
+                gap_mid,
             )| {
                 let (open, high, low, close) = candle;
                 let (day_high, day_low) = day;
@@ -264,6 +274,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                     open_of_day_paisa: open_of_day,
                     market_structure,
                     supertrend_x2_paisa,
+                    gap_mid_paisa: gap_mid,
                 };
                 (snapshot, proximity, prior)
             },
@@ -572,6 +583,20 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         m |= 1u128 << bits::BIT_NARROW_CPR_DAY;
     }
 
+    // Group 15: gap midpoint (bits 66-68) — the resolved optional level
+    // (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    if let Some(gm) = s.gap_mid_paisa {
+        if c > gm {
+            m |= 1u128 << bits::BIT_CLOSE_ABOVE_GAP_MID;
+        }
+        if c < gm {
+            m |= 1u128 << bits::BIT_CLOSE_BELOW_GAP_MID;
+        }
+        if oracle_is_near(c, gm, p.gap_mid_proximity_bps) {
+            m |= 1u128 << bits::BIT_NEAR_GAP_MID;
+        }
+    }
+
     m
 }
 
@@ -640,6 +665,10 @@ proptest! {
         prop_assert_eq!(pair(bits::BIT_ABOVE_CPR_TC, bits::BIT_BELOW_CPR_BC), 0);
         prop_assert_eq!(pair(bits::BIT_ABOVE_CPR_TC, bits::BIT_INSIDE_CPR), 0);
         prop_assert_eq!(pair(bits::BIT_BELOW_CPR_BC, bits::BIT_INSIDE_CPR), 0);
+        prop_assert_eq!(
+            pair(bits::BIT_CLOSE_ABOVE_GAP_MID, bits::BIT_CLOSE_BELOW_GAP_MID),
+            0
+        );
     }
 
     /// The three CPR position bits (60-62) form an EXACT PARTITION: with the
@@ -803,11 +832,13 @@ fn every_implemented_bit_is_individually_reachable() {
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
         supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 10,
         pdh_pdl_proximity_bps: 10,
         fib_proximity_bps: 10,
+        gap_mid_proximity_bps: 10,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1421,10 +1452,36 @@ fn every_implemented_bit_is_individually_reachable() {
         },
         &no_prior,
     );
+    // Group 15: gap midpoint (bits 66-68, DEC-GAP-MIDPOINT-CONDITIONS-001) —
+    // a resolved level below / above / exactly at the close.
+    check(
+        bits::BIT_CLOSE_ABOVE_GAP_MID,
+        IndicatorSnapshot {
+            gap_mid_paisa: Some(1_049_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_GAP_MID,
+        IndicatorSnapshot {
+            gap_mid_paisa: Some(1_051_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_GAP_MID,
+        IndicatorSnapshot {
+            gap_mid_paisa: Some(1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
 
     assert_eq!(
         seen, FULL_MASK,
-        "not all implemented bits (incl. R5-S5/BOS/CHoCH/CPR/Supertrend) were exercised"
+        "not all implemented bits (incl. R5-S5/BOS/CHoCH/CPR/Supertrend/gap-mid) were exercised"
     );
 }
 
@@ -1439,6 +1496,7 @@ fn tombstoned_vwap_bits_never_fire() {
         pivot_proximity_bps: 10,
         pdh_pdl_proximity_bps: 10,
         fib_proximity_bps: 10,
+        gap_mid_proximity_bps: 10,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1460,6 +1518,7 @@ fn tombstoned_vwap_bits_never_fire() {
             open_of_day_paisa: close,
             market_structure: MarketStructureSignal::default(),
             supertrend_x2_paisa: None,
+            gap_mid_paisa: None,
         };
         let m = evaluate_atoms(&s, &prox, &no_prior);
         assert_eq!(
@@ -1483,6 +1542,7 @@ fn cpr_equality_boundaries_are_pinned() {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        gap_mid_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1504,6 +1564,7 @@ fn cpr_equality_boundaries_are_pinned() {
             open_of_day_paisa: close,
             market_structure: MarketStructureSignal::default(),
             supertrend_x2_paisa: None,
+            gap_mid_paisa: None,
         };
         evaluate_atoms(&s, &prox, &no_prior)
     };
@@ -1553,6 +1614,7 @@ fn cpr_equality_boundaries_are_pinned() {
         open_of_day_paisa: 1_000_000,
         market_structure: MarketStructureSignal::default(),
         supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
     };
     let m_tie = evaluate_atoms(&s_tie, &prox, &no_prior);
     assert_eq!(
@@ -1608,11 +1670,13 @@ fn equality_boundaries_keep_strict_bits_clear() {
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
         supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        gap_mid_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1940,11 +2004,13 @@ fn degenerate_bars_fire_no_shape_or_gap_bits() {
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
         supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        gap_mid_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -2016,4 +2082,88 @@ fn pivots_panic_on_pdc_out_of_range() {
 #[should_panic(expected = "PDH must be >= PDL")]
 fn fib_panics_on_pdh_below_pdl() {
     let _ = compute_fib_levels(1_000_000, 1_100_000);
+}
+
+// ───────────────────── gap-midpoint level properties ────────────────────────
+// DEC-GAP-MIDPOINT-CONDITIONS-001: the pure session-edge level law.
+
+/// Two ordered candles (X1, X2) plus an open/pdc pair inside the paisa domain.
+fn arb_gap_inputs() -> impl Strategy<Value = (i64, i64, i64, i64, i64, i64)> {
+    (
+        (1i64..=MAX_PAISA, 0i64..=100_000),
+        (1i64..=MAX_PAISA, 0i64..=100_000),
+        1i64..=MAX_PAISA,
+        1i64..=MAX_PAISA,
+    )
+        .prop_map(|((x1_lo, r1), (x2_lo, r2), open, pdc)| {
+            (x1_lo + r1, x1_lo, x2_lo + r2, x2_lo, open, pdc)
+        })
+}
+
+proptest! {
+    /// The minted level lies INCLUSIVELY between its two source extremes, with
+    /// equality only when the two extremes are equal (the midpoint law).
+    #[test]
+    fn gap_mid_lies_between_its_source_extremes(
+        (x1_hi, x1_lo, x2_hi, x2_lo, open, pdc) in arb_gap_inputs()
+    ) {
+        if let Some((level, direction)) = compute_gap_mid(x1_hi, x1_lo, x2_hi, x2_lo, open, pdc) {
+            let (a, b) = match direction {
+                GapDirection::Up => (x1_hi, x2_hi),
+                GapDirection::Down => (x1_lo, x2_lo),
+            };
+            prop_assert!(a.min(b) <= level && level <= a.max(b),
+                "level {level} outside [{}, {}]", a.min(b), a.max(b));
+            if a != b {
+                // Strictly interior unless the pair degenerates … except the
+                // 1-paisa-apart pair, whose half-even midpoint legally lands
+                // ON the even endpoint. For gaps >= 2 paisa it is interior.
+                if (a - b).abs() >= 2 {
+                    prop_assert!(a.min(b) < level && level < a.max(b));
+                }
+            } else {
+                prop_assert_eq!(level, a, "equal extremes yield the shared value");
+            }
+        }
+    }
+
+    /// The direction law: gap-up (`open > pdc`) selects the HIGH pair, gap-down
+    /// the LOW pair, and flipping the gap sign flips the pair; a zero gap
+    /// yields None.
+    #[test]
+    fn gap_mid_direction_law(
+        (x1_hi, x1_lo, x2_hi, x2_lo, open, pdc) in arb_gap_inputs()
+    ) {
+        let got = compute_gap_mid(x1_hi, x1_lo, x2_hi, x2_lo, open, pdc);
+        if open == pdc {
+            prop_assert_eq!(got, None, "zero gap must yield no level");
+        } else {
+            let (level, direction) = got.expect("nonzero gap always mints a level");
+            let expected_dir = if open > pdc { GapDirection::Up } else { GapDirection::Down };
+            prop_assert_eq!(direction, expected_dir);
+            // The level equals the midpoint of the SELECTED pair — recomputed
+            // independently with integer arithmetic + explicit half-even.
+            let (a, b) = match direction {
+                GapDirection::Up => (x1_hi, x2_hi),
+                GapDirection::Down => (x1_lo, x2_lo),
+            };
+            let sum = a + b;
+            let expected_level = if sum.rem_euclid(2) == 0 {
+                sum / 2
+            } else {
+                // .5 tie → nearest EVEN integer.
+                let floor = sum.div_euclid(2);
+                if floor % 2 == 0 { floor } else { floor + 1 }
+            };
+            prop_assert_eq!(level, expected_level);
+        }
+    }
+
+    /// Zero gap yields None for ANY candle shape (the dedicated zero-gap law).
+    #[test]
+    fn gap_mid_zero_gap_is_always_none(
+        (x1_hi, x1_lo, x2_hi, x2_lo, open, _pdc) in arb_gap_inputs()
+    ) {
+        prop_assert_eq!(compute_gap_mid(x1_hi, x1_lo, x2_hi, x2_lo, open, open), None);
+    }
 }

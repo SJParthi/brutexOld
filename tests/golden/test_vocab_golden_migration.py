@@ -25,7 +25,15 @@ NEW ``supertrend_x2_paisa`` field) — and per case
 ``new & ((1<<64)-1) == old`` (bits 0-63 bit-identical). The only NEW bits
 (64/65) are exactly the strict ×2-domain comparison recomputed INDEPENDENTLY
 here (``close×2`` vs the case's own ``supertrend_x2_paisa``; ``None`` /
-equality → both clear). No bit at or above 66 is ever set.
+equality → both clear). No bit at or above 66 is ever
+set by the v4 layer itself.
+
+**DEC-GAP-MIDPOINT-CONDITIONS-001 (the 66→69 growth, woven at the vocab
+train):** the gap-midpoint bits 66-68 were APPENDED with exactly two per-case
+input keys drawn from a SEPARATE second RNG stream — the pre-existing
+invariants above still hold verbatim over the pre-existing fields/bits (the
+appended keys are enumerated and excluded from the input hash; the gap bits
+are the one sanctioned firing class at or above 66).
 
 Each companion is a committed copy of its era's masks: the ``note`` field
 records the provenance prose and ``source_fixture_sha256`` the source
@@ -55,6 +63,14 @@ _OLD_V3 = json.loads(
 
 #: The two RETIRED tombstone bits the reshape cleared.
 _TOMBSTONE_MASK = (1 << 52) | (1 << 53)
+#: The per-case input keys APPENDED by DEC-GAP-MIDPOINT-CONDITIONS-001 (bits
+#: 66-68, drawn from a SEPARATE second RNG stream so every pre-existing draw is
+#: unshifted) — excluded from the pre-reshape input hash, enumerated so any
+#: OTHER new key still breaks the invariant.
+_GAP_APPENDED_KEYS = frozenset({"gap_mid_paisa"})
+_GAP_APPENDED_PROXIMITY_KEYS = frozenset({"gap_mid_bps"})
+#: The implemented gap-midpoint trio (bits 66-68).
+_GAP_MASK = 0b111 << 66
 #: The pre-reshape 60-bit vocabulary span.
 _LOW60 = (1 << 60) - 1
 #: The pre-SuperTrend-flip 64-bit span (bits 0-63 — frozen across v3→v4).
@@ -65,17 +81,28 @@ _NARROW_BPS = 30
 
 
 def _input_sha(case: dict[str, Any]) -> str:
-    """SHA-256 of a case's PRE-v4-era INPUT fields.
+    """SHA-256 of a case's PRE-v4-era, PRE-gap INPUT fields.
 
-    Everything except ``expected_mask`` AND the v4-appended
-    ``supertrend_x2_paisa`` field — canonical JSON (``sort_keys`` + compact
+    Everything except ``expected_mask``, the v4-appended
+    ``supertrend_x2_paisa`` field AND the DEC-GAP-MIDPOINT-CONDITIONS-001
+    appends (``gap_mid_paisa`` + ``proximity.gap_mid_bps`` — the enumerated
+    ``_GAP_APPENDED_KEYS``) — canonical JSON (``sort_keys`` + compact
     separators), exactly how BOTH companions' ``inputs_sha256`` values were
     minted from their era's fixture (the v2 and v3 fixtures carried identical
-    input fields — the v2→v3 regen burned the VWAP draw in place; v4 only
-    APPENDED the SuperTrend field, so stripping it recovers the frozen v2/v3
-    input dict byte-for-byte).
+    input fields — the v2→v3 regen burned the VWAP draw in place; v4 and the
+    gap growth only APPENDED fields, so stripping them recovers the frozen
+    v2/v3 input dict byte-for-byte). A NEW key outside the enumerated
+    append-set still fails loudly (it lands in the hash).
     """
-    d = {k: v for k, v in case.items() if k not in ("expected_mask", "supertrend_x2_paisa")}
+    d = {
+        k: v
+        for k, v in case.items()
+        if k not in ("expected_mask", "supertrend_x2_paisa") and k not in _GAP_APPENDED_KEYS
+    }
+    prox = dict(d["proximity"])
+    for k in _GAP_APPENDED_PROXIMITY_KEYS:
+        prox.pop(k, None)
+    d["proximity"] = prox
     return hashlib.sha256(json.dumps(d, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -168,18 +195,26 @@ def test_pre_existing_bits_are_back_compat_and_tombstones_cleared() -> None:
     assert tombstones_cleared > 0
 
 
-def test_no_bit_at_or_above_66_is_ever_set() -> None:
-    """The reserved headroom (bits >= 66) stays inert.
+def test_no_bit_at_or_above_69_is_ever_set() -> None:
+    """The reserved headroom (bits >= 69) stays inert.
 
-    DELIBERATE law change at the vocab-66 SuperTrend implemented-flip
-    (crate 0.5.0): the former ``>> 64 == 0`` law is retired — bits 64/65 MAY
-    now fire (their exact justification is
-    :func:`test_new_supertrend_bits_are_exactly_the_independent_arithmetic`);
-    everything at or above the declared 66-bit layout must never fire.
+    DELIBERATE law changes: the vocab-66 SuperTrend implemented-flip
+    (crate 0.5.0) retired the former ``>> 64 == 0`` law — bits 64/65 MAY now
+    fire (their exact justification is
+    :func:`test_new_supertrend_bits_are_exactly_the_independent_arithmetic`) —
+    and DEC-GAP-MIDPOINT-CONDITIONS-001 retired ``>> 66 == 0`` — the
+    IMPLEMENTED gap trio 66-68 MAY fire (its VERBATIM-carried level is
+    exercised by the vocab golden + Python↔Rust parity suites); everything at
+    or above the declared 69-bit layout must never fire.
     """
+    gap_fired = 0
     for case in _NEW["cases"]:
         mask = int(case["expected_mask"], 16)
-        assert mask >> 66 == 0, f"case {case['id']}: bit >= 66 fired ({mask:#034x})"
+        assert mask >> 69 == 0, f"case {case['id']}: bit >= 69 fired ({mask:#034x})"
+        if mask & _GAP_MASK:
+            gap_fired += 1
+    # Anti-vacuity: the gap trio genuinely fires somewhere in the corpus.
+    assert gap_fired > 0
 
 
 # ────────────────────────────────────────────────────────────────────────

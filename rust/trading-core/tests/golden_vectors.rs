@@ -26,6 +26,15 @@ struct Proximity {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    /// Group-15 gap-midpoint tolerance (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    /// serde-defaulted so a pre-gap fixture snapshot still parses (10 = the
+    /// evaluator default).
+    #[serde(default = "default_gap_mid_bps")]
+    gap_mid_bps: i64,
+}
+
+fn default_gap_mid_bps() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -68,6 +77,12 @@ struct Case {
     /// The SuperTrend line in the ×2-scaled paisa domain (fixture version 4 —
     /// the vocab-66 implemented-flip; `None` = warm-up, bits 64/65 clear).
     supertrend_x2_paisa: Option<i64>,
+    /// Session-edge gap-midpoint level (Group 15, bits 66-68) — resolved
+    /// upstream and carried VERBATIM like the VWAP
+    /// (DEC-GAP-MIDPOINT-CONDITIONS-001). serde-defaulted (`None`) so a
+    /// pre-gap fixture snapshot still parses.
+    #[serde(default)]
+    gap_mid_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -135,11 +150,13 @@ fn eval_case(c: &Case) -> u128 {
         // Fixture version 4 (the vocab-66 SuperTrend implemented-flip)
         // carries the appended ST input per case — threaded verbatim.
         supertrend_x2_paisa: c.supertrend_x2_paisa,
+        gap_mid_paisa: c.gap_mid_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
         pdh_pdl_proximity_bps: c.proximity.pdh_pdl_bps,
         fib_proximity_bps: c.proximity.fib_bps,
+        gap_mid_proximity_bps: c.proximity.gap_mid_bps,
     };
     let prior = PriorBarHistory {
         prior_n: c.prior.prior_n,
