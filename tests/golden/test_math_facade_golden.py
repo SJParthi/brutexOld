@@ -42,6 +42,9 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "ResidentSweepSim",
         "ResidentSweepSimU128",
         "add_u64",
+        # DEC-ALPHA-BUYHOLD-METRIC-001 — the ALPHA-vs-BUY&HOLD benchmark
+        # scalar (a deliberate, reviewed surface addition; fenced additive).
+        "alpha_vs_buyhold_pct",
         "bitand_count_u64s",
         "bitcount_u64s",
         "blake3_hash",

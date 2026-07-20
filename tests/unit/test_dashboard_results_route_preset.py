@@ -123,7 +123,14 @@ class TestPresetParam:
         assert resp.status_code == 200
         payload = resp.json()
         assert payload["preset"] == "min_dd_first"
-        assert payload["preset_inert_axes"] == ["composite_score", "max_consecutive_losses"]
+        # DEC-ALPHA-BUYHOLD-METRIC-001: alpha_pct joins the inert set — an
+        # ARTIFACT-level metric never persisted on ResultRow (honest
+        # disclosure, the Golden-Rule-#10 law).
+        assert payload["preset_inert_axes"] == [
+            "composite_score",
+            "max_consecutive_losses",
+            "alpha_pct",
+        ]
         assert [r["max_drawdown_pct"] for r in payload["rows"]] == [2.0, 25.0]
 
     def test_invalid_preset_is_a_clean_400_naming_valid_values(self, client: TestClient) -> None:

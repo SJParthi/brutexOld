@@ -8,6 +8,7 @@
     "ResidentSweepSimU128",
     "__version__",
     "add_u64",
+    "alpha_vs_buyhold_pct",
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",

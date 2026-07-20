@@ -69,6 +69,9 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "ResidentSweepSimU128",
     "__version__",
     "add_u64",
+    # DEC-ALPHA-BUYHOLD-METRIC-001 — the ALPHA-vs-BUY&HOLD benchmark
+    # scalar (fenced additive entry; NO crate version bump).
+    "alpha_vs_buyhold_pct",
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
@@ -141,6 +144,7 @@ from ._fno_math import (  # noqa: E402
     ResidentSweepSimU128,
     __version__,
     add_u64,
+    alpha_vs_buyhold_pct,
     bitand_count_u64s,
     bitcount_u64s,
     blake3_hash,
@@ -194,6 +198,7 @@ __all__ = [
     "ResidentSweepSimU128",
     "__version__",
     "add_u64",
+    "alpha_vs_buyhold_pct",
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",

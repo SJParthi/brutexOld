@@ -2608,6 +2608,9 @@
             <tr><td>Sharpe (full precision)</td><td data-oc="r1_sharpe">—</td></tr>
             <tr><td>DSR</td><td data-oc="r1_dsr">—</td></tr>
             <tr><td>CPCV pass %</td><td data-oc="r1_cpcv">—</td></tr>
+            <!-- DEC-ALPHA-BUYHOLD-METRIC-001: alpha vs buy-&-hold ("—"
+                 until an alpha-carrying artifact lands). -->
+            <tr><td>Alpha vs buy &amp; hold %</td><td data-oc="r1_alpha" data-explain="alpha_pct">—</td></tr>
             <!-- DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade
                  verdict joined onto the winner (server-built status_text;
                  "—" until a cascade-joined artifact lands). -->
@@ -3189,6 +3192,7 @@
       <div class="story-cell"><div class="k">Consistency — Sharpe</div><div class="v" id="stSharpe" data-explain="sharpe">—</div></div>
       <div class="story-cell"><div class="k">Real-or-Fluke — DSR</div><div class="v" id="stDsr" data-explain="dsr">—</div></div>
       <div class="story-cell"><div class="k">CPCV pass %</div><div class="v" id="stCpcv" data-explain="cpcv_pass_pct">—</div></div>
+      <div class="story-cell"><div class="k">Alpha vs buy &amp; hold %</div><div class="v" id="stAlpha" data-explain="alpha_pct">—</div></div>
       <div class="story-cell"><div class="k">Win rate</div><div class="v" id="stWinRate" data-explain="win_rate">—</div></div>
       <div class="story-cell"><div class="k">Profit factor</div><div class="v" id="stPf" data-explain="profit_factor">—</div></div>
       <div class="story-cell"><div class="k">Trades</div><div class="v" id="stTrades" data-explain="trades">—</div></div>

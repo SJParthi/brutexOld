@@ -44,8 +44,12 @@
 //! the walk-forward pass-count with the numpy-pairwise REPLICATED mean
 //! (all PR-2, DEC-METRICS-RUST-STATS-002); [`cvar`] — the integer-exact
 //! CVaR worst-k tail fold (DEC-RANK-CVAR-TAIL-GATE-001; claim class
-//! STRUCTURAL — all-integer, no float ever participates).
+//! STRUCTURAL — all-integer, no float ever participates);
+//! [`alpha`] — the ALPHA-vs-BUY&HOLD benchmark scalar
+//! (DEC-ALPHA-BUYHOLD-METRIC-001; STRUCTURAL — fixed convert-first op
+//! order transcribed from the Python oracle, no numpy involvement).
 
+pub mod alpha;
 pub mod cpcv;
 pub mod cvar;
 pub mod deflated_sharpe;

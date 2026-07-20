@@ -144,6 +144,10 @@ var BX_SCREENER_COLUMNS = [
      law): the stored dsr is the per-tuple figure, never shown unlabeled. */
   { key: "metrics.dsr", label: "DSR (tuple-N)", type: "num", explain: "dsr" },
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
+  /* DEC-ALPHA-BUYHOLD-METRIC-001: alpha vs buy-&-hold — additive artifact
+     metric; a pre-alpha artifact lacks the key entirely -> "—" (absent-
+     excluded-but-counted under a filter, the #1631 law — never a 0). */
+  { key: "metrics.alpha_pct", label: "Alpha %", type: "num", explain: "alpha_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
   // Losing-streak resilience columns (the sibling block; dotted keys resolve
   // row.resilience.* / row.metrics.* generically; null → "—", never a

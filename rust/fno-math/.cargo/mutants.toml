@@ -109,7 +109,8 @@
 # band per mutation.yml's shard arithmetic (the #1597 +1-shard dial stands
 # if a scheduled run approaches the cap). In-session evidence: the 86 cvar
 # mutants were run locally the CI way (--in-place, --test-tool cargo,
-# -- --release) — verdict recorded in MIGRATION.md #1957.
+# -- --release) — verdict recorded in MIGRATION.md #2056 (renumbered from
+# the pre-fold #1957 at the 2026-07-20 train-b wave-2b fold).
 examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",

@@ -90,6 +90,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.guarded_read import read_regular_bytes_deadline
+from brutex.engine.alpha_metric import AlphaBaseline, AlphaValues, compute_alpha_values
 from brutex.engine.resilience_streaks import project_resilience_annotation
 from brutex.models import BruteXError
 from brutex.ranking import MIN_TRADES, STREAK_DOOR_WLR_EXEMPT, streak_door_threshold
@@ -451,8 +452,14 @@ def resolve_preset(name: str) -> str:
     return DEFAULT_TOP100_PRESET
 
 
-def _rank_record(candidate: Top100Candidate) -> RankRecord:
-    """Project one pooled candidate onto the COMMON flat rank-record shape."""
+def _rank_record(candidate: Top100Candidate, *, alpha_pct: float | None = None) -> RankRecord:
+    """Project one pooled candidate onto the COMMON flat rank-record shape.
+
+    ``alpha_pct`` (DEC-ALPHA-BUYHOLD-METRIC-001) is the candidate's computed
+    alpha-vs-buy-&-hold percent, or the honest ``None`` when no baseline
+    covers its instrument's window — the ``alpha`` preset ranks such rows
+    LAST (the None-after-scored law), every other preset ignores the axis.
+    """
     return RankRecord(
         run_id=candidate.row.run_id,
         max_drawdown_pct=candidate.row.max_drawdown_pct,
@@ -476,11 +483,15 @@ def _rank_record(candidate: Top100Candidate) -> RankRecord:
         # last under each preset's presence flag).
         trailing_sharpe_ratio=candidate.row.trailing_sharpe_ratio,
         decay_weighted_net_paisa=candidate.row.decay_weighted_net_paisa,
+        alpha_pct=alpha_pct,
     )
 
 
 def rank_candidates(
-    candidates: Sequence[Top100Candidate], *, preset: str
+    candidates: Sequence[Top100Candidate],
+    *,
+    preset: str,
+    alpha_by_run_id: Mapping[str, float] | None = None,
 ) -> tuple[Top100Candidate, ...]:
     """Order *candidates* under *preset* — a strict, discovery-order-free total order.
 
@@ -488,9 +499,19 @@ def rank_candidates(
     (:func:`brutex.ranking.presets.sort_by_preset` — the ``ResultsStore.top_k``
     law: stable ``run_id``-ASC pre-sort, then ONE stable sort on the preset
     key) — identical output for any input permutation (property-pinned).
+    ``alpha_by_run_id`` feeds the ``alpha`` preset's axis (an absent id ==
+    honestly uncomputable → ``None``); the default ``None`` map is
+    byte-identical to the pre-alpha ordering under every preset.
     """
     resolved = resolve_preset(preset)
-    return sort_by_preset(candidates, preset=PRESETS[resolved], record_of=_rank_record)
+    alpha_map: Mapping[str, float] = {} if alpha_by_run_id is None else alpha_by_run_id
+    return sort_by_preset(
+        candidates,
+        preset=PRESETS[resolved],
+        record_of=lambda candidate: _rank_record(
+            candidate, alpha_pct=alpha_map.get(candidate.row.run_id)
+        ),
+    )
 
 
 # ── Entry payload projection ─────────────────────────────────────────────────
@@ -505,7 +526,11 @@ def _loads_object(rendered: str) -> dict[str, object]:
 
 
 def _metrics_payload(
-    row: ResultRow, agg: ComboAggregate, *, cpcv_pass_rate: float | None = None
+    row: ResultRow,
+    agg: ComboAggregate,
+    *,
+    cpcv_pass_rate: float | None = None,
+    alpha: AlphaValues | None = None,
 ) -> dict[str, object]:
     """Every ResultRow metric + the agg's depth stats — full precision, ints exact.
 
@@ -515,6 +540,11 @@ def _metrics_payload(
     unit projection, never a rounding (CLAUDE.md §4). Emitted ONLY when the
     rate is known: an absent key renders the honest "—" on every display
     site, NEVER a fabricated 0 (the oneclick_artifacts absent-key law).
+
+    ``alpha`` (DEC-ALPHA-BUYHOLD-METRIC-001) follows the SAME emit-on-known
+    law: a non-``None`` triple adds ``alpha_pct`` / ``strategy_return_pct``
+    / ``bh_return_pct`` at full float precision; an instrument with no
+    baseline for the window adds NOTHING — the honest "—", never 0.
     """
     payload: dict[str, object] = {
         # ── the persisted ResultRow, field-for-field (R27 traceability) ──
@@ -570,6 +600,10 @@ def _metrics_payload(
     }
     if cpcv_pass_rate is not None:
         payload["cpcv_pass_pct"] = cpcv_pass_rate * 100.0
+    if alpha is not None:
+        payload["alpha_pct"] = alpha.alpha_pct
+        payload["strategy_return_pct"] = alpha.strategy_return_pct
+        payload["bh_return_pct"] = alpha.bh_return_pct
     return payload
 
 
@@ -661,6 +695,7 @@ def _entry_payload(
     margin_roi: Mapping[str, object] | None,
     join: CascadeJoin | None = None,
     join_state: str = CASCADE_STATE_NO_REPORT,
+    alpha: AlphaValues | None = None,
 ) -> dict[str, object]:
     """Project one ranked candidate onto the binding entry shape (B5).
 
@@ -680,7 +715,7 @@ def _entry_payload(
         "tf": row.tf,
         "direction": row.direction,
         "arm": {"sl_paisa": candidate.sl_paisa, "tp_paisa": candidate.tp_paisa},
-        "metrics": _metrics_payload(row, candidate.agg, cpcv_pass_rate=cpcv_rate),
+        "metrics": _metrics_payload(row, candidate.agg, cpcv_pass_rate=cpcv_rate, alpha=alpha),
         "regime": _regime_payload(candidate.agg),
         "vix_band": _vix_band_payload(candidate.agg),
         "family_id": family_id,
@@ -708,6 +743,9 @@ def build_top100(
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
     cascade_join: CascadeJoin | None = None,
+    alpha_baselines: Mapping[str, AlphaBaseline] | None = None,
+    start_equity_paisa: int | None = None,
+    alpha_gate: bool = False,
 ) -> Top100Artifact:
     """Build the global artifact from the pooled winners — one O(pool) pass.
 
@@ -750,6 +788,27 @@ def build_top100(
         preset order / family collapse are byte-untouched (R13 — a
         cascade-FAILED rank-1 stays rank-1, flagged never hidden).
 
+    alpha_baselines, start_equity_paisa
+        DEC-ALPHA-BUYHOLD-METRIC-001: instrument → the R27 baseline's
+        paisa pair, plus the grid's start equity (the strategy notional).
+        When BOTH are supplied every candidate whose instrument has a
+        baseline gains the O(1)/candidate kernel-routed alpha triple on its
+        ``metrics`` (``alpha_pct`` / ``strategy_return_pct`` /
+        ``bh_return_pct`` — emit-on-known; an uncovered instrument adds
+        NOTHING → the honest "—"). Defaults (``None``) are BYTE-IDENTICAL
+        to the pre-alpha artifact (pinned).
+    alpha_gate
+        The DEFAULT-OFF rejection gate (``BRUTEX_ALPHA_GATE``, resolved by
+        the CALLER — fail-loud at launch): when ``True``, gate-passing
+        candidates whose COMPUTABLE alpha is <= 0 are EXCLUDED before the
+        family collapse — counted (``source["alpha_gate_excluded"]``) +
+        named (ONE ``top100.alpha_gate_excluded`` WARN with a capped id
+        sample), never silent truncation. An UNCOMPUTABLE alpha never
+        excludes (Golden Rule #1 — you cannot judge what you cannot
+        measure). ARTIFACT-LEVEL scope only: persisted stores + the
+        ``sweep_identity`` tuple digest are byte-untouched (post-hoc
+        display selection, NOT a store-address fold — the honest scope).
+
     Raises
     ------
     Top100Error
@@ -761,6 +820,20 @@ def build_top100(
             raise Top100Error(f"build_top100: duplicate candidate run_id {candidate.row.run_id!r}")
         seen.add(candidate.row.run_id)
     resolved = resolve_preset(preset)
+
+    # ── Alpha vs buy-&-hold (DEC-ALPHA-BUYHOLD-METRIC-001) ──
+    # One O(1) kernel-routed triple per candidate whose instrument carries a
+    # baseline; an uncovered instrument stays honestly ABSENT from the map
+    # (its entries emit no alpha keys → the display "—", never a 0).
+    alpha_values: dict[str, AlphaValues] = {}
+    if alpha_baselines and start_equity_paisa is not None:
+        for candidate in candidates:
+            baseline = alpha_baselines.get(candidate.row.instrument)
+            if baseline is None:
+                continue
+            alpha_values[candidate.row.run_id] = compute_alpha_values(
+                candidate.row.net_pnl_paisa, start_equity_paisa, baseline
+            )
 
     # ── Cascade sweep_id gate (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) ──
     # The cascade dir is ONE-per-results-root and overwritten per sweep, so a
@@ -783,6 +856,40 @@ def build_top100(
         join_for_entries = cascade_join
 
     passers = [c for c in candidates if passes_hard_gates(c.row, c.agg)]
+    # Snapshot the HARD-gate passer count BEFORE the alpha gate can narrow
+    # ``passers``: ``source["gate_passers"]`` + the ``top100.built`` log field
+    # keep their historical meaning ("hard-gate passers") and stay equal to
+    # the report-side ``ResultsDepthReport.gate_passers`` accounting under
+    # gate-ON; ``alpha_gate_excluded`` is the SOLE accounting of alpha
+    # rejections (review r1, DEC-ALPHA-BUYHOLD-METRIC-001).
+    hard_passers = len(passers)
+
+    # ── The DEFAULT-OFF alpha rejection gate (DEC-ALPHA-BUYHOLD-METRIC-001) ──
+    # Runs BEFORE the family collapse so an excluded candidate can never be a
+    # representative. Only a COMPUTABLE alpha <= 0 excludes; an uncomputable
+    # one (no baseline) is kept — never judged on a number that does not
+    # exist. COUNTED + NAMED, never silent truncation.
+    alpha_gate_excluded = 0
+    if alpha_gate:
+        kept: list[Top100Candidate] = []
+        excluded_ids: list[str] = []
+        for candidate in passers:
+            values = alpha_values.get(candidate.row.run_id)
+            if values is not None and values.alpha_pct <= 0.0:
+                excluded_ids.append(candidate.row.run_id)
+                continue
+            kept.append(candidate)
+        alpha_gate_excluded = len(excluded_ids)
+        if excluded_ids:
+            _LOG.warning(
+                "top100.alpha_gate_excluded",
+                run_id=run_id,
+                excluded=alpha_gate_excluded,
+                sample=excluded_ids[:10],
+                note="alpha <= 0 vs buy-&-hold — excluded from the top100 BUILD only "
+                "(stores + run identity untouched; BRUTEX_ALPHA_GATE is operator-gated)",
+            )
+        passers = kept
 
     # Family collapse (R34): one representative per family among the PASSERS.
     # The partition's representative (fewest mask bits, run_id ASC) is used
@@ -811,7 +918,11 @@ def build_top100(
         members_of[chosen.row.run_id] = listed
     families_collapsed = len(passers) - len(representatives)
 
-    ranked = rank_candidates(representatives, preset=resolved)[:TOP100_LIMIT]
+    ranked = rank_candidates(
+        representatives,
+        preset=resolved,
+        alpha_by_run_id={run_id_: values.alpha_pct for run_id_, values in alpha_values.items()},
+    )[:TOP100_LIMIT]
     entries: list[Mapping[str, object]] = []
     for position, candidate in enumerate(ranked, start=1):
         run = candidate.row.run_id
@@ -829,6 +940,7 @@ def build_top100(
                 ),
                 join=join_for_entries,
                 join_state=join_state,
+                alpha=alpha_values.get(run),
             )
         )
 
@@ -836,7 +948,7 @@ def build_top100(
         "data_snapshot_hashes": sorted(set(data_snapshot_hashes)),
         "stores": counts.stores,
         "pool": len(candidates),
-        "gate_passers": len(passers),
+        "gate_passers": hard_passers,
         "excluded_no_aggs": counts.excluded_no_aggs,
         "zero_trade_excluded": counts.zero_trade_excluded,
         "parity_excluded": counts.parity_excluded,
@@ -844,6 +956,12 @@ def build_top100(
         "reasons_wired": reason_provider is not None,
         "margin_roi_wired": margin_roi_provider is not None,
     }
+    # DEC-ALPHA-BUYHOLD-METRIC-001 — EMIT-ON-NON-DEFAULT: the two gate keys
+    # appear ONLY when the operator-gated switch is ON, so a default build's
+    # bytes are IDENTICAL to the pre-alpha artifact (golden-pinned).
+    if alpha_gate:
+        source["alpha_gate"] = True
+        source["alpha_gate_excluded"] = alpha_gate_excluded
     # Root cascade-join meta — writer-ALWAYS-emitted, reader-OPTIONAL. Under
     # a mismatch the report's sweep_id is NAMED (the diagnosable half) while
     # the counts stay honest null (a stale report's totals must never read
@@ -876,7 +994,7 @@ def build_top100(
         run_id=run_id,
         preset=resolved,
         pool=len(candidates),
-        gate_passers=len(passers),
+        gate_passers=hard_passers,
         families_collapsed=families_collapsed,
         entries=len(entries),
         cascade_join_state=join_state,

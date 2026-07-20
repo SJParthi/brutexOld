@@ -87,6 +87,11 @@ from typing import TYPE_CHECKING, Final, cast
 import structlog
 
 from brutex.data.guarded_read import read_parquet_regular, read_regular_bytes, read_regular_text
+from brutex.engine.alpha_metric import (
+    AlphaBaseline,
+    alpha_baseline_from_series,
+    resolve_alpha_gate_enabled,
+)
 from brutex.engine.baseline import baseline_filename, compute_baseline, write_baseline
 from brutex.engine.combo_aggregates import ComboAggregate, aggregate_combo
 from brutex.engine.minute_path import MinuteIndex
@@ -841,6 +846,7 @@ def run_results_depth_pass(
     cascade_join: CascadeJoin | None = None,
     expected_missing: int | None = None,
     quarantined_labels: frozenset[str] | None = None,
+    alpha_gate: bool | None = None,
 ) -> ResultsDepthReport:
     """Run the full results-depth pass over one grid's persisted stores.
 
@@ -919,12 +925,25 @@ def run_results_depth_pass(
         the tuple that is actually missing, so a stale entry matches nothing.
         ``None`` / empty (the default — direct callers, the sequential path
         whose ``tuples_quarantined_prior`` is 0) ⇒ no identity attribution.
+    alpha_gate
+        DEC-ALPHA-BUYHOLD-METRIC-001: the DEFAULT-OFF alpha rejection gate
+        threaded to :func:`build_top100`. ``None`` (the default) resolves
+        :data:`~brutex.engine.alpha_metric.ALPHA_GATE_ENV` HERE — at the
+        very start of the pass, before any tuple work — so a junk env fails
+        the pass instantly and loudly (the WP6 CLI adapter ALSO resolves it
+        eagerly pre-sweep, so a CLI launch refuses cleanly before the sweep
+        even starts; this in-pass resolve only front-loads the same law for
+        direct callers).
 
     Returns
     -------
     ResultsDepthReport
         The honest counters — loud failures included, never masked.
     """
+    # DEC-ALPHA-BUYHOLD-METRIC-001: resolve the gate FIRST (before any tuple
+    # work) — a junk BRUTEX_ALPHA_GATE raises here, never after hours of
+    # capture work (the eager fail-loud env convention).
+    alpha_gate_enabled = resolve_alpha_gate_enabled() if alpha_gate is None else alpha_gate
     run_id = grid_identity(grid)
     # Review round 2 M1: the quarantined-prior IDENTITY set (empty when the
     # caller passes None — direct callers / the sequential path).
@@ -1173,7 +1192,15 @@ def run_results_depth_pass(
             )
 
     # ── Baselines (R27): per pooled instrument, from the sweep's own bars ──
+    # The SAME computed series ALSO feeds the alpha-vs-buy-&-hold inputs
+    # (DEC-ALPHA-BUYHOLD-METRIC-001): its anchor OPEN + last session CLOSE
+    # as exact 2-dp paisa — one source, never a second derivation. An
+    # instrument whose baseline errors carries NO alpha (the honest "—") —
+    # and the ADDITIVE alpha derivation runs strictly AFTER the baseline
+    # write + tally in its OWN narrow guard, so a raise there can never
+    # skip the pre-existing R27 artifact (one WARN, alpha honestly absent).
     baselines: dict[str, str] = {}
+    alpha_baselines: dict[str, AlphaBaseline] = {}
     first_tf = grid.timeframes[0].label
     for instrument in instruments_pooled:
         try:
@@ -1195,6 +1222,17 @@ def run_results_depth_pass(
         else:
             baselines[instrument] = baseline_filename(instrument)
             tallies.baselines_written += 1
+            try:
+                alpha_baselines[instrument] = alpha_baseline_from_series(series)
+            except (KeyboardInterrupt, SystemExit, MemoryError):
+                raise
+            except Exception as exc:
+                _LOG.warning(
+                    "results_depth.alpha_baseline_error",
+                    instrument=instrument,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
 
     # ── The global top-100 (R21/R26/R34), in its own fence ──
     top100_written = False
@@ -1219,6 +1257,9 @@ def run_results_depth_pass(
             reason_provider=reason_provider,
             margin_roi_provider=margin_roi_provider,
             cascade_join=cascade_join,
+            alpha_baselines=alpha_baselines,
+            start_equity_paisa=grid.start_equity_paisa,
+            alpha_gate=alpha_gate_enabled,
         )
         write_top100(runs_dir, artifact)
         top100_written = True

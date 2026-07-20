@@ -196,6 +196,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // behind the default-OFF `BRUTEX_RANK_CVAR_RUST` seam
     // (`brutex.ranking.cvar_gate`).
     m.add_function(wrap_pyfunction!(stats::cvar::stats_cvar_tail_fold, m)?)?;
+    // DEC-ALPHA-BUYHOLD-METRIC-001 — the ALPHA-vs-BUY&HOLD benchmark scalar
+    // (fenced additive registration; NO crate version bump — the #1942
+    // precedent, run identity / `_indicator_version` untouched).
+    m.add_function(wrap_pyfunction!(stats::alpha::alpha_vs_buyhold_pct, m)?)?;
     // ---- end stats module ----
     // ---- optcost module (DEC-OPTCOST-TAILS-RUST-001): options-cost tail
     // kernels (regime rates / moneyness / strike-lot-expiry rules).

@@ -146,6 +146,25 @@ STRATEGIES_RUST_COMBO_ENV = (
 )
 os.environ.setdefault(STRATEGIES_RUST_COMBO_ENV, "0")
 
+# DEC-ALPHA-BUYHOLD-METRIC-001 test hermeticity (the market-hours-guard
+# philosophy — hermetic against the AMBIENT ENVIRONMENT): the alpha
+# rejection gate (`BRUTEX_ALPHA_GATE`, default OFF) is resolved from the
+# REAL ``os.environ`` at cmd_sweep_all launch + the results-depth pass
+# entry. When the flag is UNSET this belt pins it explicitly OFF
+# (``setdefault``), so the default-build byte-identity pins (no gate keys on
+# the top100 ``source``) never depend on the runner's shell; an explicit
+# outer export — truthy or junk alike — WINS over the setdefault, and such a
+# run will honestly flip those pins / red the fail-loud launches (the
+# sibling-belt contract; not something a setdefault can prevent). The gate's
+# OWN tests stay fully armed — they inject env mappings or
+# ``monkeypatch.setenv`` explicitly (which overrides this setdefault) — so
+# this default disables ONLY the ambient env read, never the tested law.
+# Pinned literal (the wheel-free discipline above — the constant home
+# ``brutex.engine.alpha_metric`` transitively imports the engine package,
+# which hard-imports the wheels); drift-pinned equal to
+# ``alpha_metric.ALPHA_GATE_ENV`` by tests/unit/test_engine_alpha_metric.py.
+os.environ.setdefault("BRUTEX_ALPHA_GATE", "0")
+
 # DEC-BOX-AUTODEPLOY-LANE-001 hermeticity belt: the nightly's pre-chain
 # box-update leg runs REAL git (incl. a network `git fetch origin main`) at
 # `cmd_nightly_run` time — the whole suite runs with the lane's kill switch

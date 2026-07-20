@@ -132,6 +132,13 @@ class RankRecord:
     #: unscored (a pre-extension store row or an anchor-less run) — ranks
     #: AFTER every scored record. Defaulted-LAST.
     decay_weighted_net_paisa: float | None = None
+    #: ALPHA vs buy-&-hold, percent (DEC-ALPHA-BUYHOLD-METRIC-001) — an
+    #: ARTIFACT-level display metric, not persisted on ``ResultRow``.
+    #: Defaulted LAST so every existing construction site is byte-identical;
+    #: ``None`` == honestly uncomputable (no baseline for the window) and
+    #: ranks AFTER every real value under the ``alpha`` preset (the
+    #: None-after-scored law), never coerced to a fake number.
+    alpha_pct: float | None = None
 
 
 #: A preset sort key — the 4-part min-DD ascending key, the 5-part
@@ -249,6 +256,17 @@ def _decay_net_key(record: RankRecord) -> tuple[int, float]:
     return (1, decay_net)
 
 
+def _alpha_key(record: RankRecord) -> tuple[int, float]:
+    """``(value_present, raw_value)`` — the alpha-vs-buy-&-hold axis
+    (DEC-ALPHA-BUYHOLD-METRIC-001). A ``None`` alpha (no baseline for the
+    window) sorts LAST under ``reverse=True`` via the presence flag, never
+    coerced to a fake number (the ``_composite_key`` law, verbatim)."""
+    alpha = record.alpha_pct
+    if alpha is None:
+        return (0, 0.0)
+    return (1, alpha)
+
+
 @dataclass(frozen=True, slots=True)
 class RankingPreset:
     """One named ranking law: a sort key + its direction.
@@ -353,6 +371,18 @@ PRESETS: Final[Mapping[str, RankingPreset]] = {
         ),
         reverse=True,
         key=_decay_net_key,
+    ),
+    # DEC-ALPHA-BUYHOLD-METRIC-001 — APPENDED (additive; the default token
+    # and every existing preset's position are byte-identical).
+    "alpha": RankingPreset(
+        name="alpha",
+        describe=(
+            "alpha vs buy-&-hold, descending (strategy return % minus the "
+            "instrument's buy-&-hold return % over the same window; "
+            "uncomputable rows rank last)"
+        ),
+        reverse=True,
+        key=_alpha_key,
     ),
 }
 
