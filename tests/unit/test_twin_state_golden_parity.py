@@ -1,33 +1,29 @@
-"""Frozen golden replay for the STATEFUL Rust indicator state (R2-RC-F2).
+"""Frozen golden replay for the STATEFUL Rust indicator states (R2-RC-F2).
 
-``trading_core.MarketStructureState`` (BOS/CHoCH — Group-12 bits 56-59) is the
-SINGLE source of the stateful market-structure indicator: production
-(``brutex/engine/stage1a.py``) drives ONLY this Rust pyclass, and the
-hand-synced Python twin that once mirrored it in ``brutex/indicators/``
-was deleted by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (this file was the
+``trading_core.VwapState`` (session-anchored VWAP — Group-10 bits 52/53) and
+``trading_core.MarketStructureState`` (BOS/CHoCH — Group-12 bits 56-59) are the
+SINGLE source of the two stateful indicators: production
+(``brutex/engine/stage1a.py``) drives ONLY these Rust pyclasses, and the
+hand-synced Python twins that once mirrored them in ``brutex/indicators/``
+were deleted by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (this file was the
 both-twins parity suite that proved the twins bit-identical before the
 deletion).
 
-The former ``VwapState`` half of this suite was RETIRED with the bits-52/53
-VWAP tombstone (the 60→66 reshape — the pyclass was deleted from the crate at
-0.4.0). The fixture is the schema ``twin-state-golden-v2`` re-emission of the
-SAME seeded generator with the VWAP streams dropped; the regeneration run
-PROVED the market-structure half byte-identical to the frozen v1 fixture's MS
-half (the retired builders' RNG draws are burned draw-for-draw —
-``generate_twin_state_golden._burn_retired_vwap_draws``), so the MS contract
-survives the reshape bit-for-bit.
+The frozen contract survives the deletion in full: the language-neutral golden
+streams in ``tests/golden/fixtures/twin_state_golden_vectors.json``
+(fixed-seed, expected values frozen FROM the Rust production state by
+``tests/golden/generate_twin_state_golden.py`` — the fixture and its SHA-256
+manifest are NEVER regenerated; TickVault's native Rust side replays the same
+file) are replayed here through the production pyclasses and every per-bar
+output is asserted bit-identical to the frozen expectation. A drift in the
+Rust core, the PyO3 boundary, or a stale installed wheel fails this suite.
 
-The language-neutral golden streams (fixed-seed, expected values frozen FROM
-the Rust production state by ``tests/golden/generate_twin_state_golden.py``;
-TickVault's native Rust side replays the same file) are replayed here through
-the production pyclass and every per-bar output is asserted bit-identical to
-the frozen expectation. A drift in the Rust core, the PyO3 boundary, or a
-stale installed wheel fails this suite.
-
-The streams cover the k-bar fractal confirmation delay (k ∈ {1, 2, 3}, incl.
-a break on the exact confirming bar and tied-extreme windows that confirm
-nothing), flat windows, engulfing both-side breaks, full BOS→CHoCH trend-flip
-sequences, and i64-extreme market-structure levels.
+The streams cover IST session boundaries (day-ordinal resets, the 09:00-09:15
+pre-open auction exclusion, warm/cold time-of-day rewinds, contract rolls),
+FFI-ceiling ``MAX_BAR_PAISA`` bars whose ``cum_pv`` far exceeds i64 (the i128
+truncating-division seam), the k-bar fractal confirmation delay (k ∈ {1, 2, 3},
+incl. a break on the exact confirming bar and tied-extreme windows that confirm
+nothing), and i64-extreme market-structure levels.
 """
 
 from __future__ import annotations
@@ -46,10 +42,14 @@ _DATA: dict[str, Any] = json.loads(_RAW)
 
 # Byte-freeze manifest (fixtures/README.md convention): any edit to the vectors
 # — accidental or a regeneration — must consciously update this digest.
-# DELIBERATE RE-LOCK (the 60→66 reshape): schema v2 — the VWAP streams
-# dropped; the MS half proven byte-identical to the v1 fixture's MS half.
-# Old digest: 85a0e57dbde7f2dcba91e71184f8c2c4bbf488a92e1d8104a9db92477f3dd08e.
-_EXPECTED_SHA256 = "d6d8cc89369a3a07a59136b1e2886a5cc2c508aa83dd9699899114d869e60b94"
+# DELIBERATE RE-LOCK (the vocab-train Regen, DEC-VOCAB-VWAP-RETAIN-001,
+# MIGRATION.md #2206): the wipe-era v2 (MS-only) fixture regains its VWAP
+# half. The regen run PROVED the MS half byte-identical to BOTH the v2
+# fixture AND the pre-wipe v1, and the VWAP half byte-identical to the
+# pre-wipe v1 (sha 85a0e57dbde7f2dcba91e71184f8c2c4bbf488a92e1d8104a9db92
+# 477f3dd08e) — the ONLY delta is `generated_with_crate_version`
+# 0.3.0 -> 0.6.0.
+_EXPECTED_SHA256 = "e069248fefd6b1f44723346918833273a58f87056b2675865762988db8b55b52"
 
 #: Golden streams frozen with NO confirmable swing (tied/flat/vetoed windows) —
 #: after their full replay both swing-level getters must still read ``None``.
@@ -69,10 +69,21 @@ class TestFixtureIntegrity:
         """Byte-for-byte no-drift gate on the golden vector file."""
         assert hashlib.sha256(_RAW.encode("utf-8")).hexdigest() == _EXPECTED_SHA256
 
-    def test_schema_is_v2_with_no_vwap_streams(self) -> None:
-        """The reshape re-emission: schema v2, the VWAP streams GONE."""
-        assert _DATA["schema"] == "twin-state-golden-v2"
-        assert "vwap_streams" not in _DATA
+    def test_vwap_vectors_are_non_vacuous(self) -> None:
+        """The frozen VWAP expectations exercise both the None warm-up and a
+        cum_pv that exceeds i64 (the i128-accumulator seam has teeth)."""
+        i64_max = 2**63 - 1
+        all_bars = [b for s in _DATA["vwap_streams"] for b in s["bars"]]
+        assert any(b["expected_vwap_paisa"] is None for b in all_bars)
+        assert any(b["expected_vwap_paisa"] is not None for b in all_bars)
+        # Re-derive the running cum_pv of the large-magnitude stream and prove
+        # it passes i64::MAX (so the goldens genuinely cross the i128 seam).
+        (large,) = [s for s in _DATA["vwap_streams"] if s["id"] == "vwap_large_magnitude_i64_edges"]
+        cum_pv = 0
+        for bar in large["bars"]:
+            if not bar["is_pre_open"] and bar["volume"] > 0:
+                cum_pv += bar["typical_paisa"] * bar["volume"]
+        assert cum_pv > i64_max
 
     def test_market_structure_vectors_fire_all_four_signals(self) -> None:
         """Each of the four BOS/CHoCH booleans reads true somewhere in the
@@ -89,6 +100,35 @@ class TestFixtureIntegrity:
             s for s in _DATA["market_structure_streams"] if s["id"] == "ms_engulf_both_sides_k2"
         ]
         assert any(bar["expected_signal"] == [False, True, True, False] for bar in engulf["bars"])
+
+
+class TestVwapGoldenReplay:
+    """``trading_core.VwapState`` == the frozen golden expectation, per bar,
+    bit-for-bit."""
+
+    def test_rust_state_reproduces_every_golden_bar(self) -> None:
+        """Replay every stream through the production state; collect any divergence."""
+        mismatches: list[str] = []
+        for stream in _DATA["vwap_streams"]:
+            rs = trading_core.VwapState()
+            for i, bar in enumerate(stream["bars"]):
+                rs_out = rs.update(
+                    bar["typical_paisa"],
+                    bar["volume"],
+                    bar["is_pre_open"],
+                    bar["session_key"],
+                    bar["session_day_ordinal"],
+                    bar["tod_seconds"],
+                )
+                expected = bar["expected_vwap_paisa"]
+                if rs_out != expected:
+                    mismatches.append(f"{stream['id']} bar {i}: rust={rs_out} golden={expected}")
+                # The idempotent read must agree with the update return.
+                if rs.current() != rs_out:
+                    mismatches.append(
+                        f"{stream['id']} bar {i}: current() drift (rust {rs.current()} vs {rs_out})"
+                    )
+        assert not mismatches, "VWAP golden divergence:\n" + "\n".join(mismatches[:20])
 
 
 class TestMarketStructureGoldenReplay:

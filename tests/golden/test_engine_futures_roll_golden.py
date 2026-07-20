@@ -66,16 +66,23 @@ _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "futures_roll_golden.json"
 # e4accd47db6fde1c478ec0b3924812fb9168e8a233d148f483751100cb2e0621;
 # v1 (52 masks, VWAP bits live):
 # 1210f918e909090190ffde9231879dbb3111aa539077cdbc6113c9e4baa458f4.
-_EXPECTED_SHA256 = "4da440f6425d8d1a89856c16da6a21e687c4cffb818153ee804ff6c0ce312b7e"
+_EXPECTED_SHA256 = "1ce3ac7fb8833f3564582d5e9510a20af12696a4bc93eca26748df3df1ac8166"
 # TRAIN-FOLD NOTE (DEC-GAP-MIDPOINT-CONDITIONS-001, woven onto the ST flip):
 # the gap-midpoint bits 66/67 additionally join the WARM pre-roll day 2's
 # non-first bars (bar 26 stays dark per the arm-from-bar-2 law; the
 # anchor-cold post-roll day 52-77 carries NO gap bit — the D11 reset; the
 # member's XOR audit: bit 67 on 18 bars, bit 66 on 7, vs its reshape base).
-# The fixture + this digest RE-LOCK at the train's Regen phase (the composed
-# ST+gap replay); until then the pin matches the kept ST-era fixture. The
-# member's gap-only (no-ST) digest was
+# The member's gap-only (no-ST) digest was
 # 9c12a2b7b35c4f4bc87398997a8880a488f700f514953eb5df4e4e1252f0cba0.
+# REGEN RE-LOCK (the vocab-train Regen — the composed ST+gap+VWAP replay):
+# vs the kept ST-era fixture (4da440f6425d8d1a89856c16da6a21e687c4cffb8181
+# 53ee804ff6c0ce312b7e) the XOR delta is EXACTLY bit 67 on 18 bars + bit 66
+# on 7 (the member's own audited warm-pre-roll-day-2 gap delta, #2204;
+# days 1 and 3 stay gap-dark — the contract cold start + the D11 reset)
+# PLUS the RETAINED VWAP pair (DEC-VOCAB-VWAP-RETAIN-001, #2206) on the
+# volume-bearing script: bit 52 on 60 bars + bit 53 on 15, across all
+# three days, never on a session's first bar (the doji first bar's
+# typical == close — strict inequality).
 
 #: The pre-roll contract's TWO IST days (day 2 = the vendor June-2025
 #: monthly expiry — owned by the EXPIRING contract per the ``>=`` law; day 1
@@ -129,16 +136,20 @@ _STRUCTURE_MASK = (
     | (1 << B.BIT_CHOCH_BULLISH)
     | (1 << B.BIT_CHOCH_BEARISH)
 )
-#: The four stateful market-structure bits (the former "_SIX_BITS" also
-#: carried the VWAP pair — retired tombstones since the 60→66 reshape).
+#: The four stateful market-structure bits (the pre-wipe "_SIX_BITS" also
+#: carried the VWAP pair — RETAINED-ACTIVE again per
+#: DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206; asserted separately below).
 _STRUCTURE_BITS = (
     B.BIT_BOS_BULLISH,
     B.BIT_BOS_BEARISH,
     B.BIT_CHOCH_BULLISH,
     B.BIT_CHOCH_BEARISH,
 )
-#: The RETIRED VWAP tombstone pair — positively asserted 0 in EVERY mask.
-_VWAP_TOMBSTONE_MASK = (1 << B.BIT_CLOSE_ABOVE_VWAP) | (1 << B.BIT_CLOSE_BELOW_VWAP)
+#: The RETAINED session-VWAP pair (bits 52/53) — LIVE on this volume-bearing
+#: futures script; the wipe-era never-fire pin is inverted back to the
+#: pre-wipe reachability direction (#2206).
+_VWAP_PAIR_BITS = (B.BIT_CLOSE_ABOVE_VWAP, B.BIT_CLOSE_BELOW_VWAP)
+_VWAP_PAIR_MASK = (1 << B.BIT_CLOSE_ABOVE_VWAP) | (1 << B.BIT_CLOSE_BELOW_VWAP)
 #: The CPR position bits — exactly one fires per anchor-WARM bar.
 _CPR_POSITION_MASK = (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_BELOW_CPR_BC) | (1 << B.BIT_INSIDE_CPR)
 
@@ -149,8 +160,14 @@ _CPR_POSITION_MASK = (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_BELOW_CPR_BC) | (1 
 # DEC-GAP-MIDPOINT-CONDITIONS-001 added EXACTLY bit 66 (the member's audited
 # last-pre-roll delta, its literal 1225564335183544321 + 2**66) — the woven
 # tree carries BOTH: base + 2**64 + 2**66. Machine-checked at the train's
-# Regen replay.
-_EXPECTED_LAST_PRE_ROLL_MASK = 93459284703731302401
+# Regen replay, which ALSO adds EXACTLY bit 52 (close above the session
+# VWAP — RETAINED per DEC-VOCAB-VWAP-RETAIN-001, #2206; the last pre-roll
+# close 155 sits above the day's running VWAP): the final literal is
+# base + 2**52 + 2**64 + 2**66. The first post-roll mask is BYTE-UNCHANGED
+# under retention (a session's FIRST bar has vwap == its own typical ==
+# the doji close — strict inequality fires neither vwap bit; anchor-cold
+# D11 day otherwise).
+_EXPECTED_LAST_PRE_ROLL_MASK = 93463788303358672897
 _EXPECTED_FIRST_POST_ROLL_MASK = 21474836480
 
 
@@ -233,9 +250,20 @@ def test_structure_bits_fire_reset_and_refire_across_the_roll() -> None:
     assert all((m & ANCHOR_DEPENDENT_MASK) == 0 for m in post)
 
 
-def test_vwap_tombstones_never_fire() -> None:
-    """The RETIRED bits 52/53 are 0 in EVERY mask — the positive wipe pin."""
-    assert all((m & _VWAP_TOMBSTONE_MASK) == 0 for m in _masks())
+def test_vwap_pair_fires_and_resets_across_the_roll() -> None:
+    """Bits 52/53 are LIVE on the volume-bearing script (#2206) — the
+    pre-wipe reachability direction restored: each fires pre-roll AND
+    re-fires on the post-roll day (the session-anchored state rebuilds each
+    day), and NO session's FIRST bar carries either (the doji first bar's
+    typical == close — strict inequality)."""
+    masks = _masks()
+    n_pre = 2 * len(_HLC_SCRIPT)
+    pre, post = masks[:n_pre], masks[n_pre:]
+    for bit in _VWAP_PAIR_BITS:
+        assert any(m & (1 << bit) for m in pre), f"vwap bit {bit} never fired pre-roll"
+        assert any(m & (1 << bit) for m in post), f"vwap bit {bit} never re-fired post-roll"
+    n_day = len(_HLC_SCRIPT)
+    assert all((masks[d * n_day] & _VWAP_PAIR_MASK) == 0 for d in range(3))
 
 
 def test_warm_day_fires_anchor_dependent_and_cpr_bits() -> None:

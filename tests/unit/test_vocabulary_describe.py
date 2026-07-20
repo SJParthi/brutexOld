@@ -78,23 +78,27 @@ class TestMatchedConditionNames:
 class TestTombstoneRendering:
     """TOMB-01 — the ONE common tombstone-aware rendering authority.
 
-    Pre-reshape persisted masks carrying the RETIRED VWAP bits (52/53) must
-    render "(retired)", never present a dead condition as live; every other
-    declared bit keeps its plain name.
+    VACUOUS on this tree: all 74 declared bits are IMPLEMENTED and
+    ``RETIRED_MASK == 0`` (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206 —
+    the bits-52/53 wipe reversed), so NO bit renders the "(retired)" suffix.
+    The mask-driven authority is deliberately KEPT (grow-only machinery for
+    any future tombstone) — these pins hold its RETIRED_MASK-derivation law.
     """
 
-    def test_retired_bit_renders_the_suffix(self) -> None:
-        assert condition_display_name(BIT_CLOSE_ABOVE_VWAP) == "close_above_vwap (retired)"
-        assert condition_display_name(BIT_CLOSE_BELOW_VWAP) == "close_below_vwap (retired)"
+    def test_retained_vwap_bits_render_plain(self) -> None:
+        # The wipe-era "(retired)" suffix expectation is dead — the RETAINED
+        # pair reads its plain live names again (#2206).
+        assert condition_display_name(BIT_CLOSE_ABOVE_VWAP) == "close_above_vwap"
+        assert condition_display_name(BIT_CLOSE_BELOW_VWAP) == "close_below_vwap"
 
     def test_implemented_bit_renders_plain(self) -> None:
         assert condition_display_name(0) == "close_above_ema20"
         assert condition_display_name(BIT_NARROW_CPR_DAY) == "narrow_cpr_day"
 
     def test_layout_only_bit_renders_plain_not_retired(self) -> None:
-        # Declared-but-unimplemented (SuperTrend 64/65) is NOT retired — the
-        # suffix appears ONLY for tombstoned bits (StrategySpec refuses 64/65
-        # in persisted masks anyway).
+        # IMPLEMENTED since the vocab-66 SuperTrend flip — plain either way
+        # (the suffix appears ONLY for RETIRED_MASK bits, of which there are
+        # none on the 74/74 tree).
         assert condition_display_name(BIT_CLOSE_ABOVE_SUPERTREND) == "close_above_supertrend"
 
     def test_undeclared_bit_raises(self) -> None:
@@ -102,33 +106,31 @@ class TestTombstoneRendering:
             condition_display_name(TOTAL_CONDITIONS)
 
     def test_suffix_set_is_exactly_the_retired_mask(self) -> None:
-        # Exhaustive: the suffix appears for EXACTLY the RETIRED_MASK bits.
+        # Exhaustive: the suffix appears for EXACTLY the RETIRED_MASK bits —
+        # the EMPTY set on the 74/74 retention tree (#2206).
         suffixed = {
             bit
             for bit in range(TOTAL_CONDITIONS)
             if condition_display_name(bit).endswith(RETIRED_SUFFIX)
         }
         assert suffixed == {bit for bit in range(TOTAL_CONDITIONS) if (RETIRED_MASK >> bit) & 1}
-        # The VWAP tombstone pair + the three DEC-FIB-TEMPLATE-EXPRESS-001 gap
-        # placeholders (bits 66-68 — reserved=true, dropped at the re-stack
-        # onto the gap-midpoint branch, NEVER implemented here).
-        assert suffixed == {BIT_CLOSE_ABOVE_VWAP, BIT_CLOSE_BELOW_VWAP, 66, 67, 68}
-        # Sanity: disjoint from the implemented set (a live bit never suffixed).
-        assert not any((IMPLEMENTED_MASK >> bit) & 1 for bit in suffixed)
+        assert suffixed == set()
+        assert RETIRED_MASK == 0
 
-    def test_matched_condition_names_marks_a_pre_reshape_mask(self) -> None:
-        # A persisted pre-reshape mask carrying bit 52 beside a live bit.
+    def test_matched_condition_names_renders_a_vwap_mask_plain(self) -> None:
+        # A persisted mask carrying bit 52 beside a live bit — both PLAIN
+        # (the retention reversed the wipe; 52 is a live condition again).
         assert matched_condition_names(_mask(0, BIT_CLOSE_ABOVE_VWAP)) == [
             "close_above_ema20",
-            "close_above_vwap (retired)",
+            "close_above_vwap",
         ]
 
-    def test_describe_mask_marks_a_pre_reshape_mask(self) -> None:
+    def test_describe_mask_renders_the_vwap_group_plain(self) -> None:
         groups = describe_mask(_mask(BIT_CLOSE_ABOVE_VWAP, BIT_CLOSE_BELOW_VWAP))
         assert groups == [
             MaskGroup(
                 group="VWAP Position",
-                conditions=("close_above_vwap (retired)", "close_below_vwap (retired)"),
+                conditions=("close_above_vwap", "close_below_vwap"),
             )
         ]
 
@@ -141,10 +143,12 @@ class TestTombstoneRendering:
         assert display_condition_names(
             ["close_above_vwap", "close_above_ema20", "junk_name", "close_below_vwap (retired)"]
         ) == [
-            "close_above_vwap (retired)",
+            "close_above_vwap",  # a RETAINED live name maps to itself (#2206)
             "close_above_ema20",
             "junk_name",  # unknown strings pass through verbatim — never a crash
-            "close_below_vwap (retired)",  # already suffixed (new artifact) — idempotent
+            # A WIPE-ERA artifact's already-suffixed string is not a known
+            # name — it passes through verbatim (never a crash, never dropped).
+            "close_below_vwap (retired)",
         ]
 
     def test_display_condition_names_is_idempotent(self) -> None:

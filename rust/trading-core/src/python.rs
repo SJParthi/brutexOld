@@ -2583,8 +2583,10 @@ mod tests {
         // A small close × MAX_BPS fits → accepted (the product guard does not
         // over-reject a legitimate large bps on a normal-priced bar).
         assert!(
-            check_evaluate_inputs(0, 0, 0, 1_000_000, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0, 0, 0,)
-                .is_ok()
+            check_evaluate_inputs(
+                0, 0, 0, 1_000_000, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0, 0, 0,
+            )
+            .is_ok()
         );
         // pdc out of range → rejected.
         assert!(
@@ -2618,7 +2620,8 @@ mod tests {
         let over = fits + 1; // close * MAX_BPS  > i64::MAX
         // exact-fit product is ACCEPTED (reaches the inner evaluator).
         assert!(
-            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0, 0, 0,).is_ok()
+            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0, 0, 0,)
+                .is_ok()
         );
         // one paisa over → product overflows i64 → REJECTED.
         let err = check_evaluate_inputs(0, 0, 0, over, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0, 0, 0)
@@ -2626,7 +2629,8 @@ mod tests {
         assert!(err.contains("overflows i64"), "got: {err}");
         // The same boundary holds per-bps-slot: only the offending slot rejects.
         assert!(
-            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, 0, MAX_BPS, 0, 0, 0,).is_ok()
+            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, 0, MAX_BPS, 0, 0, 0,)
+                .is_ok()
         );
         assert!(
             check_evaluate_inputs(0, 0, 0, over, None, None, 0, 0, 0, 0, 0, 0, MAX_BPS, 0, 0,)
@@ -3119,14 +3123,17 @@ mod tests {
 
     #[test]
     fn spec_impl_rejects_a_reserved_bit() {
-        // Bit 66 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 66).
-        let reserved = 1u128 << 66;
-        let err = spec_eval(&format!("{reserved:032x}"), 0).unwrap_err();
-        assert!(err.contains("unimplemented/reserved"), "got: {err}");
-        // The tombstoned VWAP bit 52 is equally refused (the wipe).
-        let tombstone = 1u128 << 52;
-        let err = spec_eval(&format!("{tombstone:032x}"), 0).unwrap_err();
-        assert!(err.contains("unimplemented/reserved"), "got: {err}");
+        // ALL 74 declared bits are IMPLEMENTED on this tree (74/74 —
+        // DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206, reversed the
+        // bits-52/53 wipe): the RETAINED session-VWAP bit 52 is ACCEPTED at
+        // the boundary again and does not fire on this vwap-less fixture bar
+        // (the abstain arm) — the wipe-era refusal expectation is dead.
+        let vwap = 1u128 << 52;
+        let (_bits, fires, _dir) = spec_eval(&format!("{vwap:032x}"), 0).unwrap();
+        assert!(
+            !fires,
+            "no vwap on the fixture bar ⇒ the required bit is absent"
+        );
         // Bit 64 (Supertrend) is IMPLEMENTED since the vocab-66 flip — a mask
         // requiring it is ACCEPTED at the boundary (and does not fire on this
         // ST-less fixture bar, whose line is None).
@@ -3136,9 +3143,19 @@ mod tests {
             !fires,
             "no ST line on the fixture bar ⇒ the required bit is absent"
         );
-        // Bit 69 is the first UNDECLARED bit (TOTAL_CONDITIONS == 69 since
-        // DEC-GAP-MIDPOINT-CONDITIONS-001 appended the gap trio at 66-68).
-        let undeclared = 1u128 << 69;
+        // Bit 66 (gap-midpoint) is IMPLEMENTED since
+        // DEC-GAP-MIDPOINT-CONDITIONS-001 (#2204) — accepted; no level on
+        // the fixture bar ⇒ not fired.
+        let gap = 1u128 << 66;
+        let (_bits, fires, _dir) = spec_eval(&format!("{gap:032x}"), 0).unwrap();
+        assert!(
+            !fires,
+            "no gap level on the fixture bar ⇒ the required bit is absent"
+        );
+        // Bit 74 is the first UNDECLARED bit (TOTAL_CONDITIONS == 74 since
+        // DEC-FIB-TEMPLATE-EXPRESS-001 (#2205) appended the express bits
+        // 69-73) — REFUSED at the boundary.
+        let undeclared = 1u128 << 74;
         let err = spec_eval(&format!("{undeclared:032x}"), 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
     }
@@ -3403,7 +3420,7 @@ mod tests {
         assert!(vwap_update_guard(0, 0).is_ok());
         assert!(vwap_update_guard(0, -5).is_ok());
         assert!(vwap_update_guard(MAX_BAR_PAISA, MAX_BAR_PAISA).is_ok());
-        assert!(vwap_update_guard(24_000_00, 100).is_ok());
+        assert!(vwap_update_guard(2_400_000, 100).is_ok());
     }
 
     // ── PyMarketStructureState swing-level getters ─────────────────────
@@ -3487,12 +3504,14 @@ mod tests {
             );
 
             let got_f = py_compute_fib_levels_impl(pdh, pdl).unwrap();
-            // The COMPUTE projection is 19 (bull tail appended) while the frozen
-            // evaluator ABI stays 15 (DEC-FIB-BULLISH-RETRACE-001).
+            // The COMPUTE projection and the evaluator ABI are BOTH 19 since
+            // DEC-FIB-TEMPLATE-EXPRESS-001 (#2205) — but with DIFFERENT slot
+            // sets (the constant-pun discipline): the compute list carries
+            // the full bull ladder as its LAST FOUR entries.
             prop_assert_eq!(got_f.len(), FIB_COMPUTE_LIST_LEN);
             let f = compute_fib_levels(pdh, pdl);
             prop_assert_eq!(
-                &got_f[FIB_LEVELS_LEN..],
+                &got_f[FIB_COMPUTE_LIST_LEN - 4..],
                 &[
                     f.retrace_bull_23_paisa,
                     f.retrace_bull_38_paisa,
@@ -3710,7 +3729,7 @@ mod tests {
         ema20: Option<i64>,
         ema200: Option<i64>,
         pivot_row: [i64; 12],
-        fib_row: [i64; 15],
+        fib_row: [i64; 19],
         tod: u32,
         bps: (i64, i64, i64),
     ) -> Result<Vec<u128>, String> {
@@ -3764,8 +3783,12 @@ mod tests {
             990_000, 1_000_000, 1_050_000, 950_000,
         ];
         let fib_row = [
+            // The 19-slot evaluator-ABI fib row (FIB_ROW_LEN — the express
+            // reshape #2205 appended bull_23 / bull_78 / ext_up_424 /
+            // ext_down_424 at indices 15-18).
             1_010_000, 1_005_300, 1_002_400, 1_000_000, 997_600, 994_300, 990_000, 1_015_400,
-            1_022_400, 1_030_000, 1_042_400, 984_600, 977_600, 970_000, 957_600,
+            1_022_400, 1_030_000, 1_042_400, 984_600, 977_600, 970_000, 957_600, 994_720,
+            1_005_720, 1_074_800, 925_200,
         ];
         for (open, high, low, close, ema20, ema200, tod) in [
             (
@@ -3854,7 +3877,7 @@ mod tests {
             None,
             None,
             pivot_row,
-            [0; 15],
+            [0; 19],
             34_000,
             (10, 10, 10),
         )
@@ -3872,7 +3895,7 @@ mod tests {
             None,
             None,
             [0; 12],
-            [0; 15],
+            [0; 19],
             34_000,
             (10, 10, 10),
         )
@@ -3893,7 +3916,7 @@ mod tests {
             None,
             None,
             [0; 12],
-            [0; 15],
+            [0; 19],
             34_000,
             (MAX_BPS, 10, 10),
         )
@@ -3919,7 +3942,7 @@ mod tests {
             ema20_paisa: &[None],
             ema200_paisa: &[None],
             day_pivot_levels: &[0; 12],
-            day_fib_levels: &[0; 15],
+            day_fib_levels: &[0; 19],
             day_has_pivot: &[false],
             day_has_fib: &[false],
             supertrend_x2_paisa: None,
@@ -3962,7 +3985,7 @@ mod tests {
             ema20_paisa: &[None],
             ema200_paisa: &[None],
             day_pivot_levels: &[0; 12],
-            day_fib_levels: &[0; 15],
+            day_fib_levels: &[0; 19],
             day_has_pivot: &[false],
             day_has_fib: &[false],
             supertrend_x2_paisa: None,
@@ -3995,7 +4018,7 @@ mod tests {
     #[test]
     fn stage1a_batch_values_accepts_a_two_day_input() {
         let two_day_pivots: Vec<i64> = (0..24).map(|i| 10_000 + i).collect();
-        let two_day_fibs: Vec<i64> = (0..30).map(|i| 20_000 + i).collect();
+        let two_day_fibs: Vec<i64> = (0..38).map(|i| 20_000 + i).collect();
         let inputs = crate::stage1a_batch::Stage1aBatchInputs {
             open_paisa: &[10_000, 10_020],
             high_paisa: &[10_100, 10_120],
@@ -4162,12 +4185,27 @@ mod tests {
     fn check_evaluate_inputs_rejects_bad_gap_mid_bps() {
         // The 4th bps slot joins the SAME loop — a negative / absurd value is
         // rejected NAMING the slot.
-        let err =
-            check_evaluate_inputs(0, 0, 0, 1, None, None, 0, 0, 0, 0, 10, 10, 10, -1, 0).unwrap_err();
+        let err = check_evaluate_inputs(0, 0, 0, 1, None, None, 0, 0, 0, 0, 10, 10, 10, -1, 0)
+            .unwrap_err();
         assert!(err.contains("gap_mid_bps"), "got: {err}");
-        let err =
-            check_evaluate_inputs(0, 0, 0, 1, None, None, 0, 0, 0, 0, 10, 10, 10, MAX_BPS + 1, 0)
-                .unwrap_err();
+        let err = check_evaluate_inputs(
+            0,
+            0,
+            0,
+            1,
+            None,
+            None,
+            0,
+            0,
+            0,
+            0,
+            10,
+            10,
+            10,
+            MAX_BPS + 1,
+            0,
+        )
+        .unwrap_err();
         assert!(err.contains("gap_mid_bps"), "got: {err}");
         // The gap slot also rides the exact product check.
         let err = check_evaluate_inputs(
@@ -4256,7 +4294,7 @@ mod tests {
             ema20_paisa: &[None],
             ema200_paisa: &[None],
             day_pivot_levels: &[0; 12],
-            day_fib_levels: &[0; 15],
+            day_fib_levels: &[0; 19],
             day_has_pivot: &[false],
             day_has_fib: &[false],
             pivot_bps: 10,

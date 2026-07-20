@@ -43,6 +43,23 @@ def main() -> int:
     cases = data["cases"]
     mismatches: list[str] = []
     for c in cases:
+        # The appended-last member args (ST / gap / swing) ride kwargs and
+        # tolerate ABSENT keys: the 8 keyless express cases (ids 400-407,
+        # DEC-FIB-TEMPLATE-EXPRESS-001 #2205) omit the ST/gap/vwap keys and
+        # instead carry the swing pair + `proximity.swing_bps`; an absent key
+        # takes the pyo3 signature default — the SAME law the Rust fixture
+        # readers pin via `#[serde(default)]` (DEC-VOCAB-VWAP-RETAIN-001
+        # #2206 mandatory pin 2).
+        tail_kwargs: dict[str, object] = {
+            "supertrend_x2_paisa": c.get("supertrend_x2_paisa"),
+            "gap_mid_paisa": c.get("gap_mid_paisa"),
+            "last_swing_high_paisa": c.get("last_swing_high_paisa"),
+            "last_swing_low_paisa": c.get("last_swing_low_paisa"),
+        }
+        if "gap_mid_bps" in c["proximity"]:
+            tail_kwargs["gap_mid_bps"] = c["proximity"]["gap_mid_bps"]
+        if "swing_bps" in c["proximity"]:
+            tail_kwargs["swing_bps"] = c["proximity"]["swing_bps"]
         got = trading_core.evaluate_from_raw(
             _tod_seconds(c["timestamp_ist"]),
             c["open_paisa"],
@@ -51,6 +68,9 @@ def main() -> int:
             c["close_paisa"],
             c["ema20_paisa"],
             c["ema200_paisa"],
+            # Session VWAP at its historical mid-list position (bits 52/53
+            # RETAINED — DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206).
+            c.get("vwap_paisa"),
             c["prev_pdh_paisa"],
             c["prev_pdl_paisa"],
             c["prev_pdc_paisa"],
@@ -66,11 +86,7 @@ def main() -> int:
             c["market_structure"]["bos_bearish"],
             c["market_structure"]["choch_bullish"],
             c["market_structure"]["choch_bearish"],
-            c["supertrend_x2_paisa"],
-            # Group-15 gap-midpoint (DEC-GAP-MIDPOINT-CONDITIONS-001) —
-            # appended-last, carried VERBATIM like the VWAP.
-            c["gap_mid_paisa"],
-            c["proximity"]["gap_mid_bps"],
+            **tail_kwargs,
         )
         expected = int(c["expected_mask"], 16)
         if got != expected:

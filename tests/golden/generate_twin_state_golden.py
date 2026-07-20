@@ -2,21 +2,18 @@
 
 R2-RC-F2 (goldens for the STATEFUL indicator states): the frozen 400-case
 `vocab_golden_vectors.json` answer-key pins the EVALUATOR bits, not the
-per-bar `.update()` derivation of the stateful `MarketStructureState`
-machine (BOS/CHoCH, bits 56-59). Production (`brutex/engine/stage1a.py`)
-drives ONLY the Rust `trading_core` class. This fixture froze the machine's
-per-bar contract while a hand-synced Python twin still mirrored it in
-`brutex/indicators/` (DEC-SHARED-CORE-001 / ADR-0012 D7); the twin was
+per-bar `.update()` derivation of the two stateful indicator machines —
+`VwapState` (session-anchored VWAP, bits 52/53) and `MarketStructureState`
+(BOS/CHoCH, bits 56-59). Production (`brutex/engine/stage1a.py`) drives ONLY
+the Rust `trading_core` classes. This fixture froze the two machines'
+per-bar contract while hand-synced Python twins still mirrored them in
+`brutex/indicators/` (DEC-SHARED-CORE-001 / ADR-0012 D7); the twins were
 deleted by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 and the frozen fixture
-now pins the single Rust source.
-
-The former `VwapState` half of this golden was RETIRED with the bits 52-53
-VWAP tombstone (the VWAP/volume wipe — the spot-only engine has no traded
-volume; the Rust `VwapState` itself was deleted from the crate at 0.4.0),
-so this generator now emits ONLY the market-structure streams. The
-MarketStructureState core is byte-untouched by the wipe, so a regeneration
-reproduces the frozen fixture's MS half bit-for-bit (a migration
-invariant the regen run must verify).
+now pins the single Rust source. Regenerated EXACTLY ONCE since: the
+vocab-train Regen re-lock under DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md
+#2206) — the wipe-era v2 (MS-only) fixture regains its VWAP half (this
+generator restored verbatim from the pre-wipe tree; the MS half must
+reproduce the wipe-era fixture byte-for-byte — the regen run's self-check).
 
 HOW THE EXPECTED VALUES ARE COMPUTED (Golden Rule #1):
 
@@ -31,6 +28,20 @@ PyO3 boundary, or a stale wheel fails CI.
 The bar streams are a fixed-seed (`random.Random(SEED)`) mix of scripted edge
 sequences + seeded random streams covering:
 
+* VWAP: session open/close transitions (IST 09:15 reset via a new day ordinal),
+  the 09:00-09:15 pre-open auction exclusion, zero/negative-volume skips,
+  contract-roll (`session_key`) resets, warm same-day time-of-day rewinds,
+  cold (not-warm) rewinds that must NOT reset, and large-magnitude bars at the
+  FFI ceiling `MAX_BAR_PAISA = i64::MAX / 65536` whose running `cum_pv` far
+  exceeds i64 (the i128-accumulator / unbounded-int truncating-division seam).
+  Every stream keeps `typical_paisa >= 0` BY CONTRACT, not by accident: a
+  negative typical is REJECTED with `ValueError` at the PyO3
+  `VwapState.update` boundary (historically also by the deleted Python
+  twin's mirror guard) because the trunc-vs-floor division semantics
+  genuinely diverged there (Rust i128 `/` truncates toward zero, Python `//`
+  floors — e.g. bars (-7, 1) then (0, 1) gave -3 vs -4 pre-guard). The
+  rejection itself is pinned by `tests/unit/test_trading_core_ffi_guards.py`,
+  so the closed domain hole cannot silently reopen.
 * Market structure: k ∈ {1, 2, 3}, the k-bar fractal confirmation delay, a
   break landing on the exact confirming bar, tied-extreme windows that confirm
   nothing (strict-inequality seam), flat windows, engulfing both-side breaks,
@@ -61,8 +72,136 @@ import trading_core
 SEED = 20260703
 I64_MAX = 2**63 - 1
 I64_MIN = -(2**63)
+# The PyO3 FFI overflow guard on VwapState.update (python.rs `MAX_BAR_PAISA`).
+MAX_BAR_PAISA = I64_MAX // 65536
+# 2026-01-05 (a Monday) — date.toordinal() == the Rust twin's i64 day ordinal.
+DAY0 = 739621
+OPEN_TOD = 9 * 3600 + 15 * 60  # 09:15:00 IST session open
+PRE_OPEN_TOD = 9 * 3600  # 09:00:00 IST pre-open auction start
+CLOSE_TOD = 15 * 3600 + 30 * 60  # 15:30:00 IST session close
 
 _OUT = Path(__file__).parent / "fixtures" / "twin_state_golden_vectors.json"
+
+
+def _vwap_bar(
+    typical: int,
+    volume: int,
+    *,
+    pre_open: bool = False,
+    key: int = 1,
+    day: int = DAY0,
+    tod: int = OPEN_TOD,
+) -> dict[str, Any]:
+    """One VWAP input bar (expected output filled in later from Rust)."""
+    return {
+        "typical_paisa": typical,
+        "volume": volume,
+        "is_pre_open": pre_open,
+        "session_key": key,
+        "session_day_ordinal": day,
+        "tod_seconds": tod,
+    }
+
+
+def _vwap_scripted_session_edges() -> list[dict[str, Any]]:
+    """Hand-scripted VWAP stream hitting every reset/skip branch."""
+    return [
+        # Day 1: pre-open auction volume must be excluded (huge print, no bias).
+        _vwap_bar(99_999_00, 1_000_000, pre_open=True, tod=PRE_OPEN_TOD),
+        _vwap_bar(50_000_00, 2_000_000, pre_open=True, tod=PRE_OPEN_TOD + 300),
+        # 09:15 open bar with zero volume → still warming (None).
+        _vwap_bar(24_000_00, 0, tod=OPEN_TOD),
+        # First counted volume.
+        _vwap_bar(24_000_00, 100, tod=OPEN_TOD + 60),
+        _vwap_bar(24_010_50, 300, tod=OPEN_TOD + 120),
+        # A mid-session pre-open-flagged bar is skipped (never counted).
+        _vwap_bar(1_00, 999_999, pre_open=True, tod=OPEN_TOD + 180),
+        # Negative volume is skipped like zero.
+        _vwap_bar(24_020_00, -5, tod=OPEN_TOD + 240),
+        # A zero typical price still counts its volume (drags the VWAP down).
+        _vwap_bar(0, 50, tod=OPEN_TOD + 300),
+        # Last bar of the session at 15:30.
+        _vwap_bar(23_990_25, 777, tod=CLOSE_TOD),
+        # Day 2: the new IST day ordinal resets the session.
+        _vwap_bar(25_000_00, 10, day=DAY0 + 1, tod=OPEN_TOD),
+        _vwap_bar(25_100_00, 30, day=DAY0 + 1, tod=OPEN_TOD + 60),
+        # Warm same-day time-of-day REWIND → reset (a re-opened session).
+        _vwap_bar(10_000_00, 40, day=DAY0 + 1, tod=OPEN_TOD + 30),
+        # Contract roll (session_key change) mid-day → reset.
+        _vwap_bar(11_000_00, 60, key=2, day=DAY0 + 1, tod=OPEN_TOD + 90),
+        _vwap_bar(11_500_00, 60, key=2, day=DAY0 + 1, tod=OPEN_TOD + 150),
+        # Day 3, new key: pre-open-only bars leave the state COLD, so the
+        # following tod rewind must NOT reset (the `warm and` guard).
+        _vwap_bar(12_000_00, 500, pre_open=True, key=3, day=DAY0 + 2, tod=PRE_OPEN_TOD + 600),
+        _vwap_bar(12_000_00, 500, pre_open=True, key=3, day=DAY0 + 2, tod=PRE_OPEN_TOD + 60),
+        _vwap_bar(12_345_00, 7, key=3, day=DAY0 + 2, tod=OPEN_TOD),
+        # Day 4 opens at a LATER time-of-day than day 3's last bar (a data hole
+        # at the open), so the day-ordinal change is the ONLY reset trigger —
+        # the tod-rewind branch must not be needed to shadow it.
+        _vwap_bar(20_000_00, 11, key=3, day=DAY0 + 3, tod=OPEN_TOD + 3600),
+        _vwap_bar(20_500_00, 33, key=3, day=DAY0 + 3, tod=OPEN_TOD + 3660),
+        # Day 5 opens at the EXACT same time-of-day as day 4's last bar (an
+        # equal tod is NOT a rewind — strict `<`), again day-branch-only.
+        _vwap_bar(30_000_00, 5, key=3, day=DAY0 + 4, tod=OPEN_TOD + 3660),
+    ]
+
+
+def _vwap_large_magnitude() -> list[dict[str, Any]]:
+    """FFI-ceiling bars: cum_pv exceeds i64::MAX by orders of magnitude.
+
+    40 bars of `MAX_BAR_PAISA × MAX_BAR_PAISA` push cum_pv to ~8·10^29 — far
+    past i64::MAX (~9.2·10^18) — exercising the Rust i128 accumulator against
+    Python's unbounded ints, and the truncating `cum_pv / cum_vol` narrowing.
+    """
+    bars = [_vwap_bar(MAX_BAR_PAISA, MAX_BAR_PAISA, tod=OPEN_TOD + i * 60) for i in range(40)]
+    # Asymmetric extremes: max price × 1 lot, then 1 paisa × max volume — the
+    # division now has a huge remainder (truncation direction is load-bearing).
+    bars.append(_vwap_bar(MAX_BAR_PAISA, 1, tod=OPEN_TOD + 40 * 60))
+    bars.append(_vwap_bar(1, MAX_BAR_PAISA, tod=OPEN_TOD + 41 * 60))
+    bars.append(_vwap_bar(3, 7, tod=OPEN_TOD + 42 * 60))
+    return bars
+
+
+def _vwap_unit_volume_precision(rnd: random.Random) -> list[dict[str, Any]]:
+    """Volume-1 bars: any per-bar off-by-one in ``cum_pv``/``cum_vol`` moves the
+    truncated quotient (``(Σ + n) // n == Σ // n + 1`` exactly), so the goldens
+    pin the accumulation at single-paisa precision — the huge-volume streams
+    alone cannot (a +1 on a 10^9 divisor almost never crosses a floor
+    boundary)."""
+    return [_vwap_bar(rnd.randint(1, 999), 1, tod=OPEN_TOD + i * 60) for i in range(12)]
+
+
+def _vwap_random_multi_session(rnd: random.Random) -> list[dict[str, Any]]:
+    """Seeded random stream: 3 sessions × 60 bars, mixed magnitudes + a roll."""
+    bars: list[dict[str, Any]] = []
+    key = 10
+    for day_off in range(3):
+        day = DAY0 + 7 + day_off
+        # Two pre-open auction bars per session.
+        for j in range(2):
+            bars.append(
+                _vwap_bar(
+                    rnd.randint(1, 30_000_00),
+                    rnd.randint(0, 1_000_000),
+                    pre_open=True,
+                    key=key,
+                    day=day,
+                    tod=PRE_OPEN_TOD + j * 300,
+                )
+            )
+        for i in range(60):
+            bucket = rnd.random()
+            if bucket < 0.70:
+                typical = rnd.randint(1_00, 90_000_00)  # normal futures magnitude
+            elif bucket < 0.90:
+                typical = rnd.randint(90_000_00, 10**12)  # stress magnitude
+            else:
+                typical = rnd.randint(10**12, MAX_BAR_PAISA)  # FFI-ceiling region
+            volume = 0 if rnd.random() < 0.08 else rnd.randint(1, 10**9)
+            if day_off == 1 and i == 30:
+                key += 1  # one mid-session contract roll
+            bars.append(_vwap_bar(typical, volume, key=key, day=day, tod=OPEN_TOD + i * 375))
+    return bars
 
 
 def _ms_bar(high: int, low: int, close: int) -> dict[str, Any]:
@@ -214,34 +353,19 @@ def _ms_random_walk(rnd: random.Random, n: int) -> list[dict[str, Any]]:
     return bars
 
 
-def _burn_retired_vwap_draws(rnd: random.Random) -> None:
-    """Reproduce the RNG consumption of the retired VWAP stream builders.
-
-    The retired `_vwap_unit_volume_precision` drew 12 `randint(1, 999)`; the
-    retired `_vwap_random_multi_session` drew, per each of 3 sessions: 2 × (a
-    typical `randint(1, 30_000_00)` + a volume `randint(0, 1_000_000)`) for
-    the pre-open bars, then 60 × (a bucket `random()`, a bucketed typical
-    `randint`, a volume gate `random()` and — when the gate passes — a volume
-    `randint(1, 10**9)`). Replayed here draw-for-draw so the downstream
-    market-structure random walks see the SAME rng state as the frozen
-    fixture's generation run.
-    """
-    for _ in range(12):
-        rnd.randint(1, 999)
-    for _day_off in range(3):
-        for _ in range(2):
-            rnd.randint(1, 30_000_00)
-            rnd.randint(0, 1_000_000)
-        for _ in range(60):
-            bucket = rnd.random()
-            if bucket < 0.70:
-                rnd.randint(1_00, 90_000_00)
-            elif bucket < 0.90:
-                rnd.randint(90_000_00, 10**12)
-            else:
-                rnd.randint(10**12, I64_MAX // 65536)
-            if rnd.random() >= 0.08:
-                rnd.randint(1, 10**9)
+def _fill_vwap_expected(streams: list[dict[str, Any]]) -> None:
+    """Compute every expected VWAP from the Rust production twin."""
+    for stream in streams:
+        state = trading_core.VwapState()
+        for bar in stream["bars"]:
+            bar["expected_vwap_paisa"] = state.update(
+                bar["typical_paisa"],
+                bar["volume"],
+                bar["is_pre_open"],
+                bar["session_key"],
+                bar["session_day_ordinal"],
+                bar["tod_seconds"],
+            )
 
 
 def _fill_ms_expected(streams: list[dict[str, Any]]) -> None:
@@ -256,11 +380,12 @@ def _fill_ms_expected(streams: list[dict[str, Any]]) -> None:
 def main() -> None:
     """Build the streams, compute expecteds from Rust, freeze the JSON."""
     rnd = random.Random(SEED)
-    # SEED-STREAM COMPATIBILITY: the retired VWAP builders used to consume
-    # seeded draws BEFORE the market-structure random walks. To keep the MS
-    # half bit-identical to the frozen fixture (the regen migration
-    # invariant), burn the exact same number/shape of draws they made.
-    _burn_retired_vwap_draws(rnd)
+    vwap_streams: list[dict[str, Any]] = [
+        {"id": "vwap_scripted_session_edges", "bars": _vwap_scripted_session_edges()},
+        {"id": "vwap_large_magnitude_i64_edges", "bars": _vwap_large_magnitude()},
+        {"id": "vwap_unit_volume_precision", "bars": _vwap_unit_volume_precision(rnd)},
+        {"id": "vwap_random_multi_session", "bars": _vwap_random_multi_session(rnd)},
+    ]
     ms_streams: list[dict[str, Any]] = [
         {"id": "ms_scripted_trend_flips_k2", "k": 2, "bars": _ms_scripted_trend_flips_k2()},
         {
@@ -281,30 +406,32 @@ def main() -> None:
         {"id": "ms_random_walk_k2", "k": 2, "bars": _ms_random_walk(rnd, 250)},
         {"id": "ms_random_walk_k3", "k": 3, "bars": _ms_random_walk(rnd, 250)},
     ]
+    _fill_vwap_expected(vwap_streams)
     _fill_ms_expected(ms_streams)
 
     doc = {
-        "schema": "twin-state-golden-v2",
+        "schema": "twin-state-golden-v1",
         "description": (
-            "Language-neutral golden vectors for the stateful indicator state: "
-            "trading_core MarketStructureState (Rust, PRODUCTION — expected "
-            "values computed from it). expected_signal is [bos_bullish, "
-            "bos_bearish, choch_bullish, choch_bearish]. Schema v2: the "
-            "vwap_streams half was RETIRED with the bits 52-53 VWAP tombstone "
-            "(the VwapState core was deleted at crate 0.4.0); the MS streams "
-            "are bit-identical to the v1 fixture's (the core is untouched — "
-            "the regen run verifies it)."
+            "Language-neutral golden vectors for the stateful indicator twins: "
+            "trading_core VwapState / MarketStructureState (Rust, PRODUCTION — "
+            "expected values computed from it) vs brutex.indicators (Python "
+            "mirrors). session_day_ordinal is the proleptic-Gregorian ordinal "
+            "(Python date.toordinal() == the Rust i64 day ordinal). "
+            "expected_signal is [bos_bullish, bos_bearish, choch_bullish, "
+            "choch_bearish]."
         ),
         "seed": SEED,
         "generated_with_crate_version": trading_core.__build_crate_version__,
         "generator": "tests/golden/generate_twin_state_golden.py",
+        "vwap_streams": vwap_streams,
         "market_structure_streams": ms_streams,
     }
     text = json.dumps(doc, indent=1) + "\n"
     _OUT.write_text(text, encoding="utf-8")
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    total_vwap = sum(len(s["bars"]) for s in vwap_streams)
     total_ms = sum(len(s["bars"]) for s in ms_streams)
-    print(f"wrote {_OUT} ({total_ms} ms bars)")
+    print(f"wrote {_OUT} ({total_vwap} vwap bars, {total_ms} ms bars)")
     print(f"sha256: {digest}")
 
 

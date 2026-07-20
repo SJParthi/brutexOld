@@ -40,20 +40,23 @@ def test_manifest_loads_and_is_valid() -> None:
     # implemented-flip, crate 0.5.0), the gap-midpoint trio (66..68,
     # DEC-GAP-MIDPOINT-CONDITIONS-001) and the fib-template express bits
     # (69..73, DEC-FIB-TEMPLATE-EXPRESS-001) are implemented.
-    assert m.implemented_mask == ((1 << 74) - 1) ^ (1 << 52) ^ (1 << 53)
-    # RETIRED_MASK = exactly the tombstoned VWAP pair, disjoint from IMPLEMENTED.
-    assert m.retired_mask == (1 << 52) | (1 << 53)
+    # ALL 74 declared bits are IMPLEMENTED — DEC-VOCAB-VWAP-RETAIN-001
+    # (MIGRATION.md #2206) reversed the bits-52/53 wipe, so RETIRED_MASK is
+    # the EMPTY set (the grow-only tombstone machinery stays, vacuous).
+    assert m.implemented_mask == (1 << 74) - 1
+    assert m.retired_mask == 0
     assert m.retired_mask & m.implemented_mask == 0
     for c in m.conditions:
         if 54 <= c.bit <= 63:
             assert c.implemented is True
-    # The tombstoned VWAP bits: reserved, unimplemented, positions kept.
+    # The RETAINED session-VWAP bits: live again (implemented, never
+    # reserved), positions kept, 1day-inapplicable exactly as pre-wipe.
     vwap = {c.name: c for c in m.conditions if c.group == "VWAP Position"}
     assert vwap["close_above_vwap"].bit == 52
     assert vwap["close_below_vwap"].bit == 53
     for c in vwap.values():
-        assert c.reserved is True
-        assert c.implemented is False
+        assert c.reserved is False
+        assert c.implemented is True
         assert c.applies_to_1day is False
     # The Supertrend bits: IMPLEMENTED since the vocab-66 flip (crate
     # 0.5.0), never reserved, 1day-applicable from declaration.
@@ -143,12 +146,10 @@ def test_render_rust_has_banner_and_constants() -> None:
     assert "pub const BIT_NEAR_SWING_LOW: u32 = 73;" in rs
     assert "pub const TOTAL_CONDITIONS: u32 = 74;" in rs
     assert "pub const MASK_WIDTH: u32 = 128;" in rs
-    assert "pub const IMPLEMENTED_MASK: u128 = 18889452420679698743295;" in rs
-    # TOMB-04: the RETIRED tombstones render distinctly; NO LAYOUT-ONLY bit
-    # exists on today's manifest (the SuperTrend pair left that class at the
-    # vocab-66 implemented-flip; the gap trio + the express bits landed
-    # implemented), so the layout-only suffix renders nowhere.
-    assert "(RETIRED — reserved=true, position held forever, never gets math)" in rs
+    assert "pub const IMPLEMENTED_MASK: u128 = 18889465931478580854783;" in rs
+    # TOMB-04 is VACUOUS on the 74/74 retention tree (#2206): NO RETIRED bit
+    # and NO LAYOUT-ONLY bit exists, so neither suffix renders anywhere.
+    assert "(RETIRED — reserved=true, position held forever, never gets math)" not in rs
     assert "(LAYOUT ONLY — implemented=false, math lands in a later PR)" not in rs
     assert "fn bit_positions_are_dense()" in rs
 
@@ -162,14 +163,12 @@ def test_render_python_has_banner_and_constants() -> None:
     assert "BIT_NEAR_SWING_LOW: Final[int] = 73" in py
     assert "TOTAL_CONDITIONS: Final[int] = 74" in py
     assert "MASK_WIDTH: Final[int] = 128" in py
-    assert "IMPLEMENTED_MASK: Final[int] = 18889452420679698743295" in py
-    # TOMB-01: the tombstone mask is emitted so renderers can suffix retired
-    # bits without a hand-kept copy (0x30000000000000 = bits 52|53).
-    assert f"RETIRED_MASK: Final[int] = {(1 << 52) | (1 << 53)}" in py
-    # TOMB-04: RETIRED renders distinctly; no LAYOUT-ONLY bit exists on
-    # today's manifest (the vocab-66 SuperTrend implemented-flip + the
-    # implemented gap/express appends).
-    assert "RETIRED (tombstone, never gets math): bit 52" in py
+    assert "IMPLEMENTED_MASK: Final[int] = 18889465931478580854783" in py
+    # TOMB-01: the tombstone mask is still EMITTED (renderers stay
+    # hand-copy-free) — the EMPTY set on the 74/74 retention tree (#2206).
+    assert "RETIRED_MASK: Final[int] = 0" in py
+    # TOMB-04 is vacuous: no RETIRED and no LAYOUT-ONLY doc line renders.
+    assert "RETIRED (tombstone, never gets math): bit 52" not in py
     assert "LAYOUT-ONLY (math in a later PR): bit 64" not in py
     assert '"close_above_vwap": BIT_CLOSE_ABOVE_VWAP,' in py
 

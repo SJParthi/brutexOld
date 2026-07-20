@@ -13,13 +13,16 @@ The fixture is language-neutral (raw int64-paisa inputs). Since
 DEC-VOCAB-U128-CODEGEN-001 the mask is a **u128** serialised as a hex STRING
 (``expected_mask``) so a bit >= 53 keeps full precision across JSON doubles, and
 the "both ways" coverage gate is partitioned over the IMPLEMENTED bits only —
-the NON-implemented bits (the RETIRED VWAP tombstones 52/53 + every reserved
-bit >= 66) are proven inert by
-:func:`test_layout_only_bits_are_always_clear`. Version 4 is the vocab-66
-SuperTrend implemented-flip (crate 0.5.0 — bits 64/65 live, the
-``supertrend_x2_paisa`` draw appended strictly after the whole historical
-stream); version 3 was the 60→66 reshape (``vwap_paisa`` survives as an INERT
-RNG-burn record — no longer an evaluator input). The frozen-input migration
+any NON-implemented bit is proven inert by
+:func:`test_layout_only_bits_are_always_clear` (VACUOUS on this tree: all 74
+declared bits are IMPLEMENTED — DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md
+#2206, reversed the bits-52/53 wipe, so ``vwap_paisa`` is a LIVE evaluator
+input again, exactly its pre-wipe role). Version 4 is the vocab-train final
+74-bit configuration (crate 0.6.0): 408 cases — the 400 seeded
+migration-invariant cases (inputs byte-frozen; the ST/gap keys appended, the
+un-burned vwap draw re-consumed) + the 8 deterministic express cases
+(DEC-FIB-TEMPLATE-EXPRESS-001, ids 400-407 — keyless on the ST/gap/vwap
+fields, carrying the swing pair instead). The frozen-input migration
 invariants live in ``test_vocab_golden_migration.py``; the fixture bytes are
 SHA-pinned + proven byte-identical to a fresh generation (GOLD-06).
 """
@@ -62,10 +65,11 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
     )
     fib = compute_fib_levels(day, case["prev_pdh_paisa"], case["prev_pdl_paisa"])
     ms = case["market_structure"]
-    # NOTE: the case's ``vwap_paisa`` field is deliberately NOT consumed —
-    # it is the inert RNG-burn record of the retired bits-52/53 draw. The
-    # ``supertrend_x2_paisa`` field IS consumed (bits 64/65 went live at the
-    # vocab-66 SuperTrend flip, fixture version 4).
+    # The case's ``vwap_paisa`` field is CONSUMED again — bits 52/53 are
+    # RETAINED-ACTIVE per DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206; the
+    # wipe-era "inert RNG-burn record" reading is dead). The keyless express
+    # cases (ids >= 400) default it to None — the abstain arm — exactly like
+    # the Rust readers' ``#[serde(default)]``.
     snapshot = IndicatorSnapshot(
         timestamp_ist=ts,
         open_paisa=case["open_paisa"],
@@ -74,6 +78,7 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
         close_paisa=case["close_paisa"],
         ema20_paisa=case["ema20_paisa"],
         ema200_paisa=case["ema200_paisa"],
+        vwap_paisa=case.get("vwap_paisa"),
         pivots=pivots,
         fib=fib,
         day_high_paisa=case["day_high_paisa"],
@@ -177,7 +182,15 @@ def test_fixture_metadata_is_consistent() -> None:
 #: SHA-256 of the frozen fixture bytes (GOLD-06 — the README "SHA-256
 #: manifest" drift guard). Regenerate with
 #: ``python scripts/gen_vocab_golden_vectors.py`` then update this.
-_EXPECTED_SHA256 = "fcc4acaad86f5511dd0dbfe83ac880ade771a2364e1e40630b55e001c1e6adc0"
+#: DELIBERATE RE-LOCK (the vocab-train Regen — the ONE golden transition):
+#: 408 cases, 74/74 both-ways coverage; the 400 seeded inputs byte-identical
+#: to origin/main's v2 fixture modulo the enumerated appended keys
+#: (``supertrend_x2_paisa`` / ``gap_mid_paisa`` / ``proximity.gap_mid_bps``)
+#: and ``new_mask & (2**60 - 1) == v2_mask`` on 400/400 (#2206's low-60
+#: identity law; 355/400 carry a 52/53 bit — the pre-wipe census exactly).
+#: Old (wipe-era train) digest:
+#: fcc4acaad86f5511dd0dbfe83ac880ade771a2364e1e40630b55e001c1e6adc0.
+_EXPECTED_SHA256 = "5f645e284e95afa41edff53616ef6c7924d25a6b854244b05a6dc3c9a82c1cce"
 
 
 def test_fixture_sha256_matches_pinned_manifest() -> None:

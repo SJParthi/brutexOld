@@ -142,7 +142,10 @@ fn gap_mid_bps_is_deliberately_not_encoded() {
         1,
     )
     .unwrap();
-    assert_eq!(to_hex(&gap_variant.canonical_bytes()), FIXTURE_CANONICAL_HEX);
+    assert_eq!(
+        to_hex(&gap_variant.canonical_bytes()),
+        FIXTURE_CANONICAL_HEX
+    );
     assert_eq!(gap_variant.canonical_bytes(), base.canonical_bytes());
 }
 

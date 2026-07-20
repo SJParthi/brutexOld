@@ -203,9 +203,11 @@ def default_condition_bits() -> list[int]:
     is deliberately HONEST: a LAYOUT-ONLY or RETIRED bit (``implemented=false``
     in ``conditions.toml``, whose evaluator emits a constant 0) is EXCLUDED, so
     the default never sweeps a dead condition that could never fire. On the
-    66-condition layout that is the 64 ACTIVE bits ``[0..51, 54..65]`` — only
-    the RETIRED VWAP tombstones (52/53) are excluded (the SuperTrend bits
-    64/65 joined the default at the vocab-66 implemented-flip, crate 0.5.0).
+    74-condition layout ALL 74 bits are ACTIVE (``[0..73]``): the session-VWAP
+    pair 52/53 is RETAINED-ACTIVE per DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md
+    #2206 — the wipe-era tombstone exclusion reversed), and the SuperTrend
+    (64/65), gap-midpoint (66-68) and fib-express (69-73) bits all landed
+    implemented, so the derivation currently excludes nothing.
 
     Returns
     -------
@@ -252,12 +254,14 @@ def parse_condition_ids(raw: str) -> list[int]:
     so nothing downstream would catch it (TOMB-03/G-U64U12-02/G-RETROT-03; the
     old rationale here — "the results store rejects dead bits" — had it
     inverted). The refusal names the bit, its condition name, and its status:
-    RETIRED (a ``reserved = true`` tombstone — e.g. the VWAP bits 52/53 after
-    the spot-only volume wipe, DEC-ENGINE-SPOT-ONLY-001; a saved pre-reshape
-    script must drop them) vs declared-but-NOT-YET-implemented (a LAYOUT-ONLY
-    bit awaiting its math — none on today's layout: the SuperTrend bits 64/65
-    left that class at the vocab-66 implemented-flip, crate 0.5.0;
-    DEC-VOCAB-U128-CODEGEN-001 grow-only territory). Bits outside the declared
+    RETIRED (a ``reserved = true`` tombstone — NONE on today's 74/74 layout:
+    the VWAP pair 52/53 left that class at the retention,
+    DEC-VOCAB-VWAP-RETAIN-001 / MIGRATION.md #2206) vs
+    declared-but-NOT-YET-implemented (a LAYOUT-ONLY bit awaiting its math —
+    also none today: the SuperTrend bits 64/65 left that class at the
+    vocab-66 implemented-flip; DEC-VOCAB-U128-CODEGEN-001 grow-only
+    territory). Both refusal arms are KEPT — mask-driven, vacuous at
+    ``RETIRED_MASK == 0`` — for any future tombstone/layout-only bit. Bits outside the declared
     layout (``>= TOTAL_CONDITIONS``) stay the plain out-of-range refusal —
     deliberately NOT the engine's forward-compat ``[0, 128)`` u128 ceiling.
 

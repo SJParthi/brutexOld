@@ -478,19 +478,17 @@ class TestBuildBarBitsSourceSpecificity:
     def test_non_default_source_changes_bar_bits(self) -> None:
         bars = _spike_bars()
         base = build_bar_bits(bars)
-        # VWAP bits 52/53 are TOMBSTONED (DEC-VOCAB-66-RESHAPE-IMPL-001,
-        # MIGRATION.md #2200 — the VwapState math was deleted from the shared
-        # trading-core crate, the positions are held forever and provably
-        # never fire), so a non-default ``vwap_source`` is carried but INERT:
-        # bar_bits are EQUAL, never flipped. Retiring the vwap_source axis
-        # itself is a separate decision — `DEC-PRICE-SOURCE-VWAP-ARM-RETIRE-001`
-        # (follow-up, not minted here); until it lands the #1396 plumbing
-        # stays intact and this pin documents its inertness.
+        # VWAP bits 52/53 are RETAINED-ACTIVE again (DEC-VOCAB-VWAP-RETAIN-001,
+        # MIGRATION.md #2206 — the wipe-era tombstone reading and the
+        # backticked `DEC-PRICE-SOURCE-VWAP-ARM-RETIRE-001` follow-up are
+        # DEAD): the #1681 price-source VWAP arm is LIVE, so a non-default
+        # ``vwap_source`` genuinely flips bar_bits on volume-bearing bars —
+        # the pre-wipe `!=` direction restored.
         vwap_low = build_bar_bits(bars, vwap_source=PriceSource.LOW)
         # A non-default EMA source still flips an EMA bit (0-5) — the EMA arm
         # of the price-source axis is live.
         ema_hlc3 = build_bar_bits(bars, ema_source=PriceSource.HLC3)
-        assert vwap_low == base
+        assert vwap_low != base
         assert ema_hlc3 != base
 
 

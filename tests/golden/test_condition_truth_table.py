@@ -49,19 +49,17 @@ _VECTORS_PATH = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 
 #: SHA-256 of the frozen truth table (the README "SHA-256 manifest" drift guard).
 #: Regenerate with ``python scripts/gen_condition_truth_table.py`` then update this.
-# DELIBERATE RE-LOCK (the vocab-66 SuperTrend implemented-flip, crate
-# 0.5.0): the table projects the IMPLEMENTED bits per selected case
-# (22 cases x 64 = 1408 rows over the version-4 fixture); only the
-# tombstoned VWAP bits (52/53) carry no row. Old digest (the 60->66 reshape's
-# 22 x 62 table):
-# ea1671b986d5a95dfd304432d8d0e8c6c90c261c59e68c1264067728973df126.
-# TRAIN-FOLD NOTE (DEC-GAP-MIDPOINT-CONDITIONS-001 +
-# DEC-FIB-TEMPLATE-EXPRESS-001): the gap trio 66-68 AND the express bits
-# 69-73 are IMPLEMENTED on this tree — the CSV + this digest re-lock at the
-# train's Regen phase (cases x the 72 implemented bits; the row law derives
-# mechanically from the woven IMPLEMENTED_MASK + the generator's selected
-# cases); until then the pin matches the kept ST-era CSV.
-_EXPECTED_SHA256 = "c044cb2cee17d5be14bf5589312ce3ffc7a034e3247670d0baeea31dc6cb5dcc"
+# DELIBERATE RE-LOCK (the vocab-train Regen — the ONE golden transition):
+# the table projects the IMPLEMENTED bits per selected case over the
+# regenerated version-4 fixture (408 cases; the generator selects 26) —
+# 26 cases x 74 implemented bits = 1924 rows. ALL 74 bits carry rows: the
+# gap trio 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001, #2204) + the express
+# bits 69-73 (DEC-FIB-TEMPLATE-EXPRESS-001, #2205) are IMPLEMENTED, and
+# bits 52/53 are RETAINED-ACTIVE per DEC-VOCAB-VWAP-RETAIN-001
+# (MIGRATION.md #2206 — the wipe reversed; the tombstone no-row clause is
+# dead). Old digest (the kept ST-era 22 x 64 table):
+# c044cb2cee17d5be14bf5589312ce3ffc7a034e3247670d0baeea31dc6cb5dcc.
+_EXPECTED_SHA256 = "24b26f448e5a1bcec655abb66a95426c6290c89826578bfddcda0e413fbccfff"
 
 
 def _read_rows() -> list[dict[str, str]]:

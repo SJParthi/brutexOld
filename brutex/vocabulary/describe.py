@@ -33,13 +33,16 @@ from brutex.vocabulary.bits import (
 )
 
 #: Display suffix for a RETIRED (tombstoned) condition bit — a bit whose math
-#: was deliberately deleted (``reserved = true`` in ``conditions.toml``; e.g.
-#: the VWAP bits 52/53 after the spot-only volume wipe). The evaluator emits 0
-#: for these forever, so a PERSISTED pre-reshape mask that carries one can
-#: never fire again — rendering the plain name would present a dead condition
-#: as live (TOMB-01). ONE suffix authority (CLAUDE.md §11 COMMON): every
-#: renderer goes through :func:`condition_display_name` /
-#: :func:`display_condition_names`, never a copied literal.
+#: was deliberately deleted (``reserved = true`` in ``conditions.toml``).
+#: NONE exists on today's 74/74 layout: the VWAP bits 52/53 — the class's
+#: one historical member — are RETAINED-ACTIVE again per
+#: DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206), so the suffix currently
+#: renders nowhere; the machinery stays for any future tombstone (a retired
+#: bit's evaluator emits 0 forever, and rendering its plain name would
+#: present a dead condition as live — TOMB-01). ONE suffix authority
+#: (CLAUDE.md §11 COMMON): every renderer goes through
+#: :func:`condition_display_name` / :func:`display_condition_names`, never a
+#: copied literal.
 RETIRED_SUFFIX: Final[str] = " (retired)"
 
 
@@ -88,13 +91,14 @@ def condition_display_name(bit: int) -> str:
 
     The ONE rendering authority for a condition bit's human-readable name: a
     RETIRED bit (:data:`~brutex.vocabulary.bits.RETIRED_MASK` — ``reserved =
-    true`` tombstones whose math was deleted, e.g. the VWAP bits 52/53) reads
-    ``"<name> (retired)"`` so a pre-reshape persisted mask never presents a
-    dead condition as live; every other declared bit — implemented AND
-    LAYOUT-ONLY (declared-but-unimplemented, which no persisted mask can
-    carry: :class:`~brutex.strategies.spec.StrategySpec` refuses them; none
-    exist on today's layout — the SuperTrend bits 64/65 left that class at
-    the vocab-66 implemented-flip, crate 0.5.0) — reads its plain name.
+    true`` tombstones whose math was deleted; NONE on today's 74/74 layout —
+    the VWAP bits 52/53 left that class at the retention,
+    DEC-VOCAB-VWAP-RETAIN-001 / MIGRATION.md #2206, so the suffix currently
+    renders nowhere) would read ``"<name> (retired)"`` so a persisted mask
+    never presents a dead condition as live; every other declared bit —
+    implemented AND LAYOUT-ONLY (declared-but-unimplemented, which no
+    persisted mask can carry: :class:`~brutex.strategies.spec.StrategySpec`
+    refuses them; also none on today's layout) — reads its plain name.
 
     Parameters
     ----------
