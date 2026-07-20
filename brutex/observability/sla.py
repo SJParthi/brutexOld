@@ -59,6 +59,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
+from brutex.observability import observability_rust
+
 logger = logging.getLogger(__name__)
 
 # ────────────────────────────────────────────────────────────────────────
@@ -176,6 +178,26 @@ def _predicate_holds(predicate: SLAPredicate, value: float, threshold: float) ->
     return abs(value - threshold) < _EPS
 
 
+def _sla_decide_python(
+    predicate: SLAPredicate,
+    value: float,
+    threshold: float,
+    prev_breach: bool,
+) -> tuple[bool, bool]:
+    """The SLA decision — the LIVE parity oracle over :func:`_predicate_holds`.
+
+    A disclosed COMPOSITION of the loop-inlined lines of
+    :meth:`SLADetector.check_once` (DEC-RUST-OBSERVABILITY-001 — the
+    Slice-0 exemption): ``breached`` per the untouched
+    :func:`_predicate_holds` component, ``edge = breached != prev_breach``
+    (≡ ``new_state != prev_state`` over the 2-member :class:`SLAState`).
+    Flag-OFF the seam returns this function's result DIRECTLY — the default
+    path is byte-identical.
+    """
+    breached = _predicate_holds(predicate, value, threshold)
+    return breached, breached != prev_breach
+
+
 @dataclass(slots=True)
 class SLADetector:
     """Watches a set of SLA rules; fires callbacks on state transitions.
@@ -247,10 +269,22 @@ class SLADetector:
                 continue
             if value is None:
                 continue  # provider says "not available yet"
-            breached = _predicate_holds(rule.predicate, value, rule.threshold)
+            # The decision routes through the default-OFF observability_rust
+            # facade with `_sla_decide_python` as the live oracle
+            # (DEC-RUST-OBSERVABILITY-001; branch-free here — all
+            # flag/guard/burn-in branching lives facade-side). prev_state is
+            # read BEFORE the decision (a side-effect-free dict read; the
+            # ONE disclosed re-ordering vs the pre-seam loop).
             prev_state = self._state[rule.name]
+            breached, edge = observability_rust.routed_sla_decide(
+                rule.predicate,
+                value,
+                rule.threshold,
+                prev_state == SLAState.BREACH,
+                python_law=_sla_decide_python,
+            )
             new_state = SLAState.BREACH if breached else SLAState.OK
-            if new_state == prev_state:
+            if not edge:
                 continue  # hysteresis: steady state, no edge
             self._state[rule.name] = new_state
             event = SLAEvent(

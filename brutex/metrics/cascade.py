@@ -42,6 +42,17 @@ where given (WFO ≥0.75 of walks, SPA p<0.05, MC p<0.01, Lockbox per #8); the
 DSR/CPCV/PBO cut-offs are conventional defaults flagged in :class:`CascadeConfig`
 (no invented spec number — Golden Rule #1).
 
+An OPTIONAL default-OFF **single-event sensitivity** stage
+(DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001) runs between the hard gates and
+DSR when :attr:`CascadeConfig.single_event_max_best_day_pct` is set: group the
+candidate's per-bar returns by IST day (the ``worst5_days`` day law — the day
+ordinals ``build_candidate_input`` already carries) and FAIL iff the total is
+non-positive OR the total MINUS the best single day is strictly below X% of the
+total ("would you still be profitable without your best day?"). This gate is
+ADDITIONAL defense-in-depth for the windfall-fluke class; **DSR remains the
+load-bearing anti-single-event filter** — the gate never replaces it. ``None``
+(the default) means the stage does not run and is fully absent from behavior.
+
 Robustness (no degenerate input crashes the sweep)
 --------------------------------------------------
 A brute-force sweep feeds wildly varying candidates, so the orchestrator never
@@ -89,6 +100,7 @@ import numpy as np
 
 from brutex.metrics.cpcv import DEFAULT_N_GROUPS, DEFAULT_N_TEST_GROUPS, cpcv_pass_rate
 from brutex.metrics.deflated_sharpe import deflated_sharpe_ratio
+from brutex.metrics.extreme_vol_stratum import evaluate_stratum
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
     LOCKBOX_DEFAULT_WINDOW_DAYS,
@@ -97,6 +109,7 @@ from brutex.metrics.lockbox import (
 )
 from brutex.metrics.monte_carlo import monte_carlo_permutation_test
 from brutex.metrics.pbo import pbo_probability
+from brutex.metrics.regime_fragility import evaluate_fragility
 from brutex.metrics.spa import BootstrapConfig, reality_check, romano_wolf
 from brutex.metrics.wfo import WFOScheme, wfo_pass_rate
 
@@ -153,10 +166,47 @@ _COMPOSITE_WEIGHTS: Final[dict[str, float]] = {
 }
 
 
+#: DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001 — the single-event knob is a
+#: PERCENT: valid strictly between 0 and this full scale.
+_PCT_FULL_SCALE = 100.0
+
+
+def validate_single_event_pct(value: float | None) -> float | None:
+    """The ONE validation law for the single-event sensitivity knob.
+
+    ``None`` (OFF) passes through; otherwise the value must be a non-bool
+    finite number strictly between 0 and 100 (percent). Junk raises
+    :class:`ValueError` naming BOTH the config field and its CLI flag
+    (``--single-event-max-best-day-pct``), so the eager ``cmd_sweep_all``
+    parse and :meth:`CascadeConfig.__post_init__` share exactly this one law
+    (DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001, review round 1 — junk must
+    refuse BEFORE any compute, never after a completed multi-day sweep).
+    """
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        # The finite check is LOAD-BEARING in this exclusion form: a NaN
+        # compares False against BOTH bounds below, so without it a NaN
+        # would silently pass (mutation-killed, review round 1).
+        or not math.isfinite(value)
+        or float(value) <= 0.0
+        or float(value) >= _PCT_FULL_SCALE
+    ):
+        raise ValueError(
+            "single_event_max_best_day_pct (--single-event-max-best-day-pct) "
+            "must be None (OFF) or a finite percent strictly between 0 and "
+            f"100, got {value!r} (DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001)"
+        )
+    return value
+
+
 class FilterStage(Enum):
     """The pipeline stage at which a candidate was rejected (or that it passed)."""
 
     HARD_GATES = "hard_gates"
+    SINGLE_EVENT_SENSITIVITY = "single_event_sensitivity"
     DEFLATED_SHARPE = "deflated_sharpe"
     CPCV = "cpcv"
     REALITY_CHECK_SPA = "reality_check_spa"
@@ -165,6 +215,14 @@ class FilterStage(Enum):
     WALK_FORWARD = "walk_forward"
     LOCKBOX = "lockbox"
     MONTE_CARLO = "monte_carlo"
+    # Default-OFF filter #10 (DEC-REGIME-MUST-SURVIVE-STRATUM-001): the
+    # extreme-vol must-survive stratum — runs ONLY when
+    # ``CascadeConfig.extreme_vol_stratum`` is True.
+    EXTREME_VOL_STRATUM = "extreme_vol_stratum"
+    # Default-OFF filter #11 (DEC-REGIME-FRAGILITY-GATE-001): the
+    # regime-fragility gate — runs ONLY when
+    # ``CascadeConfig.regime_fragility`` is True.
+    REGIME_FRAGILITY = "regime_fragility"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +271,31 @@ class CandidateInput:
     #: per-trade caller needs no evidence — its rows already ARE trades).
     #: May be EMPTY (a zero-trade candidate ⇒ honest ``INSUFFICIENT_N``).
     lockbox_trade_days: tuple[int, ...] | None = None
+    #: Per-trade extreme-vol stratum membership flags for filter #10
+    #: (DEC-REGIME-MUST-SURVIVE-STRATUM-001): ``flags[i]`` is True iff trade
+    #: *i*'s ENTRY session classified extreme
+    #: (:func:`brutex.metrics.extreme_vol_stratum.classify_extreme_sessions`).
+    #: Aligned index-for-index with ``trade_pnls_paisa`` (same length when
+    #: BOTH are present). ``None`` (the default) = data unavailable — the
+    #: filter records the honest ``"unproven_current_regime"`` abstain,
+    #: never a fabricated verdict and never a reject.
+    extreme_vol_entry_flags: tuple[bool, ...] | None = None
+    #: Per-trade net P&L (paisa, signed) aligned with
+    #: ``extreme_vol_entry_flags`` — the series filter #10 splits by the
+    #: flags. ``None`` (the default) keeps every existing construction
+    #: byte-identical; the filter needs BOTH fields to evaluate.
+    trade_pnls_paisa: tuple[int, ...] | None = None
+    #: Per-trade session-lens trend token of the ENTRY session for filter
+    #: #11 (DEC-REGIME-FRAGILITY-GATE-001) — the taxonomy leaf maps it
+    #: (junk degrades to the UNKNOWN bucket, excluded from the laws).
+    #: Aligned index-for-index with ``trade_pnls_paisa`` (same length when
+    #: BOTH are present). ``None`` (the default) = the axis is skipped —
+    #: an honest abstain, never a fabricated verdict and never a reject.
+    trade_trend_tokens: tuple[str, ...] | None = None
+    #: Per-trade structural-era label of the ENTRY date for filter #11
+    #: (``regime_taxonomy.era_for_date(...).label``). Same alignment /
+    #: default laws as ``trade_trend_tokens``.
+    trade_era_labels: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         """Reject a non-finite metric / series value or an empty id up front."""
@@ -238,6 +321,70 @@ class CandidateInput:
                 f"CandidateInput.lockbox_trade_days must be non-decreasing "
                 f"(trades chronological) (candidate {self.candidate_id!r})"
             )
+        if (
+            self.extreme_vol_entry_flags is not None
+            and self.trade_pnls_paisa is not None
+            and len(self.extreme_vol_entry_flags) != len(self.trade_pnls_paisa)
+        ):
+            raise ValueError(
+                f"CandidateInput.extreme_vol_entry_flags length "
+                f"{len(self.extreme_vol_entry_flags)} != trade_pnls_paisa length "
+                f"{len(self.trade_pnls_paisa)} (candidate {self.candidate_id!r})"
+            )
+        for axis_name, axis_labels in (
+            ("trade_trend_tokens", self.trade_trend_tokens),
+            ("trade_era_labels", self.trade_era_labels),
+        ):
+            if (
+                axis_labels is not None
+                and self.trade_pnls_paisa is not None
+                and len(axis_labels) != len(self.trade_pnls_paisa)
+            ):
+                raise ValueError(
+                    f"CandidateInput.{axis_name} length {len(axis_labels)} != "
+                    f"trade_pnls_paisa length {len(self.trade_pnls_paisa)} "
+                    f"(candidate {self.candidate_id!r})"
+                )
+
+
+def _single_event_verdict(c: CandidateInput, x_pct: float) -> str | None:
+    """The single-event sensitivity LAW — reject detail or ``None`` (pass).
+
+    Groups the candidate's per-bar ``returns`` by IST day using the SAME
+    per-bar day ordinals ``build_candidate_input`` carries (``lockbox_days``
+    is aligned 1:1 with ``returns`` — both are the whole-window per-bar
+    series; the ``worst5_days``/``ist_trade_date`` day law). Let
+    ``total = Σ returns`` and ``best`` = the max single-day sum. FAIL iff
+    ``total <= 0`` OR ``total − best < (x_pct/100)·total`` (strict ``<`` —
+    a remainder of exactly X% passes). Measured basis
+    (DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001): the windfall fluke's
+    remainder is 0.3% of total (16× below the 5.0 default) while the
+    lumpiest legit comparator keeps 76.7% (15× above); the strict
+    ``total − best <= 0`` form is REFUTED (the fluke's scratches net
+    positive). Day ordinals that do not align with ``returns`` are an
+    evaluation failure → an honest reject detail (fail-safe, the CPCV
+    ValueError-arm posture), never a silent pass.
+    """
+    if len(c.lockbox_days) != len(c.returns):
+        return (
+            "single-event sensitivity could not be evaluated: day ordinals "
+            f"({len(c.lockbox_days)}) do not align with returns ({len(c.returns)})"
+        )
+    total = math.fsum(c.returns)
+    if total <= 0.0:
+        return f"single-event sensitivity: total return {total:.6g} <= 0"
+    day_sums: dict[int, list[float]] = {}
+    for day, r in zip(c.lockbox_days, c.returns, strict=True):
+        day_sums.setdefault(day, []).append(r)
+    best = max(math.fsum(values) for values in day_sums.values())
+    remaining = total - best
+    if remaining < (x_pct / _PCT_FULL_SCALE) * total:
+        remain_pct = remaining / total * _PCT_FULL_SCALE
+        return (
+            f"single-event sensitivity: total {total:.6g} minus best day {best:.6g} "
+            f"leaves {remaining:.6g} ({remain_pct:.4g}% of total) < {x_pct}% floor"
+        )
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +430,35 @@ class CascadeConfig:
     # #9 Monte-Carlo (spec line 472: p < 0.01)
     mc_alpha: float = 0.01
     mc_n_permutations: int = 1000
+    # #10 extreme-vol must-survive stratum (DEC-REGIME-MUST-SURVIVE-STRATUM-001)
+    # — DEFAULT-OFF: when False (the default) the filter never runs and the
+    # report is byte-identical to the pre-filter shape (no stage_survivors
+    # key, no verdict fields). Flipping the default ON is its own DEC.
+    extreme_vol_stratum: bool = False
+    # #11 regime-fragility gate (DEC-REGIME-FRAGILITY-GATE-001) —
+    # DEFAULT-OFF: when False (the default) the filter never runs and the
+    # report is byte-identical to the pre-filter shape (no stage_survivors
+    # key, no verdict fields). Flipping the default ON is its own DEC.
+    regime_fragility: bool = False
+    #: Default-OFF single-event sensitivity gate
+    #: (DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001). ``None`` (the default)
+    #: means the stage is NOT run — fully absent from behavior (reports
+    #: byte-identical to pre-change). When set to X (percent, ``0 < X < 100``,
+    #: finite), a candidate FAILS iff its total per-bar return is
+    #: non-positive OR ``total − best_single_IST_day < (X/100)·total``
+    #: (strict ``<`` — exactly X% remaining passes). Validated at
+    #: construction: junk (non-finite, bool, ``<= 0`` or ``>= 100``) raises
+    #: :class:`ValueError` loudly. ADDITIONAL defense-in-depth only — DSR
+    #: remains the load-bearing anti-single-event filter.
+    single_event_max_best_day_pct: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the single-event knob up front (fail loud, Golden Rule #1).
+
+        DELEGATES to :func:`validate_single_event_pct` — the ONE law shared
+        with the eager ``cmd_sweep_all`` CLI parse (review round 1).
+        """
+        validate_single_event_pct(self.single_event_max_best_day_pct)
 
     def bootstrap(self) -> BootstrapConfig:
         """The shared deterministic :class:`BootstrapConfig` for SPA / RW."""
@@ -341,6 +517,35 @@ class CandidateVerdict:
     #: pre-change constructions/deserialisations load ``None``, never a
     #: fabricated 0.
     dsr_corrected: float | None = None
+    #: The extreme-vol stratum status token (filter #10,
+    #: DEC-REGIME-MUST-SURVIVE-STRATUM-001):
+    #: ``"ok"`` / ``"fail"`` / ``"unproven_current_regime"`` /
+    #: ``"insufficient_stratum_trades"``, or ``None`` when the filter never
+    #: evaluated this candidate (flag OFF, or the candidate died at an
+    #: earlier stage — scope is deliberately survivors-only). Appended +
+    #: defaulted (the ``cpcv_pass_rate`` precedent) so every existing
+    #: construction is byte-identical. An ABSTAIN status is RECORDED but
+    #: never a rejection (coordinator-confirmed semantics).
+    extreme_vol_status: str | None = None
+    #: The measured stratum numbers behind ``extreme_vol_status`` (trade
+    #: counts / expectancies / variances / ratio — full precision, never
+    #: rounded), or ``None`` whenever the status is ``None``.
+    extreme_vol_stats: dict[str, float | int | None] | None = None
+    #: The regime-fragility status token (filter #11,
+    #: DEC-REGIME-FRAGILITY-GATE-001): ``"ok"`` / ``"fail"`` /
+    #: ``"insufficient_strata"``, or ``None`` when the filter never
+    #: evaluated this candidate (flag OFF, or the candidate died at an
+    #: earlier stage — scope is deliberately survivors-only). Appended +
+    #: defaulted (the ``extreme_vol_status`` precedent) so every existing
+    #: construction is byte-identical. An ABSTAIN status is RECORDED but
+    #: never a rejection.
+    regime_fragility_status: str | None = None
+    #: The measured per-axis per-stratum numbers behind
+    #: ``regime_fragility_status`` (trade counts / expectancies /
+    #: positive-P&L shares + ``taxonomy_version`` — full precision, never
+    #: rounded), or ``None`` whenever the status is ``None`` OR the
+    #: evidence was absent (the visible evidence-None abstain).
+    regime_fragility_stats: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -628,6 +833,24 @@ def run_stage4_cascade(
         survivors = kept
     stage_survivors[FilterStage.HARD_GATES.value] = len(survivors)
 
+    # ── #1b SINGLE-EVENT SENSITIVITY (per-candidate, DEFAULT-OFF) ──
+    # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001: runs ONLY when the knob is
+    # set — the None default leaves this block fully absent from behavior
+    # (stage_survivors carries no token, reports byte-identical). Additional
+    # defense-in-depth; DSR (#2) stays the load-bearing anti-single-event
+    # filter.
+    if config.single_event_max_best_day_pct is not None:
+        x_pct = config.single_event_max_best_day_pct
+        kept = []
+        for c in survivors:
+            detail = _single_event_verdict(c, x_pct)
+            if detail is None:
+                kept.append(c)
+            else:
+                reject(c, FilterStage.SINGLE_EVENT_SENSITIVITY, detail)
+        survivors = kept
+        stage_survivors[FilterStage.SINGLE_EVENT_SENSITIVITY.value] = len(survivors)
+
     # ── #2 DEFLATED SHARPE (per-candidate). The deflation inputs come from ONE
     # of two same-population sources (ADR-0008 condition 3 / DEC-TRIAL-STATS-
     # CONSUME-001): the FROZEN leaderboard trial stats when supplied — N = every
@@ -858,6 +1081,85 @@ def run_stage4_cascade(
     survivors = kept
     stage_survivors[FilterStage.MONTE_CARLO.value] = len(survivors)
 
+    # ── #10 EXTREME-VOL MUST-SURVIVE STRATUM (per-candidate, DEFAULT-OFF —
+    # DEC-REGIME-MUST-SURVIVE-STRATUM-001). Gated on the config flag: when
+    # OFF (the default) this block does not execute AT ALL — no
+    # stage_survivors key, no verdict fields, report byte-identical. Scope is
+    # deliberately MINIMAL: only candidates surviving to #10 are evaluated
+    # (an earlier-stage reject never gains a stratum status — it was already
+    # decided). ABSTAIN statuses ("unproven_current_regime" /
+    # "insufficient_stratum_trades") are RECORDED but NEVER reject — data
+    # unavailability is visible honesty, not a failure. ──
+    extreme_vol_status_by_id: dict[str, str] = {}
+    extreme_vol_stats_by_id: dict[str, dict[str, float | int | None]] = {}
+    if config.extreme_vol_stratum:
+        kept = []
+        for c in survivors:
+            if c.extreme_vol_entry_flags is None or c.trade_pnls_paisa is None:
+                # Data unavailable (an old manifest / a hand-built caller):
+                # honest ABSTAIN — visible, never a reject (Golden Rule #1).
+                extreme_vol_status_by_id[c.candidate_id] = "unproven_current_regime"
+                kept.append(c)
+                continue
+            stratum_pnls: list[int] = []
+            calm_pnls: list[int] = []
+            for pnl, is_extreme in zip(c.trade_pnls_paisa, c.extreme_vol_entry_flags, strict=True):
+                (stratum_pnls if is_extreme else calm_pnls).append(pnl)
+            sv = evaluate_stratum(stratum_pnls, calm_pnls)
+            extreme_vol_status_by_id[c.candidate_id] = sv.status
+            extreme_vol_stats_by_id[c.candidate_id] = {
+                "stratum_trades": sv.stratum_trades,
+                "calm_trades": sv.calm_trades,
+                "stratum_expectancy_paisa": sv.stratum_expectancy_paisa,
+                "calm_expectancy_paisa": sv.calm_expectancy_paisa,
+                "stratum_variance": sv.stratum_variance,
+                "calm_variance": sv.calm_variance,
+                "variance_ratio": sv.variance_ratio,
+            }
+            if sv.status == "fail":
+                reject(c, FilterStage.EXTREME_VOL_STRATUM, sv.detail)
+            else:
+                kept.append(c)
+        survivors = kept
+        stage_survivors[FilterStage.EXTREME_VOL_STRATUM.value] = len(survivors)
+
+    # ── #11 REGIME-FRAGILITY GATE (per-candidate, DEFAULT-OFF —
+    # DEC-REGIME-FRAGILITY-GATE-001). Gated on the config flag: when OFF
+    # (the default) this block does not execute AT ALL — no stage_survivors
+    # key, no verdict fields, report byte-identical. Scope is deliberately
+    # MINIMAL: only candidates surviving to #11 are evaluated (an
+    # earlier-stage reject never gains a fragility status — it was already
+    # decided). The ABSTAIN status ("insufficient_strata") is RECORDED but
+    # NEVER rejects — data unavailability is visible honesty, not a
+    # failure. ──
+    regime_fragility_status_by_id: dict[str, str] = {}
+    regime_fragility_stats_by_id: dict[str, dict[str, object]] = {}
+    if config.regime_fragility:
+        kept = []
+        for c in survivors:
+            if c.trade_pnls_paisa is None or (
+                c.trade_trend_tokens is None and c.trade_era_labels is None
+            ):
+                # Evidence unavailable (an old manifest / a hand-built
+                # caller): honest ABSTAIN — visible, never a reject
+                # (Golden Rule #1).
+                regime_fragility_status_by_id[c.candidate_id] = "insufficient_strata"
+                kept.append(c)
+                continue
+            fv = evaluate_fragility(
+                c.trade_pnls_paisa,
+                trend_tokens=c.trade_trend_tokens,
+                era_labels=c.trade_era_labels,
+            )
+            regime_fragility_status_by_id[c.candidate_id] = fv.status
+            regime_fragility_stats_by_id[c.candidate_id] = fv.stats
+            if fv.status == "fail":
+                reject(c, FilterStage.REGIME_FRAGILITY, fv.detail)
+            else:
+                kept.append(c)
+        survivors = kept
+        stage_survivors[FilterStage.REGIME_FRAGILITY.value] = len(survivors)
+
     # ── Composite ranking of survivors (spec 686-697) ──
     scores = _composite_scores(survivors, lockbox_sharpe_by_id)
     # Deterministic TOTAL order (DEC-STATS-GATE-INTEGRITY-001 R2-SR-F6,
@@ -891,8 +1193,24 @@ def run_stage4_cascade(
     # measured stage-3 rate; a candidate that never reached #3 (or hit the
     # ValueError arm) stamps the honest ``None``. ``replace`` preserves every
     # other field bit-for-bit; ordering/decisions were finalised above.
+    # The extreme-vol filter #10 fields ride the SAME recording-only stamp
+    # (DEC-REGIME-MUST-SURVIVE-STRATUM-001): both default to ``None``, so a
+    # flag-OFF run (empty maps) stamps every verdict with its own defaults —
+    # provably byte-identical to the pre-filter report.
+    # The regime-fragility filter #11 fields ride the SAME recording-only
+    # stamp (DEC-REGIME-FRAGILITY-GATE-001): both default to ``None``, so a
+    # flag-OFF run (empty maps) stamps every verdict with its own defaults —
+    # provably byte-identical to the pre-filter report.
     ordered_verdicts = tuple(
-        replace(verdicts[cid], cpcv_pass_rate=cpcv_rate_by_id.get(cid)) for cid in ids
+        replace(
+            verdicts[cid],
+            cpcv_pass_rate=cpcv_rate_by_id.get(cid),
+            extreme_vol_status=extreme_vol_status_by_id.get(cid),
+            extreme_vol_stats=extreme_vol_stats_by_id.get(cid),
+            regime_fragility_status=regime_fragility_status_by_id.get(cid),
+            regime_fragility_stats=regime_fragility_stats_by_id.get(cid),
+        )
+        for cid in ids
     )
     return CascadeReport(
         verdicts=ordered_verdicts,

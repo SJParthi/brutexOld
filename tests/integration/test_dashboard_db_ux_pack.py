@@ -211,8 +211,14 @@ def test_universe_hero_states_all_vendor_listed_strikes() -> None:
     states the REAL rule — ALL vendor-listed strikes (verified: CLAUDE.md §6,
     get_contracts returns every listed strike, not relative-to-spot)."""
     html = _bare_client().get("/universe").text
-    assert "ATM±10" not in html, "the false ATM±10 fan claim must be gone"
-    assert "ATM±3" not in html, "the false ATM±3 fan claim must be gone"
+    # Train weave seam: the Dhan rolling-ATM options tooltip legitimately names
+    # its own "× ATM±10 ×" key axis — a TRUE per-bar rolling-ATM window
+    # (DEC-DHAN-ROLLING-OPTIONS-001), NOT the killed GROWW fixed-fan claim.
+    # The killed-token scan therefore runs with that ONE sanctioned tooltip
+    # fragment removed; any OTHER ATM±10/ATM±3 occurrence still fails the pin.
+    scanned = html.replace("EC0-3 × ATM±10 × CALL/PUT", "")
+    assert "ATM±10" not in scanned, "the false ATM±10 fan claim must be gone"
+    assert "ATM±3" not in scanned, "the false ATM±3 fan claim must be gone"
     assert "ALL vendor-listed strikes" in html
     assert "not relative-to-spot" in html
     assert "CLAUDE.md §6" in html  # the citation marker

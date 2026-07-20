@@ -256,6 +256,16 @@ class TestDiscoverTouchedModules:
         #     100.00% under the static whole-engine gate + the whole-package floor
         #     (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #2205 — first discovered
         #     when the express change touched VOCAB_BITS).
+        #   * brutex/pull_state_rust.py — the pull-state Rust facade
+        #     (DEC-RUST-PULL-STATE-001): each wave's kernel-accessor section
+        #     is exercised by that wave's OWN seam suite, stem-named for the
+        #     CONSUMER module it gates
+        #     (test_pull_outcome_rust_seam.py / test_pull_scope_rust_seam.py …),
+        #     so the stem-matched test_pull_state_rust*.py pair measures ~62%
+        #     standalone; the dedicated static ci.yml gate runs the curated
+        #     static suite (every per-wave seam file it enumerates) at
+        #     100.00% + the whole-package floor (the pull_controller.py
+        #     precedent).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -270,6 +280,7 @@ class TestDiscoverTouchedModules:
                     "brutex/engine/resilience_streaks.py",
                     "brutex/engine/results_depth_pass.py",
                     "brutex/engine/combo_mask.py",
+                    "brutex/pull_state_rust.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE

@@ -18,9 +18,19 @@ auto-pull must be **gated on credentials being present**. It must also
 have something to pull *for*: the per-underlying expiry/contract fan-out
 iterates the loaded indices, so the instrument master must already be
 populated. Both conditions are required.
+
+DEC-RUST-PULL-STATE-001 (flip phase): the reload predicate's decision plane
+IS the ``brutex_pull_state`` Rust kernel
+(:func:`brutex.pull_state_rust.rust_should_reload_master`); the former
+byte-identical Python oracle body is DELETED. A missing/stale/raising wheel —
+or the removed ``BRUTEX_PULL_STATE_RUST`` knob still set — raises the typed
+error out of this predicate, FAIL-CLOSED (the boot-time reload decision stops
+loudly, never silently guesses).
 """
 
 from __future__ import annotations
+
+from brutex import pull_state_rust as _pull_state_rust
 
 
 def should_reload_instrument_master(
@@ -89,10 +99,27 @@ def should_reload_instrument_master(
         ``True`` iff the lake is empty, missing indices, non-lean, carries
         stale (un-enriched) stock economics, OR carries stale OPT/REF
         eligibility flags.
+
+    Raises
+    ------
+    brutex.pull_state_rust.PullStateKernelError
+        Wheel absent/stale, kernel raise, a poisoned (non-bool) result, or a
+        count outside the kernel's i64 domain — fail-closed, no oracle exists
+        (DEC-RUST-PULL-STATE-001; the pre-flip silent Python arm for
+        out-of-i64 counts was deleted with the oracle).
+    brutex.pull_state_rust.PullStateFlagRemovedError
+        The removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
     """
-    lake_is_empty = index_count == 0 and stock_count == 0
-    indices_missing = index_count == 0
-    return lake_is_empty or indices_missing or legs_present or stale_economics or stale_eligibility
+    # --- auto_pull (Wave 3G, flip phase — DEC-RUST-PULL-STATE-001): the ONE
+    # predicate IS the Rust kernel (five facts in, one bool out); the former
+    # byte-identical Python oracle body is DELETED.
+    return _pull_state_rust.rust_should_reload_master(
+        index_count=index_count,
+        stock_count=stock_count,
+        legs_present=legs_present,
+        stale_economics=stale_economics,
+        stale_eligibility=stale_eligibility,
+    )
 
 
 # NOTE: ``should_auto_pull_universe`` was removed in DEC-UNIVERSE-PULL-PHASED-001

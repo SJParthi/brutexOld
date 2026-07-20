@@ -23,9 +23,17 @@ OVERRIDE_FLAG="${OPERATOR_OVERRIDE:-false}"
 # have empty statusCheckRollup (CI hasn't started registering jobs).
 # If we don't gate on a minimum check count, the script falsely returns
 # "all green" on empty rollup → false-merge approval (the exact PR #25
-# failure mode this script exists to prevent). Set to the count of
-# jobs in `ci-ok needs:` list (currently 20 hard gates).
-EXPECTED_MIN_CHECKS="${EXPECTED_MIN_CHECKS:-20}"
+# failure mode this script exists to prevent).
+# Floor arithmetic (TRAIN A re-derive, 2026-07-20 — the stale "20 hard
+# gates" figure predated the shard/crate-gate growth): the woven ci.yml
+# carries 49 jobs of which exactly ONE (test-shard) is a 6-way matrix,
+# so 48 + 6 = 54 check runs register on every PR head (the workflow is
+# trigger-unfiltered on pull_request); the REQUIRED subset alone is 52
+# (46 ci-ok `needs:` entries with test-shard expanding to 6, plus the
+# ci-ok context itself). 45 sits conservatively BELOW both figures
+# (7+ checks of headroom — never a false refusal on a healthy run) yet
+# 2.25x the stale 20 floor.
+EXPECTED_MIN_CHECKS="${EXPECTED_MIN_CHECKS:-45}"
 
 # DEC-MERGE-LIVE-ROLLUP-001: a comma-separated allow-list of check-run NAMES
 # to IGNORE in the rollup (count + failed + pending). Default EMPTY (no
@@ -128,11 +136,66 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 # Query CI status via gh pr view
-STATUS_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json statusCheckRollup,mergeable,number 2>/dev/null || echo "{}")
+STATUS_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json statusCheckRollup,mergeable,number,headRefOid 2>/dev/null || echo "{}")
 
 if [[ "$STATUS_JSON" == "{}" ]]; then
     echo "ERROR: Could not fetch PR #$PR_NUMBER status from $REPO." >&2
     exit 3
+fi
+
+# TRAIN A red-team mandate (statusCheckRollup PAGINATION): `gh pr view
+# --json statusCheckRollup` returns only the FIRST GraphQL page (100
+# contexts). On a mega-train head carrying >100 check runs the scans
+# below would silently evaluate a TRUNCATED rollup — a failed check
+# beyond item 100 becomes invisible, i.e. fail OPEN. Exactly when the
+# returned rollup hits the 100-entry page cap (the provably
+# possibly-truncated shape) re-fetch the FULL check-run list for the
+# head SHA via the paginated REST endpoint (`gh api --paginate`) and
+# substitute it into STATUS_JSON, normalized to the UPPERCASE GraphQL
+# enum spelling the scans below expect. Below 100 entries the rollup is
+# complete by construction and behavior is byte-identical (no extra gh
+# call). Legacy commit-status contexts are not re-added on the paginated
+# path: every check in this repo is a GitHub-Actions check run, and the
+# GraphQL rollup never carried a `conclusion` for StatusContext entries
+# anyway (count-only) — dropping them can only LOWER the registered
+# count, the fail-closed direction. A failed paginated fetch fails
+# CLOSED (exit 3) — the same class as the gh-pr-view failure above:
+# cannot measure ⇒ never merge.
+RAW_ROLLUP_LEN=$(echo "$STATUS_JSON" | python3 -c "
+import json, sys
+print(len(json.load(sys.stdin).get('statusCheckRollup', [])))
+")
+if [[ "$RAW_ROLLUP_LEN" -ge 100 ]]; then
+    HEAD_SHA=$(echo "$STATUS_JSON" | python3 -c "
+import json, sys
+print(json.load(sys.stdin).get('headRefOid', '') or '')
+")
+    if [[ -z "$HEAD_SHA" ]]; then
+        echo "ERROR: rollup at the 100-entry page cap but no headRefOid for PR #$PR_NUMBER — cannot paginate check runs." >&2
+        exit 3
+    fi
+    ROLLUP_NDJSON=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+        --jq '.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}' 2>/dev/null) || {
+        echo "ERROR: paginated check-run fetch failed for PR #$PR_NUMBER (head $HEAD_SHA) — refusing to evaluate a possibly-truncated rollup." >&2
+        exit 3
+    }
+    STATUS_JSON=$(echo "$ROLLUP_NDJSON" | STATUS_JSON="$STATUS_JSON" python3 -c "
+import json, os, sys
+data = json.loads(os.environ['STATUS_JSON'])
+rollup = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    run = json.loads(line)
+    rollup.append({
+        'name': run.get('name') or '?',
+        'status': (run.get('status') or '').upper() or None,
+        'conclusion': (run.get('conclusion') or '').upper() or None,
+    })
+data['statusCheckRollup'] = rollup
+print(json.dumps(data))
+")
 fi
 
 # Check mergeable state (Agent 5 MED finding: was fetched but unused).
@@ -170,7 +233,7 @@ print(len(rollup))
 
 # Agent 5 CRIT fix: empty rollup means CI hasn't started yet. Treat as
 # PENDING, not GREEN. Refuse merge until at least EXPECTED_MIN_CHECKS
-# jobs have registered (default 20 per ci-ok needs: list).
+# jobs have registered (default 45 — see the floor arithmetic above).
 if [[ "$ROLLUP_COUNT" -lt "$EXPECTED_MIN_CHECKS" ]]; then
     echo "===================================================================" >&2
     echo "❌ MERGE BLOCKED: PR #$PR_NUMBER has only $ROLLUP_COUNT CI checks" >&2

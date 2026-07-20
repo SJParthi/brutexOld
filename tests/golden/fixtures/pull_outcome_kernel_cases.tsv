@@ -1,0 +1,93 @@
+classify	running	routine note	0	0	0	0	running	ok	running	input
+classify	running	routine note	0	0	1	0	wedged	bad	wedged	input
+classify	running	routine note	0	1	0	0	running_stalled_suspect	warn	stalled	input
+classify	running	routine note	0	1	1	0	wedged	bad	wedged	input
+classify	error	routine note	0	0	0	0	error	bad	failed	input
+classify	error	routine note	0	0	1	0	error	bad	failed	input
+classify	error	routine note	0	1	0	0	error	bad	failed	input
+classify	error	routine note	0	1	1	0	error	bad	failed	input
+classify	done	routine note	0	0	0	0	completed	ok	completed	completed
+classify	done	routine note	0	0	1	0	completed	ok	completed	completed
+classify	done	routine note	0	1	0	0	completed	ok	completed	completed
+classify	done	routine note	0	1	1	0	completed	ok	completed	completed
+classify	idle	routine note	0	0	0	0	never_run	idle	never_run	empty
+classify	idle	routine note	0	0	1	0	never_run	idle	never_run	empty
+classify	idle	routine note	0	1	0	0	never_run	idle	never_run	empty
+classify	idle	routine note	0	1	1	0	never_run	idle	never_run	empty
+classify	limbo-token	routine note	0	0	0	0	never_run	idle	never_run	empty
+classify	limbo-token	routine note	0	0	1	0	never_run	idle	never_run	empty
+classify	limbo-token	routine note	0	1	0	0	never_run	idle	never_run	empty
+classify	limbo-token	routine note	0	1	1	0	never_run	idle	never_run	empty
+classify	error		0	0	0	0	error	bad	failed	input
+classify	error	deferred — inside NSE market-hours window	0	0	0	0	deferred_market_hours	warn	deferred_market_hours	input
+classify	error	deferred — inside NSE market-hours window (block ends 15:35 IST)	0	0	0	0	deferred_market_hours	warn	deferred_market_hours	input
+classify	error	deferred — inside NSE market-hours windo	0	0	0	0	error	bad	failed	input
+classify	error	 deferred — inside NSE market-hours window	0	0	0	0	error	bad	failed	input
+classify	error	LakeWriteHalt: lake write halted: disk_full	0	0	0	0	halted_disk_full	bad	halted_disk_full	input
+classify	error	LakeWriteHalt: lake write halted: out_of_memory	0	0	0	0	halted_oom	bad	halted_oom	input
+classify	error	LakeWriteHalt: lake write halted: mystery	0	0	0	0	halted_lake_write	bad	halted_lake_write	input
+classify	error	LakeWriteHalt	0	0	0	0	halted_lake_write	bad	halted_lake_write	input
+classify	error	LakeWriteHalt without colon	0	0	0	0	error	bad	failed	input
+classify	error	ValueError: disk_full mentioned outside a lake halt	0	0	0	0	error	bad	failed	input
+classify	error	ошибка: юникод в деталях	0	0	0	0	error	bad	failed	input
+classify	error	: leading colon means empty exception name	0	0	0	0	error	bad	failed	input
+classify	error	MarketHoursHalt without colon	0	0	0	0	error	bad	failed	input
+classify	error	DailyQuotaExceeded: boom	0	0	0	0	halted_quota	bad	halt:DailyQuotaExceeded	input
+classify	error	GreeksEnrichPoolBroken: boom	0	0	0	0	halted_pool_broken	bad	halt:GreeksEnrichPoolBroken	input
+classify	error	GrowwCredentialDeadError: boom	0	0	0	0	halted_auth	bad	halt:GrowwCredentialDeadError	input
+classify	error	MarketHoursHalt: boom	0	0	0	0	halted_market_hours	warn	halt:MarketHoursHalt	input
+classify	error	MassEmptySettleHalt: boom	0	0	0	0	halted_mass_empty	bad	halt:MassEmptySettleHalt	input
+classify	error	PullAlreadyRunningError: boom	0	0	0	0	refused_busy	warn	halt:PullAlreadyRunningError	input
+classify	error	QuotaInvariantError: boom	0	0	0	0	halted_quota	bad	halt:QuotaInvariantError	input
+classify	error	VendorDownError: boom	0	0	0	0	halted_vendor_down	bad	halt:VendorDownError	input
+classify	error	routine note	0	0	0	1	error	bad	failed	input
+classify	error	LakeWriteHalt: lake write halted: disk_full	0	0	0	1	halted_disk_full	bad	halted_disk_full	input
+classify	done		0	0	0	0	completed	ok	completed	completed
+classify	done		0	0	0	1	@verdict			
+classify	done		1	0	0	0	completed_with_failures	warn	completed_failures	input
+classify	done		1	0	0	1	completed_with_failures	warn	completed_failures	input
+classify	done		3	0	0	0	completed_with_failures	warn	completed_failures	input
+classify	done		3	0	0	1	completed_with_failures	warn	completed_failures	input
+classify	done	routine note	0	0	0	1	@verdict			
+classify	done	routine note	1	0	0	0	completed_with_failures	warn	completed_failures	input
+classify	done	routine note	1	0	0	1	completed_with_failures	warn	completed_failures	input
+classify	done	routine note	3	0	0	0	completed_with_failures	warn	completed_failures	input
+classify	done	routine note	3	0	0	1	completed_with_failures	warn	completed_failures	input
+classify	done	deferred — inside NSE market-hours window	0	0	0	0	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window	0	0	0	1	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window	1	0	0	0	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window	1	0	0	1	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window	3	0	0	0	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window	3	0	0	1	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window (block ends 15:35 IST)	0	0	0	0	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window (block ends 15:35 IST)	0	0	0	1	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window (block ends 15:35 IST)	1	0	0	0	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window (block ends 15:35 IST)	1	0	0	1	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window (block ends 15:35 IST)	3	0	0	0	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours window (block ends 15:35 IST)	3	0	0	1	deferred_market_hours	warn	deferred_market_hours	input
+classify	done	deferred — inside NSE market-hours windo	0	0	0	0	completed	ok	completed	completed
+classify	done	deferred — inside NSE market-hours windo	0	0	0	1	@verdict			
+classify	done	deferred — inside NSE market-hours windo	1	0	0	0	completed_with_failures	warn	completed_failures	input
+classify	done	deferred — inside NSE market-hours windo	1	0	0	1	completed_with_failures	warn	completed_failures	input
+classify	done	deferred — inside NSE market-hours windo	3	0	0	0	completed_with_failures	warn	completed_failures	input
+classify	done	deferred — inside NSE market-hours windo	3	0	0	1	completed_with_failures	warn	completed_failures	input
+classify	done	 deferred — inside NSE market-hours window	0	0	0	0	completed	ok	completed	completed
+classify	done	 deferred — inside NSE market-hours window	0	0	0	1	@verdict			
+classify	done	 deferred — inside NSE market-hours window	1	0	0	0	completed_with_failures	warn	completed_failures	input
+classify	done	 deferred — inside NSE market-hours window	1	0	0	1	completed_with_failures	warn	completed_failures	input
+classify	done	 deferred — inside NSE market-hours window	3	0	0	0	completed_with_failures	warn	completed_failures	input
+classify	done	 deferred — inside NSE market-hours window	3	0	0	1	completed_with_failures	warn	completed_failures	input
+classify	idle		0	0	0	0	never_run	idle	never_run	empty
+classify	idle		0	0	0	1	@verdict_prepull			
+classify	idle	routine note	0	0	0	1	@verdict_prepull			
+classify	limbo-token		0	0	0	0	never_run	idle	never_run	empty
+classify	limbo-token		0	0	0	1	@verdict_prepull			
+classify	limbo-token	routine note	0	0	0	1	@verdict_prepull			
+classify	running	deferred — inside NSE market-hours window	0	0	0	0	running	ok	running	input
+classify	running	LakeWriteHalt: lake write halted: disk_full	0	0	0	0	running	ok	running	input
+correlates	p1	p1	1
+correlates	p1	p2	0
+correlates	p1		0
+correlates			0
+correlates		p1	0
+correlates	run-α	run-α	1

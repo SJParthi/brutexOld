@@ -34,9 +34,11 @@ import structlog
 
 from brutex import __version__
 from brutex.data.guarded_read import read_regular_text
-from brutex.nightly.chain import LinkStatus, NightlyReport, first_breaker
+from brutex.nightly.chain import LinkStatus, NightlyReport, first_breaker_python
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from brutex.engine.sweep_audit import SweepAuditWriter
 
 logger = structlog.get_logger(__name__)
@@ -238,8 +240,14 @@ def _count_text(value: int | None) -> str:
 
 
 def _verdict(report: NightlyReport) -> str:
-    """Derive the terminal verdict label for the nightly report."""
-    breaker = first_breaker(report.links)
+    """Derive the terminal verdict label for the nightly report.
+
+    Pure — consults :func:`first_breaker_python` (never the routed seam),
+    so it doubles as the oracle helper of :func:`_summary_lines_python`
+    (DEC-NIGHTLY-RUST-CORE-001; the crate mirrors this law as
+    ``nightly_verdict``, engaged through the ``summary_lines`` seam).
+    """
+    breaker = first_breaker_python(report.links)
     if breaker is not None:
         return "REFUSED" if breaker.status is LinkStatus.REFUSED else "FAILED"
     if report.suspect:
@@ -247,18 +255,18 @@ def _verdict(report: NightlyReport) -> str:
     return "OK"
 
 
-def summary_lines(report: NightlyReport) -> tuple[list[str], str]:
-    """The pure Telegram body builder: ``(lines, verdict)`` (testable w/o a notifier).
+def _summary_lines_python(report: NightlyReport) -> tuple[list[str], str]:
+    """The retained pure body of :func:`summary_lines` (the parity oracle).
 
-    ``verdict`` ∈ {"OK", "SUSPECT", "REFUSED", "FAILED"}; the lines carry the
-    chain-order per-link verdicts + the honest counts (``?`` for unknown) and
-    the ``--skip-backup`` nag when the operator opted out.
+    Verbatim except the ONE oracle-purity repoint: the breaker lookup
+    consults :func:`first_breaker_python` (never the routed public seam),
+    so a flag-ON burn-in compares against an all-Python chain.
     """
     verdict = _verdict(report)
     duration = max(0.0, report.ended_utc - report.started_utc)
     hours, rem = divmod(int(duration), 3600)
     minutes = rem // 60
-    breaker = first_breaker(report.links)
+    breaker = first_breaker_python(report.links)
     headline = {
         "OK": "✅ OK",
         "SUSPECT": "⚠️ SUSPECT",
@@ -298,3 +306,51 @@ def summary_lines(report: NightlyReport) -> tuple[list[str], str]:
     for note in report.honesty_notes:
         lines.append(f"ℹ️ {note}")
     return lines, verdict
+
+
+def summary_lines(report: NightlyReport) -> tuple[list[str], str]:
+    """The pure Telegram body builder: ``(lines, verdict)`` (testable w/o a notifier).
+
+    ``verdict`` ∈ {"OK", "SUSPECT", "REFUSED", "FAILED"}; the lines carry the
+    chain-order per-link verdicts + the honest counts (``?`` for unknown) and
+    the ``--skip-backup`` nag when the operator opted out.
+
+    Routed through the default-OFF ``brutex_ops`` seam
+    (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
+    retained oracle :func:`_summary_lines_python`, byte-identical. The
+    routed arm crosses ONLY flat strings/ints/floats (the report projected
+    to ``(link, status, blocked_by)`` rows + ``counts.items()`` pairs); the
+    crate internally mirrors ``_verdict`` and ``_count_text``.
+    """
+    from brutex.nightly import nightly_rust
+
+    if not nightly_rust.nightly_rust_enabled():
+        return _summary_lines_python(report)
+
+    def _crate_value(crate: ModuleType) -> tuple[list[str], str]:
+        value: tuple[list[str], str] = crate.nightly_summary_lines(
+            report.nightly_id,
+            report.started_utc,
+            report.ended_utc,
+            [
+                (
+                    outcome.link.value,
+                    outcome.status.value,
+                    None if outcome.blocked_by is None else outcome.blocked_by.value,
+                )
+                for outcome in report.links
+            ],
+            list(report.counts.items()),
+            [(tripwire.name, tripwire.detail) for tripwire in report.tripwires],
+            list(report.honesty_notes),
+            report.dry_run,
+            report.suspect,
+        )
+        return value
+
+    return nightly_rust.route_kernel(
+        "summary_lines",
+        crate_call=_crate_value,
+        python_call=lambda: _summary_lines_python(report),
+        validate=nightly_rust.is_summary_tuple,
+    )

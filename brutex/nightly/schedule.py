@@ -45,12 +45,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
 from brutex.data.guarded_read import read_regular_text
 from brutex.nightly.backup import MANIFEST_NAME, PARTIAL_SUFFIX
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 logger = structlog.get_logger(__name__)
 
@@ -106,6 +109,12 @@ PMSET_WAKE_LEAD_MINUTES: Final[int] = 5
 DEADMAN_GRACE_SECONDS: Final[float] = 3 * 3600.0
 
 
+def _pmset_wake_command_python(hour: int, minute: int, lead_minutes: int) -> str:
+    """The retained pure body of :func:`pmset_wake_command` (the parity oracle)."""
+    total = (hour * 60 + minute - lead_minutes) % (24 * 60)
+    return f"sudo pmset repeat wakeorpoweron MTWRFSU {total // 60:02d}:{total % 60:02d}:00"
+
+
 def pmset_wake_command(
     hour: int, minute: int, *, lead_minutes: int = PMSET_WAKE_LEAD_MINUTES
 ) -> str:
@@ -116,17 +125,60 @@ def pmset_wake_command(
     trigger (launchd cannot wake a sleeping Mac); BruteX documents + prints
     this command and NEVER runs it (sudo, system-wide power setting).
     Wraps across midnight (a 00:02 trigger wakes at 23:57).
+
+    Routed through the default-OFF ``brutex_ops`` seam
+    (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
+    retained oracle :func:`_pmset_wake_command_python`, byte-identical.
     """
-    total = (hour * 60 + minute - lead_minutes) % (24 * 60)
-    return f"sudo pmset repeat wakeorpoweron MTWRFSU {total // 60:02d}:{total % 60:02d}:00"
+    from brutex.nightly import nightly_rust
+
+    if not nightly_rust.nightly_rust_enabled():
+        return _pmset_wake_command_python(hour, minute, lead_minutes)
+
+    return nightly_rust.route_kernel(
+        "pmset_wake_command",
+        crate_call=lambda crate: crate.nightly_pmset_wake_command(hour, minute, lead_minutes),
+        python_call=lambda: _pmset_wake_command_python(hour, minute, lead_minutes),
+        validate=nightly_rust.is_str,
+    )
+
+
+def _parse_at_python(text: str) -> tuple[int, int] | None:
+    """The retained pure DECISION core of :func:`parse_at` (the parity oracle).
+
+    ``None`` = no match (the public wrapper mints the exact ValueError at
+    ONE site, so junk keeps its byte-identical refusal message).
+    """
+    match = _AT_RE.match(text.strip())
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def parse_at(text: str) -> tuple[int, int]:
-    """Parse ``HH:MM`` fail-loud; junk raises :class:`ValueError` naming the value."""
-    match = _AT_RE.match(text.strip())
-    if match is None:
+    """Parse ``HH:MM`` fail-loud; junk raises :class:`ValueError` naming the value.
+
+    Routed through the default-OFF ``brutex_ops`` seam
+    (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
+    retained decision core :func:`_parse_at_python`, byte-identical
+    (refusal message included — it is minted HERE on both arms). The crate
+    refuses non-ASCII candidates (CPython's un-flagged ``\\d`` matches
+    Unicode digits) into the degrade set, so the oracle decides those.
+    """
+    from brutex.nightly import nightly_rust
+
+    if not nightly_rust.nightly_rust_enabled():
+        verdict = _parse_at_python(text)
+    else:
+        verdict = nightly_rust.route_kernel(
+            "parse_at",
+            crate_call=lambda crate: crate.nightly_parse_at(text),
+            python_call=lambda: _parse_at_python(text),
+            validate=nightly_rust.is_hm_tuple_or_none,
+        )
+    if verdict is None:
         raise ValueError(f"--at must be HH:MM (24h), got {text!r}")
-    return int(match.group(1)), int(match.group(2))
+    return verdict
 
 
 def resolve_program_arguments(
@@ -161,7 +213,64 @@ def render_launchd_plist(
     the ``<stem>.out.log`` / ``<stem>.err.log`` pair, so a SECOND LaunchAgent
     (the cross-verify producer, label ``com.brutex.crossverify``) renders
     through this ONE law without clobbering the nightly's log files.
+
+    Routed through the default-OFF ``brutex_ops`` seam
+    (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
+    retained oracle :func:`_render_launchd_plist_python`, byte-identical.
+    On the routed arm the two log paths are PRE-FORMATTED here with the
+    SAME ``str(log_dir / f"{log_stem}.out.log")`` expression the oracle
+    uses (pathlib semantics stay Python-owned — the lake_rust_stats
+    "isoformat pinned both arms" law); the crate owns the escape/sort/
+    assembly laws.
     """
+    from brutex.nightly import nightly_rust
+
+    if not nightly_rust.nightly_rust_enabled():
+        return _render_launchd_plist_python(
+            label=label,
+            program_arguments=program_arguments,
+            hour=hour,
+            minute=minute,
+            env_vars=env_vars,
+            log_dir=log_dir,
+            log_stem=log_stem,
+        )
+
+    return nightly_rust.route_kernel(
+        "render_launchd_plist",
+        crate_call=lambda crate: crate.nightly_render_launchd_plist(
+            label,
+            list(program_arguments),
+            hour,
+            minute,
+            list(env_vars.items()),
+            str(log_dir / f"{log_stem}.out.log"),
+            str(log_dir / f"{log_stem}.err.log"),
+        ),
+        python_call=lambda: _render_launchd_plist_python(
+            label=label,
+            program_arguments=program_arguments,
+            hour=hour,
+            minute=minute,
+            env_vars=env_vars,
+            log_dir=log_dir,
+            log_stem=log_stem,
+        ),
+        validate=nightly_rust.is_str,
+    )
+
+
+def _render_launchd_plist_python(
+    *,
+    label: str,
+    program_arguments: Sequence[str],
+    hour: int,
+    minute: int,
+    env_vars: Mapping[str, str],
+    log_dir: Path,
+    log_stem: str = "nightly-launchd",
+) -> str:
+    """The retained pure body of :func:`render_launchd_plist` (the parity oracle)."""
     argv_xml = "".join(
         f"    <string>{_xml_escape(token)}</string>\n" for token in program_arguments
     )
@@ -323,16 +432,52 @@ class DeadmanVerdict:
     allowed_age_seconds: float | None  # since-last-expected-fire + grace; None when UNKNOWN
 
 
+def _seconds_since_scheduled_fire_python(*, hour: int, minute: int, now_local: datetime) -> float:
+    """The retained pure body of :func:`seconds_since_scheduled_fire` (the oracle)."""
+    fire = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if fire > now_local:
+        fire -= timedelta(days=1)
+    return (now_local - fire).total_seconds()
+
+
 def seconds_since_scheduled_fire(*, hour: int, minute: int, now_local: datetime) -> float:
     """Seconds from the most recent ``HH:MM`` local fire time to *now_local*.
 
     Pure calendar arithmetic: today's fire if already past (or exactly now),
     else yesterday's. Always ``>= 0`` and ``< 24 h``.
+
+    Routed through the default-OFF ``brutex_ops`` seam
+    (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
+    retained oracle :func:`_seconds_since_scheduled_fire_python`,
+    byte-identical. Only *now_local*'s intraday components cross the FFI
+    (the datetime object never does); an out-of-range ``hour``/``minute``
+    (Python's ``replace`` would raise) refuses into the degrade set, so the
+    oracle raises the genuine Python error.
     """
-    fire = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if fire > now_local:
-        fire -= timedelta(days=1)
-    return (now_local - fire).total_seconds()
+    from brutex.nightly import nightly_rust
+
+    if not nightly_rust.nightly_rust_enabled():
+        return _seconds_since_scheduled_fire_python(hour=hour, minute=minute, now_local=now_local)
+
+    def _crate_value(crate: ModuleType) -> float:
+        value: float = crate.nightly_seconds_since_fire(
+            hour,
+            minute,
+            now_local.hour,
+            now_local.minute,
+            now_local.second,
+            now_local.microsecond,
+        )
+        return value
+
+    return nightly_rust.route_kernel(
+        "seconds_since_scheduled_fire",
+        crate_call=_crate_value,
+        python_call=lambda: _seconds_since_scheduled_fire_python(
+            hour=hour, minute=minute, now_local=now_local
+        ),
+        validate=nightly_rust.is_float,
+    )
 
 
 def newest_nightly_run_age(

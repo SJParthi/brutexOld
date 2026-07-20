@@ -1,0 +1,399 @@
+# kernel-cache-soak.yml — the kernel-cache OFF↔ON A/B soak on the self-hosted M4-Pro.
+#
+# WHY (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001)
+# --------------------------------------------
+# The per-worker resident-kernel cache (DEC-SWEEP-WORKER-KERNEL-CACHE-001,
+# MIGRATION.md #1729) shipped DEFAULT-OFF: the default-ON flip is a separate
+# later one-constant DEC that may open ONLY with §8 M4-Pro soak evidence —
+# real per-worker + pool-wide RSS, wall ratio, byte identity, telemetry
+# invariants. This workflow runs `scripts/ci/kernel_cache_soak.py run` on the
+# operator's registered self-hosted Apple M4-Pro (CLAUDE.md §8) against the
+# operator's REAL lake, and uploads the machine-readable `soak-report.json`
+# the flip DEC quotes. The harness + acceptance bars are coordinator-blessed;
+# the FLIP itself is NOT pre-approved — it additionally needs the MEASURED
+# numbers from THIS runner plus operator sign-off (numbers from any other
+# machine are UNVERIFIED lab evidence — the DEC-SWEEP-CAP-BENCH-001 clause).
+#
+# TRIGGER + RUNNER PRECEDENT (soak-selfhosted.yml / bench-m4pro.yml)
+# ------------------------------------------------------------------
+# `workflow_dispatch` ONLY — a soak is an operator decision feeding one DEC
+# (no cron in v1), and NO `pull_request` trigger: an offline runner (the Mac
+# asleep) would otherwise hang a PR's mergeable state (DEC-M4PRO-PR-TRIGGER-001).
+# A dispatched run on an offline runner queues and is AUTO-CANCELLED by GitHub
+# after 24 h with NO step executing — the in-job issue watchdog below cannot
+# fire for a never-started run, and a runner lost mid-soak shares the same
+# blindness (the soak-selfhosted SOAK-R8-2/SOAK-R9-1 gap; the ADR-0018
+# out-of-job watchdog follow-up covers both — NOT built here). A dispatch is
+# operator-interactive, so a refused `plan` job is operator-watched.
+#
+# TIMING (the soak-selfhosted `plan` job pattern — SOAK-R6-1/OH6-1)
+# -----------------------------------------------------------------
+# GHA expressions have NO arithmetic, so the duration-derived job timeout is
+# computed in POSIX shell inside a cheap GitHub-hosted `plan` job and consumed
+# via `fromJSON()`. budget_minutes is fenced 1..1195: on self-hosted
+# runners the job's GITHUB_TOKEN dies at 24 h, so the derived timeout
+# (m + 45 + m/6) must stay under 1440 min or the failure watchdog could never
+# authenticate (SEC9-1; m <= 1195 — the soak-selfhosted 1200 ceiling is NOT
+# possible here because the fixed slack is 45 not 30 — two wheel
+# builds + two preloads; the default 600 derives 745).
+#
+# HONEST ENVELOPE (Golden Rule #10)
+# ---------------------------------
+# The soak grid is BOUNDED (each arm ≈ hours, never the full 2-4-day §8
+# sweep twice — structurally impossible under the token fence); RSS evidence
+# keeps FULL bar depth (RSS is bar-DEPTH-driven, not tuple-count-driven) but
+# is SCOPED to the MEASURED kernel-cache capacity — the report echoes
+# provenance.worker_kernel_capacity_effective (the grid-derived default is
+# explicitly PINNED as BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY in both arm envs,
+# so neither an ambient var nor a .env-file value the child's dotenv re-read
+# would inject can re-scope it — the DEFAULT sizing law is what gets
+# measured); widen the fib_anchors /
+# price_source_cells inputs to soak capacity > 1 — the flip DEC must weigh
+# whether the measured capacity covers the operator's grids. The full-grid
+# wall saving stays MODELED in the report. Per-PID RSS via ps
+# polling is a LOWER bound on the true peak (stamped in the report). The
+# lake location on the runner is UNVERIFIED (`BRUTEX_LAKE_ROOT` may not be
+# exported by the runner daemon) — the script preflights the lake SHAPE and
+# REFUSES to soak blind; pass the `lake_root` input explicitly on the first
+# dispatch if the preflight refuses. This workflow wires NO Telegram
+# secrets — the issue watchdog + the uploaded artifact are the guaranteed
+# signals (the OH7-1 posture).
+
+name: Kernel-cache soak (self-hosted M4-Pro)
+
+on:
+  workflow_dispatch:
+    inputs:
+      budget_minutes:
+        description: "Both-arms wall budget in minutes, 1..1195 (job timeout = budget + 45 + budget/6, kept under the 24-h self-hosted GITHUB_TOKEN validity — SEC9-1)"
+        required: false
+        default: "600"
+      lake_root:
+        description: "Lake root on the runner (blank → $BRUTEX_LAKE_ROOT → ~/.brutex/lake; the script preflights and REFUSES to soak blind)"
+        required: false
+        default: ""
+      max_tuples:
+        description: "Optional sweep-all --max-tuples refusal guard (digits; blank = unset). Bound the grid via k/conditions/sl/tp — sweep-all refuses, it never truncates"
+        required: false
+        default: ""
+      sample_interval_s:
+        description: "RSS ps-poll cadence in seconds, 1..300"
+        required: false
+        default: "5"
+      fib_anchors:
+        description: "Optional sweep-all --fib-anchors CSV (blank = prev_day). Widens the kernel-cache capacity axis so the soak can measure capacity > 1 — the script/sweep-all refuse an unknown value loudly"
+        required: false
+        default: ""
+      price_source_cells:
+        description: "Optional sweep-all --price-source-cells CSV (blank = hlc3:close). The second capacity-widening axis"
+        required: false
+        default: ""
+      arm_order:
+        description: "Arm execution order: off-first (default) or on-first. The SECOND arm inherits a warm OS page-cache/import state — dispatch on-first for the runbook §5.4 wall-bias check (fenced to the two literals in the plan job)"
+        required: false
+        default: "off-first"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: kernel-cache-soak-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Cargo network resilience (CI-only flake hardening) — see ci.yml.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  plan:
+    name: Derive soak timing (shell arithmetic)
+    # GHA expressions cannot add or multiply (see header) — the derivation
+    # runs here in POSIX shell. Cheap GitHub-hosted job: it must never queue
+    # behind an asleep self-hosted Mac.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      timeout_minutes: ${{ steps.derive.outputs.timeout_minutes }}
+      budget_minutes: ${{ steps.derive.outputs.budget_minutes }}
+      sample_interval_s: ${{ steps.derive.outputs.sample_interval_s }}
+      max_tuples: ${{ steps.derive.outputs.max_tuples }}
+      arm_order: ${{ steps.derive.outputs.arm_order }}
+    steps:
+      - name: Validate inputs and derive timeout
+        id: derive
+        # Env-indirection + strict digits fences (the soak-selfhosted COMMON
+        # pattern): every input is DATA not code; anything non-numeric is
+        # REFUSED, leading zeros are base-10-coerced (never octal), a literal
+        # zero budget is REFUSED (a zero-minute soak would fake-green).
+        env:
+          BUDGET_MINUTES: ${{ github.event.inputs.budget_minutes || '600' }}
+          SAMPLE_INTERVAL_S: ${{ github.event.inputs.sample_interval_s || '5' }}
+          MAX_TUPLES: ${{ github.event.inputs.max_tuples || '' }}
+          ARM_ORDER: ${{ github.event.inputs.arm_order || 'off-first' }}
+        run: |
+          m=${BUDGET_MINUTES//_/}
+          case "$m" in
+            ''|*[!0-9]*)
+              echo "::error::budget_minutes='$BUDGET_MINUTES' is not a non-negative integer." >&2
+              exit 1
+              ;;
+          esac
+          # Magnitude fence BEFORE arithmetic (SEC7-2): refuse on LENGTH first
+          # so a near-2^64 value can never wrap $((m + 45)) / $((m * 60)).
+          if [ "${#m}" -gt 5 ]; then
+            echo "::error::budget_minutes='$BUDGET_MINUTES' is absurdly large (max 1195)." >&2
+            exit 1
+          fi
+          # Force DECIMAL (SOAK-R7-3): '0600' would otherwise parse octal.
+          m=$((10#$m))
+          if [ "$m" -lt 1 ]; then
+            echo "::error::budget_minutes must be >= 1 — a zero-minute dispatch would fake-green a soak that soaked nothing." >&2
+            exit 1
+          fi
+          # SEC9-1: derived timeout (m + 45 + m/6) must stay under 1440 min
+          # (the 24-h self-hosted GITHUB_TOKEN validity), else the failure
+          # watchdog below would hold a dead token and file NOTHING.
+          # m + 45 + m/6 < 1440 → m <= 1195.
+          if [ "$m" -gt 1195 ]; then
+            echo "::error::budget_minutes=$m exceeds the ceiling (1195): the derived timeout must stay under the 24-h self-hosted GITHUB_TOKEN validity (SEC9-1)." >&2
+            exit 1
+          fi
+          s=${SAMPLE_INTERVAL_S//_/}
+          case "$s" in
+            ''|*[!0-9]*)
+              echo "::error::sample_interval_s='$SAMPLE_INTERVAL_S' is not a non-negative integer." >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#s}" -gt 3 ]; then
+            echo "::error::sample_interval_s='$SAMPLE_INTERVAL_S' is absurdly large (max 300)." >&2
+            exit 1
+          fi
+          s=$((10#$s))
+          if [ "$s" -lt 1 ] || [ "$s" -gt 300 ]; then
+            echo "::error::sample_interval_s=$s must be within 1..300." >&2
+            exit 1
+          fi
+          t=${MAX_TUPLES//_/}
+          if [ -n "$t" ]; then
+            case "$t" in
+              *[!0-9]*)
+                echo "::error::max_tuples='$MAX_TUPLES' is not an integer (or blank)." >&2
+                exit 1
+                ;;
+            esac
+            if [ "${#t}" -gt 9 ]; then
+              echo "::error::max_tuples='$MAX_TUPLES' is absurdly large." >&2
+              exit 1
+            fi
+            t=$((10#$t))
+          fi
+          # arm_order: a strict two-literal fence (fix-round-4, refuter-B
+          # NIT-1 — the runbook §5.4 bias check needed the fallback path;
+          # DATA-not-code like every other input, anything else REFUSED).
+          case "$ARM_ORDER" in
+            off-first|on-first) ;;
+            *)
+              echo "::error::arm_order='$ARM_ORDER' must be 'off-first' or 'on-first'." >&2
+              exit 1
+              ;;
+          esac
+          # Fixed slack 45 (two wheel builds + two arm preloads) + m/6 for the
+          # duration-LINEAR tail (the compare phase hashes the grown result
+          # trees — SOAK-R7-4's linear-teardown law).
+          timeout_minutes=$((m + 45 + m / 6))
+          {
+            echo "timeout_minutes=$timeout_minutes"
+            echo "budget_minutes=$m"
+            echo "sample_interval_s=$s"
+            echo "max_tuples=$t"
+            echo "arm_order=$ARM_ORDER"
+          } >> "$GITHUB_OUTPUT"
+          echo "Soak plan: budget_minutes=$m timeout_minutes=$timeout_minutes sample_interval_s=$s max_tuples='${t:-}' arm_order=$ARM_ORDER"
+
+  soak:
+    name: Kernel-cache OFF↔ON A/B soak
+    needs: plan
+    # Gated to the registered self-hosted M4-Pro (verify-m4pro/bench-m4pro
+    # precedent). If no runner with this label set is online the dispatched
+    # job queues (blocks no PR) and GitHub auto-cancels it after 24 h with no
+    # step running — see the header's never-started-run blindness note.
+    runs-on: [self-hosted, macos, m4pro]
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
+
+    env:
+      PYTHONHASHSEED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # SEC13-1: never persist the job-scoped issues:write GITHUB_TOKEN
+          # into .git/config — later steps run third-party code (pip build
+          # backends + cargo build.rs/proc-macros) on the persistent
+          # self-hosted M4-Pro for hours. Nothing after checkout uses
+          # authenticated git (the watchdog authenticates via `github.token`
+          # inside actions/github-script). Same convention as
+          # soak-selfhosted.yml / bench-m4pro.yml.
+          persist-credentials: false
+
+      - name: Show runner identity (real hardware proof)
+        run: |
+          echo "Runner: $(uname -a)"
+          sw_vers || true
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install deps
+        run: pip install -e ".[dev,data]"
+
+      - name: Verify runner Rust toolchain (for the fno_math + trading_core wheels)
+        # GitHub-owned-actions-ONLY on the self-hosted M4-Pro (SEC12-1): the
+        # wheels build with the runner's OWN local rustup/cargo exactly like
+        # verify-m4pro.yml / bench-m4pro.yml / soak-selfhosted.yml — never a
+        # mutable third-party toolchain action on this persistent machine.
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "cargo not found on the self-hosted runner PATH — install rustup" >&2
+            echo "(https://rustup.rs) in the runner daemon's environment: the same" >&2
+            echo "local-toolchain contract the sibling M4-Pro workflows rely on" >&2
+            exit 1
+          fi
+          cargo --version
+          rustc --version
+
+      - name: Install fno_math Rust extension
+        # Belt-and-suspenders crates.io flake guard (reused from soak-selfhosted.yml).
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Preflight — refuse when the runner disk cannot hold two result trees (SOAK-R9-3)
+        # Two bounded-grid sweep result trees + logs under $RUNNER_TEMP. The
+        # script re-checks with the same digits-fenced probe; this early gate
+        # refuses before the wheel-build minutes are spent. Fixed 30 GiB
+        # requirement (bounded-grid trees are store-Parquet-scale, not the
+        # soak-audit-JSONL scale) — digits-fenced per SOAK-R10-1.
+        run: |
+          required_kib=31457280
+          free_kib=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
+          case "$free_kib" in
+            ''|*[!0-9]*)
+              echo "::error::Disk preflight could not read free space under \$RUNNER_TEMP (df/awk yielded '$free_kib') — refusing to launch a multi-hour soak blind (SOAK-R10-1)." >&2
+              exit 1
+              ;;
+          esac
+          echo "Disk preflight: need ~${required_kib} KiB under \$RUNNER_TEMP, free ${free_kib} KiB"
+          if [ "$free_kib" -lt "$required_kib" ]; then
+            echo "::error::Insufficient disk for this soak: ~${required_kib} KiB required under \$RUNNER_TEMP but only ${free_kib} KiB free." >&2
+            exit 1
+          fi
+
+      - name: Run kernel-cache soak (OFF arm → ON arm → compare → report)
+        # Belt-and-suspenders: the SAME derived bound as a per-step timeout,
+        # so even a silently no-op'd job-level expression cannot let the run
+        # outrun budget + 45 + budget/6 (the soak-selfhosted G2 pattern).
+        # Inputs reach the script via env (DATA, never interpolated into the
+        # script text) — lake_root may be blank → the script resolves
+        # $BRUTEX_LAKE_ROOT → ~/.brutex/lake and PREFLIGHTS loudly.
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
+        env:
+          BUDGET_MINUTES: ${{ needs.plan.outputs.budget_minutes }}
+          SAMPLE_INTERVAL_S: ${{ needs.plan.outputs.sample_interval_s }}
+          MAX_TUPLES: ${{ needs.plan.outputs.max_tuples }}
+          ARM_ORDER: ${{ needs.plan.outputs.arm_order }}
+          LAKE_ROOT_INPUT: ${{ github.event.inputs.lake_root }}
+          FIB_ANCHORS_INPUT: ${{ github.event.inputs.fib_anchors }}
+          PRICE_SOURCE_CELLS_INPUT: ${{ github.event.inputs.price_source_cells }}
+        run: |
+          set -u
+          out="$RUNNER_TEMP/kernel-cache-soak"
+          # Fresh-out law (R2 MAJOR-3): the script REFUSES a non-empty --out.
+          # RUNNER_TEMP is normally cleaned per job; clear any stale leftover
+          # explicitly so a runner that skipped cleanup cannot resume-skid.
+          rm -rf "$out"
+          # arm_order rides the plan job's two-literal fence (fix-round-4 —
+          # the runbook §5.4 bias check is now dispatchable, not fallback-only).
+          args=(run --out "$out" --budget-minutes "$BUDGET_MINUTES" --sample-interval-s "$SAMPLE_INTERVAL_S" --arm-order "$ARM_ORDER")
+          if [ -n "$LAKE_ROOT_INPUT" ]; then
+            args+=(--lake-root "$LAKE_ROOT_INPUT")
+          fi
+          if [ -n "$MAX_TUPLES" ]; then
+            args+=(--max-tuples "$MAX_TUPLES")
+          fi
+          if [ -n "$FIB_ANCHORS_INPUT" ]; then
+            args+=(--fib-anchors "$FIB_ANCHORS_INPUT")
+          fi
+          if [ -n "$PRICE_SOURCE_CELLS_INPUT" ]; then
+            args+=(--price-source-cells "$PRICE_SOURCE_CELLS_INPUT")
+          fi
+          python scripts/ci/kernel_cache_soak.py "${args[@]}"
+
+      - name: Upload soak report (bounded)
+        # BOUNDED artifact only (SOAK-R7-4): the report dir holds
+        # soak-report.json + summary.md + 64 KiB log tails — NEVER the raw
+        # result trees. 90-day retention (the bench-m4pro abs-bench
+        # precedent): the flip DEC copies the numbers into the runbook +
+        # ledger — artifacts expire, ledgers do not.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: kernel-cache-soak-report
+          path: ${{ runner.temp }}/kernel-cache-soak/report/**
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Open issue on failure
+        # A soak failure must never be eyeball-only (CLAUDE.md §11 AUTOMATED).
+        # Fires on BOTH a failed and a CANCELLED (timeout-killed) run — the
+        # soak-selfhosted AL-SOAK-1 stance — and dedups by title. Covers a
+        # STARTED run whose runner stayed alive; a never-started or
+        # runner-lost run files nothing (the ADR-0018 gap, header note).
+        if: failure() || cancelled()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const title = `kernel-cache-soak: failure on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,soak',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `Kernel-cache OFF↔ON soak failed on ${context.sha} (arm crash, identity diff, preflight refusal or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) and the kernel-cache-soak-report artifact (written even on acceptance failure). This workflow wires no Telegram secrets — this issue plus the artifact are the guaranteed signals; a never-started run (24 h queue auto-cancel) or a runner lost mid-soak files nothing (the ADR-0018 out-of-job watchdog gap).`,
+              labels: ['bug', 'soak', 'critical'],
+            });

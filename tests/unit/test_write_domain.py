@@ -19,9 +19,11 @@ from brutex.data.write_domain import (
     PRIMARY_DOMAIN_NAME,
     WriteDomain,
     WriteDomainError,
+    assert_profile_free_dest,
     assert_write_domain,
     feeds_write_domain,
     primary_write_domain,
+    resolve_profile_free_root,
 )
 
 #: The second-vendor feed subtree token used across the battery — a
@@ -354,3 +356,106 @@ class TestFeedsComponentSwapRail:
         domain = primary_write_domain(root)
         with pytest.raises(WriteDomainError, match="cannot probe the"):
             assert_write_domain(root / "bars/x.parquet", domain)
+
+
+class TestProfileFreeMasqueradePin:
+    """The masquerade pin (DEC-WRITE-DOMAIN-CALLER-BINDING-001, NG4E-1's
+    domain-less arm): a PROFILE-FREE writer refuses, typed, a dest whose
+    lake-relative path enters ``feeds/`` — while every legitimate
+    maintenance-lane dest today stays byte-identical (pass arms below).
+    """
+
+    def test_feeds_dest_refuses_typed_naming_the_masquerade_class(self, tmp_path: Path) -> None:
+        root = _lake(tmp_path)
+        resolved = resolve_profile_free_root(root)
+        with pytest.raises(WriteDomainError, match="MASQUERADE"):
+            assert_profile_free_dest(root / _FEED / "bars/x.parquet", resolved)
+
+    def test_unregistered_feeds_dest_refuses_too(self, tmp_path: Path) -> None:
+        """The pin is a whole-``feeds/``-prefix judgment — registration-free
+        by construction (there is no registry on the profile-free side)."""
+        root = _lake(tmp_path)
+        resolved = resolve_profile_free_root(root)
+        with pytest.raises(WriteDomainError, match="MASQUERADE"):
+            assert_profile_free_dest(root / "feeds/never-registered/bars/x.parquet", resolved)
+
+    def test_bars_dest_passes(self, tmp_path: Path) -> None:
+        root = _lake(tmp_path)
+        resolved = resolve_profile_free_root(root)
+        assert_profile_free_dest(root / "bars/NSE/INDEX/NIFTY/1minute/2024/01.parquet", resolved)
+
+    def test_options_dest_passes(self, tmp_path: Path) -> None:
+        root = _lake(tmp_path)
+        resolved = resolve_profile_free_root(root)
+        assert_profile_free_dest(root / "options/S1/2024-01.parquet", resolved)
+
+    def test_out_of_root_dest_is_not_the_masquerade_class(self, tmp_path: Path) -> None:
+        """Deliberately NARROW: a dest outside the writer's own root passes
+        this pin unjudged (legacy behavior preserved — out-of-root
+        containment belongs to the per-writer rails, never this pin)."""
+        root = _lake(tmp_path)
+        resolved = resolve_profile_free_root(root)
+        assert_profile_free_dest(tmp_path / "elsewhere/bars/x.parquet", resolved)
+
+    def test_mixed_case_feeds_is_not_the_feeds_subtree(self, tmp_path: Path) -> None:
+        """Case-sensitivity parity with the domain check (the module
+        docstring's pinned limit): ``FeedS/`` is NOT the feeds subtree."""
+        root = _lake(tmp_path)
+        (root / "FeedS/vendor2").mkdir(parents=True)
+        resolved = resolve_profile_free_root(root)
+        assert_profile_free_dest(root / "FeedS/vendor2/x.parquet", resolved)
+
+    def test_unresolvable_dest_is_the_same_typed_refusal(self, tmp_path: Path) -> None:
+        root = _lake(tmp_path)
+        loop = root / "loop"
+        loop.symlink_to(loop)
+        resolved = resolve_profile_free_root(root)
+        with pytest.raises(WriteDomainError, match="cannot resolve write dest"):
+            assert_profile_free_dest(loop / "x.parquet", resolved)
+
+    def test_symlinked_bars_dest_resolving_into_feeds_refuses(self, tmp_path: Path) -> None:
+        """The masquerade the resolved judgment exists for: ``bars/`` swapped
+        to a symlink INTO a feed subtree — a bars-addressed profile-free
+        write would physically land in the feed vendor's tree."""
+        root = tmp_path / "lake"
+        (root / _FEED / "bars").mkdir(parents=True)
+        (root / "bars").symlink_to(root / _FEED / "bars", target_is_directory=True)
+        resolved = resolve_profile_free_root(root)
+        with pytest.raises(WriteDomainError, match="MASQUERADE"):
+            assert_profile_free_dest(root / "bars/NSE/x.parquet", resolved)
+
+    def test_swap_rail_composes_with_the_pin(self, tmp_path: Path) -> None:
+        """The round-6 in-lake swap rail runs on the profile-free path too: a
+        SWAPPED ``<root>/feeds`` component resolves the ``feeds`` token away
+        (the prefix judgment alone would fail open) — the rail refuses,
+        naming the symlinked component."""
+        root = tmp_path / "lake"
+        for sub in ("bars/NSE", "other/vendor2/bars"):
+            (root / sub).mkdir(parents=True)
+        (root / FEEDS_COMPONENT).symlink_to(root / "other", target_is_directory=True)
+        resolved = resolve_profile_free_root(root)
+        with pytest.raises(WriteDomainError, match="component under the lake root is a SYMLINK"):
+            assert_profile_free_dest(root / _FEED / "bars/x.parquet", resolved)
+
+    def test_bars_dest_away_from_swap_target_still_passes(self, tmp_path: Path) -> None:
+        root = tmp_path / "lake"
+        for sub in ("bars/NSE", "other/vendor2/bars"):
+            (root / sub).mkdir(parents=True)
+        (root / FEEDS_COMPONENT).symlink_to(root / "other", target_is_directory=True)
+        resolved = resolve_profile_free_root(root)
+        assert_profile_free_dest(root / "bars/NSE/x.parquet", resolved)
+
+    def test_mount_shape_root_via_symlink_passes(self, tmp_path: Path) -> None:
+        """Both sides resolve consistently — a lake root reached via a
+        symlink (the legitimate mount shape) keeps passing."""
+        real_root = _lake(tmp_path)
+        mount = tmp_path / "mnt-lake"
+        mount.symlink_to(real_root, target_is_directory=True)
+        resolved = resolve_profile_free_root(mount)
+        assert_profile_free_dest(mount / "bars/NSE/INDEX/NIFTY/1minute/2024/01.parquet", resolved)
+
+    def test_resolve_profile_free_root_unresolvable_is_typed(self, tmp_path: Path) -> None:
+        loop = tmp_path / "loop"
+        loop.symlink_to(loop)
+        with pytest.raises(WriteDomainError, match="cannot resolve lake root"):
+            resolve_profile_free_root(loop / "lake")

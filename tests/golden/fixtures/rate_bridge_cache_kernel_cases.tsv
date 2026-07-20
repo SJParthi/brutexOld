@@ -1,0 +1,28 @@
+# rate_bridge_cache decision golden (DEC-RUST-PULL-STATE-001 Wave 3H)
+# serve	id	age_kind	age_bits	ttl_bits	inflight	arm
+# token	id	prior	token	revalidates
+serve	cold_owner	0	-	0000000000000040	0	2
+serve	cold_follower	0	-	0000000000000040	1	1
+serve	fresh_hit	1	000000000000f03f	0000000000000040	0	0
+serve	fresh_hit_inflight_ttl_wins	1	000000000000f03f	0000000000000040	1	0
+serve	boundary_exact_owner	1	0000000000000040	0000000000000040	0	2
+serve	boundary_exact_follower	1	0000000000000040	0000000000000040	1	1
+serve	just_under_boundary	1	0000000000fcff3f	0000000000000040	0	0
+serve	stale_owner	1	0000000000003840	0000000000000040	0	2
+serve	stale_follower	1	0000000000003840	0000000000000040	1	1
+serve	ttl_zero_owner	1	000000000000e03f	0000000000000000	0	2
+serve	ttl_zero_follower	1	000000000000e03f	0000000000000000	1	1
+serve	ttl_negative_owner	1	000000000000e03f	000000000000f0bf	0	2
+serve	ttl_nan_owner	1	000000000000e03f	000000000000f87f	0	2
+serve	ttl_inf_hit	1	0000000000003840	000000000000f07f	0	0
+serve	skew_future_probe_clamps_hit	1	0000000000000000	0000000000000040	0	0
+serve	skew_future_ttl_zero_owner	1	0000000000000000	0000000000000000	0	2
+token	first_probe_reads	\N	s:t1	0
+token	unchanged_revalidates	s:t1	s:t1	1
+token	changed_rereads	s:t1	s:t2	0
+token	probe_error_rereads	s:t1	\N	0
+token	both_none_rereads	\N	\N	0
+token	equal_empty_revalidates	s:	s:	1
+token	empty_vs_token_rereads	s:	s:t1	0
+token	token_vs_empty_rereads	s:t1	s:	0
+token	unicode_equal_revalidates	s:μ:1	s:μ:1	1

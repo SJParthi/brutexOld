@@ -77,6 +77,18 @@ paths = [
   '''^brutex/dashboard/static/''',
 ]
 
+[[rules.allowlists]]
+description = """Audited FP (2026-07-19, PR #1707): the brutex/data/lake_rust_waved.py
+call-site kwargs fragment `canonical_keys=canonical_keys, include_bars=include_bars`
+trips generic-api-key purely on the `keys` keyword + identifier entropy — plain
+Python identifiers, never a value (DEC-AWS-ONLY-CREDS-001: every credential lives
+ONLY in AWS SSM). Match-pinned (regexTarget), deliberately NOT a path allowlist —
+high-signal rules and every other generic-api-key shape stay live on the file."""
+regexTarget = "match"
+regexes = [
+  '''canonical_keys, include_bars=include_bars''',
+]
+
 [[rules]]
 id = "curl-auth-header"
 [[rules.allowlists]]

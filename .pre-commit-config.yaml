@@ -95,8 +95,20 @@ repos:
           - polars>=1.0,<2.0
           # blake3 ships py.typed + a .pyi; without it the hook env degrades
           # blake3.blake3(...).hexdigest() to Any → phantom no-any-return on
-          # files like sweep_supervisor.py (the same class as polars above).
+          # files like sweep_supervisor.py (the same class as polars above;
+          # landed independently on main AND via the crossverify lane).
           - blake3>=1.0
+          # starlette: the same wheel-less-env phantom class — without it the
+          # hook env degrades TrustedHostMiddleware to Any (misc subclass
+          # error on trusted_host.py) at the pre-push stage of a
+          # merge-forward, while the BINDING venv-faithful `mypy --strict
+          # brutex` is clean (2026-07-19 incident, the crossverify lane).
+          # starlette ships py.typed; without it the hook env degrades
+          # TrustedHostMiddleware to Any → a phantom [misc]
+          # cannot-subclass-Any on dashboard/trusted_host.py (the same
+          # wheel-less-env class as polars/blake3 above; the venv-faithful
+          # `mypy --strict brutex` is clean on the file).
+          - starlette>=0.40
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust

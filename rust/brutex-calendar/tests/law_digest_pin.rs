@@ -32,7 +32,12 @@ include!("../../source_digest_core.rs");
 const PINNED_LAW_DIGESTS: &[(&str, &str)] = &[
     (
         "brutex/calendars/settle_evidence.py",
-        "37e5d11e1b5c33eff1556f9e4dce57d81518ab76a22a0d66213d8322d57d5751",
+        // Re-pinned 2026-07-20 after the train-a pull-state fold (6a41f28 —
+        // pull-state consumers Rust-only) reworded the `_SETTLE_SHAPE` doc
+        // comments in this file: COMMENT-ONLY delta (11+/10-, `#:` lines),
+        // the converted validation law is byte-untouched, and the
+        // regenerated corpus was BYTE-IDENTICAL (155 settle cases unchanged).
+        "61b37db08e9f8fa999b937e851924c3f14d3b94c32b3007b0d0cedd84d743172",
     ),
     (
         "brutex/calendars/observed_sessions.py",
