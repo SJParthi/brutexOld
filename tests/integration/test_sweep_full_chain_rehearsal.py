@@ -123,7 +123,7 @@ _CI_K_SAMPLES = 8
 #: no cascade/stage3/DSR/metrics math; the run-identity engine goldens are
 #: byte-unchanged vs main). Re-measured under 0.3.2 (same 4-vCPU sandbox, INFO
 #: log guard active): ``"deadbeef"*5`` → 3.46 s and ``"abad1dea"*5`` → 2.80 s
-#: both now draw a DSR-KILLED pool, while THIS constant (``"feedface"*5``) →
+#: both now draw a DSR-KILLED pool, while the then-pin (``"feedface"*5``) →
 #: 18.56 s draws ONE candidate through the DSR gate and exercises the ENTIRE
 #: statistical cascade — walk-forward, CPCV, PBO, SPA/reality-check,
 #: Romano-Wolf, lockbox AND the 1000-permutation Monte-Carlo filter (which
@@ -142,8 +142,8 @@ _CI_K_SAMPLES = 8
 #: worst-case fills the OLD fixture's DSR pool was unpassable for EVERY
 #: measured sha (28 candidates, all deflated_sharpe=0 — leaderboard Sharpe
 #: variance 2.5-39.9 vs candidate Sharpes <= 3.3), so the FIXTURE was
-#: re-derived (see ``_bars`` + ``_sweep_all``) rather than the sha: this SAME
-#: constant (``"feedface"*5``) now draws TWO candidates through the DSR gate
+#: re-derived (see ``_bars`` + ``_sweep_all``) rather than the sha: the SAME
+#: then-pin (``"feedface"*5``) then drew TWO candidates through the DSR gate
 #: over the re-derived 9-candidate pool (variance 0.788 measured) and
 #: exercises the ENTIRE statistical cascade — walk-forward, CPCV, PBO,
 #: SPA/reality-check, Romano-Wolf, the LOCKBOX (which filters one — a real
@@ -154,7 +154,36 @@ _CI_K_SAMPLES = 8
 #: cafebabe/deadc0de/baddcafe/feedc0de/d15ea5e0/ba5eba11/5ca1ab1e/ca11ab1e/
 #: b01dface/f005ba11/0ddba11d/deadfa11/fee1dead x5 + 10 repeated-hex-word
 #: constants (transcript in the club-O PR body).
-_PINNED_CODE_COMMIT_SHA: Final[str] = "feedfacefeedfacefeedfacefeedfacefeedface"
+#:
+#: RE-MEASURED at the 2026-07-20 vocab-train fold (``integration/train-vocab``
+#: — DEC-VOCAB-66-RESHAPE-IMPL-001 #2200 → DEC-SUPERTREND-CONDITIONS-001 #2203:
+#: the vocabulary grew 60 → 74 and the shared ``trading_core`` crate re-keyed
+#: 0.3.2 → 0.6.0 through ``cli._indicator_version()`` — the SAME
+#: Golden-Rule-#4 identity-re-key class as the 0.3.2 re-pin above, ONE virgin
+#: re-key window for the whole train, plus regenerated goldens): under the
+#: 74-bit identity the then-pin (``"feedface"*5``) drew a pool the DSR gate
+#: passed WHOLE — 9 of 9, zero ``deflated_sharpe`` rejections — so under the
+#: D-8 absent-key law (``CASCADE_DOOR_BY_STAGE``; doors emitted only when a
+#: kill was observed) the manifest honestly OMITTED the ``dsr`` door and
+#: ``test_r28``'s ``doors["dsr"] > 0`` failed deterministically (every
+#: PYTHONHASHSEED, single-test AND full-file shapes; the funnel assert is the
+#: teeth and was NOT weakened — the #1798 law mandates re-measuring the pin).
+#: Re-measured per the #1798 matrix (same 4-vCPU sandbox, INFO log guard
+#: active, one full chain pass per candidate): feedface → 150.7 s,
+#: DSR-passes-9-of-9 with the MC leg killing one (the red, reproduced);
+#: cafef00d/5eedc0de/c0ffee42/abad1dea/beefcafe/d00dfeed/0badf00d/deadbeef/
+#: cafebabe/cafed00d/baddcafe/feedc0de x5 + "0"*40 + "1"*40 → ALL DSR-KILLED
+#: pools (survivors 0, hard_gates 6-8 — the statistical legs never run, the
+#: #1798 rot shape; at the 74-bit identity even the POOL SIZE is
+#: sha-sensitive: the unique stage-3 refined-cell count moves with the CMA
+#: seed), while THIS constant (``"deadc0de"*5``) draws the full 9-candidate
+#: pool (``hard_gates == 9``) with a genuinely JUDGED DSR gate — 7 killed
+#: (``doors["dsr"] == 7``) + 2 passed — and every statistical leg executes on
+#: both survivors: walk-forward, CPCV, PBO, SPA/reality-check, Romano-Wolf,
+#: the LOCKBOX and the 1000-permutation Monte-Carlo (which keeps both).
+#: Measured x3: 35.2 / 34.7 / 38.7 s per uninstrumented pass — ~8x margin to
+#: the 300 s strict budget; doors + stage_survivors byte-identical every run.
+_PINNED_CODE_COMMIT_SHA: Final[str] = "deadc0dedeadc0dedeadc0dedeadc0dedeadc0de"
 
 
 def _trading_days(start: date, n: int) -> list[date]:
