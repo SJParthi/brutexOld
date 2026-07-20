@@ -72,6 +72,12 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "optcost_strike_offset_from_atm",
         "optcost_strike_step",
         "popcount_bytes",
+        # LANE W1 (DEC-RANK-PARETO-PERSIST-001 family) — the multi-key
+        # selection kernels (a deliberate, reviewed surface addition; fenced
+        # additive entries).
+        "rank_axis_topm",
+        "rank_dd_band_indices",
+        "rank_pareto_frontier",
         "stats_cpcv_pass_count",
         # DEC-RANK-CVAR-TAIL-GATE-001 — the integer-exact CVaR worst-k tail
         # fold (a deliberate, reviewed surface addition).

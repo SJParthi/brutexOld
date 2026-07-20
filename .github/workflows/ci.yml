@@ -570,6 +570,22 @@ jobs:
           else
             echo "(brutex.engine.rust_stage1a test file not present yet — gate inactive)"
           fi
+          # DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001
+          # (LANE W1): the flag-gated Rust selection seam (burn-in /
+          # autorevert / refuse-poison leaf) — 100% line+branch STANDALONE
+          # under its dedicated unit file (the rust_stage1a stanza pattern;
+          # the module also rides the whole-engine glob gate above). The
+          # sibling oracles gate elsewhere: brutex.ranking.multi_select rides
+          # the ranking PACKAGE gate (19i-adjacent below — its stem suite
+          # tests/unit/test_ranking_multi_select.py is inside the
+          # test_ranking*.py glob), and brutex/engine/pool_union.py rides the
+          # whole-engine glob + the coverage_gate_discovery stem match (the
+          # DEC-LAKE-RUST-MERGE-DEDUP-001 no-redundant-stanza precedent).
+          if compgen -G "tests/unit/test_engine_rust_rank_select.py" > /dev/null; then
+            pytest --cov=brutex.engine.rust_rank_select --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_rust_rank_select.py
+          else
+            echo "(brutex.engine.rust_rank_select test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1671): the
           # rank-budget worker-divisor wiring — a dedicated per-module pin at
           # 100% line+branch over its two suites (the module also rides the

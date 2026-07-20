@@ -119,4 +119,9 @@ examine_globs = [
     "src/mask_word.rs",
     "src/stats/*.rs",
     "src/optcost/*.rs",
+    # LANE W1 (DEC-RANK-PARETO-PERSIST-001 family): the multi-key selection
+    # kernels join the mutation scope (18 inline #[cfg(test)] tests incl. the
+    # independent naive-oracle differential carry the kill load; the Python
+    # hypothesis differential vs the oracle is the wheel-level net).
+    "src/rank_select.rs",
 ]

@@ -117,7 +117,20 @@ _EXPECTED_RUN_ID = "2aa8c684565a5e250a86d59b8161e8bfed3e1e94fbc0f8a91fce128c1ce0
 # sits wholly inside the 24-month trailing window AND decay bucket 0 →
 # trailing_net_pnl_paisa == decay_weighted_net_paisa == net (+3_890) and
 # trailing sharpe/pf equal the full-history columns.
-_EXPECTED_STORE_HASH = "1022bebf4e372f2ca8291a90bdab9f32e189822778447382eb01aa1dce737728"
+# → RE-LOCKED AGAIN for DEC-RANK-PARETO-PERSIST-001 /
+# DEC-RANK-QUOTA-PERSIST-1000-001 (RE-DERIVED at the 2026-07-20 train-b
+# wave-2b fold, MIGRATION.md #2059/#2060): the persisted schema ALSO gained
+# the two appended-LAST nullable selection-provenance columns
+# (`pareto_member` Boolean + `selection_basis` Utf8 — at the fold strictly
+# AFTER the W2 recency family) and the persist union stamps them — the byte
+# stream moved by design while `_EXPECTED_RUN_ID` above is byte-identical
+# (run identity untouched; persistence-side only). The two parent re-locks
+# over the SAME pre-fold base `8670c7f6…74a0` (W2's `1022bebf…7728`; the
+# lane's `e98221de…68d5`) each covered only its OWN column set, so neither
+# literal can reproduce on the UNION tree — this literal was regenerated on
+# the FOLDED tree (the house law: goldens are re-derived, never merged
+# textually), determinism pinned below.
+_EXPECTED_STORE_HASH = "b0a3bed9369163cc69129cd3e9722e70ebb7a722c32d7e566e18475034851bae"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:

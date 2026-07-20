@@ -112,6 +112,7 @@ from brutex.engine.period_stats import (
 )
 from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreGateConflictError
+from brutex.engine.rust_rank_select import union_selection
 from brutex.engine.rust_trade_sim import PriceColumns, ResidentTradeSim
 from brutex.engine.session_lens import ist_trade_date
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
@@ -163,6 +164,7 @@ from brutex.ranking import (
     cvar_rejects,
     rank_combos,
 )
+from brutex.ranking.multi_select import SelectionInputs
 from brutex.ranking.temporal import (
     TemporalGateInput,
     TemporalGateStats,
@@ -768,8 +770,12 @@ class SweepRunSummary:
         ``cfg.overfit`` is set, the Stage-3 multiple-testing overfit gate too (the
         leaderboard size before ``top_k`` truncation).
     persisted
-        Ranked finalists appended to the store (``ranked`` truncated to
-        ``cfg.top_k``).
+        Finalists appended to the store — the LANE-W1 persist UNION
+        (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001): the
+        composite top-``cfg.top_k`` prefix PLUS the union-only extras the
+        per-axis quotas + the ε-Pareto frontier admit (so
+        ``persisted >= min(ranked, top_k)``; at ``top_k=None`` the union adds
+        tags, never rows — ``persisted == ranked``).
     store_content_hash
         The :class:`~brutex.engine.results_store.FlushResult` content hash — the
         sweep's reproducible content address.
@@ -825,6 +831,13 @@ class SweepRunSummary:
     temporal_abstained: bool = False
     #: How many calendar years the tuple's window JUDGED (the P1 denominator).
     temporal_judged_years: int = 0
+    #: LANE-W1 (DEC-RANK-QUOTA-PERSIST-1000-001): gate-passing RANKED combos
+    #: NOT selected by ANY persist basis (``ranked - persisted``) — the
+    #: "gated-pass-but-truncated" honesty counter (0 at ``top_k=None``).
+    gated_pass_truncated: int = 0
+    #: LANE-W1 (DEC-RANK-PARETO-PERSIST-001): ε-Pareto frontier members
+    #: dropped by the ``PARETO_FRONTIER_CAP`` bound (every drop also warned).
+    frontier_dropped: int = 0
 
 
 def canonical_trade_params(
@@ -1105,6 +1118,8 @@ def ranked_combo_to_result_row(
     temporal: TemporalRobustnessConfig | None = None,
     temporal_judged_years: Sequence[int] | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
+    selection_basis: str | None = None,
+    pareto_member: bool | None = None,
 ) -> ResultRow:
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
@@ -1203,6 +1218,13 @@ def ranked_combo_to_result_row(
         The equity base anchoring the per-period dd walk (the
         ``build_equity_curve`` law; the dd values are invariant to the
         constant offset — threaded for basis-law fidelity).
+    selection_basis, pareto_member
+        The LANE-W1 selection-provenance stamps (DEC-RANK-PARETO-PERSIST-001 /
+        DEC-RANK-QUOTA-PERSIST-1000-001) computed ONCE per ranked pool by the
+        union composer at the persist seam; ``None`` (the defaults — every
+        pre-W1 caller) keeps the row untagged. REFERENCE ONLY: never rankable,
+        never in the run identity (:data:`brutex.engine.results_store.SELECTION_FIELDS`
+        is excluded from ``_RANKABLE_FIELDS`` and validated at construction).
 
     Returns
     -------
@@ -1329,6 +1351,8 @@ def ranked_combo_to_result_row(
             None if m.trailing_net_pnl_paisa is None else float(m.trailing_net_pnl_paisa)
         ),
         decay_weighted_net_paisa=m.decay_weighted_net_paisa,
+        pareto_member=pareto_member,
+        selection_basis=selection_basis,
     )
 
 
@@ -1693,6 +1717,25 @@ def _iter_mask_metrics(
             yield mask, metrics
 
 
+def _selection_inputs_from_ranked(ranked: Sequence[RankedCombo]) -> SelectionInputs:
+    """Project a composite-ordered leaderboard into the union composer's columns.
+
+    The BATCH arm's :class:`~brutex.ranking.multi_select.SelectionInputs`
+    builder (LANE W1): ``rank_combos`` already returns the pool in the
+    ``(-composite, mask)`` order the composer's prefix/over-cap laws demand,
+    so the projection is a mechanical column pull — O(ranked).
+    """
+    return SelectionInputs(
+        masks=tuple(rc.mask for rc in ranked),
+        composites=tuple(rc.composite_score for rc in ranked),
+        net_pnl_paisa=tuple(rc.metrics.net_pnl_paisa for rc in ranked),
+        win_rate=tuple(rc.metrics.win_rate for rc in ranked),
+        max_dd_pct=tuple(rc.metrics.max_drawdown_pct for rc in ranked),
+        losing_trades=tuple(rc.metrics.losing_trades for rc in ranked),
+        expectancy_paisa=tuple(rc.metrics.expectancy_paisa for rc in ranked),
+    )
+
+
 def _rebuild_bounded_finalists(
     selected: BoundedRankResult,
     sim: ResidentTradeSim | None,
@@ -1800,7 +1843,13 @@ def run_persisted_sweep(
        byte-identical to the pre-wiring per-mask
        :func:`~brutex.engine.sweep_driver.metrics_for_mask` loop (which remains
        the per-mask oracle for chunk-failure re-attribution). Rank them
-       (:func:`brutex.ranking.rank_combos`), take the top ``cfg.top_k``.
+       (:func:`brutex.ranking.rank_combos`), then compute the LANE-W1 persist
+       UNION (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001)
+       via the ONE burn-in-checked composer binding
+       (:func:`brutex.engine.rust_rank_select.union_selection`): the composite
+       top-``cfg.top_k`` prefix PLUS the per-axis reserved-quota + ε-Pareto
+       frontier extras, every finalist tagged ``selection_basis`` +
+       ``pareto_member``.
        Under the rank-memory budget plan (DEC-SWEEP-STREAMING-RANK-001 part 2
        — resolved BEFORE step 3, after the sentinel check) the BOUNDED arm
        instead folds each kept mask into
@@ -2435,6 +2484,14 @@ def run_persisted_sweep(
                         n_kept=columns.n_kept,
                     )
                 )
+    # ── LANE-W1 persist UNION (DEC-RANK-PARETO-PERSIST-001 /
+    # DEC-RANK-QUOTA-PERSIST-1000-001): both arms resolve the SAME
+    # (finalists, per-finalist tags, truncated, frontier_dropped) via the ONE
+    # shared composer — batch through `_selection_inputs_from_ranked` +
+    # `union_selection`, bounded through `rank_survivor_columns`'
+    # `union_selection_fn` seam (which delegates to the SAME binding), so the
+    # two arms' persisted row sets + tags are identical BY CONSTRUCTION.
+    finalist_tags: list[tuple[str | None, bool | None]]
     if columns is None:
         ranked = rank_combos(
             pairs,
@@ -2442,25 +2499,39 @@ def run_persisted_sweep(
             temporal=None if temporal_runtime is None else temporal_runtime.gate_input(),
             max_sl_hit_rate=cfg.max_sl_hit_rate,
         )
-        finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
+        selection = union_selection(_selection_inputs_from_ranked(ranked), top_k=cfg.top_k)
+        finalists = [ranked[index] for index in selection.order]
+        finalist_tags = [
+            (selection.basis_by_index[index], index in selection.frontier)
+            for index in selection.order
+        ]
+        gated_pass_truncated = selection.truncated
+        frontier_dropped = selection.frontier_dropped
         n_ranked = len(ranked)
         backtested = len(pairs)
         sidecar_sharpes = [metrics.sharpe_ratio for _, metrics in pairs]
     else:
         # Bounded rank: the SAME shared ranking internals over the columns
-        # (bit-identical to `rank_combos(pairs)[:top_k]` — property-pinned),
-        # then the finalists' full metrics recomputed O(top_k) via the SAME
-        # eval spine (the V16 re-simulation precedent; NO temporal_sink there
-        # — the finalists' triples already gated them).
+        # (bit-identical to `rank_combos(pairs)` — property-pinned), the union
+        # via the SAME injected composer binding, then the finalists' full
+        # metrics recomputed O(selected) via the SAME eval spine (the V16
+        # re-simulation precedent; NO temporal_sink there — the finalists'
+        # triples already gated them).
         selected = rank_survivor_columns(
             columns,
             overfit=cfg.overfit,
             top_k=plan.require_bounded_top_k(),
             temporal=None if temporal_runtime is None else temporal_runtime.columns_gate_input(),
+            union_selection_fn=union_selection,
         )
         finalists = _rebuild_bounded_finalists(
             selected, sim, bars, bar_bits, cfg, direction_label, run_id_of
         )
+        finalist_tags = [
+            (finalist.selection_basis, finalist.pareto_member) for finalist in selected.finalists
+        ]
+        gated_pass_truncated = selected.truncated
+        frontier_dropped = selected.frontier_dropped
         n_ranked = selected.n_ranked
         backtested = columns.n_kept
         sidecar_sharpes = columns.sharpe_values()
@@ -2478,7 +2549,7 @@ def run_persisted_sweep(
         )
 
     persisted = 0
-    for rc in finalists:
+    for rc, (selection_basis, pareto_member) in zip(finalists, finalist_tags, strict=True):
         row = ranked_combo_to_result_row(
             rc,
             run_id=run_id_of(rc.mask),
@@ -2498,6 +2569,11 @@ def run_persisted_sweep(
             temporal=cfg.temporal,
             temporal_judged_years=None if temporal_runtime is None else temporal_runtime.judged,
             start_equity_paisa=cfg.start_equity_paisa,
+            # The LANE-W1 provenance stamps — computed ONCE per pool above,
+            # BEFORE the single append per run_id (the results_store
+            # run-identity conflict law).
+            selection_basis=selection_basis,
+            pareto_member=pareto_member,
         )
         try:
             store.append(row)
@@ -2583,6 +2659,10 @@ def run_persisted_sweep(
         "trial_sidecar_written": sidecar_written,
         # Additive sentinel tally (DEC-MARK-MANY-SENTINEL-001) — chain-safe.
         "sentinel_written": sentinel_written,
+        # Additive LANE-W1 selection tallies (DEC-RANK-PARETO-PERSIST-001 /
+        # DEC-RANK-QUOTA-PERSIST-1000-001) — chain-safe.
+        "gated_pass_truncated": gated_pass_truncated,
+        "frontier_dropped": frontier_dropped,
     }
     if temporal_runtime is not None:
         # Temporal counters (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — emitted ONLY
@@ -2651,6 +2731,8 @@ def run_persisted_sweep(
         ),
         temporal_judged_years=0 if temporal_runtime is None else temporal_runtime.n_judged,
         cvar_rejected=cvar_rejected,
+        gated_pass_truncated=gated_pass_truncated,
+        frontier_dropped=frontier_dropped,
     )
 
 

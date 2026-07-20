@@ -550,6 +550,9 @@ jobs:
             "brutex/acceptance/report.py:tests/unit/test_acceptance_report.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
+            "brutex/engine/rust_rank_select.py:tests/unit/test_engine_rust_rank_select.py:" \
+            "brutex/engine/pool_union.py:tests/unit/test_engine_pool_union.py:" \
+            "brutex/ranking/multi_select.py:tests/unit/test_ranking_multi_select.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/strategies/combo_rust.py:tests/unit/test_strategies_combo_rust.py:" \
             "brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:" \

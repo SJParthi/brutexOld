@@ -94,6 +94,12 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "optcost_strike_offset_from_atm",
     "optcost_strike_step",
     "popcount_bytes",
+    # LANE W1 (DEC-RANK-PARETO-PERSIST-001 family) — the multi-key selection
+    # kernels (fenced additive entries; keep-both union seam with sibling
+    # fno-math lanes).
+    "rank_axis_topm",
+    "rank_dd_band_indices",
+    "rank_pareto_frontier",
     "stats_cpcv_pass_count",
     "stats_cvar_tail_fold",
     # DEC-METRICS-RUST-STATS-002 — the slice-6 PR-2 stats-tail kernels
@@ -167,6 +173,9 @@ from ._fno_math import (  # noqa: E402
     optcost_strike_offset_from_atm,
     optcost_strike_step,
     popcount_bytes,
+    rank_axis_topm,
+    rank_dd_band_indices,
+    rank_pareto_frontier,
     stats_cpcv_pass_count,
     stats_cvar_tail_fold,
     stats_expected_max_sharpe,
@@ -221,6 +230,9 @@ __all__ = [
     "optcost_strike_offset_from_atm",
     "optcost_strike_step",
     "popcount_bytes",
+    "rank_axis_topm",
+    "rank_dd_band_indices",
+    "rank_pareto_frontier",
     "stats_cpcv_pass_count",
     "stats_cvar_tail_fold",
     "stats_expected_max_sharpe",

@@ -330,6 +330,21 @@ RECENCY_FIELDS: Final[tuple[str, ...]] = (
     "decay_weighted_net_paisa",
 )
 
+#: Nullable selection-provenance columns (LANE W1, DEC-RANK-PARETO-PERSIST-001
+#: / DEC-RANK-QUOTA-PERSIST-1000-001): ``pareto_member`` (Boolean — the row is
+#: an ε-Pareto frontier member of its tuple's ranked pool) and
+#: ``selection_basis`` (Utf8 — the comma-joined, canonical-order basis tokens
+#: from :data:`brutex.ranking.multi_select.BASIS_ORDER` the row qualified
+#: under). Appended LAST in the on-disk column order (at the train-b fold:
+#: after the W2 metrics tail — loss-rate/growth/exit-quality/recency — which
+#: keeps ITS landed order; the optional-column back-compat template);
+#: ``None`` = the honest unknown (a store written before LANE W1).
+#: ANNOTATION-ONLY: deliberately excluded from :data:`_RANKABLE_FIELDS`
+#: (provenance never drives ranking) and NEVER an input to the BLAKE3 run
+#: identity. PUBLIC for the same reason as :data:`VIX_FIELDS` — one
+#: cross-module source of truth for the pair's column names.
+SELECTION_FIELDS: Final[tuple[str, ...]] = ("pareto_member", "selection_basis")
+
 #: Nullable fields that ride the DIRECTIONAL ``None`` → value backfill lane
 #: of :meth:`ResultsStore.append` (the DEC-VIX-STAMP-WIRE-001 law, extended
 #: to the growth trio by DEC-METRICS-KELLY-GROWTH-001 and to the
@@ -338,18 +353,21 @@ RECENCY_FIELDS: Final[tuple[str, ...]] = (
 #: appends rows that now CARRY values where the stored row honestly holds
 #: ``None`` — an upgrade, never a conflict. Value-vs-value disagreement
 #: still raises (typed per family — see :func:`_merge_nullable_backfill`).
+#: The LANE-W1 selection-provenance pair deliberately does NOT join this
+#: lane — selection is recomputed per persist pool, never backfilled.
 _BACKFILLABLE_FIELDS: Final[frozenset[str]] = frozenset(
     VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS
 )
 
 #: Non-nullable numeric columns a leaderboard may rank by (metrics + money +
-#: counts). The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio
-#: are deliberately NOT rankable — VIX must never drive strategy ranking
-#: (CLAUDE.md §2 Rule 3), and a nullable column has no total order UNLESS an
+#: counts). The nullable ``deflated_sharpe``, the REFERENCE-ONLY VIX trio and
+#: the LANE-W1 selection-provenance pair are deliberately NOT rankable — VIX
+#: must never drive strategy ranking (CLAUDE.md §2 Rule 3), provenance is
+#: annotation not a metric, and a nullable column has no total order UNLESS an
 #: explicit null-placement law is defined for it: the growth trio ranks under
 #: the NULLS-LAST law of :data:`_NULLABLE_RANKABLE_FIELDS` below
 #: (DEC-METRICS-KELLY-GROWTH-001 — a conscious, documented extension;
-#: ``deflated_sharpe`` + VIX keep their legacy non-rankable status).
+#: ``deflated_sharpe`` + VIX + selection keep their non-rankable status).
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
     _METRIC_FIELDS + _MONEY_PAISA_FIELDS + _COUNT_FIELDS
 )
@@ -636,6 +654,14 @@ class ResultRow:
     trailing_profit_factor: float | None = None
     trailing_net_pnl_paisa: float | None = None
     decay_weighted_net_paisa: float | None = None
+    #: LANE-W1 selection provenance (:data:`SELECTION_FIELDS`): ε-Pareto
+    #: frontier membership + the canonical-order basis tokens. ``None`` = the
+    #: honest unknown (a pre-W1 store / an un-tagged producer). Never
+    #: rankable, never in the run identity. Appended LAST — at the train-b
+    #: fold the W2 metrics tail above keeps its landed order and this pair
+    #: goes AFTER it (the optional-column back-compat template).
+    pareto_member: bool | None = None
+    selection_basis: str | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -734,6 +760,59 @@ class ResultRow:
             object.__setattr__(self, name, round_money(price))
 
         self._validate_temporal_columns()
+
+        # LANE-W1 selection-basis vocabulary law: a present tag must be
+        # non-empty, canonical-order tokens from the ONE vocabulary
+        # (brutex.ranking.multi_select.join_basis_tokens — imported, never a
+        # mirrored literal). A poisoned/misordered tag is refused at
+        # construction, never persisted.
+        #
+        # The import is deliberately FUNCTION-level (a sys.modules dict hit
+        # after the first call — negligible beside this method's Decimal
+        # validation work): importing brutex.ranking.multi_select executes
+        # brutex/ranking/__init__.py, whose brutex.metrics re-export imports
+        # numpy — and `import brutex.engine` MUST stay numpy-free at import
+        # time. ci.yml's dotted per-module coverage stanzas
+        # (--cov=brutex.engine.<mod>) import the parent package at coverage
+        # start and re-import it under measurement; numpy 2.x's
+        # single-phase-init extension refuses that second load
+        # ("cannot load module more than once per process"), so a
+        # module-level edge here broke EVERY dotted engine stanza in CI
+        # (run 29651181531 — DEC-RANK-PARETO-PERSIST-001 CI seam fix).
+        from brutex.ranking.multi_select import BASIS_FRONTIER, join_basis_tokens
+
+        if self.selection_basis is not None:
+            if not self.selection_basis:
+                raise ResultsStoreError(
+                    "ResultRow.selection_basis must be a non-empty token string or None"
+                )
+            tokens = tuple(self.selection_basis.split(","))
+            try:
+                canonical = join_basis_tokens(tokens)
+            except ValueError as exc:
+                raise ResultsStoreError(f"ResultRow.selection_basis invalid: {exc}") from exc
+            if canonical != self.selection_basis:
+                raise ResultsStoreError(
+                    f"ResultRow.selection_basis {self.selection_basis!r} is not in the "
+                    f"canonical BASIS_ORDER join (expected {canonical!r})"
+                )
+
+        # LANE-W1 tag COHERENCE cross-check (review round 1): the persist
+        # composer stamps both provenance fields from the ONE frontier set,
+        # so `pareto_member is True` ⇔ the "frontier" basis token — a
+        # hand-built row breaking that biconditional is refused exactly like
+        # an empty/unknown/misordered tag (never persisted). Legacy
+        # None/None rows are vacuously coherent (not-True, no token).
+        frontier_tagged = (
+            self.selection_basis is not None and BASIS_FRONTIER in self.selection_basis.split(",")
+        )
+        if (self.pareto_member is True) != frontier_tagged:
+            raise ResultsStoreError(
+                f"ResultRow: pareto_member ({self.pareto_member!r}) and selection_basis "
+                f"({self.selection_basis!r}) are incoherent — pareto_member is True iff "
+                f"the {BASIS_FRONTIER!r} token is in selection_basis (the ONE persist "
+                f"composer stamps both from the same frontier set)"
+            )
 
     def _validate_temporal_columns(self) -> None:
         """Validate + canonicalise the four optional temporal-stats columns.
@@ -1246,12 +1325,14 @@ class ResultsStore:
                 # None keeps None (→ Parquet null) for rows without capture.
                 columns[name] = [getattr(row, name) for row in ordered]
 
-        for name in (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS):
+        for name in (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS, *SELECTION_FIELDS):
             # The nullable growth trio + the nullable exit-quality column +
-            # the nullable recency family — appended LAST, in that order,
-            # strictly AFTER the temporal quartet's landed position (the
-            # optional-column back-compat template, each generation strictly
-            # after the previous one); None → Parquet null.
+            # the nullable recency family + the LANE-W1 selection-provenance
+            # pair — appended LAST, in that order, strictly AFTER the temporal
+            # quartet's landed position (the optional-column back-compat
+            # template, each generation strictly after the previous one —
+            # at the train-b fold the selection pair goes strictly AFTER the
+            # W2 recency family); None → Parquet null.
             columns[name] = [getattr(row, name) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
@@ -1287,6 +1368,8 @@ class ResultsStore:
                     (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS),
                     pl.Float64,
                 ),
+                "pareto_member": pl.Boolean,
+                "selection_basis": pl.Utf8,
             },
         )
         bio = io.BytesIO()
@@ -1568,6 +1651,27 @@ def _optional_float(record: dict[str, object], name: str) -> float | None:
     return None if value is None else float(value)  # type: ignore[arg-type]
 
 
+def _optional_bool(record: dict[str, object], name: str) -> bool | None:
+    """Read a nullable Boolean column with optional-column back-compat.
+
+    The :func:`_optional_float` law for the LANE-W1 ``pareto_member`` column:
+    an absent column (a pre-W1 store) reads ``None`` exactly like a stored
+    Parquet null — the honest unknown, never a fabricated ``False``.
+    """
+    value = record.get(name)
+    return None if value is None else bool(value)
+
+
+def _optional_str(record: dict[str, object], name: str) -> str | None:
+    """Read a nullable Utf8 column with optional-column back-compat.
+
+    The :func:`_optional_float` law for the LANE-W1 ``selection_basis``
+    column: absent-or-null reads ``None`` — the honest unknown.
+    """
+    value = record.get(name)
+    return None if value is None else str(value)
+
+
 def _row_from_record(record: dict[str, object]) -> ResultRow:
     """Rebuild a :class:`ResultRow` from one polars ``iter_rows(named=True)`` record.
 
@@ -1623,6 +1727,8 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         trailing_profit_factor=_optional_float(record, "trailing_profit_factor"),
         trailing_net_pnl_paisa=_optional_float(record, "trailing_net_pnl_paisa"),
         decay_weighted_net_paisa=_optional_float(record, "decay_weighted_net_paisa"),
+        pareto_member=_optional_bool(record, "pareto_member"),
+        selection_basis=_optional_str(record, "selection_basis"),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -1700,6 +1806,7 @@ __all__ = [
     "GROWTH_FIELDS",
     "MASK_BITS_MAX",
     "RECENCY_FIELDS",
+    "SELECTION_FIELDS",
     "VIX_FIELDS",
     "FlushResult",
     "ResultRow",

@@ -232,7 +232,23 @@ def test_golden_run_id_is_byte_stable() -> None:
 # 12-synthetic-day fixture sits wholly inside the 24-month trailing window
 # AND decay bucket 0 → trailing_net_pnl_paisa == decay_weighted_net_paisa
 # == net (+6_520) and trailing sharpe/pf equal the full-history columns.
-_GOLDEN_CONTENT_HASH = "011a494ce615aa4551af7d6189f20c4a5eeb34e5416301a4d67d2a4cc61d896c"
+# → **DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001 (THIS
+# re-lock — RE-DERIVED at the 2026-07-20 train-b wave-2b fold, MIGRATION.md
+# #2059/#2060)**: the persisted schema ALSO gained the two appended-LAST
+# nullable selection-provenance columns (`pareto_member` Boolean +
+# `selection_basis` Utf8 — at the fold they land strictly AFTER the W2
+# recency family, the optional-column back-compat template) and the persist
+# union now STAMPS them (this fixture runs at `top_k=None`, so the row SET
+# is provably unchanged — the union adds TAGS, never rows:
+# `ranked == persisted == 5` is asserted unchanged above/below, and
+# `_GOLDEN_RUN_ID` is byte-identical — run identity untouched, the
+# persist-side-only law). The two parent re-locks over the SAME pre-fold
+# base `ee874356…c0789` (W2's `011a494c…d896c`; the lane's `76c9e8f9…a0e0ed`)
+# each covered only its OWN column set, so neither literal can reproduce on
+# the UNION tree — this literal was regenerated on the FOLDED tree (the
+# house law above: goldens are re-derived, never merged textually), two-run
+# byte-determinism pinned below.
+_GOLDEN_CONTENT_HASH = "af3bf465cb9e593746713a30bacfafe82e71ecf767c01cc1882c3f9f3addbed9"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:

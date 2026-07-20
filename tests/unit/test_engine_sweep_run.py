@@ -1208,18 +1208,24 @@ class TestCompletionSentinel:
         # THE #650 hole, arm (b): under top_k truncation the OLD subset re-rank
         # appended the subset's own top-K — EXTRA rows, silently breaking tree
         # byte-identity. The sentinel fix re-runs the full population.
+        # RE-DERIVED for LANE W1 (DEC-RANK-QUOTA-PERSIST-1000-001): the persist
+        # set is now the UNION (composite top-1 prefix + per-axis quota
+        # extras) — at this 3-gate-passer pool the quota (M=200) admits all 3,
+        # so persisted == 3, DETERMINISTICALLY. The #650 property under test —
+        # a partial-mark redo persists EXACTLY the same rows, byte-identical,
+        # never inflated — is unchanged.
         from brutex.engine.tuple_complete import completion_sentinel_path
 
         cfg = _make_config(top_k=1)
         bars = _trending_bars()
         store_path, first = self._clean_run(tmp_path, cfg, bars)
-        assert first.persisted == 1
+        assert first.persisted == 3  # top-1 prefix + 2 quota extras (union law)
         baseline = store_path.read_bytes()
         completion_sentinel_path(store_path).unlink()  # crash before sentinel
         subset = _dedup()
         subset.mark(self._rid(cfg, cfg.condition_bits[0]))  # partial mark loop
         redone = self._redo(store_path, cfg, bars, dedup=subset)
-        assert redone.persisted == 1  # never inflated
+        assert redone.persisted == first.persisted  # never inflated
         assert store_path.read_bytes() == baseline
 
     def test_digest_path_never_calls_mark_many(self, tmp_path: Path) -> None:
@@ -1483,14 +1489,21 @@ class TestRunPersistedSweep:
         assert gated.ranked <= legacy.ranked
         assert gated.persisted == len(gated_store)
 
-    def test_top_k_truncates_persisted(self, tmp_path: Path) -> None:
+    def test_top_k_prefix_plus_union_extras_persisted(self, tmp_path: Path) -> None:
+        # RE-DERIVED for LANE W1 (DEC-RANK-QUOTA-PERSIST-1000-001 /
+        # DEC-RANK-PARETO-PERSIST-001) — was ``test_top_k_truncates_persisted``
+        # pinning ``persisted == top_k == 1``: the persist set is now the
+        # UNION of the composite top-``top_k`` prefix, the per-axis quotas and
+        # the ε-Pareto frontier, so at this 3-gate-passer pool the quota
+        # (M=200) admits every ranked row beyond the top-1 prefix.
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         cfg = _make_config(top_k=1)
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
-        assert summary.ranked >= 1
-        assert summary.persisted == 1
+        assert summary.ranked == 3
+        assert summary.persisted == 3  # 1 composite prefix + 2 union extras
+        assert summary.gated_pass_truncated == 0  # nothing left unselected
 
     def test_skip_path_on_prepopulated_dedup(self, tmp_path: Path) -> None:
         bars = _trending_bars()
@@ -3241,7 +3254,9 @@ class TestLazyRunIdDigestPath:
             tmp_path, "d", _trending_bars(), _make_config(top_k=2), digest=self._DIGEST
         )
         assert summary.enumerated == 5
-        assert summary.persisted == 2  # top_k truncation → 2 finalists
+        # LANE W1 (DEC-RANK-QUOTA-PERSIST-1000-001): finalists = the persist
+        # UNION (top-2 composite prefix + 1 quota extra at this 3-passer pool).
+        assert summary.persisted == 3
         assert calls["n"] == summary.persisted
         assert calls["n"] < summary.enumerated - summary.conflict_pruned
 
@@ -3251,10 +3266,12 @@ class TestLazyRunIdDigestPath:
         # The legacy no-digest arm still hashes ONCE per non-conflict enumerated
         # mask (the dedup probe keys on the identity BEFORE the trade sim) and
         # the finalists reuse those probe-time values — no recompute, so the
-        # count stays exactly 5 even though 2 finalists persist.
+        # count stays exactly 5 even though 3 finalists persist (the LANE-W1
+        # union: top-2 composite prefix + 1 quota extra —
+        # DEC-RANK-QUOTA-PERSIST-1000-001).
         calls = self._count_run_id_calls(monkeypatch)
         summary = _run_sweep(tmp_path, "l", _trending_bars(), _make_config(top_k=2))
-        assert summary.persisted == 2
+        assert summary.persisted == 3
         assert calls["n"] == summary.enumerated - summary.conflict_pruned == 5
 
     def test_digest_store_bytes_equal_the_eager_legacy_arm(self, tmp_path: Path) -> None:

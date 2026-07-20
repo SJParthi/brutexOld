@@ -184,13 +184,24 @@ def test_excess_to_non_excess_kurtosis_identity(
 def test_ranking_is_a_permutation_invariant_total_order(
     sharpes: list[float], perm_seed: Any
 ) -> None:
-    """Permuting the candidate enumeration yields a byte-identical ranking.
+    """Permuting the candidate enumeration yields an identically-ORDERED ranking.
 
     The determinism oracle for the tie-break fix (DEC-RANKING-TIEBREAK-001): a
     leaderboard is a SET of combos, so its ranking must not depend on the order the
     sweep enumerated them in (Golden Rules #4/#7). Distinct masks + a deliberate
     proportion of DUPLICATE Sharpes (``i % 3`` reuse) force real composite ties so
     the mask tie-break is exercised, not bypassed by always-distinct scores.
+
+    COMPOSITE-VALUE envelope (honesty reconcile, W1 finalize): the pool z-score
+    columns are LEFT-FOLDED in enumeration order (``_zscores``' ``sum``), so a
+    permuted pool can yield composite scores differing at ULP level — the
+    PRE-EXISTING documented envelope (the ``pragma: no mutate`` rationale in
+    ``composite_term_inputs``: "float rounding can differ at ULP level on some
+    pools, which cannot meaningfully reorder a leaderboard"), executed-proven
+    present at merge base 98b9a732 with the same falsifying pool. The exact
+    LAW is the mask ORDER (asserted exactly); composite values are asserted
+    equal within a tight ULP-scale tolerance, never bit-exact across a
+    permuted fold.
     """
     # Reuse each Sharpe up to three times so many combos share a composite score
     # (the tie regime the stable-sort-only version mis-ordered). Masks stay unique.
@@ -200,7 +211,10 @@ def test_ranking_is_a_permutation_invariant_total_order(
     base = rank_combos(cand)
     other = rank_combos(shuffled)
     assert [rc.mask for rc in base] == [rc.mask for rc in other]
-    assert [rc.composite_score for rc in base] == [rc.composite_score for rc in other]
+    assert all(
+        math.isclose(a.composite_score, b.composite_score, rel_tol=1e-9, abs_tol=1e-12)
+        for a, b in zip(base, other, strict=True)
+    )
     # Total order: masks strictly increase within every equal-score run.
     for a, b in itertools.pairwise(base):
         if a.composite_score == b.composite_score:

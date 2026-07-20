@@ -18,7 +18,32 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-CASCADE-STAT-TIER-WIRE-001, MIGRATION.md
+_Last updated: 2026-07-18 (DEC-RANK-PARETO-PERSIST-001 /
+DEC-RANK-QUOTA-PERSIST-1000-001 / DEC-RANK-POOL-UNION-ADMIT-001 /
+DEC-RANK-DD-BAND-ORDER-001, MIGRATION.md #2059–#2062 — renumbered
+#1970–#1973 → #2059–#2062 at the 2026-07-20 train-b wave-2b fold (the
+#1970–#1990 band is the coordinator batch-4 reserve; DEC-IDs are the
+stable handles per DEC-LEDGER-RENUMBER-001) — LANE W1 of the
+winning-completeness P0 ruling (operator 2026-07-18): the persist seam
+becomes the UNION of the composite top-K + per-axis reserved quotas + the
+ε-Pareto frontier over born-Rust `rank_select.rs` kernels (flag
+`BRUTEX_RANK_RUST_SELECT`, default flipped ON per the greenfield ruling with
+the 16-call burn-in bit-compare + ship-the-oracle autorevert + refuse-poison
+gates — membership-wrong-past-burn-in is the accepted house burn-in envelope,
+the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent);
+ResultRow gains the nullable `pareto_member` + `selection_basis`
+provenance pair (appended-last, never rankable, never in run identity); the
+REAL top-1000 persist default is MINTED (`DEFAULT_PERSIST_TOP_K` — the
+`--top` 20→1000 tuple-address re-key is greenfield-sanctioned + disclosed);
+the Stage-3 + cascade pools admit by the multi-key round-robin union at the
+SAME caps (the rank-1-forever `not_validated` shape is dead; DSR trial-N
+pinned unchanged); `min_dd_first` quantizes DD into 0.5-point ε-bands
+(composite decides within a band). ENGINE decision semantics UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; frozen store-hash goldens consciously re-locked,
+`_GOLDEN_RUN_ID` byte-identical. The per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #2059–#2062 — this header carries the
+pointer, never the story.)
+Earlier: 2026-07-19 (DEC-CASCADE-STAT-TIER-WIRE-001, MIGRATION.md
 #2058 (renumbered #1986 → #2058 at the 2026-07-20 train-b wave-2b fold —
 #1986 was the QM-assigned provisional; DEC-IDs are the stable handles per
 DEC-LEDGER-RENUMBER-001), branch `claude/cascade-stat-tier-wire` — the Stage-4 cascade WIRES
@@ -4207,7 +4232,81 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/cascade-stat-tier-wire` (**DEC-CASCADE-STAT-TIER-WIRE-001,
+- **Active branch:** `claude/rank-pareto-persist` (**DEC-RANK-PARETO-PERSIST-001 +
+  DEC-RANK-QUOTA-PERSIST-1000-001 + DEC-RANK-POOL-UNION-ADMIT-001 +
+  DEC-RANK-DD-BAND-ORDER-001, MIGRATION.md #2059–#2062** — renumbered
+  #1970–#1973 → #2059–#2062 at the 2026-07-20 train-b wave-2b fold (the
+  provisional band sat inside the coordinator batch-4 reserve #1970–#1990;
+  DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001) — LANE W1
+  of the winning-completeness P0 ruling (operator 2026-07-18, "Approve
+  all dude okay"). ITEMS 1+2 (persist): the Stage-2 persist seam in
+  `run_persisted_sweep` selects the dedup-UNION of the composite
+  top-``top_k`` prefix + the per-axis reserved quotas (top-`AXIS_QUOTA_M`=200
+  under composite/DD-asc/losing-trades-asc/win-rate-desc/expectancy-desc) +
+  the additive-ε Pareto frontier over {net_pnl MAX, win_rate MAX, max_dd_pct
+  MIN, losing_trades MIN} capped at `PARETO_FRONTIER_CAP`=500 (drops counted
+  + WARNED; the pinned 5th axis `sl_hit_rate` deferred LOUDLY to LANE W2's
+  column) — every persisted row stamped `selection_basis` (canonical
+  BASIS_ORDER comma-join, store-validated) + `pareto_member`, computed ONCE
+  per pool BEFORE the single append per run_id; both persist arms share ONE
+  composer (bounded == batch byte-parity-pinned; SurvivorColumns grows 5
+  selection-axis columns, +40 B/kept disclosed); `SweepRunSummary` +
+  the flush audit gain `gated_pass_truncated` + `frontier_dropped`. BORN-RUST:
+  NEW `rust/fno-math/src/rank_select.rs` (ε-Pareto skyline O(n²)-worst
+  disclosed · per-axis bounded top-M O(A·n·log M) · DD-band quantize) behind
+  the `brutex/engine/rust_rank_select.py` seam (rust_metrics template:
+  16-call burn-in bit-compare, ship-the-ORACLE autorevert, refuse-poison
+  TypeGuard, warn-once; `BRUTEX_RANK_RUST_SELECT` kill switch; the default
+  FLIPPED ON in the final commit per the greenfield ruling
+  [coordinator-relayed] — cross-arm selection identity ENFORCED by the
+  burn-in bit-compare + refuse-poison gates; membership-wrong-past-burn-in
+  is the accepted house burn-in envelope, the
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent, guarded by the cargo +
+  CI parity suites); Python oracle = `brutex/ranking/multi_select.py` (stdlib
+  leaf). THE MINT: `DEFAULT_PERSIST_TOP_K = 1000` consumed by cli `--top` +
+  dashboard `DEFAULT_TOP` (the 20→1000 store-ADDRESS re-key is
+  greenfield-SANCTIONED + disclosed; run identity untouched — top_k never in
+  `canonical_trade_params`); display-only `--top` knobs stay 20 (disclosed).
+  ITEM 3 (pools): NEW `brutex/engine/pool_union.py` — the ONE round-robin
+  union law (sources sharpe · DEFAULT preset via `sort_by_preset` · dd ·
+  win_rate · persisted frontier; "composite DESC" honestly OMITTED —
+  composite_score is not persisted on ResultRow, the HIGH-#40 seam;
+  single-source reduction == legacy byte-identically, parity-pinned) at BOTH
+  seams via `multi_axis=True` defaults on `group_survivors` (bounded 5-heap
+  streaming arm == the pure oracle, property-pinned; 5× the legacy per-board
+  bound disclosed) + `spec_from_store_rows` (top_k=None union-inert) — the
+  rank-1-forever `not_validated` shape is DEAD (regression-pinned both
+  seams); DSR trial-N leaderboard-frozen (sidecar-based) — pinned
+  bit-identical across pool widths; pool p-values SHIFT + ~2-4× cascade
+  candidate compute (disclosed). ITEM 5: `min_dd_first` key 1 becomes
+  `floor(dd / DD_BAND_PCT)` at `DD_BAND_PCT`=0.5 points (band-edge joins the
+  UPPER band; composite DESC within band; consecutive-losses third; ordering
+  goldens consciously re-locked; the batch quantizer bit-mirrored in Rust,
+  drift-pinned). W1-default constants (ε trio + M + cap + band width) are
+  DISCLOSED stand-ins for un-ruled operator constants. [FB] EXECUTED at the
+  stash-reverted merge-base: the quota-admitted gate-passer beyond composite
+  top-1 was NOT persisted (1 ≠ 3). GOLDENS: the lane's own re-locks
+  (`_GOLDEN_CONTENT_HASH` ee874356→76c9e8f9 + futures `_EXPECTED_STORE_HASH`
+  8670c7f6→e98221de) were RE-DERIVED AGAIN at the train-b wave-2b fold —
+  both parents re-locked the SAME pre-fold base over DIFFERENT column sets
+  (the W2 metrics tail vs the selection pair), so neither literal reproduces
+  on the union tree; the folded-tree literals live in the two golden files
+  with in-file fold audit notes (row SETS unchanged at top_k=None;
+  `_GOLDEN_RUN_ID` byte-identical); fixtures gain ONLY the NEW
+  `results_store_pre_selection_columns.parquet`. COLLISIONS (coordinator
+  ruling: W1 lands FIRST, owning lanes rebase; per-file diff summaries in
+  the PR body): results_store→B2-1 LIVE · stage3_select→B2-2 LIVE ·
+  cascade_wire→T14 · sweep_stream→B3-2 · sweep_run→PR #1479
+  (line-disjoint except one sorted-import anchor, keep-both); fno-math edits
+  strictly ADDITIVE (hub law). GATES: sweep_run 404/126 · pool_union 62/32 ·
+  stage3_select 100/38 · cascade_wire 522/156 · rust_rank_select 144/58 ·
+  multi_select 115/34 ALL 100.00% line+branch; ranking package gate 100.00%;
+  cargo 629+4+1 passed --locked, clippy -D warnings + fmt clean; mypy
+  --strict clean (483 files); pyright 0 errors (baseline 0); mutation.yml
+  pairs wired + wiring-pinned + 5 hand-applied mutants executed KILLED.
+  ENGINE decision semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/scope/vocab/rate change.)
+  Earlier: `claude/cascade-stat-tier-wire` (**DEC-CASCADE-STAT-TIER-WIRE-001,
   MIGRATION.md #2058 — renumbered #1986 → #2058 at the 2026-07-20 train-b
   wave-2b fold (#1986 was the QM-assigned provisional; DEC-IDs are the stable
   handles per DEC-LEDGER-RENUMBER-001); P0 item 16, operator-approved
@@ -13014,7 +13113,32 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/cascade-stat-tier-wire`
+- **Active feature branch:** `claude/rank-pareto-persist`
+  (DEC-RANK-PARETO-PERSIST-001 + DEC-RANK-QUOTA-PERSIST-1000-001 +
+  DEC-RANK-POOL-UNION-ADMIT-001 + DEC-RANK-DD-BAND-ORDER-001, MIGRATION.md
+  #2059–#2062 — renumbered #1970–#1973 → #2059–#2062 at the 2026-07-20
+  train-b wave-2b fold per DEC-LEDGER-RENUMBER-001 — LANE W1 of the
+  winning-completeness P0 ruling: the persist
+  seam becomes the union of the composite top-K + per-axis quotas
+  (AXIS_QUOTA_M=200) + the ε-Pareto frontier (cap 500) over born-Rust
+  `rank_select.rs` kernels (`BRUTEX_RANK_RUST_SELECT`, default ON per the
+  greenfield ruling, burn-in bit-compare + ship-the-oracle autorevert +
+  refuse-poison gates — membership-wrong-past-burn-in is the accepted house
+  burn-in envelope, the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent);
+  rows stamped `pareto_member` + `selection_basis`
+  (appended-last nullable columns, never rankable, never in run identity);
+  `DEFAULT_PERSIST_TOP_K = 1000` minted (cli `--top` + dashboard
+  DEFAULT_TOP consume it; the 20→1000 tuple-address re-key
+  greenfield-sanctioned + disclosed); the Stage-3 + cascade pools admit by
+  the round-robin multi-key union at the SAME caps (pool_union.py — the
+  rank-1-forever `not_validated` shape dead; DSR trial-N pinned unchanged);
+  `min_dd_first` DD ε-banded at 0.5 points (floor boundary, composite within
+  band); frozen store-hash goldens consciously re-locked (RE-DERIVED
+  again on the folded union tree at the wave-2b fold — see §1),
+  `_GOLDEN_RUN_ID` byte-identical; ENGINE decision semantics UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #2059–#2062 for the full blurb)
+  Earlier: `claude/cascade-stat-tier-wire`
   (DEC-CASCADE-STAT-TIER-WIRE-001, MIGRATION.md #2058 — renumbered
   #1986 → #2058 at the 2026-07-20 train-b wave-2b fold per
   DEC-LEDGER-RENUMBER-001 — the Stage-4 cascade

@@ -74,6 +74,7 @@ from brutex.engine.tuple_complete import (
 )
 from brutex.orchestrator.audit import AuditWriter
 from brutex.ranking import OverfitGateConfig
+from brutex.ranking.multi_select import union_persist_bound
 from brutex.strategies.types import Side
 from brutex.vocabulary import has_conflict
 
@@ -1832,25 +1833,42 @@ class TestIdentity:
         assert "store_unreadable" in _codes(verify_identity(tree, _grid()))
 
     def test_topk_inflation_signature(self, tmp_path: Path) -> None:
-        # THE #650 regression at this tier: a top_k=1 store holding MORE than
-        # top_k rows under one digest is corrupt — detectable bars-free, even
-        # on a pre-#646 tree (delete the sidecar/sentinel to prove it).
+        # THE #650 regression at this tier: a top_k=1 store holding MORE rows
+        # than the LANE-W1 union persist bound (top_k + quota/frontier
+        # extras — a legitimate union store exceeds bare top_k by design,
+        # review round 1 gate re-run) under one digest is corrupt —
+        # detectable bars-free, even on a pre-#646 tree (delete the
+        # sidecar/sentinel to prove it).
         grid = _grid(top_k=1)
         root = tmp_path / "results"
         root.mkdir()
         _sweep(root, grid)
         store_path = _store_path(root, grid)
         store = ResultsStore.load(store_path)
-        assert len(store) == 1
-        (row,) = store.rows()
-        extra = dataclasses.replace(row, run_id="f" * 64)
-        store.append(extra)
+        assert grid.top_k is not None
+        bound = union_persist_bound(grid.top_k)
+        baseline = len(store)
+        assert 1 <= baseline <= bound  # the union legitimately persists > top_k
+        (row, *_rest) = store.rows()
+        for index in range(bound - baseline + 1):
+            store.append(dataclasses.replace(row, run_id=f"{(1 << 200) + index:064x}"))
         store.flush()
         trial_stats_sidecar_path(store_path).unlink()
         completion_sentinel_path(store_path).unlink()
         report = verify_identity(root, grid)
         assert "rows_exceed_top_k" in _codes(report)
         assert not report.clean
+
+    def test_union_extras_within_bound_are_not_inflation(self, tmp_path: Path) -> None:
+        # The W1 counter-pin: a legitimate union store (rows > top_k but
+        # within union_persist_bound) must NOT read as #650 inflation.
+        grid = _grid(top_k=1)
+        root = tmp_path / "results"
+        root.mkdir()
+        _sweep(root, grid)
+        store = ResultsStore.load(_store_path(root, grid))
+        assert grid.top_k is not None and len(store) > grid.top_k
+        assert "rows_exceed_top_k" not in _codes(verify_identity(root, grid))
 
     def test_row_label_mismatch(self, tree: Path) -> None:
         store_path = _store_path(tree, _grid())
@@ -2874,6 +2892,39 @@ class TestPreVixSchemaMigration:
         self._reflush(_PRE_VIX_FIXTURE, original)
         self._reflush(_PRE_VIX_FIXTURE, scratch)
         _drop_store_columns(original, sorted(_APPENDED_NULLABLE_FIELDS - {"sl_hit_rate"}))
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+
+    def test_original_with_selection_column_abstains(self, tmp_path: Path) -> None:
+        # LANE W1 (review round 1 gate re-run): a store carrying ANY
+        # selection-provenance column is not the pre-VIX generation
+        # (selection landed after VIX) — partial presence abstains.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        self._reflush(_PRE_VIX_FIXTURE, original)
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        _drop_store_columns(original, ["vix_mean", "vix_min", "vix_max", "selection_basis"])
+        # original keeps pareto_member — partial selection presence.
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+        assert _stores_differ_only_in_vix(original, scratch) is None
+
+    def test_scratch_without_selection_pair_abstains(self, tmp_path: Path) -> None:
+        # The recount side must CARRY the selection pair (the current writer
+        # always appends it) for the migration to explain the diff.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        shutil.copyfile(_PRE_VIX_FIXTURE, original)
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        _drop_store_columns(scratch, ["pareto_member", "selection_basis"])
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+
+    def test_non_generation_schema_drift_abstains(self, tmp_path: Path) -> None:
+        # Both optional generations absent from the original AND another
+        # column missing — the stripped compare still refuses.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        shutil.copyfile(_PRE_VIX_FIXTURE, original)
+        _drop_store_columns(original, ["deflated_sharpe"])
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
         assert _is_pre_vix_schema_migration(original, scratch) is False
 
     def test_unreadable_footer_abstains(self, tmp_path: Path) -> None:

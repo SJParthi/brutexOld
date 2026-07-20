@@ -36,8 +36,10 @@ from brutex.engine.results_store import ResultsStore
 
 from tests.golden.generate_results_store_backcompat_fixtures import (
     PRE_DEFLATED_FIXTURE,
+    PRE_SELECTION_FIXTURE,
     PRE_VIX_FIXTURE,
     fixture_rows,
+    fixture_rows_with_vix,
     render_legacy_store_bytes,
 )
 
@@ -49,12 +51,20 @@ _EXPECTED_SHA256: Final[dict[str, str]] = {
     "results_store_pre_deflated_sharpe.parquet": (
         "e346e0f4b3394910c6dfc1448dbdff0d1ade0dde665ee4841223335dc1250a87"
     ),
+    # LANE W1 (DEC-RANK-PARETO-PERSIST-001): the pre-selection-columns
+    # generation — deflated_sharpe + the VIX trio, NO pareto_member /
+    # selection_basis. Byte-fidelity to the pre-W1 writer proven at capture
+    # time: rendered through the ACTUAL pre-change ResultsStore._render_bytes
+    # (branch commit 4641b07's tree) — identical SHA-256 b0aeb264….
+    "results_store_pre_selection_columns.parquet": (
+        "b0aeb264744093118ebba3a75fe958d27f83a827cbe182528e5683241b002687"
+    ),
 }
 
 
 def test_committed_fixture_bytes_match_manifest() -> None:
     """Byte-freeze: each committed fixture hashes to its pinned SHA-256."""
-    for path in (PRE_VIX_FIXTURE, PRE_DEFLATED_FIXTURE):
+    for path in (PRE_VIX_FIXTURE, PRE_DEFLATED_FIXTURE, PRE_SELECTION_FIXTURE):
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         assert digest == _EXPECTED_SHA256[path.name], path.name
 
@@ -68,6 +78,10 @@ def test_generator_reproduces_the_committed_bytes() -> None:
     )
     assert render_legacy_store_bytes(rows, with_deflated_sharpe=False) == (
         PRE_DEFLATED_FIXTURE.read_bytes()
+    )
+    assert (
+        render_legacy_store_bytes(fixture_rows_with_vix(), with_deflated_sharpe=True, with_vix=True)
+        == PRE_SELECTION_FIXTURE.read_bytes()
     )
 
 
@@ -113,10 +127,12 @@ def test_legacy_load_reflushes_to_the_current_schema_losslessly(tmp_path: Path) 
     assert ResultsStore.load(migrated_path).rows() == legacy.rows()
     schema = pl.read_parquet_schema(migrated_path)
     # Ruling-5 appended-LAST order: the VIX trio, then the growth trio, then
-    # the exit-quality column, then the Stage-C recency family
-    # (DEC-METRICS-TRAILING-WINDOW-001; each generation strictly after the
-    # previous — any future columns must extend this pin again).
-    assert [*schema][-11:] == [
+    # the exit-quality column, then the Stage-C recency family, then the
+    # LANE-W1 selection-provenance pair (DEC-METRICS-TRAILING-WINDOW-001 →
+    # DEC-RANK-PARETO-PERSIST-001, re-derived at the train-b fold; each
+    # generation strictly after the previous — any future columns must
+    # extend this pin again).
+    assert [*schema][-13:] == [
         "vix_mean",
         "vix_min",
         "vix_max",
@@ -128,4 +144,20 @@ def test_legacy_load_reflushes_to_the_current_schema_losslessly(tmp_path: Path) 
         "trailing_profit_factor",
         "trailing_net_pnl_paisa",
         "decay_weighted_net_paisa",
+        "pareto_member",
+        "selection_basis",
     ]
+
+
+def test_pre_selection_store_loads_with_none_pair() -> None:
+    """A pre-W1 store loads: selection pair ``None``, VIX trio intact."""
+    pytest.importorskip("polars")
+    loaded = ResultsStore.load(PRE_SELECTION_FIXTURE)
+    assert len(loaded) == 2
+    for row in loaded.rows():
+        assert row.pareto_member is None
+        assert row.selection_basis is None
+    # The VIX trio (already columns in this generation) round-trips both arms.
+    assert [row.vix_mean for row in loaded.rows()] == [14.5, None]
+    assert [row.vix_min for row in loaded.rows()] == [12.25, None]
+    assert [row.vix_max for row in loaded.rows()] == [17.75, None]

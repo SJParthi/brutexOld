@@ -73,6 +73,7 @@ from brutex import __version__
 from brutex.config.hardware_envelope import apply_polars_thread_bound
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import RuntimeFileError, read_runtime_file, runtime_file_path
+from brutex.ranking.multi_select import DEFAULT_PERSIST_TOP_K
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
 
 # ────────────────────────────────────────────────────────────────────────
@@ -634,11 +635,15 @@ def _add_sweep_grid_args(
     parser.add_argument(
         "--top",
         type=int,
-        default=20,
+        default=DEFAULT_PERSIST_TOP_K,
         help=(
-            "Persist the top-N composite-ranked combos per tuple (default 20 for fast "
-            "operator runs; the spec's Stage-4 filter #1 production sizing is 1000 — "
-            "TRACK1_BACKTEST_SPEC.md, DEC-SPEC-TOPK-RECONCILE-001)"
+            "Persist the top-N composite-ranked combos per tuple (default "
+            f"{DEFAULT_PERSIST_TOP_K} — the spec's Stage-4 filter #1 production sizing, "
+            "finally MINTED as the one common constant "
+            "brutex.ranking.multi_select.DEFAULT_PERSIST_TOP_K per "
+            "DEC-RANK-QUOTA-PERSIST-1000-001; supersedes the fast-operator-run 20 of "
+            "DEC-SPEC-TOPK-RECONCILE-001 — the per-axis quota + ε-Pareto frontier union "
+            "persists BEYOND this composite prefix, tagged selection_basis)"
         ),
     )
     parser.add_argument(

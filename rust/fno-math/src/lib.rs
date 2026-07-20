@@ -98,6 +98,12 @@ pub mod stats;
 /// DEC-ETC-REGIME-HISTORY-001).
 pub mod optcost;
 
+/// LANE W1 (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001 /
+/// DEC-RANK-DD-BAND-ORDER-001): born-Rust multi-key selection kernels —
+/// ε-Pareto skyline, per-axis bounded top-M heaps, DD-band quantize. The
+/// Python twin (`brutex.ranking.multi_select`) is the parity ORACLE.
+pub mod rank_select;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -235,5 +241,13 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(optcost::strike::optcost_round_to_atm, m)?)?;
     // ---- end optcost module ----
+    // ── LANE W1 (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001 /
+    // DEC-RANK-DD-BAND-ORDER-001): the multi-key selection kernels (fenced
+    // additive registration block — keep-both union seam with sibling
+    // fno-math lanes). ──
+    m.add_function(wrap_pyfunction!(rank_select::rank_pareto_frontier, m)?)?;
+    m.add_function(wrap_pyfunction!(rank_select::rank_axis_topm, m)?)?;
+    m.add_function(wrap_pyfunction!(rank_select::rank_dd_band_indices, m)?)?;
+    // ── end LANE W1 registration block ──
     Ok(())
 }

@@ -79,6 +79,11 @@ def _row(**overrides: object) -> ResultRow:
         "avg_exit_price": Decimal("14100.25"),
     }
     base.update(overrides)
+    # The store's tag-coherence law (review round 1): a pareto_member=True
+    # row must carry the "frontier" basis token (production stamps both
+    # from the ONE frontier set — the helper mirrors it).
+    if base.get("pareto_member") is True and "selection_basis" not in base:
+        base["selection_basis"] = "frontier"
     return ResultRow(**base)  # type: ignore[arg-type]
 
 
@@ -129,9 +134,20 @@ class TestGroupSurvivors:
 
     def test_trims_each_leaderboard_to_top_k(self) -> None:
         rows = [_row(run_id=_rid(i), sharpe_ratio=float(i)) for i in range(1, 6)]
-        boards = group_survivors(rows, top_k=2)
+        # Legacy single-key arm: the Sharpe top-2 exactly (the byte-identity
+        # arm the golden-equality suite pins).
+        boards = group_survivors(rows, top_k=2, multi_axis=False)
         (board,) = boards.values()
         assert [r.sharpe_ratio for r in board] == [5.0, 4.0]
+        # LANE-W1 union default (DEC-RANK-POOL-UNION-ADMIT-001): the SAME
+        # top-2 CAP, membership by round-robin — source 1 (Sharpe) admits
+        # 5.0, source 2 (the DEFAULT preset; every non-Sharpe axis is uniform
+        # on these rows so its order falls to run_id ASC) admits rid(1) —
+        # emitted in TODAY's Sharpe-desc discipline.
+        union_boards = group_survivors(rows, top_k=2)
+        (union_board,) = union_boards.values()
+        assert [r.sharpe_ratio for r in union_board] == [5.0, 1.0]
+        assert len(union_board) == 2  # the cap NEVER grows
 
     def test_smaller_leaderboard_yields_all_rows(self) -> None:
         boards = group_survivors([_row()], top_k=DEFAULT_STAGE3_TOP_K)
@@ -188,11 +204,17 @@ class TestSelectStage3Survivors:
                 [_row(run_id=_rid(4), instrument="BANKNIFTY", sharpe_ratio=9.9)],
             ),
         )
-        boards = select_stage3_survivors(tmp_path, top_k=2)
+        boards = select_stage3_survivors(tmp_path, top_k=2, multi_axis=False)
         nifty = boards[LeaderboardKey("NIFTY", "5m", "A")]
         assert [r.run_id for r in nifty] == [_rid(2), _rid(3)]  # top-2, Sharpe desc
         bank = boards[LeaderboardKey("BANKNIFTY", "5m", "A")]
         assert [r.run_id for r in bank] == [_rid(4)]
+        # The union DEFAULT threads through the disk composition too (LANE
+        # W1): same cap, round-robin membership (Sharpe best rid(2) + the
+        # preset source's run_id-ASC best rid(1) — uniform non-Sharpe axes).
+        union_boards = select_stage3_survivors(tmp_path, top_k=2)
+        union_nifty = union_boards[LeaderboardKey("NIFTY", "5m", "A")]
+        assert [r.run_id for r in union_nifty] == [_rid(2), _rid(1)]
 
     def test_existing_empty_tree_yields_empty_dict(self, tmp_path: Path) -> None:
         assert select_stage3_survivors(tmp_path) == {}
@@ -299,8 +321,12 @@ class TestGoldenEqualityVsReference:
     K = 3
 
     def _check(self, rows: list[ResultRow], *, top_k: int) -> None:
+        # LANE W1 (DEC-RANK-POOL-UNION-ADMIT-001): this suite pins the LEGACY
+        # single-key arm (`multi_axis=False`) byte-identical to the
+        # pre-#1294 reference — the "axes disabled ⇒ byte-identical" law.
+        # The union DEFAULT's own laws live in TestMultiAxisUnion below.
         _assert_byte_identical(
-            group_survivors(rows, top_k=top_k),
+            group_survivors(rows, top_k=top_k, multi_axis=False),
             _group_survivors_reference(rows, top_k=top_k),
         )
 
@@ -387,7 +413,113 @@ class TestGoldenEqualityVsReference:
             self._check(rows, top_k=4)
 
     def test_lazy_iterable_consumed_in_one_pass(self) -> None:
-        # The streaming contract: a one-shot generator is sufficient input.
+        # The streaming contract: a one-shot generator is sufficient input —
+        # on BOTH arms (the union arm also streams rows exactly once).
         rows = [_row(run_id=_rid(i), sharpe_ratio=float(i)) for i in range(1, 6)]
-        boards = group_survivors(iter(rows), top_k=2)
+        boards = group_survivors(iter(rows), top_k=2, multi_axis=False)
         _assert_byte_identical(boards, _group_survivors_reference(rows, top_k=2))
+        union_from_iter = group_survivors(iter(rows), top_k=2)
+        _assert_byte_identical(union_from_iter, group_survivors(rows, top_k=2))
+
+
+class TestMultiAxisUnion:
+    """The LANE-W1 union-admission arm (DEC-RANK-POOL-UNION-ADMIT-001)."""
+
+    def test_dd_optimal_row_outside_sharpe_topk_is_admitted(self) -> None:
+        # THE rank-1-forever regression (winning-completeness item 3): a
+        # DD-optimal / high-win-rate row whose Sharpe sits BELOW the top-K
+        # cut previously never reached the Stage-3 pool (annotation-only
+        # not_validated forever). Under the union it is admitted via the
+        # DD/preset/win-rate sources — at the SAME total cap.
+        rows = [
+            _row(
+                run_id=_rid(i),
+                sharpe_ratio=float(10 + i),
+                max_drawdown_pct=20.0,
+                win_rate=0.5,
+            )
+            for i in range(1, 6)  # five high-Sharpe, high-DD rows
+        ]
+        dd_optimal = _row(
+            run_id=_rid(99),
+            sharpe_ratio=0.8,  # dead last on Sharpe
+            max_drawdown_pct=3.0,  # best DD by far
+            win_rate=0.9,  # best win rate
+        )
+        rows.append(dd_optimal)
+        legacy = group_survivors(rows, top_k=3, multi_axis=False)
+        (legacy_board,) = legacy.values()
+        assert dd_optimal not in legacy_board  # the pre-W1 shape: never admitted
+        union = group_survivors(rows, top_k=3)
+        (union_board,) = union.values()
+        assert dd_optimal in union_board  # admitted via the DD/preset sources
+        assert len(union_board) == 3  # the cap NEVER grows
+
+    def test_frontier_source_admits_persisted_pareto_member(self) -> None:
+        # Item 1's "Stage-3 heap needs explicit frontier inclusion": a
+        # persisted ε-Pareto member that loses on EVERY quota axis is still
+        # admitted via the frontier source (pareto_member is the persisted
+        # column — the sweep's union stamped it).
+        rows = [
+            _row(
+                run_id=_rid(i),
+                sharpe_ratio=float(10 + i),
+                max_drawdown_pct=1.0 + i / 10.0,
+                win_rate=0.9,
+            )
+            for i in range(1, 7)
+        ]
+        frontier_row = _row(
+            run_id=_rid(50),
+            sharpe_ratio=0.1,  # worst on every axis...
+            max_drawdown_pct=25.0,
+            win_rate=0.1,
+            pareto_member=True,  # ...but a persisted frontier member
+        )
+        rows.append(frontier_row)
+        union = group_survivors(rows, top_k=5)
+        (board,) = union.values()
+        assert frontier_row in board
+        # An untagged store (pareto_member None — pre-W1 rows) simply has no
+        # frontier source; nothing crashes, the other sources decide.
+        legacy_rows = [r for r in rows if r.pareto_member is None]
+        boards = group_survivors(legacy_rows, top_k=5)
+        assert sum(len(b) for b in boards.values()) == 5
+
+    def test_bounded_union_matches_pure_oracle(self) -> None:
+        # The bounded 5-heap streaming arm == the pure sort-based
+        # pool_union.union_select_rows oracle, per board (the same shared
+        # round-robin law over the same total orders — membership AND order).
+        from brutex.engine.pool_union import union_select_rows
+
+        rng = random.Random(20260718)
+        rows = [
+            _row(
+                run_id=_rid(rng.randrange(1, 60)),
+                instrument=rng.choice(("NIFTY", "BANKNIFTY")),
+                sharpe_ratio=float(rng.randrange(7)),
+                max_drawdown_pct=float(rng.randrange(1, 30)),
+                win_rate=rng.randrange(1, 100) / 100.0,
+                net_pnl_paisa=i,
+                pareto_member=rng.choice((None, True, False)),
+            )
+            for i in range(80)
+        ]
+        boards = group_survivors(rows, top_k=6)
+        for key, board in boards.items():
+            pool = [
+                r
+                for r in rows
+                if (r.instrument, r.tf, r.mode) == (key.instrument, key.tf, key.mode)
+            ]
+            assert board == union_select_rows(pool, cap=6)
+
+    def test_small_board_union_is_byte_identical_to_legacy(self) -> None:
+        # A board with <= top_k rows admits EVERYTHING under either arm —
+        # the union default is byte-identical there (the common production
+        # shape until pools exceed the cap).
+        rows = [_row(run_id=_rid(i), sharpe_ratio=float(i)) for i in range(1, 5)]
+        _assert_byte_identical(
+            group_survivors(rows, top_k=10),
+            group_survivors(rows, top_k=10, multi_axis=False),
+        )

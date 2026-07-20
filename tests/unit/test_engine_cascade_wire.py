@@ -2183,7 +2183,15 @@ class TestDsrTrialStatsConsumption:
 # ── Spec building from persisted rows ─────────────────────────────────────────
 
 
-def _result_row(seed: int, *, mask: int, sharpe: float) -> ResultRow:
+def _result_row(
+    seed: int,
+    *,
+    mask: int,
+    sharpe: float,
+    max_drawdown_pct: float = 12.5,
+    win_rate: float = 0.625,
+    pareto_member: bool | None = None,
+) -> ResultRow:
     return ResultRow(
         run_id=_rid(seed),
         instrument="NIFTY",
@@ -2203,10 +2211,14 @@ def _result_row(seed: int, *, mask: int, sharpe: float) -> ResultRow:
         sortino_ratio=2.0,
         calmar_ratio=1.25,
         profit_factor=1.8,
-        win_rate=0.625,
-        max_drawdown_pct=12.5,
+        win_rate=win_rate,
+        max_drawdown_pct=max_drawdown_pct,
         avg_entry_price=Decimal("14020.50"),
         avg_exit_price=Decimal("14100.25"),
+        pareto_member=pareto_member,
+        # The store's tag-coherence law (review round 1): pareto_member=True
+        # rows must carry the "frontier" basis token.
+        selection_basis="frontier" if pareto_member is True else None,
     )
 
 
@@ -2252,6 +2264,7 @@ class TestSpecFromStoreRows:
             _result_row(2, mask=2, sharpe=1.5),
             _result_row(3, mask=3, sharpe=1.0),
         ]
+        # Legacy single-key arm (the byte-identity arm): Sharpe top-2 exactly.
         spec = cw.spec_from_store_rows(
             instrument="NIFTY",
             tf_label="1minute",
@@ -2264,9 +2277,29 @@ class TestSpecFromStoreRows:
             start_equity_paisa=10_000_000,
             rows=rows,
             top_k=2,
+            multi_axis=False,
         )
         assert spec is not None
         assert spec.winners == ((_rid(2), 2), (_rid(3), 3))
+        # LANE-W1 union DEFAULT (DEC-RANK-POOL-UNION-ADMIT-001): same top-2
+        # CAP, round-robin membership — Sharpe admits rid(2); the DEFAULT
+        # preset source (uniform non-Sharpe axes on these rows → run_id ASC)
+        # admits rid(1) — emitted in TODAY's Sharpe-desc winners order.
+        union_spec = cw.spec_from_store_rows(
+            instrument="NIFTY",
+            tf_label="1minute",
+            tf_minutes=1,
+            direction_label="bull",
+            sl_paisa=None,
+            tp_paisa=None,
+            prior_n=3,
+            proximity_bps=None,
+            start_equity_paisa=10_000_000,
+            rows=rows,
+            top_k=2,
+        )
+        assert union_spec is not None
+        assert union_spec.winners == ((_rid(2), 2), (_rid(1), 1))
 
     def test_defaults_to_prev_day_fib_anchor(self) -> None:
         spec = cw.spec_from_store_rows(
@@ -2999,3 +3032,94 @@ class TestNewReportKeysSerialised:
         verdicts = payload["verdicts"]
         assert isinstance(verdicts, list)
         assert verdicts[0]["candidate_pbo"] is None
+
+
+class TestSpecUnionAdmission:
+    """LANE-W1 multi-key cascade-pool admission (DEC-RANK-POOL-UNION-ADMIT-001)."""
+
+    def _spec(self, rows: list[ResultRow], **kwargs: object) -> cw.CascadeTupleSpec:
+        spec = cw.spec_from_store_rows(
+            instrument="NIFTY",
+            tf_label="1minute",
+            tf_minutes=1,
+            direction_label="bull",
+            sl_paisa=None,
+            tp_paisa=None,
+            prior_n=3,
+            proximity_bps=None,
+            start_equity_paisa=10_000_000,
+            rows=rows,
+            **kwargs,  # type: ignore[arg-type]
+        )
+        assert spec is not None
+        return spec
+
+    def test_dd_optimal_row_reaches_the_validation_pool(self) -> None:
+        # THE rank-1-forever regression: a DD-optimal low-Sharpe combo —
+        # crowned #1 by the DEFAULT min_dd_first display preset — was absent
+        # from the Sharpe-top-K cascade pool, so it read annotation-only
+        # `not_validated` forever (no DSR/CPCV/WFO/MC evidence). The union
+        # admits it via the DD/preset sources at the SAME total K.
+        rows = [
+            _result_row(i, mask=i, sharpe=float(10 + i), max_drawdown_pct=22.0) for i in range(1, 6)
+        ]
+        dd_optimal = _result_row(99, mask=99, sharpe=0.8, max_drawdown_pct=3.0, win_rate=0.9)
+        rows.append(dd_optimal)
+        legacy = self._spec(rows, top_k=3, multi_axis=False)
+        assert (_rid(99), 99) not in legacy.winners  # the pre-W1 shape
+        union = self._spec(rows, top_k=3)
+        assert (_rid(99), 99) in union.winners  # union-admitted
+        assert len(union.winners) == len(legacy.winners) == 3  # cap unchanged
+
+    def test_persisted_frontier_member_reaches_the_pool(self) -> None:
+        # Item 1's explicit frontier inclusion: a persisted ε-Pareto member
+        # losing on every quota axis still enters the validation pool.
+        rows = [
+            _result_row(i, mask=i, sharpe=float(10 + i), max_drawdown_pct=2.0, win_rate=0.9)
+            for i in range(1, 7)
+        ]
+        frontier = _result_row(
+            50, mask=50, sharpe=0.1, max_drawdown_pct=28.0, win_rate=0.1, pareto_member=True
+        )
+        rows.append(frontier)
+        union = self._spec(rows, top_k=5)
+        assert (_rid(50), 50) in union.winners
+
+    def test_top_k_none_is_union_inert(self) -> None:
+        # top_k=None (the stage3_wire refined-cell path) selects the WHOLE
+        # pool — the union arm never engages; byte-identical either way.
+        rows = [_result_row(1, mask=1, sharpe=0.5), _result_row(2, mask=2, sharpe=1.5)]
+        assert (
+            self._spec(rows, top_k=None).winners
+            == self._spec(rows, top_k=None, multi_axis=False).winners
+            == ((_rid(2), 2), (_rid(1), 1))
+        )
+
+    def test_pool_at_or_below_cap_is_union_inert(self) -> None:
+        rows = [_result_row(1, mask=1, sharpe=0.5), _result_row(2, mask=2, sharpe=1.5)]
+        assert (
+            self._spec(rows, top_k=5).winners == self._spec(rows, top_k=5, multi_axis=False).winners
+        )
+
+
+class TestTrialNUnchangedByPoolWidening:
+    """DSR trial-N regression pin (DEC-RANK-POOL-UNION-ADMIT-001 rail).
+
+    N is SIDECAR-based (`build_leaderboard_trials` aggregates the per-tuple
+    trial-stats sidecars written from the FULL backtested population at the
+    persist seam) — pool/persist widening must NEVER move it: the union
+    evaluates MORE candidates against the SAME N.
+    """
+
+    def test_trial_n_is_identical_across_pool_widths_and_union_arms(self, tmp_path: Path) -> None:
+        grid = _swept_tree(tmp_path)
+        baseline = cw.build_leaderboard_trials(tmp_path, grid)
+        # Build cascade specs at BOTH pool widths and BOTH admission arms —
+        # then re-aggregate: the trials records are bit-identical (the specs
+        # are not even an input to the N computation — pinned structurally
+        # by re-running the aggregation after each spec build).
+        for top_k in (1, 3):
+            cw.build_stage2_cascade_specs(tmp_path, grid, top_k=top_k)
+            assert cw.build_leaderboard_trials(tmp_path, grid) == baseline
+        (record,) = baseline
+        assert record.n_trials > 0  # anti-vacuous: a REAL backtested N

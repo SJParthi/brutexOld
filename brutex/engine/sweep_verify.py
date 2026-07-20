@@ -16,7 +16,9 @@ into three tiers; this slice ships the two bars-free tiers:
   :func:`recorded_context_from_audit`, never from memory — review condition
   2a). Re-derives every expected store path and every row's 9-field
   ``run_id``, checks mask membership/labels, and applies the killer cheap
-  check: ``rows > top_k`` under one digest is the #650 inflation signature —
+  check: ``rows > union_persist_bound(top_k)`` under one digest is the #650
+  inflation signature (LANE W1: a legitimate store holds the composite top-K
+  prefix PLUS the persist union's quota/frontier extras) —
   post-#654 the digest path always rewrites the FULL population, so an
   oversized store cannot occur legitimately. This detects the pre-#646
   inflation #654's envelope called "undetectable by the sweep" — without bars.
@@ -64,6 +66,7 @@ from brutex.engine.results_store import (
     EXIT_QUALITY_FIELDS,
     GROWTH_FIELDS,
     RECENCY_FIELDS,
+    SELECTION_FIELDS,
     VIX_FIELDS,
     ResultsStore,
     ResultsStoreError,
@@ -95,6 +98,7 @@ from brutex.engine.tuple_complete import (
 from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
 from brutex.ranking import OverfitGateConfig
+from brutex.ranking.multi_select import union_persist_bound
 from brutex.strategies.types import PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
@@ -1262,13 +1266,22 @@ def _verify_store_rows(
     except ResultsStoreError as exc:
         add("store_unreadable", "corrupt", str(exc))
         return
-    if is_grid_tuple and grid.top_k is not None and len(rows) > grid.top_k:
-        add(
-            "rows_exceed_top_k",
-            "corrupt",
-            f"{len(rows)} rows > top_k={grid.top_k} — the #650 subset-re-rank "
-            f"inflation signature (impossible legitimately, pre- AND post-#654)",
-        )
+    if is_grid_tuple and grid.top_k is not None:
+        # LANE W1 (review round 1 gate re-run): a legitimate store holds the
+        # composite top-K prefix PLUS the persist union's quota/frontier
+        # extras, so the #650 inflation signature is rows beyond the ONE
+        # union_persist_bound law — a bare `rows > top_k` would false-flag
+        # every legitimate union store as corrupt.
+        bound = union_persist_bound(grid.top_k)
+        if len(rows) > bound:
+            add(
+                "rows_exceed_top_k",
+                "corrupt",
+                f"{len(rows)} rows > the union persist bound {bound} at "
+                f"top_k={grid.top_k} (top_k + quota/frontier extras, "
+                f"DEC-RANK-QUOTA-PERSIST-1000-001) — the #650 subset-re-rank "
+                f"inflation signature (impossible legitimately, pre- AND post-#654)",
+            )
     try:
         cfg = tuple_.to_run_config(grid, roll_schedule=roll_schedule)
     except ValueError as exc:
@@ -1839,7 +1852,7 @@ def recorded_overfit_from_audit(results_root: Path) -> OverfitGateConfig | None:
 #: there widens the attribution nulling + the schema-migration strip here
 #: automatically.
 _APPENDED_NULLABLE_FIELDS: Final[frozenset[str]] = frozenset(
-    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS
+    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS + SELECTION_FIELDS
 )
 
 
@@ -1947,8 +1960,12 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     all-``None`` trio, so its rows compare fully EQUAL to an unstamped
     recount's — yet the recount's reflush writes the CURRENT schema with the
     appended-last all-null nullable columns (the trio + the strictly-later
-    growth / exit-quality / recency families such a store also predates) and
-    the bytes differ. That diff is attributable iff the ONLY schema
+    growth / exit-quality / recency families — and, post-LANE-W1, the two
+    ``SELECTION_FIELDS`` provenance columns (DEC-RANK-PARETO-PERSIST-001 /
+    DEC-RANK-QUOTA-PERSIST-1000-001), which join the SAME appended nullable
+    set: selection landed after VIX, so the genuine pre-VIX generation
+    carries neither — such a store also predates them all) and the bytes
+    differ. That diff is attributable iff the ONLY schema
     difference is exactly those missing columns: the scratch must carry the
     whole trio, the original NONE of the appended nullable columns (a
     partial presence of ANY of them is not the pre-VIX generation), and
