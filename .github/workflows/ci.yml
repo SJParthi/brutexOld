@@ -216,11 +216,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -235,7 +235,7 @@ jobs:
   # BUILD WHEELS — the ONE maturin wheel build for the whole run
   # (DEC-SWEEP-COVERAGE-SHARD-001). Previously ~10 jobs each rebuilt the
   # same 2-4 crates from source per run (minutes each, crates.io-flake
-  # exposed); now this job builds all four ONCE — behind an actions/cache
+  # exposed); now this job builds all five ONCE — behind an actions/cache
   # keyed on the crate sources, so an unchanged-Rust push restores the
   # wheels in seconds — and every consumer job downloads + pip-installs
   # them. run-smoke deliberately KEEPS its own from-source build: it
@@ -258,13 +258,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: wheelhouse
-          key: rust-wheels-v1-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**') }}
+          key: rust-wheels-v1-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-pull-state/**') }}
       - name: Install Rust toolchain (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-      - name: Build the four maturin wheels (cache miss only)
+      - name: Build the five maturin wheels (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: |
           # Belt-and-suspenders crates.io flake guard (the same 3-attempt
@@ -289,14 +289,15 @@ jobs:
           build_with_retry ./rust/trading-core
           build_with_retry ./rust/brutex-feed
           build_with_retry ./rust/brutex-strategies
+          build_with_retry ./rust/brutex-pull-state
       - name: Verify the wheels import (runs on the cache-hit arm too)
         # A corrupt/stale cache entry must fail HERE, loudly, not in a
         # dozen downstream jobs.
         run: |
           ls -l wheelhouse/
-          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 4
-          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies; print('all four kernels import OK')"
+          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 5
+          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
+          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_pull_state; print('all five kernels import OK')"
       - name: Upload wheels artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -372,11 +373,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Compute this shard's file list (deterministic partition)
         run: |
           set -euo pipefail
@@ -483,11 +484,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Strict per-module 100% coverage gate (Golden Rule #12)
         # New modules ship at 100% line + 100% branch from the start.
         # Add modules to this list as they reach 100%. Legacy modules
@@ -1964,13 +1965,16 @@ jobs:
           # crossverify tail fence, and the CLI --auto gate (settle constant +
           # Muhurat deferral + composed mid-run belt). Both ship at 100%
           # line+branch standalone from the start.
+          # DEC-RUST-PULL-STATE-001 Wave 1B: the pull_scope kernel-seam arms
+          # (flag consults + degrade paths) live in the seam suite, which MUST
+          # join this gate so the module stays 100% line+branch.
           if compgen -G "tests/unit/test_pull_scope.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py
+            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py tests/unit/test_pull_scope_rust_seam.py
           else
             echo "(brutex.dashboard.pull_scope test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_auto_pull_gate.py" > /dev/null; then
-            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py
+            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py tests/unit/test_auto_pull_gate_rust_seam.py
           else
             echo "(brutex.calendars.auto_pull_gate test file not present yet — gate inactive)"
           fi
@@ -1979,7 +1983,7 @@ jobs:
           # ticker + the once-per-day fire law). 100% line+branch standalone
           # from the start.
           if compgen -G "tests/unit/test_dashboard_auto_pull_scheduler.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.auto_pull_scheduler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_auto_pull_scheduler.py
+            pytest --cov=brutex.dashboard.auto_pull_scheduler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_auto_pull_scheduler.py tests/unit/test_dashboard_auto_pull_scheduler_rust_seam.py
           else
             echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
           fi
@@ -2322,7 +2326,7 @@ jobs:
           fi
           if compgen -G "tests/unit/test_pull_progress.py" > /dev/null; then
             # + the ETA/open-ended/add_bars honesty suite (DEC-PULL-PROGRESS-HONESTY-001)
-            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py
+            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py tests/unit/test_pull_progress_rust_seam.py
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
@@ -2674,10 +2678,27 @@ jobs:
           # last-pull OUTCOME classifier — a HALTED pull (disk-full /
           # market-hours / quota / …) must never render the clean-completion
           # green. 100% line+branch on pull_outcome.py.
+          # DEC-RUST-PULL-STATE-001 Wave 1A: the pull_outcome kernel-seam arms
+          # (flag consults + code composition + degrade paths) live in the seam
+          # suite, which MUST join this gate so the module stays 100%
+          # line+branch.
           if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py tests/unit/test_pull_outcome_rust_seam.py
           else
             echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-RUST-PULL-STATE-001: the pull-state Rust facade
+          # brutex/pull_state_rust.py — its 100% line+branch is a
+          # MULTI-FILE-suite property by construction (each wave's accessor
+          # section is exercised by that wave's OWN seam suite, stem-named for
+          # the CONSUMER module it gates), so this STATIC gate runs exactly
+          # the curated static suite enumerated below (every per-wave seam
+          # file); the discovery gate excludes the facade for the same
+          # structural reason (see COVERAGE_DISCOVERY_EXCLUDE).
+          if compgen -G "tests/unit/test_pull_state_rust.py" > /dev/null; then
+            pytest --cov=brutex.pull_state_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_state_fail_closed.py tests/unit/test_pull_outcome_rust_seam.py tests/unit/test_pull_scope_rust_seam.py tests/unit/test_auto_pull_gate_rust_seam.py tests/unit/test_pull_intent_rust_seam.py tests/unit/test_pull_progress_rust_seam.py tests/unit/test_dashboard_auto_pull_scheduler_rust_seam.py tests/unit/test_pull_census_rust_seam.py tests/unit/test_dashboard_auto_pull_rust_seam.py tests/unit/test_rate_bridge_rust_seam.py tests/unit/test_rate_bridge_cache_rust_seam.py
+          else
+            echo "(brutex.pull_state_rust test file not present yet — gate inactive)"
           fi
           # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
           # health-hub fold (nightly · backup dead-man · doctor · mutation ·
@@ -2970,11 +2991,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
@@ -3111,11 +3132,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Download shard coverage data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -3239,11 +3260,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -3312,11 +3333,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
       # this job installs `.[dev]` only (no pyarrow), so the feed parity
       # module (tests/property/test_feed_rust_parity.py) skips on its
@@ -3422,11 +3443,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3487,11 +3508,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement.
         run: |
@@ -3914,6 +3935,48 @@ jobs:
       - name: cargo test
         run: cargo test --release
 
+  rust-brutex-pull-state:
+    name: Rust (brutex-pull-state build + clippy + test)
+    # DEC-RUST-PULL-STATE-001: the pull-state DECISION kernel crate gates
+    # itself on-push — fmt/check/clippy/test + the PyO3 binding compiles,
+    # mirroring the rust-brutex-feed pattern (the PR that introduces a crate
+    # must gate that crate). Post-flip these kernels are the ONLY decision
+    # path for the pull-state modules, so the crate's cargo suites (the
+    # *_golden.rs cross-language pins, the proptest invariants and the
+    # source_digest_parity twin) must run on EVERY push — not only in the
+    # weekly mutation.yml matrix. The Python-side bit-identity proof (the
+    # frozen pull_outcome / stall goldens + the fail-closed seam suites)
+    # lives in the test (unit) + golden jobs, which install the wheel via
+    # `pip install ./rust/brutex-pull-state`.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-pull-state
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-pull-state -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --release
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python
+
   # ─────────────────────────────────────────────────────────────────
   # MAKE RUN SMOKE — cold-start direct-run path, the gate that catches
   # "100% green but the app won't start" bugs (DEC-RUN-SMOKE-GATE-001).
@@ -3958,7 +4021,7 @@ jobs:
       # operator's runtime dependency set is self-sufficient.
       - name: Install brutex[data,ui] — the make run set (NO dev)
         run: pip install -e ".[data,ui]"
-      - name: Build both Rust kernels (the make run way)
+      - name: Build the required Rust kernels (the make run way)
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry each wheel build up to
         # 3 times. POSIX sh; installs exactly the same kernels.
@@ -3978,9 +4041,10 @@ jobs:
           }
           install_with_retry ./rust/fno-math
           install_with_retry ./rust/trading-core
+          install_with_retry ./rust/brutex-pull-state
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
-          python -c "import trading_core, fno_math; print('kernels OK')"
+          python -c "import trading_core, fno_math, brutex_pull_state; print('kernels OK')"
           python -c "import brutex.indicators.fib_levels; print('fib_levels OK')"
           python -c "import brutex.engine; print('engine OK')"
       - name: CLI smoke — build_parser must not crash (cli.py:329)
@@ -4048,11 +4112,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -4125,11 +4189,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Run the full-chain rehearsal + byte-identity proof
         # -s so the measured `rehearsal.<leg>.seconds` lines land in the raw
         # log (the runtime budget stays evidence-backed on every push).
@@ -4599,11 +4663,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -5015,11 +5079,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Revert fix to merge-base + run shipped tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -5260,6 +5324,11 @@ jobs:
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
+      # DEC-RUST-PULL-STATE-001: the pull-state decision-kernel crate gate —
+      # the PR that introduces a crate must gate that crate. Post-flip these
+      # kernels are the ONLY decision path for the pull-state modules, so
+      # their cargo suites run on every push here, not only in mutation.yml.
+      - rust-brutex-pull-state
       # DEC-RUN-SMOKE-GATE-001: the cold-start boot gate (the `make run-raw`
       # dependency set — `make run` itself delegates to ./up.sh per
       # DEC-ONE-ENTRY-UNIFY-001) — the ONLY job that walks the real direct
@@ -5381,6 +5450,7 @@ jobs:
           echo "  rust-brutex-calendar:${{ needs.rust-brutex-calendar.result }}"
           echo "  rust-brutex-ops:${{ needs.rust-brutex-ops.result }}"
           echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
+          echo "  rust-pull-state:${{ needs.rust-brutex-pull-state.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
@@ -5427,6 +5497,7 @@ jobs:
             "${{ needs.rust-brutex-calendar.result }}" \
             "${{ needs.rust-brutex-ops.result }}" \
             "${{ needs.rust-brutexd.result }}" \
+            "${{ needs.rust-brutex-pull-state.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.no-dhan-guard.result }}" \

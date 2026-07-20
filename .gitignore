@@ -161,6 +161,11 @@ Cargo.lock
 # track its lockfile for reproducibility (Golden Rule #4) + the
 # security-audit Cargo.lock trigger.
 !rust/brutex-calendar/Cargo.lock
+# brutex-pull-state (the pull-state decision kernel, DEC-RUST-PULL-STATE-001
+# lane) is likewise an application extension crate: its lockfile is tracked
+# for reproducible builds (Golden Rule #4) + the security-audit Cargo.lock
+# trigger.
+!rust/brutex-pull-state/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.

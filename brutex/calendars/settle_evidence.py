@@ -116,17 +116,18 @@ STALE_EVIDENCE_AFTER_DAYS: Final[int] = 180
 #: is ~500× headroom; a planted multi-GB file reads as invalid, never whole.
 MAX_EVIDENCE_BYTES: Final[int] = 1 * 1024 * 1024
 
-#: Strict ASCII ``HH:MM`` (the auto_pull_gate ``_SETTLE_SHAPE`` twin —
-#: ``re.ASCII`` per the DEC-LAKE-STATS-MANIFEST-001 round-3 precedent).
-#: Consumed via ``fullmatch`` ONLY: under ``.match`` the ``$`` anchor matches
-#: BEFORE a single trailing newline, so ``"15:45\n"`` would validate and the
-#: raw newline would reach the ``settle_evidence.valid`` INFO + the gate
+#: Strict ASCII ``HH:MM`` (``re.ASCII`` per the DEC-LAKE-STATS-MANIFEST-001
+#: round-3 precedent). The former auto_pull_gate ``_SETTLE_SHAPE`` Python
+#: twin was DELETED at the pull-state flip — the env-tier settle token's
+#: shape law now lives in the Rust kernel (``settle_token_verdict``, the
+#: crate's byte-digit check; auto_pull_gate consults it fail-closed and
+#: composes the byte-identical ValueErrors Python-side). Consumed via
+#: ``fullmatch`` ONLY: under ``.match`` the ``$`` anchor matches BEFORE a
+#: single trailing newline, so ``"15:45\n"`` would validate and the raw
+#: newline would reach the ``settle_evidence.valid`` INFO + the gate
 #: provenance un-repr'd (refuter r1 F-R1-1 — executed repro; fullmatch
-#: refuses it). The env-tier ``_SETTLE_SHAPE`` twin stays ``.match`` with the
-#: same pattern BYTE-UNTOUCHED: its token is ``.strip()``'d pre-match, so a
-#: post-strip token can never end in a newline (the quirk is unreachable
-#: there) and the base resolver ACCEPTED ``"17:00\n"`` — converting it would
-#: churn a behavior-equivalent surface for zero safety.
+#: refuses it). The kernel's shape law has no such quirk (its token is
+#: ``.strip()``'d pre-consult, so a trailing newline never reaches it).
 _HHMM_SHAPE: Final[re.Pattern[str]] = re.compile(r"^(\d{2}):(\d{2})$", re.ASCII)
 
 #: Strict ASCII ISO calendar-day shape for ``per_day`` keys (``fullmatch``

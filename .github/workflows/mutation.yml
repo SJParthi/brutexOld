@@ -205,6 +205,11 @@ jobs:
         run: pip install -e ".[dev,data,ui]" "mutmut>=2.5,<3.0"
       - name: Install Rust toolchain (for the PyO3 wheels)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          # Pin to the repo RUST_VERSION (mirrors every other toolchain step):
+          # all five kernels are edition 2024 / rust-version 1.93.1, so the
+          # unpinned `stable` default could refuse the crates on an older runner.
+          toolchain: ${{ env.RUST_VERSION }}
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the wheel build up to 3
@@ -247,6 +252,22 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The pull-state facade pair is FAIL-CLOSED (`DEC-RUST-PULL-STATE-001`
+        # flip: the Python oracles are deleted) — without the wheel every
+        # facade test raises PullStateKernelError and the pair's mutants
+        # would falsely survive (or the baseline would be red).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: Run mutmut on critical modules
@@ -527,6 +548,7 @@ jobs:
             "brutex/data/detectors_rust.py:tests/unit/test_detectors_rust.py:" \
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
             "brutex/notifications/notify_rust.py:tests/unit/test_notify_rust.py:" \
+            "brutex/pull_state_rust.py:tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_state_fail_closed.py:" \
             "brutex/nightly/box_update.py:tests/unit/test_nightly_box_update.py:" \
             "brutex/nightly/env_preflight.py:tests/unit/test_nightly_env_preflight.py:" \
             "brutex/nightly/nightly_rust.py:tests/unit/test_nightly_rust.py:" \
@@ -1013,6 +1035,67 @@ jobs:
       # NO per-job issue step — the fan-in mutation-verdict job owns alerts.
 
   # ─────────────────────────────────────────────────────────────────
+  rust-mutation-brutex-pull-state:
+    name: "Rust mutation (cargo-mutants, brutex-pull-state)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003)
+    # — see the rust-mutation job comment for the measured rationale.
+    if: github.event_name != 'push'
+    defaults:
+      run:
+        working-directory: rust/brutex-pull-state
+    steps:
+      # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-pull-state -> target
+          shared-key: "mutation-brutex-pull-state"
+          # cache-on-failure — see the fno-math twin.
+          cache-on-failure: true
+      - name: Install cargo-mutants
+        # Version PINNED — see the fno-math twin.
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Run cargo-mutants (the 12 pull-state decision kernels, in-place)
+        run: |
+          # `DEC-RUST-PULL-STATE-001` (the flip made these kernels the ONLY
+          # decision path — mutation coverage is no longer optional):
+          # - SCOPE lives in rust/brutex-pull-state/.cargo/mutants.toml (ONE
+          #   source of truth): the 12 kernel sources; python.rs (PyResult-
+          #   alias UNVIABLE wrapper class, gated end-to-end by the Python
+          #   wheel suites) + lib.rs (const/re-export only) documented OUT
+          #   there.
+          # - --in-place: build.rs include!s ../source_digest_core.rs and the
+          #   golden tests read ../../tests/golden/fixtures/... — both
+          #   outside the crate dir, so copy-mode baselines break (the #1258
+          #   measured trading-core rationale).
+          # - default features suffice: the kernels compile without pyo3.
+          cargo mutants \
+            --in-place \
+            --test-tool cargo \
+            --no-shuffle \
+            --timeout 300 \
+            --output cargo-mutants.out \
+            -- \
+            --release
+      - name: Upload cargo-mutants report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cargo-mutants-report-brutex-pull-state
+          path: rust/brutex-pull-state/cargo-mutants.out
+          retention-days: 14
+      # NO per-job issue step — the fan-in mutation-verdict job owns alerts.
   # brutex-strategies deep mutation gate (DEC-STRATEGIES-RUST-COMBO-001) —
   # the combo byte-law kernel's cargo-mutants pass. SINGLE job (no shard
   # matrix): the scope is the two small pure cores (src/canon.rs +
@@ -1113,7 +1196,7 @@ jobs:
       contents: read
       issues: write # the fan-in filers + the scheduled-green auto-close below
     if: always()
-    needs: [python-mutation, rust-mutation, rust-mutation-trading-core, rust-mutation-brutex-feed, rust-mutation-brutex-strategies]
+    needs: [python-mutation, rust-mutation, rust-mutation-trading-core, rust-mutation-brutex-feed, rust-mutation-brutex-pull-state, rust-mutation-brutex-strategies]
     steps:
       - name: Open GitHub issue — fno-math gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result) && github.event_name != 'workflow_dispatch'
@@ -1178,6 +1261,27 @@ jobs:
               body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-FEED-RUST-CORE-001 on the DEC-MUTATION-RUNTIME-003 machinery); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });
+      - name: Open GitHub issue — brutex-pull-state gate red
+        if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-pull-state.result) && github.event_name != 'workflow_dispatch'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const outcome = '${{ needs.rust-mutation-brutex-pull-state.result }}';
+            const sha7 = context.sha.substring(0, 7);
+            const title = `cargo-mutants: mutation gate red in brutex-pull-state on ${sha7}`;
+            const cause = outcome === 'cancelled'
+              ? 'The job hit the 120-minute timeout (conclusion cancelled). This is a RUNTIME/budget regression — NOT evidence of surviving mutants. Check whether the mutant count or per-mutant build cost grew.'
+              : 'The job failed: surviving (MISSED) mutants, per-mutant --timeout 300 timeouts, or a baseline/tooling break (cargo-mutants exit 4 = the BASELINE failed — a config/toolchain break, not survivors). The job log + report artifact distinguish them.';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'bug,mutation,rust',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo, title,
+              body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (the pull-state lane's `+"`DEC-RUST-PULL-STATE-001`"+` on the DEC-MUTATION-RUNTIME-003 machinery; the kernels are the ONLY decision path post-flip); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
+              labels: ['bug', 'mutation', 'rust', 'critical'],
+            });
       - name: Open GitHub issue — brutex-strategies gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-strategies.result) && github.event_name != 'workflow_dispatch'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
@@ -1206,6 +1310,7 @@ jobs:
           && needs.rust-mutation.result == 'success'
           && needs.rust-mutation-trading-core.result == 'success'
           && needs.rust-mutation-brutex-feed.result == 'success'
+          && needs.rust-mutation-brutex-pull-state.result == 'success'
           && needs.rust-mutation-brutex-strategies.result == 'success'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
@@ -1246,7 +1351,7 @@ jobs:
               core.info(`closed #${issue.number} (${m[1]})`);
             }
       - name: Fail on any red or cancelled gate
-        # On a push run the two Rust jobs are `skipped` — skipped does NOT
+        # On a push run the Rust matrix jobs are `skipped` — skipped does NOT
         # fail the verdict (only failure/cancelled do), so a green python
         # push run yields a green workflow.
         if: >-
@@ -1254,11 +1359,13 @@ jobs:
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-trading-core.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-feed.result)
+          || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-pull-state.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-strategies.result)
         run: |
           echo "python:            ${{ needs.python-mutation.result }}"
           echo "fno-math:          ${{ needs.rust-mutation.result }}"
           echo "trading-core:      ${{ needs.rust-mutation-trading-core.result }}"
           echo "brutex-feed:       ${{ needs.rust-mutation-brutex-feed.result }}"
+          echo "brutex-pull-state: ${{ needs.rust-mutation-brutex-pull-state.result }}"
           echo "brutex-strategies: ${{ needs.rust-mutation-brutex-strategies.result }}"
           exit 1

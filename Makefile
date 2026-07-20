@@ -103,6 +103,11 @@ run-raw: preflight
 		{ cd rust/brutex-feed && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
 			|| echo "==> brutex_feed build failed — OPTIONAL kernel (BRUTEX_FEED_RUST is default-OFF; the feed degrades to the Python oracle)"; \
 	}
+	@$(VPY) -c "import brutex_pull_state" 2>/dev/null || { \
+		echo "==> brutex_pull_state kernel not importable — building it (REQUIRED; the pull-state decision plane is Rust-only and fail-closed)"; \
+		$(VPIP) install maturin; \
+		cd rust/brutex-pull-state && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
+	}
 	$(VPY) -m brutex run
 
 fmt:
