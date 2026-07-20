@@ -150,7 +150,7 @@ VOCAB_BITS: int = 74
 """Current condition vocabulary size (the dense bit count from
 ``rust/trading-core/conditions.toml`` / ``brutex.vocabulary.bits.TOTAL_CONDITIONS``).
 DEC-PLUGIN-001 / DEC-PLUGIN-002 govern add/remove (grow-only). 66 -> 74 at
-DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935): the five express bits 69-73
+DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205): the five express bits 69-73
 plus the reserved gap placeholders 66-68 (declared, unimplemented)."""
 
 MAX_VOCAB_BITS: int = 128

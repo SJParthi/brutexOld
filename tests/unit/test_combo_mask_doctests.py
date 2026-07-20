@@ -28,7 +28,7 @@ def test_count_combos_examples_match_the_74_vocab() -> None:
     # vocabulary size so a future vocab change forces BOTH updates together.
     from brutex.engine.combo_mask import VOCAB_BITS, count_combos
 
-    # 66 -> 74 at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935).
+    # 66 -> 74 at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205).
     assert VOCAB_BITS == 74
     assert count_combos(1) == 74
     assert count_combos(2) == 2701

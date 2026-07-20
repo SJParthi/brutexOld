@@ -479,7 +479,7 @@ class TestBuildBarBitsSourceSpecificity:
         bars = _spike_bars()
         base = build_bar_bits(bars)
         # VWAP bits 52/53 are TOMBSTONED (DEC-VOCAB-66-RESHAPE-IMPL-001,
-        # MIGRATION.md #1804 — the VwapState math was deleted from the shared
+        # MIGRATION.md #2200 — the VwapState math was deleted from the shared
         # trading-core crate, the positions are held forever and provably
         # never fire), so a non-default ``vwap_source`` is carried but INERT:
         # bar_bits are EQUAL, never flipped. Retiring the vwap_source axis

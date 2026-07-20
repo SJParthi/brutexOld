@@ -332,7 +332,7 @@ class TestKernelFfiContract:
 
     def test_evaluator_abi_is_19_post_express(self) -> None:
         # CONSCIOUS pin flip (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md
-        # #1935): the evaluate_with_levels fib_levels ABI grew 15 -> 19 —
+        # #2205): the evaluate_with_levels fib_levels ABI grew 15 -> 19 —
         # bull23/bull78/up424/dn424 APPENDED last so every pre-existing slot
         # keeps its meaning (the prefix pin below).  FIB_LEVELS_LEN stays
         # DISTINCT from FIB_COMPUTE_LIST_LEN (both 19, different slot sets —

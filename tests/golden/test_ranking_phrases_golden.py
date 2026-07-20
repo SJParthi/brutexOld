@@ -33,7 +33,7 @@ from brutex.ranking.phrases import PHRASE_TABLE, reason_for_mask
 # (bits 66-68) were APPENDED after the ST rows — pre-existing rows
 # byte-identical. Pre-gap (ST-era) digest:
 # b4d8249ad59ef0f02d0355f5250ceb03bb8d58ee9f6cbdcbe549bfd27258b746.
-# RE-LOCKED again at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935, the
+# RE-LOCKED again at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205, the
 # fib-template express woven at the train fold): the 5 express rows —
 # bull-236/786 retracements, the two-sided 424 extension, near-swing
 # high/low (bits 69-73) — were APPENDED after the gap rows; the member's 3

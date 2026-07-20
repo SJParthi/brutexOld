@@ -2,7 +2,7 @@
 
 Implements the 5-stage funnel from `docs/TRACK1_BACKTEST_SPEC.md`:
 
-  Stage 1A — precompute the 64 active (of 66 declared) atomic conditions per bar per (instr × TF)
+  Stage 1A — precompute the 74 active (of 74 declared) atomic conditions per bar per (instr × TF)
   Stage 1B — coarse Sharpe filter + drop bottom 50%
   Stage 2  — full backtest on survivors (~33B trials)
   Stage 2.5 — Bayesian adaptive early-stop

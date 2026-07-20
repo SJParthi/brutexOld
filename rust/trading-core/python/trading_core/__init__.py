@@ -40,12 +40,15 @@ wheel is built by maturin and installed in every CI job that imports
   error is a column-length mismatch (``ValueError``). Consumed by the
   default-OFF ``BRUTEX_GREEKS_RUST_BATCH`` enrich seam via
   ``brutex.options.greeks.compute_greeks_batch``.
-* ``MarketStructureState`` — the stateful, look-ahead-clean BOS/CHoCH detector
-  BruteX's ``stage1a`` engine drives per bar so the per-bar compute runs in Rust
-  (the bit-identical backtest==live path; ``DEC-NIFTY-BOS-CHOCH-001``). The
-  former ``VwapState`` twin was DELETED with the bits 52-53 tombstone (the
-  VWAP/volume wipe — the spot-only engine has no traded volume); the 0.4.0
-  shim REFUSES a stale wheel that still exposes it (see below).
+* ``VwapState`` / ``MarketStructureState`` — the stateful, look-ahead-clean
+  session-anchored VWAP + BOS/CHoCH detectors BruteX's ``stage1a`` engine drives
+  per bar so the per-bar compute runs in Rust (the bit-identical
+  backtest==live path; ``DEC-STAGE1A-WIRE-VWAP-BOS-001`` / ``DEC-NIFTY-BOS-CHOCH-001``).
+  ``VwapState`` was deleted by the 0.4.0 vocabulary reshape's VWAP tombstone
+  and is RESTORED — bits 52/53 retained, evaluate-with-volume /
+  abstain-without — per the operator ruling ``DEC-VOCAB-VWAP-RETAIN-001``
+  (MIGRATION.md #2206); the 0.6.0 shim REFUSES a wipe-era wheel on the
+  missing symbol (the presence handshake below).
 * ``SupertrendState`` — the stateful SuperTrend (ATR-10 Wilder, factor 3, hl2)
   line in the exact ×2-scaled integer-paisa domain (bits 64-65 — the vocab-66
   PR-B implemented-flip). ``update(high, low, close)`` returns the value the
@@ -121,6 +124,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "SPEC_SCHEMA_VERSION",
     "SupertrendState",
     "TOTAL_CONDITIONS",
+    "VwapState",
     "__version__",
     "compute_ema",
     "compute_fib_levels",
@@ -173,27 +177,15 @@ def _assert_compiled_surface(
 _compiled = importlib.import_module("._trading_core", __name__)
 _assert_compiled_surface(_compiled)
 
-# Version-SENSITIVE staleness teeth (the 0.5.0 SuperTrend flip): a pre-0.5.0
-# wheel misses the ``SupertrendState`` symbol, so ``_assert_compiled_surface``
-# above already refuses it with the actionable rebuild message — the ADDITION
-# side of this reshape needs no extra check beyond the surface list.
-# Version-SENSITIVE staleness teeth (the 0.4.0 vocabulary reshape):
-# ``_assert_compiled_surface`` above already refuses a stale 0.3.x wheel on
-# its missing ``NARROW_CPR_WIDTH_BPS`` symbol, so this check is defensive
-# belt-and-braces — a second, DELETION-side handshake (the surface check is
-# presence-only) that names the reshape explicitly when a wheel still
-# exposes the deleted ``VwapState``.
-if hasattr(_compiled, "VwapState"):
-    raise ImportError(
-        "trading_core: the installed compiled wheel "
-        f"(trading_core._trading_core at {getattr(_compiled, '__file__', '<unknown location>')}) "
-        "is STALE — it still exposes the DELETED VwapState (removed with the "
-        "bits 52-53 VWAP tombstone in crate 0.4.0), so its evaluate ABIs "
-        "predate the reshape. Rebuild + reinstall the wheel from the current "
-        "source: run `maturin develop --release` inside rust/trading-core "
-        "(with the project venv active)."
-    )
-
+# Version-SENSITIVE staleness teeth (the 0.6.0 vocab-train reconcile): the
+# VWAP retention (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206) restored the
+# ``VwapState`` pyclass the 0.4.0 reshape had deleted, and the train grew the
+# vocabulary through the SuperTrend flip / gap-midpoint / fib-express members
+# — so a wipe-era (0.4.x/0.5.x) wheel misses ``VwapState`` and/or
+# ``compute_gap_mid`` and ``_assert_compiled_surface`` above refuses it with
+# the actionable rebuild message. The former 0.4.0 DELETION-side handshake
+# (refuse a wheel that still EXPOSES ``VwapState``) is REMOVED with the
+# retention — the presence surface list is the whole handshake again.
 # The freshness handshake above MUST run before this re-export so a stale
 # wheel raises the actionable message, not a bare from-import failure.
 from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
@@ -210,6 +202,7 @@ from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     TOTAL_CONDITIONS,
     MarketStructureState,
     SupertrendState,
+    VwapState,
     __version__,
     compute_ema,
     compute_fib_levels,
@@ -263,6 +256,7 @@ __all__ = [
     "TOTAL_CONDITIONS",
     "MarketStructureState",
     "SupertrendState",
+    "VwapState",
     "__version__",
     "compute_ema",
     "compute_fib_levels",

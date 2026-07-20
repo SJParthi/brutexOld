@@ -162,7 +162,7 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # (test_engine_combo_mask.py + test_combo_mask_doctests.py) structurally
         # top out below 100% STANDALONE — the SAME multi-file-suite mismatch as
         # stage1a.py above. First discovered when DEC-FIB-TEMPLATE-EXPRESS-001
-        # (MIGRATION.md #1935) touched the module (VOCAB_BITS 66 -> 74); the
+        # (MIGRATION.md #2205) touched the module (VOCAB_BITS 66 -> 74); the
         # sub-100 stem readout PRE-DATES that change (measured at the merge
         # base too). The real gates: the static engine gate + the
         # whole-package --cov-fail-under=100 floor.

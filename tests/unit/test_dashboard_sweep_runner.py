@@ -192,7 +192,7 @@ def test_k_bound_is_the_implemented_condition_count() -> None:
     IMPLEMENTED bit — 72 on the 74-declared layout: only the tombstoned VWAP
     pair 52/53 is out — the vocab-66 SuperTrend implemented-flip made 64/65
     live, DEC-GAP-MIDPOINT-CONDITIONS-001 implemented the gap trio 66-68 and
-    DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935) implemented the five
+    DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205) implemented the five
     express bits 69-73 — so a ``k`` above 72 can never form a combo
     (``C(72, 73) = 0`` — an empty-grid illusion, not a sweep). Pinned against
     ``IMPLEMENTED_MASK`` so vocab growth moves the bound automatically

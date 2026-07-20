@@ -20,7 +20,7 @@ via ``build_app`` + ``TestClient`` and pins:
 * one-shot failures route through the BXUI errorCard with Retry and
   "Loading…" is never a terminal element state (F-M4);
 * the ticker strip is on all three pages (R36 "always visible");
-* stale "52-condition" display copy is gone from EVERY template (66 declared / 64 active now);
+* stale "52-condition" display copy is gone from EVERY template (74 declared / 74 active now);
 * the hostile fixture's strings survive ONLY as JSON data through the routes
   and the new templates carry ZERO string-to-DOM assignment sinks (F-M2).
 
@@ -826,7 +826,7 @@ class TestFailureLaw:
 
 
 # ---------------------------------------------------------------------------
-# Stale copy sweep: "52-condition" → the 66-declared / 64-active wording
+# Stale copy sweep: "52-condition" → the 74-declared / 74-active wording
 # ---------------------------------------------------------------------------
 
 
@@ -837,20 +837,21 @@ class TestVocabularyCopy:
             assert "52-condition" not in text, path.name
             assert "52 condition" not in text, path.name
 
-    def test_welcome_says_66_declared_64_active_u128(self) -> None:
-        # The honest wording (TOMB-05 + the DEC-SUPERTREND-CONDITIONS-001
-        # implemented-flip): 66 DECLARED bit positions, 64 ACTIVE — never a
-        # bare count that reads dead bits as live, never a stale 62 that
-        # reads the LIVE SuperTrend pair as declared-only.
+    def test_welcome_says_74_declared_74_active_u128(self) -> None:
+        # The honest wording (the vocab-train finish — the SuperTrend flip
+        # #2203, gap-midpoint #2204, fib-express #2205 growth to 74 and the
+        # VWAP retention DEC-VOCAB-VWAP-RETAIN-001 #2206): 74 DECLARED bit
+        # positions, 74 ACTIVE — never a bare count that reads dead bits as
+        # live, never a stale 64/66 that predates the train.
         html = _template("welcome.html")
-        assert "66-condition" in html
-        assert "64 active" in html
+        assert "74-condition" in html
+        assert "74 active" in html
+        assert "64 active" not in html
         assert "62 active" not in html
+        assert "66-condition" not in html
         assert "60-condition" not in html
         assert "u128" in html
         assert "u64" not in html
-        # The retired VWAP pair must not be advertised as an evaluated family.
-        assert "Fibonacci + VWAP" not in html
 
 
 # ---------------------------------------------------------------------------

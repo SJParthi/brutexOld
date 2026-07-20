@@ -254,7 +254,7 @@ class TestDiscoverTouchedModules:
         #     stem files (test_engine_combo_mask.py + test_combo_mask_doctests.py
         #     top out below 100% standalone — measured at the merge base too);
         #     100.00% under the static whole-engine gate + the whole-package floor
-        #     (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 — first discovered
+        #     (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #2205 — first discovered
         #     when the express change touched VOCAB_BITS).
         # Keep it tiny + justified.
         assert (

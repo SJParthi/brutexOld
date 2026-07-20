@@ -61,7 +61,7 @@ def test_implemented_mask_exceeds_the_sign_bit_at_import() -> None:
     # get here; the mask itself now spans past bit 63's value.
     assert IMPLEMENTED_MASK > 2**63
     assert (IMPLEMENTED_MASK >> 63) & 1 == 1
-    # 69 -> 74 at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935): the
+    # 69 -> 74 at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205): the
     # IMPLEMENTED mask occupies bits 64-73 of the second u64 limb (SuperTrend
     # 64/65 live + the gap trio 66-68 + the express bits 69-73).
     assert TOTAL_CONDITIONS == 74

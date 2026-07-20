@@ -64,7 +64,7 @@ def test_default_length_is_the_72_active_bits() -> None:
     (The pre-reshape dense-``IMPLEMENTED_MASK`` era swept all 60; the 60→66
     reshape swept 62; the vocab-66 SuperTrend implemented-flip made it 64;
     DEC-GAP-MIDPOINT-CONDITIONS-001 appended the implemented gap trio at
-    bits 66-68 — 67; and DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935)
+    bits 66-68 — 67; and DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205)
     appended the five implemented express bits 69-73 — C(72, k) now. Only
     the tombstones (52/53) are excluded.)
     """

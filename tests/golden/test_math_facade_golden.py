@@ -69,6 +69,11 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         # joined trading_core.__all__; a deliberate, reviewed surface change.
         "SupertrendState",
         "TOTAL_CONDITIONS",
+        # The VWAP retention (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206;
+        # crate 0.6.0) — the Group-10 state RESTORED to trading_core.__all__;
+        # a deliberate, reviewed surface change (the 0.4.0 reshape's removal
+        # reversed).
+        "VwapState",
         "compute_ema",
         "compute_fib_levels",
         "compute_gap_mid",

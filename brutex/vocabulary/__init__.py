@@ -1,10 +1,11 @@
-"""The 66-declared (64-active) atomic-condition vocabulary.
+"""The 74-declared (74-active) atomic-condition vocabulary.
 
 Per `docs/TRACK1_VOCABULARY.md` (grown 52 → 60 by DEC-VOCAB-U128-CODEGEN-001 /
 ADR-0012 PR-1):
-- 66 declared boolean conditions packed into a u128 bitmask (bits 0..65;
-  64 ACTIVE — only the VWAP bits 52/53 are RETIRED tombstones; the SuperTrend
-  bits 64/65 are LIVE since DEC-SUPERTREND-CONDITIONS-001)
+- 74 declared boolean conditions packed into a u128 bitmask (bits 0..73;
+  74 ACTIVE — the VWAP bits 52/53 are RETAINED per DEC-VOCAB-VWAP-RETAIN-001
+  (evaluate with volume, abstain without); the SuperTrend bits 64/65 are LIVE
+  since DEC-SUPERTREND-CONDITIONS-001)
 - 14 indicator groups (EMA, Pivot, PDH/PDL, Fib, Candle, Prior, DayStructure,
   TimeOfDay, DayType, VWAP Position (retired), Pivot Proximity Extended,
   Market Structure, Central Pivot Range, Supertrend — `bits.GROUP_RANGES` is
@@ -20,7 +21,7 @@ Same code path, same bit semantics, bit-identical output.
 
 ## Modules
 
-- `bits` — bit-position constants for each of the 66 declared conditions (64 active)
+- `bits` — bit-position constants for each of the 74 declared conditions (74 active)
 - `conflicts` — conflict pairs (pruned at strategy generation)
 - `evaluator` — `evaluate_atoms(snapshot, params) -> u128` per bar
 - `snapshot` — `IndicatorSnapshot` input dataclass
@@ -39,7 +40,7 @@ Each `evaluate_atoms()` call performs:
 
 Operator decree 2026-05-16: COMMON · DYNAMIC · SCALABLE · AUTOMATED.
 This module satisfies all 5 (DEC-SHARED-CORE-001 #441 — the condition
-logic (52 conditions then, 66 declared / 64 active now) lives ONCE, in the Rust `trading-core` crate, which BruteX
+logic (52 conditions then, 74 declared / 74 active now) lives ONCE, in the Rust `trading-core` crate, which BruteX
 reaches via the `trading_core` PyO3 wheel and TickVault links natively):
 - COMMON: the *same compiled core* serves backtest + live (not just an
   identical class — literally one Rust implementation, bit-identical)

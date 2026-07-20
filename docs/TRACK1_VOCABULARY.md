@@ -3,20 +3,26 @@
 > **Status:** Locked 2026-05-15. Companion to `TRACK1_BACKTEST_SPEC.md §8`.
 >
 > **Grown since lock (the grow-only law — bits 0-51 below are UNCHANGED,
-> never renumbered):** the LIVE vocabulary is **69 declared conditions
-> (65 ACTIVE) on a u128 mask**, governed by the single-source-of-truth
+> never renumbered):** the LIVE vocabulary is **74 declared conditions
+> (74 ACTIVE) on a u128 mask**, governed by the single-source-of-truth
 > manifest `rust/trading-core/conditions.toml` → codegen
 > (`scripts/codegen_vocab.py` emits `brutex/vocabulary/bits.py` +
 > `rust/trading-core/src/bits.rs`; DEC-VOCAB-U128-CODEGEN-001,
 > MIGRATION.md #1010). Post-lock groups: **Group 10 — VWAP Position**
-> (bits 52-53, DEC-NIFTY-INDICATORS-001 #1011 — RETIRED tombstones since
-> the 60→66 reshape, DEC-VOCAB-66-RESHAPE-IMPL-001 #1804) · **Group 11 —
+> (bits 52-53, DEC-NIFTY-INDICATORS-001 #1011 — tombstoned by the 60→66
+> reshape #2200, RETAINED + ACTIVE again per the operator ruling
+> DEC-VOCAB-VWAP-RETAIN-001 #2206: evaluate when volume is available,
+> abstain when none) · **Group 11 —
 > Pivot Proximity Extended** (bits 54-55, #1011) · **Group 12 —
 > Market Structure** (bits 56-59, DEC-NIFTY-BOS-CHOCH-001, MIGRATION.md
-> #1012) · **Group 13 — Central Pivot Range** (bits 60-63, #1804-#1805)
-> · **Group 14 — Supertrend** (bits 64-65, LAYOUT-ONLY, #1806) ·
-> **Group 15 — Gap Midpoint** (bits 66-68,
-> DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901) — see §16. The
+> #1012) · **Group 13 — Central Pivot Range** (bits 60-63, #2200-#2201)
+> · **Group 14 — Supertrend** (bits 64-65, LIVE since
+> DEC-SUPERTREND-CONDITIONS-001 #2203 — the #2202 layout-only reservation
+> implemented) · **Group 15 — Gap Midpoint** (bits 66-68,
+> DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #2204) · **Group 16 —
+> Fibonacci Extended** (bits 69-71) + **Group 17 — Swing Proximity**
+> (bits 72-73, both DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #2205)
+> — see §16. The
 > u64 / 52-bit / "bits 52-63 reserved" arithmetic in the locked body
 > below is point-in-time history, kept verbatim; the manifest is the
 > live layout authority.
@@ -326,18 +332,18 @@ The manifest `rust/trading-core/conditions.toml` is the single source
 of truth (codegen → `src/bits.rs` + `brutex/vocabulary/bits.py`; the
 mask is **u128** since DEC-VOCAB-U128-CODEGEN-001); the evaluator's
 boolean branches stay hand-written. The declared width is **74 bits**
-since **DEC-FIB-TEMPLATE-EXPRESS-001** (MIGRATION.md #1935).
+since **DEC-FIB-TEMPLATE-EXPRESS-001** (MIGRATION.md #2205).
 
 | Group | Bits | Conditions | Decision |
 |---|---|---|---|
-| 10 — VWAP Position | 52-53 | `close_above_vwap`, `close_below_vwap` — **RETIRED tombstones** since the 60→66 reshape (`reserved = true`; the VWAP/volume wipe — positions held forever, evaluator emits 0) | DEC-NIFTY-INDICATORS-001 #1011; tombstoned by DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804 |
+| 10 — VWAP Position | 52-53 | `close_above_vwap`, `close_below_vwap` — **RETAINED + ACTIVE** (the 60→66 reshape's tombstone REVERSED by the operator ruling: evaluated when traded volume is available, ABSTAINING — both bits clear — when none is provided; index volume == 0 by construction) | DEC-NIFTY-INDICATORS-001 #1011; tombstoned by DEC-VOCAB-66-RESHAPE-IMPL-001 #2200, retained by DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206 |
 | 11 — Pivot Proximity Extended | 54-55 | `near_pivot_r5`, `near_pivot_s5` | DEC-NIFTY-INDICATORS-001, MIGRATION.md #1011 |
 | 12 — Market Structure | 56-59 | `bos_bullish`, `bos_bearish`, `choch_bullish`, `choch_bearish` (fractal swing state machine, confirmed k bars later) | DEC-NIFTY-BOS-CHOCH-001, MIGRATION.md #1012 |
-| 13 — Central Pivot Range | 60-63 | `above_cpr_tc`, `below_cpr_bc`, `inside_cpr`, `narrow_cpr_day` | DEC-CPR-CONDITIONS-001 / DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804-#1805 |
-| 14 — Supertrend | 64-65 | `close_above_supertrend`, `close_below_supertrend` — declared LAYOUT-ONLY (`implemented = false`; math in a later PR) | DEC-SUPERTREND-LAYOUT-001, MIGRATION.md #1806 |
-| 15 — Gap Midpoint | 66-68 | `close_above_gap_mid`, `close_below_gap_mid`, `near_gap_mid` | DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 |
-| 16 — Fibonacci Extended | 69-71 | `near_fib_bull_236`, `near_fib_bull_786`, `near_fib_424` | DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 |
-| 17 — Swing Proximity | 72-73 | `near_swing_high`, `near_swing_low` | DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 |
+| 13 — Central Pivot Range | 60-63 | `above_cpr_tc`, `below_cpr_bc`, `inside_cpr`, `narrow_cpr_day` | DEC-CPR-CONDITIONS-001 / DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #2200-#2201 |
+| 14 — Supertrend | 64-65 | `close_above_supertrend`, `close_below_supertrend` — LIVE (ATR-10 Wilder, factor 3, hl2, Pine-v6 parity in ×2-scaled integer paisa; 9-bar warm-up `None` abstains, strict-inequality flip) | DEC-SUPERTREND-LAYOUT-001 #2202 (layout); implemented by DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #2203 |
+| 15 — Gap Midpoint | 66-68 | `close_above_gap_mid`, `close_below_gap_mid`, `near_gap_mid` | DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #2204 |
+| 16 — Fibonacci Extended | 69-71 | `near_fib_bull_236`, `near_fib_bull_786`, `near_fib_424` | DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #2205 |
+| 17 — Swing Proximity | 72-73 | `near_swing_high`, `near_swing_low` | DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #2205 |
 
 ### Group 15 — Gap Midpoint (bits 66-68), the per-TF session-edge level
 
@@ -385,7 +391,7 @@ Semantics (the binding laws, each test-pinned):
 ### Groups 16-17 — Fibonacci Extended + Swing Proximity (bits 69-73), the fib-template express
 
 Five conditions added by **DEC-FIB-TEMPLATE-EXPRESS-001** (MIGRATION.md
-#1935) on top of the live Gap Midpoint group (the member's reserved
+#2205) on top of the live Gap Midpoint group (the member's reserved
 `placeholder_gap_66..68` rows were dropped verbatim at the re-stack onto
 the gap branch, per that DEC's own re-stack obligation — bits 66-68 are
 the REAL gap conditions above, never placeholders):

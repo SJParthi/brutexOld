@@ -161,7 +161,7 @@ def has_conflict(mask: int) -> bool:
     """Return True if `mask` contains any conflict pair.
 
     Args:
-        mask: u128 strategy mask (``TOTAL_CONDITIONS`` = 69 declared bits).
+        mask: u128 strategy mask (``TOTAL_CONDITIONS`` = 74 declared bits).
 
     Returns:
         True if mask has any conflict pair (i.e., the strategy is

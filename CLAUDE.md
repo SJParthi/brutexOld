@@ -18,20 +18,44 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 —
+_Last updated: 2026-07-20 (VOCAB-TRAIN merge vehicle, branch
+`integration/train-vocab` — the fold of the FOUR vocabulary member PRs as ONE
+train off main tip 2bf9235ca, in binding order: **#1574**
+(DEC-VOCAB-66-RESHAPE-IMPL-001 #2200 + DEC-CPR-CONDITIONS-001 #2201 +
+DEC-SUPERTREND-LAYOUT-001 #2202) → **#1636** (DEC-SUPERTREND-CONDITIONS-001
+#2203) → **#1622** (DEC-GAP-MIDPOINT-CONDITIONS-001 #2204) → **#1632**
+(DEC-FIB-TEMPLATE-EXPRESS-001 #2205) — PLUS the operator VWAP-retention
+ruling (DEC-VOCAB-VWAP-RETAIN-001 #2206, event 10f5522e — the vocab-66
+VWAP/volume wipe REVERSED: bits 52/53 retained, evaluate-with-volume /
+abstain-without) and the scope/consent record
+(DEC-VOCAB-DESIGN-CONTRACT-74-001 #2207). FINAL VOCABULARY **74 TOTAL / 74
+ACTIVE** on the u128 mask (RETIRED_MASK 0; CONFLICT_PAIRS 31); crate/wheel →
+0.6.0 (ONE virgin indicator_version re-key window for the whole train); the
+six member ledger rows renumbered into the census-CONFIRMED band #2200–#2249
+(#1804→#2200 · #1805→#2201 · #1806→#2202 · #1807→#2203 · #1901→#2204 ·
+#1935→#2205 — chains in-entry per DEC-LEDGER-RENUMBER-001); TickVault
+lockstep REQUIRED at adoption per DEC-SHARED-CORE-001 (pin >= 0.6.0;
+appended-last FFI growth ST → gap → swing with the vwap arg back at its
+historical slot; per-member obligations in #2200–#2206); fixture/goldens
+regen = the train's NEXT (Regen) phase. ENGINE VOCABULARY GROWN 60→74 by
+operator consent (#2207) — NIFTY/BANKNIFTY/SENSEX spot scope +
+rate/lake/schema untouched. This header carries pointers, never the story;
+each member's full record lives in its §1 Active-branch blurb + its
+MIGRATION.md entry (#2200–#2207).)
+Earlier: 2026-07-17 (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #2205 —
 the fib-template EXPRESS: five new vocabulary bits 69-73 (bullish 23.6/78.6
 retracements · the two-sided 424% extension · near-swing high/low) on the u128
 mask, TOTAL_CONDITIONS 66→74 with the reserved gap placeholders 66-68 (dropped
-at the re-stack onto the #1901 gap branch), crate 0.4.0→0.4.1 (new runs re-key;
+at the re-stack onto the #2204 gap branch), crate 0.4.0→0.4.1 (new runs re-key;
 the frozen sweep goldens' hardcoded "ind-v1" context keeps them stable —
 verified UNMODIFIED), the NEW default-omitted `swing_proximity_bps` identity
 knob (absent ⟺ 10 at every emission site via the ONE `swing_params_fragment`),
 and the KEEP-GOLDEN extension-constant ruling with the LOUD 424@5bps corner.
 VOCAB-CLASS DRAFT HOLD — operator review required. ENGINE surface UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
-blurb + MIGRATION.md #1935 — this header carries the pointer, never the
+blurb + MIGRATION.md #2205 — this header carries the pointer, never the
 story.)
-Earlier: 2026-07-17 (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 —
+Earlier: 2026-07-17 (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #2204 —
 the sweep vocabulary GROWS 66 → 69: Group 15 "Gap Midpoint" (bits 66-68
 `close_above_gap_mid` / `close_below_gap_mid` / `near_gap_mid`) — the per-TF
 SESSION-EDGE gap-midpoint level `(X1+X2)/2` (X1 = the prior session's LAST
@@ -43,29 +67,29 @@ D11 reset; single-source math in the shared crate
 appended-last WITH defaults on all three evaluator faces + the Rust Stage-1A
 batch twin in lockstep; crate 0.4.0 → 0.4.1 so every NEW run re-keys via
 indicator_version. ENGINE VOCABULARY GROWN 66→69 (additive on top of the
-#1804 reshape — every EXISTING mask's results BYTE-IDENTICAL, the frozen
+#2200 reshape — every EXISTING mask's results BYTE-IDENTICAL, the frozen
 sweep-run goldens measured unchanged; bits 66-68 are the FIRST IMPLEMENTED
 bits ≥ 64, so this DEC lands AFTER PR #1574 AND the vocab-66 track's PR-B,
 which owns the u128-regime machinery); NIFTY/BANKNIFTY/SENSEX scope +
 rate/lake/schema untouched; TickVault coordination flagged per
 DEC-SHARED-CORE-001. The per-item record lives in the §1 Active-branch blurb
-+ MIGRATION.md #1901 — this header carries the pointer, never the story.)
-Earlier: 2026-07-17 (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #1807 —
++ MIGRATION.md #2204 — this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #2203 —
 the SuperTrend conditions go LIVE on bits 64/65: the vocab-66 layout's reserved
 pair flips implemented (ATR-10/factor-3 Pine-v6-parity integer state in the
 shared trading-core crate; ×2-scaled paisa, 9 warm-up Nones, strict-inequality
 flip, NO session resets, D11 roll reset), ONE appended `supertrend_x2_paisa`
 Option<i64> on all four FFI faces (ABI-ADDITIVE), the (64,65) conflict pair,
 crate/wheel 0.4.0 → 0.5.0 (the SECOND indicator_version re-key — one deploy
-window with #1804's, no production sweep between), active vocabulary 62 → 64
+window with #2200's, no production sweep between), active vocabulary 62 → 64
 of 66 declared (default grid C(62,k)→C(64,k), k=5: 6,471,002→7,624,512); warm
 production bar_bits genuinely exceed u64 (the u128 regime is LIVE — retirement
 pins + the capability-gated ≥64 Rust-first dispatch pin for the enum-kernel
 lane); Apriori-ON over a 64/65-carrying pool refuses gracefully per tuple (the
 documented interim law). ENGINE surface UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
 this header carries the pointer, never the story — the full record lives in
-the §1 Active-branch blurb + MIGRATION.md #1807.)
-Earlier: 2026-07-15 (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804 —
+the §1 Active-branch blurb + MIGRATION.md #2203.)
+Earlier: 2026-07-15 (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #2200 —
 the condition vocabulary reshapes 60 → 66 declared / 62 ACTIVE, implementing the
 `DEC-VOCAB-VWAP-VOLUME-WIPE-001` wipe ruling (decision PR in flight): the dead
 session-VWAP bits 52/53 are TOMBSTONED (positions held forever, math deleted
@@ -79,7 +103,7 @@ replay gates on the recorded vocabulary identity (fail-closed, no escape — the
 replay overwrites); every fixture regenerated under the frozen-input migration
 invariant (400/400 + an independent Decimal oracle). ENGINE surface UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; this header carries the pointer, never the story — the
-full record lives in the §1 Active-branch blurb + MIGRATION.md #1804.)
+full record lives in the §1 Active-branch blurb + MIGRATION.md #2200.)
 Earlier: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
 MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
 overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
@@ -3979,11 +4003,52 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fib-template-express`
-  (**DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935** — the fib-template
+- **Active branch:** `integration/train-vocab`
+  (**VOCAB-TRAIN merge vehicle** — the fold of the FOUR vocabulary member PRs
+  as ONE train off main tip 2bf9235ca, in binding order: **#1574**
+  `claude/vocab-66-reshape` (DEC-VOCAB-66-RESHAPE-IMPL-001 #2200 +
+  DEC-CPR-CONDITIONS-001 #2201 + DEC-SUPERTREND-LAYOUT-001 #2202 — the 60→66
+  reshape: CPR bits 60-63 live, SuperTrend 64/65 layout-only, the VWAP
+  tombstone since REVERSED by #2206) → **#1636** `claude/vocab66-supertrend-flip`
+  (DEC-SUPERTREND-CONDITIONS-001 #2203 — bits 64/65 implemented) → **#1622**
+  `claude/gap-midpoint-conditions` (DEC-GAP-MIDPOINT-CONDITIONS-001 #2204 —
+  session-edge gap-midpoint bits 66-68) → **#1632**
+  `claude/fib-template-express` (DEC-FIB-TEMPLATE-EXPRESS-001 #2205 — fib
+  bull/424 bits 69-71 + swing bits 72/73) — PLUS the operator VWAP-retention
+  ruling folded ON the train (DEC-VOCAB-VWAP-RETAIN-001 #2206, event
+  10f5522e, retention commit ee3ace082: the vocab-66 wipe REVERSED — bits
+  52/53 RETAINED, evaluated when volume is available, ABSTAINING when none;
+  the pre-wipe abstain path restored verbatim from pre-wipe main blobs; the
+  fixture migration law strengthened to low-60 identity; the burned vwap
+  draw un-burned stream-stably) and the scope/consent record
+  (DEC-VOCAB-DESIGN-CONTRACT-74-001 #2207 — operator consent 3f54b589 + the
+  standing merge-everything directive cover the 66→74 growth; disclosed,
+  never landed silently). FINAL MARKERS: **74 TOTAL / 74 ACTIVE**
+  (IMPLEMENTED_MASK (1<<74)-1, RETIRED_MASK 0), CONFLICT_PAIRS 31, u128
+  mask; crate/wheel 0.6.0 — ONE virgin indicator_version re-key window for
+  the whole train (member hops 0.3.2→0.4.0→0.5.0→0.6.0 collapse into one
+  deploy window; every NEW run re-keys per §2 Rule 4); the six member
+  ledger rows renumbered into the census-CONFIRMED band #2200–#2249
+  (chains in-entry per DEC-LEDGER-RENUMBER-001). TICKVAULT LOCKSTEP
+  (DEC-SHARED-CORE-001, REQUIRED at adoption): pin trading-core >= 0.6.0;
+  the FFI faces grew appended-last ST → gap → swing with the vwap arg woven
+  back at its historical slot (retention); native-side obligations
+  (SupertrendState wiring, the session-edge X1/X2 capture re-implementation,
+  ProximityParams/IndicatorSnapshot growth, fib list 15→19) live in the
+  member entries #2200–#2206. NAMED RESIDUALS for the Regen/CI phase: the
+  vocab/truth-table/stage1a-batch fixtures still hold pre-retention masks
+  (vocab blob 245b292e2 — regen wheel-gated), the twin-state/stage1a-batch
+  generator restorations, and the wheel-dependent pin-class test sweep (the
+  retention commit body carries the audit). ENGINE VOCABULARY GROWN 60→74
+  by operator consent (#2207) — NIFTY/BANKNIFTY/SENSEX spot-only scope,
+  rate caps, lake/schema ALL untouched; this blurb carries pointers, never
+  round narration — each member's full record lives in its own Earlier
+  blurb below + its MIGRATION.md entry (#2200–#2207).)
+  Earlier: `claude/fib-template-express`
+  (**DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #2205** — the fib-template
   EXPRESS, STACKED on PR #1574's `claude/vocab-66-reshape` head 696bf036a
   (the diff shrinks as predecessors land; queue order #1574 → vocab-66 PR-B →
-  gap #1901 → this; VOCAB-CLASS DRAFT HOLD — no ready-for-review / auto-merge
+  gap #2204 → this; VOCAB-CLASS DRAFT HOLD — no ready-for-review / auto-merge
   without explicit operator consent): FIVE new conditions on the u128 mask —
   69 `near_fib_bull_236` + 70 `near_fib_bull_786` (the PDL-anchored bullish
   retracements, DEC-FIB-BULLISH-RETRACE-001 fields; bull 38/62 stay
@@ -3994,7 +4059,7 @@ hostile-review pass._
   `MarketStructureState` that feeds BOS/CHoCH, strictly POST-update; None ⇒
   never fires — never fabricated; a contract-roll hard reset returns them to
   None). TOTAL_CONDITIONS 66→74; bits 66-68 are reserved `placeholder_gap_*`
-  rows for DEC-GAP-MIDPOINT-CONDITIONS-001 (#1901) — the RE-STACK OBLIGATION:
+  rows for DEC-GAP-MIDPOINT-CONDITIONS-001 (#2204) — the RE-STACK OBLIGATION:
   dropped verbatim at the re-stack, NEVER implemented here (they join
   RETIRED_MASK for display + are refused by StrategySpec). Bands: 69-71 reuse
   the swept `fib_proximity_bps` (zero new identity surface); 72/73 ride the
@@ -4042,7 +4107,7 @@ hostile-review pass._
   the loud length error). ENGINE surface UNCHANGED — NIFTY/BANKNIFTY/SENSEX
   spot; F&O lake REFERENCE_ONLY; no lake/schema/scope/rate change; no new
   I/O.)
-  Earlier: `claude/gap-midpoint-conditions` (**DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901** —
+  Earlier: `claude/gap-midpoint-conditions` (**DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #2204** —
   the sweep vocabulary GROWS 66 → 69: Group 15 "Gap Midpoint" — bits 66 `close_above_gap_mid` /
   67 `close_below_gap_mid` / 68 `near_gap_mid` — the per-TF SESSION-EDGE gap-midpoint level
   `(X1+X2)/2` decoded from the ES Trading Academy spreadsheet (the same academy whose charts ground
@@ -4078,9 +4143,9 @@ hostile-review pass._
   ≥64-guard resolution + the u128 M4-Pro throughput measurement — bits 66-68 are the first
   IMPLEMENTED bits ≥ 64; the regime-enabling machinery is PR-B's, not this DEC's. GOLDEN
   EVIDENCE: the 400-case vocab golden (the TickVault contract) regenerated ADDITIVELY via a second
-  rng stream — audited all 400 cases: every pre-existing field byte-identical (incl. the #1804 reshape's
+  rng stream — audited all 400 cases: every pre-existing field byte-identical (incl. the #2200 reshape's
   burned inert vwap draw), low-66 mask bits byte-identical, 342/400 fire a gap bit, both-ways
-  coverage TRUE for all 65 ACTIVE bits — the #1804 migration harness AMENDED, not weakened
+  coverage TRUE for all 65 ACTIVE bits — the #2200 migration harness AMENDED, not weakened
   (input hash excludes exactly the two enumerated gap keys; the no-bit-≥64 gate names 66-68 as
   the one sanctioned exception); the truth-table
   CSV +66 rows + SHA re-pin; the banknifty-week Stage-1A golden AUDITED re-lock (XOR delta ==
@@ -4097,7 +4162,7 @@ hostile-review pass._
   UNMODIFIED-green + non-vacuity teeth; hypothesis properties (level-between / direction pair-flip
   vs an independent stdlib recompute / zero-gap None / above-below exclusion e2e); mutants on the
   arming boundary + the X1 swap hand-killed (13 + 50 failures). HONEST (Golden Rule #10): this is
-  an ENGINE-surface change — ENGINE VOCABULARY GROWN 66→69 (on the #1804 reshape), additive, deliberately NOT "engine
+  an ENGINE-surface change — ENGINE VOCABULARY GROWN 66→69 (on the #2200 reshape), additive, deliberately NOT "engine
   unchanged": every EXISTING mask's results are byte-identical (legacy callers dark via the FFI
   defaults; goldens measured) and every NEW run re-keys via indicator_version; the DIRECTION LAW
   is OUR INTERPRETATION pending the original GAP_CALC_SPEC.md sheet (inaccessible in the build
@@ -4121,8 +4186,8 @@ hostile-review pass._
   brutex` Success (466 files); pyright 0 errors on touched modules;
   validate_ledger_numbering OK (1371 headers).)
   Earlier: `claude/vocab66-supertrend-flip` (**DEC-SUPERTREND-CONDITIONS-001,
-  MIGRATION.md #1807** — the SuperTrend implemented-flip, the "later stacked PR"
-  DEC-SUPERTREND-LAYOUT-001 (#1806) reserved bits 64/65 for (stacked on PR #1574's
+  MIGRATION.md #2203** — the SuperTrend implemented-flip, the "later stacked PR"
+  DEC-SUPERTREND-LAYOUT-001 (#2202) reserved bits 64/65 for (stacked on PR #1574's
   head 696bf036a; the PR opens after #1574 lands): `close_above_supertrend` (64) /
   `close_below_supertrend` (65) go LIVE — NEW
   `rust/trading-core/src/indicators/supertrend.rs` (`SupertrendState` + batch
@@ -4145,8 +4210,8 @@ hostile-review pass._
   implemented — the 52/53 tombstones stay clear); crate/wheel 0.4.0 → 0.5.0
   (lockstep-pinned; `SupertrendState` joins the wheel handshake +
   EXPECTED_BUILD.json) = the SECOND indicator_version re-key — ONE deploy
-  window with #1804's 0.4.0 (no production sweep between; a pre-flip
-  cascade/results root refuses by design via the #1804 REPL-01 vocabulary
+  window with #2200's 0.4.0 (no production sweep between; a pre-flip
+  cascade/results root refuses by design via the #2200 REPL-01 vocabulary
   identity gate). Engine wiring: stage1a.py owns the state (push-per-bar, no
   day reset, roll recreate; collect_batch_inputs computes the column per roll
   segment), rust_stage1a/evaluator thread it; every declared surface lit
@@ -4185,9 +4250,9 @@ hostile-review pass._
   (attested); pin >= 0.5.0 at adoption. ENGINE surface
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/rate change; the
   vocabulary ACTIVATION is the consciously-ledgered subject — see §1's chain +
-  MIGRATION.md #1807 for the full record.)
+  MIGRATION.md #2203 for the full record.)
   Earlier: `claude/vocab-66-reshape`
-  (**DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804** — the 60→66 vocabulary
+  (**DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #2200** — the 60→66 vocabulary
   reshape implementing `DEC-VOCAB-VWAP-VOLUME-WIPE-001` (decision PR in
   flight): TOTAL_CONDITIONS 60→66, 62 ACTIVE — the dead session-VWAP bits 52/53
   TOMBSTONED (positions held forever, `reserved=true`/`implemented=false`
@@ -11884,9 +11949,9 @@ hostile-review pass._
    the volume-bearing VWAP bits 52/53 now permanently abstain on every
    engine instrument, since no spot index carries volume) [the vocabulary
    has SINCE grown under the grow-only law — the #1574 vocab-66 reshape
-   (60→66, DEC-VOCAB-66-RESHAPE-IMPL-001 #1804-#1806) then the Group-15
+   (60→66, DEC-VOCAB-66-RESHAPE-IMPL-001 #2200-#2202) then the Group-15
    gap-midpoint bits 66-68 (66→69, DEC-GAP-MIDPOINT-CONDITIONS-001,
-   MIGRATION.md #1901; additive — existing masks byte-identical, new runs
+   MIGRATION.md #2204; additive — existing masks byte-identical, new runs
    re-key via indicator_version); the spot-only ENGINE scope this
    retirement fixes is untouched]; the futures
    resolver / alias-aware loader / Stage-1A roll machinery / symbol_id 4
@@ -12130,17 +12195,26 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/fib-template-express`
-  (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #1935 — the fib-template
+- **Active feature branch:** `integration/train-vocab`
+  (VOCAB-TRAIN merge vehicle — the fold of the four vocabulary member PRs
+  #1574 (#2200-#2202) → #1636 (#2203) → #1622 (#2204) → #1632 (#2205) off
+  main tip 2bf9235ca, plus the operator VWAP-retention ruling
+  (DEC-VOCAB-VWAP-RETAIN-001 #2206) and the scope/consent record
+  (DEC-VOCAB-DESIGN-CONTRACT-74-001 #2207); final vocabulary 74 total / 74
+  active, CONFLICT_PAIRS 31, crate 0.6.0 — one virgin indicator_version
+  re-key window; fixture regen = the Regen phase; matches §1's Active
+  branch line — see §1 + MIGRATION.md #2200–#2207 for the full blurb)
+  Earlier: `claude/fib-template-express`
+  (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md #2205 — the fib-template
   express: five bits 69-73 (bull 236/786 · two-sided 424 · near-swing
   high/low) on the u128 mask, TOTAL_CONDITIONS 66→74 with reserved gap
-  placeholders 66-68 (dropped at the re-stack onto #1901), crate 0.4.1
+  placeholders 66-68 (dropped at the re-stack onto #2204), crate 0.4.1
   re-key window, the default-omitted `swing_proximity_bps` identity knob,
   KEEP-GOLDEN extension constants with the loud 424@5bps corner; stacked on
   PR #1574; VOCAB-CLASS DRAFT HOLD; matches §1's Active branch line — see
-  §1 + MIGRATION.md #1935 for the full blurb)
+  §1 + MIGRATION.md #2205 for the full blurb)
   Earlier: `claude/gap-midpoint-conditions`
-  (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #1901 — the sweep vocabulary
+  (DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md #2204 — the sweep vocabulary
   GROWS 66 → 69: Group 15 "Gap Midpoint" bits 66-68 (`close_above_gap_mid` /
   `close_below_gap_mid` / `near_gap_mid`) — the per-TF session-edge
   gap-midpoint level `(X1+X2)/2` (X1 = the prior session's LAST completed TF
@@ -12152,7 +12226,7 @@ hostile-review pass._
   + the Rust Stage-1A batch twin in lockstep; crate 0.4.0 → 0.4.1 re-keys
   every NEW run via indicator_version; the TF=3minute spreadsheet parity
   golden (6 cases + the marginal-direction day) + the full §3.7 battery green;
-  ENGINE VOCABULARY GROWN 66→69 (additive on the #1804 reshape — every
+  ENGINE VOCABULARY GROWN 66→69 (additive on the #2200 reshape — every
   EXISTING mask's results byte-identical, the frozen sweep-run goldens
   measured unchanged; bits 66-68 are the first IMPLEMENTED bits ≥ 64 — lands
   AFTER PR #1574 and the vocab-66 track's PR-B, which owns the u128-regime
@@ -12160,25 +12234,25 @@ hostile-review pass._
   untouched; TickVault coordination flagged per DEC-SHARED-CORE-001; matches
   §1's Active branch line)
   Earlier: `claude/vocab66-supertrend-flip`
-  (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #1807 — the SuperTrend
+  (DEC-SUPERTREND-CONDITIONS-001, MIGRATION.md #2203 — the SuperTrend
   implemented-flip: bits 64/65 LIVE (ATR-10/factor-3 Pine-parity ×2-paisa
   integer state, 9 warm-up Nones, strict flip, no session resets, D11 roll
   reset), ONE appended defaulted `supertrend_x2_paisa` arg on all four FFI
   faces (ABI-additive), the (64,65) conflict pair, trading-core 0.4.0 → 0.5.0
-  (the SECOND indicator_version re-key — one deploy window with #1804's),
+  (the SECOND indicator_version re-key — one deploy window with #2200's),
   active vocabulary 62 → 64 of 66; warm bar_bits > u64 (u128 regime LIVE —
   retirement pins + the capability-gated ≥64 dispatch pin; combo_mask.py
   untouched, the enum-kernel lane owns it); Apriori ≥64 tuples refuse
   gracefully (documented interim law); goldens regenerated under the
   frozen-stream law, the sweep-run golden proven unmoved; stacked on PR
   #1574's head — matches §1's Active branch line — see §1 + MIGRATION.md
-  #1807 for the full blurb)
+  #2203 for the full blurb)
   Earlier: `claude/vocab-66-reshape`
-  (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804 — the 66-declared /
+  (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #2200 — the 66-declared /
   62-active vocabulary reshape: VWAP bits 52/53 tombstoned + CPR bits 60-63
   live (NARROW_CPR_WIDTH_BPS=30 supersedes 50) + SuperTrend 64/65 layout-only;
   trading-core 0.4.0 re-key window; cascade-replay vocabulary-identity gate;
-  matches §1's Active branch line — see §1 + MIGRATION.md #1804 for the full
+  matches §1's Active branch line — see §1 + MIGRATION.md #2200 for the full
   blurb)
   Earlier: `integration/club-s2-results-v2`
   (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
@@ -13874,7 +13948,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:1049-1050`; `cli.py:5739-5740` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:1049-1050`; `cli.py:5772-5773` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |

@@ -370,8 +370,8 @@ class ResultRow:
         The u128 strategy mask (persisted as the ``mask_bits_lo``/``mask_bits_hi``
         limb columns) — set bits are the required-true atomic conditions
         (``brutex.vocabulary.bits``). Validated ``0 <= mask_bits <= MASK_BITS_MAX``
-        (only the ``TOTAL_CONDITIONS`` = 69 declared condition bits; reserved
-        bits 69..127 rejected — the validation reads ``TOTAL_CONDITIONS`` so it
+        (only the ``TOTAL_CONDITIONS`` = 74 declared condition bits; reserved
+        bits 74..127 rejected — the validation reads ``TOTAL_CONDITIONS`` so it
         can never drift again; declared-but-unimplemented bits are admitted
         here, the ``StrategySpec`` layer owns that refusal). This is the machine-readable winning combo;
         ``condition_names`` is its human-readable decode (DEC-SWEEP-WINNERS-BY-NAME-001).

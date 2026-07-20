@@ -1,8 +1,8 @@
-"""Supporting indicator computations for the 66-declared (64-active) vocabulary.
+"""Supporting indicator computations for the 74-declared (74-active) vocabulary.
 
-Per `docs/TRACK1_VOCABULARY.md` the atomic boolean conditions (66 declared on
-the u128 layout; 64 ACTIVE — only the VWAP bits 52/53 are RETIRED
-tombstones; the SuperTrend bits 64/65 are LIVE since
+Per `docs/TRACK1_VOCABULARY.md` the atomic boolean conditions (74 declared on
+the u128 layout; 74 ACTIVE — the VWAP bits 52/53 are RETAINED per
+DEC-VOCAB-VWAP-RETAIN-001; the SuperTrend bits 64/65 are LIVE since
 DEC-SUPERTREND-CONDITIONS-001) are evaluated in the
 shared Rust ``trading_core`` crate; this package supplies the Python-side
 indicator STATE those conditions consume:
@@ -29,7 +29,7 @@ Modules:
 - `day_extremes`   — Running Day High / Day Low from session open.
 - `prev_day_ohlc`  — Previous Day OHLC anchors (calendar-aware).
 
-The per-bar condition VOCABULARY itself (66 declared / 64 active boolean
+The per-bar condition VOCABULARY itself (74 declared / 74 active boolean
 conditions) lives in :mod:`brutex.vocabulary` (bits + evaluator shim), never
 here.
 """
