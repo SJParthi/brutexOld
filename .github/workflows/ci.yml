@@ -262,7 +262,16 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: wheelhouse
-          key: rust-wheels-v1-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-pull-state/**', 'rust/brutex-lake/**') }}
+          # v1 → v2 (TRAIN A, red-team mandate — stale-wheel-under-green-CI):
+          # the key now hashes EVERY ci-gated crate's sources (previously
+          # only the six wheelhouse-built crates), so a source change in ANY
+          # gated crate invalidates the wheelhouse and a stale wheel can
+          # never ride a green run. Gated set = the ci-ok crate gates
+          # (rust=fno-math · rust-trading-core · rust-brutex-feed ·
+          # rust-brutex-strategies · rust-brutex-calendar · rust-brutexd ·
+          # rust-brutex-ops · rust-brutex-pull-state) + brutex-lake (gated
+          # via this required build-wheels job + the ci-ok kernel verify).
+          key: rust-wheels-v2-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-calendar/**', 'rust/brutexd/**', 'rust/brutex-ops/**', 'rust/brutex-pull-state/**', 'rust/brutex-lake/**') }}
       - name: Install Rust toolchain (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
