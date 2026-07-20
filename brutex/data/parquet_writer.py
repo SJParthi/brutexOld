@@ -1087,6 +1087,15 @@ class ParquetWriter:
                         dataset_created = not any(dest.parent.parent.rglob("*.parquet"))
                         self._atomic_write(dest, content_bytes)
                         self._record_stats_hook(dest, fast_result)
+                        # Write-epoch bump (DEC-LAKE-HEAL-STARTUP-EPOCH-001):
+                        # the fast lane RENDERED partition bytes exactly like
+                        # the legacy fresh branch, moving lake_content_token —
+                        # refresh the L3 startup-sweep cheap gate here too, or
+                        # a prebuild through the fast lane would leave a stale
+                        # epoch and license an unsound O(1) skip on the next
+                        # boot (and break the A/B op-count parity teeth).
+                        # Unconditional + best-effort, mirroring write().
+                        bump_write_epoch(self._lake_root)
             except (LakeWriteHalt, MemoryError):
                 # NEVER swallowed (V3 C7): a full disk / OOM is a pull-wide
                 # stop, not a per-partition degrade. (KeyboardInterrupt /
