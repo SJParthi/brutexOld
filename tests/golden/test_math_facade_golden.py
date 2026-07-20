@@ -70,6 +70,9 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "optcost_strike_step",
         "popcount_bytes",
         "stats_cpcv_pass_count",
+        # DEC-RANK-CVAR-TAIL-GATE-001 — the integer-exact CVaR worst-k tail
+        # fold (a deliberate, reviewed surface addition).
+        "stats_cvar_tail_fold",
         # DEC-METRICS-RUST-STATS-002 — the stats-tail kernels (a deliberate,
         # reviewed surface addition; fenced additive entries).
         "stats_expected_max_sharpe",

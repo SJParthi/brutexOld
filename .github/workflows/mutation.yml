@@ -300,9 +300,13 @@ jobs:
           #
           # Tests on these already hit 100% line coverage; mutmut verifies that
           # the coverage is *meaningful* (the tests detect a behaviour change).
+          #    brutex/ranking/cvar_gate.py (DEC-RANK-CVAR-TAIL-GATE-001) joins
+          #    the pass with its dedicated runner file
+          #    tests/unit/test_ranking_cvar_gate.py — the integer-exact CVaR
+          #    tail law + the kernel seam are tested ONLY there.
           mutmut run \
-            --paths-to-mutate brutex/metrics/deflated_sharpe.py,brutex/ranking/__init__.py,brutex/ranking/overfit.py,brutex/ranking/streaks.py \
-            --runner "sh -c 'pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py tests/unit/test_ranking_gate_reasons.py tests/unit/test_ranking_streaks.py -x -q --no-header || exit 1'" \
+            --paths-to-mutate brutex/metrics/deflated_sharpe.py,brutex/ranking/__init__.py,brutex/ranking/overfit.py,brutex/ranking/streaks.py,brutex/ranking/cvar_gate.py \
+            --runner "sh -c 'pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py tests/unit/test_ranking_gate_reasons.py tests/unit/test_ranking_streaks.py tests/unit/test_ranking_cvar_gate.py -x -q --no-header || exit 1'" \
             --simple-output
           mutmut results | tee mutmut-results-math.txt
           if grep -qE "^[0-9]+" mutmut-results-math.txt; then

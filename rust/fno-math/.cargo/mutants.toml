@@ -97,6 +97,19 @@
 # superseded by 692 + 499). 1191/8 ≈ 149 mutants/shard on the 8-shard
 # matrix (the #1597 +1-shard dial taken TWICE — see mutation.yml's shard
 # arithmetic; ~86 min actual / ~103 min at +20% vs the 120-min cap).
+#
+# DEC-RANK-CVAR-TAIL-GATE-001 (2026-07-18, train-B fold): src/stats/cvar.rs
+# (the integer-exact CVaR worst-k tail fold) lands INSIDE the existing
+# src/stats/*.rs glob — no scope edit needed (the slice-6 comment above
+# pre-decided that later stats modules ride the same glob). The lane's own
+# pre-fold measurement was 778 total (+86 cvar mutants over the pre-optcost
+# 692 baseline). Folded on TOP of the DEC-OPTCOST-TAILS-RUST-001 tree above,
+# the +86 cvar mutants are additive to the 1191 optcost census, so the
+# merged total is 1191 + 86 = 1277 — still absorbed by the 8-shard matrix
+# band per mutation.yml's shard arithmetic (the #1597 +1-shard dial stands
+# if a scheduled run approaches the cap). In-session evidence: the 86 cvar
+# mutants were run locally the CI way (--in-place, --test-tool cargo,
+# -- --release) — verdict recorded in MIGRATION.md #1957.
 examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",

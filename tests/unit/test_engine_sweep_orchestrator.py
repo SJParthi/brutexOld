@@ -691,6 +691,25 @@ class TestTupleDigestGateSelectionIdentity:
         assert d90 != d0
         assert d90 != d80  # a distinct KNOB value re-keys again, not just presence
 
+    def test_cvar_gate_rekeys_and_is_value_sensitive(self) -> None:
+        # DEC-RANK-CVAR-TAIL-GATE-001: an ACTIVE CVaR tail gate re-keys the
+        # store address exactly like the overfit gate; the explicit None
+        # default elides (byte-stable — the killing test for the
+        # elision-condition flip mutant).
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+        from brutex.ranking import CvarGateConfig
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        assert _tuple_digest(_tuple(), _grid(cvar_gate=None)) == d0
+        d50 = _tuple_digest(_tuple(), _grid(cvar_gate=CvarGateConfig(threshold_paisa=50_000)))
+        d60 = _tuple_digest(_tuple(), _grid(cvar_gate=CvarGateConfig(threshold_paisa=60_000)))
+        da = _tuple_digest(
+            _tuple(), _grid(cvar_gate=CvarGateConfig(threshold_paisa=50_000, alpha_bps=100))
+        )
+        assert d50 != d0
+        assert d50 != d60  # threshold value re-keys
+        assert d50 != da  # alpha value re-keys
+
     def test_one_law_digest_never_aliases_the_precise_era(self) -> None:
         # DEC-FILL-WORST-CASE-ONLY-001 anti-aliasing pin: the unconditional
         # fill_mode token moves the default store address off the frozen

@@ -42,9 +42,12 @@
 //! AS241 inverse-CDF transcription); [`deflated_sharpe`] — the PSR + SR_0
 //! DSR kernels; [`pbo`] — the CSCV split-enumeration logit loop; [`wfo`] —
 //! the walk-forward pass-count with the numpy-pairwise REPLICATED mean
-//! (all PR-2, DEC-METRICS-RUST-STATS-002).
+//! (all PR-2, DEC-METRICS-RUST-STATS-002); [`cvar`] — the integer-exact
+//! CVaR worst-k tail fold (DEC-RANK-CVAR-TAIL-GATE-001; claim class
+//! STRUCTURAL — all-integer, no float ever participates).
 
 pub mod cpcv;
+pub mod cvar;
 pub mod deflated_sharpe;
 pub mod norm;
 pub mod pbo;

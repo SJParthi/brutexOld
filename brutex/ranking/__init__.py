@@ -67,6 +67,13 @@ from dataclasses import dataclass
 from typing import Final, cast
 
 from brutex.metrics.compute import ResultMetrics
+from brutex.ranking.cvar_gate import (
+    GATE_CVAR_TAIL,
+    CvarGateConfig,
+    CvarTailFold,
+    cvar_rejects,
+    cvar_tail_fold,
+)
 from brutex.ranking.overfit import (
     OverfitGateConfig,
     deflated_sharpe_for,
@@ -413,6 +420,12 @@ GATE_SL_HIT_RATE: Final[str] = "sl_hit_rate"
 #: :func:`passes_gates` checks its doors, so ``gate_reasons(m)[0]`` is always
 #: the door ``passes_gates`` short-circuits on. Consumers (P2's manifest
 #: counter fold) may rely on this order being stable.
+# The CVaR tail gate's `cvar_tail` token (DEC-RANK-CVAR-TAIL-GATE-001,
+# brutex.ranking.cvar_gate.GATE_CVAR_TAIL) is deliberately OUT of this
+# vocabulary, exactly like the overfit gate: gate_reasons judges a
+# ResultMetrics row, and the CVaR verdict needs the per-trade P&L list
+# that never reaches it — it is counted at its own eval-spine seam
+# (sweep_run._iter_mask_metrics), never fabricated per-row here.
 GATE_REASON_ORDER: Final[tuple[str, ...]] = (
     GATE_NON_FINITE_INPUT,
     GATE_MIN_TRADES,
@@ -1016,6 +1029,7 @@ def rank_combos(
 
 __all__ = [
     "GATE_CONSECUTIVE_LOSSES",
+    "GATE_CVAR_TAIL",
     "GATE_MAX_DRAWDOWN",
     "GATE_MIN_TRADES",
     "GATE_NON_FINITE_INPUT",
@@ -1028,11 +1042,15 @@ __all__ = [
     "MIN_TRADES",
     "N_COMPOSITE_TERMS",
     "STREAK_DOOR_WLR_EXEMPT",
+    "CvarGateConfig",
+    "CvarTailFold",
     "OverfitGateConfig",
     "RankedCombo",
     "TemporalGateInput",
     "composite_scores",
     "composite_term_inputs",
+    "cvar_rejects",
+    "cvar_tail_fold",
     "dsr_z_contributions",
     "ensure_unique_survivor_masks",
     "gate_reasons",

@@ -192,6 +192,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(stats::pbo::stats_pbo_cscv, m)?)?;
     m.add_function(wrap_pyfunction!(stats::wfo::stats_wfo_pass_count, m)?)?;
+    // DEC-RANK-CVAR-TAIL-GATE-001: the integer-exact CVaR worst-k tail fold
+    // behind the default-OFF `BRUTEX_RANK_CVAR_RUST` seam
+    // (`brutex.ranking.cvar_gate`).
+    m.add_function(wrap_pyfunction!(stats::cvar::stats_cvar_tail_fold, m)?)?;
     // ---- end stats module ----
     // ---- optcost module (DEC-OPTCOST-TAILS-RUST-001): options-cost tail
     // kernels (regime rates / moneyness / strike-lot-expiry rules).

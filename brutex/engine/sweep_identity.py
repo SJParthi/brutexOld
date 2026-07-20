@@ -34,7 +34,7 @@ from typing import Any, Protocol
 # post-dates the crate's fragment law) is refused to the oracle INSIDE the
 # facade (`gate_fragment_beyond_crate`; the train-b tier-2 seam remedy).
 from brutex.engine.sweep_ops_rust import routed_gate_fragment, sweep_ops_rust_enabled
-from brutex.ranking import OverfitGateConfig
+from brutex.ranking import CvarGateConfig, OverfitGateConfig
 
 
 class _GateConfigInput(Protocol):
@@ -71,6 +71,11 @@ class _GateConfigInput(Protocol):
         The default ``None`` contributes nothing, so ungated digests are
         byte-identical.
         """
+        raise NotImplementedError
+
+    @property
+    def cvar_gate(self) -> CvarGateConfig | None:
+        """The CVaR tail-risk gate config, or ``None`` when the gate is off."""
         raise NotImplementedError
 
     @property
@@ -115,6 +120,14 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
     defaults). All legs flattened to JSON-native scalars.
     """
     if not sweep_ops_rust_enabled():
+        return _gate_config_fragment_python(grid)
+    if grid.cvar_gate is not None:
+        # DEC-RANK-CVAR-TAIL-GATE-001 × DEC-RUST-SWEEP-OPS-001: the crate
+        # fragment law predates the cvar leg, so a SET gate is OUTSIDE its
+        # domain — post-burn-in the crate would serve a fragment silently
+        # DROPPING the ``cvar`` key (a run-identity-class divergence). The
+        # WHOLE computation routes to the Python oracle instead (the
+        # ``max_sl_hit_rate`` beyond-crate seam remedy, mirrored).
         return _gate_config_fragment_python(grid)
     overfit = grid.overfit
     overfit_values = (
@@ -163,6 +176,13 @@ def _gate_config_fragment_python(grid: _GateConfigInput) -> dict[str, Any] | Non
         # ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B); the
         # fragment arm itself stays covered via a Protocol fake.
         fragment["max_sl_hit_rate"] = grid.max_sl_hit_rate
+    cvar = grid.cvar_gate
+    if cvar is not None:
+        # DEC-RANK-CVAR-TAIL-GATE-001: an ACTIVE CVaR tail gate changes which
+        # masks survive to ranking/persistence, so it re-keys exactly like the
+        # overfit gate; ``None`` (the default — the gate OFF) contributes
+        # NOTHING, keeping the default digest byte-stable.
+        fragment["cvar"] = [cvar.alpha_bps, cvar.threshold_paisa]
     if grid.stage3_enable:
         # The Stage-3 knobs matter to the result ONLY when the pass runs; a
         # disabled pass leaves them inert, so they never re-key a light grid.
