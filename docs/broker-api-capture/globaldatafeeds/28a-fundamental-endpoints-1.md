@@ -141,7 +141,7 @@ For details, please see [glossary](/glossary-923501m0).
 ```
 function SubscribeCorporateAnnouncements()
 {
-    var request1 = 
+    var request1 =
     {
     "MessageType": "SubscribeCorporateAnnouncements",
     "Exchange": "BSE"
@@ -159,7 +159,7 @@ function SubscribeCorporateAnnouncements()
 ```
 Time : Mon May 25 2026 15:37:49 GMT+0530 (India Standard Time)
 RESPONSE: {"Exchange":"BSE",
-"ScripId":"CMMHOSP",      
+"ScripId":"CMMHOSP",
 "FillingDate":1779703656,
 "MeetingDate":1779647400,
 "TradeDate":1779703656,
@@ -206,9 +206,9 @@ For details, please see [glossary](/glossary-923501m0).
 ```
 function SubscribeFinancialResults()
 {
-    var request1 = 
+    var request1 =
     {
-        "MessageType": "SubscribeFinancialResults",	
+        "MessageType": "SubscribeFinancialResults",
         "Exchange": "BSE",
         "Detailed": true,
 	"Unsubscribe": false
@@ -246,7 +246,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -274,7 +274,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                        
+        Response
         |
 
         | :------------ |
@@ -286,11 +286,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetCorpAnnCateResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetCorpAnnCateResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetCorporateAnnouncementsCategories.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetCorporateAnnouncementsCategories.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be
@@ -367,7 +367,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -466,43 +466,43 @@ paths:
 
         A.G.M.,AGM
 
-        Amalgamation,AM 
+        Amalgamation,AM
 
         Annual Book Closure,ABC
 
-        Bonus issue,BN 
+        Bonus issue,BN
 
         Buy Back of Shares,BGM
 
-        Change in Terms or Status,EX 
+        Change in Terms or Status,EX
 
-        Consolidation of Shares,CS 
+        Consolidation of Shares,CS
 
-        Conversion of FCD,FC 
+        Conversion of FCD,FC
           </Tab>
           <Tab title="CsvContent">
         CorporateActiontype,PurposeCode
 
         A.G.M.,AGM
 
-        Amalgamation,AM 
+        Amalgamation,AM
 
         Annual Book Closure,ABC
 
-        Bonus issue,BN 
+        Bonus issue,BN
 
         Buy Back of Shares,BGM
 
-        Change in Terms or Status,EX 
+        Change in Terms or Status,EX
 
-        Consolidation of Shares,CS 
+        Consolidation of Shares,CS
 
-        Conversion of FCD,FC 
+        Conversion of FCD,FC
 
 
-        Note: 
+        Note:
 
-        1. The file containing above values in CSV format will be returned. 
+        1. The file containing above values in CSV format will be returned.
 
         2. To see it working, copy-paste the request in browser.
           </Tab>
@@ -741,7 +741,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -780,62 +780,62 @@ paths:
         10px; border-radius: 5px;">
           <Tabs style="background-color:lightgrey;">
           <Tab title="JSON">
-        {  
+        {
 
-        "Value":[  
+        "Value":[
 
-        { "ScripId": "SHRINIWAS",  
+        { "ScripId": "SHRINIWAS",
 
-        "ScripCode": 538897,  
+        "ScripCode": 538897,
 
-        "ScripName": "Shri Niwas Leasing and Finance Limited",  
+        "ScripName": "Shri Niwas Leasing and Finance Limited",
 
-        "ActionId": 0,  
+        "ActionId": 0,
 
-        "IndustryName": "Financial Services",  
+        "IndustryName": "Financial Services",
 
-        "ListedStatus": "Active",  
+        "ListedStatus": "Active",
 
-        "ScripFaceValue": "10.0",  
+        "ScripFaceValue": "10.0",
 
-        "ISIN": "INE201F01015",  
+        "ISIN": "INE201F01015",
 
-        "AnnounceType": "U",  
+        "AnnounceType": "U",
 
-        "AnnouncementDate": "02-20-2025 16:36:03",  
+        "AnnouncementDate": "02-20-2025 16:36:03",
 
-        "MeetingDate": ""01-01-0001 00:00:00"",  
+        "MeetingDate": ""01-01-0001 00:00:00"",
 
-        "CorporateActionType": "Right Issue of Equity Shares",  
+        "CorporateActionType": "Right Issue of Equity Shares",
 
-        "PurposeCode": "ET ",  
+        "PurposeCode": "ET ",
 
         "AnnouncementUrl":
-        "https://www.bseindia.com/xml-data/corpfiling/AttachHis/3f6bbaa7-8faa-4e87-8aa8-824213bfa789.pdf",  
+        "https://www.bseindia.com/xml-data/corpfiling/AttachHis/3f6bbaa7-8faa-4e87-8aa8-824213bfa789.pdf",
 
-        "RatioAmount": "00100001 ",  
+        "RatioAmount": "00100001 ",
 
-        "BcRdFlag": "RD",  
+        "BcRdFlag": "RD",
 
-        "BcRdFrom": ""02-27-2025 00:00:00"",  
+        "BcRdFrom": ""02-27-2025 00:00:00"",
 
-        "BcRdTo": ""02-27-2025 00:00:00"",  
+        "BcRdTo": ""02-27-2025 00:00:00"",
 
-        "ProvXdate": ""02-27-2025 00:00:00"",  
+        "ProvXdate": ""02-27-2025 00:00:00"",
 
-        "NdStartDate": ""01-01-0001 00:00:00"",  
+        "NdStartDate": ""01-01-0001 00:00:00"",
 
-        "NdEndDate": ""01-01-0001 00:00:00"",  
+        "NdEndDate": ""01-01-0001 00:00:00"",
 
-        "PaymentDate": ""01-01-0001 00:00:00"",  
+        "PaymentDate": ""01-01-0001 00:00:00"",
 
-        "ReferenceSrno": "1",  
+        "ReferenceSrno": "1",
 
-        "ModifyDate": "02-24-2025 16:43:15",  
+        "ModifyDate": "02-24-2025 16:43:15",
 
-        "ReceivedAt": "02-24-2025 16:44:02",  
+        "ReceivedAt": "02-24-2025 16:44:02",
 
-        "SavedAt": "02-24-2025 16:44:02"}  
+        "SavedAt": "02-24-2025 16:44:02"}
 
         ]}
           </Tab>
@@ -863,7 +863,7 @@ paths:
         &lt;/CorporateActions&gt;
           </Tab>
           <Tab title="CSV">
-        ScripId,ScripCode,ScripName,ActionId,IndustryName,ListedStatus,ScripFaceValue,ISIN,AnnounceType,AnnouncementDate,MeetingDate,CorporateActionType,PurposeCode,AnnouncementUrl,RatioAmount,BcRdFlag,BcRdFrom,BcRdTo,ProvXdate,NdStartDate,NdEndDate,PaymentDate,ReferenceSrno,ModifyDate,ReceivedAt,SavedAt  
+        ScripId,ScripCode,ScripName,ActionId,IndustryName,ListedStatus,ScripFaceValue,ISIN,AnnounceType,AnnouncementDate,MeetingDate,CorporateActionType,PurposeCode,AnnouncementUrl,RatioAmount,BcRdFlag,BcRdFrom,BcRdTo,ProvXdate,NdStartDate,NdEndDate,PaymentDate,ReferenceSrno,ModifyDate,ReceivedAt,SavedAt
 
         SHRINIWAS,538897,Shri Niwas Leasing and Finance Limited,0,Financial
         Services,Active,10.0,INE201F01015,U,"02-20-2025 16:36:03","01-01-0001
@@ -875,7 +875,7 @@ paths:
         16:44:02"
           </Tab>
           <Tab title="CsvContent">
-        ScripId,ScripCode,ScripName,ActionId,IndustryName,ListedStatus,ScripFaceValue,ISIN,AnnounceType,AnnouncementDate,MeetingDate,CorporateActionType,PurposeCode,AnnouncementUrl,RatioAmount,BcRdFlag,BcRdFrom,BcRdTo,ProvXdate,NdStartDate,NdEndDate,PaymentDate,ReferenceSrno,ModifyDate,ReceivedAt,SavedAt  
+        ScripId,ScripCode,ScripName,ActionId,IndustryName,ListedStatus,ScripFaceValue,ISIN,AnnounceType,AnnouncementDate,MeetingDate,CorporateActionType,PurposeCode,AnnouncementUrl,RatioAmount,BcRdFlag,BcRdFrom,BcRdTo,ProvXdate,NdStartDate,NdEndDate,PaymentDate,ReferenceSrno,ModifyDate,ReceivedAt,SavedAt
 
         SHRINIWAS,538897,Shri Niwas Leasing and Finance Limited,0,Financial
         Services,Active,10.0,INE201F01015,U,"02-20-2025 16:36:03","01-01-0001
@@ -887,9 +887,9 @@ paths:
         16:44:02"
 
 
-        Note: 
+        Note:
 
-        1. The file containing above values in CSV format will be returned. 
+        1. The file containing above values in CSV format will be returned.
 
         2. To see it working, copy-paste the request in browser.
           </Tab>
@@ -1189,7 +1189,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1218,21 +1218,21 @@ paths:
         10px; border-radius: 5px;">
             <Tabs style="background-color:lightgrey;">
                     <Tab title="JSON">
-                        {  
-                            "Value": [  
-                            {  
-                            "ScripId": "ABB",  
-                            "ScripCode": 500002,  
-                            "ScripName": "ABB India Limited",  
-                            "ISIN": "INE117A01022",  
-                            "ResultsDate": 1739730600000,  
-                            "LTP": 5289.35,  
-                            "Change": -96.3,  
-                            "ChangePct": -1.79,  
-                            "ReceivedAt": 1739760900000,  
-                            "SavedAt": 1739760901000  
-                            }  
-                            ]  
+                        {
+                            "Value": [
+                            {
+                            "ScripId": "ABB",
+                            "ScripCode": 500002,
+                            "ScripName": "ABB India Limited",
+                            "ISIN": "INE117A01022",
+                            "ResultsDate": 1739730600000,
+                            "LTP": 5289.35,
+                            "Change": -96.3,
+                            "ChangePct": -1.79,
+                            "ReceivedAt": 1739760900000,
+                            "SavedAt": 1739760901000
+                            }
+                            ]
                             }
                     </Tab>
                     <Tab title="XML">
@@ -1243,22 +1243,22 @@ paths:
                         &lt;/ResultCalendar&gt;
                     </Tab>
                     <Tab title="CSV">
-                        ScripId,ScripCode,ScripName,ISIN,ResultsDate,LTP,Change,ChangePct,ReceivedAt,SavedAt  
-          
+                        ScripId,ScripCode,ScripName,ISIN,ResultsDate,LTP,Change,ChangePct,ReceivedAt,SavedAt
+
                         ABB,500002,ABB India Limited,INE117A01022,1739730600000,5289.35,-96.3,-1.79,1739760900000,1739760901000
                     </Tab>
                     <Tab title="CsvContent">
-                        ScripId,ScripCode,ScripName,ISIN,ResultsDate,LTP,Change,ChangePct,ReceivedAt,SavedAt  
-          
+                        ScripId,ScripCode,ScripName,ISIN,ResultsDate,LTP,Change,ChangePct,ReceivedAt,SavedAt
+
                         ABB,500002,ABB India Limited,INE117A01022,1739730600000,5289.35,-96.3,-1.79,1739760900000,1739760901000
-                        
-                        Note: 
-                        1. The file containing above values in CSV format will be returned. 
+
+                        Note:
+                        1. The file containing above values in CSV format will be returned.
                         2. To see it working, copy-paste the request in browser.
                     </Tab>
                   </Tabs>
           </div>
-          
+
       tags:
         - Corporate Data APIs (RESTful)/Financial Results
         - Corporate Data

@@ -37,6 +37,7 @@ import re
 from pathlib import Path
 
 import brutex
+import pytest
 
 from tests.fakes.doctest_isolation import quiet_structlog
 
@@ -64,8 +65,18 @@ _SKIPPED_MODULES: frozenset[str] = frozenset({"brutex.__main__"})
 _MEASURED_EXAMPLE_FLOOR = 55
 
 
+@pytest.mark.usefixtures("_doctest_structlog_stderr")
 def test_all_brutex_module_doctests() -> None:
-    """Every doctest example in every ``brutex`` module passes (repo-wide gate)."""
+    """Every doctest example in every ``brutex`` module passes (repo-wide gate).
+
+    Runs under the conftest ``_doctest_structlog_stderr`` sink routing so a
+    background thread logging via unconfigured structlog (default
+    ``PrintLogger`` → the current ``sys.stdout``, which ``doctest.testmod``
+    swaps for its capture buffer) can never contaminate an example's ``Got:``
+    output — the PR #1666 unit-shard-2 flake class (a leaked lake-heal
+    ``StartupSweeper`` daemon; regression-pinned with the exact leak shape in
+    ``test_combo_mask_doctests.py``).
+    """
     walk_errors: list[str] = []
     failures: list[tuple[str, int]] = []
     attempted = 0

@@ -15,15 +15,6 @@
 # Philosophy: fast hooks only (<10 seconds total). Slow things like
 # pytest with full coverage, cargo test, bandit etc. are CI-only.
 
-# Scoped exclude (2026-07-19, the Wave-D merge-forward): the
-# docs/design/sweep_core/ measurement artifacts landed on main AS-IS via the
-# GitHub merge path (no local hooks) and sit OUTSIDE every CI lint gate
-# (`ruff check brutex tests`) BY DESIGN — the local hygiene/ruff hooks must
-# not rewrite main-committed bytes on every later merge-forward (the #1775
-# probe-file force-exclude precedent, made global here because the hygiene
-# hooks have no per-hook pyproject scope).
-exclude: '^docs/design/sweep_core/'
-
 repos:
   # ── Generic file hygiene ───────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -31,14 +22,13 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-        # The tri-fold (PR #1698) sweep-core RAW evidence files (the pinned
-        # design doc + raw measurement JSONs) landed on main WITHOUT trailing
-        # newlines; they are committed byte-frozen evidence outside every CI
-        # gate, and "fixing" them in a merge-forward push range would diverge
-        # a vehicle branch from main — the DEC-SETTLE-EVIDENCE-ADOPTION-001
-        # hook-scope posture applied at the hook level (brutex-ops
-        # merge-forward over main 1a3f4852).
-        exclude: ^docs/design/sweep_core/
+        # Fuzzer corpus seeds are raw INPUT BYTES, not text — "fixing" the
+        # trailing newline rewrites the seed (e.g. the 2-byte \n\n
+        # crash-2-byte-header-underflow seed would shrink to 1 byte and no
+        # longer reproduce its crash). docs/design/sweep_core/ is design-doc
+        # measurement tooling + raw transcripts, outside the production
+        # gates (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^(rust/brutex-feed/fuzz/seeds/|docs/design/sweep_core/)
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-yaml
@@ -64,8 +54,16 @@ repos:
       - id: ruff
         name: ruff check
         args: [--fix, --exit-non-zero-on-fix]
+        # Design-doc measurement tooling (standalone one-shot scripts +
+        # raw transcripts), outside the production gates — T201/S101 etc.
+        # are appropriate there (coordinator ruling).
+        # DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^docs/design/sweep_core/
       - id: ruff-format
         name: ruff format
+        # Same design-doc measurement-tooling carve-out as ruff check
+        # above (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^docs/design/sweep_core/
 
   # ── Python: mypy --strict (only changed files) ──────────────────
   # rev MUST track the pyproject `mypy>=1.10,<3.0` toolchain (the same law
@@ -97,20 +95,8 @@ repos:
           - polars>=1.0,<2.0
           # blake3 ships py.typed + a .pyi; without it the hook env degrades
           # blake3.blake3(...).hexdigest() to Any → phantom no-any-return on
-          # files like sweep_supervisor.py (the same class as polars above;
-          # landed independently on main AND via the crossverify lane).
+          # files like sweep_supervisor.py (the same class as polars above).
           - blake3>=1.0
-          # starlette: the same wheel-less-env phantom class — without it the
-          # hook env degrades TrustedHostMiddleware to Any (misc subclass
-          # error on trusted_host.py) at the pre-push stage of a
-          # merge-forward, while the BINDING venv-faithful `mypy --strict
-          # brutex` is clean (2026-07-19 incident, the crossverify lane).
-          # starlette ships py.typed; without it the hook env degrades
-          # TrustedHostMiddleware to Any → a phantom [misc]
-          # cannot-subclass-Any on dashboard/trusted_host.py (the same
-          # wheel-less-env class as polars/blake3 above; the venv-faithful
-          # `mypy --strict brutex` is clean on the file).
-          - starlette>=0.40
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust

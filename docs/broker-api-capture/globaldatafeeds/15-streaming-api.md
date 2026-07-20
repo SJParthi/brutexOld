@@ -26,7 +26,7 @@ Nothing. This function authenticates the user and sends response accordingly
  function Authenticate()
   {
      writeToScreen("Authenticate");
-    var message = 
+    var message =
     {
        MessageType: "Authenticate",
        Password: accessKey
@@ -55,7 +55,7 @@ RESPONSE: {"T":"Batch", "data":[{"E":"NFO","I":"OPTSTK_SBIN_28OCT2025_CE_860","L
 
 ++ multiple line of traded symbols in batch wise format like above .
 
-Expansion on  returns:- 
+Expansion on  returns:-
 
 E - Exchange , I - InstrumentIdentifier ,LTT - LastTradeTime , STT - ServerTime , ATP - AverageTradedPrice ,C- Close ,O- Open ,H- High ,L -Low, LTP- LastTradePrice,LTQ- LastTradeQty ,TTQ- TotalQtyTraded, BP- BuyPrice,BQ-BuyQty,SP- SellPrice ,SQ- SellQty,OI-OpenInterest,QL-QuotationLot,VAL-Value,PO-PreOpen,PC-PriceChange,PCP-PriceChangePercentage,OIC-OpenInterestChange, T- MessageType
 ```
@@ -80,7 +80,7 @@ Nothing. This function authenticates the user and sends response accordingly
  function Authenticate()
   {
      writeToScreen("Authenticate");
-    var message = 
+    var message =
     {
        MessageType: "Authenticate",
        Password: accessKey
@@ -126,5 +126,5 @@ RESPONSE: {"Exchange":"MCX","Periodicity":"MINUTE","Period":1,"Result":[{"Instru
 "Close":5.05}],
 "MessageType":"RealtimeSnapshotCollection"}
 
-++ multiple line of traded symbols 
+++ multiple line of traded symbols
 ```
