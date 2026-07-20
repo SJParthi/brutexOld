@@ -134,11 +134,14 @@ class TestPerSwapEquality:
         assert time(15, 30) == session.SESSION_CLOSE
 
     def test_zoneinfo_family_consumers_bind_the_root(self) -> None:
+        # NOTE: brutex.orchestrator.quota_tracker was ALSO pinned here until
+        # its dormant scaffold (incl. its private ``_IST``) was deleted
+        # (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727b) — the module
+        # now constructs no IST at all, so the singlesource invariant is
+        # satisfied by removal; every other family pin is unchanged.
         from brutex.crossverify import config as cv_config
         from brutex.dashboard import db_view
-        from brutex.orchestrator import quota_tracker
 
-        assert quota_tracker._IST is IST
         assert cv_config._IST is IST
         assert db_view._IST is IST
 

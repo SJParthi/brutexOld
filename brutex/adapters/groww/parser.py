@@ -270,7 +270,13 @@ def parse_candle_rows(
         # the whole series. OI is null for index/spot rows anyway, so no data is lost.
         if len(row) == _CANDLE_ROW_LEN_NO_OI:
             ts_raw, open_, high, low, close, volume = row
-            open_interest = None
+            # The ``None -> ""`` mutant here is PROVABLY EQUIVALENT at the sole
+            # consumer: ``assemble_candle`` routes open_interest through
+            # ``is_absent``, which treats ``None`` and ``""`` identically
+            # (candle_fields.is_absent — empty/whitespace string == absent), so
+            # no test can distinguish them (the money.py documented-pragma
+            # precedent, DEC-MUTATION-MONEY-001).
+            open_interest = None  # pragma: no mutate
         else:
             ts_raw, open_, high, low, close, volume, open_interest = row
         if isinstance(ts_raw, (int, float)) and not isinstance(ts_raw, bool):

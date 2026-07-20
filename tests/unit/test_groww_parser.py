@@ -593,3 +593,98 @@ class TestEpochTimestampVerdictPerWindow:
         verdicts = self._verdicts(logs)
         assert len(verdicts) == 1
         assert verdicts[0]["epoch_rows"] == 1
+
+
+# ── mutation hardening (mutmut per-PR gate, ci.yml mutation-py) ─────────────
+
+
+class TestMutationHardening:
+    """Exact-value kills for the mutants the behavioral suite cannot see.
+
+    The 2026-07-20 mutmut retarget onto this module (the per-PR ``mutation-py``
+    gate — RETARGETED from the deleted ``brutex/data/parser.py``,
+    DEC-DATA-PARSER-DEAD-DELETE-001) measured 70 mutants with 16 survivors:
+    14 message-STRING mutants (``pytest.raises(..., match=...)`` is a substring
+    search, so an ``XX``-wrapped message still matches), one logger-name mutant
+    and one log-field mutant. This class pins each surviving site EXACTLY (the
+    ``TestMutationHardening`` house idiom — literal / exact-message /
+    log-event-field kills); the one provably-equivalent mutant
+    (``open_interest = None`` vs ``""`` — ``is_absent`` collapses both) carries
+    a documented in-module pragma instead.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_guard(self) -> Iterator[None]:
+        parser.reset_epoch_timestamp_warnings()
+        yield
+        parser.reset_epoch_timestamp_warnings()
+
+    def test_logger_name_is_the_module_path(self) -> None:
+        # structlog lazy proxies carry their get_logger() args verbatim.
+        assert parser._LOG._logger_factory_args == ("brutex.adapters.groww.parser",)
+
+    def test_epoch_warn_fields_exact(self) -> None:
+        raw = 1_700_000_000
+        with pull_id_scope("pullaaaa0001"), capture_logs() as logs:
+            parser.parse_timestamp_ist(raw)
+        warns = _epoch_warns(logs)
+        assert len(warns) == 1
+        assert warns[0]["sample"] == repr(raw)  # the RAW value, never a placeholder
+        assert (
+            warns[0]["risk"]
+            == "if the vendor sent IST-naive epochs every bar shifts +05:30 silently"
+        )
+
+    def test_bool_timestamp_message_exact(self) -> None:
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_timestamp_ist(True)
+        assert str(excinfo.value) == "candle timestamp must not be bool: True"
+
+    def test_unparseable_string_message_exact(self) -> None:
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_timestamp_ist("junk")
+        assert str(excinfo.value) == "unparseable Groww timestamp: 'junk'"
+
+    def test_out_of_range_string_message_exact(self) -> None:
+        # Year-1 IST -> UTC subtracts +05:30 into year 0 -> OverflowError branch.
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_timestamp_ist("0001-01-01T00:00:00")
+        assert str(excinfo.value) == "out-of-range candle timestamp: '0001-01-01T00:00:00'"
+
+    def test_non_finite_epoch_message_exact(self) -> None:
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_timestamp_ist(float("nan"))
+        assert str(excinfo.value) == "non-finite candle timestamp: nan"
+
+    def test_out_of_range_epoch_message_exact(self) -> None:
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_timestamp_ist(1e30)
+        assert str(excinfo.value) == "out-of-range candle timestamp: 1e+30"
+
+    def test_wrong_type_timestamp_message_exact(self) -> None:
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_timestamp_ist([])
+        assert str(excinfo.value) == (
+            "candle timestamp must be a string or epoch seconds, got list: []"
+        )
+
+    def test_missing_candles_key_message_exact(self) -> None:
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_candle_rows({})
+        assert str(excinfo.value) == "missing required 'candles' key in Groww payload"
+
+    def test_candles_not_array_message_exact(self) -> None:
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_candle_rows({"candles": "x"})
+        assert str(excinfo.value) == "'candles' must be an array, got str"
+
+    def test_bad_row_message_exact(self) -> None:
+        # ONE equality kills all four f-string fragments of the 4-part message.
+        with pytest.raises(CandleParseError) as excinfo:
+            parser.parse_candle_rows({"candles": [[1, 2, 3]]})
+        assert str(excinfo.value) == (
+            "candle row 0 must be a 7-element array "
+            "[ts, open, high, low, close, volume, open_interest] (settled bars) "
+            "or a 6-element array [ts, open, high, low, close, volume] (the current "
+            "not-yet-finalised session, no open_interest), got [1, 2, 3]"
+        )

@@ -4475,16 +4475,18 @@ jobs:
   # Python mutation testing (mutmut) — per-PR on critical modules
   #
   # HONEST ENVELOPE (Golden Rule #10, R2-CI-3c): this per-PR gate covers
-  # EXACTLY TWO modules — brutex/data/parser.py (the vendor candle-payload
-  # parser, ≥98% floor, 300 s budget; RETARGETED from the deleted
-  # brutex/orchestrator/state.py by DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
-  # MIGRATION.md #1727 — measured 2026-07-11: 33 mutants, 100.00% killed,
-  # 72 s wall on mutmut 2.5.1, comfortably inside the 300 s budget; the
-  # larger candidate brutex/data/partition.py measured 109 mutants / 240 s —
-  # too close to the budget on 2-core runners) and brutex/money.py (2dp
-  # money display, ≥99% floor,
-  # 240 s budget). It is deliberately NOT the whole-package mutation pass:
-  # parser.py 300 s + money.py 240 s + the two Rust-wheel builds (fno-math +
+  # EXACTLY TWO modules — brutex/adapters/groww/parser.py (the LIVE vendor
+  # candle-payload parser, ≥98% floor, 300 s budget; RETARGETED from
+  # brutex/data/parser.py after main's lap-8 fold DELETED that dead module +
+  # its tests/unit/test_data_parser.py, DEC-DATA-PARSER-DEAD-DELETE-001,
+  # MIGRATION.md #1941 — the earlier chain was state.py → data/parser.py per
+  # DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1727b; measured
+  # 2026-07-20: 69 mutants, 100.00% killed, 135 s wall on mutmut 2.5.1 in a
+  # minimal local py3.12 env — ≈150 s projected at the CI ~2.2 s/mutant pace
+  # of the old 33-mutant/72 s run, inside the 300 s budget) and
+  # brutex/money.py (2dp money display, ≥99% floor,
+  # 420 s budget). It is deliberately NOT the whole-package mutation pass:
+  # parser.py 300 s + money.py 420 s + the two Rust-wheel builds (fno-math +
   # trading-core) + `.[dev]` install already sit close to the 20-minute job
   # budget, so the per-PR set is kept to these two safety-critical math
   # modules to avoid a timeout (a timeout would REGRESS this gate to red-on-
@@ -4501,7 +4503,7 @@ jobs:
     needs: build-wheels
     # 20 -> 90 (DEC-SWEEP-UNKILLABLE-CORE-001 D-19): the four Phase-2
     # run-core critical modules join the gate. Measured GREEN path (ship
-    # time): ~40 min of mutmut on the four + ~9 min state.py/money.py +
+    # time): ~40 min of mutmut on the four + ~9 min parser.py/money.py +
     # installs = ~55 min typical; 90 is the hang belt. A module that
     # exhausts its OWN per-step `timeout` budget fails that step (exit 124)
     # long before this job value bites.
@@ -4531,23 +4533,31 @@ jobs:
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
         run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
-      - name: mutmut on parser.py (vendor candle parser) (blocking — DEC-P0-001)
+      - name: mutmut on groww/parser.py (vendor candle parser) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
           # 5-minute budget per module; DEC-P0-001 (2026-05-17) removed
           # blanket `|| true`. mutmut run exits with the count of survivors
           # which can be non-zero on success; we let the run finish even
           # if survivors exist, then enforce a survivor-budget gate.
-          # RETARGETED state.py → parser.py (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
-          # MIGRATION.md #1727): state.py was deleted as dead scaffolding;
-          # parser.py is the safety-critical vendor-payload → bar parse,
-          # already a weekly zero-survivor pair in mutation.yml, and the
-          # measured run (33 mutants, 72 s, 100.00% kill) fits the budget.
+          # RETARGETED data/parser.py → adapters/groww/parser.py: main's
+          # lap-8 fold DELETED brutex/data/parser.py + its
+          # tests/unit/test_data_parser.py (DEC-DATA-PARSER-DEAD-DELETE-001,
+          # MIGRATION.md #1941), which left this step's prior target dangling
+          # (a 0-mutant set — the score parser below exits 1 on it). The
+          # groww parser is the LIVE safety-critical vendor-payload → bar
+          # parse (its 100% line+branch coverage gate on
+          # tests/unit/test_groww_parser.py lives earlier in this workflow);
+          # measured 2026-07-20: 69 mutants, 100.00% killed, 135 s wall in a
+          # minimal local py3.12 env (≈150 s projected at the CI
+          # ~2.2 s/mutant pace of the old 33-mutant/72 s run) after the
+          # TestMutationHardening exact-message kills + ONE documented
+          # equivalent-mutant pragma landed with the retarget.
           set +e
           timeout 300 mutmut run \
-            --paths-to-mutate brutex/data/parser.py \
+            --paths-to-mutate brutex/adapters/groww/parser.py \
             --tests-dir tests/unit \
-            --runner "pytest -x tests/unit/test_data_parser.py"
+            --runner "pytest -x tests/unit/test_groww_parser.py"
           run_rc=$?
           set -e
           if [ $run_rc -eq 124 ]; then
@@ -4569,8 +4579,8 @@ jobs:
           # Enforce ≥98% mutation score per operator decree 2026-05-17 + DEC-P0-009.
           # Progression: 85% (original Golden Rule #12) → 96% (operator 2026-05-17
           # "minimum 96 percentage dude") → 98% (operator 2026-05-17 "100 percentage
-          # would be fine"). parser.py measured 100.00% (33/33 killed,
-          # 2026-07-11 retarget run). 98% floor leaves headroom for tooling
+          # would be fine"). groww/parser.py measured 100.00% (69/69 killed,
+          # 2026-07-20 retarget run). 98% floor leaves headroom for tooling
           # quirks only.
           # Operator decree 2026-05-17 (DEC-P0-003): no downgrade — 100% standards
           # held. If parser.py current score is below 85%, write more tests until
@@ -4637,7 +4647,7 @@ jobs:
           # Strip the 10-space CI-yml indent that bash heredoc preserves
           # (it would still cause IndentationError when python parses).
           sed -i 's/^          //' /tmp/check_mutation_score.py
-          MUT_MODULE="parser.py" MUT_XML="mutmut-results.xml" python3 /tmp/check_mutation_score.py
+          MUT_MODULE="groww/parser.py" MUT_XML="mutmut-results.xml" python3 /tmp/check_mutation_score.py
 
       - name: mutmut on money.py (2dp money display) (blocking — DEC-MUTATION-MONEY-001)
         run: |
