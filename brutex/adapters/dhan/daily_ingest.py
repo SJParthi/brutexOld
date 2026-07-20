@@ -236,8 +236,7 @@ def _process_daily_item(
         # ``toDate`` is "non-inclusive" but the belt covers BOTH readings — on
         # a prev-day-capped pull an over-fetched day would be TODAY'S forming
         # daily bar, which keep-first would freeze (the #837/#1774 class).
-        bounded = drop_bars_after(filtered.kept, item.end - timedelta(days=1))
-        dropped = len(filtered.kept) - len(bounded)
+        bounded, dropped = drop_bars_after(filtered.kept, item.end - timedelta(days=1))
         if dropped > 0:
             _LOG.warning(
                 "dhan.future_bar_dropped",

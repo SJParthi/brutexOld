@@ -431,8 +431,7 @@ def _process_item(
         # over-fetch one day PAST the operator range, and on a prev-day-capped
         # pull that day is TODAY'S forming session, which keep-first would freeze
         # (the #837/#1774 class). Dropped bars are counted + warned, never stored.
-        bounded = drop_bars_after(kept, item.end - timedelta(days=1))
-        dropped = len(kept) - len(bounded)
+        bounded, dropped = drop_bars_after(kept, item.end - timedelta(days=1))
         if dropped > 0:
             _LOG.warning(
                 "dhan.future_bar_dropped",
