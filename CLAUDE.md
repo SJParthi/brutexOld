@@ -39,6 +39,27 @@ digest VALUE-IDENTICAL (the review-fix NIT `float()` normalization on
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
 identity untouched. This header carries the pointer, never the story — the
 full record lives in the §1 Active-branch blurb + MIGRATION.md #1851.)
+Earlier: 2026-07-15 (DEC-DASHBOARD-BATCHA-REMAINDER-001, MIGRATION.md
+#1795, branch `claude/dbhtml-batcha-refold` — the Batch-A ADDITIVE REMAINDER
+refolded onto main after adopting main's landed #1720/#1763 disposition (the
+coordinator ruling for the stale PR #1368; the PR itself is recommended
+CLOSED AS SUPERSEDED): (1) the bx-datepicker.js REBUILD-LEAK fix — the
+per-instance document click/keydown listeners collapse onto ONE delegated
+document listener pair over a pruned + reattach-aware doc-target registry
+(a control-rebuilding page no longer accumulates listeners retaining every
+replaced instance's detached tree); (2) the /results STORE-ERROR truth
+card — the #1617 Ruling-10/C3 `store_error_payload` markers now render a
+DISTINCT `renderStoreError` card naming the error_type, never the "No
+sweeps yet" empty hero (the fake-empty illusion closed). #1368's
+createElement conversions of fetch_windows/spot_coverage + the sink-count
+pin tightenings CONTRADICTED main's landed #1720 suites and are DROPPED;
+the six-template visual adoption is implementation-stale — re-authoring is
+a named follow-up, not manufactured churn. Fails-before executed on both
+pins; the 147-file dashboard battery + main's #1720/#1763/#1791 suites pass
+UNMODIFIED. DISPLAY zone only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no lake/schema/scope/vocab/rate change. This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1795.)
 Earlier: 2026-07-19 (CLUB REGIME merge vehicle, branch
 `integration/club-regime` — the stack-fold of FOUR regime-robustness member
 PRs as ONE merge event off main tip 184a48a4: #1677 DEC-REGIME-TAXONOMY-001
@@ -4200,6 +4221,78 @@ hostile-review pass._
   clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run
   identity untouched — the recording is audit-PAYLOAD only. The full record
   lives in MIGRATION.md #1851.)
+  Earlier: `claude/dbhtml-batcha-refold`
+  (**DEC-DASHBOARD-BATCHA-REMAINDER-001, MIGRATION.md #1795** — the Batch-A
+  additive remainder REFOLDED onto main tip 1ad31acd after adopting main's
+  landed #1720/#1763 disposition per the coordinator's binding ruling for
+  the stale PR #1368 (merge-base f171835f); the PR itself is RECOMMENDED
+  CLOSED AS SUPERSEDED. Delivered — exactly the two genuinely-additive
+  items, adapted to main's current shape: (1) the bx-datepicker.js
+  REBUILD-LEAK fix — every `buildCalendar`/`buildSelect` previously added
+  its OWN never-removed document click/keydown listener pair, so a page
+  that REBUILDS its controls (the MutationObserver re-wires fresh nodes)
+  accumulated document listeners whose closures retained every replaced
+  instance's detached DOM tree (the PR author's headless-Chromium
+  measurement, quoted not re-measured — no browser in this env: 4,001
+  document listeners after 1,000 rebuilds; ~103 surviving detached nodes
+  per rebuild; document click dispatch 0.20 ms → 4.60 ms); instances now
+  REGISTER `{root, isInside, close, esc}` in the module-level doc-target
+  registry, the two document listeners attach EXACTLY ONCE
+  (`registerDocTarget`), disconnected roots are PRUNED on every document
+  event and every `auto()` re-wire pass, and a detached-then-REATTACHED
+  wrap is re-registered via its stamped `_bxDocTarget` entry
+  (`reattachDocTargets` — the enhance-dedup correctly blocks a second
+  build, so without the stamp a reattached live node would lose its
+  outside-click/Escape close forever); the DEC-DATEPICKER-LABEL-CLOSE-FIX-001
+  own-input guard moves verbatim into the calendar's `isInside`; main had
+  NOT touched bx-datepicker.js since the merge-base (verified empty diff) —
+  the PR's file adopts wholesale; (2) the /results STORE-ERROR truth card —
+  main's template consumed a `store_error_payload` degrade (the
+  DEC-SWEEP-RESULTS-DEPTH-001 #1617 Ruling-10/C3 `error`/`error_type`
+  markers, served precisely so a corrupt/unreadable ResultsStore can never
+  masquerade as empty) as the friendly "No sweeps yet" hero + "no sweep has
+  been run yet" status — a fake-empty illusion (Golden Rule #1); the NEW
+  `renderStoreError` renders a DISTINCT error card NAMING the error_type
+  ("results store error (<type>)" + "not an empty leaderboard: the sweep
+  store could not be read.") via BXUI.errorCard with a
+  createElement/textContent fallback, reusing main's existing
+  `renderCardsUnknown`/`eraBanner`/`statusEl`/`setDot` seams; the
+  early-return `if (board && board.error)` guard runs BEFORE any count/hero
+  rendering; the genuine no-sweeps case keeps the hero (pinned). DROPPED
+  per the ruling (they CONTRADICT main's landed suites): #1368's
+  createElement/textContent conversions of the fetch_windows +
+  spot_coverage row builders + the sink-count pin tightenings
+  (fetch_windows/spot_coverage baselines 2→0; `_SANCTIONED_EXTRA_SINKS`
+  shrunk) — main's #1720 suites pin the esc()'d string-builder tbody
+  patches VERBATIM with sanctioned sinks {db.html:1, fetch_windows.html:1,
+  spot_coverage.html:1} — plus the dependent test rewrites
+  (db_view status-label / db_ux_pack bx-chip / universe_polish token pins).
+  ALREADY DELIVERED BY MAIN (not re-done): the tbody patch idiom +
+  BXPoll migration + bounded tick fetches (#1720 + #1791
+  `BXUI.fetchTextBounded`), the universe poller belt (#1763 →
+  `boundedLatestJson` at the #1791 reconcile), the bx-* token foundation
+  (#1632). The REST of Batch A (six-template visual adoption) is
+  implementation-STALE vs three generations of main reshaping —
+  re-authoring = named follow-up DEC-DASHBOARD-VISUAL-BATCHA-REAUTHOR-001,
+  deliberately NOT claimed here. FAILS-BEFORE EXECUTED: both new pins
+  (`test_doc_listeners_are_delegated_once` +
+  `test_results_store_error_renders_distinct_card_not_empty_hero`) FAIL
+  with the two source files stash-reverted to origin/main (2 failed) and
+  pass at HEAD. HONEST: the store-error card is source-string/route-render
+  pinned, not browser-executed (the #1557 envelope); `renderStoreError`
+  clears ROWS — a store FAULT replaces a previously-rendered table
+  (deliberate; the transient-failure keep-last-table law of `failState` is
+  untouched); the datepicker registry is document-global by design and
+  O(enhanced wraps) per auto() pass, never O(1)-claimed. GATES: the whole
+  147-file dashboard battery 3281 passed / 1 skipped (the CI-only node
+  guard) with main's #1720/#1763/#1791 suites UNMODIFIED; node --check
+  clean on bx-datepicker.js + the touched template's inline scripts (the
+  frontend_latency `_TOUCHED_TEMPLATES` harness covers results.html); ZERO
+  `brutex/**/*.py` modules touched — no ci.yml coverage stanza applies;
+  ruff/ruff-format clean on the touched test files; `mypy --strict` clean
+  on them; pyright 0 new vs the origin/main baseline. DISPLAY zone only —
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change.)
   Earlier: `integration/club-regime`
   (**CLUB REGIME merge vehicle** — the stack-fold of FOUR regime-robustness
   member PRs as ONE merge event off main tip 184a48a4, in stack order:
@@ -12563,6 +12656,22 @@ hostile-review pass._
   `sweep_apriori.py` byte-untouched; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
   §1 + MIGRATION.md #1851 for the full blurb)
+  Earlier: `claude/dbhtml-batcha-refold`
+  (DEC-DASHBOARD-BATCHA-REMAINDER-001, MIGRATION.md #1795 — the Batch-A
+  additive remainder refolded onto main tip 1ad31acd per the coordinator
+  ruling on the stale PR #1368 (adopt main's landed #1720/#1763
+  disposition; recommend closing #1368 as superseded): the bx-datepicker.js
+  rebuild-leak fix (ONE delegated document click/keydown listener pair over
+  a pruned + reattach-aware doc-target registry — never one pair per
+  buildCalendar/buildSelect instance) + the /results store-error truth card
+  (the #1617 Ruling-10/C3 `store_error_payload` markers render a distinct
+  `renderStoreError` card naming the error_type, never the "No sweeps yet"
+  empty hero); #1368's contradicting createElement conversions + sink-pin
+  tightenings DROPPED (main's #1720 suites pin the esc()'d string-builder
+  tbody patches verbatim); fails-before executed on both new pins; the
+  147-file dashboard battery green with main's suites UNMODIFIED; DISPLAY
+  zone only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1795 for the full blurb)
   Earlier: `integration/club-regime`
   (CLUB REGIME merge vehicle — the stack-fold of the four regime-robustness
   member PRs as ONE merge event: #1677 DEC-REGIME-TAXONOMY-001 (MIGRATION.md
