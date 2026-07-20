@@ -283,17 +283,17 @@ SubscribeOptionChainGreeks : Returns data of entire OptionChain Greeks for reque
 
 ```javascript
 function SubscribeOptionChainGreeks()
-{	
-     var request = 	 
+{
+     var request =
 		{
 			MessageType: "SubscribeOptionChainGreeks",
-			Exchange: "NFO",					
-			Product: "NIFTY",					
-			Expiry:"17OCT2024",					
-			//OptionType:"PE",					
-			StrikePrice: 25000, 				
-			Depth: 5 							
-		        //Unsubscribe: false                  
+			Exchange: "NFO",
+			Product: "NIFTY",
+			Expiry:"17OCT2024",
+			//OptionType:"PE",
+			StrikePrice: 25000,
+			Depth: 5
+		        //Unsubscribe: false
 		};
      doSend(request);
 }
