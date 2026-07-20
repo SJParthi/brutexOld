@@ -1966,8 +1966,10 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     set: selection landed after VIX, so the genuine pre-VIX generation
     carries neither — such a store also predates them all) and the bytes
     differ. That diff is attributable iff the ONLY schema
-    difference is exactly those missing columns: the scratch must carry the
-    whole trio, the original NONE of the appended nullable columns (a
+    difference is exactly those missing columns: the scratch must carry
+    EVERY always-appended nullable column (the trio + the later families +
+    the selection pair — a current-writer reflush always writes them all),
+    the original NONE of the appended nullable columns (a
     partial presence of ANY of them is not the pre-VIX generation), and
     stripping the appended nullable columns from the scratch schema must
     reproduce the original schema EXACTLY (names AND dtypes,
@@ -1994,8 +1996,13 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     if any(name in original_names for name in _APPENDED_NULLABLE_FIELDS):
         return False  # partial nullable-column presence — not the pre-VIX generation
     scratch_names = {name for name, _ in scratch_schema}
-    if any(name not in scratch_names for name in VIX_FIELDS):
-        return False  # the recount side lacks the trio — not this migration
+    if any(name not in scratch_names for name in _APPENDED_NULLABLE_FIELDS):
+        # The recount side lacks an ALWAYS-appended nullable column (the trio
+        # or a later family, the LANE-W1 selection pair included) — a
+        # current-writer reflush always writes them all, so this is not the
+        # migration shape (the member's #2059/#2060 tooth, generalized at the
+        # wave-2b fold from its selection-pair special case).
+        return False
     stripped = [entry for entry in scratch_schema if entry[0] not in _APPENDED_NULLABLE_FIELDS]
     return stripped == original_schema
 

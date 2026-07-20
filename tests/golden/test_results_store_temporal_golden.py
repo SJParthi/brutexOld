@@ -51,6 +51,30 @@ bytes; v1 frozen at
 new byte oracle for the emit-on-present all-``None`` arm in
 ``tests/unit/test_engine_results_store_temporal.py``, delta-audited by the
 same pin below.
+
+WAVE-2B RE-INTEGRATION (2026-07-20, the train-b rank-pareto fold —
+MIGRATION.md #2059/#2060; the SAME sanctioned additive-only re-lock class):
+the LANE-W1 selection-provenance pair (``pareto_member`` Boolean +
+``selection_basis`` Utf8 — ALWAYS-written nullable columns, appended
+strictly LAST after the W2 families) joined the writer, so a reflush of
+:func:`_expected_rows` no longer lands on the v2 bytes. Per the
+do-NOT-regenerate law the v2 files are BYTE-UNTOUCHED and stay frozen LOAD
+oracles — they now genuinely guard the optional-column law for the
+selection pair (absent columns load as honest ``None``) — and the
+byte-determinism pin moved onto the NEW sibling
+``results_store_temporal_v3.parquet``, minted 2026-07-20 as a reviewed act
+through the COMBINED production writer via the SAME documented generation
+law (sha256
+``c3ad093bb35244bfddfe26c0850592bf713e99b339ea372a9acef739152b08a8``,
+10 983 bytes, NOT asserted). The v2→v3 delta is machine-pinned
+additive-only below: v3's columns == v2's in the SAME order + EXACTLY the
+2 selection columns (``pareto_member`` Boolean + ``selection_basis`` Utf8,
+ALL-null — the hand-built literal rows carry no selection provenance), and
+``v3.drop(the 2)`` is schema- AND value-equal to v2. The sibling
+``results_store_pre_temporal_v3.parquet`` (SAME regeneration event; sha256
+``c0b2ed156cde1b074f8b85a6d69573343fac1182021f430dfba9495ab52d9382``,
+9 726 bytes) is the new byte oracle for the emit-on-present all-``None``
+arm in the unit suite, delta-audited by the same pin.
 """
 
 from __future__ import annotations
@@ -79,6 +103,14 @@ _PRE_TEMPORAL_V2: Path = (
     Path(__file__).parent / "fixtures" / "results_store_pre_temporal_v2.parquet"
 )
 
+#: The wave-2b byte-determinism twins (module docstring): the SAME literals
+#: flushed through the COMBINED writer with the LANE-W1 selection pair
+#: appended LAST (all-null here) — MIGRATION.md #2059/#2060.
+_FIXTURE_V3: Path = Path(__file__).parent / "fixtures" / "results_store_temporal_v3.parquet"
+_PRE_TEMPORAL_V3: Path = (
+    Path(__file__).parent / "fixtures" / "results_store_pre_temporal_v3.parquet"
+)
+
 #: The 8 W2 always-written nullable Float64 columns, in their ruled appended
 #: order (GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS — mirrored
 #: literally so a constant reorder cannot silently re-derive this pin).
@@ -91,6 +123,15 @@ _W2_COLUMNS: list[str] = [
     "trailing_profit_factor",
     "trailing_net_pnl_paisa",
     "decay_weighted_net_paisa",
+]
+
+#: The LANE-W1 selection-provenance pair (DEC-RANK-PARETO-PERSIST-001 /
+#: DEC-RANK-QUOTA-PERSIST-1000-001, MIGRATION.md #2059/#2060) —
+#: ALWAYS-written nullable columns appended strictly LAST after the W2
+#: families at the 2026-07-20 wave-2b fold (mirrored literally, as above).
+_SELECTION_COLUMNS: list[str] = [
+    "pareto_member",
+    "selection_basis",
 ]
 
 #: The exact canonical column strings row 1 was generated with (hand-locked).
@@ -229,13 +270,15 @@ def test_temporal_flush_reproduces_the_fixture_bytes(tmp_path: Path) -> None:
     the version-robust contract). Repointed v1 → v2 at the W2 re-integration
     (module docstring — the combined writer always appends W2's 8, so the v1
     bytes are unreproducible by construction; v1 stays the frozen LOAD
-    oracle, byte-untouched)."""
+    oracle, byte-untouched) and v2 → v3 at the 2026-07-20 wave-2b
+    rank-pareto fold (the writer now also always appends the selection pair;
+    v2 stays a frozen LOAD oracle, byte-untouched)."""
     pytest.importorskip("polars")
     store = ResultsStore(path=tmp_path / "regen.parquet")
     for row in _expected_rows():
         store.append(row)
     store.flush()
-    assert (tmp_path / "regen.parquet").read_bytes() == _FIXTURE_V2.read_bytes()
+    assert (tmp_path / "regen.parquet").read_bytes() == _FIXTURE_V3.read_bytes()
 
 
 def test_v2_delta_vs_v1_is_exactly_the_appended_w2_families() -> None:
@@ -259,3 +302,26 @@ def test_v2_delta_vs_v1_is_exactly_the_appended_w2_families() -> None:
         stripped = v2.drop(_W2_COLUMNS)
         assert stripped.schema == v1.schema, v2_path.name
         assert stripped.equals(v1), v2_path.name
+
+
+def test_v3_delta_vs_v2_is_exactly_the_appended_selection_pair() -> None:
+    """The PERMANENT machine form of the 2026-07-20 wave-2b regeneration
+    audit (module docstring; the same #1749 additive-only re-lock law), for
+    BOTH v2/v3 fixture pairs: v3's schema is v2's schema + EXACTLY the 2
+    LANE-W1 selection columns appended LAST (``pareto_member`` Boolean +
+    ``selection_basis`` Utf8, all-null — the hand-built literal rows carry
+    no selection provenance), and dropping them yields a frame schema- AND
+    value-equal to v2 (the explicit schema compare beside ``.equals``, as
+    above)."""
+    pl = pytest.importorskip("polars")
+    for v2_path, v3_path in ((_FIXTURE_V2, _FIXTURE_V3), (_PRE_TEMPORAL_V2, _PRE_TEMPORAL_V3)):
+        v2 = pl.read_parquet(v2_path)
+        v3 = pl.read_parquet(v3_path)
+        assert v3.columns == v2.columns + _SELECTION_COLUMNS, v3_path.name
+        assert v3.schema["pareto_member"] == pl.Boolean
+        assert v3.schema["selection_basis"] == pl.Utf8
+        for name in _SELECTION_COLUMNS:
+            assert v3[name].null_count() == v3.height, name
+        stripped = v3.drop(_SELECTION_COLUMNS)
+        assert stripped.schema == v2.schema, v3_path.name
+        assert stripped.equals(v2), v3_path.name

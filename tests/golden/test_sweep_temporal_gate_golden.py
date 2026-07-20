@@ -239,7 +239,24 @@ def run_sweep(tmp_path: Path, tag: str, cfg: SweepRunConfig) -> SweepRunSummary:
 #: bit-compare, executed 2026-07-19). The exclusion truth + summary pins
 #: below are UNCHANGED — the ONE sanctioned ranking-gate delta of the W2
 #: lane (Door 5, loosening-only) kills nothing here.
-_GOLDEN_TEMPORAL_CONTENT_HASH = "fdc92094ad05076c4ec680f597c0de02de321086d8f206ef849d832919780a76"
+#: RE-LOCKED at the 2026-07-20 train-b wave-2b rank-pareto fold
+#: (MIGRATION.md #2059/#2060; hop fdc92094… → c3f1fb8f…): the LANE-W1
+#: selection-provenance pair (`pareto_member` Boolean + `selection_basis`
+#: Utf8 — ALWAYS-written nullable columns, appended strictly LAST after the
+#: W2 families) joined the writer, so the gate-ON store's bytes moved.
+#: AUDITED DELTA CLASS — schema-additive ONLY: the SAME single survivor row
+#: (mask ``1<<0``, run_id byte-stable — run identity untouched, selection is
+#: persistence-side only; the member branch NEVER touched this file — it
+#: predates the temporal gate, the movement is the mechanical consequence of
+#: the appended columns), every prior column value equal (the entire hand
+#: audit above re-verified holding on the folded tree by the field pins
+#: below, which pass UNMODIFIED), plus EXACTLY the 2 appended selection
+#: columns — the survivor row stamps `pareto_member=True` +
+#: `selection_basis="composite,dd,losing_trades,win_rate,expectancy,frontier"`
+#: (a single-survivor pool is trivially every basis' best + the frontier).
+#: Two-run byte-determinism pinned in-test; the exclusion truth + summary
+#: pins below pass UNMODIFIED.
+_GOLDEN_TEMPORAL_CONTENT_HASH = "c3f1fb8f0bf45463de52dc7218b99fac8981ae65fc2903208f23b1431be965cc"
 
 #: The exclusion truth at DEFAULT thresholds (the operator demand, frozen).
 _SURVIVOR_MASKS = (1 << 0,)

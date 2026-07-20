@@ -308,11 +308,28 @@ class TestTieBreakLawsViaPublicApi:
         assert [r.net_pnl_paisa for r in board] == [100]  # the earlier twin
 
     def test_disabled_rust_runtime_refuses_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # DEC-RUST-STAGE3-REFINE-001: the Python selection math is DELETED —
-        # a falsy flag is a loud typed refusal, never a silent fallback.
+        # DEC-RUST-STAGE3-REFINE-001: the LEGACY Sharpe-only Python selection
+        # math is DELETED (the wheel's SelectSession is the one legacy arm) —
+        # a falsy flag is a loud typed refusal on that arm, never a silent
+        # fallback. Reconciled at the 2026-07-20 wave-2b rank-pareto fold
+        # (MIGRATION.md #2061): the DEFAULT union arm (`multi_axis=True`) is
+        # ruled Rust-OPTIONAL pure orchestration and legitimately serves
+        # without the wheel — the refusal law binds the `multi_axis=False`
+        # legacy arm, pinned here; the union-serves twin follows.
         monkeypatch.setenv(REFINE_RUST_ENV, "0")
         with pytest.raises(RefineRustUnavailableError, match="NO fallback"):
-            group_survivors([_row()], top_k=1)
+            group_survivors([_row()], top_k=1, multi_axis=False)
+
+    def test_disabled_rust_runtime_union_arm_still_serves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The #2061 Rust-optional half of the reconciliation above: the union
+        # DEFAULT arm is pure-Python orchestration (`_AxisEntry` bounded
+        # heaps) and must keep serving under a falsy refine flag.
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        boards = group_survivors([_row()], top_k=1)
+        (board,) = boards.values()
+        assert len(board) == 1
 
 
 class TestGoldenEqualityVsReference:

@@ -137,11 +137,17 @@ def test_run_identity_goldens_are_unmoved() -> None:
     # canonical content hash was re-derived on the folded tree — ee874356… →
     # 011a494c… (the audited schema-additive delta: EXACTLY the 8
     # appended-last nullable growth/exit-quality/recency columns; the run_id
-    # 715212… is UNMOVED — run identity untouched). This pin's LAW is
+    # 715212… is UNMOVED — run identity untouched). Refreshed AGAIN at the
+    # 2026-07-20 train-b wave-2b rank-pareto fold (MIGRATION.md #2059/#2060):
+    # the canonical content hash was re-derived on the folded tree —
+    # 011a494c… → af3bf465… (the audited schema-additive delta: EXACTLY the 2
+    # appended-last selection-provenance columns `pareto_member` +
+    # `selection_basis`; the run_id 715212… is STILL unmoved — run identity
+    # untouched, selection is persistence-side only). This pin's LAW is
     # unchanged — the resilience annotation pass must mirror whatever the
     # canonical frozen value is (these literals are copies OF the canonical
     # suite's, never an independent re-lock of it).
     assert _GOLDEN_RUN_ID == "715212420d2cca2dd998aa0f716ef5b658d551a212a61af135fe0cf6fae62fc9"
     assert (
-        _GOLDEN_CONTENT_HASH == "011a494ce615aa4551af7d6189f20c4a5eeb34e5416301a4d67d2a4cc61d896c"
+        _GOLDEN_CONTENT_HASH == "af3bf465cb9e593746713a30bacfafe82e71ecf767c01cc1882c3f9f3addbed9"
     )

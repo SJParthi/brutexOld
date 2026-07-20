@@ -44,12 +44,16 @@ _PRE_EXTENSION_FIXTURE: Path = (
 #: delta is hand-audited + machine-pinned additive-only — EXACTLY the 8
 #: appended W2 columns — in tests/golden/test_results_store_temporal_golden.py,
 #: which also documents the generation law: append the pre-extension golden's
-#: literals → flush through the production writer).
+#: literals → flush through the production writer). Repointed AGAIN v2 → v3
+#: at the 2026-07-20 train-b wave-2b rank-pareto fold (MIGRATION.md
+#: #2059/#2060; the v2→v3 delta is machine-pinned additive-only — EXACTLY
+#: the 2 appended selection columns — in the same golden suite; v2 frozen
+#: byte-untouched).
 _PRE_TEMPORAL_FIXTURE: Path = (
     Path(__file__).resolve().parents[1]
     / "golden"
     / "fixtures"
-    / "results_store_pre_temporal_v2.parquet"
+    / "results_store_pre_temporal_v3.parquet"
 )
 
 #: The pre-extension column set (identity → limbs → money → counts → metrics →
@@ -114,6 +118,16 @@ _W2_COLUMNS = [
     "trailing_profit_factor",
     "trailing_net_pnl_paisa",
     "decay_weighted_net_paisa",
+]
+
+#: The LANE-W1 selection-provenance pair (DEC-RANK-PARETO-PERSIST-001 /
+#: DEC-RANK-QUOTA-PERSIST-1000-001, MIGRATION.md #2059/#2060) —
+#: ALWAYS-written nullable columns (``pareto_member`` Boolean +
+#: ``selection_basis`` Utf8), appended strictly LAST after the W2 families
+#: at the 2026-07-20 train-b wave-2b fold; never emit-on-present.
+_SELECTION_COLUMNS = [
+    "pareto_member",
+    "selection_basis",
 ]
 
 # ── A consistent temporal bucket set for a 40-trade / −123450-paisa / 18-win row ──
@@ -194,8 +208,13 @@ class TestEmitOnPresent:
         the oracle is ``results_store_pre_temporal_v2.parquet`` (the SAME
         literals, W2's 8 as nulls; the v1→v2 delta hand-audited +
         machine-pinned additive-only in the golden suite; v1 frozen
-        byte-untouched). The pin's INTENT is unchanged: temporal
-        emit-on-present adds NOTHING when absent. (Byte-level, so
+        byte-untouched). Re-anchored AGAIN at the 2026-07-20 wave-2b
+        rank-pareto fold (MIGRATION.md #2059/#2060): the combined writer now
+        also always emits the selection pair, so the oracle is
+        ``results_store_pre_temporal_v3.parquet`` (the SAME literals, the
+        pair as nulls; the v2→v3 delta machine-pinned additive-only in the
+        golden suite; v2 frozen byte-untouched). The pin's INTENT is
+        unchanged: temporal emit-on-present adds NOTHING when absent. (Byte-level, so
         polars/zstd-build sensitive like _GOLDEN_CONTENT_HASH; the schema
         test below is the version-robust twin.)"""
         from tests.golden.test_results_store_pre_extension_golden import _expected_rows
@@ -220,7 +239,7 @@ class TestEmitOnPresent:
         store.append(_row(1))
         store.flush()
         assert pl.read_parquet(tmp_path / "a.parquet").columns == (
-            _PRE_EXTENSION_COLUMNS + _W2_COLUMNS
+            _PRE_EXTENSION_COLUMNS + _W2_COLUMNS + _SELECTION_COLUMNS
         )
 
     def test_temporal_flush_emits_the_quartet_at_its_landed_position(self, tmp_path: Path) -> None:
@@ -236,7 +255,9 @@ class TestEmitOnPresent:
         store.append(_row(1, with_temporal=True))
         store.flush()
         df = pl.read_parquet(tmp_path / "a.parquet")
-        assert df.columns == _PRE_EXTENSION_COLUMNS + _TEMPORAL_COLUMNS + _W2_COLUMNS
+        assert df.columns == (
+            _PRE_EXTENSION_COLUMNS + _TEMPORAL_COLUMNS + _W2_COLUMNS + _SELECTION_COLUMNS
+        )
         assert all(df.schema[name] == pl.Utf8 for name in _TEMPORAL_COLUMNS)
         assert all(df.schema[name] == pl.Float64 for name in _W2_COLUMNS)
 
