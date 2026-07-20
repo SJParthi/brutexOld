@@ -22,6 +22,14 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # The tri-fold (PR #1698) sweep-core RAW evidence files (the pinned
+        # design doc + raw measurement JSONs) landed on main WITHOUT trailing
+        # newlines; they are committed byte-frozen evidence outside every CI
+        # gate, and "fixing" them in a merge-forward push range would diverge
+        # a vehicle branch from main — the DEC-SETTLE-EVIDENCE-ADOPTION-001
+        # hook-scope posture applied at the hook level (brutex-ops
+        # merge-forward over main 1a3f4852).
+        exclude: ^docs/design/sweep_core/
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-yaml
@@ -80,8 +88,15 @@ repos:
           - polars>=1.0,<2.0
           # blake3 ships py.typed + a .pyi; without it the hook env degrades
           # blake3.blake3(...).hexdigest() to Any → phantom no-any-return on
-          # files like sweep_supervisor.py (the same class as polars above).
+          # files like sweep_supervisor.py (the same class as polars above;
+          # landed independently on main AND via the crossverify lane).
           - blake3>=1.0
+          # starlette: the same wheel-less-env phantom class — without it the
+          # hook env degrades TrustedHostMiddleware to Any (misc subclass
+          # error on trusted_host.py) at the pre-push stage of a
+          # merge-forward, while the BINDING venv-faithful `mypy --strict
+          # brutex` is clean (2026-07-19 incident, the crossverify lane).
+          - starlette>=0.40
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust

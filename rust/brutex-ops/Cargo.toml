@@ -1,0 +1,122 @@
+# brutex-ops — the BruteX ops/automation Rust kernels (unified crate).
+#
+# ONE crate, THREE ops lanes — hand-unified from the three divergent full
+# copies the lane PRs shipped (the integration/brutex-ops-unified vehicle):
+#
+#   * `backup`      — DEC-BACKUP-RUST-OPS-001 (PR #1669): the dead-man verdict
+#     state machine (`deadman.py::evaluate_deadman`), the four golden-pinned
+#     template renderers (`schedule_render.py`), the restic `--json` parse +
+#     argv laws (`restic_runner.py`); facade `brutex/backup/backup_rust.py`
+#     (`BRUTEX_BACKUP_RUST`, default OFF).
+#   * `crossverify` — DEC-CROSSVERIFY-RUST-CORE-001 (PR #1673): the pinned
+#     CSV byte assembly of `csv_render.render_day_csv` + the
+#     canonical-identity mapping / S3-key law of `canonical.py`; facade
+#     `brutex/crossverify/rust_seam.py` (`BRUTEX_CROSSVERIFY_RUST`).
+#   * `nightly`     — DEC-NIGHTLY-RUST-CORE-001 (PR #1676): the nightly
+#     chain's pure decision laws (R42 break/exit-code, audit-reconcile
+#     tripwire, verdict/Telegram summary, launchd plist render + schedule
+#     arithmetic); facade `brutex/nightly/nightly_rust.py`
+#     (`BRUTEX_NIGHTLY_RUST`).
+#
+# Every lane keeps its verbatim Python bodies as the LIVE parity oracle;
+# every kernel crosses primitives / pre-formatted strings only (the
+# #1914/#1797 house FFI law) — no Decimal, no datetime, no tz math, no
+# exception TEXT is ever re-implemented here.
+#
+# ## Lane structure (APPEND-ONLY)
+#
+# One module per ops lane (`src/<lane>.rs`, pure Rust) + one clearly
+# delimited per-lane pyfunction/registration block in `src/python.rs`.
+# Future lanes APPEND their own module + block — never editing an existing
+# lane's block (the rust/brutex-lake multi-wave precedent).
+#
+# Pure-Rust-first (rlib, std + serde_json core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature
+# (turned on by maturin for the wheel build) — the brutex-feed shape.
+#
+# Standalone crate — deliberately NOT in any Cargo workspace (the sibling
+# rust/fno-math / rust/trading-core / rust/brutex-feed / rust/brutex-lake
+# are standalone too). Built + gated by the `rust-brutex-ops` ci.yml cargo
+# job AND the dedicated non-required wheel lane
+# .github/workflows/ops-rust-parity.yml.
+
+[package]
+name = "brutex-ops"
+version = "0.1.0"
+edition = "2024"
+# Edition 2024 needs rustc >= 1.85; ci.yml's RUST_VERSION 1.93.1 is the
+# floor toolchain this crate is gated on (the brutex-feed posture).
+rust-version = "1.93.1"
+description = "BruteX ops Rust kernels — backup deadman/template/restic laws, cross-verify CSV/canonical-identity laws, nightly chain decision laws (default-OFF seams)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it
+# from the SPDX license check (mirrors brutex-feed / fno-math / trading-core).
+publish = false
+
+[lib]
+name = "brutex_ops"
+path = "src/lib.rs"
+# cdylib so `import brutex_ops` finds the maturin-built extension; rlib so
+# `cargo test` links the pure-Rust cores with zero Python symbols.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust cores need NO Python. The PyO3 module is opt-in: `cargo
+# test` (default features) builds + links zero Python symbols; maturin turns
+# `python` on for the wheel build (see pyproject.toml) — the brutex-feed /
+# trading-core shape.
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# The restic `--json` parse twin (backup lane; pure Rust, rlib-safe).
+# Deliberately WITHOUT `arbitrary_precision` / `preserve_order`: the Python
+# facade's abstain rule routes every serde-vs-CPython JSON dialect
+# divergence (NaN/Infinity literals, lone surrogates, huge ints) to the
+# Python oracle, so the default strict parser is the honest envelope.
+serde_json = "1"
+
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into
+# the artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` /
+# `__source_digest__`. Build-script-only: it does NOT enter the shipped
+# rlib's dependency tree. ONE digest scheme covers all three lanes'
+# sources (Cargo.toml + src/**/*.rs — the whole src tree is hashed).
+blake3 = "1.5"
+
+[dev-dependencies]
+# Property-based testing — invariants + determinism over the pure cores.
+# Test-only; same major as the sibling crates so the toolchains agree.
+proptest = "1.6.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# PANIC-PROFILE RULING (the unification vehicle; recorded in the
+# DEC-BACKUP-RUST-OPS-001 / DEC-CROSSVERIFY-RUST-CORE-001 /
+# DEC-NIGHTLY-RUST-CORE-001 ledger entries): the backup + crossverify lane
+# copies shipped `panic = "abort"` (the brutex-feed house profile) while the
+# nightly copy deliberately kept the cargo DEFAULT (unwind) so a kernel
+# panic surfaces across the FFI as pyo3's catchable PanicException. The
+# unified crate adopts UNWIND (the nightly/brutex-lake posture): all THREE
+# facades carry pyo3 panic belts that degrade to the Python oracle, and
+# `abort` would neutralise every one of them — a runtime panic would
+# SIGABRT the process mid-backup / mid-crossverify / mid-nightly, the worst
+# failure mode for ops tooling (the #1669 review NIT-1 already conceded
+# this honestly). The kernels remain written structurally panic-free (no
+# unwrap/expect/unchecked indexing on data) — the belts are defense-in-depth.
+strip = "symbols"
+overflow-checks = true # Finance-adjacent ops code — an overflow must never be silent.
+
+[profile.bench]
+inherits = "release"
+debug = true
