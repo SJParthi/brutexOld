@@ -97,6 +97,21 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "over just-written bytes (no dups by construction; never a "
         "bar-serving read), so the dedup gate has nothing to collapse"
     ),
+    "brutex/adapters/dhan/rolling_option_writer.py": (
+        "write-side merge read under the partition locks; timestamp keep-first "
+        "dedup before the atomic rewrite — the dhan feed-lake twin of "
+        "option_parquet_writer (DEC-DHAN-ROLLING-OPTIONS-001)"
+    ),
+    "brutex/adapters/dhan/rolling_option_greeks.py": (
+        "dhan rolling-option Greeks overlay — reads the keep-first writer's OWN "
+        "partitions + the locked write-side overlay merge read "
+        "(DEC-DHAN-ROLLING-OPTIONS-001)"
+    ),
+    "brutex/adapters/dhan/daily_consistency.py": (
+        "observe-only daily-vs-minute close probe over the dhan feed lake "
+        "(timestamp+close columns; never serves bar rows) — "
+        "DEC-DHAN-NATIVE-DAILY-001"
+    ),
     "brutex/dashboard/db_view.py": (
         "wired: pagers use DEDUP_PARQUET_SOURCE_SQL + QUALIFY; totals use distinct_count_sql"
     ),
