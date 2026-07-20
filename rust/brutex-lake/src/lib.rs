@@ -120,6 +120,10 @@ mod locks;
 // own module file; registration lines only in this file (sibling Wave
 // slices extend the same crate additively).
 pub mod resample;
+// Wave-B tail (ADR-0020 rows 14-15, DEC-LAKE-RUST-RESAMPLE-DAILY-001) — the
+// daily-derive residue (aggregate → forming-session drop → midnight-IST
+// restamp); own module file, registration lines only here (§4.1 additive).
+pub mod resample_daily;
 // ADR-0020 Wave C row 4 (+ the row-5 rider): the canonical stats-shard JSON
 // render + the crate-internal partition twins — DEC-LAKE-RUST-STATS-MANIFEST-001
 // (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
@@ -600,6 +604,11 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
         detectors::classify_partial_window_verdict,
         m
     )?)?;
+    // Wave-B tail (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md #1946) —
+    // the session-cutoff + daily-residue faces, appended ADDITIVELY after
+    // every earlier registration (§4.1 — never reordering the siblings).
+    m.add_function(wrap_pyfunction!(resample::resample_session_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(resample_daily::resample_daily_ipc, m)?)?;
     Ok(())
 }
 

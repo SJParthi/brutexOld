@@ -154,6 +154,24 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
         "brutex/data/lake_rust_render.py",
         ".github/workflows/lake-rust-parity.yml",
     ),
+    # DEC-NOTIFY-RUST-CORE-001 (MIGRATION.md #1957): brutex_notify is the
+    # default-OFF notification-laws crate behind BRUTEX_NOTIFY_RUST. It is
+    # consumed ONLY through the import-guarded facade
+    # brutex/notifications/notify_rust.py
+    # (`importlib.import_module("brutex_notify")` inside the guard — an absent
+    # or broken install latches the flag OFF with one loud WARN and the
+    # Python oracle serves, byte-identical; flag OFF never imports the crate
+    # at all). It is deliberately NOT a build prerequisite: in NO cargo
+    # workspace, built ONLY by its own CI lane
+    # (.github/workflows/notify-rust-parity.yml). A module-top
+    # `import brutex_notify` anywhere in brutex/ would break the
+    # notifications package's wheel-free-at-import discipline (its isolated
+    # ci.yml cov gates run with zero PyO3 wheels) — the inverse pin below
+    # forbids exactly that.
+    "brutex_notify": (
+        "brutex/notifications/notify_rust.py",
+        ".github/workflows/notify-rust-parity.yml",
+    ),
     # DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940 / ADR-0020 slice T10):
     # brutex_data is the default-OFF data pure-law crate (the fno_symbol
     # structural grammar). It is consumed ONLY through the import-guarded
@@ -204,6 +222,22 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
     "brutex_strategies": (
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
+    ),
+    # DEC-RUST-OBSERVABILITY-001 (MIGRATION.md #1961): brutex_observability is
+    # the observability decision-law crate behind a deliberately default-OFF
+    # import-guarded facade (BRUTEX_OBSERVABILITY_RUST). It is consumed ONLY
+    # through brutex/observability/observability_rust.py
+    # (`importlib.import_module("brutex_observability")` inside the guard —
+    # an absent or stale wheel latches crate_unavailable/crate_stale with one
+    # loud WARN and the Python oracle serves, byte-identical). It is NOT
+    # wired into the always-on kernel build: never module-top imported, in NO
+    # cargo workspace, built + tested by its own observability-rust-parity CI
+    # lane (.github/workflows/observability-rust-parity.yml). A module-top
+    # `import brutex_observability` anywhere in brutex/ would make a clean
+    # clone crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_observability": (
+        "brutex/observability/observability_rust.py",
+        ".github/workflows/observability-rust-parity.yml",
     ),
     # DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): brutex_calendar is
     # the calendar-leaf pure-law crate (classify_month_drift /

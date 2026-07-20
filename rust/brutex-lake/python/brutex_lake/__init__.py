@@ -19,7 +19,12 @@ attempt/release + the atomic-write commit (chmod→fsync→rename) behind
 ``BRUTEX_LAKE_RUST_LOCKS``;
 ``brutex/data/lake_rust_resample.py`` (ADR-0020 Wave B / G5,
 DEC-LAKE-RUST-RESAMPLE-001) — the tf_resampler seam
-(``resample_1m_ipc`` / ``resample_all_ipc``);
+(``resample_1m_ipc`` / ``resample_all_ipc``) plus the T11 session-cutoff
+face (``resample_session_ipc`` — DEC-LAKE-RUST-RESAMPLE-DAILY-001);
+``brutex/data/lake_rust_resample_daily.py`` (ADR-0020 Wave B tail rows
+14-15, DEC-LAKE-RUST-RESAMPLE-DAILY-001) — the daily-derive residue
+(``resample_daily_ipc``: aggregate → forming-session drop → midnight-IST
+restamp) behind ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY``;
 ``brutex/data/lake_rust_stats.py`` (ADR-0020 Wave C G6+G7,
 DEC-LAKE-RUST-STATS-MANIFEST-001) — the stats-shard canonical-JSON render
 (``render_stats_shard_json``); and ``brutex/data/window_ledger_rust.py``
@@ -69,6 +74,8 @@ from brutex_lake._brutex_lake import (
     render_stats_shard_json,
     resample_1m_ipc,
     resample_all_ipc,
+    resample_daily_ipc,
+    resample_session_ipc,
 )
 
 __all__ = [
@@ -90,4 +97,6 @@ __all__ = [
     "render_stats_shard_json",
     "resample_1m_ipc",
     "resample_all_ipc",
+    "resample_daily_ipc",
+    "resample_session_ipc",
 ]

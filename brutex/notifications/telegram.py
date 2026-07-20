@@ -68,6 +68,7 @@ from types import TracebackType
 from typing import Final, Self
 
 from brutex.models import BruteXError
+from brutex.notifications.notify_rust import routed_dedupe_should_drop
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,18 @@ DEDUPE_WINDOW_SECONDS: Final[dict[str, float]] = {
     TelegramEventKind.RUN_COMPLETE: 0.0,
     TelegramEventKind.TEST: 0.0,
 }
+
+
+def _dedupe_should_drop_python(window: float, last_seen: float | None, now: float) -> bool:
+    """The VERBATIM Python dedupe drop predicate — the LIVE parity oracle.
+
+    DEC-NOTIFY-RUST-CORE-001: the pre-facade tail of
+    :meth:`TelegramBucket.check_dedupe_locked`, extracted token-for-token
+    (the Slice-0 idiom). The caller has already resolved *window* from
+    :data:`DEDUPE_WINDOW_SECONDS` and short-circuited ``window <= 0.0``;
+    this is the pure ``(now - last_seen) < window`` strict-float law.
+    """
+    return last_seen is not None and (now - last_seen) < window
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -344,13 +357,19 @@ class TelegramBucket:
         recorded via :meth:`record_dedupe_locked` only AFTER a successful
         send, so a FAILED send never suppresses identical follow-up alerts
         for the whole dedupe window (dedupe-before-send fix, R2-OCLI-F4).
-        Caller holds ``self._lock``.
+        Caller holds ``self._lock``. The window-table lookup + the cache
+        read stay HERE (state); only the pure drop PREDICATE routes through
+        the default-OFF ``BRUTEX_NOTIFY_RUST`` facade
+        (DEC-NOTIFY-RUST-CORE-001) — flag OFF is the byte-identical
+        :func:`_dedupe_should_drop_python` oracle.
         """
         window = DEDUPE_WINDOW_SECONDS.get(kind, 0.0)
         if window <= 0.0:
             return False
         last_seen = self._dedupe_cache.get((kind, dedupe_key))
-        return last_seen is not None and (now - last_seen) < window
+        return routed_dedupe_should_drop(
+            window, last_seen, now, python_law=_dedupe_should_drop_python
+        )
 
     def record_dedupe_locked(self, kind: str, dedupe_key: str, now: float) -> None:
         """Stamp the dedupe last-seen time for a SUCCESSFULLY sent event.

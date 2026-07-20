@@ -38,6 +38,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from brutex.data.lake_rust_resample_daily import (
+    lake_rust_resample_daily_enabled,
+    resample_daily_frame_via_rust,
+)
+
 # Reuse the spot module's ONE fixed +05:30 IST offset (CLAUDE.md §11 COMMON — one
 # source of truth; do NOT redefine the same constant here). The friend import is the
 # established convention (pyproject reportPrivateUsage="warning" + per-site ignore at
@@ -98,6 +103,39 @@ def resample_1m_to_fno_daily(df_1m: pl.DataFrame, *, before: date) -> list[Candl
     if df_1m.is_empty():
         return []
 
+    if lake_rust_resample_daily_enabled():
+        # The T11 daily seam (DEC-LAKE-RUST-RESAMPLE-DAILY-001): the crate
+        # runs aggregate + forming-session drop + midnight-IST restamp as
+        # ONE frame call (oi_aware=True — carry-last OI by presence);
+        # validation runs FIRST (the seam law) and every degrade serves the
+        # verbatim frame composite `_fno_daily_frame_python`. The rows
+        # arriving here are ALREADY filtered + restamped, so the
+        # materialization below is the OFF arm's loop MINUS those two
+        # steps — same `Decimal(str(x))` / `int(oi)` / null-stays-None law
+        # (CandleBar-level ON≡OFF equality is parity-corpus-pinned).
+        from brutex.data.tf_resampler import validate_resample_frame
+
+        validate_resample_frame(df_1m, DAILY_TF_MINUTES)
+        stamped = resample_daily_frame_via_rust(
+            df_1m, before, oi_aware=True, oracle=_fno_daily_frame_python
+        )
+        stamped_has_oi = OPEN_INTEREST_COLUMN in stamped.columns
+        rust_bars: list[CandleBar] = []
+        for row in stamped.iter_rows(named=True):
+            raw_oi = row[OPEN_INTEREST_COLUMN] if stamped_has_oi else None
+            rust_bars.append(
+                CandleBar(
+                    timestamp=row["ts_utc"],
+                    open=Decimal(str(row["open"])),
+                    high=Decimal(str(row["high"])),
+                    low=Decimal(str(row["low"])),
+                    close=Decimal(str(row["close"])),
+                    volume=int(row["volume"]),
+                    open_interest=None if raw_oi is None else int(raw_oi),
+                )
+            )
+        return rust_bars
+
     daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
     # Defensive: the OHLCV-aware resampler only appends the OI column when the
     # input carried one. A hand-built test frame (or the 1m no-op branch) can omit
@@ -128,6 +166,44 @@ def resample_1m_to_fno_daily(df_1m: pl.DataFrame, *, before: date) -> list[Candl
             )
         )
     return bars
+
+
+def _fno_daily_frame_python(df_1m: pl.DataFrame, before: date) -> pl.DataFrame:
+    """The F&O daily FRAME composite — the Rust daily seam's live parity oracle.
+
+    DEC-LAKE-RUST-RESAMPLE-DAILY-001: the frame-level twin of the per-row
+    OFF-arm body — 375-minute aggregation (the shared
+    :func:`~brutex.data.tf_resampler.resample_1m_to_tf`) → drop sessions
+    ``>= before`` → re-stamp to midnight IST (the spot module's vectorized
+    law: ``(_ist_date.cast(Datetime("us")).replace_time_zone("UTC")) −
+    offset``, so the output ``ts_utc`` is always ``Datetime(us, UTC)``) →
+    select ``ts_utc`` + OHLCV + ``open_interest`` when present (the ten
+    Greeks-overlay columns are DROPPED — the daily materializer never read
+    them; the crate face mirrors this select). Served on every seam
+    degrade AND compared against the crate frame by the burn-in; naive
+    input timestamps are treated as UTC (the lake convention — the same
+    fixed-offset arithmetic the spot vectorized body uses).
+    """
+    import polars as pl
+
+    from brutex.data.tf_resampler import OPEN_INTEREST_COLUMN, resample_1m_to_tf
+
+    daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
+    ist_offset = _IST.utcoffset(None)  # timedelta(+05:30) — the ONE IST definition
+    columns = ["ts_utc", "open", "high", "low", "close", "volume"]
+    if OPEN_INTEREST_COLUMN in daily.columns:
+        columns.append(OPEN_INTEREST_COLUMN)
+    frame: pl.DataFrame = (
+        daily.with_columns((pl.col("ts_utc") + ist_offset).dt.date().alias("_ist_date"))
+        .filter(pl.col("_ist_date") < before)
+        .with_columns(
+            (
+                pl.col("_ist_date").cast(pl.Datetime("us")).dt.replace_time_zone("UTC") - ist_offset
+            ).alias("ts_utc")
+        )
+        .select(*columns)
+    )
+    return frame
 
 
 def resample_1m_to_fno_daily_positional(df_1m: pl.DataFrame, before: date) -> list[CandleBar]:

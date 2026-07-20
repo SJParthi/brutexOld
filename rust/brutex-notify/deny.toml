@@ -1,0 +1,40 @@
+# cargo-deny configuration for brutex-notify (DEC-NOTIFY-RUST-CORE-001).
+#
+# The crate's dependency tree is a strict SUBSET of the sibling kernels':
+# ONLY the optional pyo3 (the binding), the build-script blake3 (the source
+# digest) and the dev-only proptest — every license already sits in the
+# vetted permissive allow-list the siblings pin. Mirrors brutex-feed/deny.toml:
+# only OSI-approved permissive licenses; multiple transitive versions
+# allowed; source registry locked to crates.io.
+
+[advisories]
+version = 2
+
+[licenses]
+version = 2
+# brutex-notify is `license = "Proprietary"` (not a valid SPDX expression);
+# it is a private, unpublished crate, so exclude it from the SPDX license
+# check.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
