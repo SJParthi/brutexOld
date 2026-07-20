@@ -553,26 +553,88 @@ def test_extinct_tuple_diffcheck_completes_in_bounded_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Round-3 BLOCKER regression (MIGRATION.md #1752): an explicit ``--k 6``
-    over ALL 60 conditions on this 8-bar lake (extinct at level 1 — 8 bars
-    can never reach MIN_TRADES=30 hits) with the R45 diffcheck DEFAULT-ON
+    over a WIDE pool on this 8-bar lake (extinct at level 1 — 8 bars can
+    never reach MIN_TRADES=30 hits) with the R45 diffcheck DEFAULT-ON
     completes in seconds. Pre-fix ``run_for_tuple`` materialised the raw
-    conflict-pruned C(60,6)=50,063,860-mask walk — 126.4 s measured in this
-    container (k=7 ≈ 45 min, k=8 ≈ 5 h + a ~20 GB list → OOM) — which the
-    extinction-mode ``effective_max_combos`` auto-raise unbounds and the
-    per-level breaker cannot see (0 candidates ⇒ 0 breaker work). Post-fix
-    the diffcheck samples the EXECUTED (empty) candidate population and
-    skips: measured 0.8 s, == the diffcheck-OFF baseline."""
+    conflict-pruned combination walk — 126.4 s measured in this container for
+    the era's C(60,6)=50,063,860 masks (k=7 ≈ 45 min, k=8 ≈ 5 h + a ~20 GB
+    list → OOM) — which the extinction-mode ``effective_max_combos``
+    auto-raise unbounds and the per-level breaker cannot see (0 candidates ⇒
+    0 breaker work). Post-fix the diffcheck samples the EXECUTED (empty)
+    candidate population and skips: seconds, == the diffcheck-OFF baseline.
+
+    RE-DERIVED for the 74-bit head (DEC-SWEEP-APRIORI-DEFAULT-001 #1850 ×
+    DEC-SUPERTREND-CONDITIONS-001 #2203): the DEFAULT vocabulary now carries
+    bits >= 64, which Apriori-ON refuses per tuple (rc 6 — the interim-law
+    e2e twin below pins that shape), so this bounded-time pin restricts the
+    run to the FULL sub-64 prefix (bits 0..63) — the Apriori frontier
+    genuinely executes, and the pre-fix raw walk would materialise
+    C(64,6)=74,974,368 masks, an even STRONGER regression detector than the
+    original C(60,6)."""
     monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
     monkeypatch.delenv("BRUTEX_SWEEP_DIFFCHECK", raising=False)  # default ON
     lake_root, catalog_path = _persist(tmp_path)
+    sub64 = ",".join(str(b) for b in range(64))  # the full u64-frontier pool
     t0 = time.monotonic()
-    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps", k="6", conditions=None)
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps", k="6", conditions=sub64)
     wall = time.monotonic() - t0
     assert rc == EXIT_OK
     assert wall < 60.0, (
         f"extinct k=6 tuple took {wall:.1f}s with the diffcheck ON — "
-        "the raw C(60,6) walk is back (round-3 BLOCKER regression)"
+        "the raw C(64,6) walk is back (round-3 BLOCKER regression)"
     )
+
+
+def test_apriori_on_over_the_default_74bit_pool_refuses_gracefully_rc6(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The #2203 interim law, END-TO-END: Apriori-ON (explicit truthy env +
+    explicit ``--k``) over the DEFAULT 74-bit vocabulary refuses PER TUPLE
+    via the typed ``SweepAprioriUnsupportedError`` — the CLI exits the loud
+    ``EXIT_SWEEP_TUPLE_FAILED`` (rc 6), never a crash, never a corrupt store,
+    never a silent legacy downgrade (the operator explicitly asked for
+    Apriori; the frozen generator honestly cannot serve a >= 64-bit pool —
+    the u128 frontier is the named follow-up). The driver-level mechanism
+    twin is ``test_driver_reports_supertrend_bit_tuple_as_tuple_failed``
+    (tests/unit/test_engine_sweep_apriori.py); this pins the CLI exit-code
+    shape CI observed on the 74-bit head.
+
+    The typed message itself does NOT reach stderr (the CLI prints only the
+    generic ``TUPLE_FAILED`` WARNING block naming the supervisor audit path —
+    measured), so the typed-error TEETH are pinned where the mechanism records
+    them: the ``TUPLE_FAILED`` audit line's ``error`` payload."""
+    import json
+
+    from brutex.cli import EXIT_SWEEP_TUPLE_FAILED
+
+    monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    rc = _sweep_all(lake_root, catalog_path, results_root, k="6", conditions=None)
+    assert rc == EXIT_SWEEP_TUPLE_FAILED
+    err = capsys.readouterr().err
+    # The stderr surface: the loud generic failed-tuple WARNING naming the
+    # TUPLE_FAILED audit lane (never the raw traceback, never silence).
+    assert "FAILED mid-sweep" in err
+    assert "TUPLE_FAILED" in err
+    # The typed-error pin, read from the audit lane stderr names: the tuple
+    # failed for EXACTLY the #2203 u64-only-frontier reason — not some
+    # unrelated defect that happens to share the exit code.
+    audit_path = results_root / "audit" / "sweep-all-supervisor.jsonl"
+    failed_records = [
+        rec
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        for rec in [json.loads(line)]
+        if rec.get("action") == "TUPLE_FAILED"
+    ]
+    assert failed_records, "no TUPLE_FAILED audit line recorded"
+    assert any(
+        "SweepAprioriUnsupportedError" in str(rec["payload"]["error"])
+        and "Apriori frontier requires <64-bit masks" in str(rec["payload"]["error"])
+        for rec in failed_records
+    )
+    assert _tuple_stores(results_root) == []  # nothing persisted
 
 
 # ── DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001: the overfit gate-config channel ──
