@@ -17,6 +17,7 @@ rebuild (once per revision), and the unchanged 400-preset contract.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -115,6 +116,28 @@ class TestLoadSweepScanViaRollup:
         assert scan.store_count == 1
         assert scan.instruments == ("NIFTY",)
         assert len(scan.rows) == 2
+        # #1467 fold seam: the all-ungated union serves the ROW-derived
+        # coordinate so the rollup payload matches the legacy wire.
+        assert scan.gate_coordinates == ("ungated",)
+
+    def test_gated_rows_force_the_legacy_fallback(self, tmp_path: Path) -> None:
+        """#1467 fold seam (DEC-SWEEP-SERVING-GATE-PROVENANCE-001 ×
+        DEC-RESULTS-TOPK-ROLLUP-001): a rollup union carrying ANY gated row
+        falls back to the legacy scan (reason ``gate_coordinates_present``) —
+        the case-2/case-3 gate semantics need the store-level census only the
+        legacy scan performs, and a superset scan must never be gate-scoped."""
+        token = '{"gate_config":{"overfit":[0.95]}}'
+        _write_store(tmp_path, [replace(_row(1), gate_provenance=token), _row(2)])
+        sweeps_root = tmp_path / SWEEPS_DIRNAME
+        assert rr.rebuild_rollup(sweeps_root) is True
+        gate = rr.LogGate()
+        with structlog.testing.capture_logs() as logs:
+            serve = load_sweep_scan_via_rollup(tmp_path, rev=_rev(tmp_path), log_gate=gate)
+        assert serve.scan is None
+        assert serve.fallback_reason == "gate_coordinates_present"
+        warns = [e for e in logs if e["event"] == "sweep_results.rollup_fallback"]
+        assert len(warns) == 1
+        assert warns[0]["reason"] == "gate_coordinates_present"
 
     def test_fallback_names_the_reason_and_dedupes_the_warn(self, tmp_path: Path) -> None:
         _write_store(tmp_path, [_row(1)])
@@ -356,6 +379,37 @@ class TestLeaderboardRouteRollup:
         ):
             payload = client.get("/api/v1/sweep/leaderboard", params=params).json()
             assert payload["available"] is True
+
+    def test_gate_scoped_requests_never_touch_the_rollup(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1467 fold seam (DEC-SWEEP-SERVING-GATE-PROVENANCE-001 ×
+        DEC-RESULTS-TOPK-ROLLUP-001): ANY ``?gate=`` request bypasses the
+        rollup — a gate-coexistence lake (one run_id under two gate
+        coordinates) structurally cannot be one run_id-keyed rollup store, so
+        the legacy scan owns gate serving (the composite-preset fallback
+        precedent). Gate-None rollup serving is pinned by the sibling wire-
+        parity tests above — deliberately not duplicated here."""
+        lake_root = store.path.parent
+        _write_store(lake_root, [_row(1)])
+        rr.rebuild_rollup(lake_root / SWEEPS_DIRNAME)
+
+        def _forbidden(root: Path, *, current_rev: str) -> object:
+            raise AssertionError("a GATE-scoped request must never consult the rollup")
+
+        monkeypatch.setattr(rr, "classify_rollup", _forbidden)
+        # A resolvable coordinate + the blank degenerate both serve via legacy.
+        for params in (
+            {"gate": "ungated"},
+            {"gate": ""},  # blank ?gate= = the degenerate-param class, stays legacy
+        ):
+            payload = client.get("/api/v1/sweep/leaderboard", params=params).json()
+            assert payload["available"] is True
+            assert payload["gate_coordinate"] == "ungated"
+        # An UNKNOWN token 400s via the legacy resolution — still zero rollup
+        # consults (the _forbidden spy above is the proof either way).
+        resp = client.get("/api/v1/sweep/leaderboard", params={"gate": "gate:" + "f" * 16})
+        assert resp.status_code == 400
 
     def test_rank_by_and_top_ride_the_rollup(
         self, client: TestClient, store: InstrumentStore

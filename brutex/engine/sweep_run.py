@@ -676,6 +676,16 @@ class SweepRunConfig:
     #: (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 law); ``None`` is elided.
     #: Appended LAST (defaulted-last law).
     cvar_gate: CvarGateConfig | None = None
+    #: Gate-scoped-dedup provenance carrier (DEC-SWEEP-SERVING-GATE-
+    #: PROVENANCE-001): the producing grid's canonical gate+selection token
+    #: (:func:`brutex.engine.sweep_orchestrator.grid_gate_provenance` — set by
+    #: ``SweepTuple.to_run_config``, the ONE production seam), stamped onto
+    #: every persisted finalist row so the ``/results`` read side can scope
+    #: coordinates. ``None`` (the default — every ungated grid and every
+    #: legacy direct caller) is byte-identical to the pre-carrier config: no
+    #: row token, no store column. NEVER an input to the run identity
+    #: (:func:`_canonical_params` does not read it).
+    gate_provenance: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -1120,6 +1130,7 @@ def ranked_combo_to_result_row(
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
     selection_basis: str | None = None,
     pareto_member: bool | None = None,
+    gate_provenance: str | None = None,
 ) -> ResultRow:
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
@@ -1225,6 +1236,16 @@ def ranked_combo_to_result_row(
         pre-W1 caller) keeps the row untagged. REFERENCE ONLY: never rankable,
         never in the run identity (:data:`brutex.engine.results_store.SELECTION_FIELDS`
         is excluded from ``_RANKABLE_FIELDS`` and validated at construction).
+    gate_provenance
+        Optional gate-scoped-dedup provenance token
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) stamped verbatim onto the
+        row's nullable ``gate_provenance`` carrier — the producing grid's
+        canonical gate+selection identity string
+        (:func:`brutex.engine.sweep_orchestrator.grid_gate_provenance`,
+        threaded here via ``SweepRunConfig.gate_provenance``). ``None`` (the
+        default — every ungated grid and every legacy caller) is
+        byte-identical to before: no row token, no store column. NEVER an
+        input to the run identity and NOT the statutory 5-door gate re-check.
 
     Returns
     -------
@@ -1353,6 +1374,7 @@ def ranked_combo_to_result_row(
         decay_weighted_net_paisa=m.decay_weighted_net_paisa,
         pareto_member=pareto_member,
         selection_basis=selection_basis,
+        gate_provenance=gate_provenance,
     )
 
 
@@ -2574,6 +2596,9 @@ def run_persisted_sweep(
             # run-identity conflict law).
             selection_basis=selection_basis,
             pareto_member=pareto_member,
+            # The gate-provenance carrier (DEC-SWEEP-SERVING-GATE-
+            # PROVENANCE-001): threaded from the grid via to_run_config.
+            gate_provenance=cfg.gate_provenance,
         )
         try:
             store.append(row)

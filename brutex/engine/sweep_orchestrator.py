@@ -94,6 +94,7 @@ from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_identity import (
     _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
+    gate_provenance_token,
 )
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_ops_rust import (
@@ -707,6 +708,10 @@ class SweepTuple:
             temporal=grid.temporal,
             max_sl_hit_rate=grid.max_sl_hit_rate,
             cvar_gate=grid.cvar_gate,
+            # The row-side gate-provenance carrier (DEC-SWEEP-SERVING-GATE-
+            # PROVENANCE-001): the SAME grid the store-address digest folds,
+            # so the persisted rows' token and the address can never disagree.
+            gate_provenance=grid_gate_provenance(grid),
         )
 
 
@@ -932,6 +937,35 @@ def _selection_identity_fragment(grid: SweepGridConfig) -> dict[str, int] | None
     return fragment or None
 
 
+def grid_gate_provenance(grid: SweepGridConfig) -> str | None:
+    """Return *grid*'s canonical GATE-CONFIG serving-provenance token, or ``None`` at defaults.
+
+    The ONE write-side seam of DEC-SWEEP-SERVING-GATE-PROVENANCE-001. This is the
+    SERVING carrier — the token persisted on the rows / the store schema and
+    hashed by :func:`brutex.dashboard.sweep_results_view.gate_coordinate_of` into
+    the leaderboard serving COORDINATE. It is scoped to the GATE CONFIG ONLY
+    (:func:`~brutex.engine.sweep_identity._gate_config_fragment` — overfit /
+    Stage-3, the knobs that change what the rows MEAN); the SELECTION knobs
+    (``top_k`` / ``min_hits`` / ``max_combos``) are DELIBERATELY excluded
+    (``selection=None``) because they are a display / which-finalists concern,
+    not a what-rows-mean concern — a ``--top``-only light run therefore carries
+    NO gate coordinate (is "ungated"), so a zero-survivor gated re-run's 0-row
+    sentinel serves the honest empty set instead of mis-folding the stale
+    baseline rows (the CLI-default 0-row-misfold, closed here).
+
+    SEPARABLE from the store ADDRESS: :func:`_tuple_digest` STILL folds
+    :func:`_selection_identity_fragment` directly into the Parquet /
+    completion-sentinel filename (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001,
+    #1336), so a changed ``top_k`` still re-keys the on-disk store — only the
+    serving carrier drops the selection leg. ``None`` — an ungated grid — keeps
+    every row + store byte-identical to the pre-column format.
+    """
+    return gate_provenance_token(
+        gate_config=_gate_config_fragment(grid),
+        selection=None,
+    )
+
+
 def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     """Return the BLAKE3 hex digest of *tuple_*'s full canonical identity under *grid*.
 
@@ -1103,7 +1137,7 @@ def tuple_store_path(root: Path, tuple_: SweepTuple, grid: SweepGridConfig) -> P
     return root / tuple_.instrument / tuple_.tf.label / filename
 
 
-def load_or_create_store(path: Path) -> ResultsStore:
+def load_or_create_store(path: Path, *, gate_provenance: str | None = None) -> ResultsStore:
     """Return a :class:`ResultsStore` for *path*, pre-loaded if the file exists.
 
     The idempotence keystone (Golden Rule #4 / #7): by loading an existing
@@ -1115,6 +1149,14 @@ def load_or_create_store(path: Path) -> ResultsStore:
     ----------
     path
         The destination Parquet file.
+    gate_provenance
+        Optional store-level gate+selection token
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) stamped on a FRESHLY-created
+        store so a gated tuple that persists ZERO survivors still flushes a
+        schema-discoverable gated Parquet (the arm-2 carrier). A LOADED store
+        keeps its own on-disk schema presence instead (the load flag inside
+        :meth:`~brutex.engine.results_store.ResultsStore.load`). ``None``
+        (every ungated/legacy caller) is byte-identical to before.
 
     Returns
     -------
@@ -1124,7 +1166,7 @@ def load_or_create_store(path: Path) -> ResultsStore:
     """
     if path.exists():
         return ResultsStore.load(path)
-    return ResultsStore(path=path)
+    return ResultsStore(path=path, gate_provenance=gate_provenance)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1151,8 +1193,16 @@ class TupleStoreProvider:
         return tuple_store_path(self.root, tuple_, self.grid)
 
     def __call__(self, tuple_: SweepTuple) -> ResultsStore:
-        """Load-or-create the tuple's store (the original lambda body, verbatim)."""
-        return load_or_create_store(self.store_path(tuple_))
+        """Load-or-create the tuple's store, stamped with the grid's gate provenance.
+
+        A FRESH store carries :func:`grid_gate_provenance` so even a
+        zero-survivor gated tuple flushes a schema-discoverable gated Parquet
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001); an ungated grid passes
+        ``None`` — byte-identical to the pre-provenance lambda body.
+        """
+        return load_or_create_store(
+            self.store_path(tuple_), gate_provenance=grid_gate_provenance(self.grid)
+        )
 
 
 def make_store_for(root: Path, grid: SweepGridConfig) -> Callable[[SweepTuple], ResultsStore]:
@@ -1809,6 +1859,7 @@ __all__ = [
     "TupleStoreProvider",
     "bloom_capacity_hint",
     "count_sweep_tuples",
+    "grid_gate_provenance",
     "hit_memo_cell_key",
     "iter_sweep_tuples",
     "load_or_create_store",

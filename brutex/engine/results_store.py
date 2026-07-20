@@ -131,7 +131,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, fields, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import structlog
 
@@ -345,29 +345,49 @@ RECENCY_FIELDS: Final[tuple[str, ...]] = (
 #: cross-module source of truth for the pair's column names.
 SELECTION_FIELDS: Final[tuple[str, ...]] = ("pareto_member", "selection_basis")
 
+#: Nullable Utf8 GATE-PROVENANCE column (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
+#: the canonical gate+selection identity token
+#: (:func:`brutex.engine.sweep_identity.gate_provenance_token`) the producing
+#: grid ran under, or ``None`` for an ungated default-selection run / a store
+#: written before the column existed. CONDITIONALLY emitted — the column is
+#: present ONLY in gated stores (see :meth:`ResultsStore._render_bytes`), so
+#: every ungated store's bytes stay byte-identical to the pre-column format
+#: (the frozen ``_GOLDEN_CONTENT_HASH`` lever). This is gate-scoped-DEDUP
+#: provenance for the ``/results`` read side — NOT part of the BLAKE3 run
+#: identity, never rankable, and NOT the statutory 5-door gate re-check.
+#: Appended LAST in the on-disk column order — AFTER the LANE-W1 selection
+#: pair (the train-b fold order; the optional-column back-compat template).
+GATE_PROVENANCE_FIELD: Final[str] = "gate_provenance"
+
 #: Nullable fields that ride the DIRECTIONAL ``None`` → value backfill lane
 #: of :meth:`ResultsStore.append` (the DEC-VIX-STAMP-WIRE-001 law, extended
-#: to the growth trio by DEC-METRICS-KELLY-GROWTH-001 and to the
-#: exit-quality column by the Stage-B extension): a redo into a
+#: to the growth trio by DEC-METRICS-KELLY-GROWTH-001, to the
+#: exit-quality column by the Stage-B extension, and to the gate-provenance
+#: carrier by DEC-SWEEP-SERVING-GATE-PROVENANCE-001): a redo into a
 #: pre-extension store (``load_or_create_store`` PRE-LOADS the old file)
 #: appends rows that now CARRY values where the stored row honestly holds
 #: ``None`` — an upgrade, never a conflict. Value-vs-value disagreement
-#: still raises (typed per family — see :func:`_merge_nullable_backfill`).
+#: still raises (typed per family — see :func:`_merge_nullable_backfill`;
+#: the gate-provenance token rides its OWN directional merge,
+#: :func:`_merge_gate_provenance_backfill`, whose two-different-known-tokens
+#: case raises the plain :class:`ResultsStoreError`).
 #: The LANE-W1 selection-provenance pair deliberately does NOT join this
 #: lane — selection is recomputed per persist pool, never backfilled.
 _BACKFILLABLE_FIELDS: Final[frozenset[str]] = frozenset(
-    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS
+    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS + (GATE_PROVENANCE_FIELD,)
 )
 
 #: Non-nullable numeric columns a leaderboard may rank by (metrics + money +
-#: counts). The nullable ``deflated_sharpe``, the REFERENCE-ONLY VIX trio and
-#: the LANE-W1 selection-provenance pair are deliberately NOT rankable — VIX
+#: counts). The nullable ``deflated_sharpe``, the REFERENCE-ONLY VIX trio, the
+#: LANE-W1 selection-provenance pair and the gate-provenance carrier are
+#: deliberately NOT rankable — VIX
 #: must never drive strategy ranking (CLAUDE.md §2 Rule 3), provenance is
 #: annotation not a metric, and a nullable column has no total order UNLESS an
 #: explicit null-placement law is defined for it: the growth trio ranks under
 #: the NULLS-LAST law of :data:`_NULLABLE_RANKABLE_FIELDS` below
 #: (DEC-METRICS-KELLY-GROWTH-001 — a conscious, documented extension;
-#: ``deflated_sharpe`` + VIX + selection keep their non-rankable status).
+#: ``deflated_sharpe`` + VIX + selection + gate provenance keep their
+#: non-rankable status).
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
     _METRIC_FIELDS + _MONEY_PAISA_FIELDS + _COUNT_FIELDS
 )
@@ -662,6 +682,16 @@ class ResultRow:
     #: goes AFTER it (the optional-column back-compat template).
     pareto_member: bool | None = None
     selection_basis: str | None = None
+    #: Gate-scoped-dedup provenance (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
+    #: the canonical gate+selection token of the producing grid
+    #: (:func:`brutex.engine.sweep_identity.gate_provenance_token`), or
+    #: ``None`` = ungated / legacy (a store written before the column existed
+    #: loads ``None`` presence-tolerantly — the optional-column law). An
+    #: OPAQUE carrier string — deliberately unvalidated beyond ``str | None``;
+    #: never rankable, never in the BLAKE3 run identity, and NOT the statutory
+    #: 5-door gate re-check (that verdict is a P2 concern, disjoint from this
+    #: column).
+    gate_provenance: str | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -887,11 +917,46 @@ class ResultsStore:
     ----------
     path
         Destination Parquet file. Created (with parents) on :meth:`flush`.
+    gate_provenance
+        Optional store-level gate+selection token
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) the producing grid runs under
+        — the ``gate_provenance`` COLUMN is emitted whenever it is set, EVEN
+        AT ZERO ROWS, so a gated re-run that persists no survivors still
+        writes a schema-discoverable gated store (the arm-2 carrier; the
+        read side derives its coordinate set from that schema presence).
+        ``None`` (the default — every ungated/legacy caller) changes nothing:
+        the column then rides only on row values, so ungated stores stay
+        byte-identical to the pre-column format.
     """
 
-    def __init__(self, *, path: Path) -> None:
+    def __init__(self, *, path: Path, gate_provenance: str | None = None) -> None:
         self._path = path
         self._rows: dict[str, ResultRow] = {}
+        self._gate_provenance = gate_provenance
+        #: Set by :meth:`load` — whether the LOADED file carried the
+        #: ``gate_provenance`` column (schema presence, valid even at 0 rows);
+        #: ``None`` = this store was never loaded from disk.
+        self._gate_column_loaded: bool | None = None
+
+    @property
+    def gate_provenance_present(self) -> bool:
+        """Whether this store is GATED — i.e. carries the ``gate_provenance`` column.
+
+        The ONE schema-presence law (DEC-SWEEP-SERVING-GATE-PROVENANCE-001),
+        shared by the writer (:meth:`_render_bytes` emits the column iff this
+        is ``True``) and the dashboard's store-level gate-coordinate
+        derivation. ``True`` when the store was constructed with a
+        store-level token, OR was LOADED from a file whose schema carries the
+        column (preserved across a load → flush round trip, even at 0 rows),
+        OR any held row carries a non-``None`` token. ``False`` is the
+        ungated/legacy store — its flush stays byte-identical to the
+        pre-column format.
+        """
+        return (
+            self._gate_provenance is not None
+            or bool(self._gate_column_loaded)
+            or any(row.gate_provenance is not None for row in self._rows.values())
+        )
 
     @property
     def path(self) -> Path:
@@ -941,7 +1006,16 @@ class ResultsStore:
            GLOBAL trailing anchor (the data-end of the snapshot inside the
            identity via ``data_snapshot_hash``) + code.
 
-        Every other field keeps the strict rule: any difference raises the
+        The nullable ``gate_provenance`` carrier follows the SAME directional
+        law (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): identical → no-op,
+        ``None`` → token backfills (a pre-provenance store's rows load
+        ``None`` and a same-config redo may stamp them), token → ``None``
+        never erases, and two DIFFERENT known tokens raise the plain
+        :class:`ResultsStoreError` (two configs at one store address is a
+        genuine anomaly — the address folds the config since
+        DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001).
+
+        Every OTHER field keeps the strict rule: any difference raises the
         plain :class:`ResultsStoreError` run-identity conflict (a genuine
         reproducibility breach — the backfill never masks it).
 
@@ -1022,9 +1096,14 @@ class ResultsStore:
                     f"map to one result (Golden Rule #4) — refusing to overwrite."
                 )
             # Only the sanctioned overlay families (the backfillable nullable
-            # columns and/or the temporal columns) differ — apply each
-            # family's directional merge.
+            # columns, the gate-provenance carrier and/or the temporal
+            # columns) differ — apply each family's directional merge.
+            # Provenance FIRST (the DEC-SWEEP-SERVING-GATE-PROVENANCE-001
+            # order): its two-different-known-tokens RAISE fires before any
+            # other union is attempted.
             merged = existing
+            if GATE_PROVENANCE_FIELD in differing:
+                merged = _merge_gate_provenance_backfill(merged, row)
             if any(name in _TEMPORAL_JSON_FIELDS for name in differing):
                 # Align every backfillable nullable field so the enrichment
                 # helper's non-temporal equality precondition holds; the
@@ -1054,11 +1133,14 @@ class ResultsStore:
                         ),
                     )
                 merged = enriched
-            if any(name in _BACKFILLABLE_FIELDS for name in differing):
+            if any(
+                name in _BACKFILLABLE_FIELDS and name != GATE_PROVENANCE_FIELD for name in differing
+            ):
                 # The per-family directional union (typed value-vs-value
                 # conflicts raise inside) — temporal enrichment above only
                 # touched temporal fields, so merged's backfillable fields
-                # still equal existing's here.
+                # still equal existing's here (the gate-provenance carrier was
+                # already union-merged above and is untouched by this helper).
                 merged = _merge_nullable_backfill(merged, row)
             if merged == existing:
                 # Directional no-op: the incoming row is strictly LESS informed
@@ -1086,11 +1168,17 @@ class ResultsStore:
                 for name in RECENCY_FIELDS
                 if getattr(existing, name) is None and getattr(merged, name) is not None
             )
+            gate_backfilled = tuple(
+                name
+                for name in (GATE_PROVENANCE_FIELD,)
+                if getattr(existing, name) is None and getattr(merged, name) is not None
+            )
             for event, names in (
                 ("results_store.vix_backfill", vix_backfilled),
                 ("results_store.growth_backfill", growth_backfilled),
                 ("results_store.exit_quality_backfill", exit_quality_backfilled),
                 ("results_store.recency_backfill", recency_backfilled),
+                ("results_store.gate_provenance_backfill", gate_backfilled),
             ):
                 if names:
                     _LOG.info(event, run_id=row.run_id, backfilled_fields=names)
@@ -1098,7 +1186,11 @@ class ResultsStore:
             # enrichment changed the bytes but not the row count — the D16
             # contract reports False for it.
             return bool(
-                vix_backfilled or growth_backfilled or exit_quality_backfilled or recency_backfilled
+                vix_backfilled
+                or growth_backfilled
+                or exit_quality_backfilled
+                or recency_backfilled
+                or gate_backfilled
             )
         self._rows[row.run_id] = row
         return True
@@ -1240,6 +1332,14 @@ class ResultsStore:
             df = pl.read_parquet(path)
         except (pl.exceptions.PolarsError, OSError) as exc:
             raise ResultsStoreSchemaError(f"unreadable results store at {path}: {exc}") from exc
+        # Schema-presence of the CONDITIONAL gate_provenance column — recorded
+        # from the decoded frame (valid even at ZERO rows) so (a) the dashboard
+        # can derive a 0-row gated store's coordinate without a second footer
+        # read, and (b) a load → flush round trip preserves the column (the
+        # emission predicate `gate_provenance_present` folds this flag), never
+        # silently un-gating a 0-row gated store
+        # (DEC-SWEEP-SERVING-GATE-PROVENANCE-001).
+        store._gate_column_loaded = GATE_PROVENANCE_FIELD in df.columns
         try:
             for record in df.iter_rows(named=True):
                 store.append(_row_from_record(record))
@@ -1340,38 +1440,48 @@ class ResultsStore:
         # fixed insertion order above (identity → mask limbs → money → counts →
         # metrics → deflated → prices → the VIX trio → [temporal,
         # emit-on-present, at its LANDED position] → the growth trio → the
-        # exit-quality column → the recency family LAST — each optional
+        # exit-quality column → the recency family → the LANE-W1 selection
+        # pair → the CONDITIONAL gate_provenance column LAST — each optional
         # family appended at its own introduction point, landed-first-wins,
         # for legacy-file back-compat) for a reproducible byte stream.
         # The SCHEMA dict governs the frame's column ORDER (probed): it must
         # spell the ruled on-disk order exactly — … prices → VIX → [temporal,
         # emit-on-present, at its LANDED position] → growth → exit-quality →
-        # recency LAST (the landed-first-wins re-integration ruling).
-        df = pl.DataFrame(
-            columns,
-            schema={
-                **dict.fromkeys(_STRING_FIELDS, pl.Utf8),
-                **dict.fromkeys(
-                    (*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64
+        # recency → selection → the CONDITIONAL gate_provenance LAST (the
+        # landed-first-wins re-integration ruling).
+        schema: dict[str, Any] = {
+            **dict.fromkeys(_STRING_FIELDS, pl.Utf8),
+            **dict.fromkeys((*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64),
+            **dict.fromkeys(
+                (
+                    *_METRIC_FIELDS,
+                    *_NULLABLE_METRIC_FIELDS,
+                    *_PRICE_FIELDS,
+                    *VIX_FIELDS,
                 ),
-                **dict.fromkeys(
-                    (
-                        *_METRIC_FIELDS,
-                        *_NULLABLE_METRIC_FIELDS,
-                        *_PRICE_FIELDS,
-                        *VIX_FIELDS,
-                    ),
-                    pl.Float64,
-                ),
-                **(dict.fromkeys(_TEMPORAL_JSON_FIELDS, pl.Utf8) if temporal_present else {}),
-                **dict.fromkeys(
-                    (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS),
-                    pl.Float64,
-                ),
-                "pareto_member": pl.Boolean,
-                "selection_basis": pl.Utf8,
-            },
-        )
+                pl.Float64,
+            ),
+            **(dict.fromkeys(_TEMPORAL_JSON_FIELDS, pl.Utf8) if temporal_present else {}),
+            **dict.fromkeys(
+                (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS),
+                pl.Float64,
+            ),
+            "pareto_member": pl.Boolean,
+            "selection_basis": pl.Utf8,
+        }
+        if self.gate_provenance_present:
+            # CONDITIONAL emission (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): the
+            # gate_provenance column is written ONLY for a GATED store (a
+            # store-level token, a loaded gated schema, or any token-carrying
+            # row — the ONE `gate_provenance_present` law), appended LAST. An
+            # ungated store emits NO column, so its bytes — and every frozen
+            # store-bytes golden — stay byte-identical to the pre-column
+            # format. At zero rows the column still lands in the schema
+            # footer, which is exactly how the read side discovers a gated
+            # re-run that persisted no survivors (the arm-2 carrier).
+            columns[GATE_PROVENANCE_FIELD] = [row.gate_provenance for row in ordered]
+            schema[GATE_PROVENANCE_FIELD] = pl.Utf8
+        df = pl.DataFrame(columns, schema=schema)
         bio = io.BytesIO()
         df.write_parquet(
             bio,
@@ -1417,8 +1527,10 @@ def _merge_nullable_backfill(existing: ResultRow, incoming: ResultRow) -> Result
 
     The resolution is a per-field UNION under the directional law of
     :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001, extended to the
-    growth trio by DEC-METRICS-KELLY-GROWTH-001): for each of
-    :data:`_BACKFILLABLE_FIELDS` the known (non-``None``) value wins —
+    growth trio by DEC-METRICS-KELLY-GROWTH-001): for each NUMERIC member of
+    :data:`_BACKFILLABLE_FIELDS` (the gate-provenance carrier rides its OWN
+    :func:`_merge_gate_provenance_backfill` and is untouched — this helper
+    preserves the caller's already-merged value) the known (non-``None``) value wins —
     ``None`` means *honestly unknown*, never a conflicting fact — so a
     more-informed redo backfills a less-informed row (a stamped redo fills
     the VIX trio; a post-extension redo fills the growth trio of a
@@ -1552,7 +1664,10 @@ def _merge_nullable_backfill(existing: ResultRow, incoming: ResultRow) -> Result
             if getattr(existing, name) is not None
             else getattr(incoming, name)
         )
-        for name in _BACKFILLABLE_FIELDS
+        # The NUMERIC backfillable families only — the gate-provenance
+        # carrier (also in _BACKFILLABLE_FIELDS) is union-merged by
+        # _merge_gate_provenance_backfill and preserved via replace().
+        for name in (*VIX_FIELDS, *GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS)
     }
     # Explicit keywords (not a **splat) so mypy checks each against its field type.
     return replace(
@@ -1665,11 +1780,55 @@ def _optional_bool(record: dict[str, object], name: str) -> bool | None:
 def _optional_str(record: dict[str, object], name: str) -> str | None:
     """Read a nullable Utf8 column with optional-column back-compat.
 
-    The :func:`_optional_float` law for the LANE-W1 ``selection_basis``
-    column: absent-or-null reads ``None`` — the honest unknown.
+    The string twin of :func:`_optional_float` — the SAME ``record.get``
+    presence-tolerant read law (gap-register ruling 5): absent-or-null reads
+    ``None`` — the honest unknown, never a fabricated value (Golden Rule #1).
+    Consumers: the LANE-W1 ``selection_basis`` column and the
+    ``gate_provenance`` carrier (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, the
+    latter pinned by the frozen pre-extension golden fixture).
     """
     value = record.get(name)
     return None if value is None else str(value)
+
+
+def _merge_gate_provenance_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
+    """Union-merge the nullable ``gate_provenance`` carrier of two same-``run_id`` rows.
+
+    The directional law of :meth:`ResultsStore.append`
+    (DEC-SWEEP-SERVING-GATE-PROVENANCE-001), mirroring
+    :func:`_merge_nullable_backfill`: the known (non-``None``) token wins —
+    ``None`` means *honestly unknown* (a pre-provenance store's rows, or an
+    un-threaded legacy caller), never a conflicting fact — so a
+    provenance-stamped redo backfills a legacy row and a legacy redo never
+    erases a stamp. The caller (:meth:`ResultsStore.append`) has ALREADY
+    established that every non-backfillable field is equal.
+
+    Raises
+    ------
+    ResultsStoreError
+        When the two rows carry DIFFERENT known tokens: two gate configs
+        can never legitimately share one store address (the address folds
+        the config, DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so this is a
+        genuine anomaly — refused loudly, never silently overwritten.
+    """
+    stored, arrived = existing.gate_provenance, incoming.gate_provenance
+    if stored == arrived or arrived is None:
+        return existing
+    if stored is not None:
+        _LOG.error(
+            "results_store.gate_provenance_conflict",
+            run_id=existing.run_id,
+            stored=stored,
+            incoming=arrived,
+        )
+        raise ResultsStoreError(
+            f"gate-provenance conflict for {existing.run_id}: the stored row and the "
+            f"redo carry DIFFERENT known gate_provenance tokens while every other "
+            f"column is compatible. Two gate configs can never share one store "
+            f"address (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) — refusing to "
+            f"overwrite (Golden Rule #4)."
+        )
+    return replace(existing, gate_provenance=arrived)
 
 
 def _row_from_record(record: dict[str, object]) -> ResultRow:
@@ -1729,6 +1888,7 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         decay_weighted_net_paisa=_optional_float(record, "decay_weighted_net_paisa"),
         pareto_member=_optional_bool(record, "pareto_member"),
         selection_basis=_optional_str(record, "selection_basis"),
+        gate_provenance=_optional_str(record, GATE_PROVENANCE_FIELD),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -1803,6 +1963,7 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 __all__ = [
     "CONDITION_NAME_SEP",
     "EXIT_QUALITY_FIELDS",
+    "GATE_PROVENANCE_FIELD",
     "GROWTH_FIELDS",
     "MASK_BITS_MAX",
     "RECENCY_FIELDS",

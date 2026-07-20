@@ -22,6 +22,7 @@ sites pass their grid unchanged and the frozen ``grid_identity`` /
 
 from __future__ import annotations
 
+import json
 from typing import Any, Protocol
 
 # DEC-RUST-SWEEP-OPS-001 (slice 1): the default-OFF Rust routing facade. The
@@ -196,4 +197,36 @@ def _gate_config_fragment_python(grid: _GateConfigInput) -> dict[str, Any] | Non
     return fragment or None
 
 
-__all__ = ["_gate_config_fragment"]
+def gate_provenance_token(
+    *, gate_config: dict[str, Any] | None, selection: dict[str, Any] | None
+) -> str | None:
+    """Return the canonical gate+selection provenance STRING, or ``None`` at defaults.
+
+    The row/store CARRIER value of DEC-SWEEP-SERVING-GATE-PROVENANCE-001: the
+    canonical JSON of the non-``None`` ``{gate_config, selection}`` legs —
+    EXACTLY the two fragments :func:`_gate_config_fragment` (here) and
+    ``sweep_orchestrator._selection_identity_fragment`` already fold into the
+    per-tuple store-address digest (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) —
+    so the persisted ``ResultRow.gate_provenance`` token and the store address
+    can never disagree (single source of truth; the caller MUST pass those two
+    fragments' outputs, never hand-built dicts). Stored as the parseable
+    PRE-IMAGE, not a hash, so the read side can GROUP and LABEL coordinates.
+
+    ``None`` when BOTH fragments are ``None`` (an ungated default-selection
+    grid) — the golden-neutrality lever: an ungated row carries ``None``, the
+    store emits NO ``gate_provenance`` column, and every frozen store-bytes
+    golden stays byte-identical (Golden Rule #4). Serialised with the SAME
+    ``sort_keys`` / compact-separator / ``allow_nan=False`` discipline as the
+    digest descriptor, so the token itself is byte-deterministic.
+    """
+    legs: dict[str, Any] = {}
+    if gate_config is not None:
+        legs["gate_config"] = gate_config
+    if selection is not None:
+        legs["selection"] = selection
+    if not legs:
+        return None
+    return json.dumps(legs, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+__all__ = ["_gate_config_fragment", "gate_provenance_token"]

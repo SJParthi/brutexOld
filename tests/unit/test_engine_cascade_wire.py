@@ -445,6 +445,70 @@ class TestCascadeConfig:
             cw.cascade_config_from_dict({"seed": 1, "not_a_real_field": 7})
 
 
+class TestResolveMcPermutations:
+    """The MC permutation-budget knob (DEC-REHEARSAL-MC-BUDGET-001, #1817)."""
+
+    def test_env_name_is_the_documented_knob(self) -> None:
+        assert cw.MC_PERMUTATIONS_ENV == "BRUTEX_SWEEP_MC_PERMUTATIONS"
+
+    def test_unset_and_blank_resolve_to_none(self) -> None:
+        assert cw.resolve_mc_permutations({}) is None
+        assert cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: ""}) is None
+        assert cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: "   "}) is None
+
+    def test_default_identity_config_equality(self) -> None:
+        """Env unset ⇒ None override ⇒ the BYTE-IDENTICAL production config.
+
+        The CLI arm mirrors this exactly: ``mc_permutations is None`` threads
+        ``overrides=None`` into :func:`cw.cascade_config_for_sweep`, so the
+        resulting frozen config compares EQUAL to the no-override build and
+        keeps the production ``mc_n_permutations`` default (1000).
+        """
+        sweep_id = "a" * 64
+        resolved = cw.resolve_mc_permutations({})
+        overrides: dict[str, object] | None = (
+            None if resolved is None else {"mc_n_permutations": resolved}
+        )
+        assert cw.cascade_config_for_sweep(
+            sweep_id, overrides=overrides
+        ) == cw.cascade_config_for_sweep(sweep_id)
+        assert cw.cascade_config_for_sweep(sweep_id).mc_n_permutations == 1000
+
+    def test_override_threads_through_overrides_seam(self) -> None:
+        """The resolved value reaches the config via the EXISTING seam and
+        survives the manifest dict round trip (the manual-replay exactness)."""
+        sweep_id = "deadbeef" * 8
+        resolved = cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: " 25 "})
+        assert resolved == 25
+        cfg = cw.cascade_config_for_sweep(sweep_id, overrides={"mc_n_permutations": resolved})
+        assert cfg.mc_n_permutations == 25
+        # The override never perturbs the deterministic per-sweep seed.
+        assert cfg.seed == cw.cascade_config_for_sweep(sweep_id).seed
+        # Manifest storage round trip: the frozen value replays exactly.
+        restored = cw.cascade_config_from_dict(cw.cascade_config_to_dict(cfg))
+        assert restored == cfg
+        assert restored.mc_n_permutations == 25
+
+    def test_floor_is_one(self) -> None:
+        assert cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: "1"}) == 1
+
+    @pytest.mark.parametrize("junk", ["many", "1.5", "0x10", "1_000_junk", "25 permutations"])
+    def test_junk_fails_loud_naming_the_env_var(self, junk: str) -> None:
+        with pytest.raises(ValueError, match="BRUTEX_SWEEP_MC_PERMUTATIONS"):
+            cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: junk})
+
+    @pytest.mark.parametrize("nonpositive", ["0", "-1", "-1000"])
+    def test_nonpositive_fails_loud(self, nonpositive: str) -> None:
+        with pytest.raises(ValueError, match="must be an integer >= 1"):
+            cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: nonpositive})
+
+    def test_env_none_reads_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(cw.MC_PERMUTATIONS_ENV, "42")
+        assert cw.resolve_mc_permutations() == 42
+        monkeypatch.delenv(cw.MC_PERMUTATIONS_ENV)
+        assert cw.resolve_mc_permutations() is None
+
+
 # ── Pure numeric helpers ──────────────────────────────────────────────────────
 
 

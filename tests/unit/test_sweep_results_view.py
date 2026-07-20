@@ -330,6 +330,12 @@ def test_to_dict_shape(tmp_path: Path) -> None:
         "snapshot_hashes",
         "mixed_snapshot_eras",
         "run_id_conflicts",
+        # The four ALWAYS-present additive gate-scoping keys
+        # (DEC-SWEEP-SERVING-GATE-PROVENANCE-001).
+        "gate_coordinate",
+        "gate_coordinates",
+        "mixed_gate_coordinates",
+        "gate_reasons",
         "rows",
         # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (graft 9): the two always-present
         # additive envelope keys — a conscious pin update, not a drift.
@@ -473,10 +479,18 @@ class TestSnapshotEraHonesty:
             # (their own values pinned in test_sweep_results_view_temporal.py).
             "temporal_coverage",
             "cascade_report",
+            # The additive gate-scoping keys (DEC-SWEEP-SERVING-GATE-PROVENANCE-001).
+            "gate_coordinate",
+            "gate_coordinates",
+            "mixed_gate_coordinates",
+            "gate_reasons",
         }
         legacy = {k: v for k, v in payload.items() if k not in new_top_level}
         for row in legacy["rows"]:
             row.pop("snapshot_era")
+            row.pop("gate_provenance")
+            row.pop("gate_coordinate")
+            row.pop("gate_reasons")
         assert legacy == {
             "available": True,
             "total_rows": 2,
@@ -679,7 +693,7 @@ class TestVixOnlyDivergence:
         # the private loader — the leaderboard renders no VIX column.
         from brutex.dashboard import sweep_results_view as view_mod
 
-        rows, _, _, conflicts = view_mod._load_rows_resilient(
+        rows, _, _, conflicts, _, _ = view_mod._load_rows_resilient(
             view_mod._iter_store_paths(tmp_path / "sweeps")
         )
         assert conflicts == 0

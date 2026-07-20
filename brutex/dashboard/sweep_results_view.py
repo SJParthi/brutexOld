@@ -87,6 +87,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final
 
+import blake3
 import structlog
 
 from brutex.dashboard.composite_join import COMPOSITE_STATE_ABSENT, CompositeIndex
@@ -134,6 +135,8 @@ __all__ = [
     "CASCADE_REPORT_MAX_BYTES",
     "DEFAULT_RANK_BY",
     "DEFAULT_TOP_N",
+    "GATE_COORDINATE_SENTINEL",
+    "GATE_COORDINATE_UNGATED",
     "MAX_TOP_N",
     "PRESET_INERT_AXES",
     "RANKABLE_COLUMNS",
@@ -146,6 +149,7 @@ __all__ = [
     "SweepLeaderboard",
     "SweepScan",
     "build_sweep_leaderboard",
+    "gate_coordinate_of",
     "load_cascade_join_file",
     "load_sweep_scan",
     "load_sweep_scan_tree",
@@ -155,6 +159,7 @@ __all__ = [
     "preset_rank_record_source",
     "rank_value_source",
     "resolve_preset_param",
+    "resolve_rank_by_param",
     "store_error_payload",
 ]
 
@@ -201,6 +206,48 @@ SNAPSHOT_ERA_AMBIGUOUS: Final[str] = "ambiguous"
 #: BOTH by a ``SWEEP_START`` payload and by a :class:`ResultRow` (``k`` = the
 #: row's ``mask_bits`` popcount — the sweep enumerates exactly-k-of-bits masks).
 _EraKey = tuple[str, str, str, str, int]
+
+# ── Gate-scoped serving (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) ──────────────
+
+#: The gate coordinate of every row/store WITHOUT gate provenance — a legacy
+#: store, an ungated default-selection run, or a stage-3 refined cell (the
+#: cell writer does not thread the token yet — a ledgered follow-up). A stable
+#: label, never ``None``, so it groups and renders.
+GATE_COORDINATE_UNGATED: Final[str] = "ungated"
+
+#: The gate coordinate of a 0-ROW gated store (the ``gate_provenance`` column
+#: is present in the Parquet schema but there are no rows to read the config
+#: VALUE from) — "a gated re-run ran here and persisted ZERO survivors, config
+#: unknown". Folds into the single known config when exactly one exists (the
+#: coexistence folding rule in :func:`_fold_gate_coordinates`).
+GATE_COORDINATE_SENTINEL: Final[str] = "gated"
+
+#: Prefix + digest length of a KNOWN gate-config coordinate tag — a short
+#: BLAKE3 of the ``gate_provenance`` column VALUE (the pre-image stays on the
+#: row payload as ``gate_provenance``). GATE-CONFIG-scoped, NOT store-path
+#: scoped: every tuple of one gated run shares ONE coordinate.
+_GATE_TAG_PREFIX: Final[str] = "gate:"
+_GATE_TAG_HEX_LEN: Final[int] = 16
+
+#: How many DISTINCT KNOWN gate-config coordinates make a tree MIXED (the
+#: ``|K| >= 2`` invariant of the coexistence folding rule).
+_MIXED_KNOWN_CONFIG_MIN: Final[int] = 2
+
+
+def gate_coordinate_of(gate_provenance: str | None) -> str:
+    """Return the gate COORDINATE of one row's ``gate_provenance`` token.
+
+    ``None`` → :data:`GATE_COORDINATE_UNGATED` (the honest legacy/ungated
+    bucket, never merged with a gated one); a known token → the stable short
+    tag ``gate:<blake3-16hex>`` of the token bytes — the SAME philosophy as the
+    engine's ``_tuple_digest`` (a short content digest), GATE-CONFIG-scoped so
+    all tuples of one gated run group into ONE coordinate. Pure + O(1).
+    """
+    if gate_provenance is None:
+        return GATE_COORDINATE_UNGATED
+    digest = str(blake3.blake3(gate_provenance.encode("utf-8")).hexdigest())
+    return _GATE_TAG_PREFIX + digest[:_GATE_TAG_HEX_LEN]
+
 
 #: Hard byte cap on one cascade-report read (DEC-RESULTS-CASCADE-VERDICT-
 #: JOIN-001): a real report is a few KiB–MiB; an out-of-band multi-GB file
@@ -468,6 +515,24 @@ class SweepLeaderboard:
     mixed_snapshot_eras: bool
     run_id_conflicts: int
     preset: str | None = None
+    #: The RESOLVED served gate coordinate (DEC-SWEEP-SERVING-GATE-
+    #: PROVENANCE-001 payload contract): :data:`GATE_COORDINATE_UNGATED`, a
+    #: ``gate:<hash>`` tag, or the 0-row :data:`GATE_COORDINATE_SENTINEL`;
+    #: ``None`` ONLY in the ambiguous mixed case (>1 distinct KNOWN gated
+    #: config — case 3, everything served + labeled, never a silent pick).
+    gate_coordinate: str | None = GATE_COORDINATE_UNGATED
+    #: The FOLDED sorted distinct coordinates present across the scanned
+    #: stores (the coexistence folding rule applied — a lone 0-row sentinel
+    #: beside exactly one known config folds into it).
+    gate_coordinates: tuple[str, ...] = ()
+    #: ``True`` iff >= 2 distinct KNOWN gate-config coordinates exist among
+    #: populated gated stores (the |K| >= 2 invariant) — forces the UI
+    #: coordinate dropdown.
+    mixed_gate_coordinates: bool = False
+    #: Honest 0-row-gated context ("N evaluated, 0 survived the gate" per
+    #: readable ``.trials.json``) — non-empty ONLY when the SERVED coordinate
+    #: is the 0-row sentinel; never fabricated.
+    gate_reasons: tuple[str, ...] = ()
     inert_axes: tuple[str, ...] = PRESET_INERT_AXES
     cascade_join_meta: dict[str, Any] | None = None
     composite_join_meta: dict[str, Any] | None = None
@@ -492,7 +557,11 @@ class SweepLeaderboard:
         :attr:`inert_axes`; gap-register ruling 10). The cascade/composite
         joins add their EMIT-ON-PRESENT meta keys (``cascade_join`` /
         ``composite_join`` / ``cascade_flagged``) only when the respective
-        loader ran AND found something to report.
+        loader ran AND found something to report. The FOUR gate-scoping keys
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001 — ``gate_coordinate`` /
+        ``gate_coordinates`` / ``mixed_gate_coordinates`` / ``gate_reasons``)
+        are ALWAYS present (additive; a single-coordinate legacy lake keeps an
+        identical row set + order, only these keys appear).
         """
         payload: dict[str, Any] = {
             "available": self.available,
@@ -506,6 +575,10 @@ class SweepLeaderboard:
             "snapshot_hashes": list(self.snapshot_hashes),
             "mixed_snapshot_eras": self.mixed_snapshot_eras,
             "run_id_conflicts": self.run_id_conflicts,
+            "gate_coordinate": self.gate_coordinate,
+            "gate_coordinates": list(self.gate_coordinates),
+            "mixed_gate_coordinates": self.mixed_gate_coordinates,
+            "gate_reasons": list(self.gate_reasons),
             "rows": list(self.rows),
             "temporal_coverage": {
                 "rows_with_data": self.temporal_rows_with_data,
@@ -604,6 +677,22 @@ class SweepScan:
     cascade_report_mtime_ns: int | None = None
     total_rows_override: int | None = None
     superset_only: bool = False
+    #: RAW (unfolded) sorted distinct STORE-LEVEL gate coordinates
+    #: (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): the per-row
+    #: :func:`gate_coordinate_of` values of every loaded row, PLUS — for every
+    #: 0-ROW store — the schema-presence verdict
+    #: (:data:`GATE_COORDINATE_SENTINEL` when the ``gate_provenance`` column is
+    #: present, :data:`GATE_COORDINATE_UNGATED` otherwise), so a gated re-run
+    #: that persisted ZERO survivors is IN the coordinate set (the arm-2
+    #: store-level correction). Coordinate-AGNOSTIC raw union — the
+    #: coexistence FOLDING + the serving resolution live in
+    #: :func:`build_sweep_leaderboard`, never here. Default ``()`` keeps any
+    #: directly-constructed legacy scan resolving to "no scoping".
+    gate_coordinates: tuple[str, ...] = ()
+    #: Honest context strings for the 0-row-gated (case-2) payload — one per
+    #: 0-row GATED store whose ``.trials.json`` sidecar was readable
+    #: ("N evaluated, 0 survived the gate"); empty when none/unreadable.
+    gate_trials_context: tuple[str, ...] = ()
 
 
 def _depth_run_dir(stamp: Path) -> Path | None:
@@ -706,7 +795,14 @@ def load_sweep_scan_tree(sweeps_root: Path) -> SweepScan:
     loader instead of re-deriving ``<lake>/sweeps`` (CLAUDE.md §11 COMMON).
     """
     paths = _iter_store_paths(sweeps_root)
-    all_rows, store_count, skipped, run_id_conflicts = _load_rows_resilient(paths)
+    (
+        all_rows,
+        store_count,
+        skipped,
+        run_id_conflicts,
+        gate_coordinates,
+        gate_trials_context,
+    ) = _load_rows_resilient(paths)
 
     # The filter dropdown option sets come from EVERY discovered row (so a filter
     # the operator can pick is always one that exists), independent of the active
@@ -768,6 +864,8 @@ def load_sweep_scan_tree(sweeps_root: Path) -> SweepScan:
         cascade_report_present=report_present,
         cascade_report_groups=report_groups,
         cascade_report_mtime_ns=report_mtime_ns,
+        gate_coordinates=gate_coordinates,
+        gate_trials_context=gate_trials_context,
     )
 
 
@@ -781,6 +879,24 @@ def _resolve_rank_by(rank_by: str | None) -> str:
     if rank_by is not None and rank_by in RANKABLE_COLUMNS:
         return rank_by
     return DEFAULT_RANK_BY
+
+
+def resolve_rank_by_param(rank_by: str | None) -> str:
+    """Resolve a raw ``?rank_by=`` query token to its EFFECTIVE ranking column.
+
+    The public twin of :func:`_resolve_rank_by` (ONE source of truth — a thin
+    delegator, CLAUDE.md §11 COMMON) for callers that must key on the RESOLVED
+    value BEFORE the build runs: the route's L2 cache key
+    (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md #1758 — the d1
+    cache-key-injection fix) carries this resolved column, never the raw
+    user-controlled string, so an unknown/hostile ``rank_by`` (a) cannot smuggle
+    key-delimiter bytes into the key and (b) shares ONE cache slot with every
+    other spelling that resolves to the same column (the payload echoes the
+    resolved value, so slot-sharing is byte-exact). Rank-time behaviour is
+    UNCHANGED — :func:`build_sweep_leaderboard` still applies the identical
+    fall-back internally.
+    """
+    return _resolve_rank_by(rank_by)
 
 
 def _clamp_top_n(top_n: int) -> int:
@@ -1018,6 +1134,10 @@ def store_error_payload(exc: ResultsStoreError) -> dict[str, Any]:
         "snapshot_hashes": [],
         "mixed_snapshot_eras": False,
         "run_id_conflicts": 0,
+        "gate_coordinate": None,
+        "gate_coordinates": [],
+        "mixed_gate_coordinates": False,
+        "gate_reasons": [],
         "rows": [],
         "temporal_coverage": {"rows_with_data": 0, "rows_total": 0},
         "cascade_report": {"present": False, "groups": None, "mtime_ns": None},
@@ -1039,8 +1159,13 @@ def _iter_store_paths(sweeps_root: Path) -> list[Path]:
     return sorted(sweeps_root.glob("*/*/*.parquet"))
 
 
-def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, int, int]:
-    """Load every readable store; return ``(rows, store_count, skipped, run_id_conflicts)``.
+def _load_rows_resilient(
+    paths: Sequence[Path],
+) -> tuple[list[ResultRow], int, int, int, tuple[str, ...], tuple[str, ...]]:
+    """Load every readable store; return the rows + counters + gate-coordinate census.
+
+    Returns ``(rows, store_count, skipped, run_id_conflicts, gate_coordinates,
+    gate_trials_context)`` — see :class:`SweepScan` for the last two.
 
     A single corrupt / version-incompatible store is SKIPPED (logged + counted),
     mirroring :func:`brutex.dashboard.movers_resilient` so one bad file never 500s
@@ -1049,16 +1174,22 @@ def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, i
     COMMON :func:`movers_read_skip_errors` skip set — both are caught here; a
     genuine logic error (``ValueError`` / ``KeyError`` …) still propagates.
 
-    Rows are keyed by ``run_id`` across stores so the SAME combo appearing in two
-    overlapping stores is counted ONCE (the run-identity dedup the store itself
-    guarantees within a file — Golden Rule #4 — extended across files here). A
-    duplicate carrying DIFFERENT metrics (upstream non-determinism / a healed
-    store next to its stale twin) keeps the deterministic FIRST row — *paths* is
-    sorted, so first-wins is discovery-order-independent — but is COUNTED in
-    ``run_id_conflicts`` + logged as a ``sweep_results.run_id_conflict`` WARNING
-    (DEC-RESULTS-SURFACE-HONESTY-001); an IDENTICAL duplicate stays a silent,
-    conflict-free dedup. A duplicate differing ONLY on the REFERENCE-ONLY VIX
-    trio (:func:`_differs_only_in_vix` over the public
+    Rows are keyed by ``(gate_coordinate, run_id)`` across stores
+    (DEC-SWEEP-SERVING-GATE-PROVENANCE-001 — the arm-1 fix): the per-mask
+    ``run_id`` is deliberately gate-BLIND, so the SAME combo re-run under a
+    DIFFERENT gate config is a genuinely different logical result — BOTH rows
+    are kept, each under its own coordinate, and the pair is NOT counted as a
+    conflict. WITHIN one coordinate the pre-existing law is byte-unchanged: an
+    identical duplicate is a silent dedup; a duplicate carrying DIFFERENT
+    metrics (upstream non-determinism / a healed store next to its stale twin)
+    keeps the deterministic FIRST row — *paths* is sorted, so first-wins is
+    discovery-order-independent — but is COUNTED in ``run_id_conflicts`` +
+    logged as a ``sweep_results.run_id_conflict`` WARNING
+    (DEC-RESULTS-SURFACE-HONESTY-001). NOTE the SEMANTIC NARROWING (ledgered):
+    ``run_id_conflicts`` now means WITHIN-coordinate conflicts only — a
+    cross-coordinate duplicate is scoping, not corruption. A within-coordinate
+    duplicate differing ONLY on the REFERENCE-ONLY VIX trio
+    (:func:`_differs_only_in_vix` over the public
     :data:`~brutex.engine.results_store.VIX_FIELDS`) is NOT that family — VIX
     sits deliberately OUTSIDE the run identity (DEC-VIX-STAMP-WIRE-001: the
     India-VIX lake moved between the writes, or a pre-VIX store sits beside a
@@ -1067,6 +1198,15 @@ def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, i
     ``run_id_conflicts``. The engine's ``ResultsStore.append`` RAISES on the same
     divergence (Golden Rule #4) — the dashboard must render regardless, so it
     counts instead of raising (the engine's strictness stays engine-side).
+
+    The gate-coordinate census is STORE-level (the arm-2 correction): a
+    populated store contributes its rows' coordinates; a 0-ROW store
+    contributes the schema-presence verdict via
+    :attr:`~brutex.engine.results_store.ResultsStore.gate_provenance_present`
+    — the sentinel :data:`GATE_COORDINATE_SENTINEL` for a gated schema (a
+    gated re-run that persisted zero survivors MUST be able to win the empty
+    set), :data:`GATE_COORDINATE_UNGATED` otherwise — plus, best-effort, the
+    0-row gated store's ``.trials.json`` context string.
     """
     # The unreadable-store skip set: the engine wraps a damaged Parquet into its OWN
     # ResultsStoreError (DEC-SWEEP-VERIFY-001), and the COMMON movers skip set
@@ -1076,10 +1216,12 @@ def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, i
         ResultsStoreError,
         *movers_read_skip_errors(),
     )
-    by_run_id: dict[str, ResultRow] = {}
+    by_gate_run: dict[tuple[str, str], ResultRow] = {}
     store_count = 0
     skipped = 0
     run_id_conflicts = 0
+    gate_coordinates: set[str] = set()
+    gate_trials: list[str] = []
     for path in paths:
         try:
             store = ResultsStore.load(path)
@@ -1088,10 +1230,26 @@ def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, i
             _LOG.warning("sweep_results.store_skip", path=str(path), error=str(exc))
             continue
         store_count += 1
-        for row in store.rows():
-            existing = by_run_id.get(row.run_id)
+        store_rows = store.rows()
+        if not store_rows:
+            # A 0-ROW store still names a coordinate (the arm-2 store-level
+            # correction): schema presence of the CONDITIONAL gate_provenance
+            # column — readable at zero rows — decides gated-vs-ungated.
+            if store.gate_provenance_present:
+                gate_coordinates.add(GATE_COORDINATE_SENTINEL)
+                context = _gated_trials_context(path)
+                if context is not None:
+                    gate_trials.append(context)
+            else:
+                gate_coordinates.add(GATE_COORDINATE_UNGATED)
+            continue
+        for row in store_rows:
+            coordinate = gate_coordinate_of(row.gate_provenance)
+            gate_coordinates.add(coordinate)
+            key = (coordinate, row.run_id)
+            existing = by_gate_run.get(key)
             if existing is None:
-                by_run_id[row.run_id] = row
+                by_gate_run[key] = row
             elif existing != row:
                 if _differs_only_in_vix(existing, row):
                     # NOT the corruption-grade family: the REFERENCE-ONLY VIX
@@ -1104,7 +1262,7 @@ def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, i
                     # sorted) and log the DISTINCT event, never
                     # ``run_id_conflict``'s false non-determinism diagnosis.
                     if _vix_known_count(row) > _vix_known_count(existing):
-                        by_run_id[row.run_id] = row
+                        by_gate_run[key] = row
                     _LOG.warning(
                         "sweep_results.vix_only_divergence",
                         run_id=row.run_id,
@@ -1116,10 +1274,42 @@ def _load_rows_resilient(paths: Sequence[Path]) -> tuple[list[ResultRow], int, i
                     _LOG.warning(
                         "sweep_results.run_id_conflict",
                         run_id=row.run_id,
+                        gate_coordinate=coordinate,
                         dropped_from=str(path),
                         policy="first-wins",
                     )
-    return list(by_run_id.values()), store_count, skipped, run_id_conflicts
+    return (
+        list(by_gate_run.values()),
+        store_count,
+        skipped,
+        run_id_conflicts,
+        tuple(sorted(gate_coordinates)),
+        tuple(gate_trials),
+    )
+
+
+def _gated_trials_context(store_path: Path) -> str | None:
+    """Best-effort "N evaluated, 0 survived the gate" line for a 0-row gated store.
+
+    Reads the store's paired ``.trials.json`` sidecar (the SAME
+    :func:`~brutex.engine.trial_stats.trial_stats_sidecar_path` convention the
+    sweep writes) and phrases its honest trial census. ``None`` — absent /
+    unreadable sidecar — contributes no context, never a fabricated count
+    (Golden Rule #1) and never an error on the read-only page.
+    """
+    # Function-local import mirroring _snapshot_eras: the engine sidecar
+    # reader is only paid when a leaderboard scan actually runs.
+    from brutex.engine.trial_stats import (
+        TrialStatsError,
+        read_tuple_trial_stats,
+        trial_stats_sidecar_path,
+    )
+
+    try:
+        stats = read_tuple_trial_stats(trial_stats_sidecar_path(store_path))
+    except (TrialStatsError, OSError):
+        return None
+    return f"{stats.n_backtested} evaluated, 0 survived the gate"
 
 
 def _differs_only_in_vix(existing: ResultRow, row: ResultRow) -> bool:
@@ -1370,11 +1560,26 @@ def _project_row(
     full-precision figure, never rounded) + ``benchmark_window`` (the series'
     session span). Unresolvable ⇒ both ``null`` — rendered ``—``, never
     recomputed at serve, never fabricated.
+
+    The THREE additive gate keys (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
+    ``gate_provenance`` (the row's verbatim gate-config token, ``None`` for
+    ungated/legacy — this is gate-scoped-DEDUP provenance, NOT the statutory
+    5-door gate re-check; a sibling PR's ``hard_gates_recheck`` verdict is a
+    DISJOINT surface), ``gate_coordinate`` (its :func:`gate_coordinate_of`
+    tag — the row's own store coordinate, the ``snapshot_era`` marker pattern:
+    label, never exclusion), and ``gate_reasons`` (the failed-door token list —
+    ``[]`` for every persisted row: a finalist already cleared the hard gates,
+    and re-judging per-row here would fabricate a verdict the persisted columns
+    cannot support — ``max_consecutive_losses`` is not persisted and the DSR
+    gate is pool-relative; Golden Rule #1).
     """
-    projected = {
+    projected: dict[str, Any] = {
         "rank": rank,
         "run_id": row.run_id,
         "snapshot_era": snapshot_era,
+        "gate_provenance": row.gate_provenance,
+        "gate_coordinate": gate_coordinate_of(row.gate_provenance),
+        "gate_reasons": [],
         "instrument": row.instrument,
         "tf": row.tf,
         "direction": row.direction,
@@ -1506,6 +1711,34 @@ def load_sweep_scan_via_rollup(lake_root: Path, *, rev: str, log_gate: LogGate) 
         return RollupServe(
             scan=None, behind_stores=0, conflict_suspect=False, fallback_reason=verdict.reason
         )
+    # #1467 fold seam (DEC-SWEEP-SERVING-GATE-PROVENANCE-001 ×
+    # DEC-RESULTS-TOPK-ROLLUP-001): gate-scoped serves bypass the rollup — a
+    # gate-coexistence lake (one run_id under two gate coordinates)
+    # structurally cannot be one run_id-keyed rollup store, and the
+    # case-2/case-3 serving semantics need the STORE-level coordinate census
+    # only the legacy scan performs — so the legacy scan owns gate serving:
+    # the route's serve predicate already keeps any explicit ``?gate=``
+    # request legacy, and any gated ROW in the union forces the fallback arm
+    # here (reason ``gate_coordinates_present``; Hook C then rebuilds from
+    # the legacy scan — once per revision via the route's level-1 slot). An
+    # all-ungated union serves with the honest ROW-derived coordinate so the
+    # rollup payload stays byte-identical to the legacy wire (parity-pinned).
+    # HONEST residual (disclosed): a 0-ROW gated store's store-level sentinel
+    # is invisible to the row union — its case-2 empty-gated view can only
+    # come from the legacy scan (reachable only once a gated re-run's rollup
+    # rebuild lands beside populated ungated stores; the member's conflict
+    # fence + census WARNs bound the coexistence shapes).
+    if any(r.gate_provenance is not None for r in verdict.rows):
+        if log_gate.should_emit(("fallback", rev, "gate_coordinates_present")):
+            _LOG.warning(
+                "sweep_results.rollup_fallback", rev=rev, reason="gate_coordinates_present"
+            )
+        return RollupServe(
+            scan=None,
+            behind_stores=0,
+            conflict_suspect=False,
+            fallback_reason="gate_coordinates_present",
+        )
     stamp = verdict.stamp
     scan = SweepScan(
         rows=verdict.rows,
@@ -1519,6 +1752,7 @@ def load_sweep_scan_via_rollup(lake_root: Path, *, rev: str, log_gate: LogGate) 
         snapshot_hashes=stamp.snapshot_hashes,
         total_rows_override=stamp.total_rows,
         superset_only=True,
+        gate_coordinates=(GATE_COORDINATE_UNGATED,) if verdict.rows else (),
     )
     if verdict.outcome == "stale":
         if log_gate.should_emit(("stale", rev, verdict.reason)):
@@ -1557,6 +1791,95 @@ def load_sweep_scan_via_rollup(lake_root: Path, *, rev: str, log_gate: LogGate) 
 # trio) — the two joins read the SAME report and coexist deliberately
 # (club S2 fold).
 # ═════════════════════════════════════════════════════════════════════════════
+
+
+def _fold_gate_coordinates(raw: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
+    """Apply the coexistence FOLDING rule; return ``(folded_sorted, mixed)``.
+
+    DEC-SWEEP-SERVING-GATE-PROVENANCE-001, the |K|-based law over the RAW
+    store-level coordinate set (K = the KNOWN ``gate:<hash>`` config
+    coordinates from POPULATED gated stores; S = the 0-row
+    :data:`GATE_COORDINATE_SENTINEL`; U = :data:`GATE_COORDINATE_UNGATED`):
+
+    * ``|K| == 1`` — the 0-row sentinel FOLDS INTO that single known config (a
+      single-config run's zero-survivor tuples belong to the same coordinate),
+      so ``"gated"`` never appears beside its own config's tag.
+    * ``|K| == 0`` — the sentinel (when present) stands as the only gated
+      label.
+    * ``|K| >= 2`` — genuinely different configs on one root: the sentinel
+      cannot be attributed, so it stands as its OWN entry beside the known
+      configs.
+
+    ``mixed`` is the invariant ``|K| >= 2`` — a lone sentinel beside one known
+    config never spuriously trips the mixed banner/dropdown. Residual
+    (ledgered v2 follow-up): two DIFFERENT all-0-row gated configs both read
+    the one ``"gated"`` sentinel and merge.
+    """
+    known = {c for c in raw if c.startswith(_GATE_TAG_PREFIX)}
+    folded = set(raw)
+    if len(known) == 1:
+        folded.discard(GATE_COORDINATE_SENTINEL)
+    return tuple(sorted(folded)), len(known) >= _MIXED_KNOWN_CONFIG_MIN
+
+
+class UnknownGateCoordinateError(ValueError):
+    """An explicit ``?gate=`` token that names no folded coordinate.
+
+    Subclasses :class:`ValueError` so every existing ``except ValueError``
+    caller (and the historic route catch) stays behaviourally compatible, but
+    carries the offending :attr:`coordinate` token as an attribute so the route
+    can build a SANITISED, LENGTH-BOUNDED 400 detail rather than echoing
+    arbitrary client input (the raw token can be a 500-char / control-char
+    string — an info-leak / log-spam vector if reflected verbatim).
+    """
+
+    def __init__(self, coordinate: str, message: str) -> None:
+        super().__init__(message)
+        #: The raw offending gate token (unsanitised — the route bounds/strips it).
+        self.coordinate = coordinate
+
+
+def _resolve_gate_scope(
+    gate: str | None, folded: tuple[str, ...], mixed: bool
+) -> tuple[str | None, str | None]:
+    """Resolve the served gate coordinate; return ``(payload_coordinate, row_scope)``.
+
+    The DEC-SWEEP-SERVING-GATE-PROVENANCE-001 payload-contract resolution over
+    the FOLDED coordinate set:
+
+    * **Explicit non-blank *gate*** — must name a folded coordinate EXACTLY;
+      unknown raises ``ValueError`` naming the available set (the
+      ``resolve_preset_param`` precedent — the route maps it to a clean 400;
+      an explicit operator choice must refuse loudly, never silently serve
+      something else). Returns ``(token, token)``.
+    * **Absent/blank, <= 1 coordinate (case 1)** — serve ALL rows, no scoping
+      (``row_scope=None``); the payload coordinate is the one present (or the
+      honest :data:`GATE_COORDINATE_UNGATED` for an empty tree).
+    * **Absent/blank, mixed (case 3)** — >= 2 distinct KNOWN configs: NEVER a
+      silent pick — serve ALL rows labeled per-row, payload coordinate
+      ``None``.
+    * **Absent/blank, exactly one gated + ungated (case 2)** — serve ONLY the
+      gated coordinate (the trustworthy view); a 0-row sentinel coordinate
+      legitimately serves the EMPTY set — the honest "the gated re-run
+      produced zero survivors", never the stale ungated rows.
+    """
+    token = (gate or "").strip()
+    if token:
+        if token not in folded:
+            available = ", ".join(folded) or "(none)"
+            raise UnknownGateCoordinateError(
+                token,
+                f"unknown gate coordinate {token!r}; available coordinates: {available}",
+            )
+        return token, token
+    if len(folded) <= 1:
+        return (folded[0] if folded else GATE_COORDINATE_UNGATED), None
+    if mixed:
+        return None, None
+    # Post-fold, a non-mixed multi-coordinate set is EXACTLY one gated
+    # coordinate (a gate:<hash> tag or the 0-row sentinel) + "ungated".
+    gated = [c for c in folded if c != GATE_COORDINATE_UNGATED]
+    return gated[0], gated[0]
 
 
 def _cascade_row_keys(run_id: str, load: CascadeJoinLoad | None) -> dict[str, Any]:
@@ -1620,6 +1943,7 @@ def build_sweep_leaderboard(
     top_n: int = DEFAULT_TOP_N,
     scan: SweepScan | None = None,
     preset: str | None = None,
+    gate: str | None = None,
     cascade: CascadeJoinLoad | None = None,
     composite: CompositeIndex | None = None,
     min_trades: int | None = None,
@@ -1667,6 +1991,14 @@ def build_sweep_leaderboard(
         ``run_id``-ASC deterministic ties, the exact ``ResultsStore.top_k``
         two-pass idiom); an unknown token raises ``ValueError`` naming the
         valid values (the route maps it to a clean 400).
+    gate
+        Optional EXPLICIT gate coordinate to scope the served rows to
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) — one of the tree's folded
+        ``gate_coordinates`` (``"ungated"``, a ``gate:<hash>`` tag, or the
+        0-row ``"gated"`` sentinel). ``None``/blank applies the deterministic
+        default resolution (:func:`_resolve_gate_scope` — cases 1/2/3 of the
+        payload contract); an unknown token raises ``ValueError`` naming the
+        available coordinates (the route maps it to a clean 400).
     cascade
         The cascade-report load (:func:`load_cascade_join_file`) or ``None``
         (every pre-change caller — byte-identical payload). A ``joined``
@@ -1702,7 +2034,8 @@ def build_sweep_leaderboard(
     ------
     ValueError
         If *preset* names an unknown ranking preset (see
-        :func:`resolve_preset_param`).
+        :func:`resolve_preset_param`) or *gate* names an unknown gate
+        coordinate (see :func:`_resolve_gate_scope`).
     """
     resolved_preset = resolve_preset_param(preset)
     resolved_rank = _resolve_rank_by(rank_by)
@@ -1735,6 +2068,13 @@ def build_sweep_leaderboard(
             "filtered leaderboards must use the legacy full scan"
         )
 
+    # Gate-coordinate resolution BEFORE the row filters (DEC-SWEEP-SERVING-
+    # GATE-PROVENANCE-001): the coordinate set is STORE-level (0-row gated
+    # stores included), the fold + resolution live at THIS operator-facing
+    # layer — the scan stays a raw coordinate-agnostic union.
+    folded_gates, mixed_gates = _fold_gate_coordinates(scan.gate_coordinates)
+    gate_coordinate, gate_scope = _resolve_gate_scope(gate, folded_gates, mixed_gates)
+
     # The joined ranking-composite map (DEC-RESULTS-CASCADE-VERDICT-JOIN-001)
     # — non-None ONLY when the index joined non-empty: it then feeds BOTH the
     # per-row display key and the preset composite axis (the honest dynamic
@@ -1755,6 +2095,13 @@ def build_sweep_leaderboard(
             max_abs_dd_pct=max_abs_dd_pct,
         )
     ]
+    if gate_scope is not None:
+        # Scope to ONE coordinate (an explicit ?gate= or the case-2 default):
+        # a foreign-gate row is EXCLUDED from this view — the one deliberate
+        # exception to the marker-never-exclusion pattern, because arm-2's
+        # defect IS foreign-gate rows drowning the requested coordinate. A
+        # 0-row sentinel scope matches no row — the honest empty set.
+        filtered = [r for r in filtered if gate_coordinate_of(r.gate_provenance) == gate_scope]
     if resolved_preset is None:
         # Deterministic rank: by the chosen column descending, ties broken by run_id
         # ascending (the SAME total order ResultsStore.top_k uses — Golden Rule #4), so
@@ -1861,6 +2208,15 @@ def build_sweep_leaderboard(
         mixed_snapshot_eras=len(scan.snapshot_hashes) > 1,
         run_id_conflicts=scan.run_id_conflicts,
         preset=resolved_preset,
+        gate_coordinate=gate_coordinate,
+        gate_coordinates=folded_gates,
+        mixed_gate_coordinates=mixed_gates,
+        # The honest 0-row-gated context — surfaced ONLY when the SERVED
+        # coordinate is the sentinel (the case-2 empty-set answer); a
+        # populated coordinate's finalists carry no failed-door reasons.
+        gate_reasons=(
+            scan.gate_trials_context if gate_coordinate == GATE_COORDINATE_SENTINEL else ()
+        ),
         inert_axes=(
             _INERT_AXES_COMPOSITE_ACTIVE if composite_of is not None else PRESET_INERT_AXES
         ),

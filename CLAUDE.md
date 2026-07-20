@@ -18,7 +18,17 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-RANK-PARETO-PERSIST-001 /
+_Last updated: 2026-07-20 (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md
+#1758 + DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1817 — both numbers KEPT at
+the train-b wave-3 fold (zero collision on the woven ledger) — branch
+`claude/dedup-gate-provenance-serving`: gate-scoped `/results` serving over the
+nullable `ResultRow.gate_provenance` carrier + the rehearsal-scoped Stage-4
+MC-permutation budget (`BRUTEX_SWEEP_MC_PERMUTATIONS`; the production 1000
+default untouched). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity
+untouched — ungated stores byte-identical, the frozen goldens UNMODIFIED. The
+full record lives in the §1 Active-branch blurb + MIGRATION.md #1758/#1817 —
+this header carries the pointer, never the story.)
+Earlier: 2026-07-18 (DEC-RANK-PARETO-PERSIST-001 /
 DEC-RANK-QUOTA-PERSIST-1000-001 / DEC-RANK-POOL-UNION-ADMIT-001 /
 DEC-RANK-DD-BAND-ORDER-001, MIGRATION.md #2059–#2062 — renumbered
 #1970–#1973 → #2059–#2062 at the 2026-07-20 train-b wave-2b fold (the
@@ -4232,7 +4242,52 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rank-pareto-persist` (**DEC-RANK-PARETO-PERSIST-001 +
+- **Active branch:** `claude/dedup-gate-provenance-serving` (**DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+  MIGRATION.md #1758** (renumbered #1724 → #1758 to the drain-steward reservation) — gate-scoped
+  `/results` serving + the row/store gate-provenance carrier: the dedup audit's residual arms after
+  #1715 re-keyed the store ADDRESS per gate config — `ResultRow.gate_provenance` (Ruling-5 optional
+  column; ungated stores byte-identical, a 0-row gated store schema-discoverable), gate-aware
+  `(gate_coordinate, run_id)` cross-store dedup (arm-1: a gated re-run's row is never
+  first-wins-collapsed under its stale ungated twin; arm-2: a zero-survivor gated re-run honestly
+  serves the EMPTY set, never the stale ungated rows), the |K|-based coexistence folding rule +
+  payload contract cases 1/2/3, `?gate=` on `/api/v1/sweep/leaderboard` (unknown token = clean 400)
+  + 4 additive payload keys + the results.html gate column/dropdown. FIX ROUND (protocol round 1):
+  the refuter-SURVIVED d1 L2 cache-key INJECTION closed structurally — every user-controlled key
+  leg percent-encoded (`quote`, safe='') so `|`/`=` can never forge another request's key legs, AND
+  `rank_by` enters the key as its RESOLVED effective column (NEW public
+  `sweep_results_view.resolve_rank_by_param`, ONE source of truth with the rank-time fall-back) —
+  a must-400 request can never alias a cached 200; regression + gate∘preset∘filter composition +
+  the 0-row token-unrecoverable fold-boundary pins added. SAME-BRANCH SECOND DEC (2026-07-15
+  merge-reconcile of main through #1794, semantic /results coexistence with #1473's
+  Cascade/CPCV/Composite columns — both features fully coexist, both suites green):
+  **DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1817** (renumbered #1795 → #1817 at the 2026-07-16 refold onto post-Club-Q main) — the rehearsal-scoped Stage-4
+  Monte-Carlo permutation budget: NEW fail-loud env knob `BRUTEX_SWEEP_MC_PERMUTATIONS`
+  (`cascade_wire.resolve_mc_permutations`, the `resolve_diffcheck_k` idiom — junk/`<1`
+  refuses loud, resolved EAGERLY in `cmd_sweep_all`) threaded through the EXISTING
+  `cascade_config_for_sweep(overrides=…)` seam into the manifest-stored config (manual
+  replay exact, pinned); env unset threads NO override — the production
+  `mc_n_permutations=1000` default is byte-identical (config-equality + manifest pins);
+  the R38 rehearsal fixture sets MC=100 (the `BRUTEX_SWEEP_DIFFCHECK_K=8` idiom;
+  the smallest budget whose p-value floor `1/101` still admits a filter-#9 PASS
+  at the production `mc_alpha=0.01` — smaller budgets are constant-reject) + a
+  `reset_configuration`-fenced INFO logging bound (the #1630 dispatch-guard posture its
+  direct `cmd_sweep_all` calls bypass) — closing the SYSTEMIC commit-seed-dependent
+  `test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns at root cause (an expensive
+  per-commit seed draw sent candidates into cascade filter #9's 1000-permutation
+  pure-Python re-simulation with unconfigured-DEBUG rendering; main itself failed at
+  452.6 s — run 29249947445; this PR's check at 304.2 s/318.0 s); the production 1000
+  default is UNTOUCHED, and the runtime ceiling law is the folded b12257e TWO-TIER
+  (merge-reconcile 2026-07-15 — the test-file half of PR #1522's 1711bf99, pushed by a
+  sibling session: strict 300 s where the process is NOT coverage-traced — the dedicated
+  sweep-rehearsal job keeps full teeth; the documented 3× instrumentation allowance
+  900 s where coverage.py is actively tracing, probed via the LIVE
+  `coverage.Coverage.current()` — COMPLEMENTARY, both stand: the root-cause budget
+  bounds the WORKLOAD, the two-tier ceiling is the defensive tracer allowance; the
+  full record lives in MIGRATION.md #1817's merge-reconcile note). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the frozen
+  `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass UNMODIFIED; touched
+  modules 100% line+branch.)
+  Earlier: `claude/rank-pareto-persist` (**DEC-RANK-PARETO-PERSIST-001 +
   DEC-RANK-QUOTA-PERSIST-1000-001 + DEC-RANK-POOL-UNION-ADMIT-001 +
   DEC-RANK-DD-BAND-ORDER-001, MIGRATION.md #2059–#2062** — renumbered
   #1970–#1973 → #2059–#2062 at the 2026-07-20 train-b wave-2b fold (the
@@ -13113,7 +13168,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rank-pareto-persist`
+- **Active feature branch:** `claude/dedup-gate-provenance-serving`
+  (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md #1758 (renumbered
+  #1724 → #1758 to the drain-steward reservation) — gate-scoped `/results`
+  serving + the row/store gate-provenance carrier + the d1 L2 cache-key
+  injection fix (percent-encoded key legs + the RESOLVED `rank_by` leg via
+  the NEW public `resolve_rank_by_param`); + the same-branch second DEC
+  DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1817 — the rehearsal-scoped
+  Stage-4 MC permutation budget knob `BRUTEX_SWEEP_MC_PERMUTATIONS`
+  (fail-loud; env unset = the byte-identical production 1000 default) + the
+  R38 fixture's MC=100 (the smallest both-directions-teeth budget at
+  mc_alpha=0.01) + scoped INFO logging bound, closing the systemic
+  rehearsal 300 s overruns at root cause; the runtime ceiling law is the
+  folded b12257e two-tier — strict 300 s uninstrumented / the documented 3×
+  allowance 900 s under an actively-tracing coverage.py, complementary to
+  the root-cause budget; production MC default 1000 untouched; see §1
+  Active branch for the full blurb; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/rank-pareto-persist`
   (DEC-RANK-PARETO-PERSIST-001 + DEC-RANK-QUOTA-PERSIST-1000-001 +
   DEC-RANK-POOL-UNION-ADMIT-001 + DEC-RANK-DD-BAND-ORDER-001, MIGRATION.md
   #2059–#2062 — renumbered #1970–#1973 → #2059–#2062 at the 2026-07-20
