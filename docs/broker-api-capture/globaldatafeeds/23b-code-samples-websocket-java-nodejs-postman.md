@@ -42,10 +42,10 @@ The flow of operations should be as follows :
 Note the code below in file at the top :
 
 ```java
-      	//GFDL TODO - please enter below the endpoint received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in 
+      	//GFDL TODO - please enter below the endpoint received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in
         String EndPoint = "ws://endpoint:port";
-        
-        //GFDL TODO - please enter below the API Key received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in 
+
+        //GFDL TODO - please enter below the API Key received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in
         String AccessKey = "Enter your API Key here";
 ```
 
@@ -62,16 +62,16 @@ Note the code below in file at the top :
 ```java
 public class WebSocketSample_JAVA {
     public static void main(String[] args) throws Exception {
-        
-    	//GFDL TODO - please enter below the endpoint received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in 
+
+    	//GFDL TODO - please enter below the endpoint received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in
         String EndPoint = "ws://endpoint:port";
-        
-        //GFDL TODO - please enter below the API Key received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in 
+
+        //GFDL TODO - please enter below the API Key received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in
         String AccessKey = "Enter your API Key here";
 
-        
+
         /*GFDL TODO : All the functions supported by API are listed below. You can uncomment any function to see the flow of request and response*/
-        
+
         String functionName = "SubscribeRealtime";
         //String functionName = "SubscribeSnapshot";
 
@@ -81,7 +81,7 @@ public class WebSocketSample_JAVA {
         //String functionName = "GetLastQuoteArray";
         //String functionName = "GetLastQuoteArrayShort";
         //String functionName = "GetLastQuoteArrayShortWithClose";
-        
+
         //String functionName = "GetSnapshot";
         //String functionName = "GetHistory";
 
@@ -101,26 +101,26 @@ public class WebSocketSample_JAVA {
 
         //String functionName = "GetMarketMessages";
         //String functionName = "GetExchangeMessages";
-        
+
         //String functionName = "GetLastQuoteOptionChain";
         //String functionName = "GetExchangeSnapshot";
-    
+
         final WSClientEndpoint clientEndPoint;
         clientEndPoint = new WSClientEndpoint(new URI(EndPoint));
-        
+
         //Here user is Authenticated using "getAuthenticate" function
         clientEndPoint.sendMessage(getAuthenticate("Authenticate",AccessKey));
         Thread.sleep(500);
-        
-        
+
+
         if(clientEndPoint.APIConnection)
-        {       	
+        {
             switch (functionName) {
 			///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 			///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 			/* 	GFDL : 	1. 	SubscribeRealtime : pushes realtime data every second for the subscribed instrument from server
-			2. 	So you will need to send this request only once and subscribe for the data.	
-			3.	Please note that if there is internet disconnection for any reason, you will need to 
+			2. 	So you will need to send this request only once and subscribe for the data.
+			3.	Please note that if there is internet disconnection for any reason, you will need to
 			subscribe to all the instruments again - to receive the data.
 			4.	To see this function in action, you should run it during market hours
 			5.	If you want to subscribe to data of multiple symbols, you will need to send 1 request each - for each symbol
@@ -234,14 +234,14 @@ Note the code below in file at the top :
 ```javascript
 """
 /*
-GFDL TODO - please enter below the endpoint received from GFDL team. 
-If you dont have one, please contact us on sales@globaldatafeeds.in 
+GFDL TODO - please enter below the endpoint received from GFDL team.
+If you dont have one, please contact us on sales@globaldatafeeds.in
 */
 var endpoint = "ws://endpoint:port/";
 
 /*
-//GFDL TODO - please enter below the API Key received from GFDL team. 
-If you dont have one, please contact us on sales@globaldatafeeds.in 
+//GFDL TODO - please enter below the API Key received from GFDL team.
+If you dont have one, please contact us on sales@globaldatafeeds.in
 */
 var accesskey = "Enter Your API Key Here";
 ```
@@ -261,8 +261,8 @@ var accesskey = "Enter Your API Key Here";
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	/* 	GFDL : 	1. 	SubscribeRealtime : pushes realtime data every second for the subscribed instrument from server
-				2. 	So you will need to send this request only once and subscribe for the data.	
-				3.	Please note that if there is internet disconnection for any reason, you will need to 
+				2. 	So you will need to send this request only once and subscribe for the data.
+				3.	Please note that if there is internet disconnection for any reason, you will need to
 					subscribe to all the instruments again - to receive the data.
 				4.	To see this function in action, you should run it during market hours
 				5.	If you want to subscribe to data of multiple symbols, you will need to send 1 request each - for each symbol
@@ -273,24 +273,24 @@ var accesskey = "Enter Your API Key Here";
 /*
 Subscribing to realtime data of Futures & Options :
 ---------------------------------------------------
-//Below request will subscribe to realtime data of Current Month Futures of NIFTY	
+//Below request will subscribe to realtime data of Current Month Futures of NIFTY
 //This example shows how to request data using Continuous Format
-//Similarly, you can send NIFTY-II (Near month), NIFTY-III (Far month). 
+//Similarly, you can send NIFTY-II (Near month), NIFTY-III (Far month).
 //Below Symbol is Continuous Format of NIFTY Futures. It will never expire. So no change in code will be necessary.
 //You can use same naming convention for Futures of Instruments from NFO, CDS, MCX Exchanges
 //CDS Examples : USDINR-I, USDINR-II, USDINR-III
 //MCX Examples : NATURALGAS-I, NATURALGAS-II, NATURALGAS-III
 
-//Similarly, you can send NIFTY20AUGFUT (near month), NIFTY20SEPFUT (far month). 
+//Similarly, you can send NIFTY20AUGFUT (near month), NIFTY20SEPFUT (far month).
 //You can use same naming convention for Futures of Instruments from NFO, CDS, MCX Exchanges
 //NFO Options Examples : NIFTY02JUL2010000CE, RELIANCE30JUL201700CE
 //CDS Futures Examples : USDINR20JULFUT, USDINR20AUGFUT, USDINR20SEPFUT
 //CDS Options Examples : USDINR29JUL2075.5CE, EURINR29JUL2080CE
 //MCX Options Examples : CRUDEOIL20JULFUT, CRUDEOIL20AUGFUT, CRUDEOIL20SEPFUT
-//MCX Options Examples : CRUDEOIL20JUL2050PE, GOLD20JUL43700PE	
+//MCX Options Examples : CRUDEOIL20JUL2050PE, GOLD20JUL43700PE
 //Important : Replace it with appropriate expiry date if this contract is expired
 
-//Similarly, you can send FUTIDX_NIFTY_27AUG2020_XX_0 (near month), FUTIDX_NIFTY_24SEP2020_XX_0 (far month). 
+//Similarly, you can send FUTIDX_NIFTY_27AUG2020_XX_0 (near month), FUTIDX_NIFTY_24SEP2020_XX_0 (far month).
 //You can use same naming convention for Futures of Instruments from NFO, CDS, MCX Exchanges
 //NFO Options Examples : OPTIDX_NIFTY_02JUL2020_CE_10000, OPTSTK_RELIANCE_30JUL2020_CE_1700
 //CDS Futures Examples : FUTCUR_USDINR_26JUN2020_XX_0, FUTCUR_USDINR_29JUL2020_XX_0, FUTCUR_USDINR_27AUG2020_XX_0
@@ -305,23 +305,23 @@ Subscribing to realtime data of NSE Indices
 //Use NSE_IDX as Exchange
 //Please note that Indices Symbols have white space. For example, between NIFTY & 50, NIFTY & BANK above
 
-Subscribing to realtime data of NSE Stocks 
+Subscribing to realtime data of NSE Stocks
 ------------------------------------------
 //For EQ Series, use InstrumentIdentifier value BAJAJ-AUTO, RELIANCE, AXISBANK, LT, etc..
-//To subscribe to realtime data of any other series, append the series name to symbol name 
+//To subscribe to realtime data of any other series, append the series name to symbol name
 //for example, to request data of RELIANCE CAPITAL from BE Series, use RELCAPITAL.BE
 //EQ Series Symbols are mentioned without any suffix
 
-// Please see symbol naming conventions here : 
+// Please see symbol naming conventions here :
 // https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/documentation-support/symbol-naming-convention/
 */
 
 function SubscribeRealtime()
 {
-	if (connection.connected) 
+	if (connection.connected)
 	{
 		var ExchangeName = "NFO";				//GFDL : Supported values : NSE (stocks), NSE_IDX (Indices), NFO (F&O), MCX & CDS (Currency)
-		var InstIdentifier = "NIFTY-I";			//GFDL : NIFTY-I always represents current month Futures. 
+		var InstIdentifier = "NIFTY-I";			//GFDL : NIFTY-I always represents current month Futures.
 		request = '{"MessageType":"SubscribeRealtime","Exchange":"' + ExchangeName + '","InstrumentIdentifier":"' + InstIdentifier + '"}';
 		callAPI(request);
 	}

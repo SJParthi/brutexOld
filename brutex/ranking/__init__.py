@@ -69,6 +69,7 @@ from brutex.ranking.overfit import (
     passes_overfit_gate,
     pool_sharpe_dispersion,
 )
+from brutex.ranking.temporal import TemporalGateInput, TemporalTriple, apply_temporal_gate
 
 # ── Hard rejection gate thresholds (the spec, above) ──
 #: Minimum closed trades for a result to be rankable (below this is statistical
@@ -322,6 +323,56 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
     return tuple(reasons)
 
 
+#: The :func:`persisted_hard_gates_recheck` wire verdicts — the serve-time
+#: belt's two-state vocabulary (DEC-RESULTS-TRUST-HONESTY-001): ``"ok"`` = no
+#: reconstructible door failed; ``"marked"`` = at least one did (the row is
+#: MARKED, never dropped — the ``snapshot_era`` pattern).
+HARD_GATES_RECHECK_OK: Final[str] = "ok"
+HARD_GATES_RECHECK_MARKED: Final[str] = "marked"
+
+
+def persisted_hard_gates_recheck(
+    *,
+    total_trades: int,
+    profit_factor: float | None,
+    max_drawdown_pct: float,
+    win_rate: float,
+) -> str:
+    """Serve-time hard-gate RE-CHECK over the fields a stored ``ResultRow`` persists.
+
+    DEC-RESULTS-TRUST-HONESTY-001 (the /results belt for legacy / non-gated
+    stores): re-judges the reconstructible hard doors from the persisted
+    scalars — the fail-closed non-finite guard (over the three persisted float
+    inputs), door 1 (``total_trades < MIN_TRADES``), door 2 (``profit_factor``
+    ``None``/``< 1.2``) and door 3 (``max_drawdown_pct > 30``) — reading the
+    SAME threshold constants as :func:`passes_gates` (CLAUDE.md §11 COMMON;
+    homed beside the predicate so a threshold change moves both at once).
+
+    Returns :data:`HARD_GATES_RECHECK_MARKED` when any judged door fails, else
+    :data:`HARD_GATES_RECHECK_OK`. The consumer MARKS, never drops (Golden
+    Rule #1 — a legacy row is surfaced with its verdict, not hidden).
+
+    HONEST envelope (Golden Rule #10): a PARTIAL recheck, one-way by
+    construction — doors 4 (win-rate × win/loss-ratio) and 5 (consecutive
+    losses) need ``win_loss_ratio`` / ``max_consecutive_losses``, which a
+    ``ResultRow`` does NOT persist, so they are NOT judged (fabricating
+    neutral fills would fake door verdicts). Therefore ``"marked"`` implies
+    the full :func:`passes_gates` would also reject (property-pinned), while
+    ``"ok"`` is necessary-not-sufficient — never presented as a full-gate
+    pass. ``win_rate`` participates only in the fail-closed non-finite guard
+    (its door needs the unpersisted ratio).
+    """
+    if any(_non_finite_gate_input(value) for value in (profit_factor, max_drawdown_pct, win_rate)):
+        return HARD_GATES_RECHECK_MARKED
+    if total_trades < MIN_TRADES:
+        return HARD_GATES_RECHECK_MARKED
+    if profit_factor is None or profit_factor < _MIN_PROFIT_FACTOR:
+        return HARD_GATES_RECHECK_MARKED
+    if max_drawdown_pct > _MAX_DRAWDOWN_PCT:
+        return HARD_GATES_RECHECK_MARKED
+    return HARD_GATES_RECHECK_OK
+
+
 def _f(value: float | None) -> float:
     """A ``None`` composite term contributes 0 (survivors have real metrics)."""
     return value if value is not None else 0.0
@@ -561,10 +612,67 @@ def _overfit_gate(
     return [survivors[position] for position in kept_positions], kept_dsrs
 
 
+def _temporal_survivors(
+    candidates: Sequence[tuple[int, ResultMetrics]],
+    temporal: TemporalGateInput,
+) -> list[tuple[int, ResultMetrics]]:
+    """Hard doors + the temporal year gate in ONE pass (the gate-ON arm only).
+
+    DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: judges every candidate through the SAME
+    :func:`passes_gates` doors the default arm uses (one shared predicate — the
+    two arms cannot drift), collects each survivor's aligned
+    :class:`~brutex.ranking.temporal.TemporalTriple`, and applies
+    :func:`~brutex.ranking.temporal.apply_temporal_gate` (the ONE mode fold —
+    ``observe`` counts would-be kills and filters nothing; a whole-gate
+    abstention keeps everything and records it on ``temporal.stats``).
+
+    Fail-loud wiring guard (Golden Rule #1): the config being active REQUIRES a
+    triple per candidate — a length mismatch or a ``None`` triple on a
+    gate-passing survivor raises :class:`ValueError` naming the mask, never a
+    silent pass-all.
+    """
+    if temporal.triples is None:
+        raise ValueError(
+            "rank_combos: temporal gate is configured but no per-candidate triples "
+            "were supplied (TemporalGateInput.triples is None on the batch path) — "
+            "a missing fold must never become a silent pass-all"
+        )
+    if len(temporal.triples) != len(candidates):
+        raise ValueError(
+            f"rank_combos: {len(temporal.triples)} temporal triples for "
+            f"{len(candidates)} candidates — the fold and the candidate stream "
+            f"desynchronised (wiring bug)"
+        )
+    survivors: list[tuple[int, ResultMetrics]] = []
+    survivor_triples: list[TemporalTriple] = []
+    for index, (mask, m) in enumerate(candidates):
+        if not passes_gates(m):
+            continue
+        triple = temporal.triples[index]
+        if triple is None:
+            raise ValueError(
+                f"rank_combos: candidate mask 0x{mask:032x} passed the hard doors "
+                f"but carries no TemporalTriple — a missing per-mask fold (wiring "
+                f"bug), never a silent pass-all"
+            )
+        survivors.append((mask, m))
+        survivor_triples.append(triple)
+    kept = apply_temporal_gate(
+        survivor_triples,
+        cfg=temporal.cfg,
+        n_judged_years=temporal.n_judged_years,
+        stats=temporal.stats,
+    )
+    if len(kept) == len(survivors):
+        return survivors
+    return [survivors[position] for position in kept]
+
+
 def rank_combos(
     candidates: Sequence[tuple[int, ResultMetrics]],
     *,
     overfit: OverfitGateConfig | None = None,
+    temporal: TemporalGateInput | None = None,
 ) -> list[RankedCombo]:
     """Rank a leaderboard: gate, z-normalise the composite terms, score, sort.
 
@@ -585,6 +693,19 @@ def rank_combos(
         **6th (overfit) gate + the 8th (Deflated-Sharpe) ranking term**
         (DEC-RANKING-OVERFIT-001). ``None`` (the default) keeps the legacy
         five-gate / seven-term ranking byte-identical.
+    temporal
+        Opt-in :class:`~brutex.ranking.temporal.TemporalGateInput` activating
+        the **temporal-robustness year gate**
+        (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): the hard-door SURVIVORS are
+        filtered through the P1/P2 predicates BEFORE the overfit gate — the
+        candidate POOL feeding the DSR deflation (``N = len(candidates)`` and
+        its Sharpe column) is UNTOUCHED in both rank paths, so survivors'
+        ``deflated_sharpe`` is bit-identical gate-on vs gate-off
+        (regression-pinned). Requires ``triples`` aligned 1:1 with
+        *candidates* (a missing triple raises — never a silent pass-all);
+        ``mode="observe"`` evaluates + counts on ``stats`` and filters
+        nothing; a whole-gate abstention filters nothing and records itself.
+        ``None`` (the default) is byte-identical legacy ranking.
 
     Returns
     -------
@@ -605,7 +726,9 @@ def rank_combos(
         tie-break depends on a unique mask per combo; a duplicate would silently
         reintroduce input-order-dependent ordering, so it is rejected LOUDLY with the
         offending mask(s) named (DEC-RANKING-TIEBREAK-001) — a deterministic,
-        auditable error instead of latent nondeterminism.
+        auditable error instead of latent nondeterminism. Also on a temporal
+        wiring violation (missing/misaligned triples — see
+        :func:`_temporal_survivors`).
     """
     # ── The ONE flag-gated Rust dispatch seam (slice 4 PR-1;
     # ``BRUTEX_RANKING_RUST``, default OFF — :mod:`brutex.ranking.rust_ranking`).
@@ -613,14 +736,25 @@ def rank_combos(
     # + one env probe (OFF-cost bench-pinned) and the module graph stays
     # cycle-free; a ``None`` return (wheel missing/stale) falls through to
     # the verbatim Python pipeline below, byte-identical by construction.
+    # MERGE-DERIVED LAW (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 landed after the
+    # kernel slice): the seam is probed on the ``temporal is None`` arm ONLY —
+    # ``rank_combos_via_rust`` carries no temporal parameter (it predates the
+    # axis), so a temporal-gated leaderboard ALWAYS runs the Python pipeline
+    # below (the year gate must filter; a kernel serve would silently skip it).
     from brutex.ranking.rust_ranking import rank_combos_via_rust, ranking_rust_enabled
 
-    if ranking_rust_enabled():
-        rust_ranked = rank_combos_via_rust(candidates, overfit=overfit)
-        if rust_ranked is not None:
-            return rust_ranked
-
-    survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
+    # Hard doors → temporal (survivors filter) → overfit (full candidate pool).
+    # The temporal=None default arm's survivors expression is LITERALLY the
+    # pre-change line — the temporal machinery is never invoked (the gate-OFF
+    # zero-work spy pin).
+    if temporal is None:
+        if ranking_rust_enabled():
+            rust_ranked = rank_combos_via_rust(candidates, overfit=overfit)
+            if rust_ranked is not None:
+                return rust_ranked
+        survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
+    else:
+        survivors = _temporal_survivors(candidates, temporal)
 
     # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): a local-variable
     # annotation is never evaluated at runtime, so mutmut's ``| None`` → ``& None``
@@ -693,10 +827,13 @@ __all__ = [
     "GATE_PROFIT_FACTOR",
     "GATE_REASON_ORDER",
     "GATE_WIN_RATE_WLR",
+    "HARD_GATES_RECHECK_MARKED",
+    "HARD_GATES_RECHECK_OK",
     "MIN_TRADES",
     "N_COMPOSITE_TERMS",
     "OverfitGateConfig",
     "RankedCombo",
+    "TemporalGateInput",
     "composite_scores",
     "composite_term_inputs",
     "dsr_z_contributions",
@@ -704,5 +841,6 @@ __all__ = [
     "gate_reasons",
     "overfit_gate_positions",
     "passes_gates",
+    "persisted_hard_gates_recheck",
     "rank_combos",
 ]

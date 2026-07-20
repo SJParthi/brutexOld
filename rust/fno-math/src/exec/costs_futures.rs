@@ -1,4 +1,4 @@
-//! Futures charge stack (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) — the
+//! Futures charge stack (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1978) — the
 //! exact-integer twin of `brutex.costs.futures_costs._futures_charge_stack_py`
 //! (futures_costs.py:722-847 pre-extraction).
 //!

@@ -1,4 +1,4 @@
-//! Options charge stack (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) — the
+//! Options charge stack (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1978) — the
 //! exact-integer twin of `brutex.costs.calculator._charge_stack_py`
 //! (CALCULATOR_SPEC §4 Steps 1, 3–13 in EXACT order).
 //!

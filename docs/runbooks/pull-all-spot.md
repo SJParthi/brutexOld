@@ -351,6 +351,22 @@ never pulled) …` — the never-pulled arm is literally the dry-run truth;
 pre-#1792 this shape read `prebuild failures: …`) — the inherited
 full-pipeline dry-run shape, not a defect of this button/command.
 
+**Circuit-halt day (exchange-wide >10% halt):** a halted session prints
+fewer than 375 index minutes, so the today-completeness INDEX law
+(count == session minutes + close edge;
+DEC-PULL-TODAY-COMPLETENESS-GATE-001, MIGRATION.md #1774) reads the
+still-settling day incomplete and WITHHOLDS today's bars from the
+keep-first lake — the window defers as the streak-exempt
+`TODAY_INCOMPLETE` and lands at the NEXT nightly, whose window no longer
+covers that day (the gate is covers-today-only, so the settled shorter
+session stores then). The halt day's bars are deferred exactly one
+nightly, never lost — the disclosed correct-or-absent trade-off. Two
+edges: a same-day re-pull after close but before vendor settle still
+covers-today and defers again (the nightly cadence is what bounds it to
+one deferral); and once the shorter halt session is a past date, the
+completeness-gap/trailing-truncation detectors (#1794) may flag it —
+the stored bars are kept, only the ledger status churns.
+
 ## 8. ▶ Pull F&O — the manual fno-only sibling (round-6 two-button split)
 
 The round-6 coordinator ruling replaced the combined "Pull · full pipeline"

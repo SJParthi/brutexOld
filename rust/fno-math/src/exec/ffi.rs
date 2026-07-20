@@ -1,5 +1,5 @@
 //! PyO3 wrappers for the exec cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md
-//! #1963) — every export prefixed `exec_` (the `brutex.math` facade
+//! #1978) — every export prefixed `exec_` (the `brutex.math` facade
 //! collision law). Wrappers ONLY `.map_err(PyValueError::new_err)`; the pure
 //! cores return `Result<_, String>` so `cargo test` links zero libpython
 //! (the house `metrics.rs` split — wrappers live beside the module, NOT in

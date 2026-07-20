@@ -173,13 +173,14 @@ at the working tree of this branch:
    (`brutex/data/lake_heal.py:2010-2036`); dataset discovery walks
    `lake_root/bars` (`brutex/dashboard/db_view.py:1196-1248`); the stats
    manifest knows kinds `bars`/`options` only
-   (`brutex/data/lake_stats_manifest.py:171-175`); `parse_partition_path` (`brutex/data/partition.py:201`)
+   (`KIND_BARS`/`KIND_OPTIONS`, `brutex/data/lake_stats_manifest.py:193-196`); `parse_partition_path` (`brutex/data/partition.py:201`)
    refuses a non-`BAR_DIR_NAME` root (`brutex/data/partition.py:254-255`). A `snap1s/`
    sibling is never descended, never crashed on — and never covered (§3.5).
 3. **Freshness coupling: `lake_revision` stats the window ledger.** The
    dashboard's cross-process cache token is derived from the ledger stat +
-   sweeps digest + greeks marker (`brutex/dashboard/lake_revision.py:403`,
-   `:183-206`) — a write that does not touch the window ledger moves NO
+   sweeps digest + greeks marker (`lake_revision`,
+   `brutex/dashboard/lake_revision.py:676`; the ledger component
+   `_ledger_revision`, `:204`) — a write that does not touch the window ledger moves NO
    dashboard freshness token. The ingest's ledger checkpoint (§5.2) is
    therefore the ONE invalidation hook; this is why the sibling's
    scoped-separate-ledger was rejected (R11, §11 A9).
@@ -191,28 +192,42 @@ at the working tree of this branch:
    **zero tick-shaped storage anywhere** today: `brutex/live/` does not exist
    (DEC-LIVE-REMOVE-001, MIGRATION.md #862), the finest stored granularity is
    the 1-minute bar, and the interval vocabulary
-   (`brutex/data/timeframes.py:108-130`; `brutex/data/partition.py:69-74`)
+   (`LAKE_INTERVAL_LABELS`, `brutex/data/timeframes.py:320`;
+   `brutex/data/partition.py:69-74`)
    contains no sub-minute label — this design deliberately does NOT add one.
 
 Reused verbatim (Golden Rule #11 COMMON): `atomic_write_via` +
-`lake_write_guard` (`brutex/data/atomic_io.py:139-151`, `:63-85` — ENOSPC/OOM ⇒
+`lake_write_guard` (`brutex/data/atomic_io.py:159-172`, `:65-85` — ENOSPC/OOM ⇒
 `LakeWriteHalt`), the cross-process partition flock
 (`brutex/data/partition_lock.py:24-40`, 75 s bounded acquire `:107-120`), the
 per-path in-process lock intern (`brutex/data/parquet_writer.py:163-176`
 pattern), `round_money`, the calendar's `get_session`
-(`brutex/calendars/nse.py:661`), the session filter law
+(`brutex/calendars/nse.py:707`), the session filter law
 (`brutex/data/session.py:13-36`), the durable WindowLedger
 (`brutex/data/window_ledger.py:280-358` — `market`/`security_id`/`interval`
 are plain strings, so the new tokens need no schema change; the Phase-1 compat
 gate pins this stays true), the hash-chained audit writer
 (`brutex/orchestrator/audit.py:9-26`, `:579`), the DuckDB keep-first
 `dedup_qualify_sql` (`brutex/data/lake_read.py:237-265`), the ONE resampler
-(`resample_1m_to_tf`, `brutex/data/tf_resampler.py:169`; 09:15 session anchor `:37-42`) and
+(`resample_1m_to_tf`, `brutex/data/tf_resampler.py:289`; 09:15 session anchor `:214`) and
 `materialize_lake_timeframes` (`brutex/data/timeframe_materialize.py:437`).
 
 Deliberately NOT built (v1): any new interval token, any engine feed change,
 any `VALID_SEGMENTS`/`VALID_INTERVALS` widening, any snap1s census/heal/stats
 coverage (§3.5), any Telegram surface, any live capture (§9.5).
+
+**Post-design reconcile (DEC-TF-REGISTRY-DYNAMIC-001, MIGRATION.md #1904 —
+landed AFTER this design was written):** the interval vocabulary this section
+cites is now a DERIVED VIEW of the seconds-keyed `TfSpec` registry
+(`brutex/data/timeframes.py` — `TfSpec(duration_s, base_granularity_s,
+anchor)`, `ALL_TFS`), which TYPE-accepts sub-minute specs as framework-only
+capability and whose own HONEST GATE names GDFL as exactly the
+forward-capture-only feed that does NOT yet license one. NOTHING in this
+design changes: no `1second`/`30second` `TfSpec` is registered here — a
+sub-minute registration still requires its own DEC plus a REAL sub-minute
+feed (the #1904 gate verbatim), and the §6.2 derive emits 1-minute bars only.
+The §6.2 coarser-TF disclosure survives #1904 unchanged (the resampler's
+09:15 `SESSION_OPEN` anchor law is preserved by the registry).
 
 ---
 
@@ -235,7 +250,7 @@ coverage (§3.5), any Telegram surface, any live capture (§9.5).
 - `raw_ticker` = the CSV `Ticker` column verbatim minus the suffix
   (`NIFTY25200CE`, `OIL-I`), screened by the `_safe_segment` traversal-refusal
   idiom (`brutex/data/option_parquet_writer.py:158-168`) + the filesystem-char
-  law (`_FORBIDDEN_SYMBOL_CHARS`, `brutex/data/partition.py:101-103`).
+  law (`_FORBIDDEN_SYMBOL_CHARS`, `brutex/data/partition.py:110-112`).
 - Month stem via the ONE `option_partition_stem`
   (`brutex/data/partition.py:319-332`) — no new f-string stem law. Note kept
   from the storage panel: in-session IST date == UTC date (09:15–15:30 IST is
@@ -344,6 +359,25 @@ level 3, `statistics=False`, `use_pyarrow=False` — the house determinism knobs
 | Off-box backup | **EXCLUDED**: restic exclude patterns for `snap1s/` AND the derived `bars/*/FNO/*-G1S/` dirs until the GDFL subscriber agreement is read — a NAMED DIVERGENCE from DEC-BACKUP-OFFBOX-001 (#1596)'s fail-safe whole-root include set; the derived-bars inclusion is deliberate (vendor derived-data clauses commonly restrict redistribution of DERIVED data too) | Licensing checklist item — reading the agreement either clears replication or makes the exclusion permanent (operator decision, recorded) |
 | Dashboard freshness | FREE via the ledger checkpoint (§5.2) — `lake_revision` stats the ledger, so an ingest moves every generation-keyed cache with ZERO new revision plumbing | — |
 
+**The backup-exclusion vs forward-archive TENSION, stated honestly (Golden
+Rule #10):** GDFL data is forward-capture-only (§9.1 limit 1 — the vendor
+window is days-scale), so once captured, `snap1s/` + the derived `*-G1S`
+dirs are IRREPLACEABLE — they can never be re-pulled. The off-box exclusion
+above therefore leaves the ONLY 1s-class archive with ZERO off-box copy, and
+the nightly sealed-snapshot backup is no net either: it excludes `bars/`
+wholesale under the rationale "(re-pullable)"
+(`brutex/nightly/backup.py::_excluded_by_law`) — a rationale that is FALSE
+for `-G1S` bars. Until the licensing read resolves, the sole loss protection
+is the R18 operator obligation to retain the original vendor CSVs (from
+which §3.4 re-derives the tree byte-identically) — a single-copy,
+operator-managed mitigation covering the `csv_dump` source only (a future
+`ws_live` capture has NO vendor artifact to re-derive from). Resolving this
+is a NAMED, pre-first-ingest gap: **`DEC-GDFL-BACKUP-LICENSING-RESOLVE-001`**
+— read the subscriber agreement BEFORE the first production ingest and
+either lift the exclusion or record a sanctioned operator-controlled
+encrypted off-box copy of the retained CSVs as the standing mitigation;
+"read it eventually" is not an acceptable posture for irreplaceable data.
+
 ### §3.6 Schema versioning + drift refusal
 
 Every partition write stamps `schema_version=1` in the parquet key-value
@@ -400,7 +434,7 @@ seq↔payload). `ts == prev_ts` ⇒ `seq = prev_seq + 1`, counted
 | Mixed `Ticker` across rows | FILE FAIL | `mixed_ticker` (one-instrument law) |
 | Mixed `Date` across rows | FILE FAIL | `mixed_date` (one-day law — kills cross-day contamination structurally) |
 | Non-trading file date (holiday per real calendar) | FILE FAIL | `non_trading_date` (a vendor dump for a holiday = something is deeply wrong) |
-| Out-of-coverage year (2027+ today — `is_trading_day_checked` raise, `brutex/calendars/nse.py:609`) | FILE FAIL | `calendar_coverage` (never ingest what we cannot session-judge) |
+| Out-of-coverage year (2027+ today — `is_trading_day_checked` raise, `brutex/calendars/nse.py:655`) | FILE FAIL | `calendar_coverage` (never ingest what we cannot session-judge) |
 | File dated today-IST before session close | FILE FAIL (deferral message) | `today_incomplete_source`; `--allow-today` escape (R26) |
 | Backward timestamp | FILE FAIL (default) | `backward_timestamp`; `--allow-row-skips` escape |
 | Row count > 2,000,000 | FILE FAIL | `row_cap` (streaming rail; ~150× the measured max — a "one-day" file past 2M rows is not a one-day file) |
@@ -499,8 +533,8 @@ own inputs. The reconciled law:
 ### §4.5 Session law (R10)
 
 Each row is judged against its OWN IST date's REAL session via
-`calendars/nse.get_session` (`brutex/calendars/nse.py:661` — Muhurat
-(`MUHURAT_SESSIONS`, `:383`), half-days and special-weekend sessions are
+`calendars/nse.get_session` (`brutex/calendars/nse.py:707` — Muhurat
+(`MUHURAT_SESSIONS`, `:429`), half-days and special-weekend sessions are
 first-class; a Muhurat-dated file is a legal, KEPT session). The raw store
 keeps `[open, close]` INCLUSIVE — a 15:30:00 closing print is real data; rows
 strictly after the close instant are skipped + counted `rows_postclose`;
@@ -558,7 +592,8 @@ The sibling panel instantiated a SEPARATE WindowLedger at the new tree's root
 so GDFL rows are structurally invisible to the Groww `/coverage/windows`
 rollups. REJECTED, with the deciding argument: `lake_revision` derives the
 dashboard's cross-process freshness token from the LAKE-ROOT ledger stat
-(`brutex/dashboard/lake_revision.py:183-206`, `:403`) — a scoped ledger moves
+(`lake_revision`, `brutex/dashboard/lake_revision.py:676`; the ledger
+component `_ledger_revision`, `:204`) — a scoped ledger moves
 NO freshness token, so every `/db` view of snap1s data stays permanently stale
 unless `lake_revision` grows a fourth component (a larger `brutex/` edit than
 the one-map fix below, plus a second ledger to operate). Instead:
@@ -568,7 +603,7 @@ the one-map fix below, plus a second ledger to operate). Instead:
   namespace precedent, `brutex/adapters/ingest_common.py:304`), keeping
   `gdfl-1m` free for a hypothetical future direct-minute pull.
 - **REQUIRED Phase-1 companion edit (G1)**: `db_view._window_market_bucket`
-  (`brutex/dashboard/db_view.py:6142-6151`) folds ANY unknown market namespace
+  (`brutex/dashboard/db_view.py:6593-6605`) folds ANY unknown market namespace
   into the **"spot"** display bucket — without the edit, GDFL rows would
   silently inflate the dashboard's SPOT window counts and severity rollups
   (a wrong-display class, not just noise). The fold is EXACT string
@@ -577,8 +612,8 @@ the one-map fix below, plus a second ledger to operate). Instead:
   enumerated equalities or a `market.startswith("gdfl")` arm (a bare
   `== "gdfl"` entry would match NEITHER hyphenated token); and BOTH counts
   folds initialise only the spot/options/futures keys
-  (`_window_counts_from_records`, `brutex/dashboard/db_view.py:6165`;
-  `_fold_status_counts`, `:6357`), so the new `gdfl` counts key + payload
+  (`_window_counts_from_records`, `brutex/dashboard/db_view.py:6607`;
+  `_fold_status_counts`, `:6797`), so the new `gdfl` counts key + payload
   key land in the SAME edit (else the fold KeyErrors on the first GDFL
   row). Pinned by a route test. Visibility is a feature:
   `/coverage/windows` SHOWS gdfl ingest state in its own bucket rather than
@@ -741,10 +776,10 @@ that summing conserves into 1m volume.
   folding it into the last minute label fabricates placement. On a REGULAR
   day this is behavior-identical to a fixed law: the 375-minute grid
   (`trading_minutes_for_lake_interval` maps `1day` → 375,
-  `brutex/data/timeframes.py:157`) ending at the 15:29 label, a 15:30:00
+  `brutex/data/timeframes.py:352`) ending at the 15:29 label, a 15:30:00
   print dropped — the common case, now DERIVED from the session instead of
   hardcoded. On a Muhurat day (`MUHURAT_SESSIONS`,
-  `brutex/calendars/nse.py:383-389` — evening 18:15–19:15 / 18:00–19:00
+  `brutex/calendars/nse.py:429-436` — evening 18:15–19:15 / 18:00–19:00
   windows; the verified 2025 afternoon shift) the grid anchors at the
   Muhurat open, so an evening-Muhurat F&O dump — first-class KEPT in the raw
   store (§4.5) — derives REAL 1m bars instead of zero bars plus a
@@ -754,7 +789,7 @@ that summing conserves into 1m volume.
   derive outcome; row 12 pins only the RAW filter.
 - **Grid alignment + the Muhurat coarser-TF disclosure**: at the 1-minute
   level every minute label is its own bucket (`resample_1m_to_tf` treats
-  tf=1 as identity, `brutex/data/tf_resampler.py:169`), so the derive emits
+  tf=1 as identity, `brutex/data/tf_resampler.py:289`), so the derive emits
   1m ONLY and the ONE resampler owns every coarser TF unchanged. HONEST
   downstream consequence, traced in-tree (not guessed): that resampler is
   09:15-anchored FIXED arithmetic with NO session lookup and NO row drop —
@@ -817,7 +852,7 @@ designer; all grammar-verified):
 |---|---|---|
 | Metadata/provenance COLUMN on bars | REJECTED | `data_snapshot_hash` streams exactly the 7 `CandleBar` fields per bar of the `bxsnap2` preimage (`brutex/engine/snapshot_hash.py:89-94`) — a provenance column is IDENTITY-INVISIBLE, so Groww and GDFL bars at the same (symbol, ts) could keep-first-mix inside one partition under one run identity: the exact pollution this design exists to prevent. An 8th column also reads as overlay-bearing/alien to every schema-tolerant reader. |
 | **`G1S-` PREFIX** (one panel's original position) | **REFUTED** | It PARSES: `parse_fno_symbol("G1S-SIEMENS-31Jul25-8500-CE")` yields `exchange="G1S", underlying="SIEMENS"` — a phantom contract that would JOIN the real SIEMENS chain in cascade/movers/prebuild/Greeks. Recorded so reviewers see it was considered and killed (§11 A14). |
-| New SEGMENT token (`FNO1S`) | REJECTED | Widens the most load-bearing frozenset (`VALID_SEGMENTS`, `brutex/data/partition.py:87`) and must chase the `exclude_segments` seam (parameter defined at `brutex/dashboard/db_view.py:1058`) through every FNO-excluding caller (literal `{FNO}` calls at `brutex/dashboard/app.py:8633` + `brutex/dashboard/db_view.py:1777`; `brutex/dashboard/preopen_report.py:233` via the named `REPORT_EXCLUDED_SEGMENTS` constant) or leak derived contracts into SPOT pickers/preopen; every future `segment == "FNO"` equality becomes a standing "did we consider FNO1S?" audit — a large permanent blast radius for a REFERENCE_ONLY surface vs ZERO validator changes for the suffix. |
+| New SEGMENT token (`FNO1S`) | REJECTED | Widens the most load-bearing frozenset (`VALID_SEGMENTS`, `brutex/data/partition.py:87`) and must chase the `exclude_segments` seam (parameter defined at `brutex/dashboard/db_view.py:1080`) through every FNO-excluding caller (literal `{FNO}` calls at `brutex/dashboard/app.py:7022` + `brutex/dashboard/db_view.py:1796`; `brutex/dashboard/preopen_report.py:170` via the named `REPORT_EXCLUDED_SEGMENTS` constant) or leak derived contracts into SPOT pickers/preopen; every future `segment == "FNO"` equality becomes a standing "did we consider FNO1S?" audit — a large permanent blast radius for a REFERENCE_ONLY surface vs ZERO validator changes for the suffix. |
 | New EXCHANGE token | REJECTED | `VALID_EXCHANGES` = {NSE, BSE} is load-bearing venue semantics (`brutex/data/partition.py:78`); abusing it lies about the venue and poisons every exchange-keyed join. |
 | Separate lake ROOT | REJECTED | Catalog/prebuild/movers/backup/ledger all bind ONE root — a second root forks every operational surface. |
 | `-GDFL` suffix (one panel's spelling) | SUPERSEDED by `-G1S` | GDFL also serves a native MINUTE periodicity (SDK-verified — the GetHistory enum; the ≈3-month 1-min depth figure is an official-page snippet, UNCONFIRMED — site egress-blocked) — a future direct-1m ingest needs its own tag; `-G1S` encodes vendor + derivation-path so the two can never collide. |
@@ -858,8 +893,23 @@ blocks keep-first cross-vendor mixing.
   OI-aware FNO resampler (`intraday_resampler_for`, `:233-257`). The
   master-driven pipeline prebuild is UNTOUCHED — it filters instrument-MASTER rows
   (`underlying_match_tokens` over the master list,
-  `brutex/dashboard/pipeline_prebuild.py:335`) and `-G1S` symbols
+  `brutex/dashboard/pipeline_prebuild.py:378`) and `-G1S` symbols
   are deliberately not master rows (no universe pollution).
+  **Derived-TF asymmetry vs the options-prebuild retirement (stated
+  honestly):** because `fno_candle_lake.is_option_contract_coords`
+  (`brutex/data/fno_candle_lake.py:66-90`) reads **False** for a `-G1S`
+  name (the parse fails, and an undecodable symbol conservatively keeps
+  its pre-ruling behaviour by that predicate's own documented law),
+  option-shaped `-G1S` symbols sit OUTSIDE the
+  DEC-OPTIONS-PREBUILD-RETIRE-001 gate (MIGRATION.md #1831) at every site
+  that consults the predicate — and the §6.4 derive loop's DIRECT
+  `kind=OPTIONS` materialize call is itself un-gated — so they WOULD
+  receive the 19 derived TFs + 1day even though real CE/PE contracts are
+  prebuild-RETIRED (1-minute-native by ruling). The Phase-2 DEC
+  (`DEC-GDFL-DERIVE-READ-001`) must CONSCIOUSLY align (skip TF
+  materialization for option-shaped `-G1S` symbols) or accept this
+  asymmetry as a deliberate research-surface exception — never inherit it
+  silently.
 - **Derive ledger windows** under `market="gdfl-derive-1m"` per (G1S symbol,
   day) — the freshness + resume/idempotence visibility argument of R15.
   Status law: a legitimately zero-bar derive over a RESOLVED symbol (an
@@ -872,14 +922,24 @@ blocks keep-first cross-vendor mixing.
 - **Bad-tick screen interplay (G2, honest limit)**: `arrow_table_to_bars`
   applies the default-ON `BadTickScreen` (a BruteX repo identifier, not
   GDFL-data framing; 4.0× vs the previous in-session
-  kept close — `brutex/data/bad_tick.py:72`; wiring
-  `brutex/feed/replay.py:330`) to ANY engine read. Deep-OTM option LTP
+  kept close — `brutex/data/bad_tick.py:76`; wiring
+  `brutex/feed/replay.py:376`) to ANY engine read. Deep-OTM option LTP
   legitimately moves ≥4× intraday (0.05 → 0.25 is 5×), so a deliberate
   research sweep over `-G1S` OPTION bars would silently skip-and-count REAL
   bars. Carried as operator guidance (`BRUTEX_BAD_TICK_SCREEN=0` for such
   reads) + a named follow-up DEC if G1S sweeps become routine — the screen's
   4.0 threshold was derived from INDEX circuit-breaker physics, never
-  calibrated for option premiums.
+  calibrated for option premiums. **Coverage widened post-design
+  (DEC-READ-GUARD-PARITY-001 #1811 + DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001
+  #1932):** the SAME screen (same `BRUTEX_BAD_TICK_SCREEN` switch) now also
+  runs at the PREBUILD 1-minute read seam (`make_lake_read_1m` via
+  `bad_tick.screen_frame_bad_ticks`) and inside the derived-freshness gate —
+  and the §6.4 derive loop's own `materialize_lake_timeframes` call reads
+  THROUGH that seam, so a legitimate ≥4× deep-OTM `-G1S` premium move would
+  be screened out of the derived 19 TFs at derive time, not only at a later
+  engine read. The operator guidance + the recalibration follow-up cover
+  BOTH seams; Phase 2 must pin which posture the `-G1S` TF materialization
+  takes (screen honored vs the kill switch documented per run).
 - **Cross-vendor verification (the consumer-gold follow-up)**: for a contract
   Groww ALSO serves (expired SIEMENS/OFSS), a read-only
   `brutex doctor --gdfl-diff` diffs `…-CE-G1S/1minute` against the Groww twin
@@ -897,12 +957,12 @@ blocks keep-first cross-vendor mixing.
 ### §7.1 /db discovery + pager (mirrors the expired-options pattern)
 
 - **Discovery**: `brutex/dashboard/snap1s_view.py::list_snap1s_datasets` —
-  the `list_option_datasets` mirror (`brutex/dashboard/db_view.py:2149`):
+  the `list_option_datasets` mirror (`brutex/dashboard/db_view.py:2168`):
   walk `snap1s/`, one dataset row per (source, exchange, segment, raw ticker)
   with month span + row counts + the manifest's resolution outcome; route
   `GET /api/v1/db/snap1s/datasets`.
 - **Pager**: `query_snap1s_rows` — the `query_option_candles` mirror
-  (`brutex/dashboard/db_view.py:4927`): DuckDB over the ticker's month files,
+  (`brutex/dashboard/db_view.py:5181`): DuckDB over the ticker's month files,
   keep-first `QUALIFY` on `(timestamp, seq)` via
   `dedup_qualify_sql(key_columns=("timestamp","seq"))`
   (`brutex/data/lake_read.py:237-265`), `ORDER BY timestamp, seq` + the
@@ -911,7 +971,7 @@ blocks keep-first cross-vendor mixing.
   serves the §6.1 collapse as a display toggle.
 - **Caches/keying**: count memo `snap1s_count_key` (coords+bounds only — the
   `option_candle_count_key` paging-invariance law,
-  `brutex/dashboard/db_view.py:4907`) on the COMMON `MoversSnapshotCache`
+  `brutex/dashboard/db_view.py:5161`) on the COMMON `MoversSnapshotCache`
   keyed on `_summary_cache.generation` — which MOVES because the ingest
   checkpoints the window ledger (§5.2). Honest O-envelope: O(page) render over
   an O(files) footer count once per generation — the pre-stats-manifest
@@ -921,7 +981,7 @@ blocks keep-first cross-vendor mixing.
 
 - Derived `-G1S` bars are ordinary `bars/` datasets: the existing `/db` F&O
   candle machinery serves them automatically (`list_fno_candle_datasets`,
-  `brutex/dashboard/db_view.py:1251` — surfaced in the cascade's honest
+  `brutex/dashboard/db_view.py:1270` — surfaced in the cascade's honest
   `unparsed` bucket; the FNO derived-columns join keys on a DECODED symbol, so
   moneyness/spot render an honest `—`). A provenance badge
   ("1s-derived · GDFL · volume=ΣLTQ undercount") rides the dataset row (R25).
@@ -1031,6 +1091,10 @@ U = UNVERIFIED, D = design-derived.
    divergence from DEC-BACKUP-OFFBOX-001 (§3.5); derived-data clauses must be
    read for the `-G1S` bars EXPLICITLY, not just the raw tree (G5). Written
    licensing answers from GDFL sales are a BEFORE-purchase checklist item.
+   The exclusion is in TENSION with limit 1: forward-capture-only data is
+   irreplaceable, so the unresolved exclusion is a permanent-loss exposure —
+   see §3.5's stated tension + `DEC-GDFL-BACKUP-LICENSING-RESOLVE-001`
+   (resolve BEFORE the first production ingest).
 7. **The expiry-fragment grammar is UNCONFIRMED.** Raw archival always
    proceeds (R4), but every OPTION's derive leg stalls at `unresolved` until
    the operator supplies real filenames/grammar confirmation; `-I` futures
@@ -1062,6 +1126,35 @@ U = UNVERIFIED, D = design-derived.
 13. **`-I` contamination risk** (R23): under `--assume-calendar-roll`, an
     early-rolling vendor would attribute near-expiry rows to the wrong
     contract — bounded to the flag's explicit, audited use; the probe decides.
+14. **Expired-contract PERMANENCE (the forward-archive law, stated
+    explicitly).** Because capture is forward-only (limit 1), the lake is the
+    PERMANENT archive of every GDFL-captured contract that later expires:
+    `snap1s/<…>/<raw_ticker>/` dirs and derived `bars/<exch>/FNO/*-G1S/`
+    dirs are NEVER pruned by age or by expiry — no retention window exists
+    or may be added without its own DEC. The only sanctioned deletions are
+    the audited `--replace` quarantine ladder (§3.4 — quarantine-copy first,
+    never a silent delete) and, for DERIVED buckets only, a future
+    ghost-bucket prune (the DEC-DERIVED-GHOST-BUCKET-PRUNE-001 class — raw
+    partitions are never its subject). Expired `-G1S` contracts remain fully
+    readable on every directory-walk surface (`/db` F&O cascade + candle
+    pager list datasets by walk, no live-expiry filter); they drop from
+    `/movers` BY DESIGN (the `expiry >= on_date` tier law) — display
+    recency, not deletion.
+15. **Greeks posture: `-G1S` contracts are NEVER Greeks-enriched.** Both
+    Greeks enumerations key on `parse_fno_symbol`, which the `-G1S` suffix
+    deliberately fails (R14): the backfill scanner counts such a dataset
+    `undecodable` and builds NO target
+    (`brutex/data/greeks_backfill.py:1306-1309` — the `parse_fno_symbol`
+    gate inside `scan_stale_greeks_targets`), and the enrich driver's
+    per-target gate returns the `undecodable` outcome before any solve
+    (`brutex/data/greeks_enrich.py:1729-1733` — the same gate inside
+    `_run_target`). Derived `-G1S` option bars therefore carry OHLCV + OI
+    ONLY — no `iv`/`delta` overlay, ever (consistent with limit 3's
+    research-surface framing). Whether to surface that absence explicitly
+    on the /db provenance badge — or to consciously extend enrichment —
+    is IN SCOPE for the Phase-2 read DEC (`DEC-GDFL-DERIVE-READ-001`);
+    until that DEC rules, no-enrichment is the standing posture, not an
+    accident.
 
 ### §9.2 UNVERIFIED register (each row names its verdict mechanism)
 
@@ -1169,6 +1262,21 @@ into a recorder design (not this mandate). Vendor facts per
   wsgfdl-py 1.3.5's surface where the 2022 protocol mirror disagrees;
   `ΔValue`/`AverageTradedPrice` (cum_value) is a second independent
   rupee-terms turnover anchor for the volume-honesty check.
+- **N-feed registry interplay (DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md
+  #1903 — landed AFTER this design):** `brutex/feeds/` now ships the COMMON
+  `VendorPullProfile` / `VendorProfileRegistry` (per-vendor `write_domain`,
+  `rate_factory`, `market_hours_guard`, lock domain; Groww is the sole
+  PRIMARY). The v1 CSV ingest makes ZERO vendor calls and binds no rate
+  stack, but it WRITES into `snap1s/` + `bars/*-G1S/` — whether `brutex
+  gdfl ingest` registers as a (non-primary, guard-OFF) profile with its own
+  write domain, or stays a registry-outside CLI with that recorded as a
+  deliberate deviation, must be SETTLED in the Phase-1 DEC (reserve
+  **`DEC-GDFL-FEED-PROFILE-001`**). The future capture leg is
+  unambiguous: it MUST register as a `VendorPullProfile` (its own rate
+  factory with the FAIL-LOUD unset ceiling above, its own guard — a 1s
+  capture runs DURING market hours, so it must NOT inherit the primary's
+  Groww-account guard via the vendor-blind `BackgroundPullJob` start gate),
+  never a second hand-wired spine.
 
 ---
 
@@ -1200,7 +1308,8 @@ into a recorder design (not this mandate). Vendor facts per
   - `brutex/cli.py` — the `gdfl ingest` arm + `EXIT_INGEST_REFUSED=2`.
   - All new modules 100% line+branch on ci.yml-exact gates; the ledger-token
     compat pin (§5.1) + the no-raw-data repo pin (§8 row 40) ship here.
-- **Phase 2 — derive + /db read surface** (its OWN DEC):
+- **Phase 2 — derive + /db read surface** (its OWN DEC — reserve
+  **`DEC-GDFL-DERIVE-READ-001`**):
   - `brutex/data/snap1s_derive.py` — `collapse_to_1s` (pure) +
     `derive_1m_bars` + the `-G1S` symbol mint + the per-symbol kind-routed
     `materialize_lake_timeframes` loop (§6.4).

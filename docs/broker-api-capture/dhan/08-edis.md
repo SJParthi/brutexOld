@@ -51,7 +51,7 @@ curl --request POST \
 
 ```
 {
-    "isin": "INE733E01010",  
+    "isin": "INE733E01010",
     "qty": 1,
     "exchange": "NSE",
     "segment": "EQ",
@@ -77,13 +77,13 @@ curl --request POST \
     "edisFormHtml": "<!DOCTYPE html> <html>     <script>window.onload= function()
         {submit()};function submit(){ document.getElementById(\"submitbtn\").click();    }
         </script><body onload=\"submit()\">     <form name=\"frmDIS\" method=\"post\"
-        action=\"https://edis.cdslindia.com/eDIS/VerifyDIS/\" style=\"  
-        text-align: center; margin-top: 35px; /* margin-bottom: 15px; */ \">  
-        <input type= \"hidden\" name= \"DPId\" value= \"83400\" >  
-        <input type= \"hidden\" name= \"ReqId\" value= \"291951000000401\" >  
-        <input type= \"hidden\" name= \"Version\" value= \"1.1\" >  
-        <input type= \"hidden\" name= \"TransDtls\" value= \"kQBOKYtPSbWmbLYOih9ZXaLZuA3Ig5ycFPangwWZKTPgmIqdfXL58qN3tGfDlVH+S613mfqTkIWVkQTiMrqUHkzvTRxkr7NtJtP7O3Z7+Xro9Fs5svt2tQDrNJGSd1oEqc4dhoc+FCS8u9ZhNCFqkZ30djjKqjTp1j12fv4cZVwzupyLfVVyh0U8TwwqSAEP4mdq3uiimxADlrHVRrn5NSL+ndUn5BhplI7F9Ksiscj9hxz6iK2Os8m5JMFBU7bmNmIWWHEgTLOz0N+roldjRs2M8mVXSx+M+41jrdSWaCnMxvm+L2HNbsT94Zv8wEWmxSCcSDcvVFhbpcWP5RVQMHQpV6cw6+s7qfn1AWexGiUJk3APPnhYdXPjwIewhyL5rEhNRnCy+cZaJSzsBpatfOJO3xjrZd6zDv6raf/4EUwHJ8yOVYjG5L4uAjnsfBy0SCuqYnxmMphI8/mnJlopH71Kvi9IkH/wPBiKvOkNYpJD3+CFXE6No3RrRiC8DF1pkSaMm7IxdHr0ui2QBmyqcg==\" >  
-        <input style=\"display: none;\" id=\"submitbtn\" type= \"submit\" value=\"Submit\">  
+        action=\"https://edis.cdslindia.com/eDIS/VerifyDIS/\" style=\"
+        text-align: center; margin-top: 35px; /* margin-bottom: 15px; */ \">
+        <input type= \"hidden\" name= \"DPId\" value= \"83400\" >
+        <input type= \"hidden\" name= \"ReqId\" value= \"291951000000401\" >
+        <input type= \"hidden\" name= \"Version\" value= \"1.1\" >
+        <input type= \"hidden\" name= \"TransDtls\" value= \"kQBOKYtPSbWmbLYOih9ZXaLZuA3Ig5ycFPangwWZKTPgmIqdfXL58qN3tGfDlVH+S613mfqTkIWVkQTiMrqUHkzvTRxkr7NtJtP7O3Z7+Xro9Fs5svt2tQDrNJGSd1oEqc4dhoc+FCS8u9ZhNCFqkZ30djjKqjTp1j12fv4cZVwzupyLfVVyh0U8TwwqSAEP4mdq3uiimxADlrHVRrn5NSL+ndUn5BhplI7F9Ksiscj9hxz6iK2Os8m5JMFBU7bmNmIWWHEgTLOz0N+roldjRs2M8mVXSx+M+41jrdSWaCnMxvm+L2HNbsT94Zv8wEWmxSCcSDcvVFhbpcWP5RVQMHQpV6cw6+s7qfn1AWexGiUJk3APPnhYdXPjwIewhyL5rEhNRnCy+cZaJSzsBpatfOJO3xjrZd6zDv6raf/4EUwHJ8yOVYjG5L4uAjnsfBy0SCuqYnxmMphI8/mnJlopH71Kvi9IkH/wPBiKvOkNYpJD3+CFXE6No3RrRiC8DF1pkSaMm7IxdHr0ui2QBmyqcg==\" >
+        <input style=\"display: none;\" id=\"submitbtn\" type= \"submit\" value=\"Submit\">
         </form> </body> </html>"
 }
 ```

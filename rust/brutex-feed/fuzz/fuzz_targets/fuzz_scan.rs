@@ -61,10 +61,26 @@ fuzz_target!(|data: &[u8]| {
     }
     let ts_arg: &[i64] = if screen_enabled { &ts } else { &[] };
 
-    let first = scan_bars(ts_arg, &opens, &highs, &lows, &closes, screen_enabled, max_ratio)
-        .expect("well-lengthed input never errs");
-    let second = scan_bars(ts_arg, &opens, &highs, &lows, &closes, screen_enabled, max_ratio)
-        .expect("well-lengthed input never errs");
+    let first = scan_bars(
+        ts_arg,
+        &opens,
+        &highs,
+        &lows,
+        &closes,
+        screen_enabled,
+        max_ratio,
+    )
+    .expect("well-lengthed input never errs");
+    let second = scan_bars(
+        ts_arg,
+        &opens,
+        &highs,
+        &lows,
+        &closes,
+        screen_enabled,
+        max_ratio,
+    )
+    .expect("well-lengthed input never errs");
     assert_eq!(first, second, "determinism");
 
     let Some(out) = first else {

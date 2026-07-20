@@ -1,4 +1,4 @@
-//! The worst-case fill law (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963;
+//! The worst-case fill law (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1978;
 //! DEC-FILL-WORST-CASE-ONLY-001 — worst-case is the ONLY fill model).
 //!
 //! Integer twins of `brutex.costs.calculator._apply_slippage` and

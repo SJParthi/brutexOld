@@ -510,6 +510,56 @@ class TestRenderCaps:
         assert out == [5000, 0]
 
 
+class TestTrustFilterFloors:
+    """DEC-RESULTS-TRUST-HONESTY-001 · B2a — the min_trades / min_dsr floors."""
+
+    def test_min_trades_floor(self) -> None:
+        rows = [
+            {"rank": 1, "metrics": {"trades": 10}},
+            {"rank": 2, "metrics": {"trades": 60}},
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"min_trades": 30}),
+        )
+        assert [r["rank"] for r in out["rows"]] == [2]
+
+    def test_min_dsr_floor_and_missing_value_excluded(self) -> None:
+        """A row without metrics.dsr cannot demonstrate an ACTIVE floor —
+        excluded from that filtered view only (the tuple-N label law: the
+        floored figure is the stored per-tuple DSR)."""
+        rows = [
+            {"rank": 1, "metrics": {"dsr": 0.97}},
+            {"rank": 2, "metrics": {"dsr": 0.10}},
+            {"rank": 3, "metrics": {}},
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"min_dsr": 0.5}),
+        )
+        assert [r["rank"] for r in out["rows"]] == [1]
+        # No active floor keeps every row (a null/absent filter never excludes).
+        out_all = _node_call("S.applyFilters(ARGS[0], ARGS[1])", json.dumps(rows), json.dumps({}))
+        assert [r["rank"] for r in out_all["rows"]] == [1, 2, 3]
+
+    def test_boundary_at_floor_is_kept(self) -> None:
+        rows = [{"rank": 1, "metrics": {"trades": 30, "dsr": 0.5}}]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"min_trades": 30, "min_dsr": 0.5}),
+        )
+        assert [r["rank"] for r in out["rows"]] == [1]
+
+    def test_dsr_column_is_tuple_n_labeled(self) -> None:
+        """The screener DSR column header carries the tuple-N honesty label."""
+        cols = _node_call("S.COLUMNS")
+        by_key = {c["key"]: c["label"] for c in cols}
+        assert by_key["metrics.dsr"] == "DSR (tuple-N)"
+
+
 class TestResilienceColumnConflationDead:
     """FIX 1 (R4): the longest-by-COUNT vs worst-by-₹ conflation is dead on the
     /screener COLUMNS config too — node-executed over the REAL shipped

@@ -1,6 +1,6 @@
 """Unit tests for the flag-gated Rust exec-cores seam (``brutex/exec_rust.py``).
 
-DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1963). Covers the ``BRUTEX_EXEC_RUST``
+DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1978). Covers the ``BRUTEX_EXEC_RUST``
 tristate resolution, the structural OFF-never-touches-the-kernel proof, the
 wheel-missing / envelope / narrow-catch fallbacks (with ``MemoryError``
 re-raising bare), the wire-arity refusal, the kernel-vs-Python-oracle

@@ -1,6 +1,6 @@
 """Hypothesis differential: the Rust exec kernels == the Python oracles EXACTLY.
 
-DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1963). Every property drives the
+DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1978). Every property drives the
 flag-ON seam (:mod:`brutex.exec_rust`) and the verbatim Python body over the
 SAME generated inputs and requires INTEGER equality — a single paisa of
 drift fails (the coordinator's money-parity law; the #1510 IEEE-divergence

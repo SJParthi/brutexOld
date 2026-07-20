@@ -1472,6 +1472,16 @@ jobs:
           else
             echo "(brutex.engine.trial_stats test file not present yet — gate inactive)"
           fi
+          # 19i1e · brutex.engine.period_stats — the per-period finalist-stats
+          # canonical JSON + key grammar + cross-sum validators + the finalist
+          # fold / segmented-dd walk (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001; ONE
+          # COMMON home consumed by sweep_run's projector, ResultRow
+          # construction/load validation, and the dashboard parse).
+          if compgen -G "tests/unit/test_engine_period_stats.py" > /dev/null; then
+            pytest --cov=brutex.engine.period_stats --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_period_stats.py
+          else
+            echo "(brutex.engine.period_stats test file not present yet — gate inactive)"
+          fi
           # 19i1c · brutex.engine.stage3_wire — Stage-3 launcher wiring
           # (DEC-STAGE3-WIRE-001; the train-slice helper, survivor-cell
           # recovery by run-id match, the audited refinement post-pass, the
@@ -2771,6 +2781,17 @@ jobs:
           else
             echo "(brutex.engine.sweep_run_core test file not present yet — gate inactive)"
           fi
+          # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the pure /results temporal-drill
+          # serve logic — run_id validation (hostile values disk-free 400),
+          # stored quarter/month payloads + the derived half-year roll-up, the
+          # sweep_runs invalidation token, the sidecar index over real
+          # writer-produced stamps, and the day/week IST/ISO-week fold. 100%
+          # line+branch on sweep_temporal_view.py.
+          if compgen -G "tests/unit/test_sweep_temporal_view.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.sweep_temporal_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sweep_temporal_view.py
+          else
+            echo "(brutex.dashboard.sweep_temporal_view test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated
           # unit suite (the package-wide brutex.engine gate above also runs
@@ -3825,6 +3846,44 @@ jobs:
         run: cargo test --release --locked
       # Verify the optional PyO3 binding compiles standalone (the wheel
       # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python --locked
+
+  rust-brutex-calendar:
+    name: Rust (brutex-calendar build + clippy + test)
+    # DEC-RUST-CALENDAR-LEAVES-001: the calendar-leaf decision-law crate's
+    # own gate (the rust-brutex-strategies shape — the rust-brutex-feed
+    # steps plus `--locked`, because the crate commits its Cargo.lock so
+    # the lockstep is enforced here too). The crate ships INERT (consumed
+    # by nothing Python-side yet); the 317 Python-generated goldens + the
+    # source-digest parity pins run inside `cargo test`. The mutation.yml
+    # wiring is the named follow-up DEC-RUST-CALENDAR-MUTATION-WIRE-001.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-calendar
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-calendar -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --release --locked
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by maturin at flip time, not here).
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python --locked
 
@@ -4921,7 +4980,16 @@ jobs:
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
     needs: build-wheels
-    timeout-minutes: 20
+    # Sanctioned infra HEADROOM raise (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001
+    # reconcile-round-2 note, MIGRATION.md #1851): the S2 club's 45-file
+    # shipped-test baseline MEASURED 622.69 s wall (1 failed, 2374 passed) —
+    # over the script's prior 600 s per-run default, so the gate exited 2 on
+    # a baseline exit-124 timeout and could never reach a verdict; two full
+    # pytest runs (baseline + reverted) ≈ 1250 s, over the prior 20-min job
+    # budget once setup (checkout + pip + two Rust wheels, ~8-10 min) is
+    # added. 50 min holds 2 × the 1200 s per-run budget + setup. The check
+    # still runs the FULL reversion — no skip, no shipped-test narrowing.
+    timeout-minutes: 50
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -4954,6 +5022,12 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # Per-run pytest budget raised 600 s (script default) → 1200 s:
+          # the S2 club's shipped-test baseline measured 622.69 s wall —
+          # ~1.93× headroom for slower hosted runners; the two-run total
+          # (≈ 1250 s measured-shape) fits the 50-min job budget above.
+          # Sanctioned in MIGRATION.md #1851 (reconcile-round-2 note).
+          BUGFIX_REVERSION_TIMEOUT_S: "1200"
         run: python3 scripts/ci/validate_bugfix_reversion.py
 
   # ─────────────────────────────────────────────────────────────────
@@ -5173,6 +5247,9 @@ jobs:
       # DEC-STRATEGIES-RUST-COMBO-001: the combo decision-kernel crate
       # gate — the PR that introduces a crate must gate that crate.
       - rust-brutex-strategies
+      # DEC-RUST-CALENDAR-LEAVES-001: the calendar-leaf decision-law crate
+      # gate — the PR that introduces a crate must gate that crate.
+      - rust-brutex-calendar
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
@@ -5292,6 +5369,9 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  rust-brutex-feed:${{ needs.rust-brutex-feed.result }}"
+          echo "  rust-brutex-strategies:${{ needs.rust-brutex-strategies.result }}"
+          echo "  rust-brutex-calendar:${{ needs.rust-brutex-calendar.result }}"
           echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
@@ -5334,6 +5414,9 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutex-feed.result }}" \
+            "${{ needs.rust-brutex-strategies.result }}" \
+            "${{ needs.rust-brutex-calendar.result }}" \
             "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \

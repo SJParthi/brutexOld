@@ -80,7 +80,8 @@
 # matrix budget: the #1597 rehearsal's worst fno-math shard ran 65 min vs the
 # 120-min cap, and 680/6 ≈ 113 mutants/shard vs the prior 100 — an ~13% load
 # rise on a 55-min margin; re-shard only if a scheduled run approaches the
-# cap (the pre-decided +1-shard dial).# Measurement history, kept honest (convergence round 1 — the counts here must
+# cap (the pre-decided +1-shard dial).
+# Measurement history, kept honest (convergence round 1 — the counts here must
 # describe the SHIPPED tree, Golden Rule #1): the below_parallel_threshold
 # extraction + .max() reshapes brought the pre-extraction 576 down to 556
 # (measured 2026-07-07), then the race-6 merge (1bb34cc8) folded main's
@@ -92,7 +93,7 @@
 # mutation.yml shard-budget bands absorb future small drift; this growth was
 # NOT small (+7.7%), so the matrix took the #1597 pre-decided +1 shard (5→6).
 #
-# --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) ---
+# --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1978) ---
 # src/exec/ core files joined the scope: money.rs 35 + fills.rs 64 +
 # costs_options.rs 61 + costs_futures.rs 38 + exec_options.rs 12 +
 # exec_futures.rs 27 = 237 mutants measured 2026-07-11 (`cargo mutants
@@ -175,7 +176,8 @@
 # 692/6 ≈ 116 mutants/shard stays inside the 6-shard matrix budget (see
 # mutation.yml's shard arithmetic — ≥ ~20 min margin at +20% on the worst
 # end); the #1597 pre-decided +1-shard dial stands if a scheduled run
-# approaches the cap.examine_globs = [
+# approaches the cap.
+examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",
     "src/python.rs",
