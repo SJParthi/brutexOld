@@ -122,6 +122,8 @@ from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_provenance import (
     GREEKS_FORMULA_VERSION,
     INPUTS_MASK,
+    IV_SOURCE_SERVED,
+    IV_SOURCE_SOLVED,
     Q_BIAS_ZERO,
     RATE_SOURCE_ID_CSV,
     RATE_SOURCE_ID_FIXED,
@@ -154,6 +156,8 @@ from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
 from brutex.options.greeks import (
+    IV_CLAMP_MAX,
+    IV_CLAMP_MIN,
     T_FLOOR_YEARS,
     GreeksBatchOutcome,
     GreeksInputError,
@@ -186,6 +190,8 @@ __all__ = [
     "GREEKS_RUST_BATCH_DEFAULT",
     "GREEKS_RUST_BATCH_ENV",
     "GREEKS_WORKERS_ENV",
+    "IV_SOURCE_SERVED",
+    "IV_SOURCE_SOLVED",
     "Q_BIAS_ZERO",
     "RATE_SOURCE_ID_CSV",
     "RATE_SOURCE_ID_FIXED",
@@ -206,6 +212,7 @@ __all__ = [
     "GreeksEnrichReport",
     "GreeksEnrichTarget",
     "GreeksProvenance",
+    "compute_bar_overlay",
     "current_inputs_pack",
     "enrich_greeks_for_targets",
     "enrich_option_bars",
@@ -218,6 +225,7 @@ __all__ = [
     "reset_rust_batch_for_tests",
     "resolve_greeks_workers",
     "resolve_risk_free_source",
+    "served_iv_usable",
     "stamp_is_current_inputs",
     "t_years_act365",
     "unpack_greeks_provenance",
@@ -977,6 +985,28 @@ class _PendingSolve:
     forward: float
 
 
+def served_iv_usable(served_iv: float | None) -> bool:
+    """``True`` iff a vendor-served IV can price the Greeks DIRECTLY (no solve).
+
+    The ONE predicate (CLAUDE.md §11 COMMON) both :func:`_compute_bar`'s served
+    branch and the Dhan rolling reuse gate consult, so the stamped
+    :data:`~brutex.data.greeks_provenance.IV_SOURCE_SERVED` regime and the
+    idempotency compare can NEVER drift (DEC-DHAN-ROLLING-OPTIONS-001 §3). A
+    served IV is usable iff it is present, finite, and inside the kernel's own
+    ``[IV_CLAMP_MIN, IV_CLAMP_MAX]`` clamp — a garbage / out-of-band served IV
+    falls through to the honest solve-from-premium path instead (never a
+    fabricated Greek from a nonsense vol). Groww never supplies a served IV, so
+    this is always ``False`` there and the solve path is byte-identical.
+    """
+    import math
+
+    return (
+        served_iv is not None
+        and math.isfinite(served_iv)
+        and IV_CLAMP_MIN <= served_iv <= IV_CLAMP_MAX
+    )
+
+
 def _screen_bar(
     *,
     ts: datetime,
@@ -993,6 +1023,7 @@ def _screen_bar(
     is_call: bool,
     style_flag: int,
     source_id: int,
+    apply_parity_screen: bool = True,
 ) -> FnoGreeksBar | _PendingSolve:
     """Run the honest-NULL pre-screens for one bar — the pre-solve half.
 
@@ -1008,6 +1039,14 @@ def _screen_bar(
     loop). The snap applies to ``spot_at_bar``/the solve input ONLY — never
     to any Greek, ``iv``, ``t_years_used`` or ``rate_used``
     (DEC-MONEY-2DP-001 forbids rounding statistics).
+
+    ``apply_parity_screen`` (default ``True`` — every historical caller is
+    byte-identical) exists for the served-IV recomposition seam
+    (`DEC-DHAN-ROLLING-OPTIONS-001` §3 via :func:`_compute_bar`): the
+    below-parity screen exists solely to protect the IV SOLVER from an
+    indeterminate root, so the direct served-IV branch — which never
+    consumes the traded premium — skips it (``False`` skips the floor
+    computation + the BELOW_INTRINSIC refusal, nothing else).
 
     Returns a stamped honest-NULL :class:`FnoGreeksBar` when any screen
     refuses, else the :class:`_PendingSolve` carrying everything the solve
@@ -1050,17 +1089,18 @@ def _screen_bar(
         # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-3; the NO_RATE / AT_EXPIRY /
         # NO_SPOT precedence above is unchanged).
         return _null(STATUS_BAD_INPUT, with_spot=spot)
-    floor = _no_arb_floor(
-        is_call=is_call, spot=float(spot), strike=strike_f, rate=rate.rate, t_years=t_years
-    )
-    if float(close) <= floor + DEGENERATE_TIME_VALUE_REL * float(close):
-        # At/below the DISCOUNTED parity floor, or within the kernel's own
-        # 1e-9-relative verification band of it: a negative time value has no
-        # IV root, and a ~zero time value has NO DETERMINED root (the kernel
-        # would "verify" an arbitrary sigma from a wide indeterminacy band —
-        # the IVX-1 artifact). Never fed to the solver, never a spurious /
-        # arbitrary root (plan §15.8; DEC-GREEKS-CORRECTNESS-AUDIT-001).
-        return _null(STATUS_BELOW_INTRINSIC, with_spot=spot)
+    if apply_parity_screen:
+        floor = _no_arb_floor(
+            is_call=is_call, spot=float(spot), strike=strike_f, rate=rate.rate, t_years=t_years
+        )
+        if float(close) <= floor + DEGENERATE_TIME_VALUE_REL * float(close):
+            # At/below the DISCOUNTED parity floor, or within the kernel's own
+            # 1e-9-relative verification band of it: a negative time value has no
+            # IV root, and a ~zero time value has NO DETERMINED root (the kernel
+            # would "verify" an arbitrary sigma from a wide indeterminacy band —
+            # the IVX-1 artifact). Never fed to the solver, never a spurious /
+            # arbitrary root (plan §15.8; DEC-GREEKS-CORRECTNESS-AUDIT-001).
+            return _null(STATUS_BELOW_INTRINSIC, with_spot=spot)
     forward = float(spot) * math.exp(rate.rate * t_years)
     return _PendingSolve(
         ts=ts,
@@ -1104,7 +1144,12 @@ def _solve_one(p: _PendingSolve) -> GreeksBatchOutcome:
     return GreeksBatchOutcome(result=result, invalid_input=None)
 
 
-def _finish_bar(p: _PendingSolve, outcome: GreeksBatchOutcome) -> FnoGreeksBar:
+def _finish_bar(
+    p: _PendingSolve,
+    outcome: GreeksBatchOutcome,
+    *,
+    iv_source: int = IV_SOURCE_SOLVED,
+) -> FnoGreeksBar:
     """Build the final bar from a pending solve's outcome — the post-solve half.
 
     The VERBATIM tail of the historical ``_compute_bar``: an
@@ -1114,6 +1159,11 @@ def _finish_bar(p: _PendingSolve, outcome: GreeksBatchOutcome) -> FnoGreeksBar:
     kernel's admission verdict (``GreeksResult.admissible``) is deliberately
     NOT stored this round — it is exactly re-derivable downstream as
     ``abs(delta) >= 0.02 and vega * 100 >= 1e-6`` over the stored columns.
+    ``iv_source`` (default :data:`~brutex.data.greeks_provenance.IV_SOURCE_SOLVED`
+    — every historical stamp byte-identical) marks a served-IV-priced OK bar
+    :data:`~brutex.data.greeks_provenance.IV_SOURCE_SERVED`
+    (DEC-DHAN-ROLLING-OPTIONS-001 §3 via :func:`_compute_bar`); the honest-NULL
+    arms never consume it (a null bar's stamp keeps the pack default).
     """
     if outcome.invalid_input is not None:
         return _null_bar(
@@ -1166,6 +1216,7 @@ def _finish_bar(p: _PendingSolve, outcome: GreeksBatchOutcome) -> FnoGreeksBar:
             rate_version=result.rate_version,
             style_flag=p.style_flag,
             status=STATUS_OK,
+            iv_source=iv_source,
         ),
     )
 
@@ -1264,6 +1315,114 @@ def _batch_solve_outcomes(pending: list[_PendingSolve]) -> dict[int, GreeksBatch
         _RUST_BATCH_STATE.engaged = True
         _LOG.info("greeks_enrich.rust_batch_engaged")
     return dict(enumerate(outcomes))
+
+
+def _compute_bar(
+    *,
+    ts: datetime,
+    open_: Decimal,
+    high: Decimal,
+    low: Decimal,
+    close: Decimal,
+    volume: int,
+    oi: int | None,
+    spot: Decimal | None,
+    rate: RiskFreeRate | None,
+    t_years: float,
+    strike_f: float,
+    is_call: bool,
+    style_flag: int,
+    source_id: int,
+    served_iv: float | None = None,
+) -> FnoGreeksBar:
+    """Price one bar's overlay through the pre-screen + the shared kernel.
+
+    The RECOMPOSED per-bar face over the ONE shared :func:`_screen_bar` /
+    :func:`_solve_one` / :func:`_finish_bar` copies (the
+    `DEC-GREEKS-RUST-BATCH-001` split) — this wrapper only COMPOSES them, it
+    never re-implements a screen or a solve, so the status ladder can never
+    drift between the Groww enrich loop and this seam.
+
+    ``served_iv`` (DEC-DHAN-ROLLING-OPTIONS-001 §3) is the ONE cross-cutting
+    served-vs-solved seam: when a USABLE vendor IV is supplied
+    (:func:`served_iv_usable` — present, finite, in-clamp), the Greeks are
+    priced DIRECTLY from ``(spot, strike, sigma, T, rate)`` through the SAME
+    shared kernel (no root-solve, no copied math) and stamped
+    :data:`~brutex.data.greeks_provenance.IV_SOURCE_SERVED`. Absent / unusable
+    (the Groww default ``None``) → the byte-identical solve-from-premium path
+    (``_finish_bar(p, _solve_one(p))``), stamped
+    :data:`~brutex.data.greeks_provenance.IV_SOURCE_SOLVED`
+    (``pack_greeks_provenance``'s default, so a Groww stamp is unchanged). The
+    shared pre-screens (NO_RATE / AT_EXPIRY / NO_SPOT / BAD_INPUT-on-``close``)
+    apply to BOTH branches; the below-parity screen is solve-branch-only (it
+    exists solely to protect the IV solver — ``apply_parity_screen``).
+    """
+    served_ok = served_iv_usable(served_iv)
+    screened = _screen_bar(
+        ts=ts,
+        open_=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+        oi=oi,
+        spot=spot,
+        rate=rate,
+        t_years=t_years,
+        strike_f=strike_f,
+        is_call=is_call,
+        style_flag=style_flag,
+        source_id=source_id,
+        apply_parity_screen=not served_ok,
+    )
+    if not isinstance(screened, _PendingSolve):
+        return screened
+    if served_ok:
+        # ── served-IV branch (Dhan rolling-ATM, DEC-DHAN-ROLLING-OPTIONS-001
+        # §3) ── A vendor-served IV prices the six Greeks DIRECTLY from
+        # (spot, strike, sigma, T, rate) through the SAME shared Rust kernel —
+        # `compute_greeks(sigma=served_iv, ...)` is the kernel's native
+        # price-from-sigma path (NO root-solve, NO copied math). The traded
+        # premium is not consumed here, so the below-parity screen (which
+        # exists only to protect the SOLVER from an indeterminate root) was
+        # deliberately skipped above: the Greeks are well-defined for any
+        # in-clamp vol. Groww never supplies a served IV, so this branch is
+        # unreachable there and the solve path below is byte-identical.
+        try:
+            served = compute_greeks(
+                sigma=served_iv,
+                forward=screened.forward,
+                strike=screened.strike_f,
+                t_years=screened.t_years,
+                rate=screened.rate,
+                is_call=screened.is_call,
+            )
+        except GreeksInputError as exc:
+            # A caller-contract reject the served_iv clamp cannot screen — a
+            # non-positive / non-finite strike or forward (a corrupt
+            # resolved_strike). Stamped BAD_INPUT, quarantined to this bar.
+            return _finish_bar(
+                screened, GreeksBatchOutcome(result=None, invalid_input=str(exc))
+            )
+        # A ``None`` here is defensive: the kernel's price-from-sigma path
+        # returns a value for every in-clamp sigma (no root to fail) — only a
+        # stubbed kernel exercises it; ``_finish_bar`` stamps the honest
+        # NO_SOLUTION so a future kernel that CAN degrade never fabricates a
+        # Greek.
+        return _finish_bar(
+            screened,
+            GreeksBatchOutcome(result=served, invalid_input=None),
+            iv_source=IV_SOURCE_SERVED,
+        )
+    return _finish_bar(screened, _solve_one(screened))
+
+
+#: Public seam alias for the per-bar overlay pricer (DEC-DHAN-ROLLING-OPTIONS-001
+#: §3): the Dhan rolling-ATM Greeks pass reuses the SAME pre-screen + kernel core
+#: — passing ``served_iv`` to take the direct served-IV branch — so there is ONE
+#: source of truth for the Greeks math (CLAUDE.md §11 COMMON; the kept private
+#: name serves the Groww call sites in this module unchanged).
+compute_bar_overlay = _compute_bar
 
 
 #: Back-compat private alias — the FIX-7 candidate ladder MOVED VERBATIM to its

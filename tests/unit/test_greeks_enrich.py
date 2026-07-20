@@ -23,6 +23,8 @@ pytest.importorskip("trading_core", reason="greeks enrichment needs the trading_
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_enrich import (
     GREEKS_FORMULA_VERSION,
+    IV_SOURCE_SERVED,
+    IV_SOURCE_SOLVED,
     Q_BIAS_ZERO,
     RATE_SOURCE_ID_CSV,
     RATE_SOURCE_ID_FIXED,
@@ -42,6 +44,7 @@ from brutex.data.greeks_enrich import (
     GreeksEnrichTarget,
     _SpotJoinMemo,
     _target_sort_key,
+    compute_bar_overlay,
     current_inputs_pack,
     enrich_greeks_for_targets,
     enrich_option_bars,
@@ -49,6 +52,7 @@ from brutex.data.greeks_enrich import (
     pack_greeks_provenance,
     rate_source_id_for,
     resolve_risk_free_source,
+    served_iv_usable,
     stamp_is_current_inputs,
     t_years_act365,
     unpack_greeks_provenance,
@@ -973,3 +977,70 @@ class TestDriverSpotMemo:
         assert report.errored == 2
         assert report.spot_reads == 2 and report.spot_hits == 0
         assert sum(1 for e in logs if e["event"] == "greeks_enrich.target_errored") == 2
+
+
+class TestComputeBarServedIvBranch:
+    """The DEC-DHAN-ROLLING-OPTIONS-001 §3 served-vs-solved seam in _compute_bar.
+
+    Groww never supplies a served IV (the solve path is byte-identical — the
+    frozen enrich goldens prove that separately); these pins exercise the NEW
+    served branch of the shared pricer + its ``iv_source`` stamping.
+    """
+
+    def _overlay(self, *, served_iv: float | None, strike_f: float = 24700.0) -> FnoGreeksBar:
+        return compute_bar_overlay(
+            ts=datetime(2024, 6, 3, 4, 30, tzinfo=UTC),
+            open_=Decimal("120.50"),
+            high=Decimal("120.50"),
+            low=Decimal("120.50"),
+            close=Decimal("120.50"),
+            volume=100,
+            oi=50,
+            spot=Decimal("24710.55"),
+            rate=_RATE.rate_on(date(2024, 6, 3)),
+            t_years=0.05,
+            strike_f=strike_f,
+            is_call=True,
+            style_flag=STYLE_EUROPEAN_EXACT,
+            source_id=RATE_SOURCE_ID_FIXED,
+            served_iv=served_iv,
+        )
+
+    def test_served_iv_usable_predicate(self) -> None:
+        assert served_iv_usable(None) is False
+        assert served_iv_usable(float("nan")) is False
+        assert served_iv_usable(1e-6) is False  # below clamp
+        assert served_iv_usable(99.0) is False  # above clamp
+        assert served_iv_usable(0.15) is True
+
+    def test_served_prices_directly_and_stamps_served(self) -> None:
+        bar = self._overlay(served_iv=0.145)
+        prov = unpack_greeks_provenance(bar.greeks_provenance_id or 0)
+        assert prov.status == STATUS_OK
+        assert prov.iv_source == IV_SOURCE_SERVED
+        assert bar.iv == pytest.approx(0.145)  # echoed verbatim, no solve moved it
+
+    def test_absent_served_iv_solves_and_stamps_solved(self) -> None:
+        bar = self._overlay(served_iv=None)
+        prov = unpack_greeks_provenance(bar.greeks_provenance_id or 0)
+        assert prov.status == STATUS_OK
+        assert prov.iv_source == IV_SOURCE_SOLVED
+
+    def test_out_of_clamp_served_iv_falls_through_to_solve(self) -> None:
+        prov = unpack_greeks_provenance(self._overlay(served_iv=99.0).greeks_provenance_id or 0)
+        assert prov.iv_source == IV_SOURCE_SOLVED
+
+    def test_served_bad_strike_stamps_bad_input(self) -> None:
+        prov = unpack_greeks_provenance(
+            self._overlay(served_iv=0.145, strike_f=-1.0).greeks_provenance_id or 0
+        )
+        assert prov.status == STATUS_BAD_INPUT
+
+    def test_served_kernel_none_stamps_no_solution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data import greeks_enrich as ge
+
+        monkeypatch.setattr(ge, "compute_greeks", lambda **_kw: None)
+        bar = self._overlay(served_iv=0.145)
+        prov = unpack_greeks_provenance(bar.greeks_provenance_id or 0)
+        assert prov.status == STATUS_NO_SOLUTION
+        assert bar.iv is None

@@ -40,6 +40,21 @@ disclosed CI cold cost); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; run identity untouched. This header
 carries the pointer, never the story — the full record lives in the §1
 Active-branch blurb + MIGRATION.md #1979.)
+Earlier: 2026-07-15 (Club X merge vehicle, branch
+`integration/club-x-dhan` — the GATED-LAST fold of the dhan/feeds pack as ONE
+merge event off main d6ac9f85: PR #1492 DEC-DHAN-SPOT-FEED-001 (MIGRATION.md
+#1797, umbrella) + DEC-DHAN-ROLLING-FLOOR-001 (#1798), carrying the parked
+PR #1482 feed-interface pack verbatim (DEC-FEED-INTERFACE-001 #1795 +
+DEC-FEED-LAKE-ROOT-001 #1796, ADR-0021 — diff-verified fully contained, #1482
+recommended closed as superseded) · PR #1501 DEC-DHAN-ROLLING-OPTIONS-001
+(#1799). The three colliding ledger rows were renumbered to the free
+consecutive #1795–#1799 block (DEC-IDs are the stable handles per
+DEC-LEDGER-RENUMBER-001). NOTE: the club carries #1492's retirement of the
+`no-dhan-guard` CI gate (DEC-DHAN-GUARD-RETIRE-002, ADR-0022) — an
+operator/coordinator POLICY land, so the club PR stays parked-DRAFT until that
+ruling. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; each member's full record
+lives in its §1 Active-branch blurb + its MIGRATION.md entry — this header
+carries pointers, never the story.)
 Earlier: 2026-07-19 (DEC-BRUTEX-LAKE-BOX-WHEEL-001, MIGRATION.md #1986
 (provisional — renumber-at-landing), branch `claude/brutex-lake-box-wheel` —
 the brutex-lake wheel joins the operator BOX build path BEST-EFFORT (warn-only
@@ -4285,6 +4300,35 @@ hostile-review pass._
   routes; the one retired env var refuses loudly when set. This blurb
   carries the record's pointer — the full story lives in MIGRATION.md
   #1979 + the lane PR body.)
+  Earlier: `integration/club-x-dhan` (**Club X — dhan/feeds merge vehicle,
+  GATED-LAST in the drain queue** — the fold of PR #1492 (DEC-DHAN-SPOT-FEED-001,
+  MIGRATION.md #1797 umbrella + DEC-DHAN-ROLLING-FLOOR-001 #1798 — the standalone
+  read-only Dhan v2 SPOT feed track, ADR-0022; it CARRIES the parked PR #1482
+  feed-interface pack verbatim: DEC-FEED-INTERFACE-001 #1795 + DEC-FEED-LAKE-ROOT-001
+  #1796, ADR-0021 — diff-verified fully contained, #1482 recommended closed as
+  superseded) + PR #1501 (DEC-DHAN-ROLLING-OPTIONS-001 #1799 — the Dhan rolling-ATM
+  expired-options + Greeks track) as ONE merge event off main d6ac9f85. NOTE: #1492
+  retires the `no-dhan-guard` CI gate under its own DEC-DHAN-GUARD-RETIRE-002
+  (ADR-0022) — an operator/coordinator POLICY land, so this club stays parked-DRAFT
+  until that ruling. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; each member's full
+  record lives in its own MIGRATION.md entry + ADR — this line carries pointers,
+  never the story.)
+  Earlier: `claude/dhan-spot-feed`
+  (**DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1797 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
+  #1798** — the standalone READ-ONLY Dhan v2 SPOT feed track (ADR-0022), merged forward
+  onto main 43e8ca93 with the delta: the SECOND historical feed nests its whole lake at
+  `<lake_root>/feeds/dhan/` (the ADR-0021 feed-root law — Groww top-root byte-identical by
+  object identity; engine + dashboards structurally blind); pulls EXACTLY 4 indices —
+  NIFTY/BANKNIFTY/SENSEX 1-minute + INDIA VIX REFERENCE_ONLY — via the lean Dhan spot
+  spine + a Dhan-scoped prebuild; read-only AWS-SSM auth (never mints; DH-901 → the
+  single-flight SSM re-read); the ROLLING today−5y(+7d) history floor (operator ruling
+  2026-07-14 — `dhan_history_floor(today)`, ONE plan chokepoint, route 400 for a wholly
+  pre-floor pick, retention: pre-floor stored bars NEVER deleted); the full documented
+  error-code map over BOTH SDK remark-key spellings + the terminal auth/subscription
+  pull-halt (`is_terminal_pull_stop` → the CRITICAL Telegram alert); the `no-dhan-guard`
+  is RETIRED; probe kit (incl. `--floor-edge`) shipped UNRUN — every `*.dhan.co` host is
+  egress-blocked, zero Dhan facts flipped. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  the full record lives in MIGRATION.md #1797/#1798 + ADR-0022; Dhan facts table in §6b.)
   Earlier: `claude/brutex-lake-box-wheel` (**DEC-BRUTEX-LAKE-BOX-WHEEL-001,
   MIGRATION.md #1986 (provisional — renumber-at-landing; DEC-IDs are the stable handles
   per DEC-LEDGER-RENUMBER-001)** — the brutex-lake wheel joins the operator BOX build
@@ -12928,6 +12972,27 @@ hostile-review pass._
   flipped); ci.yml test/golden/chaos-race/run-smoke build the wheel;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
   line — see §1 + MIGRATION.md #1979 for the full blurb)
+  Earlier: `integration/club-x-dhan`
+  (Club X — dhan/feeds merge vehicle, GATED-LAST: PR #1492 DEC-DHAN-SPOT-FEED-001
+  MIGRATION.md #1797 + DEC-DHAN-ROLLING-FLOOR-001 #1798 (carrying the parked
+  PR #1482 feed-interface pack — DEC-FEED-INTERFACE-001 #1795 +
+  DEC-FEED-LAKE-ROOT-001 #1796, ADR-0021 — verified fully contained) + PR #1501
+  DEC-DHAN-ROLLING-OPTIONS-001 #1799, folded as ONE merge event; the
+  `no-dhan-guard` retirement (DEC-DHAN-GUARD-RETIRE-002, ADR-0022) is an
+  operator POLICY land — the club stays parked-DRAFT until that ruling; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/dhan-spot-feed`
+  (DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1797 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
+  #1798 — the standalone read-only Dhan v2 SPOT feed track (ADR-0022) merged forward
+  onto main with the delta: the second historical feed at `<lake_root>/feeds/dhan/`
+  (ADR-0021 nesting law; Groww top-root byte-identical by object identity), exactly 4
+  indices (NIFTY/BANKNIFTY/SENSEX + INDIA VIX REFERENCE_ONLY, 1-minute only), read-only
+  SSM auth (never mints), the rolling today−5y+7d floor (operator ruling 2026-07-14;
+  ONE plan chokepoint + route 400 + retention property), the documented error-code map
+  over both SDK remark spellings + the terminal auth/subscription pull halt, the
+  drop_bars_after tail belt + absent-volume tolerance, the no-dhan-guard retirement,
+  and the UNRUN `--floor-edge` probe stage; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — the full record lives in MIGRATION.md #1797/#1798)
   Earlier: `claude/brutex-lake-box-wheel`
   (DEC-BRUTEX-LAKE-BOX-WHEEL-001, MIGRATION.md #1986 — provisional,
   renumber-at-landing — the brutex-lake wheel joins the operator BOX build
@@ -14819,7 +14884,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:1058-1059`; `cli.py:5764-5765` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:1058-1059`; `cli.py:5977-5978` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
@@ -14831,6 +14896,37 @@ bruteX/
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
 | Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull reauth self-heal (on the production read-only broker a RE-READ of the Lambda-minted SSM token, `groww.token.reread` — DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 over the #909 seam), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |
+
+## 6b. Verified Dhan Facts (second historical feed — SPOT indices, REFERENCE lake `feeds/dhan/`)
+
+> **DEC-DHAN-SPOT-FEED-001 (MIGRATION.md #1797, ADR-0022) + DEC-DHAN-ROLLING-FLOOR-001
+> (#1798):** the standalone READ-ONLY Dhan v2 SPOT feed. Evidence lanes (weakest never
+> presented as fact): **VERIFIED-SDK** = the official `dhanhq` 2.2.0 wheel read from
+> source in-session; **VERIFIED-docs(mirror)** = a verbatim community mirror of the
+> official docs (dhanhq.co/docs/v2/ — original URL cited in `dhan_api_research.md`);
+> **VERIFIED-docs(snippet)** = official-domain search snippet; **COMMUNITY** =
+> third-party code only; **UNVERIFIED** = a live-probe gate (`docs/runbooks/feed-probe/`,
+> UNRUN — every `*.dhan.co` host egress-blocked in-sandbox). The ENGINE is UNCHANGED —
+> Dhan bars enter no vocabulary and no run identity.
+
+| Fact | Value | Source | Status |
+|------|-------|--------|--------|
+| Vendor / transport | **DhanHQ API v2 — `dhanhq` Python SDK 2.2.0** (injected SDK via `DhanSdkRefresher`; no raw HTTP) | SDK `dhan_http.py` (base `https://api.dhan.co/v2`); `adapters/dhan/reauth.py` | VERIFIED-SDK |
+| Intraday endpoint | `POST /v2/charts/intraday` via `intraday_minute_data(security_id, exchange_segment, instrument_type, from_date, to_date, interval=1, oi=False)`; intervals 1/5/15/25/60 min — BruteX fetches **1minute ONLY** (19 TFs + 1day DERIVED by the Dhan-scoped prebuild, §2 Rule 3) | SDK `_historical_data.py` (the official wheel, read in-session); mirror `17-historical-data.md`; `adapters/dhan/adapter.py` | VERIFIED-SDK + docs(mirror) |
+| Response shape | Parallel **COLUMN arrays** `{open[], high[], low[], close[], volume[], timestamp[]}` — NOT row arrays; unequal lengths = chunk-rejecting `DhanVendorDriftError` | mirror `17-historical-data.md`; `adapters/dhan/parser.py` | VERIFIED-docs(mirror) |
+| Timestamp semantics | Unix **epoch seconds** (UTC POSIX), stored UTC via `datetime.fromtimestamp(epoch, tz=UTC)` (host-TZ-invariant), rendered IST +05:30 | SDK `dhanhq.py` `convert_to_date_time`; `parser.py::parse_epoch_utc` | VERIFIED-SDK; epoch = bar **OPEN** time UNVERIFIED (probe gate G-I) |
+| Window cap | **90 days per intraday request** (`DHAN_INTRADAY_WINDOW_DAYS`), tiled by the COMMON `plan_windows` | mirror `17-historical-data.md`; `adapters/dhan/chunks.py` | VERIFIED-docs(mirror+snippet); 91-day behaviour UNVERIFIED (gate G-H) |
+| History floor (intraday) | Docs: minute data "for the **last 5 years**" — a ROLLING window. THE LAW: `dhan_history_floor(today) = today−5y + 7d margin` (DEC-DHAN-ROLLING-FLOOR-001, operator ruling 2026-07-14; Feb-29 rounds FORWARD; ONE clamp chokepoint `plan_dhan_work`; pre-floor stored bars NEVER deleted). **Groww's fixed `GROWW_HISTORY_FLOOR=2020-01-01` is a DIFFERENT law — never conflate** | mirror `17-historical-data.md` + support snippet; `adapters/dhan/constants.py::dhan_history_floor` | VERIFIED-docs(mirror+snippet) for the 5y depth; exact edge/margin UNVERIFIED (gates G-A/G-B — the `--floor-edge` probe) |
+| `toDate` semantics | Daily endpoint: "End date, **non-inclusive**" (docs). Intraday boundary at day resolution UNVERIFIED (probe gate #13) — the ingest tail's `drop_bars_after` BELT covers BOTH readings (a bar past the last servable day is never stored) | mirror `17-historical-data.md`; `adapters/dhan/ingest.py::_process_item` | VERIFIED-docs(mirror) daily; intraday UNVERIFIED (the belt is the cover) |
+| Rate limits — Data APIs | **5 req/s + 100,000 req/day; NO per-minute/hour governor** (`DHAN_RATE_LIMIT_RPS=5.0`, `DHAN_DAILY_QUOTA=100_000`, `DHAN_RATE_LIMIT_PER_MIN=None` — honestly none); own account, never touches the Groww governor | mirror `01-introduction.md` + support snippet; `adapters/dhan/live_controller.py` | VERIFIED-docs(mirror+snippet); HTTP-429 pairing UNVERIFIED (gate G-E) |
+| Data-API subscription | **PAID: ₹499+taxes/month** (auto-debited), includes Historical + Intraday; **FREE with 25 executed trades in the last 30 days**; enforcement = error 806/DH-902 (a terminal `DhanSubscriptionError` pull-halt naming the fix) | dhan.co support snippet; mirror `20-annexure.md`; `adapters/dhan/errors.py` | VERIFIED-docs(snippet) |
+| securityIds (IDX_I) | **NIFTY = 13 (VERIFIED-SDK — the official README's own example)**; BANKNIFTY = 25, SENSEX = 51, INDIA VIX = 21 (**COMMUNITY-UNVERIFIED** — multiple independent third-party codebases; NOT in official docs); hardcoded map `DHAN_INDEX_SECURITY_IDS`, unknown symbol = loud skip, never a blind id | SDK README; `adapters/dhan/constants.py:121-126`; community sources in `dhan_api_research.md §5` | NIFTY VERIFIED-SDK(example); 25/51/21 COMMUNITY-UNVERIFIED (gate G-C — scrip-master cross-check) |
+| INDIA VIX servability | NO official statement that VIX has `/charts/*` candles (community projects fetch id 21 successfully — encouraging, not proof) | mirror `17-historical-data.md` (absence); `dhan_api_research.md §8` | UNVERIFIED — **HARD gate G-D** (the ADR-0009 VIX-gate precedent) |
+| Auth | `access-token` (JWT) + `client-id` headers per request; creds **AWS-SSM READ-ONLY** (`/tickvault/prod/dhan/{client-id,access-token}`; BruteX NEVER mints — DH-901 → the single-flight SSM RE-READ; a same-dead-token re-read = the `DhanTokenStillStaleError` pull-wide stop). Token lifetime: docs say 24 h; the official support page says SELECTABLE 8 h–30 d — **CONFLICTING official sources** | SDK `dhan_http.py` (the per-request header dict); mirror `02-authentication.md`; `adapters/dhan/{reauth,token_store_aws}.py` | VERIFIED-SDK headers; lifetime CONFLICTING-official (probe gate #10; WHO-mints = a pre-first-wet-pull ops gate, ADR-0022 §8) |
+| Error envelope | SDK failure = `{"status":"failure","remarks":{...}}` with **snake_case** keys (`error_code`/`error_type`/`error_message` — the LIVE shape); raw-HTTP docs shape is camelCase — the classifier reads BOTH; full numeric (800-814) + DH-9xx code table mapped (805/DH-904 throttle · 806/DH-902 subscription · 807-810/DH-901 auth · 804/811-814/DH-905/DH-907 bad request · 800/DH-908/DH-909 server) | SDK `dhan_http.py::_parse_response`; mirror `20-annexure.md`; `adapters/dhan/errors.py` | VERIFIED-SDK envelope + VERIFIED-docs(mirror) codes |
+| Static IP | Whitelisting documented for **Order APIs only** (eff. 2026-04-01); no doc statement binds it to Data/historical APIs — this read-only feed hits no order endpoint | mirror `22-releases.md`; ADR-0022 §8 | VERIFIED-docs(mirror) for Order APIs; Data-API exemption UNVERIFIED (probe gate #12 — confirm on first credentialed run) |
+
+---
 
 ## 7. Verified Indian Market Microstructure Facts
 

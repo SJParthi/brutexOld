@@ -624,6 +624,120 @@ jobs:
           else
             echo "(brutex.audit_verify test file not present yet — gate inactive)"
           fi
+          # DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1796): the feed-root
+          # nesting-law leaf ships at 100% line+branch — the identity-default
+          # law + grammar/reserved refusal + path-structural attribution.
+          if compgen -G "tests/unit/test_data_feed_root.py" > /dev/null; then
+            pytest --cov=brutex.data.feed_root --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_feed_root.py
+          else
+            echo "(brutex.data.feed_root test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1795): the FeedAuditSink
+          # (Golden Rule #8 hash chain for non-default feed writes) at 100%.
+          if compgen -G "tests/unit/test_data_feed_audit.py" > /dev/null; then
+            pytest --cov=brutex.data.feed_audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_feed_audit.py
+          else
+            echo "(brutex.data.feed_audit test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1795): the FeedBinding
+          # composition record + the ONE sanctioned build_feed_sink constructor.
+          if compgen -G "tests/unit/test_feeds_binding.py" > /dev/null; then
+            pytest --cov=brutex.feeds.binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_binding.py
+          else
+            echo "(brutex.feeds.binding test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1795): the feed registry
+          # (ships ONLY the default feed — vendor-token-free).
+          if compgen -G "tests/unit/test_feeds_registry.py" > /dev/null; then
+            pytest --cov=brutex.feeds.registry --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_registry.py
+          else
+            echo "(brutex.feeds.registry test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1795): the default feed's
+          # identity-pinned thin binding (spine conformance evidence).
+          if compgen -G "tests/unit/test_feeds_groww_binding.py" > /dev/null; then
+            pytest --cov=brutex.feeds.groww_binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_groww_binding.py
+          else
+            echo "(brutex.feeds.groww_binding test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-SPOT-FEED-001 (ADR-0022): the standalone Dhan read-only SPOT
+          # feed track — the real second consumer of the feed interface. Each new
+          # module 100% line+branch, fake-driven (no boto3/dhanhq/network).
+          if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
+          else
+            echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_errors.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.errors --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_errors.py
+          else
+            echo "(brutex.adapters.dhan.errors test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_scrip_master.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.scrip_master --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_scrip_master.py
+          else
+            echo "(brutex.adapters.dhan.scrip_master test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_token_store_aws.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.token_store_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_store_aws.py
+          else
+            echo "(brutex.adapters.dhan.token_store_aws test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_reauth.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.reauth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_reauth.py
+          else
+            echo "(brutex.adapters.dhan.reauth test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
+          else
+            echo "(brutex.adapters.dhan.parser test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py
+          else
+            echo "(brutex.adapters.dhan.chunks test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_client.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py
+          else
+            echo "(brutex.adapters.dhan.client test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_adapter.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.adapter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_adapter.py
+          else
+            echo "(brutex.adapters.dhan.adapter test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_live_controller.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.live_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_live_controller.py
+          else
+            echo "(brutex.adapters.dhan.live_controller test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_ingest.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py
+          else
+            echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_credentials_dhan_aws.py" > /dev/null; then
+            pytest --cov=brutex.config.credentials_dhan_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials_dhan_aws.py
+          else
+            echo "(brutex.config.credentials_dhan_aws test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-FEED-BINDING-001 (ADR-0022): the Dhan feed binding — the real
+          # second consumer's identity-pinned FeedBinding shim.
+          if compgen -G "tests/unit/test_dhan_binding.py" > /dev/null; then
+            pytest --cov=brutex.feeds.dhan_binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_binding.py
+          else
+            echo "(brutex.feeds.dhan_binding test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-PULL-SURFACE-001 (ADR-0022): the Dhan SPOT pull core (sink +
+          # ingest + prebuild) driving the dashboard route + CLI. Fake-driven 100%
+          # (the real SSM/dhanhq build + production seam are pragma-no-cover).
+          if compgen -G "tests/unit/test_dhan_pull.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.dhan_pull --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_pull.py
+          else
+            echo "(brutex.dashboard.dhan_pull test file not present yet — gate inactive)"
+          fi
           # DEC-CONSTITUENTS-CACHE-001 (MIGRATION.md #457): the new
           # constituent disk-cache module ships at 100% line+branch from
           # the start (its live-network surface lives in nse_constituents,
@@ -4334,22 +4448,23 @@ jobs:
         run: python3 scripts/ci/validate_ledger_numbering.py
 
   # ─────────────────────────────────────────────────────────────────
-  # NO-DHAN GUARD — zero-dhan enforcement on the live surface.
-  # The live vendor is Groww; the Dhan adapter was fully removed in the
-  # J4 PR series. This guard fails the build if the retired "dhan" vendor
-  # word reappears in brutex/, scripts/, CLAUDE.md, README.md, or
-  # docs/runbooks/. The immutable DEC-DHAN-* decision IDs + the historical
-  # docs (MIGRATION.md / adr/ / TRACK1_*.md) are exempt (see the script
-  # header for the full LEDGER rationale).
+  # NO-DHAN GUARD — RETIRED, STUBBED (train-fold policy seam).
+  # The zero-dhan ENFORCEMENT is retired by operator-approved policy
+  # (GO 869e340a — DEC-DHAN-GUARD-RETIRE-002, ADR-0022): Dhan is
+  # RE-ADMITTED as a standalone read-only SPOT feed track
+  # (DEC-DHAN-SPOT-FEED-001), so the "dhan" vendor word is once again LIVE
+  # on the code surface — the old guard script would now fail every push
+  # and `scripts/ci/no-dhan-guard.sh` is deleted. The JOB survives as a
+  # trivially-green STUB so the required `CI OK` aggregate's `needs:` entry
+  # stays satisfiable (zero dangling refs); FULL removal follows the
+  # operator's branch-protection settings change.
   # ─────────────────────────────────────────────────────────────────
   no-dhan-guard:
     name: No-dhan guard (zero-dhan enforcement)
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Run no-dhan guard
-        run: bash scripts/ci/no-dhan-guard.sh
+      - run: echo "no-dhan-guard retired by operator-approved policy (GO 869e340a); stub keeps the ci-ok needs entry satisfiable — full removal follows the operator branch-protection settings change"
 
   # ─────────────────────────────────────────────────────────────────
   # CONVENTIONAL COMMITS — commit format check (only on PRs)
@@ -5423,12 +5538,11 @@ jobs:
       # trading_core + #480 numpy crashes) can never recur silently.
       - run-smoke
       - banned
-      # DEC-CI-OK-NODHAN-GATE-001 (R2-CI-1): the zero-dhan enforcement guard.
-      # It has NO event `if:` (runs on push / pull_request / dispatch alike),
-      # so it never legitimately skips — a RED no-dhan-guard is a HARD fail
-      # here (never skipped==pass). It is enforced via this required `CI OK`
-      # aggregate, NOT as a direct branch-protection required context, so the
-      # branch-protection-drift.yml expected snapshot is untouched.
+      # (no-dhan-guard ENFORCEMENT retired — DEC-DHAN-GUARD-RETIRE-002,
+      # ADR-0022, operator GO 869e340a: Dhan is re-admitted as a standalone
+      # read-only SPOT feed. The job survives as a trivially-green STUB so
+      # this needs: entry stays satisfiable; full removal follows the
+      # operator's branch-protection settings change.)
       - no-dhan-guard
       # DEC-CICD-GATE-HONESTY-001: the ledger-numbering validator,
       # de-conflated from the banned-pattern scan into its own job. It is
@@ -5503,7 +5617,7 @@ jobs:
       # REAL lake + the resume/adversarial legs + the I-1 byte-identity
       # proof, every push. Enforced via this required CI OK aggregate, NOT
       # as a direct branch-protection required context, so the drift
-      # snapshot is untouched (the no-dhan-guard precedent).
+      # snapshot is untouched (the enforced-via-ci-ok precedent).
       - sweep-rehearsal
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement

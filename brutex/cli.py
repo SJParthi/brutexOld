@@ -1199,6 +1199,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Legacy chunk-window override — ignored on Groww (tiled internally)",
     )
     fetch.add_argument(
+        "--feed",
+        choices=("groww", "dhan"),
+        default="groww",
+        help=(
+            "Historical feed (default groww — Groww behaviour byte-unchanged). "
+            "'dhan' pulls the standalone read-only Dhan feed into feeds/dhan/ "
+            "(DEC-DHAN-ROLLING-OPTIONS-001)"
+        ),
+    )
+    fetch.add_argument(
+        "--dataset",
+        choices=("spot", "rolling-options"),
+        default="spot",
+        help=(
+            "Dhan dataset (only with --feed dhan; default spot): 'spot' = the 3 index "
+            "1-minute series; 'rolling-options' = the ROLLING-ATM option series "
+            "(ATM±N per bar, NOT per-contract — Dhan serves no option chain)"
+        ),
+    )
+    fetch.add_argument(
         "--dry-run",
         action="store_true",
         help="Use synthetic candles (no Groww creds) — proves the pipe + writes sample lake data",
@@ -1379,6 +1399,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Print discovery counts only; enrich nothing, take no lock",
+    )
+    enrich.add_argument(
+        "--feed",
+        choices=("groww", "dhan"),
+        default="groww",
+        help=(
+            "Feed (default groww — Groww behaviour byte-unchanged). 'dhan' enriches the "
+            "standalone Dhan feed under feeds/dhan/ (DEC-DHAN-ROLLING-OPTIONS-001)"
+        ),
+    )
+    enrich.add_argument(
+        "--dataset",
+        choices=("spot", "rolling-options"),
+        default="rolling-options",
+        help=(
+            "Dhan dataset (only with --feed dhan; default rolling-options): "
+            "'rolling-options' = re-enrich the ROLLING-ATM option bars (ATM±N per bar, "
+            "NOT per-contract) with Greeks. 'spot' has NO Greeks (index spot)"
+        ),
     )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
@@ -5394,6 +5433,180 @@ def _run_cli_greeks_enrich(
             file=sys.stderr,
         )
     return outcome
+
+
+#: The Dhan CLI default half-open ``[start, end)`` START — the operator's REQUESTED
+#: reachable-today start (2022-06-01, recorded non-load-bearing; the honest history
+#: floor is UNVERIFIED, so an unservable pre-floor span degrades to clean-empty, never
+#: a fabricated bar — DEC-DHAN-ROLLING-OPTIONS-001 §7).
+_DHAN_CLI_DEFAULT_START: Final[date] = date(2022, 6, 1)
+
+
+def _run_dhan_fetch(  # pragma: no cover — real-run: needs AWS SSM creds + the dhanhq SDK
+    *, request: Any, dataset: str, resolved: Path
+) -> int:
+    """Execute the REAL Dhan pull (spot or rolling-ATM options); return the exit code.
+
+    The live-credential boundary — ``# pragma: no cover`` (needs real AWS SSM + the
+    ``dhanhq`` SDK), mirroring the spot precedents (``build_dhan_spot_adapter`` / the
+    dashboard route's production seam). Held under ``keep_awake``; a ``rolling-options``
+    dataset drives the ROLLING-ATM ingest (ATM±N per bar, NOT per-contract), ``spot`` the
+    3-index series. Both nest under ``feeds/dhan/`` (Groww bytes untouched).
+    """
+    from brutex.dashboard.dhan_pull import default_dhan_spot_pull
+    from brutex.dashboard.dhan_rolling_pull import default_dhan_rolling_option_pull
+    from brutex.observability.power_keepawake import keep_awake
+
+    with keep_awake("brutex fetch --feed dhan"):
+        print(
+            f"[brutex] fetch --feed dhan --dataset {dataset} → {resolved}/feeds/dhan/",
+            file=sys.stderr,
+        )
+        if dataset == "rolling-options":
+            rolling = default_dhan_rolling_option_pull(request)
+            print(
+                "[brutex] fetch --feed dhan done — rolling-ATM (ATM±N per bar, NOT "
+                f"per-contract) keys={rolling.keys_planned} total_bars={rolling.total_bars} "
+                f"failed_windows={rolling.failed_windows}"
+            )
+        else:
+            spot = default_dhan_spot_pull(request)
+            print(
+                f"[brutex] fetch --feed dhan done — spot bars={spot.spot.total_bars} "
+                f"failed_windows={spot.spot.failed_windows}"
+            )
+    return EXIT_OK
+
+
+def cmd_fetch_dhan(
+    lake_root: Path | None,
+    *,
+    start: str | None,
+    end: str | None,
+    dataset: str,
+    dry_run: bool,
+) -> int:
+    """Pull the standalone read-only Dhan feed into ``feeds/dhan/`` (``fetch --feed dhan``).
+
+    The Dhan arm of ``brutex fetch`` (DEC-DHAN-ROLLING-OPTIONS-001) — a SEPARATE
+    read-only feed track, additive to Groww (``--feed groww`` is the default and leaves
+    Groww byte-unchanged). ``--dataset rolling-options`` pulls the ROLLING-ATM option
+    series (ATM±N per bar, NOT per-contract/per-expiry/per-strike — Dhan serves no option
+    chain) via the lean rolling spine; ``--dataset spot`` pulls the 3 index 1-minute
+    series. Always 1-minute; the tree nests under ``<lake_root>/feeds/dhan/`` (Groww bytes
+    untouched — path-structural attribution).
+
+    The range is HALF-OPEN ``[start, end)``; a blank ``--start`` defaults to
+    :data:`_DHAN_CLI_DEFAULT_START` (the honest floor is UNVERIFIED, so a pre-servable
+    span records clean-empty windows, never a fabricated bar), a blank ``--end`` to
+    today (UTC). ``--dry-run`` makes NO vendor call and writes nothing (Golden Rule #1);
+    the real run is the live-credential boundary :func:`_run_dhan_fetch`.
+
+    Returns
+    -------
+    int
+        ``EXIT_OK`` on a clean run / dry-run; ``EXIT_USER_ERROR`` on a bad date range.
+    """
+    from brutex.dashboard.dhan_pull import DhanPullRequest
+
+    resolved = _resolve_lake_root(lake_root)
+    try:
+        start_d = date.fromisoformat(start) if start else _DHAN_CLI_DEFAULT_START
+        end_d = date.fromisoformat(end) if end else datetime.now(UTC).date()
+    except ValueError as exc:
+        print(f"[brutex] fetch --feed dhan: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if start_d >= end_d:
+        print(
+            f"[brutex] fetch --feed dhan: start {start_d.isoformat()} must be before "
+            f"end {end_d.isoformat()} (half-open [start, end))",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    label = (
+        "rolling-ATM options (ATM±N per bar, NOT per-contract)"
+        if dataset == "rolling-options"
+        else "spot indices"
+    )
+    request = DhanPullRequest(lake_root=resolved, start=start_d, end=end_d, dry_run=dry_run)
+    if dry_run:
+        print(
+            f"[brutex] fetch --feed dhan --dataset {dataset} --dry-run — {label}; "
+            f"window=[{start_d.isoformat()}, {end_d.isoformat()}) lake: "
+            f"{resolved}/feeds/dhan/ — NO vendor call, writes nothing (Golden Rule #1)"
+        )
+        return EXIT_OK
+    return _run_dhan_fetch(request=request, dataset=dataset, resolved=resolved)
+
+
+def cmd_enrich_greeks_dhan(lake_root: Path | None, *, dataset: str) -> int:
+    """(Re-)enrich the Dhan ROLLING-ATM option bars with Greeks (``enrich-greeks --feed dhan``).
+
+    The Dhan arm of ``brutex enrich-greeks`` (DEC-DHAN-ROLLING-OPTIONS-001) — runs the ONE
+    fenced rolling-ATM Greeks pass
+    (:func:`~brutex.adapters.dhan.rolling_option_greeks.run_dhan_rolling_greeks_pass`) over
+    the stored rolling-ATM 1-minute OPTION bars under ``feeds/dhan/rolling_options/``
+    (ATM±N per bar, NOT per-contract). It makes ZERO vendor calls — the Greeks are priced
+    from the stored bars + the risk-free source — so it is a pure lake read/write. Dhan
+    SPOT is an INDEX (no Greeks), so ``--dataset spot`` is a loud refusal.
+
+    Returns
+    -------
+    int
+        ``EXIT_OK`` on a clean pass (incl. an empty lake — nothing to enrich);
+        ``EXIT_USER_ERROR`` for ``--dataset spot`` (index has no Greeks) or a missing
+        lake; ``EXIT_INTERNAL_ERROR`` on a quarantined / failed pass.
+
+    Raises
+    ------
+    LakeWriteHalt, GreeksEnrichPoolBroken
+        A pull-wide HOST condition (disk full / OOM / dead pool worker): CRITICAL alert
+        then re-raise (the ``enrich-greeks`` halt convention).
+    """
+    from brutex.adapters.dhan.rolling_option_greeks import run_dhan_rolling_greeks_pass
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+    from brutex.data.feed_root import feed_lake_root
+    from brutex.observability.power_keepawake import keep_awake
+
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="enrich-greeks")
+    if dataset != "rolling-options":
+        print(
+            "[brutex] enrich-greeks --feed dhan: Dhan SPOT is an INDEX (no Greeks); "
+            "use --dataset rolling-options",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    dhan_root = feed_lake_root(resolved, feed="dhan")
+    with keep_awake("brutex enrich-greeks --feed dhan"):
+        print(
+            f"[brutex] enrich-greeks --feed dhan — rolling-ATM Greeks (ATM±N per bar, "
+            f"NOT per-contract) over {dhan_root}",
+            file=sys.stderr,
+        )
+        try:
+            outcome = run_dhan_rolling_greeks_pass(lake_root=dhan_root)
+        except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+            _emit_pull_halt_alert(exc)
+            raise
+    if outcome.ok is None:
+        print(
+            "[brutex] enrich-greeks --feed dhan — no rolling-ATM option targets "
+            "(pull rolling options first); nothing to enrich"
+        )
+        return EXIT_OK
+    if outcome.ok is True and outcome.errored_targets == 0:
+        print("[brutex] enrich-greeks --feed dhan done — rolling-ATM Greeks, errored_targets=0")
+        return EXIT_OK
+    if outcome.ok is True:
+        print(
+            f"[brutex] enrich-greeks --feed dhan completed with {outcome.errored_targets} "
+            "quarantined target(s) — the stamp-driven pass is idempotent, re-run after fixing",
+            file=sys.stderr,
+        )
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] enrich-greeks --feed dhan FAILED ({outcome.error})", file=sys.stderr)
+    return EXIT_INTERNAL_ERROR
 
 
 def cmd_fetch(
@@ -12805,6 +13018,14 @@ def _dispatch(argv: list[str] | None) -> int:
             open_browser=not args.no_browser,
         )
     if args.command == "fetch":
+        if args.feed == "dhan":
+            return cmd_fetch_dhan(
+                args.lake_root,
+                start=args.start,
+                end=args.end,
+                dataset=args.dataset,
+                dry_run=args.dry_run,
+            )
         return cmd_fetch(
             lake_root=args.lake_root,
             start=args.start,
@@ -12831,6 +13052,8 @@ def _dispatch(argv: list[str] | None) -> int:
             strict_exit=args.strict_exit,
         )
     if args.command == "enrich-greeks":
+        if args.feed == "dhan":
+            return cmd_enrich_greeks_dhan(args.lake_root, dataset=args.dataset)
         return cmd_enrich_greeks(
             args.lake_root,
             underlying=args.underlying,
