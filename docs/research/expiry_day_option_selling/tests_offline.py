@@ -308,6 +308,51 @@ def test_sanity_screens_drop_and_count_corrupt_rows() -> None:
     assert Decimal("23200") not in strikes
 
 
+def test_option_row_unknown_side_dropped_and_counted_old_format() -> None:
+    """NIT-1: an OPT row whose OPTION_TYP is not CE/PE is counted in
+    ``dropped_rows`` (the builder maps kind "XX" -> OPTIDX + OPTION_TYP XX)."""
+    trade_date = date(2019, 2, 7)
+    rows = _chain_rows(date(2019, 2, 7), trade_date, date(2019, 2, 28))
+    rows.append(
+        _row(
+            "XX",
+            date(2019, 2, 7),
+            trade_date,
+            strike="22000",
+            open_="10",
+            high="12",
+            low="8",
+            close="9",
+        )
+    )
+    parsed = hs.parse_old_format(_old_csv(rows))
+    assert parsed.dropped_rows == 1
+    assert len(parsed.options) == 7  # the XX row joined neither side
+    assert len(parsed.futures) == 1
+
+
+def test_option_row_unknown_side_dropped_and_counted_new_format() -> None:
+    """NIT-1 twin for the UDiFF format (IDO row with OptnTp XX)."""
+    trade_date = date(2025, 3, 6)
+    rows = _chain_rows(date(2025, 3, 6), trade_date, date(2025, 3, 27))
+    rows.append(
+        _row(
+            "XX",
+            date(2025, 3, 6),
+            trade_date,
+            strike="22000",
+            open_="10",
+            high="12",
+            low="8",
+            close="9",
+        )
+    )
+    parsed = hs.parse_new_format(_new_csv(rows))
+    assert parsed.dropped_rows == 1
+    assert len(parsed.options) == 7
+    assert len(parsed.futures) == 1
+
+
 # ---------------------------------------------------------------------------
 # Leg simulation goldens — the fill brackets
 # ---------------------------------------------------------------------------
@@ -576,8 +621,63 @@ def test_no_expiry_found_counted_not_fabricated(tmp_path: Path) -> None:
     loader = hs.DayLoader(cache_dir=tmp_path, fetch=fetch)
     discovery = hs.discover_expiry_day(date(2025, 3, 10), loader)
     assert discovery.expiry_date is None
-    # Candidate + 3 walk-back weekdays, 2 format probes each.
-    assert len(calls) == 8
+    # Candidate + 3 walk-back weekdays + 2 forward-probe weekdays,
+    # 2 format probes each: 6 days x 2 = 12 calls.
+    assert len(calls) == 12
+
+
+def test_forward_probe_recovers_too_early_regime_constant(tmp_path: Path) -> None:
+    """MINOR-1 (ii): a slightly-EARLY regime boundary constant is recovered
+    by the forward probe.
+
+    Hand-derivation: week of Mon 2025-09-01 is Tuesday-regime, so the
+    candidate is Tue 2025-09-02 — but suppose the TRUE expiry is still
+    Thu 2025-09-04 (the constant flipped a week early).  The backward
+    walk from Tuesday (Mon 9-1, Fri 8-29, Thu 8-28) can never reach a
+    LATER day; the forward probe (Wed 9-3, then Thu 9-4) finds the file
+    whose NIFTY options expire Thu 2025-09-04.
+    """
+    thursday = date(2025, 9, 4)
+    chain_zip = _zip_bytes("x.csv", _new_csv(_chain_rows(thursday, thursday, date(2025, 9, 30))))
+    fetch, calls = _dict_fetch({_new_url(thursday): chain_zip})
+    loader = hs.DayLoader(cache_dir=tmp_path, fetch=fetch)
+    discovery = hs.discover_expiry_day(date(2025, 9, 1), loader)
+    assert discovery.expiry_date == thursday
+    # The candidate Tuesday was probed FIRST (backward leg precedence).
+    assert calls[0] == _new_url(date(2025, 9, 2))
+    # The winning forward probe is the LAST url fetched.
+    assert calls[-1] == _new_url(thursday)
+
+
+def test_duplicate_expiry_across_weeks_processed_once(tmp_path: Path) -> None:
+    """MINOR-2: a boundary-week walk-back landing on the PRIOR week's
+    expiry is deduped — processed once, counted once.
+
+    Hand-derivation: week 1 (Mon 2025-08-25, Thursday regime) expires
+    Thu 2025-08-28 and carries a chain.  Week 2 (Mon 2025-09-01,
+    Tuesday regime) candidate Tue 2025-09-02 is absent; the backward
+    walk probes Mon 9-1 (absent), Fri 8-29 (absent), then Thu 8-28 —
+    the PRIOR week's expiry file, which of course holds NIFTY options
+    expiring 8-28.  Without dedupe the same expiry day would be
+    simulated twice.
+    """
+    thursday1 = date(2025, 8, 28)
+    chain_zip = _zip_bytes("x.csv", _new_csv(_chain_rows(thursday1, thursday1, date(2025, 9, 30))))
+    fetch, _calls = _dict_fetch({_new_url(thursday1): chain_zip})
+    config = hs.StudyConfig(
+        start=date(2025, 8, 25),
+        end=date(2025, 9, 5),
+        cache_dir=tmp_path / "cache",
+        out_dir=tmp_path / "out",
+    )
+    output = hs.run_study(config, fetch)
+    assert output.counters.weeks_scanned == 2
+    assert output.counters.expiry_days_found == 1
+    assert output.counters.duplicate_expiry_skipped == 1
+    assert output.counters.no_expiry_found == 0
+    # 1 day x 3 variants x (1 no-SL + 3 SL x 2 brackets) = 21 rows, once.
+    assert len(output.results) == 21
+    assert {r.expiry_date for r in output.results} == {thursday1}
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +738,21 @@ def test_404_markers_cached_and_honoured(tmp_path: Path) -> None:
     assert loader2.load(trade_date) is None  # markers honoured, no fetch
 
 
+def test_require_https_guard() -> None:
+    """NIT-3: the https-only claim is ENFORCED — the pure helper the real
+    fetcher applies to the request URL and the response's final URL
+    (redirect-downgrade guard); the injected-fetcher seam is untouched."""
+    url = "https://nsearchives.nseindia.com/content/fo/x.zip"
+    assert hs.require_https(url, context="request URL") == url
+    with pytest.raises(ValueError, match="non-https URL refused"):
+        hs.require_https("http://nsearchives.nseindia.com/x.zip", context="response final URL")
+    with pytest.raises(ValueError, match="non-https"):
+        hs.require_https("file:///etc/passwd", context="request URL")
+    # Both rendered archive templates satisfy the guard by construction.
+    assert hs.require_https(_old_url(date(2019, 2, 7)), context="template")
+    assert hs.require_https(_new_url(date(2025, 3, 6)), context="template")
+
+
 def test_from_cache_only_never_touches_network(tmp_path: Path) -> None:
     loader = hs.DayLoader(cache_dir=tmp_path, fetch=_boom_fetch, from_cache_only=True)
     assert loader.load(date(2025, 3, 6)) is None
@@ -651,6 +766,79 @@ def test_non_zip_payload_skipped_without_marker(tmp_path: Path) -> None:
     loader = hs.DayLoader(cache_dir=tmp_path, fetch=fetch)
     assert loader.load(trade_date) is None
     assert not (tmp_path / "fo_20250306_new.404").is_file()  # transient — retried next run
+
+
+def test_corrupt_cached_zip_is_cache_miss_and_refetched(tmp_path: Path) -> None:
+    """MINOR-3 (b): a corrupt cached zip == cache MISS -> re-download."""
+    trade_date = date(2025, 3, 6)
+    good_zip = _zip_bytes("x.csv", _new_csv(_chain_rows(trade_date, trade_date, date(2025, 3, 27))))
+    # Plant a TRUNCATED zip at the cache path (valid magic, torn payload —
+    # the pre-atomic-write crash shape).
+    corrupt_path = tmp_path / "fo_20250306_new.zip"
+    corrupt_path.write_bytes(good_zip[: len(good_zip) // 2])
+    fetch, calls = _dict_fetch({_new_url(trade_date): good_zip})
+    loader = hs.DayLoader(cache_dir=tmp_path, fetch=fetch)
+    day_file = loader.load(trade_date)
+    assert day_file is not None
+    assert loader.corrupt_cache == 1
+    assert calls == [_new_url(trade_date)]  # re-downloaded exactly once
+    # The healed cache now serves offline (boom fetcher never fires).
+    loader2 = hs.DayLoader(cache_dir=tmp_path, fetch=_boom_fetch)
+    assert loader2.load(trade_date) is not None
+    assert loader2.corrupt_cache == 0
+
+
+def test_corrupt_cached_zip_absent_in_cache_only_mode(tmp_path: Path) -> None:
+    """MINOR-3 (b): in from-cache-only mode a corrupt cache reads as
+    ABSENT (counted) — never a crash, never a network touch."""
+    (tmp_path / "fo_20250306_new.zip").write_bytes(b"PK\x03\x04garbage-not-a-zip")
+    loader = hs.DayLoader(cache_dir=tmp_path, fetch=_boom_fetch, from_cache_only=True)
+    assert loader.load(date(2025, 3, 6)) is None
+    assert loader.corrupt_cache == 1
+
+
+def test_non_404_fetch_failure_day_absent_no_marker(tmp_path: Path) -> None:
+    """MINOR-3 (c), loader level: a persistent non-404 failure (403
+    bot-wall shape) -> day absent, counted, NO .404 marker written."""
+
+    def bot_wall(url: str) -> bytes:
+        raise OSError(f"HTTP 403 bot wall (survived retries): {url}")
+
+    loader = hs.DayLoader(cache_dir=tmp_path, fetch=bot_wall)
+    assert loader.load(date(2025, 3, 6)) is None
+    assert loader.fetch_failed == 2  # both format probes failed
+    assert not (tmp_path / "fo_20250306_new.404").is_file()
+    assert not (tmp_path / "fo_20250306_old.404").is_file()
+
+
+def test_non_404_fetch_failure_run_continues(tmp_path: Path) -> None:
+    """MINOR-3 (c), run level: a raising (non-404) fetcher never crashes
+    ``run_study`` — the week counts ``no_expiry_found`` and the failures
+    land in ``counters.fetch_failed``."""
+
+    def bot_wall(url: str) -> bytes:
+        raise OSError(f"HTTP 403 bot wall: {url}")
+
+    config = hs.StudyConfig(
+        start=date(2025, 3, 3),
+        end=date(2025, 3, 7),
+        cache_dir=tmp_path / "cache",
+        out_dir=tmp_path / "out",
+    )
+    output = hs.run_study(config, bot_wall)
+    assert output.counters.no_expiry_found == 1
+    # 6 probed days (candidate + 3 back + 2 forward) x 2 formats.
+    assert output.counters.fetch_failed == 12
+    assert output.results == []
+
+
+def test_atomic_write_bytes_replaces_and_leaves_no_temp(tmp_path: Path) -> None:
+    """MINOR-3 (a): the cache write goes temp-file -> os.replace."""
+    target = tmp_path / "fo_20250306_new.zip"
+    target.write_bytes(b"old")
+    hs.atomic_write_bytes(target, b"new-payload")
+    assert target.read_bytes() == b"new-payload"
+    assert [p.name for p in tmp_path.iterdir()] == [target.name]  # no stray temp files
 
 
 # ---------------------------------------------------------------------------

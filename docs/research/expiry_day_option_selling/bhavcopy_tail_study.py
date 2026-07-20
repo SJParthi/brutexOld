@@ -60,14 +60,18 @@ Run (operator box — open egress)
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import io
 import json
+import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -102,9 +106,16 @@ FORMAT_PREFERENCE_BOUNDARY: Final[date] = date(2024, 8, 1)
 #: NIFTY weekly-expiry weekday regime boundary.  Thursday historically;
 #: Tuesday after NSE moved its weekly expiry day in 2025.  The exact
 #: effective date is UNVERIFIED from this container — encoded as
-#: 2025-09-01 per public reporting; the holiday/absence walk-back below
-#: self-heals a boundary error of a few weeks (a wrong candidate weekday
-#: simply finds no expiring options and walks/logs honestly).
+#: 2025-09-01 per public reporting.  Discovery robustness around a wrong
+#: constant (honest, direction-split): the BACKWARD holiday/absence
+#: walk-back self-heals only a TOO-LATE boundary constant (true expiry
+#: EARLIER in the week than the candidate); the FORWARD probe (up to
+#: :data:`MAX_FORWARD_STEPS` weekdays past the candidate) recovers a
+#: slightly TOO-EARLY constant (true expiry LATER in the week).  A
+#: boundary error beyond both windows is NOT self-healed — it shows up
+#: honestly as a ``no_expiry_found`` cluster in ``counters.json`` (the
+#: observability signal to re-derive this constant), never a fabricated
+#: expiry.
 WEEKLY_EXPIRY_TUESDAY_FROM: Final[date] = date(2025, 9, 1)
 
 _THURSDAY: Final[int] = 3  # date.weekday() value
@@ -114,6 +125,12 @@ _TUESDAY: Final[int] = 1
 #: expiry weekday when the candidate's file is absent (holiday) or holds
 #: no NIFTY options expiring that day.
 MAX_WALKBACK_STEPS: Final[int] = 3
+
+#: After the backward walk fails, probe at most this many weekdays FORWARD
+#: from the candidate before declaring ``no_expiry_found`` — keeps weeks
+#: findable when the regime boundary constant is slightly EARLY (candidate
+#: Tuesday, true expiry still Thursday).
+MAX_FORWARD_STEPS: Final[int] = 2
 
 _MONTH_ABBREVIATIONS: Final[tuple[str, ...]] = (
     "JAN",
@@ -182,10 +199,10 @@ VARIANTS: Final[tuple[Variant, ...]] = (
 
 NIFTY_LOT_HISTORY: Final[tuple[tuple[date, int], ...]] = (
     (date(2019, 1, 1), 75),  # EXTERNAL-UNVERIFIED back-extension (see above)
-    (date(2021, 7, 29), 50),  # repo lot_size_history.py:61 — Jul-2021 rebasing
-    (date(2024, 4, 26), 25),  # repo lot_size_history.py:62 — NSE FAOP circular
-    (date(2024, 11, 20), 75),  # repo lot_size_history.py:63 — SEBI Rs 15L rule
-    (date(2026, 1, 1), 65),  # repo lot_size_history.py:64 — Jan-2026 circular
+    (date(2021, 7, 29), 50),  # repo lot_size_history.py:60 — Jul-2021 rebasing
+    (date(2024, 4, 26), 25),  # repo lot_size_history.py:61 — NSE FAOP circular
+    (date(2024, 11, 20), 75),  # repo lot_size_history.py:62 — SEBI Rs 15L rule
+    (date(2026, 1, 1), 65),  # repo lot_size_history.py:63 — Jan-2026 circular
 )
 
 
@@ -399,7 +416,12 @@ def parse_old_format(csv_bytes: bytes) -> ParsedDay:
         if not _price_sane(open_, high, low):
             dropped += 1
             continue
-        if instrument.startswith("OPT") and option_type in {"CE", "PE"}:
+        if instrument.startswith("OPT"):
+            if option_type not in {"CE", "PE"}:
+                # An OPT row with an unknown side is unusable — counted,
+                # never silently vanished.
+                dropped += 1
+                continue
             options.append(
                 OptionRow(
                     symbol=symbol,
@@ -457,7 +479,12 @@ def parse_new_format(csv_bytes: bytes) -> ParsedDay:
         if not _price_sane(open_, high, low):
             dropped += 1
             continue
-        if instr_type in {"IDO", "STO"} and option_type in {"CE", "PE"}:
+        if instr_type in {"IDO", "STO"}:
+            if option_type not in {"CE", "PE"}:
+                # An option row with an unknown side is unusable — counted,
+                # never silently vanished.
+                dropped += 1
+                continue
             options.append(
                 OptionRow(
                     symbol=symbol,
@@ -508,6 +535,20 @@ _USER_AGENT: Final[str] = (
 _ZIP_MAGIC: Final[bytes] = b"PK\x03\x04"
 
 
+def require_https(url: str, *, context: str) -> str:
+    """Enforce the https-only claim: raise unless ``url`` is https.
+
+    Applied to BOTH the request URL (before any socket is opened) and the
+    response's FINAL URL after ``urlopen`` (a redirect chain must not
+    downgrade the scheme).  Pure + unit-testable; raising is the honest
+    behavior — never a silent http fetch.
+    """
+    if not url.startswith("https://"):
+        msg = f"require_https: non-https URL refused ({context}): {url!r}"
+        raise ValueError(msg)
+    return url
+
+
 def make_http_fetcher(
     *,
     sleep_seconds: float = 0.75,
@@ -519,20 +560,24 @@ def make_http_fetcher(
     Sleeps ``sleep_seconds`` before EVERY request (pull etiquette against
     a public archive), retries transient failures ``retries`` times with
     exponential backoff, and raises :class:`FetchNotFound` on a 404
-    immediately (no retry — a holiday is not transient).
+    immediately (no retry — a holiday is not transient).  https-only is
+    ENFORCED by :func:`require_https` on the request URL AND on the
+    response's final URL (redirect-downgrade guard).
     """
 
     def fetch(url: str) -> bytes:
+        require_https(url, context="request URL")
         time.sleep(sleep_seconds)
         last_error: Exception | None = None
         for attempt in range(retries):
-            request = urllib.request.Request(  # noqa: S310 — https-only NSE archive hosts (templates above)
+            request = urllib.request.Request(  # noqa: S310 — https-only ENFORCED by require_https above
                 url, headers={"User-Agent": _USER_AGENT}
             )
             try:
-                with urllib.request.urlopen(  # noqa: S310 — same https-only allowlist
+                with urllib.request.urlopen(  # noqa: S310 — https-only ENFORCED (request + final URL)
                     request, timeout=timeout_seconds
                 ) as response:
+                    require_https(response.url, context="response final URL")
                     return bytes(response.read())
             except urllib.error.HTTPError as exc:
                 if exc.code == 404:  # noqa: PLR2004 — HTTP status literal
@@ -578,6 +623,36 @@ def unzip_first_csv(zip_bytes: bytes) -> bytes:
         return archive.read(csv_names[0] if csv_names else names[0])
 
 
+#: The corrupt-zip payload class ``unzip_first_csv`` can raise on a
+#: truncated / bit-rotted / empty archive (``ValueError`` covers the
+#: empty-archive refusal above; ``zlib.error``/``EOFError`` cover a
+#: truncated deflate stream).
+_CORRUPT_ZIP_ERRORS: Final[tuple[type[Exception], ...]] = (
+    zipfile.BadZipFile,
+    ValueError,
+    EOFError,
+    zlib.error,
+)
+
+
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Crash-safe cache write: temp file in the SAME dir, then ``os.replace``.
+
+    A kill mid-write can no longer leave a truncated zip at the final
+    path (the corrupt-cache read path below is the belt for caches
+    written by older harness versions).
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".tmp.")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
 @dataclass(frozen=True)
 class DayFile:
     """One successfully-loaded bhavcopy: which format era + the CSV bytes."""
@@ -590,16 +665,28 @@ class DayFile:
 class DayLoader:
     """Cached, format-auto-selecting bhavcopy loader.
 
-    Caches raw ZIP bytes per (date, format) under ``cache_dir`` so re-runs
-    are fully offline; 404s are cached as ``.404`` marker files.  With
+    Caches raw ZIP bytes per (date, format) under ``cache_dir`` (written
+    atomically — temp file + ``os.replace``) so re-runs are fully
+    offline; 404s are cached as ``.404`` marker files.  With
     ``from_cache_only=True`` (or ``fetch is None``) the network is never
     touched — un-cached days simply load as absent (counted upstream).
+
+    Resilience (all counted, never a whole-run crash):
+
+    * a CORRUPT cached zip (truncated/bit-rotted) is dropped + treated as
+      a cache MISS (re-downloaded; or absent in cache-only mode) —
+      ``corrupt_cache`` counts it;
+    * a persistent NON-404 fetch failure (e.g. a 403 bot-wall surviving
+      the fetcher's retries) is treated as day-absent WITHOUT writing a
+      ``.404`` marker (a re-run retries it) — ``fetch_failed`` counts it.
     """
 
     cache_dir: Path
     fetch: Fetcher | None
     from_cache_only: bool = False
     fetch_calls: int = 0
+    fetch_failed: int = 0
+    corrupt_cache: int = 0
 
     def _zip_path(self, trade_date: date, fmt: str) -> Path:
         return self.cache_dir / f"fo_{trade_date.strftime('%Y%m%d')}_{fmt}.zip"
@@ -613,7 +700,17 @@ class DayLoader:
         for fmt in format_preference(trade_date):
             zip_path = self._zip_path(trade_date, fmt)
             if zip_path.is_file():
-                return DayFile(fmt=fmt, csv_bytes=unzip_first_csv(zip_path.read_bytes()))
+                try:
+                    return DayFile(fmt=fmt, csv_bytes=unzip_first_csv(zip_path.read_bytes()))
+                except _CORRUPT_ZIP_ERRORS:
+                    # Corrupt cached payload == cache MISS: drop it and
+                    # fall through to the (re-)fetch path below.
+                    self.corrupt_cache += 1
+                    zip_path.unlink(missing_ok=True)
+                    _say(
+                        f"  WARNING: corrupt cached zip for {trade_date} [{fmt}] "
+                        "— dropped, treating as cache miss"
+                    )
             if self._marker_path(trade_date, fmt).is_file():
                 continue
             if self.from_cache_only or self.fetch is None:
@@ -624,14 +721,36 @@ class DayLoader:
             except FetchNotFound:
                 self._marker_path(trade_date, fmt).write_bytes(b"")
                 continue
+            except (OSError, ValueError) as exc:
+                # A persistent non-404 failure (403 bot-wall, timeout
+                # exhaustion, DNS, https refusal): the day is treated
+                # absent WITHOUT a .404 marker (a re-run retries it) and
+                # the RUN CONTINUES — never a whole-run crash.
+                self.fetch_failed += 1
+                _say(
+                    f"  WARNING: fetch failed (non-404) for {trade_date} [{fmt}]: "
+                    f"{exc!r} — day treated absent (no marker)"
+                )
+                continue
             if not payload.startswith(_ZIP_MAGIC):
                 # An HTML error/interstitial page served with HTTP 200 —
                 # treated as absent WITHOUT a marker (could be transient
                 # bot-gating; a re-run retries it).
                 _say(f"  WARNING: non-zip payload for {trade_date} [{fmt}] — skipped")
                 continue
-            zip_path.write_bytes(payload)
-            return DayFile(fmt=fmt, csv_bytes=unzip_first_csv(payload))
+            try:
+                csv_bytes = unzip_first_csv(payload)
+            except _CORRUPT_ZIP_ERRORS:
+                # A truncated/corrupt fresh download: never cached (the
+                # cache write happens only AFTER a clean unzip), no
+                # marker — a re-run retries it.
+                _say(
+                    f"  WARNING: corrupt zip payload for {trade_date} [{fmt}] "
+                    "— skipped (not cached)"
+                )
+                continue
+            atomic_write_bytes(zip_path, payload)
+            return DayFile(fmt=fmt, csv_bytes=csv_bytes)
         return None
 
 
@@ -666,6 +785,13 @@ def _previous_weekday(day: date) -> date:
     return out
 
 
+def _next_weekday(day: date) -> date:
+    out = day + timedelta(days=1)
+    while out.weekday() >= 5:  # noqa: PLR2004 — 5/6 are Sat/Sun
+        out += timedelta(days=1)
+    return out
+
+
 @dataclass(frozen=True)
 class ExpiryDiscovery:
     """Outcome of expiry-day discovery for one ISO week."""
@@ -676,31 +802,51 @@ class ExpiryDiscovery:
     fmt: str | None
 
 
+def _probe_expiry_day(week_monday: date, probe: date, loader: DayLoader) -> ExpiryDiscovery | None:
+    """Load one candidate day; a hit == its file holds NIFTY options
+    expiring on the probed day itself."""
+    day_file = loader.load(probe)
+    if day_file is None:
+        return None
+    parsed = parse_day_file(day_file)
+    if any(option.symbol == "NIFTY" and option.expiry == probe for option in parsed.options):
+        return ExpiryDiscovery(
+            week_monday=week_monday,
+            expiry_date=probe,
+            parsed=parsed,
+            fmt=day_file.fmt,
+        )
+    return None
+
+
 def discover_expiry_day(week_monday: date, loader: DayLoader) -> ExpiryDiscovery:
     """Find the week's actual NIFTY weekly expiry day.
 
     Starts at the regime candidate weekday; if the day's file is absent
-    (holiday) OR holds no NIFTY options expiring THAT day, walks back one
-    weekday at a time (max :data:`MAX_WALKBACK_STEPS`) until a file
-    contains NIFTY options expiring on the probed day.  Weeks with none
-    found are reported ``expiry_date=None`` — logged + counted upstream,
-    never fabricated.
+    (holiday) OR holds no NIFTY options expiring THAT day, walks BACK one
+    weekday at a time (max :data:`MAX_WALKBACK_STEPS`); if that fails,
+    probes up to :data:`MAX_FORWARD_STEPS` weekdays FORWARD from the
+    candidate (covers a slightly-EARLY regime boundary constant — see the
+    :data:`WEEKLY_EXPIRY_TUESDAY_FROM` note; the backward walk alone
+    self-heals only a too-LATE constant).  A hit requires a file holding
+    NIFTY options expiring on the probed day itself.  Weeks with none
+    found are reported ``expiry_date=None`` — logged + counted upstream
+    (the ``no_expiry_found`` cluster in ``counters.json``), never
+    fabricated.
     """
-    probe = weekly_expiry_candidate(week_monday)
+    candidate = weekly_expiry_candidate(week_monday)
+    probe = candidate
     for _step in range(MAX_WALKBACK_STEPS + 1):
-        day_file = loader.load(probe)
-        if day_file is not None:
-            parsed = parse_day_file(day_file)
-            if any(
-                option.symbol == "NIFTY" and option.expiry == probe for option in parsed.options
-            ):
-                return ExpiryDiscovery(
-                    week_monday=week_monday,
-                    expiry_date=probe,
-                    parsed=parsed,
-                    fmt=day_file.fmt,
-                )
+        found = _probe_expiry_day(week_monday, probe, loader)
+        if found is not None:
+            return found
         probe = _previous_weekday(probe)
+    probe = candidate
+    for _step in range(MAX_FORWARD_STEPS):
+        probe = _next_weekday(probe)
+        found = _probe_expiry_day(week_monday, probe, loader)
+        if found is not None:
+            return found
     return ExpiryDiscovery(week_monday=week_monday, expiry_date=None, parsed=None, fmt=None)
 
 
@@ -953,6 +1099,9 @@ class StudyCounters:
     expiry_days_found: int = 0
     no_expiry_found: int = 0
     no_future: int = 0
+    duplicate_expiry_skipped: int = 0
+    fetch_failed: int = 0
+    corrupt_cache: int = 0
     dropped_rows: int = 0
     variant_skips: dict[str, int] = field(default_factory=dict)
     cost_refused_days: int = 0
@@ -982,6 +1131,7 @@ def run_study(config: StudyConfig, fetch: Fetcher | None) -> StudyOutput:
     counters = StudyCounters()
     results: list[VariantDayResult] = []
     no_expiry_weeks: list[date] = []
+    seen_expiry_dates: set[date] = set()
     for monday in iter_week_mondays(config.start, config.end):
         candidate = weekly_expiry_candidate(monday)
         if candidate < config.start or candidate > config.end:
@@ -993,6 +1143,16 @@ def run_study(config: StudyConfig, fetch: Fetcher | None) -> StudyOutput:
             no_expiry_weeks.append(monday)
             _say(f"  week of {monday}: no_expiry_found (candidate {candidate})")
             continue
+        if discovery.expiry_date in seen_expiry_dates:
+            # A boundary-week holiday walk-back can land on the PRIOR
+            # week's expiry — process each expiry date exactly ONCE.
+            counters.duplicate_expiry_skipped += 1
+            _say(
+                f"  week of {monday}: duplicate expiry {discovery.expiry_date} "
+                "(already processed) — skipped"
+            )
+            continue
+        seen_expiry_dates.add(discovery.expiry_date)
         chain = extract_chain(discovery.parsed, discovery.expiry_date)
         if chain is None:
             counters.no_future += 1
@@ -1006,6 +1166,8 @@ def run_study(config: StudyConfig, fetch: Fetcher | None) -> StudyOutput:
         if config.apply_costs and any(row.cost_refused for row in day_rows):
             counters.cost_refused_days += 1
         results.extend(day_rows)
+    counters.fetch_failed = loader.fetch_failed
+    counters.corrupt_cache = loader.corrupt_cache
     return StudyOutput(results=results, counters=counters, no_expiry_weeks=no_expiry_weeks)
 
 
@@ -1419,6 +1581,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "expiry_days_found": output.counters.expiry_days_found,
                 "no_expiry_found": output.counters.no_expiry_found,
                 "no_future": output.counters.no_future,
+                "duplicate_expiry_skipped": output.counters.duplicate_expiry_skipped,
+                "fetch_failed": output.counters.fetch_failed,
+                "corrupt_cache": output.counters.corrupt_cache,
                 "dropped_rows": output.counters.dropped_rows,
                 "variant_skips": output.counters.variant_skips,
                 "cost_refused_days": output.counters.cost_refused_days,
