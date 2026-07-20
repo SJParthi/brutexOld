@@ -35,7 +35,7 @@ _NOW_ISO = "2026-06-08T12:00:00.000001+00:00"
 
 
 def _rows(n: int = 3) -> list[tuple[Any, ...]]:
-    """*n* well-formed 17-field ledger row tuples (the ``to_rows`` shape)."""
+    """*n* well-formed 18-field ledger row tuples (the ``to_rows`` shape)."""
     out: list[tuple[Any, ...]] = []
     for i in range(n):
         out.append(
@@ -57,6 +57,9 @@ def _rows(n: int = 3) -> list[tuple[Any, ...]]:
                 (None if i % 3 == 1 else 0),
                 (None if i % 3 == 1 else 0),
                 (None if i % 3 == 1 else "live"),
+                # failed_streak — a running counter, always a REAL int (the
+                # store schema's non-null pa.int64(); FAILED rows carry it).
+                (2 if i % 4 == 2 else 0),
             )
         )
     return out

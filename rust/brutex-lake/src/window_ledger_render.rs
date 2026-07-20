@@ -2,7 +2,7 @@
 //!
 //! DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 (MIGRATION.md #1918; evidence
 //! predecessor: the #1917 spike, `docs/lake/g10_window_ledger_byte_parity/`).
-//! Renders the durable window ledger's 17-column row table
+//! Renders the durable window ledger's 18-column row table
 //! (`brutex/data/window_ledger_store.py::_rows_to_table`) from uncompressed
 //! Arrow IPC bytes to parquet bytes through the crate's rev-pinned polars
 //! write path — the SAME shared streaming-sink core the bars/options render
@@ -22,7 +22,7 @@
 //! lake_manifest read only `(mtime_ns:size)` stat tokens), so this module's
 //! contract is the module's OWN documented row-level fixed point
 //! (`window_ledger_store.py:16`): the rendered parquet must yield IDENTICAL
-//! ordered 17-column rows through every production reader (pyarrow, polars,
+//! ordered 18-column rows through every production reader (pyarrow, polars,
 //! DuckDB — the reader-parity gates). Byte-identity with pyarrow is
 //! MEASURED-INFEASIBLE and deliberately NOT claimed; golden re-baseline is
 //! FORBIDDEN (the frozen goldens stand — the probe pin
@@ -52,7 +52,7 @@
 //! VARCHAR compare, and the merge conflict rule orders the raw strings. A
 //! render that "helpfully" parsed them into a timestamp dtype would silently
 //! change that comparison surface — so the render NEVER re-types a column:
-//! the frame arrives with the facade-built dtypes (String × 9, Int64 × 7)
+//! the frame arrives with the facade-built dtypes (String × 10, Int64 × 8)
 //! and the IPC round-trip preserves them exactly
 //! (`ledger_schema_dtypes_exact` pins it; the facade's burn-in re-verifies
 //! per process). Honest disclosure: polars String maps to Arrow
@@ -79,7 +79,7 @@ use crate::{defaults_writer_options, render_at_ffi_boundary, render_parquet_with
 /// The ledger render core: uncompressed Arrow IPC bytes → parquet bytes via
 /// the shared streaming-sink chain with the zero-kwarg defaults options
 /// (module docs). A 0-ROW frame is a VALID input (an empty ledger save) and
-/// renders a readable 17-column parquet with ZERO row groups (the documented
+/// renders a readable 18-column parquet with ZERO row groups (the documented
 /// polars-vs-pyarrow empty-file structure divergence — footer-schema-based
 /// readers are unaffected, the reader-parity arm (f) proves it); an EMPTY
 /// IPC payload / garbage payload is a clean `PolarsError` (the shared core's
@@ -104,9 +104,9 @@ pub fn render_ledger_parquet_from_ipc(py: Python<'_>, ipc_bytes: &[u8]) -> PyRes
 mod tests {
     use super::*;
 
-    /// The 17 ledger columns in the store's `_COLUMNS` order
-    /// (`window_ledger_store.py` — 11 core + the 6 appended optionals).
-    const LEDGER_COLUMNS: [&str; 17] = [
+    /// The 18 ledger columns in the store's `_COLUMNS` order
+    /// (`window_ledger_store.py` — 11 core + the 7 appended optionals).
+    const LEDGER_COLUMNS: [&str; 18] = [
         "market",
         "security_id",
         "interval",
@@ -124,10 +124,11 @@ mod tests {
         "empty_retries",
         "transient_retries",
         "streak_provenance",
+        "failed_streak",
     ];
 
-    /// Build a ledger-shaped 17-column frame (the facade's dtypes: String ×10,
-    /// Int64 ×7) with per-column nulls in every NULLABLE column — plus its
+    /// Build a ledger-shaped 18-column frame (the facade's dtypes: String ×10,
+    /// Int64 ×8) with per-column nulls in every NULLABLE column — plus its
     /// uncompressed IPC serialisation. Row `i` is keyed `SEC{i:04}` so
     /// row-order assertions are unambiguous.
     fn ledger_sample_ipc(rows: usize) -> (DataFrame, Vec<u8>) {
@@ -155,6 +156,9 @@ mod tests {
         // Nullable string 17th column (club-5 #1299): None on the legacy arm.
         let streak_provenance: Vec<Option<&str>> =
             (0..n).map(|i| (i % 3 != 1).then_some("live")).collect();
+        // failed_streak (18th, appended LAST) — a running counter, always a
+        // REAL i64 (the store schema's non-null pa.int64()).
+        let failed_streak: Vec<i64> = (0..n).map(|i| if i % 4 == 2 { 2 } else { 0 }).collect();
         let df = DataFrame::new(
             n,
             vec![
@@ -179,6 +183,7 @@ mod tests {
                 Series::new("empty_retries".into(), nullable_i64.clone()).into(),
                 Series::new("transient_retries".into(), nullable_i64).into(),
                 Series::new("streak_provenance".into(), streak_provenance).into(),
+                Series::new("failed_streak".into(), failed_streak).into(),
             ],
         )
         .unwrap();
@@ -192,7 +197,7 @@ mod tests {
 
     #[test]
     fn ledger_schema_dtypes_exact() {
-        // The 17-col schema round-trips EXACTLY — names, ORDER and dtypes.
+        // The 18-col schema round-trips EXACTLY — names, ORDER and dtypes.
         // CRITICAL WATCH-ITEM: `last_attempt_at` (and `first_seen_at`) MUST
         // stay String — a timestamp dtype would silently change the DuckDB
         // `last_attempt_at >= ?` VARCHAR-compare surface
@@ -231,6 +236,7 @@ mod tests {
             "bars_net_new",
             "empty_retries",
             "transient_retries",
+            "failed_streak",
         ] {
             assert_eq!(
                 back.column(name).unwrap().dtype(),
@@ -302,11 +308,11 @@ mod tests {
 
     #[test]
     fn ledger_empty_frame_renders_zero_row_groups() {
-        // The EMPTY-ledger watch-item (spec arm f): a 0-ROW 17-col frame is a
+        // The EMPTY-ledger watch-item (spec arm f): a 0-ROW 18-col frame is a
         // VALID save shape; polars renders ZERO row groups (pyarrow renders
-        // one empty group — the documented structure divergence) and the 17
+        // one empty group — the documented structure divergence) and the 18
         // columns live in the FOOTER schema, so footer-based readers
-        // (pyarrow / polars / DuckDB describe) still see all 17.
+        // (pyarrow / polars / DuckDB describe) still see all 18.
         let (_, ipc) = ledger_sample_ipc(0);
         let parquet = render_ledger_parquet_from_ipc_impl(&ipc).unwrap();
         assert_eq!(&parquet[..4], b"PAR1");
@@ -317,7 +323,7 @@ mod tests {
             .finish()
             .unwrap();
         assert_eq!(back.height(), 0);
-        assert_eq!(back.width(), 17);
+        assert_eq!(back.width(), 18);
         assert_eq!(
             back.get_column_names()
                 .iter()

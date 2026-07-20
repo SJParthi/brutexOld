@@ -6,7 +6,7 @@ MIGRATION.md #1918 — evidence predecessor: the #1917 spike,
 ``BRUTEX_LAKE_RUST_LEDGER_RENDER`` is set truthy, the window-ledger store's
 ONE shared parquet render (``window_ledger_store._ledger_parquet_bytes`` —
 the body both ``append_ledger_delta`` and ``save_window_ledger`` write
-through) routes its 17-column row table through the ``brutex_lake`` crate's
+through) routes its 18-column row table through the ``brutex_lake`` crate's
 ``render_ledger_parquet_from_ipc`` (the rev-pinned polars streaming-sink
 write path), with the verbatim pyarrow render retained as the LIVE oracle
 (``window_ledger_store._render_ledger_parquet_python``).
@@ -26,7 +26,7 @@ off-box backup sha256s the DESTINATION copy self-consistently;
 ``lake_revision`` / ``lake_manifest`` read only ``(mtime_ns:size)`` stat
 tokens — a rewrite moving them is EXPECTED), so the sound + sufficient
 contract is the store module's OWN documented row-level fixed point
-(``window_ledger_store.py:16``): identical ordered 17-column rows through
+(``window_ledger_store.py:16``): identical ordered 18-column rows through
 every production reader (pyarrow · polars · DuckDB — the reader-parity
 gates, ``tests/integration/test_window_ledger_rust_reader_parity.py``).
 The burn-in below therefore compares ROW EQUIVALENCE, never bytes — the
@@ -90,7 +90,7 @@ change the DuckDB ``last_attempt_at >= ?`` VARCHAR-compare surface,
 ``db_view._window_counts_since``) still mismatches → autorevert.
 
 There is NO schema-shape gate (the PR-1 layer-3 extension): the ledger
-writer has exactly ONE 17-column schema by construction
+writer has exactly ONE 18-column schema by construction
 (``window_ledger_store._rows_to_table`` builds every file), unlike the
 option heal path whose stored-schema space is open-ended.
 
@@ -179,7 +179,7 @@ _LEDGER_STRING_COLUMNS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: The full 17-column on-disk order — MUST equal
+#: The full 18-column on-disk order — MUST equal
 #: ``window_ledger_store._COLUMNS`` (pinned by test, not imported: this leaf
 #: must stay importable by the store without a cycle, the
 #: ``db_view._LEDGER_ROW_COLUMNS`` precedent).
@@ -201,6 +201,10 @@ LEDGER_COLUMNS: Final[tuple[str, ...]] = (
     "empty_retries",
     "transient_retries",
     "streak_provenance",
+    # DEC-AUTO-RESUME-ZERO-SURPRISES-001 appended the running counter LAST —
+    # an Int64 column (the store schema's ``pa.int64()``), so it deliberately
+    # does NOT join :data:`_LEDGER_STRING_COLUMNS`.
+    "failed_streak",
 )
 
 #: Process-local OFF latch — the disable reason, or ``None`` when live (the
@@ -347,7 +351,7 @@ def _crate_pinned_version(crate: ModuleType) -> object:
 
 
 def _ledger_frame(rows: Sequence[tuple[Any, ...]], pl: ModuleType) -> Any:
-    """Build the 17-column polars frame from the store's row tuples.
+    """Build the 18-column polars frame from the store's row tuples.
 
     The engaged-path twin of ``window_ledger_store._rows_to_table``: the
     SAME :data:`LEDGER_COLUMNS` order (test-pinned against the store), the
@@ -355,7 +359,7 @@ def _ledger_frame(rows: Sequence[tuple[Any, ...]], pl: ModuleType) -> Any:
     ``pa.string()``, ``pl.Int64`` where it says ``pa.int64()``), built
     ``strict=True`` so a mis-typed cell raises (→ the caller's degrade set)
     instead of coercing silently. A 0-row input builds a valid EMPTY
-    17-column frame (the empty-ledger save shape).
+    18-column frame (the empty-ledger save shape).
     """
     schema = {
         name: (pl.String if name in _LEDGER_STRING_COLUMNS else pl.Int64) for name in LEDGER_COLUMNS
@@ -425,7 +429,7 @@ def render_ledger_parquet_bytes(
     Parameters
     ----------
     rows
-        The serialised 17-field ledger row tuples
+        The serialised 18-field ledger row tuples
         (:meth:`WindowLedger.to_rows` shape) — the SAME sequence the oracle
         table is built from; the engaged path builds the polars frame from
         them (:func:`_ledger_frame`).

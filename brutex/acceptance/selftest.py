@@ -452,8 +452,11 @@ _LEDGER_FIELDS: Final[tuple[str, ...]] = (
     "empty_retries",
     "transient_retries",
     # DEC-STREAK-PROVENANCE-001 (club-P, PR #1547) appended the provenance
-    # column LAST — the mirror follows the ledger's appended-LAST law.
+    # column, then DEC-AUTO-RESUME-ZERO-SURPRISES-001 appended
+    # ``failed_streak`` LAST — the mirror follows the ledger's
+    # appended-LAST law (window_ledger_store._COLUMNS is the authority).
     "streak_provenance",
+    "failed_streak",
 )
 
 
