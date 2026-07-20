@@ -43,13 +43,13 @@ Active-branch blurb + MIGRATION.md #1979.)
 Earlier: 2026-07-15 (Club X merge vehicle, branch
 `integration/club-x-dhan` — the GATED-LAST fold of the dhan/feeds pack as ONE
 merge event off main d6ac9f85: PR #1492 DEC-DHAN-SPOT-FEED-001 (MIGRATION.md
-#1797, umbrella) + DEC-DHAN-ROLLING-FLOOR-001 (#1798), carrying the parked
-PR #1482 feed-interface pack verbatim (DEC-FEED-INTERFACE-001 #1795 +
-DEC-FEED-LAKE-ROOT-001 #1796, ADR-0021 — diff-verified fully contained, #1482
+#2003, umbrella) + DEC-DHAN-ROLLING-FLOOR-001 (#2004), carrying the parked
+PR #1482 feed-interface pack verbatim (DEC-FEED-INTERFACE-001 #2001 +
+DEC-FEED-LAKE-ROOT-001 #2002, ADR-0021 — diff-verified fully contained, #1482
 recommended closed as superseded) · PR #1501 DEC-DHAN-ROLLING-OPTIONS-001
-(#1799). The three colliding ledger rows were renumbered to the free
+(#2005). The three colliding ledger rows were renumbered to the free
 consecutive #1795–#1799 block (DEC-IDs are the stable handles per
-DEC-LEDGER-RENUMBER-001). NOTE: the club carries #1492's retirement of the
+DEC-LEDGER-RENUMBER-001), then #1795–#1799 → #2001–#2005 at the TRAIN A census weave. NOTE: the club carries #1492's retirement of the
 `no-dhan-guard` CI gate (DEC-DHAN-GUARD-RETIRE-002, ADR-0022) — an
 operator/coordinator POLICY land, so the club PR stays parked-DRAFT until that
 ruling. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; each member's full record
@@ -95,7 +95,7 @@ NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
 identity untouched. This header carries the pointer, never the story — the
 full record lives in the §1 Active-branch blurb + MIGRATION.md #1851.)
 Earlier: 2026-07-15 (DEC-DASHBOARD-BATCHA-REMAINDER-001, MIGRATION.md
-#1795, branch `claude/dbhtml-batcha-refold` — the Batch-A ADDITIVE REMAINDER
+#2026 (renumbered #1795 → #2026 at the TRAIN A census weave), branch `claude/dbhtml-batcha-refold` — the Batch-A ADDITIVE REMAINDER
 refolded onto main after adopting main's landed #1720/#1763 disposition (the
 coordinator ruling for the stale PR #1368; the PR itself is recommended
 CLOSED AS SUPERSEDED): (1) the bx-datepicker.js REBUILD-LEAK fix — the
@@ -114,23 +114,23 @@ pins; the 147-file dashboard battery + main's #1720/#1763/#1791 suites pass
 UNMODIFIED. DISPLAY zone only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
 no lake/schema/scope/vocab/rate change. This header carries the pointer,
 never the story — the full record lives in the §1 Active-branch blurb +
-MIGRATION.md #1795.)
+MIGRATION.md #2026.)
 Earlier: 2026-07-19 (CLUB REGIME merge vehicle, branch
 `integration/club-regime` — the stack-fold of FOUR regime-robustness member
 PRs as ONE merge event off main tip 184a48a4: #1677 DEC-REGIME-TAXONOMY-001
-(MIGRATION.md #1961 — the shared regime taxonomy leaf
+(MIGRATION.md #2010 — the shared regime taxonomy leaf
 `brutex/metrics/regime_taxonomy.py`: trend strata + VIX bands +
 structural-era boundaries under the RegimeRow refusal pattern, the SEBI
 2021-09-01 boundary honestly LABELED-UNVERIFIED; `TAXONOMY_VERSION = 1`) ·
-#1679 DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#1962 — Stage-4 cascade filter
+#1679 DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#2011 — Stage-4 cascade filter
 #10, default-OFF `extreme_vol_stratum`: the 2024+ |daily move| >= 2%
 MUST-SURVIVE stratum; FAIL on negative stratum expectancy over >= 30 trades
 or variance ratio > 4.0; thin/zero strata ABSTAIN visibly, never reject) ·
-#1680 DEC-REGIME-FRAGILITY-GATE-001 (#1963 — cascade filter #11, default-OFF
+#1680 DEC-REGIME-FRAGILITY-GATE-001 (#2012 — cascade filter #11, default-OFF
 `regime_fragility`: >80%-of-positive-P&L regime concentration (exact integer
 4/5 cross-multiply) + cross-era expectancy sign-flip; evidence computation
 config-gated — flag-OFF byte- AND log-identical) · #1684
-DEC-REGIME-REJECT-TIER-001 (#1964 — the `?preset=regime_robust` /results
+DEC-REGIME-REJECT-TIER-001 (#2013 — the `?preset=regime_robust` /results
 read-time membership filter over the cascade join overlay; OPTION A shipped,
 OPTION B documented; activation operator-gated). ALL default-OFF / INERT —
 the frozen sweep goldens pass UNMODIFIED, fixtures byte-untouched; the
@@ -138,11 +138,11 @@ cascade config never enters the #1715 tuple digest, so a future flag-ON is a
 semantics-only operator ruling (NO re-sweep, NO re-key); every threshold is
 a CONSERVATIVE UNPROVEN default pending the first flag-ON calibration sweep.
 The four member ledger entries renumbered #1957–#1960 → #1961–#1964 at the
-fold (main took #1957–#1959 via club-O; DEC-LEDGER-RENUMBER-001).
+fold (main took #1957–#1959 via club-O), then #1961–#1964 → #2010–#2013 at the TRAIN A census weave (DEC-LEDGER-RENUMBER-001).
 Cascade/display tier only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. This header carries pointers, never the
 story — each member's full record lives in the §1 Active-branch blurb +
-MIGRATION.md #1961–#1964.)
+MIGRATION.md #2010–#2013.)
 Earlier: 2026-07-19 (BRUTEX-OPS CRATE UNIFICATION vehicle, branch
 `integration/brutex-ops-unified` — the HAND-UNIFICATION of the three lane
 PRs that each shipped a DIVERGENT FULL COPY of the NEW `rust/brutex-ops`
@@ -252,7 +252,7 @@ lake/schema/scope/vocab/rate change. This header carries the pointer,
 never the story — the full record lives in the §1 Active-branch blurb +
 MIGRATION.md #1971.)
 Earlier: 2026-07-17 (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md
-#1962, branch `claude/rust-slice-t11-resample` — T11 "resample tails" of the
+#2008 (renumbered #1962 → #2008 at the TRAIN A census weave), branch `claude/rust-slice-t11-resample` — T11 "resample tails" of the
 ADR-0020 conversion: the DAILY residues (`fno_daily_resample` +
 `spot_daily_resample` cores) gain a Rust route behind the NEW independent
 default-OFF `BRUTEX_LAKE_RUST_RESAMPLE_DAILY` facade
@@ -266,10 +266,10 @@ real-wheel parity suite at CandleBar+Decimal-repr strength + whole-prebuild
 sha256 A/B (daily-ON and both-ON). Honesty banner verbatim: "expected payoff
 ≈ 0 — conversion is for uniformity, not speed". ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
-blurb + MIGRATION.md #1962 — this header carries the pointer, never the
+blurb + MIGRATION.md #2008 — this header carries the pointer, never the
 story.)
-Earlier: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
-provisional, branch `claude/rust-observability-lane` — the observability
+Earlier: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #2007
+(renumbered #1961 → #2007 at the TRAIN A census weave; was #1961 provisional), branch `claude/rust-observability-lane` — the observability
 Rust decision-kernel lane, FIRST CUT: the four pure detector/stamp laws
 (loop_watchdog `check_once` tiered stall machine · watchdog worker-heartbeat
 decide · sla predicate+hysteresis edge · stage_stamp shape-index + verdict
@@ -307,9 +307,9 @@ wired). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
 REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes; ONE
 new env var (`BRUTEX_OBSERVABILITY_RUST`). This header carries the
 pointer, never the story — the full record lives in the §1 Active-branch
-blurb + MIGRATION.md #1961.)
-Earlier: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960
-(renumbered #1954 → #1955 → #1960 — the last hop at the 2026-07-18
+blurb + MIGRATION.md #2007.)
+Earlier: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #2006
+(renumbered #1954 → #1955 → #1960 → #2006 — the last hop at the TRAIN A census weave, the prior at the 2026-07-18
 merge-reconcile, main took #1955 for DEC-STRATEGIES-RUST-COMBO-001;
 DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001), branch
 `claude/notify-rust-core` — the notification PURE laws convert to Rust
@@ -332,7 +332,7 @@ speed; ships INERT, a default flip needs its own DEC. NEW non-required
 notify-rust-parity.yml lane + the facade mutmut pair; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in the
-§1 Active-branch blurb + MIGRATION.md #1960.)
+§1 Active-branch blurb + MIGRATION.md #2006.)
 Earlier: 2026-07-19 (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962,
 branch `claude/rust-calendar-leaves` — PR-1 of the calendar-leaf Rust
 conversion: NEW standalone crate `rust/brutex-calendar` (pyo3 0.29
@@ -4302,11 +4302,11 @@ hostile-review pass._
   #1979 + the lane PR body.)
   Earlier: `integration/club-x-dhan` (**Club X — dhan/feeds merge vehicle,
   GATED-LAST in the drain queue** — the fold of PR #1492 (DEC-DHAN-SPOT-FEED-001,
-  MIGRATION.md #1797 umbrella + DEC-DHAN-ROLLING-FLOOR-001 #1798 — the standalone
+  MIGRATION.md #2003 umbrella + DEC-DHAN-ROLLING-FLOOR-001 #2004 — the standalone
   read-only Dhan v2 SPOT feed track, ADR-0022; it CARRIES the parked PR #1482
-  feed-interface pack verbatim: DEC-FEED-INTERFACE-001 #1795 + DEC-FEED-LAKE-ROOT-001
-  #1796, ADR-0021 — diff-verified fully contained, #1482 recommended closed as
-  superseded) + PR #1501 (DEC-DHAN-ROLLING-OPTIONS-001 #1799 — the Dhan rolling-ATM
+  feed-interface pack verbatim: DEC-FEED-INTERFACE-001 #2001 + DEC-FEED-LAKE-ROOT-001
+  #2002, ADR-0021 — diff-verified fully contained, #1482 recommended closed as
+  superseded) + PR #1501 (DEC-DHAN-ROLLING-OPTIONS-001 #2005 — the Dhan rolling-ATM
   expired-options + Greeks track) as ONE merge event off main d6ac9f85. NOTE: #1492
   retires the `no-dhan-guard` CI gate under its own DEC-DHAN-GUARD-RETIRE-002
   (ADR-0022) — an operator/coordinator POLICY land, so this club stays parked-DRAFT
@@ -4314,8 +4314,8 @@ hostile-review pass._
   record lives in its own MIGRATION.md entry + ADR — this line carries pointers,
   never the story.)
   Earlier: `claude/dhan-spot-feed`
-  (**DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1797 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
-  #1798** — the standalone READ-ONLY Dhan v2 SPOT feed track (ADR-0022), merged forward
+  (**DEC-DHAN-SPOT-FEED-001, MIGRATION.md #2003 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
+  #2004** — the standalone READ-ONLY Dhan v2 SPOT feed track (ADR-0022), merged forward
   onto main 43e8ca93 with the delta: the SECOND historical feed nests its whole lake at
   `<lake_root>/feeds/dhan/` (the ADR-0021 feed-root law — Groww top-root byte-identical by
   object identity; engine + dashboards structurally blind); pulls EXACTLY 4 indices —
@@ -4328,7 +4328,7 @@ hostile-review pass._
   pull-halt (`is_terminal_pull_stop` → the CRITICAL Telegram alert); the `no-dhan-guard`
   is RETIRED; probe kit (incl. `--floor-edge`) shipped UNRUN — every `*.dhan.co` host is
   egress-blocked, zero Dhan facts flipped. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
-  the full record lives in MIGRATION.md #1797/#1798 + ADR-0022; Dhan facts table in §6b.)
+  the full record lives in MIGRATION.md #2003/#2004 + ADR-0022; Dhan facts table in §6b.)
   Earlier: `claude/brutex-lake-box-wheel` (**DEC-BRUTEX-LAKE-BOX-WHEEL-001,
   MIGRATION.md #1986 (provisional — renumber-at-landing; DEC-IDs are the stable handles
   per DEC-LEDGER-RENUMBER-001)** — the brutex-lake wheel joins the operator BOX build
@@ -4383,8 +4383,8 @@ hostile-review pass._
   BRUTEX_LAKE_RUST_* seam stays default-OFF (flag-OFF byte-identity is the seams' own
   standing OFF-arm bomb-spy pins — installing the wheel changes nothing flag-OFF).)
   Earlier: `claude/kernel-cache-soak-harness`
-  (**DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1971 (renumbered #1962 → #1971 at
-  the 2026-07-19 slice-5 merge-forward reconcile — main took #1962 for
+  (**DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #2024 (renumbered #1962 → #1971 → #2024 at
+  the 2026-07-19 slice-5 merge-forward reconcile, then the TRAIN A census weave — main took #1962 for
   DEC-RUST-CALENDAR-LEAVES-001 and split PRs #1703/#1704 reserve #1969/#1970;
   DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001)** — the §8 M4-Pro
   kernel-cache OFF↔ON A/B SOAK HARNESS: `scripts/ci/kernel_cache_soak.py`
@@ -4467,10 +4467,10 @@ hostile-review pass._
   script-side (the budget-fence precedent — the executed fork-storm-at-0 /
   sampler-death-at-inf repros both now refuse); runbook §7 reworded to the
   sandbox-mechanics truth; the per-finding record
-  lives ONLY in MIGRATION.md #1962. ENGINE UNCHANGED —
+  lives ONLY in MIGRATION.md #2024. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; zero
   `brutex/` source edits; no scope/vocab/rate change; the full record lives
-  in MIGRATION.md #1971 — this header carries the pointer, never the story.)
+  in MIGRATION.md #2024 — this header carries the pointer, never the story.)
   Earlier: `integration/club-s2-results-v2`
   (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
   overfit-recount recovery channel, folded onto the CLUB S2 members
@@ -4537,7 +4537,7 @@ hostile-review pass._
   identity untouched — the recording is audit-PAYLOAD only. The full record
   lives in MIGRATION.md #1851.)
   Earlier: `claude/dbhtml-batcha-refold`
-  (**DEC-DASHBOARD-BATCHA-REMAINDER-001, MIGRATION.md #1795** — the Batch-A
+  (**DEC-DASHBOARD-BATCHA-REMAINDER-001, MIGRATION.md #2026 (renumbered #1795 → #2026 at the TRAIN A census weave)** — the Batch-A
   additive remainder REFOLDED onto main tip 1ad31acd after adopting main's
   landed #1720/#1763 disposition per the coordinator's binding ruling for
   the stale PR #1368 (merge-base f171835f); the PR itself is RECOMMENDED
@@ -4611,7 +4611,7 @@ hostile-review pass._
   Earlier: `integration/club-regime`
   (**CLUB REGIME merge vehicle** — the stack-fold of FOUR regime-robustness
   member PRs as ONE merge event off main tip 184a48a4, in stack order:
-  **#1677** DEC-REGIME-TAXONOMY-001 (MIGRATION.md #1961) — the shared regime
+  **#1677** DEC-REGIME-TAXONOMY-001 (MIGRATION.md #2010) — the shared regime
   taxonomy leaf `brutex/metrics/regime_taxonomy.py` (pure stdlib):
   `TrendStratum` + `trend_stratum_from_lens_token` over the session-lens
   BOS/CHoCH tokens, `VolBand` + `classify_vix_band` (edges 13/17/25),
@@ -4621,7 +4621,7 @@ hostile-review pass._
   2024-11-14 weekly-expiry rationalization verified via the expiry calendar)
   + the COVID overlay; `TAXONOMY_VERSION = 1`; the sha256 vocabulary drift
   pin locks the canonical constants. **#1679**
-  DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#1962) — Stage-4 cascade filter
+  DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#2011) — Stage-4 cascade filter
   **#10** (`extreme_vol_stratum`, default-OFF on `CascadeConfig`):
   `brutex/metrics/extreme_vol_stratum.py` classifies 2024+ sessions with
   |daily move| >= 2.0% as the must-survive stratum; a finalist FAILS iff its
@@ -4631,7 +4631,7 @@ hostile-review pass._
   strata ABSTAIN — recorded visibly on the verdict, never a rejection, never
   a silent pass; per-stratum stats surfaced (`extreme_vol_stats`) for the
   operator calibration sweep. **#1680** DEC-REGIME-FRAGILITY-GATE-001
-  (#1963, stacked on #1677 + #1679) — cascade filter **#11**
+  (#2012, stacked on #1677 + #1679) — cascade filter **#11**
   (`regime_fragility`, default-OFF): `brutex/metrics/regime_fragility.py` —
   regime_concentration (>80% of positive P&L in ONE trend or era stratum;
   the exact integer `pos*5 > total*4` cross-multiply, no float epsilon) +
@@ -4640,7 +4640,7 @@ hostile-review pass._
   the evidence threading (`compute_regime_evidence`) is CONFIG-GATED in
   `brutex/engine/cascade_wire.py`, so flag-OFF computes nothing and emits
   nothing — byte- AND log-identical (caplog-pinned). **#1684**
-  DEC-REGIME-REJECT-TIER-001 (#1964) — the `?preset=regime_robust` /results
+  DEC-REGIME-REJECT-TIER-001 (#2013) — the `?preset=regime_robust` /results
   read-time membership filter in `brutex/dashboard/sweep_results_view.py`:
   excludes rows whose cascade verdict FAILED at the two regime stages
   (producer-derived `REGIME_REJECT_STAGES`), counts abstains via the
@@ -4663,7 +4663,7 @@ hostile-review pass._
   the §2 Rule 3 five-site law), D4 in-sweep stratification, the SEBI primary
   circular retrieval, unsupported-stratum attribution scoping. The union
   surfaces at the fold were docs/MIGRATION.md (the four member entries
-  renumbered #1957–#1960 → #1961–#1964 — main took #1957–#1959 via club-O;
+  renumbered #1957–#1960 → #1961–#1964 — main took #1957–#1959 via club-O — then #1961–#1964 → #2010–#2013 at the TRAIN A census weave;
   DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001) + ci.yml
   (additive gate union). Cascade/display tier only — ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
@@ -4889,7 +4889,7 @@ hostile-review pass._
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes;
   ONE new env var `BRUTEX_NIGHTLY_RUST`; run identity untouched.)
   Earlier: `claude/rust-slice-t11-resample` (**DEC-LAKE-RUST-RESAMPLE-DAILY-001,
-  MIGRATION.md #1962** — T11 "resample tails" (phase A+B) of the ADR-0020
+  MIGRATION.md #2008 (renumbered #1962 → #2008 at the TRAIN A census weave)** — T11 "resample tails" (phase A+B) of the ADR-0020
   conversion, closing the #1913-named follow-ups (daily residues ·
   session-fold · batch adoption). **ARM 1 (daily residues, NEW independent
   flag):** `fno_daily_resample.resample_1m_to_fno_daily` +
@@ -4962,8 +4962,8 @@ hostile-review pass._
   1day partition is the PDH/PDL anchor the sweep reads, so the parity gates
   are load-bearing.)
   Earlier: `claude/rust-observability-lane`
-  (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961** — renumbered
-  #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
+  (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #2007** — renumbered
+  #1954 → #1956 → #1961 → #2007 across the 2026-07-18 merge-reconciles + the TRAIN A census weave (#1954 →
   #1956 at the 3ee742b3 resync — main took #1954 for
   DEC-TEST-AWS-HERMETICITY-001 + #1955 for DEC-STRATEGIES-RUST-COMBO-001;
   #1956 → #1961 at the 71fb2ee5 resync — main took #1956 for
@@ -5085,10 +5085,10 @@ hostile-review pass._
   lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
   routes; ONE new env var.)
   Earlier: `claude/notify-rust-core`
-  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960** — renumbered
-  #1954 → #1955 → #1960: first per the coordinator ledger allocation, then at
+  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #2006** — renumbered
+  #1954 → #1955 → #1960 → #2006: first per the coordinator ledger allocation, then at
   the 2026-07-18 merge-reconcile (main took #1955 for
-  DEC-STRATEGIES-RUST-COMBO-001); the DEC-ID is the stable handle per
+  DEC-STRATEGIES-RUST-COMBO-001), then #1960 → #2006 at the TRAIN A census weave; the DEC-ID is the stable handle per
   DEC-LEDGER-RENUMBER-001 — slice 1 of the notifications Rust lane: the
   FOUR pure notification laws convert to Rust behind the default-OFF
   `BRUTEX_NOTIFY_RUST` — (1) the MarkdownV2 escape law
@@ -12974,16 +12974,16 @@ hostile-review pass._
   line — see §1 + MIGRATION.md #1979 for the full blurb)
   Earlier: `integration/club-x-dhan`
   (Club X — dhan/feeds merge vehicle, GATED-LAST: PR #1492 DEC-DHAN-SPOT-FEED-001
-  MIGRATION.md #1797 + DEC-DHAN-ROLLING-FLOOR-001 #1798 (carrying the parked
-  PR #1482 feed-interface pack — DEC-FEED-INTERFACE-001 #1795 +
-  DEC-FEED-LAKE-ROOT-001 #1796, ADR-0021 — verified fully contained) + PR #1501
-  DEC-DHAN-ROLLING-OPTIONS-001 #1799, folded as ONE merge event; the
+  MIGRATION.md #2003 + DEC-DHAN-ROLLING-FLOOR-001 #2004 (carrying the parked
+  PR #1482 feed-interface pack — DEC-FEED-INTERFACE-001 #2001 +
+  DEC-FEED-LAKE-ROOT-001 #2002, ADR-0021 — verified fully contained) + PR #1501
+  DEC-DHAN-ROLLING-OPTIONS-001 #2005, folded as ONE merge event; the
   `no-dhan-guard` retirement (DEC-DHAN-GUARD-RETIRE-002, ADR-0022) is an
   operator POLICY land — the club stays parked-DRAFT until that ruling; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
   Earlier: `claude/dhan-spot-feed`
-  (DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1797 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
-  #1798 — the standalone read-only Dhan v2 SPOT feed track (ADR-0022) merged forward
+  (DEC-DHAN-SPOT-FEED-001, MIGRATION.md #2003 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
+  #2004 — the standalone read-only Dhan v2 SPOT feed track (ADR-0022) merged forward
   onto main with the delta: the second historical feed at `<lake_root>/feeds/dhan/`
   (ADR-0021 nesting law; Groww top-root byte-identical by object identity), exactly 4
   indices (NIFTY/BANKNIFTY/SENSEX + INDIA VIX REFERENCE_ONLY, 1-minute only), read-only
@@ -12992,7 +12992,7 @@ hostile-review pass._
   over both SDK remark spellings + the terminal auth/subscription pull halt, the
   drop_bars_after tail belt + absent-volume tolerance, the no-dhan-guard retirement,
   and the UNRUN `--floor-edge` probe stage; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
-  matches §1's Active branch line — the full record lives in MIGRATION.md #1797/#1798)
+  matches §1's Active branch line — the full record lives in MIGRATION.md #2003/#2004)
   Earlier: `claude/brutex-lake-box-wheel`
   (DEC-BRUTEX-LAKE-BOX-WHEEL-001, MIGRATION.md #1986 — provisional,
   renumber-at-landing — the brutex-lake wheel joins the operator BOX build
@@ -13013,14 +13013,14 @@ hostile-review pass._
   lake/schema/scope/vocab/rate change; matches §1's Active branch line —
   see §1 + MIGRATION.md #1986 for the full blurb)
   Earlier: `claude/kernel-cache-soak-harness`
-  (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1971 (renumbered #1962 → #1971 at slice-5 reconcile) —
+  (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #2024 (renumbered #1962 → #1971 → #2024 at slice-5 reconcile, then the TRAIN A census weave) —
   the §8 M4-Pro kernel-cache OFF↔ON A/B soak harness gating the #1729
   default-ON flip: soak script + dispatch workflow + runbook + smoke/unit
   tests; records the landed PR-A truth (DEC-SWEEP-WORKER-KERNEL-CACHE-001,
   MIGRATION.md #1729, train #1553 squash 42117b0f, default-OFF flag,
   soak-gated flip); the flip itself is NOT pre-approved; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1971 for the full blurb)
+  MIGRATION.md #2024 for the full blurb)
   Earlier: `integration/club-s2-results-v2`
   (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
   overfit-recount recovery channel: the recount recovers the RECORDED
@@ -13037,7 +13037,7 @@ hostile-review pass._
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
   §1 + MIGRATION.md #1851 for the full blurb)
   Earlier: `claude/dbhtml-batcha-refold`
-  (DEC-DASHBOARD-BATCHA-REMAINDER-001, MIGRATION.md #1795 — the Batch-A
+  (DEC-DASHBOARD-BATCHA-REMAINDER-001, MIGRATION.md #2026 — the Batch-A
   additive remainder refolded onto main tip 1ad31acd per the coordinator
   ruling on the stale PR #1368 (adopt main's landed #1720/#1763
   disposition; recommend closing #1368 as superseded): the bx-datepicker.js
@@ -13051,22 +13051,22 @@ hostile-review pass._
   tbody patches verbatim); fails-before executed on both new pins; the
   147-file dashboard battery green with main's suites UNMODIFIED; DISPLAY
   zone only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
-  Active branch line — see §1 + MIGRATION.md #1795 for the full blurb)
+  Active branch line — see §1 + MIGRATION.md #2026 for the full blurb)
   Earlier: `integration/club-regime`
   (CLUB REGIME merge vehicle — the stack-fold of the four regime-robustness
   member PRs as ONE merge event: #1677 DEC-REGIME-TAXONOMY-001 (MIGRATION.md
-  #1961, the shared trend/VIX/era taxonomy leaf) · #1679
-  DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#1962, cascade filter #10 — the
+  #2010, the shared trend/VIX/era taxonomy leaf) · #1679
+  DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#2011, cascade filter #10 — the
   default-OFF 2024+ extreme-vol must-survive stratum) · #1680
-  DEC-REGIME-FRAGILITY-GATE-001 (#1963, cascade filter #11 — the default-OFF
+  DEC-REGIME-FRAGILITY-GATE-001 (#2012, cascade filter #11 — the default-OFF
   regime-concentration + era-break fragility gate) · #1684
-  DEC-REGIME-REJECT-TIER-001 (#1964, the `?preset=regime_robust` /results
+  DEC-REGIME-REJECT-TIER-001 (#2013, the `?preset=regime_robust` /results
   read-time filter, operator-gated activation). ALL default-OFF / INERT —
   frozen goldens byte-stable; activation is semantics-only (the cascade
   config never enters the #1715 tuple digest); thresholds are CONSERVATIVE
   UNPROVEN defaults pending the flag-ON calibration sweep. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
-  §1 + MIGRATION.md #1961–#1964 for the full blurbs)
+  §1 + MIGRATION.md #2010–#2013 for the full blurbs)
   Earlier: `integration/brutex-ops-unified`
   (the BRUTEX-OPS CRATE UNIFICATION vehicle — DEC-BACKUP-RUST-OPS-001
   (MIGRATION.md #1969) + DEC-CROSSVERIFY-RUST-CORE-001 (#1970) +
@@ -13134,7 +13134,7 @@ hostile-review pass._
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1971 for the full blurb)
   Earlier: `claude/rust-slice-t11-resample`
-  (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md #1962 — T11 "resample
+  (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md #2008 — T11 "resample
   tails" of the ADR-0020 conversion, closing the #1913-named follow-ups:
   the daily residues (`fno_daily_resample` + `spot_daily_resample` frame
   cores) route through the NEW `rust/brutex-lake/src/resample_daily.rs`
@@ -13151,10 +13151,10 @@ hostile-review pass._
   and both-ON); cargo 81 passed, crate stays 0.1.0, Cargo.lock untouched;
   honesty banner verbatim — payoff ≈ 0, uniformity not speed; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1962 for the full blurb)
+  see §1 + MIGRATION.md #2008 for the full blurb)
   Earlier: `claude/rust-observability-lane`
-  (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961 — renumbered
-  #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
+  (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #2007 — renumbered
+  #1954 → #1956 → #1961 → #2007 across the 2026-07-18 merge-reconciles + the TRAIN A census weave (#1954 →
   #1956 at the 3ee742b3 resync, main took #1954 for
   DEC-TEST-AWS-HERMETICITY-001; #1956 → #1961 at the 71fb2ee5 resync,
   main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001 — per the queue-master
@@ -13184,10 +13184,10 @@ hostile-review pass._
   DEC-RUST-OBSERVABILITY-TRIPWIRES-002 ·
   DEC-RUST-OBSERVABILITY-STAMP-PARSE-003 · the ci.yml crate job + weekly
   cargo-mutants wiring; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
-  §1's Active branch line — see §1 + MIGRATION.md #1961 for the full blurb)
+  §1's Active branch line — see §1 + MIGRATION.md #2007 for the full blurb)
   Earlier: `claude/notify-rust-core`
-  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960 — renumbered
-  #1954 → #1955 → #1960, the last hop at the 2026-07-18 merge-reconcile
+  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #2006 — renumbered
+  #1954 → #1955 → #1960 → #2006, the last hop at the TRAIN A census weave, the prior at the 2026-07-18 merge-reconcile
   (main took #1955 for DEC-STRATEGIES-RUST-COMBO-001; the DEC-ID is the
   stable handle per DEC-LEDGER-RENUMBER-001) — the
   notification PURE laws convert to
@@ -13204,7 +13204,7 @@ hostile-review pass._
   parity hazards — named follow-up DEC-NOTIFY-RUST-BUILDERS-002);
   expected payoff ≈ 0 — uniformity, not speed; ships INERT; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1960 for the full blurb)
+  see §1 + MIGRATION.md #2006 for the full blurb)
   Earlier: `claude/rust-calendar-leaves`
   (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — PR-1 of the
   calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
@@ -14899,8 +14899,8 @@ bruteX/
 
 ## 6b. Verified Dhan Facts (second historical feed — SPOT indices, REFERENCE lake `feeds/dhan/`)
 
-> **DEC-DHAN-SPOT-FEED-001 (MIGRATION.md #1797, ADR-0022) + DEC-DHAN-ROLLING-FLOOR-001
-> (#1798):** the standalone READ-ONLY Dhan v2 SPOT feed. Evidence lanes (weakest never
+> **DEC-DHAN-SPOT-FEED-001 (MIGRATION.md #2003, ADR-0022) + DEC-DHAN-ROLLING-FLOOR-001
+> (#2004):** the standalone READ-ONLY Dhan v2 SPOT feed. Evidence lanes (weakest never
 > presented as fact): **VERIFIED-SDK** = the official `dhanhq` 2.2.0 wheel read from
 > source in-session; **VERIFIED-docs(mirror)** = a verbatim community mirror of the
 > official docs (dhanhq.co/docs/v2/ — original URL cited in `dhan_api_research.md`);
@@ -14920,7 +14920,7 @@ bruteX/
 | `toDate` semantics | Daily endpoint: "End date, **non-inclusive**" (docs). Intraday boundary at day resolution UNVERIFIED (probe gate #13) — the ingest tail's `drop_bars_after` BELT covers BOTH readings (a bar past the last servable day is never stored) | mirror `17-historical-data.md`; `adapters/dhan/ingest.py::_process_item` | VERIFIED-docs(mirror) daily; intraday UNVERIFIED (the belt is the cover) |
 | Rate limits — Data APIs | **5 req/s + 100,000 req/day; NO per-minute/hour governor** (`DHAN_RATE_LIMIT_RPS=5.0`, `DHAN_DAILY_QUOTA=100_000`, `DHAN_RATE_LIMIT_PER_MIN=None` — honestly none); own account, never touches the Groww governor | mirror `01-introduction.md` + support snippet; `adapters/dhan/live_controller.py` | VERIFIED-docs(mirror+snippet); HTTP-429 pairing UNVERIFIED (gate G-E) |
 | Data-API subscription | **PAID: ₹499+taxes/month** (auto-debited), includes Historical + Intraday; **FREE with 25 executed trades in the last 30 days**; enforcement = error 806/DH-902 (a terminal `DhanSubscriptionError` pull-halt naming the fix) | dhan.co support snippet; mirror `20-annexure.md`; `adapters/dhan/errors.py` | VERIFIED-docs(snippet) |
-| securityIds (IDX_I) | **NIFTY = 13 (VERIFIED-SDK — the official README's own example)**; BANKNIFTY = 25, SENSEX = 51, INDIA VIX = 21 (**COMMUNITY-UNVERIFIED** — multiple independent third-party codebases; NOT in official docs); hardcoded map `DHAN_INDEX_SECURITY_IDS`, unknown symbol = loud skip, never a blind id | SDK README; `adapters/dhan/constants.py:121-126`; community sources in `dhan_api_research.md §5` | NIFTY VERIFIED-SDK(example); 25/51/21 COMMUNITY-UNVERIFIED (gate G-C — scrip-master cross-check) |
+| securityIds (IDX_I) | **NIFTY = 13 (VERIFIED-SDK — the official README's own example)**; BANKNIFTY = 25, SENSEX = 51, INDIA VIX = 21 (**COMMUNITY-UNVERIFIED** — multiple independent third-party codebases; NOT in official docs); hardcoded map `DHAN_INDEX_SECURITY_IDS`, unknown symbol = loud skip, never a blind id | SDK README; `adapters/dhan/constants.py:173-178`; community sources in `dhan_api_research.md §5` | NIFTY VERIFIED-SDK(example); 25/51/21 COMMUNITY-UNVERIFIED (gate G-C — scrip-master cross-check) |
 | INDIA VIX servability | NO official statement that VIX has `/charts/*` candles (community projects fetch id 21 successfully — encouraging, not proof) | mirror `17-historical-data.md` (absence); `dhan_api_research.md §8` | UNVERIFIED — **HARD gate G-D** (the ADR-0009 VIX-gate precedent) |
 | Auth | `access-token` (JWT) + `client-id` headers per request; creds **AWS-SSM READ-ONLY** (`/tickvault/prod/dhan/{client-id,access-token}`; BruteX NEVER mints — DH-901 → the single-flight SSM RE-READ; a same-dead-token re-read = the `DhanTokenStillStaleError` pull-wide stop). Token lifetime: docs say 24 h; the official support page says SELECTABLE 8 h–30 d — **CONFLICTING official sources** | SDK `dhan_http.py` (the per-request header dict); mirror `02-authentication.md`; `adapters/dhan/{reauth,token_store_aws}.py` | VERIFIED-SDK headers; lifetime CONFLICTING-official (probe gate #10; WHO-mints = a pre-first-wet-pull ops gate, ADR-0022 §8) |
 | Error envelope | SDK failure = `{"status":"failure","remarks":{...}}` with **snake_case** keys (`error_code`/`error_type`/`error_message` — the LIVE shape); raw-HTTP docs shape is camelCase — the classifier reads BOTH; full numeric (800-814) + DH-9xx code table mapped (805/DH-904 throttle · 806/DH-902 subscription · 807-810/DH-901 auth · 804/811-814/DH-905/DH-907 bad request · 800/DH-908/DH-909 server) | SDK `dhan_http.py::_parse_response`; mirror `20-annexure.md`; `adapters/dhan/errors.py` | VERIFIED-SDK envelope + VERIFIED-docs(mirror) codes |
