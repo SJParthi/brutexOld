@@ -355,3 +355,83 @@ def test_g5_terminal_with_nonfinite_prior_started_stamps_now(tmp_path: Path) -> 
     assert after is not None
     assert after["wall_started_utc"] == 300.0
     assert after["wall_ended_utc"] == 300.0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the wall-clock + suspect resolution law.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must produce
+    BYTE-identical artifacts to the flag-OFF Python law (which every OTHER
+    test in this file drives) — floats cross the FFI bit-exactly and the
+    json.dumps rendering stays Python on both arms.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _lifecycle(root: Path) -> bytes:
+        run_id = "r1"
+        write_exit_status(
+            root, run_id=run_id, state=RunState.RUNNING, attempt=1, pid=42, clock=lambda: 100.5
+        )
+        write_exit_status(
+            root,
+            run_id=run_id,
+            state=RunState.RUNNING,
+            attempt=1,
+            pid=42,
+            suspect=True,
+            clock=lambda: 150.25,
+        )
+        write_exit_status(
+            root,
+            run_id=run_id,
+            state=RunState.COMPLETE,
+            exit_code=0,
+            attempt=1,
+            pid=42,
+            clock=lambda: 200.75,
+        )
+        return exit_status_path(root, run_id).read_bytes()
+
+    def test_flag_on_artifact_bytes_match_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        off_bytes = self._lifecycle(tmp_path / "off")
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on_bytes = self._lifecycle(tmp_path / "on")
+        finally:
+            self._reset_facade()
+        assert on_bytes == off_bytes
+        doc = json.loads(on_bytes)
+        assert doc["wall_started_utc"] == 100.5  # the #1712 preservation law
+        assert doc["wall_ended_utc"] == 200.75
+        assert doc["suspect"] is True  # None-suspect preserved the prior flag

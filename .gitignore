@@ -152,6 +152,10 @@ Cargo.lock
 # track its lockfile for reproducibility (Golden Rule #4) + the
 # security-audit Cargo.lock trigger.
 !rust/brutex-calendar/Cargo.lock
+# Same law for the brutex-sweep-ops conversion crate
+# (DEC-RUST-SWEEP-OPS-001 — a NEW crate needs its own negation to be
+# addable; the FRESH lock is committed, never a copy of a sibling's).
+!rust/brutex-sweep-ops/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.

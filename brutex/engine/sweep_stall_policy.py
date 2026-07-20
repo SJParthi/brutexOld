@@ -43,6 +43,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
+# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-OFF Rust routing facade. The
+# scaled tail gates on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
+# default path is byte-identical; `_scaled_timeout_python` is the live
+# oracle. The fail-loud env parses stay Python.
+from brutex.engine.sweep_ops_rust import routed_stall_timeout, sweep_ops_rust_enabled
 from brutex.engine.sweep_sla_guard import resolve_per_tuple_seconds
 from brutex.engine.sweep_watchdog import DEFAULT_TIMEOUT_SECONDS
 
@@ -191,7 +196,29 @@ def resolve_stall_policy(
                 f"got {per_tuple_estimate_s!r}"
             )
         estimate = per_tuple_estimate_s
+    if sweep_ops_rust_enabled():
+        timeout_seconds, scaled_above_base = routed_stall_timeout(
+            factor,
+            estimate,
+            DEFAULT_STALL_BASE_SECONDS,
+            python_law=lambda: _scaled_timeout_python(factor, estimate),
+        )
+    else:
+        timeout_seconds, scaled_above_base = _scaled_timeout_python(factor, estimate)
+    if scaled_above_base:
+        return StallPolicy(timeout_seconds=timeout_seconds, source="scaled")
+    return StallPolicy(timeout_seconds=timeout_seconds, source="default")
+
+
+def _scaled_timeout_python(factor: float, estimate: float) -> tuple[float, bool]:
+    """The verbatim raise-only scaled tail — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip).
+
+    Returns ``(timeout_seconds, scaled_above_base)``: ``factor × estimate``
+    strictly above :data:`DEFAULT_STALL_BASE_SECONDS` ⇒ ``(scaled, True)``
+    (source ``"scaled"``), else ``(base, False)`` (source ``"default"``).
+    """
     scaled = factor * estimate
     if scaled > DEFAULT_STALL_BASE_SECONDS:
-        return StallPolicy(timeout_seconds=scaled, source="scaled")
-    return StallPolicy(timeout_seconds=DEFAULT_STALL_BASE_SECONDS, source="default")
+        return scaled, True
+    return DEFAULT_STALL_BASE_SECONDS, False

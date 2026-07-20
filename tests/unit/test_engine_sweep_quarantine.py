@@ -491,3 +491,87 @@ def test_g12_crash_loop_edge_without_callback_is_log_only(tmp_path: Path) -> Non
         )
         assert result is None
     assert tracker.consecutive == 2  # the edge fired (logged) with no callback bound
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the monotonic quarantine-ordinal fold.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must mint the SAME
+    quarantine dirnames as the flag-OFF Python fold (which every OTHER test
+    in this file drives) — the listing I/O and the MOVE stay Python on both
+    arms, so the crash-ordering law is untouched.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_ordinals_match_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def quarantine_once(root: Path) -> str:
+            (root / "sweeps").mkdir(parents=True, exist_ok=True)
+            store = root / "sweeps" / "tuple.parquet"
+            store.write_text("corrupt")
+            return quarantine_tuple_trio(
+                store, results_root=root, reason="routing", run_id="runx"
+            ).dest.name
+
+        off_root = tmp_path / "off"
+        off_names = [quarantine_once(off_root), quarantine_once(off_root)]
+        assert off_names == ["runx-1", "runx-2"]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on_root = tmp_path / "on"
+            on_names = [quarantine_once(on_root), quarantine_once(on_root)]
+        finally:
+            self._reset_facade()
+        assert on_names == off_names
+
+    def test_flag_on_unicode_dirname_degrades_to_oracle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A planted non-ASCII dirname refuses to the oracle — the answer is
+        the ORACLE's Unicode-digit read on BOTH arms (never a latch)."""
+        parent = tmp_path / ".quarantine" / "runtime"
+        parent.mkdir(parents=True)
+        (parent / "runx-٢").mkdir()  # int("٢") == 2 in Python
+        (tmp_path / "sweeps").mkdir()
+        store = tmp_path / "sweeps" / "tuple.parquet"
+        store.write_text("corrupt")
+        self._arm_fake_crate(monkeypatch)
+        try:
+            outcome = quarantine_tuple_trio(
+                store, results_root=tmp_path, reason="routing", run_id="runx"
+            )
+            from brutex.engine.sweep_ops_rust import sweep_ops_rust_disabled
+
+            assert outcome.dest.name == "runx-3"
+            assert sweep_ops_rust_disabled() is False
+        finally:
+            self._reset_facade()

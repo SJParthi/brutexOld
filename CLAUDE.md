@@ -18,7 +18,34 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (core-green pair lap-consolidation vehicle,
+_Last updated: 2026-07-19 (DEC-RUST-SWEEP-OPS-001, MIGRATION.md #2050,
+branch `claude/rust-sweep-ops` — ADR-0020 slice T15, the FINAL landed
+DEFAULT-OFF sweep-ops conversion MILESTONE (all 6 slices complete): the NEW
+standalone `rust/brutex-sweep-ops` crate + the default-OFF
+`BRUTEX_SWEEP_OPS_RUST` facade `brutex/engine/sweep_ops_rust.py` routing 27
+pure sweep-ops DECISION laws (layout/identity/stall/progress/SLA/mem-budget/
+preflight/liveness · the BLAKE3 audit entry-hash + chain-verify + stamp/
+chain-map/count folds · exit-status/quarantine/checkpoint · detach/heal/
+scheduler · verify-recount/apriori-prune · run-core stride + grid
+tuple-count) across ~22 wired modules, ~12 more assessed honest-N/A; every
+routed module keeps its verbatim `_*_python` law as the LIVE parity oracle
+(NOTHING deleted). OS/IO/byte-law/run-identity land STAYS Python by the
+#1712 unkillable-core / #1715 gate-identity / #1785 lock rails. Honesty
+banner (ADR-0020, verbatim): expected payoff ≈ 0 — conversion is for
+uniformity, not speed. Flag OFF (the default) is byte-identical AND the
+crate is NEVER imported (bomb-spy); the frozen run-identity/artifact goldens
+pass UNMODIFIED flag-OFF AND flag-ON (42 both arms, fixtures diff EMPTY —
+zero identity drift), the audit tamper/replay battery is 16/16 both arms
+(BLAKE3 sweep chain + SHA-256 orchestrator chain — tamper still breaks the
+chain on the Rust path), the #1785 lock-composition regression + the
+sweep-rehearsal chain (19/19) are green both arms, real-wheel parity 81.
+Ships INERT — the default flip + Python-oracle deletion is the NAMED
+follow-up DEC-SWEEP-OPS-RUST-FLIP-001 (a stacked PR with its own DEC).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change; one new env var `BRUTEX_SWEEP_OPS_RUST` (default OFF). This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #2050.)
+Earlier: 2026-07-19 (core-green pair lap-consolidation vehicle,
 branch `integration/core-green-pair` — an operator-directed
 lap-consolidation mini-vehicle folding TWO proven-merge-ready members off
 main tip 1a3f4852 as ONE branch + ONE draft PR (saves a full ~3h serial
@@ -3972,7 +3999,58 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/core-green-pair`
+- **Active branch:** `claude/rust-sweep-ops` (**DEC-RUST-SWEEP-OPS-001,
+  MIGRATION.md #2050** — ADR-0020 slice T15, the FINAL landed DEFAULT-OFF sweep-ops
+  conversion MILESTONE (all 6 slices complete; entry number #2050 (renumbered #1957→#1960→#2050 at the 2026-07-20 train-b tier-2 fold — #1960 taken on main by DEC-SWEEP-1DAY-FRESHNESS-GATE-001; census band 2050+ per DEC-LEDGER-RENUMBER-001) — was PROVISIONAL —
+  renumber-at-landing per DEC-LEDGER-RENUMBER-001, above the live-main ceiling #1959):
+  the NEW standalone `rust/brutex-sweep-ops` crate (pyo3 0.29 abi3-py312, maturin mixed
+  layout, committed Cargo.lock + `--locked`, `catch_unwind` panic→`RuntimeError` at the
+  FFI boundary, deliberately in NO workspace) + the default-OFF `BRUTEX_SWEEP_OPS_RUST`
+  facade `brutex/engine/sweep_ops_rust.py` (the house ADR-0020 pattern: per-call tristate
+  flag · `_CRATE_API` 27-symbol handshake with `crate_unavailable`/`crate_stale` latch ·
+  PER-LAW 16-call burn-in bit-compare with ship-the-ORACLE autorevert · exact-type
+  refuse-poison INPUT gates + structural OUTPUT gates · narrow degrade set + pyo3 panic
+  belt · RAW escape-set re-raise) routing 27 pure sweep-ops DECISION laws across ~22 wired
+  modules — slices 0/1 run_layout/sweep_identity/sweep_stall_policy · slice 1b
+  sweep_progress/sweep_sla_guard/sweep_mem_budget/sweep_preflight/sweep_liveness · slice 2
+  the BLAKE3 audit entry-hash + chain-verify over PRE-RENDERED field strings (no JSON ever
+  re-rendered in Rust — the byte-identity rail; the official `blake3` crate ≡ the pip
+  package, cross-language golden-literal-pinned) + stamp/chain-map/count folds · slice 3
+  exit-status/quarantine/checkpoint (the HARD rail: NO write/fsync/rename/lock crosses the
+  FFI; the #1712 durability ordering stays Python verbatim) · slice 4 detach/heal/scheduler
+  (flock/OFD + fork/spawn + MarkdownV2 stay Python; the scheduler daily-arm `int` return
+  TYPE reconstructed so `json.dumps` audit BYTES are identical either arm) · slice 5
+  verify-recount + apriori-prune (the run-identity seams `canonical_trade_params`/
+  `mask_run_id` NEVER converted; every finding/refusal BYTE Python) · slice 6 the run-core
+  D-9 stride + R45 diffcheck budget + grid tuple-count (the #1715 gate-identity digest
+  `5b020e892247deac` NEVER converted). ~12 more modules assessed honest-N/A (sweep_driver
+  metrics/sim land · sweep_diffcheck R45 never-adopt independence artifact · sweep_singleflight
+  flock-OFD · sweep_alerts MarkdownV2 byte-law · flight_recorder/run_manifest/diag_bundle ·
+  exit_index/sweep_scope/sweep_watchdog · sweep_cache/cancel/kernel/launch/lookahead/parallel/
+  report/stream/supervisor) — the OS/IO/byte-law/run-identity residual-Python register is the
+  honest endpoint under the #1712/#1715/#1785 rails: pure-Rust means "every pure DECISION LAW
+  is Rust-routed", not "no Python remains". EVERY routed module keeps its verbatim `_*_python`
+  law as the LIVE parity oracle (NOTHING deleted — the endgame flip + oracle deletion is the
+  NAMED follow-up **DEC-SWEEP-OPS-RUST-FLIP-001**, a stacked PR with its own DEC). HONESTY
+  BANNER (ADR-0020, verbatim): expected payoff ≈ 0 — conversion is for uniformity, not speed
+  (every routed law is a nanosecond-to-microsecond orchestration-path decision, never the
+  ~33B-trial mask/bar hot loop; the engaged path ADDS an env read + gates + an FFI hop; NO
+  speedup claimed or benched). Flag OFF (the default) is byte-identical AND the crate is NEVER
+  imported (bomb-crate spy pins); the STRONGER freeze-testimony holds — the frozen
+  run-identity/artifact goldens pass UNMODIFIED flag-OFF AND flag-ON (42 both arms),
+  `git diff --stat origin/main -- tests/golden/fixtures` is EMPTY (zero identity byte drift on
+  the whole branch), the audit-chain replay + TAMPER battery is 16/16 both arms (BLAKE3 sweep
+  chain + SHA-256 orchestrator chain — tamper STILL breaks the chain on the Rust hashing path),
+  the #1785 sweep-vs-pull lock-composition regression + the sweep-rehearsal chain (19/19) are
+  green both arms, and the real-wheel parity suite is 81 passed. CI: OPTIONAL in the
+  turnkey-build kernel guard (`tests/unit/test_run_builds_rust_kernels.py` OPTIONAL_KERNELS —
+  consumed only through the import-guarded facade, deliberately NOT a build prerequisite) +
+  its OWN dedicated NON-required lane `.github/workflows/sweep-ops-rust-parity.yml` (the
+  data-rust-parity.yml shape). Ships INERT. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
+  lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes; one new env var
+  `BRUTEX_SWEEP_OPS_RUST` (default OFF); the per-item record lives in this blurb +
+  MIGRATION.md #2050 — this header carries the pointer, never the story.)
+  Earlier: `integration/core-green-pair`
   (**core-green pair lap-consolidation vehicle** — an operator-directed
   mini-vehicle folding TWO proven-merge-ready members off main tip
   1a3f4852 as ONE branch + ONE draft PR, so ONE CI lap proves the FOLD
@@ -11990,7 +12068,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/core-green-pair`
+- **Active feature branch:** `claude/rust-sweep-ops`
+  (DEC-RUST-SWEEP-OPS-001, MIGRATION.md #2050 — ADR-0020 slice T15, the FINAL
+  landed DEFAULT-OFF sweep-ops conversion MILESTONE (all 6 slices complete):
+  the NEW standalone `rust/brutex-sweep-ops` crate + the default-OFF
+  `BRUTEX_SWEEP_OPS_RUST` facade `brutex/engine/sweep_ops_rust.py` routing 27
+  pure sweep-ops DECISION laws across ~22 wired modules (~12 more honest-N/A);
+  every routed module keeps its verbatim `_*_python` law as the LIVE parity
+  oracle (NOTHING deleted); OS/IO/byte-law/run-identity land stays Python by
+  the #1712/#1715/#1785 rails; expected payoff ≈ 0 — uniformity, not speed;
+  flag OFF byte-identical (bomb-spy) + goldens UNMODIFIED both arms (fixtures
+  diff EMPTY) + audit tamper/replay 16/16 both arms + #1785 lock-composition +
+  rehearsal 19/19 + parity 81; ships INERT — the default flip + oracle deletion
+  is the NAMED follow-up DEC-SWEEP-OPS-RUST-FLIP-001 (stacked PR, own DEC);
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #2050 for the full blurb)
+  Earlier: `integration/core-green-pair`
   (core-green pair lap-consolidation vehicle — matches §1's Active branch
   line; folds #1699 the W2 metrics-depth vehicle (head 29cfefe3d, Closes
   #1605 — DEC-METRICS-LOSSRATE-FIRSTCLASS-001 +

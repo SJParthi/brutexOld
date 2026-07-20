@@ -1778,3 +1778,63 @@ class TestRunSweepGridAprioriWiring:
             tuples_failed=0,
         )
         assert summary.tuples_failed_apriori_budget == 0
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the grid tuple-count fold
+    (DEC-RUST-SWEEP-OPS-001 slice 6).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Only the pre-extracted
+    axis-cardinality product routes — the ``SweepGridConfig`` object
+    marshaling, ``iter_sweep_tuples``, and the #1715 gate-identity digest
+    (``_tuple_digest`` / ``_selection_identity_fragment`` — run-identity
+    class) stay Python on both arms.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        grids = [
+            _grid(),
+            _grid(
+                instruments=["NIFTY", "BANKNIFTY"],
+                timeframes=[Timeframe("1minute", 1), Timeframe("5minute", 5)],
+                directions=[Side.BUY, Side.SELL],
+                k_values=[1, 2],
+                stop_losses=[80, None],
+                take_profits=[50],
+                proximities=[None],
+            ),
+        ]
+        off = [count_sweep_tuples(grid) for grid in grids]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = [count_sweep_tuples(grid) for grid in grids]
+            # The enumeration invariant holds with the routed count.
+            assert len(list(iter_sweep_tuples(grids[0]))) == on[0]
+        finally:
+            self._reset_facade()
+        assert on == off
+        assert off[1] == 32

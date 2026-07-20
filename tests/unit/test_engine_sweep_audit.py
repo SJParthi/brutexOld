@@ -654,3 +654,86 @@ def test_verify_chain_streaming_tamper_detected_mid_file(tmp_path: Path) -> None
         verify_chain(p)
     assert ei.value.seq == 40
     assert "content tampered" in ei.value.reason
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the entry-hash + verify-step laws.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    byte-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives) — the written chain bytes, the verify count, AND the
+    tamper exception message bytes.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _write_chain(path: Path) -> None:
+        with SweepAuditWriter.open(path) as log:
+            log.append(action="SWEEP_START", subject="s", payload={"n": 1}, ts_utc=1.5)
+            log.append(action="COMBO_DONE", subject="c", payload={"mask": 7}, ts_utc=2.25)
+
+    def test_flag_on_chain_bytes_and_verify_match_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        off_log = tmp_path / "off.jsonl"
+        self._write_chain(off_log)
+        assert verify_chain(off_log) == 2
+
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on_log = tmp_path / "on.jsonl"
+            self._write_chain(on_log)
+            assert on_log.read_bytes() == off_log.read_bytes()
+            assert verify_chain(on_log) == 2
+        finally:
+            self._reset_facade()
+
+    def test_flag_on_tamper_message_matches_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        log = tmp_path / "audit.jsonl"
+        self._write_chain(log)
+        tampered = log.read_text(encoding="utf-8").replace('"mask":7', '"mask":8')
+        log.write_text(tampered, encoding="utf-8")
+
+        with pytest.raises(SweepAuditChainCorruption) as off_exc:
+            verify_chain(log)
+
+        self._arm_fake_crate(monkeypatch)
+        try:
+            with pytest.raises(SweepAuditChainCorruption) as on_exc:
+                verify_chain(log)
+        finally:
+            self._reset_facade()
+
+        assert str(on_exc.value) == str(off_exc.value)
+        assert on_exc.value.seq == 1
+        assert "content tampered" in on_exc.value.reason

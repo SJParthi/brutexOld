@@ -68,6 +68,10 @@ from brutex.engine.results_store import (
     ResultsStore,
     ResultsStoreError,
 )
+from brutex.engine.sweep_ops_rust import (
+    routed_recount_verdict,
+    sweep_ops_rust_enabled,
+)
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -2115,6 +2119,35 @@ def _sidecar_diff_is_the_mode_census_residue(original_sidecar: Path, scratch_sid
     return _census_fields_only_differ(ours, theirs)
 
 
+def _recount_verdict_python(
+    vix_attributable: bool,
+    is_grid_tuple: bool,
+    context_match: bool,
+    cell_evidence: bool,
+    grid_corrupt_leaderboard: bool,
+) -> str:
+    """The pure recount post-byte-diff classification tail — the retained oracle.
+
+    The verbatim :func:`compare_recount` ladder over pre-computed flags (the
+    routed twin is the crate's ``recount_verdict`` — DEC-RUST-SWEEP-OPS-001
+    slice 5): a VIX-attributable divergence outranks everything; a GRID
+    tuple splits corrupt/inconclusive on the context match; a CELL is
+    collateral under a corrupt same-leaderboard grid (B5), verdict-grade
+    only under full context AND full cell evidence (B2), else inconclusive
+    (B1). The finding codes, severities, detail BYTES and the
+    ``grid_corrupt_leaderboards`` side effect stay with the caller.
+    """
+    if vix_attributable:
+        return "vix_divergence"
+    if is_grid_tuple:
+        return "grid_corrupt" if context_match else "grid_inconclusive"
+    if grid_corrupt_leaderboard:
+        return "cell_dependent"
+    if context_match and cell_evidence:
+        return "cell_corrupt"
+    return "cell_inconclusive"
+
+
 def compare_recount(
     original_root: Path,
     scratch_root: Path,
@@ -2451,7 +2484,28 @@ def compare_recount(
             # field, and re-pairs its OWN store's actual bytes; anything less
             # provable stays on the normal ladder.
             vix_shape = _artifact_vix_shape(original, scratch)
-            if vix_shape is not None:
+            # The pure classification tail may route through the sweep-ops
+            # crate (DEC-RUST-SWEEP-OPS-001 slice 5); the finding
+            # codes/details, the corrupt-leaderboard side effect and the
+            # run-identity seams stay Python, keyed off the token.
+            verdict_args = (
+                vix_shape is not None,
+                is_grid_tuple,
+                context_match,
+                cell_evidence,
+                leaderboard in grid_corrupt_leaderboards,
+            )
+            if sweep_ops_rust_enabled():
+
+                def _verdict_oracle(
+                    args: tuple[bool, bool, bool, bool, bool] = verdict_args,
+                ) -> str:
+                    return _recount_verdict_python(*args)
+
+                verdict = routed_recount_verdict(*verdict_args, python_law=_verdict_oracle)
+            else:
+                verdict = _recount_verdict_python(*verdict_args)
+            if verdict == "vix_divergence":
                 # Two honestly-distinguished variants (round-4 panel): the
                 # old single detail definitively claimed "the lake moved",
                 # which is FALSE for the reachable backfill shape (a
@@ -2531,41 +2585,40 @@ def compare_recount(
                     )
                 )
                 continue
-            if is_grid_tuple:
-                if context_match:
-                    grid_corrupt_leaderboards.add(leaderboard)
-                    findings.append(
-                        VerifyFinding(
-                            path=rel,
-                            code="recount_divergence",
-                            severity="corrupt",
-                            detail=(
-                                "bytes diverge from the shadow re-sweep under a "
-                                "FULLY MATCHED recorded context — verdict-grade "
-                                "corruption (the only state heal-grade evidence "
-                                "may ever come from)"
-                            ),
-                        )
+            if verdict == "grid_corrupt":
+                grid_corrupt_leaderboards.add(leaderboard)
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_divergence",
+                        severity="corrupt",
+                        detail=(
+                            "bytes diverge from the shadow re-sweep under a "
+                            "FULLY MATCHED recorded context — verdict-grade "
+                            "corruption (the only state heal-grade evidence "
+                            "may ever come from)"
+                        ),
                     )
-                else:
-                    findings.append(
-                        VerifyFinding(
-                            path=rel,
-                            code="recount_divergence_inconclusive",
-                            severity="warn",
-                            detail=(
-                                "bytes diverge BUT the recorded context does not "
-                                "match the current environment — NOT evidence of "
-                                "corruption (changed code/indicators/lake change "
-                                "results legitimately; ADR-0008 drift channels)"
-                            ),
-                        )
+                )
+            elif verdict == "grid_inconclusive":
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_divergence_inconclusive",
+                        severity="warn",
+                        detail=(
+                            "bytes diverge BUT the recorded context does not "
+                            "match the current environment — NOT evidence of "
+                            "corruption (changed code/indicators/lake change "
+                            "results legitimately; ADR-0008 drift channels)"
+                        ),
                     )
+                )
             # Stage-3 cell stores (DEC-STAGE3-RECOUNT-001): a DISTINCT code
             # family — the heal consumes ONLY `recount_divergence` (its C1
             # gate raises on non-grid paths), so cell findings must never
             # alias the grid code (condition B2).
-            elif leaderboard in grid_corrupt_leaderboards:
+            elif verdict == "cell_dependent":
                 # Condition B5: scratch cells derive from scratch GRID stores,
                 # so cell divergence under grid corruption in the same
                 # leaderboard is collateral, not independent evidence.
@@ -2582,7 +2635,7 @@ def compare_recount(
                         ),
                     )
                 )
-            elif context_match and cell_evidence:
+            elif verdict == "cell_corrupt":
                 findings.append(
                     VerifyFinding(
                         path=rel,

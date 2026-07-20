@@ -88,6 +88,11 @@ from brutex.engine.sweep_exit_status import (
     read_exit_status,
     write_exit_status_soft,
 )
+from brutex.engine.sweep_ops_rust import (
+    routed_diffcheck_budget,
+    routed_record_stride,
+    sweep_ops_rust_enabled,
+)
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     _tuple_digest,
@@ -185,11 +190,20 @@ class Stage3CellStampError(BruteXError):
     """A stage-3 cell failed stamp validation even after ONE discard + re-run (D-4)."""
 
 
+def _record_stride_python(total_tuples: int) -> int:
+    """The verbatim D-9 stride fold — the retained Python oracle
+    (DEC-RUST-SWEEP-OPS-001 slice 6; ``/`` is TRUE division by design —
+    the routed twin mirrors it in f64 inside the gated exact band)."""
+    return max(1, math.ceil(max(0, total_tuples) / DECIMATION_TARGET_RECORDS))
+
+
 def tuple_record_stride(total_tuples: int) -> int:
     """Return the D-9 TUPLE_DONE decimation stride for a *total_tuples* grid.
 
     ``ceil(total / 10_000)`` with a floor of 1 — a small grid records every
-    tuple; a 100k-tuple grid records every 10th.
+    tuple; a 100k-tuple grid records every 10th. Flag ON routes the pure
+    fold through the sweep-ops crate (DEC-RUST-SWEEP-OPS-001 slice 6);
+    flag OFF runs the verbatim oracle.
 
     Parameters
     ----------
@@ -201,7 +215,13 @@ def tuple_record_stride(total_tuples: int) -> int:
     int
         The stride (``>= 1``).
     """
-    return max(1, math.ceil(max(0, total_tuples) / DECIMATION_TARGET_RECORDS))
+    if sweep_ops_rust_enabled():
+
+        def _oracle(total: int = total_tuples) -> int:
+            return _record_stride_python(total)
+
+        return routed_record_stride(total_tuples, python_law=_oracle)
+    return _record_stride_python(total_tuples)
 
 
 def per_tuple_diffcheck_budget(k_per_run: int, total_tuples: int) -> int:
@@ -223,6 +243,18 @@ def per_tuple_diffcheck_budget(k_per_run: int, total_tuples: int) -> int:
     int
         The per-tuple sample allowance.
     """
+    if sweep_ops_rust_enabled():
+
+        def _oracle(k: int = k_per_run, total: int = total_tuples) -> int:
+            return _diffcheck_budget_python(k, total)
+
+        return routed_diffcheck_budget(k_per_run, total_tuples, python_law=_oracle)
+    return _diffcheck_budget_python(k_per_run, total_tuples)
+
+
+def _diffcheck_budget_python(k_per_run: int, total_tuples: int) -> int:
+    """The verbatim R45 K-distribution fold — the retained Python oracle
+    (DEC-RUST-SWEEP-OPS-001 slice 6)."""
     if k_per_run <= 0:
         return 0
     return max(1, k_per_run // max(1, total_tuples))

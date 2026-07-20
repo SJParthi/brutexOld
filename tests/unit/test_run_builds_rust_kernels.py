@@ -205,6 +205,21 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
+    # DEC-RUST-SWEEP-OPS-001 (MIGRATION.md #2050): brutex_sweep_ops is the
+    # default-OFF sweep-ops decision-law crate. It is consumed ONLY through
+    # the import-guarded facade brutex/engine/sweep_ops_rust.py
+    # (`importlib.import_module("brutex_sweep_ops")` inside the guard — an
+    # absent or stale wheel latches the BRUTEX_SWEEP_OPS_RUST flag OFF with
+    # one loud WARN and the Python oracles serve, byte-identical). It is
+    # deliberately NOT a turnkey build prerequisite: in NO cargo workspace,
+    # built ONLY by its own CI lane
+    # (.github/workflows/sweep-ops-rust-parity.yml). A module-top
+    # `import brutex_sweep_ops` anywhere in brutex/ would make a clean clone
+    # crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_sweep_ops": (
+        "brutex/engine/sweep_ops_rust.py",
+        ".github/workflows/sweep-ops-rust-parity.yml",
+    ),
     # DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): brutex_calendar is
     # the calendar-leaf pure-law crate (classify_month_drift /
     # validate_settle_evidence / parse_observed_sidecar), shipped INERT —

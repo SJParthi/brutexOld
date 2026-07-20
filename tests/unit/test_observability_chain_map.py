@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Final
 
+import pytest
 from brutex.observability.chain_map import (
     CHAIN_MAP_FILENAME,
     CHAIN_MAP_SCHEMA_VERSION,
@@ -296,3 +297,100 @@ class TestWrite:
         warns = [e for e in logs if e["event"] == "chain_map.write_failed"]
         assert len(warns) == 1
         assert warns[0]["run_id"] == _RUN_ID
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the per-link state ladder.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    document-identical to the flag-OFF Python ladder (which every OTHER
+    test in this file drives) — including the suspect amber floor, which
+    stays Python ABOVE the routed law on both arms.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_ladder_matrix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cases: list[dict[str, object]] = [
+            {
+                "progress": {"running": True, "stage": "stage3", "run_id": "r1"},
+                "stamps": {"preflight": StampVerdict.OK},
+                "suspect": False,
+                "exit_status": None,
+            },
+            {
+                "progress": {"running": True},
+                "stamps": {},
+                "suspect": False,
+                "exit_status": None,
+            },
+            {
+                "progress": None,
+                "stamps": {"sweep": StampVerdict.HASH_MISMATCH},
+                "suspect": False,
+                "exit_status": {"state": "complete"},
+            },
+            {
+                "progress": None,
+                "stamps": {},
+                "suspect": False,
+                "exit_status": {"state": "refused", "refusal_text": ""},
+            },
+            {
+                "progress": {"running": False, "stage": "cascade"},
+                "stamps": {},
+                "suspect": False,
+                "exit_status": {"state": "halted"},
+            },
+            {
+                "progress": None,
+                "stamps": {"artifacts": StampVerdict.OK},
+                "suspect": True,
+                "exit_status": {"state": "complete"},
+            },
+        ]
+
+        def maps() -> list[dict[str, object]]:
+            return [
+                build_chain_map(
+                    progress=case["progress"],  # type: ignore[arg-type]
+                    stamps=case["stamps"],  # type: ignore[arg-type]
+                    suspect=case["suspect"],  # type: ignore[arg-type]
+                    exit_status=case["exit_status"],  # type: ignore[arg-type]
+                )
+                for case in cases
+            ]
+
+        off = maps()
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert maps() == off
+        finally:
+            self._reset_facade()

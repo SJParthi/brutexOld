@@ -586,3 +586,79 @@ def test_crash_resume_skips_completed(tmp_path: Path) -> None:
     assert cp is not None
     assert resumed.next_index == 5
     assert not cp.is_complete
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the record decision + adoption verdict.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    behavior-identical to the flag-OFF Python laws (which every OTHER test
+    in this file drives) — refusal MESSAGE bytes included; the atomic save
+    + the corruption-class mapping stay Python on both arms.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def _drive(self, path: Path) -> list[object]:
+        outcomes: list[object] = []
+        store = SweepCheckpointStore(path=path, sweep_id="s1", total_combos=10, clock=lambda: 5.0)
+        outcomes.append(store.record(0))
+        outcomes.append(store.record(3))
+        outcomes.append(store.record(2))  # noop — never rewind
+        with pytest.raises(SweepCheckpointError) as below:
+            store.record(-1)
+        outcomes.append(str(below.value))
+        with pytest.raises(SweepCheckpointError) as beyond:
+            store.record(10)
+        outcomes.append(str(beyond.value))
+        adopt = SweepCheckpointStore(path=path, sweep_id="s1", total_combos=10)
+        loaded = adopt.load()
+        assert loaded is not None
+        outcomes.append(loaded.last_completed_index)
+        outcomes.append(SweepCheckpointStore(path=path, sweep_id="other", total_combos=10).load())
+        with pytest.raises(SweepCheckpointError) as mismatch:
+            SweepCheckpointStore(path=path, sweep_id="s1", total_combos=99).load()
+        outcomes.append(str(mismatch.value))
+        return outcomes
+
+    def test_flag_on_matches_flag_off_including_message_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        off = self._drive(tmp_path / "off.json")
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = self._drive(tmp_path / "on.json")
+        finally:
+            self._reset_facade()
+        normalise = lambda items: [  # noqa: E731 — a tiny local twin-normaliser
+            str(x).replace("on.json", "X").replace("off.json", "X") for x in items
+        ]
+        assert normalise(on) == normalise(off)
+        assert on[:3] == [True, True, False]

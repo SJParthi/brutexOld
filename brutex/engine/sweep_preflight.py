@@ -29,6 +29,16 @@ from brutex.data.session_density import (
     SessionDensityFlag,
     classify_session_density,
 )
+
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade.
+# Both pure folds gate on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
+# default path is byte-identical; `_missing_python` / `_stale_python` below
+# are the live oracles. The remediation rendering stays Python.
+from brutex.engine.sweep_ops_rust import (
+    routed_freshness_stale,
+    routed_preflight_missing,
+    sweep_ops_rust_enabled,
+)
 from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 
 if TYPE_CHECKING:
@@ -138,13 +148,31 @@ def preflight_slices(
     within each symbol.
     """
     interval_list = list(intervals)
-    missing = tuple(
+    if sweep_ops_rust_enabled():
+        missing = routed_preflight_missing(
+            slice_sizes,
+            symbols,
+            interval_list,
+            python_law=lambda: _missing_python(slice_sizes, symbols, interval_list),
+        )
+    else:
+        missing = _missing_python(slice_sizes, symbols, interval_list)
+    return PreflightReport(missing=missing, requested=len(symbols) * len(interval_list))
+
+
+def _missing_python(
+    slice_sizes: Mapping[tuple[str, str], int],
+    symbols: Sequence[str],
+    interval_list: Sequence[str],
+) -> tuple[tuple[str, str], ...]:
+    """The verbatim zero-bar pair fold — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip)."""
+    return tuple(
         (symbol, interval)
         for symbol in symbols
         for interval in interval_list
         if slice_sizes.get((symbol, interval), 0) == 0
     )
-    return PreflightReport(missing=missing, requested=len(symbols) * len(interval_list))
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +265,10 @@ def preflight_derived_freshness(verdicts: Mapping[tuple[str, str], str]) -> Fres
     an unexpected verdict string can never silently pass). Deterministic
     sorted output; pure + O(pairs).
     """
-    stale = tuple(sorted(pair for pair, verdict in verdicts.items() if verdict != "fresh"))
+    if sweep_ops_rust_enabled():
+        stale = routed_freshness_stale(verdicts, python_law=lambda: _stale_python(verdicts))
+    else:
+        stale = _stale_python(verdicts)
     return FreshnessReport(stale=stale, checked=len(verdicts))
 
 
@@ -354,6 +385,12 @@ def preflight_session_density(
         checked += 1
         flagged.extend((symbol, interval, flag) for flag in verdict.flags)
     return SessionDensityNote(flagged=tuple(flagged), slices_checked=checked)
+
+
+def _stale_python(verdicts: Mapping[tuple[str, str], str]) -> tuple[tuple[str, str], ...]:
+    """The verbatim derived-freshness stale fold — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip)."""
+    return tuple(sorted(pair for pair, verdict in verdicts.items() if verdict != "fresh"))
 
 
 def one_day_trade_law_note(intervals: Sequence[str]) -> str | None:

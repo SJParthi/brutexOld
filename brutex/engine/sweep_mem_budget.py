@@ -54,6 +54,13 @@ from typing import Final
 
 from brutex.config.hardware_envelope import memory_budget_bytes
 
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade. The
+# `plan_rank_memory` decision table gates on `sweep_ops_rust_enabled()` FIRST
+# so the flag-OFF default path is byte-identical; `_rank_plan_decision_python`
+# below is the live oracle. The mode-`on` config raises + the refusal message
+# rendering + both env resolvers stay Python.
+from brutex.engine.sweep_ops_rust import routed_rank_plan, sweep_ops_rust_enabled
+
 #: Env knob selecting the bounded-rank mode (``off`` / ``auto`` / ``on``).
 BOUNDED_RANK_MODE_ENV: Final[str] = "BRUTEX_SWEEP_BOUNDED_RANK"
 
@@ -376,8 +383,10 @@ def plan_rank_memory(
     ValueError
         Mode ``on`` without the digest path or without a finite ``top_k``.
     """
-    projected = n_masks * BATCH_RANK_BYTES_PER_KEPT
     if mode is BoundedRankMode.ON:
+        # The two config raises fire BEFORE the routed decision (they are
+        # config errors, not decision outcomes — pure hoist, no observable
+        # reorder: the projection arithmetic has no side effect).
         if not digest_path:
             raise ValueError(
                 f"{BOUNDED_RANK_MODE_ENV}=on is refused on the LEGACY no-digest sweep path: "
@@ -390,21 +399,28 @@ def plan_rank_memory(
                 f"selects top-K via a size-K heap and cannot retain an unbounded leaderboard "
                 f"(set SweepRunConfig.top_k, or use mode 'auto'/'off')"
             )
-        return RankMemoryPlan(
-            mode=mode,
-            budget_bytes=budget_bytes,
-            projected_bytes=projected,
-            n_masks=n_masks,
-            bounded_top_k=top_k,
-            refusal=None,
+    if sweep_ops_rust_enabled():
+        projected, verdict = routed_rank_plan(
+            n_masks,
+            budget_bytes,
+            mode.value,
+            top_k is not None,
+            digest_path,
+            python_law=lambda: _rank_plan_decision_python(
+                n_masks, budget_bytes, mode.value, top_k is not None, digest_path
+            ),
         )
-    if projected <= budget_bytes:
+    else:
+        projected, verdict = _rank_plan_decision_python(
+            n_masks, budget_bytes, mode.value, top_k is not None, digest_path
+        )
+    if verdict in {"batch", "bounded"}:
         return RankMemoryPlan(
             mode=mode,
             budget_bytes=budget_bytes,
             projected_bytes=projected,
             n_masks=n_masks,
-            bounded_top_k=None,
+            bounded_top_k=top_k if verdict == "bounded" else None,
             refusal=None,
         )
     prefix = (
@@ -412,31 +428,22 @@ def plan_rank_memory(
         f"({n_masks} masks x {BATCH_RANK_BYTES_PER_KEPT} B/kept model, no prune credit) "
         f"exceeds {MEM_BUDGET_ENV}={budget_bytes}"
     )
-    if mode is BoundedRankMode.OFF:
+    if verdict == "refuse_off":
         refusal = (
             f"{prefix} and {BOUNDED_RANK_MODE_ENV}=off forbids the bounded columnar rank; "
             f"the tuple is refused BEFORE any survivor allocation (graceful skip, "
             f"never a raw MemoryError). " + _remedies(include_top_k=False, include_digest=False)
         )
-    elif top_k is None:
+    elif verdict == "refuse_no_top_k":
         refusal = (
             f"{prefix} and the bounded columnar rank cannot engage with top_k=None "
             f"(rank-all needs the full leaderboard in memory). "
             + _remedies(include_top_k=True, include_digest=False)
         )
-    elif not digest_path:
+    else:  # "refuse_no_digest" — the decision law's only remaining verdict
         refusal = (
             f"{prefix} and the bounded columnar rank is refused on the LEGACY "
             f"no-digest path. " + _remedies(include_top_k=False, include_digest=True)
-        )
-    else:
-        return RankMemoryPlan(
-            mode=mode,
-            budget_bytes=budget_bytes,
-            projected_bytes=projected,
-            n_masks=n_masks,
-            bounded_top_k=top_k,
-            refusal=None,
         )
     return RankMemoryPlan(
         mode=mode,
@@ -446,6 +453,36 @@ def plan_rank_memory(
         bounded_top_k=None,
         refusal=refusal,
     )
+
+
+def _rank_plan_decision_python(
+    n_masks: int,
+    budget_bytes: int,
+    mode_token: str,
+    has_top_k: bool,
+    digest_path: bool,
+) -> tuple[int, str]:
+    """The verbatim pre-flight decision table — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip).
+
+    Returns ``(projected_bytes, verdict)`` with verdict one of ``"batch"`` /
+    ``"bounded"`` / ``"refuse_off"`` / ``"refuse_no_top_k"`` /
+    ``"refuse_no_digest"`` — the exact branch order of the pre-conversion
+    :func:`plan_rank_memory` body (mode ``on``'s config raises fire in the
+    caller BEFORE this decision, so its arm is unconditionally bounded).
+    """
+    projected = n_masks * BATCH_RANK_BYTES_PER_KEPT
+    if mode_token == BoundedRankMode.ON.value:
+        return projected, "bounded"
+    if projected <= budget_bytes:
+        return projected, "batch"
+    if mode_token == BoundedRankMode.OFF.value:
+        return projected, "refuse_off"
+    if not has_top_k:
+        return projected, "refuse_no_top_k"
+    if not digest_path:
+        return projected, "refuse_no_digest"
+    return projected, "bounded"
 
 
 __all__ = [
