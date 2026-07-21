@@ -19,11 +19,20 @@ repos:
   # ── Generic file hygiene ───────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
+    # docs/design/sweep_core/ holds MAIN-AUTHORED perf-measurement scratch
+    # (byte-identical to origin/main) that lacks trailing newlines and is OUTSIDE
+    # every CI gate scope. It only enters the hook diff on a far-behind merge-forward
+    # push (whole main delta in range). Exclude it from the file-MODIFYING fixers so
+    # the pre-push hook matches CI — the same posture the pyproject ruff extend-exclude
+    # documents (DEC-RUST-SWEEP-OPS-001 merge-forward).
     hooks:
       - id: trailing-whitespace
+        exclude: ^docs/design/sweep_core/
       - id: end-of-file-fixer
+        exclude: ^docs/design/sweep_core/
       - id: mixed-line-ending
         args: [--fix=lf]
+        exclude: ^docs/design/sweep_core/
       - id: check-yaml
       - id: check-toml
       - id: check-json
