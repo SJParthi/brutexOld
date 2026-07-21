@@ -204,6 +204,33 @@ fn report_to_dict<'py>(
         // exactly like `cpcv_pass_rate` — None -> JSON null, floats via the
         // object's own repr law downstream in `dumps_sorted`.
         vd.set_item("dsr_corrected", verdict.getattr("dsr_corrected")?)?;
+        // DEC-REGIME-MUST-SURVIVE-STRATUM-001 / DEC-REGIME-FRAGILITY-GATE-001
+        // (folded 2026-07-20 mega-PR re-forward): the filter-#10/#11
+        // regime-evidence keys are EMIT-ON-PRESENT — written ONLY when the
+        // default-OFF filter actually evaluated the candidate (status is not
+        // None), so a flag-OFF report serialises BYTE-IDENTICALLY to the
+        // pre-filter shape. The stats mapping rides CPython's own `dict()`
+        // (the builtins-delegation law), None passes through as JSON null.
+        let extreme_vol_status = verdict.getattr("extreme_vol_status")?;
+        if !extreme_vol_status.is_none() {
+            vd.set_item("extreme_vol_status", extreme_vol_status)?;
+            let stats = verdict.getattr("extreme_vol_stats")?;
+            if stats.is_none() {
+                vd.set_item("extreme_vol_stats", stats)?;
+            } else {
+                vd.set_item("extreme_vol_stats", b.dict(&stats)?)?;
+            }
+        }
+        let regime_fragility_status = verdict.getattr("regime_fragility_status")?;
+        if !regime_fragility_status.is_none() {
+            vd.set_item("regime_fragility_status", regime_fragility_status)?;
+            let stats = verdict.getattr("regime_fragility_stats")?;
+            if stats.is_none() {
+                vd.set_item("regime_fragility_stats", stats)?;
+            } else {
+                vd.set_item("regime_fragility_stats", b.dict(&stats)?)?;
+            }
+        }
         verdicts.append(vd)?;
     }
     d.set_item("verdicts", verdicts)?;

@@ -27,7 +27,6 @@ Together with ``test_catalog_statcache.py`` these hold
 
 from __future__ import annotations
 
-import pathlib
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -40,7 +39,6 @@ pytest.importorskip("duckdb")
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
-import polars as pl
 from brutex.data import catalog_reconcile
 from brutex.data.catalog import Catalog
 from brutex.data.catalog_reconcile import ReconcileResult, reconcile_catalog_from_lake
@@ -166,33 +164,33 @@ class TestSnapshotHashEquality:
 
 
 class TestWarmLaunchReadCount:
-    def test_warm_reconcile_does_zero_parquet_reads_and_sha256(
+    def test_warm_reconcile_does_zero_facade_scans(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # W-6a: the per-file read runs INSIDE the crate, so the historical
+        # pl.read_parquet / Path.read_bytes spies see nothing — the stat-cache
+        # law is pinned one seam up: a warm launch dispatches ZERO per-file
+        # facade scans (the cache skip happens BEFORE the crate call).
+        from brutex.data import catalog_reconcile as cr
+
         lake = tmp_path / "lake"
         lake.mkdir()
         _write_month(lake, interval="1minute", year=2021, month=1, n=5)
         _write_month(lake, interval="1minute", year=2021, month=2, n=4)  # 2 partitions
 
-        read_parquet_calls: list[str] = []
-        read_bytes_calls: list[str] = []
-        real_read_parquet = pl.read_parquet
-        # DEC-LAKE-READ-INODE-GUARD-001: the sha256 full-bytes read rides the
-        # guarded reader now — spy THAT seam (Path.read_bytes is unused here);
-        # the module object is the file's ONE top-level `catalog_reconcile`
-        # import (no second import style — the #1810 CodeQL convention).
-        real_read_bytes = catalog_reconcile.read_regular_bytes
+        # W-6a merge note: the per-file body is crate-owned
+        # (reconcile_file_via_rust) — spy THAT seam; the #1948-era
+        # read_parquet/read_regular_bytes seams no longer exist on this path.
+        calls: list[str] = []
+        real = cr.reconcile_file_via_rust
 
-        def spy_read_parquet(source: Any, **kwargs: Any) -> Any:
-            read_parquet_calls.append(str(source))
-            return real_read_parquet(source, **kwargs)
+        from brutex.data.lake_invariants import PartitionCoords
 
-        def spy_read_bytes(path: pathlib.Path, *args: Any, **kwargs: Any) -> bytes:
-            read_bytes_calls.append(str(path))
-            return real_read_bytes(path, *args, **kwargs)
+        def _spy(*, path: str, coords: PartitionCoords | None) -> object:
+            calls.append(path)
+            return real(path=path, coords=coords)
 
-        monkeypatch.setattr(pl, "read_parquet", spy_read_parquet)
-        monkeypatch.setattr(catalog_reconcile, "read_regular_bytes", spy_read_bytes)
+        monkeypatch.setattr(cr, "reconcile_file_via_rust", _spy)
 
         with Catalog.open(lake / "catalog.duckdb") as cat:
             cold = reconcile_catalog_from_lake(
@@ -204,9 +202,8 @@ class TestWarmLaunchReadCount:
                 interval="1minute",
                 stat_cache=True,
             )
-            cold_parquet, cold_bytes = len(read_parquet_calls), len(read_bytes_calls)
-            read_parquet_calls.clear()
-            read_bytes_calls.clear()
+            cold_scans = len(calls)
+            calls.clear()
             warm = reconcile_catalog_from_lake(
                 lake_root=lake,
                 catalog=cat,
@@ -217,12 +214,12 @@ class TestWarmLaunchReadCount:
                 stat_cache=True,
             )
 
-        # Cold: one ts-column read + one full-bytes sha256 per partition.
+        # Cold: one native scan (ts read + full-bytes sha256) per partition.
         assert cold.partitions_reconciled == 2 and cold.stat_cache_hits == 0
-        assert cold_parquet == 2 and cold_bytes == 2
-        # Warm: all skipped on stat-only matches — ZERO parquet reads, ZERO sha256.
+        assert cold_scans == 2
+        # Warm: all skipped on stat-only matches — ZERO native scans.
         assert warm.partitions_reconciled == 0 and warm.stat_cache_hits == 2
-        assert read_parquet_calls == [] and read_bytes_calls == []
+        assert calls == []
 
 
 class TestCacheInvalidation:

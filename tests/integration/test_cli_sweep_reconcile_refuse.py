@@ -304,9 +304,6 @@ def test_vanished_file_does_not_refuse(
     vanished file on ``unreadable`` and the escape-less refusal aborted the
     launch with EXIT_USER_ERROR on a transient FS glitch.
     """
-    import errno
-    from types import SimpleNamespace
-
     import brutex.data.catalog_reconcile as cr
     import polars as pl
 
@@ -322,17 +319,19 @@ def test_vanished_file_does_not_refuse(
             )
         }
     ).write_parquet(extra)
-    real_read = pl.read_parquet
+    # Wave-D seam (DEC-RUST-LAKE-WAVED-001): the per-file read is crate-owned
+    # (``reconcile_file_via_rust``) — unlink AT the seam, then delegate to the
+    # REAL facade so the genuine crate ENOENT arm (the facade's ValueError into
+    # the GAP-#9 guard, whose post-hoc existence probe reads vanished → benign
+    # counted skip, never ``unreadable``) is exercised end-to-end.
+    real_reconcile = cr.reconcile_file_via_rust
 
-    def _vanishing_read(path: object, *args: object, **kwargs: object) -> object:
-        if Path(str(path)) == extra:
+    def _vanishing_reconcile(*, path: str, coords: object) -> object:
+        if Path(path) == extra:
             extra.unlink(missing_ok=True)  # the file genuinely vanishes
-            raise FileNotFoundError(errno.ENOENT, "vanished mid-reconcile", str(extra))
-        return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
+        return real_reconcile(path=path, coords=coords)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(
-        cr, "pl", SimpleNamespace(read_parquet=_vanishing_read, exceptions=pl.exceptions)
-    )
+    monkeypatch.setattr(cr, "reconcile_file_via_rust", _vanishing_reconcile)
     rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, tmp_path))
     err = capsys.readouterr().err
     assert rc == EXIT_OK

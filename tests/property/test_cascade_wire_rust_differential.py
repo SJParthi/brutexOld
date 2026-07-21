@@ -61,7 +61,7 @@ from brutex.engine.cascade_wire import (
     wire_report_to_dict,
 )
 from brutex.execution.fill_mode import FillMode
-from brutex.metrics.cascade import CascadeReport
+from brutex.metrics.cascade import CandidateVerdict, CascadeReport
 from brutex.strategies.types import FibAnchorKind, PriceSource, price_source_params_fragment
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 from hypothesis import given
@@ -1016,14 +1016,52 @@ class TestDumpsFloatReprLaw:
 # ───── report projection differential (the d5a297475 dsr_corrected law fold) ──
 
 
+def _oracle_verdict_to_dict(verdict: CandidateVerdict) -> dict[str, object]:
+    """VERBATIM ``_verdict_to_dict`` law at origin/main cbc2f581.
+
+    TRAIN A's DEC-REGIME-MUST-SURVIVE-STRATUM-001 /
+    DEC-REGIME-FRAGILITY-GATE-001 added the EMIT-ON-PRESENT filter-#10/#11
+    keys (written ONLY when the default-OFF filter evaluated the candidate,
+    so a flag-OFF report serialises BYTE-IDENTICALLY to the pre-filter
+    shape). The projection law lives in the Rust crate, so this copy is the
+    independent Python oracle the crate must match — verbatim from
+    cbc2f581's ``cascade_wire.py`` (the 2026-07-20 mega-PR re-forward fold
+    of DEC-RUST-CASCADE-RESULTS-001).
+    """
+    out: dict[str, object] = {
+        "candidate_id": verdict.candidate_id,
+        "passed": verdict.passed,
+        "rejected_at": None if verdict.rejected_at is None else verdict.rejected_at.value,
+        "detail": verdict.detail,
+        "composite_score": verdict.composite_score,
+        "provisional": verdict.provisional,
+        "cpcv_pass_rate": verdict.cpcv_pass_rate,
+        "dsr_corrected": verdict.dsr_corrected,
+    }
+    if verdict.extreme_vol_status is not None:
+        out["extreme_vol_status"] = verdict.extreme_vol_status
+        out["extreme_vol_stats"] = (
+            None if verdict.extreme_vol_stats is None else dict(verdict.extreme_vol_stats)
+        )
+    # The filter-#11 keys ride the SAME EMIT-ON-PRESENT law
+    # (DEC-REGIME-FRAGILITY-GATE-001).
+    if verdict.regime_fragility_status is not None:
+        out["regime_fragility_status"] = verdict.regime_fragility_status
+        out["regime_fragility_stats"] = (
+            None if verdict.regime_fragility_stats is None else dict(verdict.regime_fragility_stats)
+        )
+    return out
+
+
 def _oracle_report_to_dict(report: CascadeReport) -> dict[str, object]:
-    """VERBATIM ``_report_to_dict`` law at origin/main d5a297475.
+    """VERBATIM ``_report_to_dict`` law at origin/main cbc2f581.
 
     Main's DEC-RESULTS-TRUST-HONESTY-001 added the per-verdict
     ``dsr_corrected`` key (ADDITIVE at ``REPORT_VERSION`` 1 — a pre-change
-    report simply lacks the key). The projection law lives in the Rust
+    report simply lacks the key); TRAIN A refactored the verdict projection
+    into ``_verdict_to_dict`` (above). The projection law lives in the Rust
     crate, so this copy is the independent Python oracle the crate must
-    match — verbatim from d5a297475's ``cascade_wire.py``, adapted only to
+    match — verbatim from cbc2f581's ``cascade_wire.py``, adapted only to
     reference the unchanged type faces by import (the merge-forward fold of
     DEC-RUST-CASCADE-RESULTS-001).
     """
@@ -1036,19 +1074,7 @@ def _oracle_report_to_dict(report: CascadeReport) -> dict[str, object]:
         "pool_pbo": report.pool_pbo,
         "survivor_ids": list(report.survivor_ids),
         "stage_survivors": dict(report.stage_survivors),
-        "verdicts": [
-            {
-                "candidate_id": verdict.candidate_id,
-                "passed": verdict.passed,
-                "rejected_at": None if verdict.rejected_at is None else verdict.rejected_at.value,
-                "detail": verdict.detail,
-                "composite_score": verdict.composite_score,
-                "provisional": verdict.provisional,
-                "cpcv_pass_rate": verdict.cpcv_pass_rate,
-                "dsr_corrected": verdict.dsr_corrected,
-            }
-            for verdict in report.verdicts
-        ],
+        "verdicts": [_oracle_verdict_to_dict(verdict) for verdict in report.verdicts],
     }
 
 
@@ -1154,3 +1180,74 @@ class TestReportProjectionDifferential:
         """Every frozen-corpus wire report projects law-identically."""
         for name, report in wire_report_cases():
             assert wire_report_to_dict(report) == _oracle_wire_report_to_dict(report), name
+
+    _STATS = st.none() | st.dictionaries(
+        st.text(min_size=1, max_size=8),
+        st.none()
+        | st.integers(min_value=-(2**53), max_value=2**53)
+        # allow_infinity=False: the byte-parity leg renders through
+        # `json.dumps(..., allow_nan=False)` — an inf stats value refuses
+        # loudly on BOTH arms (the serialize law), so it is out of the
+        # equality domain here.
+        | st.floats(allow_nan=False, allow_infinity=False),
+        max_size=4,
+    )
+
+    @given(
+        extreme_vol_status=st.none() | st.sampled_from(["ok", "fail", "unproven_current_regime"]),
+        extreme_vol_stats=_STATS,
+        regime_fragility_status=st.none() | st.sampled_from(["ok", "fail", "abstain_no_evidence"]),
+        regime_fragility_stats=_STATS,
+    )
+    def test_regime_evidence_keys_match_the_folded_law(
+        self,
+        extreme_vol_status: str | None,
+        extreme_vol_stats: dict[str, object] | None,
+        regime_fragility_status: str | None,
+        regime_fragility_stats: dict[str, object] | None,
+    ) -> None:
+        """The cbc2f581 EMIT-ON-PRESENT filter-#10/#11 keys: crate ≡ oracle.
+
+        The TRAIN A fold (DEC-REGIME-MUST-SURVIVE-STRATUM-001 /
+        DEC-REGIME-FRAGILITY-GATE-001): a status-``None`` verdict emits
+        NEITHER key (flag-OFF reports serialise byte-identically to the
+        pre-filter shape — the both-None draw pins it), a status-carrying
+        verdict emits status + stats (stats ``None`` passes through as JSON
+        null; a mapping rides CPython's own ``dict()``).
+        """
+        verdict = _verdict(
+            _rid(43),
+            extreme_vol_status=extreme_vol_status,
+            extreme_vol_stats=extreme_vol_stats,
+            regime_fragility_status=regime_fragility_status,
+            regime_fragility_stats=regime_fragility_stats,
+        )
+        report = CascadeWireReport(
+            sweep_id="d" * 64,
+            groups=(
+                (
+                    "NIFTY",
+                    "1minute",
+                    _report(
+                        verdicts=(verdict,),
+                        survivor_ids=(_rid(43),),
+                        n_input=1,
+                        n_survived=1,
+                    ),
+                ),
+            ),
+        )
+        got = wire_report_to_dict(report)
+        assert got == _oracle_wire_report_to_dict(report)
+        vd = got["groups"][0]["report"]["verdicts"][0]  # type: ignore[index]
+        if extreme_vol_status is None:
+            assert "extreme_vol_status" not in vd and "extreme_vol_stats" not in vd
+        if regime_fragility_status is None:
+            assert "regime_fragility_status" not in vd and "regime_fragility_stats" not in vd
+        expected = json.dumps(
+            _oracle_wire_report_to_dict(report),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        assert serialize_wire_report(report) == expected

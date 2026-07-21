@@ -1032,6 +1032,8 @@ fn project_verdict(py: Python<'_>, entry: &Bound<'_, PyAny>) -> PyResult<Verdict
         composite_score: classify(py, &mapping_get(entry, "composite_score")?),
         provisional: classify(py, &mapping_get(entry, "provisional")?),
         cpcv_pass_rate: classify(py, &mapping_get(entry, "cpcv_pass_rate")?),
+        extreme_vol_status: classify(py, &mapping_get(entry, "extreme_vol_status")?),
+        regime_fragility_status: classify(py, &mapping_get(entry, "regime_fragility_status")?),
     })
 }
 
@@ -1148,6 +1150,11 @@ fn build_cascade_join<'py>(
         v.set_item("provisional", view.provisional)?;
         v.set_item("cpcv_pass_rate", view.cpcv_pass_rate)?;
         v.set_item("survivor_rank", view.survivor_rank)?;
+        v.set_item("extreme_vol_status", view.extreme_vol_status.as_deref())?;
+        v.set_item(
+            "regime_fragility_status",
+            view.regime_fragility_status.as_deref(),
+        )?;
         views.append(v)?;
     }
     d.set_item("views", views)?;

@@ -42,6 +42,22 @@ path decides from the ledger exactly as before. The intent resume defaults ON
 REAL pull was launched and never finished) — with
 :data:`PULL_INTENT_RESUME_ENV` (``=0``) as the escape hatch.
 
+DEC-RUST-PULL-STATE-001 (flip phase): the ``brutex_pull_state`` Rust kernel
+IS this module's decision plane — the intent shape lattice
+(``intent_shape_verdict`` over the mechanically classified payload codes),
+the resume arm lattice (``intent_resume_decision``), the refused-start
+restore lattice (``intent_refused_restore_decision``) and the resume-env
+token law (``intent_resume_enabled``) are kernel-only; the Python oracle
+bodies were DELETED. The JSON decode, every warn/banner string, the store
+I/O and the frozen :class:`PullIntent` dataclass stay Python. A kernel
+fault raises the typed
+:class:`~brutex.pull_state_rust.PullStateKernelError` — FAIL-CLOSED (the
+boot-resume helpers' historical never-raises envelope is now scoped to
+everything BELOW the kernel: a wheel fault stops the decision loudly
+instead of deciding blind). An intent counter beyond the kernel's u64
+domain (a forged sidecar's arbitrary-precision int) is likewise refused
+loudly by the facade — the pre-flip silent Python arm went with the oracle.
+
 HONEST envelope (Golden Rule #10): the resume re-fires the FULL pipeline (spot
 → metadata → historical → prebuild → movers warm), so its success criteria are
 the pipeline's own — derived-TF partitions written + movers warmed — never a
@@ -70,10 +86,11 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import structlog
 
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.adapters.groww.pull_singleflight import (
     PullAlreadyRunningError,
     pull_singleflight_lock,
@@ -131,11 +148,6 @@ MAX_AUTO_RESTARTS: Final[int] = 2
 #: DEC-PULL-INTENT-RESUME-001); an explicit falsy value disables.
 PULL_INTENT_RESUME_ENV: Final[str] = "BRUTEX_PULL_INTENT_RESUME"
 
-#: The falsy set (case-insensitive) that DISABLES the resume — the complement
-#: convention of the sibling default-OFF toggles' truthy set, so the operator
-#: writes the same tokens either way (CLAUDE.md §11 COMMON).
-_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
-
 #: The intent payload's schema version (forward-compat marker; unknown extra
 #: keys are ignored on load, a wrong SHAPE is corrupt).
 _INTENT_VERSION: Final[int] = 1
@@ -159,12 +171,16 @@ def resolve_pull_intent_resume(env: Mapping[str, str] | None = None) -> bool:
     file is operator-click evidence — a REAL pull was launched and died — so
     completing it needs no extra opt-in (DEC-PULL-INTENT-RESUME-001). *env*
     defaults to :data:`os.environ`; a test injects its own mapping. O(1).
+
+    DEC-RUST-PULL-STATE-001 (flip phase): the strip+lower+falsy-set law is
+    the ``intent_resume_enabled`` Rust kernel's — the RAW token (or ``None``
+    for unset) crosses the FFI unprocessed. A kernel fault — including a
+    lone-surrogate env value failing the pyo3 ``&str`` edge — raises
+    :class:`~brutex.pull_state_rust.PullStateKernelError`, fail-closed.
     """
     source: Mapping[str, str] = os.environ if env is None else env
     raw = source.get(PULL_INTENT_RESUME_ENV)
-    if raw is None:
-        return True
-    return raw.strip().lower() not in _FALSY
+    return _pull_state_rust.rust_intent_resume_enabled(raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,40 +237,125 @@ class PullIntent:
 
     @classmethod
     def from_payload(cls, payload: object) -> PullIntent | None:
-        """Parse a loaded JSON payload; ``None`` on ANY shape violation — pure.
+        """Parse a loaded JSON payload; ``None`` on ANY shape violation.
 
         Strict: the four request fields must each be a string or ``None``,
         ``restarts`` a non-negative real ``int`` (a JSON ``true`` is NOT a
         count), ``created_at`` a string. Unknown extra keys are ignored
         (forward-compat); a violation means a corrupt / foreign file, which the
         caller treats as absent (never a fabricated pull — Golden Rule #1).
+
+        DEC-RUST-PULL-STATE-001 (flip phase): the shape LATTICE is the
+        ``intent_shape_verdict`` Rust kernel's, consulted over the
+        mechanically classified payload codes (the JSON decode — and
+        CPython's whole failure taxonomy — happened BEFORE this method; a
+        failed decode arrives as the ``None`` payload the not-a-Mapping code
+        covers). The dataclass CONSTRUCTION stays Python: a VALID verdict
+        certifies the shape (root Mapping · request fields str/absent/null ·
+        ``restarts`` a genuine non-negative int — huge positives included,
+        the sign law is the kernel's · ``created_at`` a str or absent), so
+        the extraction below is mechanical, never a second decision. A
+        kernel fault raises
+        :class:`~brutex.pull_state_rust.PullStateKernelError`, fail-closed.
         """
-        if not isinstance(payload, Mapping):
+        verdict = _pull_state_rust.rust_intent_shape_verdict(*_classify_payload_for_kernel(payload))
+        if verdict != _pull_state_rust.INTENT_SHAPE_VALID:
             return None
-        fields: dict[str, str | None] = {}
+        # The VALID verdict implies the root is a Mapping (the classifier's
+        # code 1) — the cast is type-narrowing only, never a re-decision.
+        mapping = cast("Mapping[str, Any]", payload)
         # ``scope`` is the OPTIONAL fifth request field (DEC-PULL-SCOPED-ALL-
-        # ONECLICK-001): absent on every pre-scope intent file ⇒ ``None`` ⇒ the
-        # full chain (back-compat); a non-string value is corrupt like the rest.
-        for key in ("symbols", "symbol", "from_date", "to_date", "scope"):
-            raw = payload.get(key)
-            if raw is not None and not isinstance(raw, str):
-                return None
-            fields[key] = raw
-        restarts = payload.get("restarts")
-        if isinstance(restarts, bool) or not isinstance(restarts, int) or restarts < 0:
-            return None
-        created_at = payload.get("created_at", "")
-        if not isinstance(created_at, str):
-            return None
+        # ONECLICK-001): absent on every pre-scope intent file ⇒ ``None`` ⇒
+        # the full chain (back-compat); ``created_at`` absent defaults empty.
         return cls(
-            symbols=fields["symbols"],
-            symbol=fields["symbol"],
-            from_date=fields["from_date"],
-            to_date=fields["to_date"],
-            restarts=restarts,
-            created_at=created_at,
-            scope=fields["scope"],
+            symbols=mapping.get("symbols"),
+            symbol=mapping.get("symbol"),
+            from_date=mapping.get("from_date"),
+            to_date=mapping.get("to_date"),
+            # Present by the VALID verdict (an absent ``restarts`` is refused
+            # as corrupt by the kernel lattice) — indexed, never defaulted.
+            restarts=mapping["restarts"],
+            created_at=mapping.get("created_at", ""),
+            scope=mapping.get("scope"),
         )
+
+
+#: The i64 FFI band for the classified ``restarts`` value (the kernel
+#: carries the value only when it is representable; outside it only the
+#: representability + sign FACTS cross — the sign law stays in the kernel).
+_I64_MIN: Final[int] = -(2**63)
+_I64_MAX: Final[int] = 2**63 - 1
+
+
+def _classify_payload_for_kernel(
+    payload: object,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    """MECHANICAL kernel-input classification of a decoded payload — no law.
+
+    The Wave-2E seam projection (DEC-RUST-PULL-STATE-001): every slot is a
+    concrete-type / i64-representability FACT (``isinstance`` tags — bool
+    probed before int because ``bool`` subclasses ``int``; the
+    "a JSON ``true`` is not a count" LAW itself lives in the Rust kernel,
+    like absent ≡ null for the request fields, the sign law and
+    ``created_at``'s absent-defaults-empty split).  A non-Mapping root
+    (including the ``None`` a failed JSON decode folds to — the
+    taxonomy-parity chokepoint) zeroes the field slots; the kernel refuses
+    on the root code before reading them.  Mirrored 1:1 by the golden
+    harness (``tests/golden/_pull_intent_harness.py``) and drift-pinned by
+    the frozen fixture.
+    """
+    if not isinstance(payload, Mapping):
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0)
+    codes: list[int] = [1]
+    for key in ("symbols", "symbol", "from_date", "to_date", "scope"):
+        if key not in payload:
+            codes.append(_pull_state_rust.INTENT_KIND_ABSENT)
+        else:
+            value = payload[key]
+            if value is None:
+                codes.append(_pull_state_rust.INTENT_KIND_NULL)
+            elif isinstance(value, str):
+                codes.append(_pull_state_rust.INTENT_KIND_STR)
+            else:
+                codes.append(_pull_state_rust.INTENT_KIND_OTHER)
+    if "restarts" not in payload:
+        codes.extend((_pull_state_rust.INTENT_RESTARTS_ABSENT, 0))
+    else:
+        restarts = payload["restarts"]
+        if restarts is None:
+            codes.extend((_pull_state_rust.INTENT_RESTARTS_NULL, 0))
+        elif isinstance(restarts, bool):
+            codes.extend((_pull_state_rust.INTENT_RESTARTS_BOOL, 0))
+        elif isinstance(restarts, int):
+            if _I64_MIN <= restarts <= _I64_MAX:
+                codes.extend((_pull_state_rust.INTENT_RESTARTS_INT, restarts))
+            elif restarts > 0:
+                codes.extend((_pull_state_rust.INTENT_RESTARTS_INT_HUGE_POS, 0))
+            else:
+                codes.extend((_pull_state_rust.INTENT_RESTARTS_INT_HUGE_NEG, 0))
+        else:
+            codes.extend((_pull_state_rust.INTENT_RESTARTS_OTHER, 0))
+    if "created_at" not in payload:
+        codes.append(_pull_state_rust.INTENT_KIND_ABSENT)
+    else:
+        created = payload["created_at"]
+        if created is None:
+            codes.append(_pull_state_rust.INTENT_KIND_NULL)
+        elif isinstance(created, str):
+            codes.append(_pull_state_rust.INTENT_KIND_STR)
+        else:
+            codes.append(_pull_state_rust.INTENT_KIND_OTHER)
+    return (
+        codes[0],
+        codes[1],
+        codes[2],
+        codes[3],
+        codes[4],
+        codes[5],
+        codes[6],
+        codes[7],
+        codes[8],
+    )
 
 
 class ResumeBanner:
@@ -386,13 +487,29 @@ class PullIntentStore:
         return True
 
     def load(self) -> PullIntent | None:
-        """Read the persisted intent, or ``None`` — never raises.
+        """Read the persisted intent, or ``None`` — never raises for any FILE shape.
 
         A missing file is the normal "no pull died" answer. An unreadable file
         logs ``pull_intent.read_failed`` and reads as absent. A corrupt file
         (non-JSON / wrong shape) logs ``pull_intent.corrupt``, is DELETED
         best-effort (it can never become readable again and must not re-trip
-        every boot), and reads as absent — a boot can never crash here.
+        every boot), and reads as absent.
+
+        Flip-phase exception (DEC-RUST-PULL-STATE-001, fail-closed): the
+        shape-verdict lattice is the Rust kernel, so on a PRESENT decodable
+        payload :meth:`PullIntent.from_payload` consults it — a missing/stale/
+        raising wheel raises the typed
+        :class:`~brutex.pull_state_rust.PullStateKernelError` and a still-SET
+        removed ``BRUTEX_PULL_STATE_RUST`` knob raises
+        :class:`~brutex.pull_state_rust.PullStateFlagRemovedError` (a
+        ``ValueError`` subclass), and BOTH PROPAGATE out of this method — the
+        ``from_payload`` call sits OUTSIDE the JSON-decode ``try`` on purpose:
+        folding a broken decision plane into ``None`` would fail OPEN (a
+        persisted spot-only scope silently dropped, widening the pull). The
+        boot helpers (:func:`run_auto_resume` and the orchestrator's
+        ``maybe_resume_on_boot``) let the typed refusal propagate fail-closed
+        rather than resume on a broken kernel; an ABSENT/corrupt file never
+        consults the kernel and reads as absent exactly as before.
 
         Hardened on the #1614 round-6 loader template via the shared
         :func:`read_sidecar_bytes` (refuter round 7 P-1,
@@ -569,7 +686,13 @@ def restore_intent_after_refused_start(
     dry_run: bool,
     started: bool,
 ) -> bool:
-    """Undo the pre-start intent persist when the start was REFUSED — never raises.
+    """Undo the pre-start intent persist when the start was REFUSED.
+
+    Never raises below the decision plane (store I/O stays best-effort); the
+    restore LATTICE itself is the fail-closed Rust kernel
+    (DEC-RUST-PULL-STATE-001, flip phase), so a wheel fault raises the typed
+    :class:`~brutex.pull_state_rust.PullStateKernelError` — the launcher's
+    click fails loudly rather than the restore deciding blind.
 
     Refuter round 3 F-1 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md #1779):
     :func:`persist_intent_for_launch` deliberately runs BEFORE
@@ -631,9 +754,28 @@ def restore_intent_after_refused_start(
     """
     if dry_run or started:
         return False
-    if store.load() is None:
+    current_present = store.load() is not None
+    # --- pull_intent (flip phase, DEC-RUST-PULL-STATE-001): the restore
+    # LATTICE is the kernel's ONLY.  The dry-run / started short-circuit
+    # above deliberately runs FIRST (its arm is a constant ``False`` and the
+    # ``store.load()`` side effects — corrupt delete + warns — must not fire
+    # on it), exactly as the kernel's ``NO_ACTION`` arm models; the facade's
+    # consistency gate REFUSES a wheel that breaks that totality.  Every
+    # effect (the load above, the clear/write below, the logs) stays on
+    # this Python body.
+    arm = _pull_state_rust.rust_intent_refused_restore_decision(
+        dry_run=False,
+        started=False,
+        current_present=current_present,
+        prior_present=prior is not None,
+    )
+    if arm == _pull_state_rust.RESTORE_ARM_LEAVE_ABSENT:
         return False
-    if prior is None:
+    if arm == _pull_state_rust.RESTORE_ARM_CLEAR_ORPHAN or prior is None:
+        # ``prior is None`` is the STRUCTURAL belt: a drifted wheel voting
+        # RESTORE_PRIOR with no snapshot to restore (a shape the facade's
+        # vocabulary gate cannot see) must clear the orphan — the lattice's
+        # own arm for that input — never write ``None`` or raise from here.
         store.clear()
         _LOG.info(
             "pull_intent.refused_start_restored",
@@ -759,7 +901,15 @@ def run_auto_resume(
     alert: Callable[[PullIntent], None] | None = None,
     max_restarts: int = MAX_AUTO_RESTARTS,
 ) -> ResumeAction:
-    """The whole boot-time intent-resume decision + dispatch — **never raises**.
+    """The whole boot-time intent-resume decision + dispatch.
+
+    Never raises for anything BELOW the kernel (launch faults, store I/O,
+    alert faults are all folded into the returned action) — the ONE
+    exception is the fail-closed decision plane itself
+    (DEC-RUST-PULL-STATE-001, flip phase): a pull-state kernel fault, or a
+    loaded ``restarts`` counter beyond the kernel's u64 domain, raises the
+    typed :class:`~brutex.pull_state_rust.PullStateKernelError` (the deleted
+    Python oracle is not there to decide blind).
 
     The 100 %-tested core the dashboard's thin ``app.state.brutex_resume_pipeline``
     seam delegates to (every load-bearing decision lives HERE, not in the
@@ -809,14 +959,29 @@ def run_auto_resume(
         if probe_singleflight is not None
         else (lambda: probe_pull_singleflight(store.lake_root))
     )
-    if not probe():
+    probe_ok = bool(probe())
+    # --- pull_intent (flip phase, DEC-RUST-PULL-STATE-001): the arm LATTICE
+    # (peer-probe BEFORE cap BEFORE bump — the load-bearing order) is the
+    # kernel's ONLY; every EFFECT (the probe call itself, logs, banner,
+    # alert, bump, launch) stays on this Python body.  ``has_intent=True``
+    # structurally — the no-intent arm returned above, exactly as the kernel
+    # lattice models it.  A kernel fault — or a loaded counter beyond the
+    # kernel's u64 domain (a forged sidecar) — raises the typed
+    # ``PullStateKernelError`` out of this boot helper, fail-closed.
+    arm = _pull_state_rust.rust_intent_resume_decision(
+        has_intent=True,
+        probe_acquirable=probe_ok,
+        restarts=intent.restarts,
+        max_restarts=max_restarts,
+    )
+    if arm == _pull_state_rust.RESUME_ARM_PEER_ACTIVE:
         _LOG.info(
             "pull_intent.peer_active",
             lake_root=str(store.lake_root),
             restarts=intent.restarts,
         )
         return ResumeAction.PEER_ACTIVE
-    if intent.restarts >= max_restarts:
+    if arm == _pull_state_rust.RESUME_ARM_OVER_CAP:
         store.banner.set(level="critical", message=restart_cap_message(intent, max_restarts))
         alert_fn = alert if alert is not None else emit_restart_cap_alert
         try:

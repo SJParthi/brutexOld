@@ -216,11 +216,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_cascade-*.whl
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -235,7 +235,7 @@ jobs:
   # BUILD WHEELS — the ONE maturin wheel build for the whole run
   # (DEC-SWEEP-COVERAGE-SHARD-001). Previously ~10 jobs each rebuilt the
   # same 2-4 crates from source per run (minutes each, crates.io-flake
-  # exposed); now this job builds all four ONCE — behind an actions/cache
+  # exposed); now this job builds all five ONCE — behind an actions/cache
   # keyed on the crate sources, so an unchanged-Rust push restores the
   # wheels in seconds — and every consumer job downloads + pip-installs
   # them. run-smoke deliberately KEEPS its own from-source build: it
@@ -245,7 +245,11 @@ jobs:
   build-wheels:
     name: Build Rust wheels (shared, cache-keyed)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 30 → 45 at the DEC-RUST-LAKE-WAVED-001 W-6a merge: the brutex-lake
+    # crate's rev-pinned polars graph is an estimated ~10+ min COLD build
+    # (CI-unverified until the first remote run) on top of the four kernels
+    # (cargo-cached across runs; the disclosed CI cold cost).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
@@ -258,13 +262,34 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: wheelhouse
-          key: rust-wheels-v1-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-cascade/**') }}
+          # v1 → v2 (TRAIN A, red-team mandate — stale-wheel-under-green-CI):
+          # the key now hashes EVERY ci-gated crate's sources (previously
+          # only the six wheelhouse-built crates), so a source change in ANY
+          # gated crate invalidates the wheelhouse and a stale wheel can
+          # never ride a green run. Gated set = the ci-ok crate gates
+          # (rust=fno-math · rust-trading-core · rust-brutex-feed ·
+          # rust-brutex-strategies · rust-brutex-calendar · rust-brutexd ·
+          # rust-brutex-ops · rust-brutex-pull-state) + brutex-lake (gated
+          # via this required build-wheels job + the ci-ok kernel verify).
+          key: rust-wheels-v2-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-calendar/**', 'rust/brutexd/**', 'rust/brutex-ops/**', 'rust/brutex-pull-state/**', 'rust/brutex-cascade/**', 'rust/brutex-lake/**') }}
       - name: Install Rust toolchain (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-      - name: Build the four maturin wheels (cache miss only)
+      - name: Cache the brutex-lake cargo build (cache miss only)
+        # DEC-RUST-LAKE-WAVED-001 W-6a: the brutex-lake crate compiles the
+        # whole rev-pinned polars graph (an estimated ~10+ min cold — the
+        # disclosed CI cold cost, CI-unverified until the first remote
+        # run), so a wheelhouse-cache MISS still restores the cargo
+        # target dir across runs via the crate content hash.
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-lake -> target
+          shared-key: brutex-lake-wheel
+          key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
+      - name: Build the six maturin wheels (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: |
           # Belt-and-suspenders crates.io flake guard (the same 3-attempt
@@ -290,14 +315,21 @@ jobs:
           build_with_retry ./rust/brutex-feed
           build_with_retry ./rust/brutex-strategies
           build_with_retry ./rust/brutex-cascade
+          build_with_retry ./rust/brutex-pull-state
+          # DEC-RUST-LAKE-WAVED-001 W-6a: the brutex_lake wheel is now a HARD
+          # test prerequisite — the Python lake scan/heal/reconcile/read
+          # cores are DELETED, so an absent wheel is a loud typed refusal
+          # (LakeRustWavedUnavailableError) and every lake suite would FAIL,
+          # not skip.
+          build_with_retry ./rust/brutex-lake
       - name: Verify the wheels import (runs on the cache-hit arm too)
         # A corrupt/stale cache entry must fail HERE, loudly, not in a
         # dozen downstream jobs.
         run: |
           ls -l wheelhouse/
-          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 5
-          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
-          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_cascade; print('all five kernels import OK')"
+          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 7
+          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
+          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_pull_state, brutex_lake, brutex_cascade; print('all seven kernels import OK')"
       - name: Upload wheels artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -325,7 +357,10 @@ jobs:
     name: Unit test shard ${{ matrix.shard }} (coverage data)
     runs-on: ubuntu-24.04
     needs: build-wheels
-    timeout-minutes: 75
+    # 75 → 90 (TRAIN A, red-team mandate): the diff-scoped coverage gate
+    # wall-kills at 75 on a ~35-PR integration diff; W2's on-record raise
+    # (living in #1699 as a cherry of the same edit) authorizes 90.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -373,11 +408,16 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state + brutex_lake)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
+        # + brutex_lake (DEC-RUST-LAKE-WAVED-001 W-6a): the Python lake
+        # scan/heal/reconcile/read cores are DELETED — the wheel is a HARD
+        # prerequisite of every suite that reaches the lake surface (an
+        # absent wheel is the typed LakeRustWavedUnavailableError, a loud
+        # FAIL, never a skip).
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
       - name: Compute this shard's file list (deterministic partition)
         run: |
           set -euo pipefail
@@ -484,11 +524,16 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state + brutex_lake)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
+        # + brutex_lake (DEC-RUST-LAKE-WAVED-001 W-6a): the Python lake
+        # scan/heal/reconcile/read cores are DELETED — the wheel is a HARD
+        # prerequisite of every suite that reaches the lake surface (an
+        # absent wheel is the typed LakeRustWavedUnavailableError, a loud
+        # FAIL, never a skip).
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
       - name: Strict per-module 100% coverage gate (Golden Rule #12)
         # New modules ship at 100% line + 100% branch from the start.
         # Add modules to this list as they reach 100%. Legacy modules
@@ -579,6 +624,134 @@ jobs:
             pytest --cov=brutex.audit_verify --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_audit_verify.py
           else
             echo "(brutex.audit_verify test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1796): the feed-root
+          # nesting-law leaf ships at 100% line+branch — the identity-default
+          # law + grammar/reserved refusal + path-structural attribution.
+          if compgen -G "tests/unit/test_data_feed_root.py" > /dev/null; then
+            pytest --cov=brutex.data.feed_root --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_feed_root.py
+          else
+            echo "(brutex.data.feed_root test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1795): the FeedAuditSink
+          # (Golden Rule #8 hash chain for non-default feed writes) at 100%.
+          if compgen -G "tests/unit/test_data_feed_audit.py" > /dev/null; then
+            pytest --cov=brutex.data.feed_audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_feed_audit.py
+          else
+            echo "(brutex.data.feed_audit test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1795): the FeedBinding
+          # composition record + the ONE sanctioned build_feed_sink constructor.
+          if compgen -G "tests/unit/test_feeds_binding.py" > /dev/null; then
+            pytest --cov=brutex.feeds.binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_binding.py
+          else
+            echo "(brutex.feeds.binding test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1795): the feed registry
+          # (ships ONLY the default feed — vendor-token-free).
+          if compgen -G "tests/unit/test_feeds_registry.py" > /dev/null; then
+            pytest --cov=brutex.feeds.registry --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_registry.py
+          else
+            echo "(brutex.feeds.registry test file not present yet — gate inactive)"
+          fi
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1795): the default feed's
+          # identity-pinned thin binding (spine conformance evidence).
+          if compgen -G "tests/unit/test_feeds_groww_binding.py" > /dev/null; then
+            pytest --cov=brutex.feeds.groww_binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_groww_binding.py
+          else
+            echo "(brutex.feeds.groww_binding test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-SPOT-FEED-001 (ADR-0022): the standalone Dhan read-only SPOT
+          # feed track — the real second consumer of the feed interface. Each new
+          # module 100% line+branch, fake-driven (no boto3/dhanhq/network).
+          if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
+          else
+            echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_errors.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.errors --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_errors.py
+          else
+            echo "(brutex.adapters.dhan.errors test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_scrip_master.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.scrip_master --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_scrip_master.py
+          else
+            echo "(brutex.adapters.dhan.scrip_master test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_token_store_aws.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.token_store_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_store_aws.py
+          else
+            echo "(brutex.adapters.dhan.token_store_aws test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_reauth.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.reauth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_reauth.py
+          else
+            echo "(brutex.adapters.dhan.reauth test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
+          else
+            echo "(brutex.adapters.dhan.parser test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py
+          else
+            echo "(brutex.adapters.dhan.chunks test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_client.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py
+          else
+            echo "(brutex.adapters.dhan.client test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_adapter.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.adapter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_adapter.py
+          else
+            echo "(brutex.adapters.dhan.adapter test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_live_controller.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.live_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_live_controller.py
+          else
+            echo "(brutex.adapters.dhan.live_controller test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_ingest.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py
+          else
+            echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-NATIVE-DAILY-001: the NATIVE 1-day spot ingest (daily
+          # endpoint, fixed 2020-01-01 project floor) + the read-only
+          # daily-vs-derived consistency observer — each 100% line+branch,
+          # fake-driven (no dhanhq/network).
+          if compgen -G "tests/unit/test_dhan_daily_ingest.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.daily_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_daily_ingest.py
+          else
+            echo "(brutex.adapters.dhan.daily_ingest test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_daily_consistency.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.daily_consistency --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_daily_consistency.py
+          else
+            echo "(brutex.adapters.dhan.daily_consistency test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_credentials_dhan_aws.py" > /dev/null; then
+            pytest --cov=brutex.config.credentials_dhan_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials_dhan_aws.py
+          else
+            echo "(brutex.config.credentials_dhan_aws test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-FEED-BINDING-001 (ADR-0022): the Dhan feed binding — the real
+          # second consumer's identity-pinned FeedBinding shim.
+          if compgen -G "tests/unit/test_dhan_binding.py" > /dev/null; then
+            pytest --cov=brutex.feeds.dhan_binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_binding.py
+          else
+            echo "(brutex.feeds.dhan_binding test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-PULL-SURFACE-001 (ADR-0022): the Dhan SPOT pull core (sink +
+          # ingest + prebuild) driving the dashboard route + CLI. Fake-driven 100%
+          # (the real SSM/dhanhq build + production seam are pragma-no-cover).
+          if compgen -G "tests/unit/test_dhan_pull.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.dhan_pull --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_pull.py
+          else
+            echo "(brutex.dashboard.dhan_pull test file not present yet — gate inactive)"
           fi
           # DEC-CONSTITUENTS-CACHE-001 (MIGRATION.md #457): the new
           # constituent disk-cache module ships at 100% line+branch from
@@ -1071,8 +1244,17 @@ jobs:
           # drives the publisher — boto3 stays OUT of CI).
           if compgen -G "tests/unit/test_crossverify_config.py" > /dev/null; then
             pytest --cov=brutex.crossverify.config       --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_config.py
-            pytest --cov=brutex.crossverify.canonical    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_canonical.py
-            pytest --cov=brutex.crossverify.csv_render   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_csv_render.py
+            # DEC-CROSSVERIFY-RUST-CORE: the two routed law modules gain a
+            # STEM-MATCHED Rust-arm suite beside their own UNMODIFIED file
+            # (test_crossverify_<module>_rust_arm.py — the flag-ON wiring
+            # branches), so the auto-discovery gate's stem mapping and this
+            # static stanza measure the SAME union at 100% line+branch.
+            pytest --cov=brutex.crossverify.canonical    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_canonical.py tests/unit/test_crossverify_canonical_rust_arm.py
+            pytest --cov=brutex.crossverify.csv_render   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_csv_render.py tests/unit/test_crossverify_csv_render_rust_arm.py
+            # DEC-CROSSVERIFY-RUST-CORE: the default-OFF Rust seam facade —
+            # 100% line+branch STANDALONE on crate-free fakes (the REAL-wheel
+            # arms live in the non-required ops-rust-parity lane).
+            pytest --cov=brutex.crossverify.rust_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_rust_seam.py
             pytest --cov=brutex.crossverify.gate_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_gate_seam.py
             pytest --cov=brutex.crossverify.day_export   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_day_export.py
             pytest --cov=brutex.crossverify.journal      --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_journal.py
@@ -1598,9 +1780,12 @@ jobs:
           #       DEC-LAKE-RUST-RESAMPLE-001: the flag-ON seam branch is
           #       reachable only via test_tf_resampler_rust_seam.py (the
           #       stem-matched seam-wiring pins — the feed_replay_rust_seam
-          #       precedent). All the files are required for 100%.
+          #       precedent). DEC-LAKE-RUST-RESAMPLE-DAILY-001: the batch-face
+          #       flag-ON branch of resample_all_21_tfs is reachable only via
+          #       test_tf_resampler_batch_seam.py. All the files are required
+          #       for 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_registry_parity.py tests/unit/test_tf_resampler_rust_seam.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_registry_parity.py tests/unit/test_tf_resampler_rust_seam.py tests/unit/test_tf_resampler_batch_seam.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
@@ -1608,10 +1793,12 @@ jobs:
           #       the F&O twin of resample_1m_to_daily — OHLCV aggregation +
           #       midnight-IST re-stamp + forming-session `before` guard, EXCEPT
           #       it reads the carry-last open_interest (defensive `in columns`
-          #       guard) instead of hardcoding None. 100% line+branch via
-          #       tests/unit/test_fno_daily_resample.py.
+          #       guard) instead of hardcoding None.
+          #       DEC-LAKE-RUST-RESAMPLE-DAILY-001: the flag-ON daily-seam arm
+          #       is reachable only via test_fno_daily_resample_rust_seam.py.
+          #       100% line+branch via both files together.
           if compgen -G "tests/unit/test_fno_daily_resample.py" > /dev/null; then
-            pytest --cov=brutex.data.fno_daily_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_daily_resample.py
+            pytest --cov=brutex.data.fno_daily_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_daily_resample.py tests/unit/test_fno_daily_resample_rust_seam.py
           else
             echo "(brutex.data.fno_daily_resample test file not present yet — gate inactive)"
           fi
@@ -1619,10 +1806,13 @@ jobs:
           #       the F&O twin of spot_resample.derive_intraday_tfs (OI carried)
           #       + the on-the-fly /movers resample_session_to_tf (RENAMEs the
           #       lake `timestamp -> ts_utc`, drops the trailing FORMING bucket —
-          #       no look-ahead, Property P-06). 100% line+branch via
-          #       tests/unit/test_fno_resample.py.
+          #       no look-ahead, Property P-06).
+          #       DEC-LAKE-RUST-RESAMPLE-DAILY-001: the flag-ON session-face
+          #       route of resample_session_to_tf is reachable only via
+          #       test_fno_resample_session_seam.py. 100% line+branch via
+          #       both files together.
           if compgen -G "tests/unit/test_fno_resample.py" > /dev/null; then
-            pytest --cov=brutex.data.fno_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_resample.py
+            pytest --cov=brutex.data.fno_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_resample.py tests/unit/test_fno_resample_session_seam.py
           else
             echo "(brutex.data.fno_resample test file not present yet — gate inactive)"
           fi
@@ -1948,13 +2138,16 @@ jobs:
           # crossverify tail fence, and the CLI --auto gate (settle constant +
           # Muhurat deferral + composed mid-run belt). Both ship at 100%
           # line+branch standalone from the start.
+          # DEC-RUST-PULL-STATE-001 Wave 1B: the pull_scope kernel-seam arms
+          # (flag consults + degrade paths) live in the seam suite, which MUST
+          # join this gate so the module stays 100% line+branch.
           if compgen -G "tests/unit/test_pull_scope.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py
+            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py tests/unit/test_pull_scope_rust_seam.py
           else
             echo "(brutex.dashboard.pull_scope test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_auto_pull_gate.py" > /dev/null; then
-            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py
+            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py tests/unit/test_auto_pull_gate_rust_seam.py
           else
             echo "(brutex.calendars.auto_pull_gate test file not present yet — gate inactive)"
           fi
@@ -1963,7 +2156,7 @@ jobs:
           # ticker + the once-per-day fire law). 100% line+branch standalone
           # from the start.
           if compgen -G "tests/unit/test_dashboard_auto_pull_scheduler.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.auto_pull_scheduler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_auto_pull_scheduler.py
+            pytest --cov=brutex.dashboard.auto_pull_scheduler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_auto_pull_scheduler.py tests/unit/test_dashboard_auto_pull_scheduler_rust_seam.py
           else
             echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
           fi
@@ -2306,7 +2499,7 @@ jobs:
           fi
           if compgen -G "tests/unit/test_pull_progress.py" > /dev/null; then
             # + the ETA/open-ended/add_bars honesty suite (DEC-PULL-PROGRESS-HONESTY-001)
-            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py
+            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py tests/unit/test_pull_progress_rust_seam.py
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
@@ -2583,8 +2776,17 @@ jobs:
           # brutex.metrics.cascade (262 stmts / 84 branches) — chains the hard
           # gates + the 9 filters + composite ranking. Same numpy-safe form as
           # the sibling metrics gates (brutex.metrics eagerly imports numpy).
+          # DEC-REGIME-MUST-SURVIVE-STRATUM-001: test_cascade_extreme_vol.py
+          # joins the gate — it covers the default-OFF extreme-vol
+          # must-survive filter #10 block in cascade.py.
+          # DEC-REGIME-FRAGILITY-GATE-001: test_cascade_regime_fragility.py
+          # joins the gate — it covers the default-OFF regime-fragility
+          # filter #11 block in cascade.py.
+          # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001: the default-OFF
+          # single-event sensitivity stage's tests live in the stem-matched
+          # test_cascade_single_event.py — folded into the SAME 100% gate.
           if compgen -G "tests/unit/test_cascade.py" > /dev/null; then
-            pytest tests/unit/test_cascade.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            pytest tests/unit/test_cascade.py tests/unit/test_cascade_extreme_vol.py tests/unit/test_cascade_regime_fragility.py tests/unit/test_cascade_single_event.py --cov=brutex --cov-branch --cov-fail-under=0 -q
             coverage report --include="*/brutex/metrics/cascade.py" | grep -q "brutex/metrics/cascade.py" \
               || { echo "ERROR: brutex/metrics/cascade.py was not measured — gate failed"; exit 1; }
             coverage report --include="*/brutex/metrics/cascade.py" --show-missing --fail-under=100
@@ -2649,10 +2851,27 @@ jobs:
           # last-pull OUTCOME classifier — a HALTED pull (disk-full /
           # market-hours / quota / …) must never render the clean-completion
           # green. 100% line+branch on pull_outcome.py.
+          # DEC-RUST-PULL-STATE-001 Wave 1A: the pull_outcome kernel-seam arms
+          # (flag consults + code composition + degrade paths) live in the seam
+          # suite, which MUST join this gate so the module stays 100%
+          # line+branch.
           if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py tests/unit/test_pull_outcome_rust_seam.py
           else
             echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-RUST-PULL-STATE-001: the pull-state Rust facade
+          # brutex/pull_state_rust.py — its 100% line+branch is a
+          # MULTI-FILE-suite property by construction (each wave's accessor
+          # section is exercised by that wave's OWN seam suite, stem-named for
+          # the CONSUMER module it gates), so this STATIC gate runs exactly
+          # the curated static suite enumerated below (every per-wave seam
+          # file); the discovery gate excludes the facade for the same
+          # structural reason (see COVERAGE_DISCOVERY_EXCLUDE).
+          if compgen -G "tests/unit/test_pull_state_rust.py" > /dev/null; then
+            pytest --cov=brutex.pull_state_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_state_fail_closed.py tests/unit/test_pull_outcome_rust_seam.py tests/unit/test_pull_scope_rust_seam.py tests/unit/test_auto_pull_gate_rust_seam.py tests/unit/test_pull_intent_rust_seam.py tests/unit/test_pull_progress_rust_seam.py tests/unit/test_dashboard_auto_pull_scheduler_rust_seam.py tests/unit/test_pull_census_rust_seam.py tests/unit/test_dashboard_auto_pull_rust_seam.py tests/unit/test_rate_bridge_rust_seam.py tests/unit/test_rate_bridge_cache_rust_seam.py
+          else
+            echo "(brutex.pull_state_rust test file not present yet — gate inactive)"
           fi
           # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
           # health-hub fold (nightly · backup dead-man · doctor · mutation ·
@@ -2985,11 +3204,16 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state + brutex_lake)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
+        # + brutex_lake (DEC-RUST-LAKE-WAVED-001 W-6a): the Python lake
+        # scan/heal/reconcile/read cores are DELETED — the wheel is a HARD
+        # prerequisite of every suite that reaches the lake surface (an
+        # absent wheel is the typed LakeRustWavedUnavailableError, a loud
+        # FAIL, never a skip).
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
@@ -3126,11 +3350,16 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state + brutex_lake)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
+        # + brutex_lake (DEC-RUST-LAKE-WAVED-001 W-6a): the Python lake
+        # scan/heal/reconcile/read cores are DELETED — the wheel is a HARD
+        # prerequisite of every suite that reaches the lake surface (an
+        # absent wheel is the typed LakeRustWavedUnavailableError, a loud
+        # FAIL, never a skip).
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
       - name: Download shard coverage data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -3254,11 +3483,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_cascade-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_cascade-*.whl
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -3327,11 +3556,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_cascade-*.whl
       # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
       # this job installs `.[dev]` only (no pyarrow), so the feed parity
       # module (tests/property/test_feed_rust_parity.py) skips on its
@@ -3339,6 +3568,10 @@ jobs:
       # dual-arm parity gate's execution home is the `test:` job
       # ([dev,data,ui] + the wheel), which runs tests/property in its
       # coverage pass.
+      # DEC-RUST-LAKE-WAVED-001 W-6a: NO brutex_lake wheel here for the
+      # SAME reason — every lake property suite is polars/pyarrow-guarded
+      # and module-skips in this [dev]-only job; the wheel-armed execution
+      # home for tests/property is the `test:` job's coverage pass.
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -3437,11 +3670,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_pull_state + brutex_lake)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_cascade-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3502,11 +3735,16 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state + brutex_lake)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
+        # + brutex_lake (DEC-RUST-LAKE-WAVED-001 W-6a): the Python lake
+        # scan/heal/reconcile/read cores are DELETED — the wheel is a HARD
+        # prerequisite of every suite that reaches the lake surface (an
+        # absent wheel is the typed LakeRustWavedUnavailableError, a loud
+        # FAIL, never a skip).
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement.
         run: |
@@ -3846,6 +4084,51 @@ jobs:
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python --locked
 
+  rust-brutex-ops:
+    name: Rust (brutex-ops build + clippy + test)
+    # THE UNIFIED OPS CRATE's per-PR cargo gate — DEC-BACKUP-RUST-OPS-001
+    # (MIGRATION.md #1969) + DEC-CROSSVERIFY-RUST-CORE-001 (#1970) +
+    # DEC-NIGHTLY-RUST-CORE-001 (#1971); the rust-brutex-strategies shape,
+    # `--locked` — the crate commits its Cargo.lock. The kernels are
+    # consumed ONLY through the three default-OFF import-guarded facades
+    # (brutex/backup/backup_rust.py, brutex/crossverify/rust_seam.py,
+    # brutex/nightly/nightly_rust.py — OPTIONAL kernel per
+    # tests/unit/test_run_builds_rust_kernels.py, never a turnkey build
+    # prerequisite), so this cargo gate is where the pure-Rust core is
+    # BUILT + tested per PR: the deadman verdict matrix + the FOUR backup
+    # template byte goldens, the crossverify M&M.csv golden literal, the
+    # nightly launchd-plist byte golden + semantic mirrors, and every
+    # proptest. pyo3 is OPTIONAL in the unified crate (the brutex-feed
+    # `python` feature shape) — the `--features python` check step proves
+    # the binding compiles; the WHEEL legs (maturin build + flag-ON parity)
+    # live in the dedicated non-required ops-rust-parity.yml lane.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-ops
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-ops -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --release --locked
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python --locked
+
   rust-brutex-calendar:
     name: Rust (brutex-calendar build + clippy + test)
     # DEC-RUST-CALENDAR-LEAVES-001: the calendar-leaf decision-law crate's
@@ -3916,6 +4199,48 @@ jobs:
       - name: cargo test
         run: cargo test --release
 
+  rust-brutex-pull-state:
+    name: Rust (brutex-pull-state build + clippy + test)
+    # DEC-RUST-PULL-STATE-001: the pull-state DECISION kernel crate gates
+    # itself on-push — fmt/check/clippy/test + the PyO3 binding compiles,
+    # mirroring the rust-brutex-feed pattern (the PR that introduces a crate
+    # must gate that crate). Post-flip these kernels are the ONLY decision
+    # path for the pull-state modules, so the crate's cargo suites (the
+    # *_golden.rs cross-language pins, the proptest invariants and the
+    # source_digest_parity twin) must run on EVERY push — not only in the
+    # weekly mutation.yml matrix. The Python-side bit-identity proof (the
+    # frozen pull_outcome / stall goldens + the fail-closed seam suites)
+    # lives in the test (unit) + golden jobs, which install the wheel via
+    # `pip install ./rust/brutex-pull-state`.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-pull-state
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-pull-state -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --release
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python
+
   # ─────────────────────────────────────────────────────────────────
   # MAKE RUN SMOKE — cold-start direct-run path, the gate that catches
   # "100% green but the app won't start" bugs (DEC-RUN-SMOKE-GATE-001).
@@ -3954,13 +4279,21 @@ jobs:
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache the brutex-lake cargo build (rev-pinned polars graph)
+        # DEC-RUST-LAKE-WAVED-001 W-6a — see the test job's twin step:
+        # shared cache key across the wheel-needing jobs.
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-lake -> target
+          shared-key: brutex-lake-wheel
+          key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
       # CRITICAL: install ONLY what `make run` installs — `.[data,ui]`,
       # NOT [dev]. Installing [dev] here would re-mask numpy-class bugs
       # (numpy used to live in [dev]); the whole point is to prove the
       # operator's runtime dependency set is self-sufficient.
       - name: Install brutex[data,ui] — the make run set (NO dev)
         run: pip install -e ".[data,ui]"
-      - name: Build both Rust kernels (the make run way)
+      - name: Build the required Rust kernels (the make run way)
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry each wheel build up to
         # 3 times. POSIX sh; installs exactly the same kernels.
@@ -3980,9 +4313,15 @@ jobs:
           }
           install_with_retry ./rust/fno-math
           install_with_retry ./rust/trading-core
+          install_with_retry ./rust/brutex-pull-state
+          # DEC-RUST-LAKE-WAVED-001 W-6a: the brutex_lake wheel is REQUIRED
+          # at runtime now (the Python lake scan/heal/reconcile/read cores
+          # are deleted — the L3 boot sweep + every lake read refuses loudly
+          # without it), so the make-run set builds it too (Makefile twin).
+          install_with_retry ./rust/brutex-lake
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
-          python -c "import trading_core, fno_math; print('kernels OK')"
+          python -c "import trading_core, fno_math, brutex_pull_state; print('kernels OK')"
           python -c "import brutex.indicators.fib_levels; print('fib_levels OK')"
           python -c "import brutex.engine; print('engine OK')"
       - name: CLI smoke — build_parser must not crash (cli.py:329)
@@ -4050,11 +4389,16 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state + brutex_lake)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_cascade-*.whl
+        # + brutex_lake (DEC-RUST-LAKE-WAVED-001 W-6a): this job reaches the
+        # lake scan/heal/reconcile/read surface whose Python cores are
+        # DELETED — the wheel is a HARD prerequisite (the typed
+        # LakeRustWavedUnavailableError otherwise; a WIDENING of the
+        # pre-shard subset forced by the endgame, not a convenience).
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -4127,11 +4471,16 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state + brutex_lake)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_cascade-*.whl
+        # + brutex_lake (DEC-RUST-LAKE-WAVED-001 W-6a): this job reaches the
+        # lake scan/heal/reconcile/read surface whose Python cores are
+        # DELETED — the wheel is a HARD prerequisite (the typed
+        # LakeRustWavedUnavailableError otherwise; a WIDENING of the
+        # pre-shard subset forced by the endgame, not a convenience).
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_cascade-*.whl
       - name: Run the full-chain rehearsal + byte-identity proof
         # -s so the measured `rehearsal.<leg>.seconds` lines land in the raw
         # log (the runtime budget stays evidence-backed on every push).
@@ -4186,22 +4535,23 @@ jobs:
         run: python3 scripts/ci/validate_ledger_numbering.py
 
   # ─────────────────────────────────────────────────────────────────
-  # NO-DHAN GUARD — zero-dhan enforcement on the live surface.
-  # The live vendor is Groww; the Dhan adapter was fully removed in the
-  # J4 PR series. This guard fails the build if the retired "dhan" vendor
-  # word reappears in brutex/, scripts/, CLAUDE.md, README.md, or
-  # docs/runbooks/. The immutable DEC-DHAN-* decision IDs + the historical
-  # docs (MIGRATION.md / adr/ / TRACK1_*.md) are exempt (see the script
-  # header for the full LEDGER rationale).
+  # NO-DHAN GUARD — RETIRED, STUBBED (train-fold policy seam).
+  # The zero-dhan ENFORCEMENT is retired by operator-approved policy
+  # (GO 869e340a — DEC-DHAN-GUARD-RETIRE-002, ADR-0022): Dhan is
+  # RE-ADMITTED as a standalone read-only SPOT feed track
+  # (DEC-DHAN-SPOT-FEED-001), so the "dhan" vendor word is once again LIVE
+  # on the code surface — the old guard script would now fail every push
+  # and `scripts/ci/no-dhan-guard.sh` is deleted. The JOB survives as a
+  # trivially-green STUB so the required `CI OK` aggregate's `needs:` entry
+  # stays satisfiable (zero dangling refs); FULL removal follows the
+  # operator's branch-protection settings change.
   # ─────────────────────────────────────────────────────────────────
   no-dhan-guard:
     name: No-dhan guard (zero-dhan enforcement)
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Run no-dhan guard
-        run: bash scripts/ci/no-dhan-guard.sh
+      - run: echo "no-dhan-guard retired by operator-approved policy (GO 869e340a); stub keeps the ci-ok needs entry satisfiable — full removal follows the operator branch-protection settings change"
 
   # ─────────────────────────────────────────────────────────────────
   # CONVENTIONAL COMMITS — commit format check (only on PRs)
@@ -4343,12 +4693,12 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
+      - uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
           languages: python
           queries: security-extended,security-and-quality
           config-file: ./.github/codeql/codeql-config.yml
-      - uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
+      - uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
           category: "/language:python"
 
@@ -4396,6 +4746,13 @@ jobs:
           severity: 'CRITICAL,HIGH'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          # DEC-CI-TRIVY-SEVERITY-LIMIT-001: in `format: sarif` mode
+          # trivy-action DROPS the declared `severity` filter unless this flag
+          # is set ("Building SARIF report with all severities" in the job
+          # log), so the exit-code gate re-fires on ANY-severity finding. This
+          # restores the intended CRITICAL/HIGH-only gate lost when the #1651
+          # CI-sharding merge took main's ci.yml wholesale and dropped it.
+          limit-severities-for-sarif: 'true'
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -4516,7 +4873,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '22'
       - name: Install jscpd
@@ -4594,11 +4951,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_cascade-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_cascade-*.whl
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -5010,11 +5367,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_cascade-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_cascade-*.whl
       - name: Revert fix to merge-base + run shipped tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -5247,12 +5604,22 @@ jobs:
       # DEC-STRATEGIES-RUST-COMBO-001: the combo decision-kernel crate
       # gate — the PR that introduces a crate must gate that crate.
       - rust-brutex-strategies
+      # The UNIFIED ops decision-kernel crate gate (DEC-BACKUP-RUST-OPS-001 +
+      # DEC-CROSSVERIFY-RUST-CORE-001 + DEC-NIGHTLY-RUST-CORE-001) — the PR
+      # that introduces a crate must gate that crate (the OPTIONAL kernel's
+      # own CI surface per test_run_builds_rust_kernels.py).
+      - rust-brutex-ops
       # DEC-RUST-CALENDAR-LEAVES-001: the calendar-leaf decision-law crate
       # gate — the PR that introduces a crate must gate that crate.
       - rust-brutex-calendar
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
+      # DEC-RUST-PULL-STATE-001: the pull-state decision-kernel crate gate —
+      # the PR that introduces a crate must gate that crate. Post-flip these
+      # kernels are the ONLY decision path for the pull-state modules, so
+      # their cargo suites run on every push here, not only in mutation.yml.
+      - rust-brutex-pull-state
       # DEC-RUN-SMOKE-GATE-001: the cold-start boot gate (the `make run-raw`
       # dependency set — `make run` itself delegates to ./up.sh per
       # DEC-ONE-ENTRY-UNIFY-001) — the ONLY job that walks the real direct
@@ -5261,12 +5628,11 @@ jobs:
       # trading_core + #480 numpy crashes) can never recur silently.
       - run-smoke
       - banned
-      # DEC-CI-OK-NODHAN-GATE-001 (R2-CI-1): the zero-dhan enforcement guard.
-      # It has NO event `if:` (runs on push / pull_request / dispatch alike),
-      # so it never legitimately skips — a RED no-dhan-guard is a HARD fail
-      # here (never skipped==pass). It is enforced via this required `CI OK`
-      # aggregate, NOT as a direct branch-protection required context, so the
-      # branch-protection-drift.yml expected snapshot is untouched.
+      # (no-dhan-guard ENFORCEMENT retired — DEC-DHAN-GUARD-RETIRE-002,
+      # ADR-0022, operator GO 869e340a: Dhan is re-admitted as a standalone
+      # read-only SPOT feed. The job survives as a trivially-green STUB so
+      # this needs: entry stays satisfiable; full removal follows the
+      # operator's branch-protection settings change.)
       - no-dhan-guard
       # DEC-CICD-GATE-HONESTY-001: the ledger-numbering validator,
       # de-conflated from the banned-pattern scan into its own job. It is
@@ -5341,7 +5707,7 @@ jobs:
       # REAL lake + the resume/adversarial legs + the I-1 byte-identity
       # proof, every push. Enforced via this required CI OK aggregate, NOT
       # as a direct branch-protection required context, so the drift
-      # snapshot is untouched (the no-dhan-guard precedent).
+      # snapshot is untouched (the enforced-via-ci-ok precedent).
       - sweep-rehearsal
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
@@ -5373,7 +5739,9 @@ jobs:
           echo "  rust-brutex-cascade:${{ needs.rust-brutex-cascade.result }}"
           echo "  rust-brutex-strategies:${{ needs.rust-brutex-strategies.result }}"
           echo "  rust-brutex-calendar:${{ needs.rust-brutex-calendar.result }}"
+          echo "  rust-brutex-ops:${{ needs.rust-brutex-ops.result }}"
           echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
+          echo "  rust-pull-state:${{ needs.rust-brutex-pull-state.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
@@ -5419,7 +5787,9 @@ jobs:
             "${{ needs.rust-brutex-cascade.result }}" \
             "${{ needs.rust-brutex-strategies.result }}" \
             "${{ needs.rust-brutex-calendar.result }}" \
+            "${{ needs.rust-brutex-ops.result }}" \
             "${{ needs.rust-brutexd.result }}" \
+            "${{ needs.rust-brutex-pull-state.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.no-dhan-guard.result }}" \

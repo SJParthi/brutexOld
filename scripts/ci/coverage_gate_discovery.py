@@ -108,6 +108,18 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # per-module gate in ci.yml (which runs exactly that 5-file suite at
         # --cov-fail-under=100) + the whole-package floor — DEC-WRITE-BATCH-COALESCE-001.
         "brutex/dashboard/pull_controller.py",
+        # The pull-state Rust facade (DEC-RUST-PULL-STATE-001, Waves 1A/1B/1C).
+        # Its 100% line+branch is a MULTI-FILE-suite property by construction:
+        # each wave's kernel-accessor section is exercised by that wave's OWN
+        # seam suite, stem-named for the CONSUMER module it gates
+        # (test_pull_outcome_rust_seam.py / test_pull_scope_rust_seam.py) —
+        # the stem-matched test_pull_state_rust*.py pair alone measures ~62%
+        # standalone, so the discovery gate's stem mapping is a structural
+        # mismatch that would block every facade-touching PR. The dedicated
+        # STATIC per-module gate in ci.yml runs exactly the curated static
+        # per-module suite enumerated there at --cov-fail-under=100 (+ the
+        # whole-package floor) — the pull_controller.py precedent.
+        "brutex/pull_state_rust.py",
         # The ~1050-statement ``/db`` lake-viewer module. Its 100% line+branch is
         # reached by the WHOLE db_view test FAMILY collectively — SEVENTEEN files
         # as of the DEC-DASHBOARD-READ-SCREEN-001 merge with main's

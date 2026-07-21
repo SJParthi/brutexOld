@@ -78,6 +78,12 @@ pub enum VerdictNode {
         composite_score: Leaf,
         provisional: Leaf,
         cpcv_pass_rate: Leaf,
+        /// ADDITIVE regime-evidence statuses (the 2026-07-20 mega-PR
+        /// re-forward fold of DEC-REGIME-MUST-SURVIVE-STRATUM-001 /
+        /// DEC-REGIME-FRAGILITY-GATE-001): EMIT-ON-PRESENT wire keys —
+        /// absent (flag-OFF report) classifies `Leaf::None_`.
+        extreme_vol_status: Leaf,
+        regime_fragility_status: Leaf,
     },
 }
 
@@ -142,6 +148,10 @@ pub struct ViewOut {
     pub provisional: bool,
     pub cpcv_pass_rate: Option<f64>,
     pub survivor_rank: Option<i64>,
+    /// The VERBATIM wire string when present; `None` when the filter never
+    /// ran (key absent) or the wire value was junk (nulled + counted).
+    pub extreme_vol_status: Option<String>,
+    pub regime_fragility_status: Option<String>,
 }
 
 /// One group's headline stats (`CascadeGroupStats` scalars).
@@ -289,6 +299,8 @@ fn verdict_view(
         composite_score,
         provisional,
         cpcv_pass_rate,
+        extreme_vol_status,
+        regime_fragility_status,
     } = entry
     else {
         tally.skipped_verdicts += 1;
@@ -343,6 +355,22 @@ fn verdict_view(
     } else if is_not_none(cpcv_pass_rate) && rate.is_none() {
         tally.nulled_values += 1;
     }
+    // A junk (non-string) regime status is nulled + counted — the
+    // rejected_at law; the verdict itself is kept (the 2026-07-20 fold).
+    let extreme_vol = match extreme_vol_status {
+        Leaf::Str(s) => Some(s.clone()),
+        _ => None,
+    };
+    if is_not_none(extreme_vol_status) && extreme_vol.is_none() {
+        tally.nulled_values += 1;
+    }
+    let regime_fragility = match regime_fragility_status {
+        Leaf::Str(s) => Some(s.clone()),
+        _ => None,
+    };
+    if is_not_none(regime_fragility_status) && regime_fragility.is_none() {
+        tally.nulled_values += 1;
+    }
     Some(ViewOut {
         candidate_id: cid,
         instrument: instrument.to_string(),
@@ -357,6 +385,8 @@ fn verdict_view(
         provisional: matches!(provisional, Leaf::Bool(true)),
         cpcv_pass_rate: rate,
         survivor_rank: None,
+        extreme_vol_status: extreme_vol,
+        regime_fragility_status: regime_fragility,
     })
 }
 
@@ -659,6 +689,8 @@ mod tests {
             composite_score: Leaf::Float(1.5),
             provisional: Leaf::Bool(false),
             cpcv_pass_rate: Leaf::Float(0.75),
+            extreme_vol_status: Leaf::None_,
+            regime_fragility_status: Leaf::None_,
         }
     }
 
@@ -799,6 +831,8 @@ mod tests {
                     composite_score: Leaf::None_,
                     provisional: Leaf::None_,
                     cpcv_pass_rate: Leaf::None_,
+                    extreme_vol_status: Leaf::None_,
+                    regime_fragility_status: Leaf::None_,
                 }
             })
             .collect();

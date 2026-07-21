@@ -19,13 +19,27 @@ attempt/release + the atomic-write commit (chmod→fsync→rename) behind
 ``BRUTEX_LAKE_RUST_LOCKS``;
 ``brutex/data/lake_rust_resample.py`` (ADR-0020 Wave B / G5,
 DEC-LAKE-RUST-RESAMPLE-001) — the tf_resampler seam
-(``resample_1m_ipc`` / ``resample_all_ipc``);
+(``resample_1m_ipc`` / ``resample_all_ipc``) plus the T11 session-cutoff
+face (``resample_session_ipc`` — DEC-LAKE-RUST-RESAMPLE-DAILY-001);
+``brutex/data/lake_rust_resample_daily.py`` (ADR-0020 Wave B tail rows
+14-15, DEC-LAKE-RUST-RESAMPLE-DAILY-001) — the daily-derive residue
+(``resample_daily_ipc``: aggregate → forming-session drop → midnight-IST
+restamp) behind ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY``;
 ``brutex/data/lake_rust_stats.py`` (ADR-0020 Wave C G6+G7,
 DEC-LAKE-RUST-STATS-MANIFEST-001) — the stats-shard canonical-JSON render
 (``render_stats_shard_json``); and ``brutex/data/window_ledger_rust.py``
 (ADR-0020 Wave C-3 / G8, DEC-LAKE-RUST-WINDOW-LEDGER-001) — the
 window-ledger status + merge-key date laws (``classify_window_status`` /
-``date_isoformat``); and ``brutex/data/lake_rust_ledger_render.py``
+``date_isoformat``); and ``brutex/data/lake_rust_waved.py`` (ADR-0020
+Wave-D — the heal/scan/read conversion behind ``BRUTEX_LAKE_WAVED_RUST``;
+W-1 ships the timeframe_materialize read core ``waved_read_1m_ipc`` + the
+``waved_has_stored_1m_bars`` / ``waved_month_partition_files`` drift-pinned
+twins; W-2 the ``lake_heal`` mutation core ``waved_heal_batch`` + the
+``waved_lake_content_token`` walk twin; W-3 the ``catalog_reconcile``
+per-file scan primitive ``waved_reconcile_file``; W-4 the
+``lake_invariants`` scan core ``waved_scan_lake``; W-2b the multi-file heal
+port — foreign/option-foreign/drift join the heal engaged set, witnessed by
+``waved_heal_engaged_kinds``); and ``brutex/data/lake_rust_ledger_render.py``
 (ADR-0020 G10 CONVERT, DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md
 #1918) — the window-ledger parquet render
 (``render_ledger_parquet_from_ipc``; ROW-EQUIVALENCE standard, never bytes
@@ -51,6 +65,7 @@ handshake; the facade refuses to engage when it differs from the installed
 from __future__ import annotations
 
 from brutex_lake._brutex_lake import (
+    SOURCE_DIGEST,
     __version__,
     atomic_commit_replace,
     classify_partial_window_verdict,
@@ -69,9 +84,35 @@ from brutex_lake._brutex_lake import (
     render_stats_shard_json,
     resample_1m_ipc,
     resample_all_ipc,
+    resample_daily_ipc,
+    resample_session_ipc,
+    waved_endgame_witness,
+    waved_has_stored_1m_bars,
+    waved_heal_batch,
+    waved_heal_engaged_kinds,
+    waved_lake_content_token,
+    waved_month_partition_files,
+    waved_read_1m_ipc,
+    waved_reconcile_file,
+    waved_scan_lake,
 )
 
+#: Crate version of the INSTALLED compiled kernel — derived at import from the
+#: compiled module's ``__version__`` (``env!("CARGO_PKG_VERSION")`` baked into
+#: the ``.so`` at build time), NEVER hardcoded here. Deliberately NOT in
+#: ``__all__`` (mirrors the siblings): a build stamp, not kernel API. Consumed
+#: by the ``brutex doctor`` ``wheel_freshness_brutex_lake`` stage
+#: (DEC-BRUTEX-LAKE-BOX-WHEEL-001).
+__build_crate_version__: str = __version__
+
+#: Crate-source BLAKE3 digest of the INSTALLED compiled kernel (FRAMING v1;
+#: DEC-RUST-SOURCE-DIGEST-TWIN-001). Same value as ``SOURCE_DIGEST`` — the
+#: dunder spelling mirrors the sibling wheels' doctor-facing surface
+#: (``wheel_source_digest_brutex_lake`` reads it off the compiled module).
+__source_digest__: str = SOURCE_DIGEST
+
 __all__ = [
+    "SOURCE_DIGEST",
     "__version__",
     "atomic_commit_replace",
     "classify_partial_window_verdict",
@@ -90,4 +131,15 @@ __all__ = [
     "render_stats_shard_json",
     "resample_1m_ipc",
     "resample_all_ipc",
+    "resample_daily_ipc",
+    "resample_session_ipc",
+    "waved_endgame_witness",
+    "waved_has_stored_1m_bars",
+    "waved_heal_batch",
+    "waved_heal_engaged_kinds",
+    "waved_lake_content_token",
+    "waved_month_partition_files",
+    "waved_read_1m_ipc",
+    "waved_reconcile_file",
+    "waved_scan_lake",
 ]

@@ -134,6 +134,15 @@ class CascadeVerdictView:
     provisional: bool
     cpcv_pass_rate: float | None
     survivor_rank: int | None
+    #: ADDITIVE regime-evidence statuses (`DEC-REGIME-REJECT-TIER-001`
+    #: PROPOSAL consumer; producers = the flag-gated extreme-vol-stratum /
+    #: regime-fragility filters, whose wire keys are EMIT-ON-PRESENT): the
+    #: VERBATIM wire string when present (``"ok"`` / ``"fail"`` / an honest
+    #: abstain token), ``None`` when the filter never ran (flag-OFF report —
+    #: key absent) or the wire value was junk (nulled + counted, the
+    #: ``rejected_at`` law).
+    extreme_vol_status: str | None = None
+    regime_fragility_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +204,8 @@ def build_cascade_join(payload: object) -> CascadeJoin:
             provisional=view["provisional"],
             cpcv_pass_rate=view["cpcv_pass_rate"],
             survivor_rank=view["survivor_rank"],
+            extreme_vol_status=view["extreme_vol_status"],
+            regime_fragility_status=view["regime_fragility_status"],
         )
         for view in raw["views"]
     }
