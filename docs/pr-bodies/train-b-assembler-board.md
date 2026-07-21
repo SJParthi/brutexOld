@@ -200,6 +200,7 @@ mechanical: zero raw hits anywhere; the #1709 re-key literals stay forbidden unt
 fold).
 
 - C8 battery GREEN (2026-07-20 23:49Z): D1 dirty-TSV triage = spurious trailing-whitespace strip by the dead tail worker, committed fixtures kept (pull_outcome/pull_scope owners 8/8); firewall goldens 16+6+3+4 + orchestrator 132 + cascade/stat goldens 17/17 + cascade wire 302 + metrics cascade 169 + gate/serving 162+250 + rollup/results 64+109 + stage_stamp 23 + TestCliEagerValidation green + rehearsal 20/20 (715.4s) + ruff clean + `mypy --strict` 0 issues / 579 files; all 14 crate wheels import OK (6 optional facades rebuilt); battery green; pushing this tip.
+- push-blocker root-caused + fixed: local trailing-whitespace hook was stripping the two byte-frozen pull TSV goldens (main carries identical bytes); trailing-whitespace stanza gains the fixture exclusion (DEC-HOOK-HYGIENE-MAIN-001 pattern). Non-member ci(hooks) commit.
 
 ### → census (cse_01RWPRsNLAX6Guw1PbXdUbaY)
 

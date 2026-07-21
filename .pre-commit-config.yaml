@@ -21,6 +21,15 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        # Byte-frozen TSV goldens — the trailing whitespace IS data:
+        # trailing empty TSV fields (pull_outcome_kernel_cases) + the
+        # "pipeline complete — " trailing-space prefix constants
+        # (pull_scope_note_surgery_rust). Stripping them breaks their
+        # pinning tests, and main carries the IDENTICAL bytes (they
+        # landed via server-side merges where local hooks never run).
+        # Same fixture-bytes carve-out convention as end-of-file-fixer
+        # below. DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^tests/golden/fixtures/(pull_outcome_kernel_cases|pull_scope_note_surgery_rust)\.tsv$
       - id: end-of-file-fixer
         # Fuzzer corpus seeds are raw INPUT BYTES, not text — "fixing" the
         # trailing newline rewrites the seed (e.g. the 2-byte \n\n
