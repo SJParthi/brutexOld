@@ -607,3 +607,80 @@ class TestResilienceColumnConflationDead:
         labels = list(self._labels_by_key().values())
         # No two columns share a label (the by-count / by-₹ pair are distinct).
         assert len(labels) == len(set(labels))
+
+
+class TestTierFilter:
+    """DEC-RANKING-SPLUS-TIER-001 — the tier column + exact-match filter.
+
+    The instrument law verbatim: the column is config-driven off
+    BXScreener.COLUMNS (tier.status_text — SERVER-built prose, never
+    composed in JS); the filter exact-matches the LABEL token; a row
+    WITHOUT the additive tier object (or with a null label — judged "not
+    tiered") never matches an ACTIVE filter, and the page only offers
+    options harvested from rows carrying a non-null label.
+    """
+
+    def test_columns_config_carries_the_tier_column(self) -> None:
+        cols = _node_call("S.COLUMNS")
+        keys = [c["key"] for c in cols]
+        assert "tier.status_text" in keys
+        col = cols[keys.index("tier.status_text")]
+        assert col == {
+            "key": "tier.status_text",
+            "label": "Tier",
+            "type": "str",
+            "explain": "tier",
+        }
+        # Beside the cascade verdict (the statistical-quality block).
+        assert keys.index("tier.status_text") == keys.index("cascade.status_text") + 1
+
+    def test_matching_tier_filter_keeps_only_labelled_rows(self) -> None:
+        rows = [
+            {"rank": 1, "tier": {"label": "S+", "blocked_next": []}, "metrics": {}},
+            {"rank": 2, "tier": {"label": "A", "blocked_next": ["min_trades"]}, "metrics": {}},
+            {"rank": 3, "tier": {"label": None, "blocked_next": ["win_rate"]}, "metrics": {}},
+            {"rank": 4, "metrics": {}},  # a pre-tier artifact row
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"tier": "S+"}),
+        )
+        assert [r["rank"] for r in out["rows"]] == [1]
+
+    def test_absent_or_null_label_row_never_matches_an_active_filter(self) -> None:
+        rows = [
+            {"rank": 1, "tier": {"label": None, "blocked_next": []}, "metrics": {}},
+            {"rank": 2, "metrics": {}},
+            {"rank": 3, "tier": "junk-shape", "metrics": {}},
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"tier": "A"}),
+        )
+        assert out["rows"] == []
+
+    def test_inactive_tier_filter_keeps_every_row(self) -> None:
+        rows = [
+            {"rank": 1, "tier": {"label": "S", "blocked_next": []}, "metrics": {}},
+            {"rank": 2, "metrics": {}},
+        ]
+        out = _node_call("S.applyFilters(ARGS[0], ARGS[1])", json.dumps(rows), json.dumps({}))
+        assert [r["rank"] for r in out["rows"]] == [1, 2]
+
+    def test_tier_status_text_sorts_with_nulls_last(self) -> None:
+        rows = [
+            {"rank": 1, "metrics": {}},  # absent → sorts LAST
+            {
+                "rank": 2,
+                "tier": {"status_text": "S+ — exceptional (all axes passed)"},
+                "metrics": {},
+            },
+            {"rank": 3, "tier": {"status_text": "A — blocked from S: min_trades"}, "metrics": {}},
+        ]
+        out = _node_call(
+            'S.sortRows(ARGS[0], "tier.status_text", "str", "asc")',
+            json.dumps(rows),
+        )
+        assert [r["rank"] for r in out] == [3, 2, 1]

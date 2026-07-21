@@ -1286,6 +1286,15 @@ function bxFunnelProvenance(source, runId) {
     var casc = row.cascade && typeof row.cascade === "object" ? row.cascade : null;
     setOc("r1_cascade", casc && casc.status_text ? String(casc.status_text) : "—");
     setOcClass("r1_cascade", "oc-cascade-fail", !!(casc && casc.status === "fail"));
+    /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier — status_text is
+       SERVER-built (oneclick_view.tier_status_text via the artifact bridge;
+       no tier prose composed here — a missing/pre-tier artifact reads the
+       honest "—"); S+/S paint the green .oc-tier-good badge, A stays
+       neutral (flagged annotation, never a re-rank). */
+    var tier = row.tier && typeof row.tier === "object" ? row.tier : null;
+    setOc("r1_tier", tier && tier.status_text ? String(tier.status_text) : "—");
+    setOcClass("r1_tier", "oc-tier-good",
+      !!(tier && (tier.label === "S+" || tier.label === "S")));
     setOc("r1_trades", metricText(m.trades));
     setOc("r1_vix_band", vixBandText(row.vix_band));
     /* Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown +

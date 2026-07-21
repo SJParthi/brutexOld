@@ -466,11 +466,34 @@ class TestHarvestFilterOptions:
             "tf": ["1h", "5m"],
             "direction": ["long", "short"],
             "instrument": ["BSE-SENSEX", "NSE-NIFTY"],
+            "tier": [],
         }
 
     def test_non_array_is_empty(self) -> None:
         out = _node_call("SP.bxHarvestFilterOptions(null)")
-        assert out == {"tf": [], "direction": [], "instrument": []}
+        assert out == {"tf": [], "direction": [], "instrument": [], "tier": []}
+
+    def test_tier_options_only_from_rows_carrying_a_non_null_label(self) -> None:
+        """DEC-RANKING-SPLUS-TIER-001: the instrument absent-key law applied
+        to the tier — a pre-tier row / a judged-not-tiered (null label) row
+        offers NO option, so the exact-match filter can never go active
+        against rows that cannot say."""
+        rows = [
+            {"tf": "5m", "direction": "long", "tier": {"label": "S+", "blocked_next": []}},
+            {
+                "tf": "5m",
+                "direction": "long",
+                "tier": {"label": "A", "blocked_next": ["min_trades"]},
+            },
+            {
+                "tf": "5m",
+                "direction": "long",
+                "tier": {"label": None, "blocked_next": ["win_rate"]},
+            },
+            {"tf": "5m", "direction": "long"},  # pre-tier row: no option
+        ]
+        out = _node_call("SP.bxHarvestFilterOptions(ARGS[0])", json.dumps(rows))
+        assert out["tier"] == ["A", "S+"]
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +695,7 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "scTf",
             "scDir",
             "scInstrument",
+            "scTierSel",
             "scMinWin",
             "scMinPf",
             "scMinTrades",
@@ -692,6 +716,7 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             ">Timeframe<",
             ">Direction<",
             ">Instrument<",
+            ">Tier<",
             ">Min win %<",
             ">Min PF<",
             ">Min trades<",
@@ -777,6 +802,8 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "stResGuide",
             "stResLossesIn",
             "stResLocate",
+            # DEC-RANKING-SPLUS-TIER-001 (train-b #1578 fold): the tier line.
+            "stTier",
         ),
         "explains": (
             "instrument",
@@ -807,10 +834,15 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "worst_loss_month",
             "win_rate_year_spread",
             "resilience_guide",
+            # DEC-RANKING-SPLUS-TIER-001 (train-b #1578 fold).
+            "tier",
         ),
         "strings": (
             "Edge — gross signal P&amp;L",
             "signal-only — costs modeled in the options-translation track",
+            # DEC-RANKING-SPLUS-TIER-001: the persistent tier honesty chip
+            # (the &amp;-entity form of oneclick_view.TIER_GROSS_NOTE).
+            "tier on gross signal P&amp;L; worst-case-fill re-sim deferred",
             "source: none",
             "benchmark: awaiting stored baseline artifact (R27)",
             "awaiting real run artifact — trades appear once the run's results-depth sidecars land",
@@ -1651,7 +1683,7 @@ var IDS = [
   "stDsr", "stCpcv", "stAlpha", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
   "stExpectancy", "stRecovery", "stLossStreak", "stMae", "stMfe",
   "stMinuteDd", "stExitMix", "stWorst5", "stTrendSplit", "stRegimeWonder",
-  "stCascade", "stCascadeDeep", "stBench", "stBenchDetail",
+  "stCascade", "stCascadeDeep", "stBench", "stBenchDetail", "stTier",
   "stTradesBody", "stTradesNote", "stChartHost", "stEquityHost",
   "stChartCoords", "stChartError", "stTradesError", "stTradesSource",
   "stPage", "stEquityLabel", "stArrowNote"
@@ -1984,7 +2016,7 @@ var IDS = [
   "stDsr", "stCpcv", "stAlpha", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
   "stExpectancy", "stRecovery", "stLossStreak", "stMae", "stMfe",
   "stMinuteDd", "stExitMix", "stWorst5", "stTrendSplit", "stRegimeWonder",
-  "stCascade", "stCascadeDeep", "stBench", "stBenchDetail",
+  "stCascade", "stCascadeDeep", "stBench", "stBenchDetail", "stTier",
   "stTradesBody", "stTradesNote", "stChartHost", "stEquityHost",
   "stChartCoords", "stChartError", "stTradesError", "stTradesSource",
   "stPage", "stEquityLabel", "stArrowNote"

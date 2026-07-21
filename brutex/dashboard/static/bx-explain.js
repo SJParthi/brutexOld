@@ -72,6 +72,7 @@ var BX_EXPLAIN = {
   cpcv_pass_pct: "% of CPCV combinatorial train/test folds with positive out-of-sample Sharpe — measured at cascade filter #3 (gate: at least 50%). '—' means the cascade never measured this strategy.",
   alpha_pct: "Alpha vs buy-&-hold — the strategy's % return on the sweep notional minus simply holding the instrument over the same window (DEC-ALPHA-BUYHOLD-METRIC-001). Positive = the strategy beat holding. '—' means no baseline covered this instrument's window.",
   cascade_status: "Stage-4 statistical-cascade verdict (nine filters: gates, DSR, CPCV, SPA, PBO, Romano-Wolf, walk-forward, lockbox, Monte-Carlo). 'PASS (provisional)' = DSR deflated against the pool-N fallback; '—'/'not validated' = not judged by the latest cascade.",
+  tier: "How exceptional the strategy is: S+ (500+ trades, 65%+ wins, PF 2+, tight contained stop, tiny drawdown, cascade PASS) / S / A. Annotation only — it never re-ranks; judged on gross signal P&L (worst-case-fill re-sim deferred). '—' = artifact predates tiers.",
   vix_band: "The market-fear range (India VIX) where this strategy historically made its money.",
   family_id: "Strategies that traded almost identically are grouped — this names that family.",
   mask_hex: "The strategy's machine ID — its exact condition bits, written in hex.",

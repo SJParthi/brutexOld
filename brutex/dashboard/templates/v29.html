@@ -2160,6 +2160,9 @@
      a cascade-FAILED winner stays rank-1 (annotation never reranks) but can
      NEVER read silently green: the fail state paints the red badge. */
   .oc-cascade-fail { color: var(--red); font-weight: 800; }
+  /* DEC-RANKING-SPLUS-TIER-001: the rank-1 tier badge — green for S+/S,
+     neutral for A / not tiered (the r1_cascade badge precedent). */
+  .oc-tier-good { color: var(--green); font-weight: 800; }
   #ocTimeline { max-height: 260px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.7; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 10px 12px; }
   .oc-event-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
   .oc-verify-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
@@ -2513,7 +2516,9 @@
     </div>
     <div class="verdict-text">
       <span class="tldr">In plain English</span>
-      Best stored winner: <strong data-oc="r1_name">—</strong>. Gross signal P&amp;L
+      Best stored winner: <strong data-oc="r1_name">—</strong>
+      · tier <span class="oc-tier-badge" data-oc="r1_tier" data-explain="tier">—</span>
+      <span class="dim">(tier on gross signal P&amp;L; worst-case-fill re-sim deferred)</span>. Gross signal P&amp;L
       <strong class="pos" data-oc="r1_net" data-explain="gross_signal_pnl">—</strong>
       <span class="dim">(signal-only — costs modeled in the options-translation track)</span>
       over <span data-oc="r1_trades" data-explain="trades">—</span> trades ·
@@ -3019,6 +3024,8 @@
           <select id="scDir"><option value="">All</option></select></div>
         <div class="ctl"><label for="scInstrument">Instrument</label>
           <select id="scInstrument"><option value="">All</option></select></div>
+        <div class="ctl"><label for="scTierSel">Tier</label>
+          <select id="scTierSel"><option value="">All</option></select></div>
         <div class="ctl"><label for="scMinWin">Min win %</label>
           <input id="scMinWin" type="number" step="any" placeholder="any"></div>
         <div class="ctl"><label for="scMinPf">Min PF</label>
@@ -3135,7 +3142,9 @@
       instrument <span id="stInstr" data-explain="instrument">—</span> · TF <span id="stTf">—</span> ·
       direction <span id="stDir">—</span> · SL/TP arm <span id="stArm">—</span> ·
       mask <code id="stMask">—</code> · family <span id="stFamily">—</span> ·
-      cascade <span id="stCascade" data-explain="cascade_status">—</span></div>
+      cascade <span id="stCascade" data-explain="cascade_status">—</span> ·
+      tier <span id="stTier" data-explain="tier">—</span>
+      <span class="tier-gross-note">(tier on gross signal P&amp;L; worst-case-fill re-sim deferred)</span></div>
   </section>
 
   <section aria-label="Candle chart">

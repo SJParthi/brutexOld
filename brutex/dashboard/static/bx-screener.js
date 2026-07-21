@@ -170,6 +170,11 @@ var BX_SCREENER_COLUMNS = [
      a pre-change artifact lacks the key entirely -> "—" (absent-excluded-
      but-counted under a filter, the #1631 law — never a fabricated PASS). */
   { key: "cascade.status_text", label: "Cascade", type: "str", explain: "cascade_status" },
+  /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier — tier.status_text is
+     SERVER-built (oneclick_view.tier_status_text); a pre-tier artifact lacks
+     the key entirely -> "—" (absent-excluded-but-counted under the exact
+     tier filter, the instrument law — never a fabricated tier). */
+  { key: "tier.status_text", label: "Tier", type: "str", explain: "tier" },
   { key: "family_id", label: "Family", type: "str", explain: "family_id" },
   { key: "mask_hex", label: "Mask", type: "str", explain: "mask_hex" }
 ];
@@ -300,6 +305,8 @@ function bxVixOverlap(band, lo, hi) {
  * filters: { tf: string[]|null, direction: string|null,
  *            instrument: string|null (exact match; an absent-instrument row
  *            never matches an active filter),
+ *            tier: string|null (exact match on tier.label; an absent-tier /
+ *            null-label row never matches an active filter),
  *            min_win_rate: number|null, min_pf: number|null,
  *            min_trades: number|null, min_dsr: number|null,
  *            max_abs_dd_paisa: number|null (magnitude cap — max_dd_paisa is
@@ -331,6 +338,17 @@ function bxFilterRow(row, filters) {
   // an artifact the dropdown stays empty and the filter is never active.
   if (filters.instrument && row.instrument !== filters.instrument) {
     return false;
+  }
+  // Tier is exact-match on the LABEL token (DEC-RANKING-SPLUS-TIER-001 —
+  // the instrument law verbatim): a row WITHOUT the additive `tier` object
+  // (or with a null label — judged "not tiered") never matches an ACTIVE
+  // filter; options are harvested ONLY from rows carrying a non-null label
+  // (bxHarvestFilterOptions), so a pre-tier artifact's dropdown stays empty.
+  if (filters.tier) {
+    var tierLabel = row.tier && typeof row.tier === "object" ? row.tier.label : undefined;
+    if (tierLabel !== filters.tier) {
+      return false;
+    }
   }
   var m = row.metrics || {};
   if (typeof filters.min_win_rate === "number" && !(m.win_rate >= filters.min_win_rate)) {

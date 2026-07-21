@@ -696,6 +696,17 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         // superseded by main's [W3-R4] vixBandText null-band fix above.)
         state.netPaisa = typeof m.net_pnl_paisa === 'number' ? m.net_pnl_paisa : null;
         if (state.baselinePayload) { renderBenchCard(state.baselinePayload); }
+        /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier — status_text is
+           SERVER-built (oneclick_view.tier_status_text via the artifact
+           bridge; no tier prose composed here); a missing/pre-tier artifact
+           reads the honest '—'; the blocked-axis tokens ride the title. */
+        var tier = row.tier && typeof row.tier === 'object' ? row.tier : null;
+        var stTierEl = byId('stTier');
+        stTierEl.textContent = tier && tier.status_text ? String(tier.status_text) : '—';
+        stTierEl.title = tier && Array.isArray(tier.blocked_next)
+          ? tier.blocked_next.join(', ') : '';
+        stTierEl.classList.toggle('tier-good',
+          !!(tier && (tier.label === 'S+' || tier.label === 'S')));
         // Motion covenant #1/#2: values landed via textContent above; the
         // one-shot pop rides ONLY nodes that show a real value.
         popRealValues([
@@ -858,7 +869,7 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       'stWinRate', 'stPf', 'stTrades', 'stVixBand', 'stArith',
       'stExpectancy', 'stRecovery', 'stLossStreak', 'stMae', 'stMfe',
       'stMinuteDd', 'stExitMix', 'stWorst5', 'stTrendSplit', 'stRegimeWonder',
-      'stCascade', 'stCascadeDeep', 'stBench',
+      'stCascade', 'stCascadeDeep', 'stBench', 'stTier',
       // DEC-RESILIENCE-STREAKS-001: the resilience hero cells join the
       // no-previous-target-residue law (NEW-R3-1) — a reopen under a new
       // rank pill must never show the old run's cold-streak envelope.
@@ -892,6 +903,13 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     if (resLocate) {
       resLocate.textContent = 'enter a number';
       resLocate.className = 'resilience-verdict na';
+    }
+    /* DEC-RANKING-SPLUS-TIER-001: the previous target's tier badge class +
+       blocked-axis tooltip must never survive a reopen either. */
+    var stTierReset = byId('stTier');
+    if (stTierReset) {
+      stTierReset.classList.remove('tier-good');
+      stTierReset.title = '';
     }
     var tbody = byId('stTradesBody');
     if (tbody) {

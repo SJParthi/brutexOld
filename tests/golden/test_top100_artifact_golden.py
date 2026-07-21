@@ -39,14 +39,31 @@ _RUN = "a1" * 32
 
 #: Locked digest (sha256 hex of the rendered top100.json bytes).
 #: Regeneration is a deliberate, ledgered act — see the module docstring.
+#: RE-LOCKED at the 2026-07-21 train-b #1578 fold for
+#: DEC-RANKING-SPLUS-TIER-001 (the S+/S/A tier classifier): the writer now
+#: ALWAYS emits the additive root ``tier_config`` threshold echo + the
+#: per-entry ``tier`` object ``{"label", "blocked_next"}``.
+#: On this fixture every kept entry classifies ``label="A"`` (the wp5
+#: defaults pass every A axis) with ``blocked_next`` naming its S blockers
+#: (``min_trades`` 40 < 200 · ``profit_factor`` 1.5 < 1.6 ·
+#: ``expectancy_headroom`` 250 < H=1000 · ``stop_too_wide`` 80 paisa on a
+#: ₹100 entry = 80 bps > 20 · ``missing_input:mae_1m`` — the fixture aggs
+#: carry no 1-minute path · ``cascade`` not_validated; the deep singleton
+#: adds ``max_drawdown`` 22.5 > 10). The diff vs the pre-change bytes is
+#: pinned ADDITIVE-ONLY in ``test_engine_top100_artifact.py::``
+#: ``test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture``
+#: (strip ``tier_config`` + per-entry ``tier`` → the frozen fixture bytes).
+#: Readers stay presence-tolerant; committed pre-change artifact fixtures
+#: load byte-untouched.
+#: Prior lock history:
 #: RE-LOCKED at the 2026-07-15 club-O integration merge of
 #: DEC-RESILIENCE-STREAKS-001 (#1395) with main: the merged writer emits the
 #: additive per-entry ``resilience`` block ON TOP of the two deltas the
 #: 2026-07-12 re-lock below records (root ``cascade_join`` meta + per-entry
-#: ``cascade`` object + ``metrics.exits."session_gap"``); the digest below is
+#: ``cascade`` object + ``metrics.exits."session_gap"``); that digest
+#: (9fa6a166f3370f6d3099bd86022e1d8282a2e9bef18a4efc1f735655d71ebed2) was
 #: re-derived from the merged writer's rendered bytes (additive-only — every
 #: committed pre-change artifact fixture still loads byte-untouched).
-#: Prior lock history:
 #: RE-LOCKED at the 2026-07-12 merge of DEC-RESULTS-CASCADE-VERDICT-JOIN-001
 #: (MIGRATION.md #1749) with main's DEC-TRADESIM-OPEN-SESSION-GUARD-001
 #: (MIGRATION.md #1743): the merged writer emits BOTH additive deltas — the
@@ -58,7 +75,7 @@ _RUN = "a1" * 32
 #: (zero-count on this fixture — the wp5 fixture aggs carry no session-gap
 #: closes). Readers stay presence-tolerant, so every committed pre-change
 #: artifact fixture still loads byte-untouched.
-_GOLDEN_TOP100_SHA256 = "9fa6a166f3370f6d3099bd86022e1d8282a2e9bef18a4efc1f735655d71ebed2"
+_GOLDEN_TOP100_SHA256 = "6f83b322fb0ffdf50fd6a9defeef0291818adb0079a2fc069f732397a8318e2c"
 
 
 def _fixture_artifact() -> Top100Artifact:

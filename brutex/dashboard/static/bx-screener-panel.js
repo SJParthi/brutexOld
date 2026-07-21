@@ -115,26 +115,34 @@ function bxWinnersCountLine(cap, rowCount, sortedLen, showAll, inputDropped, pay
  * come from every loaded row; instrument options come ONLY from rows that
  * CARRY the additive key — a pre-instrument artifact offers no option, so
  * the exact-match filter can never go active against rows that cannot say.
+ * Tier options (DEC-RANKING-SPLUS-TIER-001) follow the SAME law: harvested
+ * ONLY from rows carrying a tier object with a non-null label.
  *
  * @param {object[]} rows - the loaded artifact rows.
- * @returns {{tf: string[], direction: string[], instrument: string[]}}
- *   deduped, sorted option values.
+ * @returns {{tf: string[], direction: string[], instrument: string[],
+ *   tier: string[]}} deduped, sorted option values.
  */
 function bxHarvestFilterOptions(rows) {
   var tfSeen = {};
   var dirSeen = {};
   var instSeen = {};
+  var tierSeen = {};
   var list = Array.isArray(rows) ? rows : [];
   for (var i = 0; i < list.length; i++) {
     tfSeen[String(list[i].tf)] = true;
     dirSeen[String(list[i].direction)] = true;
     var inst = list[i].instrument;
     if (typeof inst === 'string' && inst !== '') { instSeen[inst] = true; }
+    var tier = list[i].tier;
+    if (tier && typeof tier === 'object' && typeof tier.label === 'string' && tier.label !== '') {
+      tierSeen[tier.label] = true;
+    }
   }
   return {
     tf: Object.keys(tfSeen).sort(),
     direction: Object.keys(dirSeen).sort(),
-    instrument: Object.keys(instSeen).sort()
+    instrument: Object.keys(instSeen).sort(),
+    tier: Object.keys(tierSeen).sort()
   };
 }
 
@@ -226,6 +234,8 @@ function bxHarvestFilterOptions(rows) {
     if (dir) { filters.direction = dir; }
     var inst = byId('scInstrument').value;
     if (inst) { filters.instrument = inst; }
+    var tier = byId('scTierSel').value;
+    if (tier) { filters.tier = tier; }
     var minWin = num('scMinWin');
     if (minWin !== null) { filters.min_win_rate = minWin; }
     var minPf = num('scMinPf');
@@ -317,6 +327,7 @@ function bxHarvestFilterOptions(rows) {
     fill(byId('scTf'), opts.tf);
     fill(byId('scDir'), opts.direction);
     fill(byId('scInstrument'), opts.instrument);
+    fill(byId('scTierSel'), opts.tier);
   }
 
   /* One-shot presentation over the memo'd promise: skeleton while pending,
@@ -448,8 +459,8 @@ function bxHarvestFilterOptions(rows) {
       clearTimeout(renderDebounceTimer);
       renderDebounceTimer = setTimeout(render, 200);
     }
-    ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMinTrades',
-     'scMinDsr', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+    ['scTf', 'scDir', 'scInstrument', 'scTierSel', 'scMinWin', 'scMinPf',
+     'scMinTrades', 'scMinDsr', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
       byId(id).addEventListener('input', renderDebounced);
     });
     byId('scShowAll').addEventListener('click', function () {

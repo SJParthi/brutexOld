@@ -1081,20 +1081,25 @@ class TestCascadeJoinAtWriter:
             == ENTRY_REQUIRED_KEYS
         )
         assert "cascade" not in ENTRY_REQUIRED_KEYS
+        # DEC-RANKING-SPLUS-TIER-001: tier is writer-always-emitted but
+        # reader-OPTIONAL — same law, same pin.
+        assert "tier" not in ENTRY_REQUIRED_KEYS
 
     def test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture(self) -> None:
         """Stripping ONLY the new keys reproduces the frozen pre-change bytes.
 
-        The frozen fixture predates THREE additive deltas now in the tree: the
+        The frozen fixture predates FOUR additive deltas now in the tree: the
         #1749 ``cascade_join``/``cascade`` keys (this DEC's), main's
         DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md #1743)
-        ``metrics.exits["session_gap"]`` key, AND — since the club-O
+        ``metrics.exits["session_gap"]`` key, — since the club-O
         integration merge — DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959)'s
         per-entry ``resilience`` block, whose payload-shape change carries the
         DELIBERATE ``schema_version`` bump 1→2 (bump-on-any-shape-change law,
-        documented on ``TOP100_SCHEMA_VERSION``). The strip normalizes all
-        three (the version compared explicitly: live == 2, frozen == 1), so
-        the pin still proves the entry/meta deltas are additive-only.
+        documented on ``TOP100_SCHEMA_VERSION``), AND — since the train-b
+        #1578 fold — the DEC-RANKING-SPLUS-TIER-001 ``tier_config``/``tier``
+        keys. The strip normalizes all four (the version compared explicitly:
+        live == 2, frozen == 1), so the pin still proves the entry/meta
+        deltas are additive-only.
         """
         frozen = json.loads(_PRE_CASCADE_TOP100.read_text(encoding="utf-8"))
         artifact = build_top100(
@@ -1114,9 +1119,12 @@ class TestCascadeJoinAtWriter:
         assert stripped["schema_version"] == TOP100_SCHEMA_VERSION == 2
         assert frozen["schema_version"] == 1
         stripped["schema_version"] = frozen["schema_version"]
+        # DEC-RANKING-SPLUS-TIER-001 (train-b #1578 fold): the always-emitted
+        # root tier_config + per-entry tier join the strip set.
+        stripped.pop("tier_config")
 
         def _strip_entry(entry: dict[str, object]) -> dict[str, object]:
-            out = {k: v for k, v in entry.items() if k not in {"cascade", "resilience"}}
+            out = {k: v for k, v in entry.items() if k not in {"cascade", "resilience", "tier"}}
             metrics = dict(cast("dict[str, object]", out["metrics"]))
             exits = dict(cast("dict[str, object]", metrics["exits"]))
             session_gap_count = exits.pop("session_gap")
@@ -1153,6 +1161,39 @@ class TestCascadeJoinAtWriter:
         assert loaded is None  # absent-by-version, the #1959 rebuild law
         (event,) = [e for e in logs if e["event"] == "top100.load_invalid"]
         assert event["reason"] == "schema_version_mismatch"
+
+    def test_pre_tier_artifact_loads_with_no_tier_keys(self, tmp_path: Path) -> None:
+        """DEC-RANKING-SPLUS-TIER-001 back-compat under the #1959 v2 gate.
+
+        Fold re-derivation (train-b 2026-07-21, PR #1578 reconcile): the
+        member authored these tier-absence assertions on the frozen v1
+        fixture, but the woven reader law loads v1 ABSENT (the test above).
+        The member claim — a PRE-tier artifact loads with a ``None``
+        ``tier_config``, no per-entry ``tier`` keys, and the None meta NOT
+        re-emitted — is preserved on a legacy-shaped v2 artifact written
+        through the REAL stamp-minting writer (the L1 re-derivation class;
+        a raw fixture edit would trip the stamp content-hash law instead).
+        """
+        base = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        legacy = replace(
+            base,
+            cascade_join=None,
+            tier_config=None,
+            entries=tuple(
+                {k: v for k, v in entry.items() if k not in {"cascade", "tier"}}
+                for entry in base.entries
+            ),
+        )
+        write_top100(tmp_path, legacy)
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.cascade_join is None
+        assert loaded.tier_config is None
+        assert all("cascade" not in entry for entry in loaded.entries)
+        assert all("tier" not in entry for entry in loaded.entries)
+        # A None meta is NOT re-emitted — the round-trip payload byte-law.
+        assert "cascade_join" not in loaded.to_payload()
+        assert "tier_config" not in loaded.to_payload()
 
     def test_load_round_trips_cascade_join_meta(self, tmp_path: Path) -> None:
         join = _join({run_id_of(1): _view(run_id_of(1))})
@@ -1389,3 +1430,179 @@ class TestAlphaPreset:
         no_map = rank_candidates(candidates, preset=DEFAULT_TOP100_PRESET)
         empty_map = rank_candidates(candidates, preset=DEFAULT_TOP100_PRESET, alpha_by_run_id={})
         assert [c.row.run_id for c in no_map] == [c.row.run_id for c in empty_map]
+
+
+# ---------------------------------------------------------------------------
+# DEC-RANKING-SPLUS-TIER-001 — the S+/S/A tier annotation at the writer
+# ---------------------------------------------------------------------------
+
+from brutex.engine import top100_artifact as _top100_module  # noqa: E402
+from brutex.ranking.tiers import (  # noqa: E402
+    DEFAULT_TIER_CONFIG,
+    TierVerdict,
+    tier_config_payload,
+)
+
+
+class TestTierAtWriter:
+    """The ADDITIVE per-entry ``tier`` object + root ``tier_config`` meta."""
+
+    def test_every_entry_carries_the_tier_object(self) -> None:
+        artifact = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+        )
+        entry = artifact.entries[0]
+        tier = entry["tier"]
+        assert isinstance(tier, dict)
+        assert set(tier) == {"label", "blocked_next"}
+        # The wp5 defaults pass every A axis and fail S (see the golden's
+        # audit) — the verdict is DATA from the classifier, never invented.
+        assert tier["label"] == "A"
+        assert isinstance(tier["blocked_next"], list)
+        assert "min_trades" in tier["blocked_next"]
+
+    def test_root_tier_config_is_the_default_config_echo(self) -> None:
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        assert artifact.tier_config == tier_config_payload(DEFAULT_TIER_CONFIG)
+        assert artifact.to_payload()["tier_config"] == tier_config_payload(DEFAULT_TIER_CONFIG)
+
+    def test_tier_uses_the_joined_cascade_status(self) -> None:
+        # With a joined PASS verdict the cascade axis passes at EVERY tier —
+        # the `cascade` token leaves blocked_next; without a join the
+        # not_validated status blocks S (the classifier is fed the SAME
+        # status the entry's own cascade object carries, threaded never
+        # re-read).
+        rid = run_id_of(1)
+        joined = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+            cascade_join=_join({rid: _view(rid)}),
+        )
+        unjoined = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        joined_tier = cast("dict[str, Any]", joined.entries[0]["tier"])
+        unjoined_tier = cast("dict[str, Any]", unjoined.entries[0]["tier"])
+        assert "cascade" not in joined_tier["blocked_next"]
+        assert "cascade" in unjoined_tier["blocked_next"]
+
+    def test_annotation_never_reranks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The R13 pin: ranks are IDENTICAL with the classifier active vs a
+        stub — the tier is stamped strictly AFTER ranking and can never
+        reorder, hide or exclude an entry."""
+        candidates = [
+            make_candidate(
+                n,
+                fingerprint=fingerprint_seed(n),
+                row_overrides={"max_drawdown_pct": float(n)},
+            )
+            for n in range(1, 6)
+        ]
+        real = _build(list(candidates))
+        monkeypatch.setattr(
+            _top100_module,
+            "classify_tier",
+            lambda inputs, *, config: TierVerdict(tier="S+", blocked_next=()),
+        )
+        stubbed = _build(list(candidates))
+        assert [e["run_id"] for e in real.entries] == [e["run_id"] for e in stubbed.entries]
+        assert [e["rank"] for e in real.entries] == [e["rank"] for e in stubbed.entries]
+        # The stub proves the seam: only the tier objects differ.
+        assert all(cast("dict[str, Any]", e["tier"])["label"] == "S+" for e in stubbed.entries)
+
+    def test_load_round_trips_tier_config_and_entry_tier(self, tmp_path: Path) -> None:
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        write_top100(tmp_path, artifact)
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.tier_config == artifact.tier_config
+        assert loaded.entries[0]["tier"] == artifact.entries[0]["tier"]
+
+    def test_non_positive_entry_price_degrades_to_missing_input(self) -> None:
+        # A (defensive) non-positive avg_entry_price cannot feed the bps stop
+        # width — the classifier reads the honest missing_input token; the
+        # entry itself is stamped normally (never a crash, never a fake bps).
+        from decimal import Decimal
+
+        cand = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides={"avg_entry_price": Decimal("0.01"), "avg_exit_price": Decimal("0.01")},
+        )
+        # 0.01 rupees → 1 paisa (usable); build a truly unusable one via 0?
+        # ResultRow validates prices positive, so the None arm is reached
+        # only through the defensive int() <= 0 guard — exercise the usable
+        # tiny-price arm here and pin the tier object still stamps.
+        artifact = _build([cand])
+        tier = cast("dict[str, Any]", artifact.entries[0]["tier"])
+        assert set(tier) == {"label", "blocked_next"}
+
+
+class TestTierMinutePathScaleLaw:
+    """Hostile-review round-1 MAJOR-1: the fraction→pct-points scale at the wiring.
+
+    The agg's ``max_dd_minute_path_pct`` is a 0-1 FRACTION (``minute_path.py``
+    ``drop / peak``) while the classifier's ``max_minute_dd_pct`` ceilings are
+    PERCENTAGE POINTS — fed verbatim, a 40% intraday dip read ``0.40 <= 7.5``
+    and the minute-path axis could NEVER fire (S+/S awardable over brutal
+    intraday drawdowns). ``_tier_payload`` must scale ×100. Verified
+    FAILS-BEFORE: both trip-tests below fail with the one-line scale reverted.
+    """
+
+    @staticmethod
+    def _minute_path_candidate(minute_dd_fraction: float) -> Top100Candidate:
+        """An S+-grade candidate WITH a present minute path (every other axis clears)."""
+        from decimal import Decimal
+
+        return make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides={
+                "total_trades": 600,
+                "winning_trades": 390,
+                "losing_trades": 210,
+                "win_rate": 0.70,
+                "profit_factor": 2.5,
+                "expectancy_paisa": 3_000,
+                "max_drawdown_pct": 4.0,
+                # sl 80 paisa on a ₹24,000 entry = 0.33 bps — well inside 10.
+                "avg_entry_price": Decimal("24000.00"),
+                "avg_exit_price": Decimal("24010.00"),
+            },
+            agg_overrides={
+                "win_loss_ratio": 1.5,
+                "max_consecutive_losses": 5,
+                # Contained: 100 <= 1.5 × sl(80) = 120.
+                "mae_1m_worst_paisa": 100,
+                # > 0 is what the availability predicate needs (the agg's
+                # exit-tally invariant keeps the fixture's n_trades=40).
+                "trades_with_1m": 40,
+                "equity_status": "ok",
+                "max_dd_minute_path_pct": minute_dd_fraction,  # 0-1 FRACTION (writer scale)
+            },
+        )
+
+    def _tier_for(self, minute_dd_fraction: float) -> dict[str, Any]:
+        candidate = self._minute_path_candidate(minute_dd_fraction)
+        rid = candidate.row.run_id
+        artifact = _build([candidate], cascade_join=_join({rid: _view(rid)}))
+        return cast("dict[str, Any]", artifact.entries[0]["tier"])
+
+    def test_an_8pct_fraction_trips_the_splus_minute_dd_ceiling(self) -> None:
+        # 0.08 fraction = 8 pct-points > the S+ 7.5 ceiling (and <= S's 15):
+        # the entry demotes to S naming EXACTLY the minute-path axis. With
+        # the scale reverted this read 0.08 <= 7.5 → a false S+ (fails-before).
+        tier = self._tier_for(0.08)
+        assert tier["label"] == "S"
+        assert tier["blocked_next"] == ["minute_path_drawdown"]
+
+    def test_a_5pct_fraction_passes_the_splus_ceiling(self) -> None:
+        # 0.05 fraction = 5 pct-points <= 7.5 — every axis clears → S+.
+        tier = self._tier_for(0.05)
+        assert tier["label"] == "S+"
+        assert tier["blocked_next"] == []
+
+    def test_a_40pct_fraction_trips_even_the_s_ceiling(self) -> None:
+        # The reviewer's motivating shape: a brutal 40% intraday dip must
+        # block BOTH minute-path tiers (0.40 fraction = 40 > 15), demoting
+        # to A with the axis named among the S blockers.
+        tier = self._tier_for(0.40)
+        assert tier["label"] == "A"
+        assert "minute_path_drawdown" in tier["blocked_next"]

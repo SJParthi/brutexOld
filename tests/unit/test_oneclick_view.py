@@ -750,3 +750,44 @@ class TestBuildBaselinePayload:
             assert payload[key] is None, key
         assert payload["detail"] == "instrument required"
         assert payload["fixture_root_active"] is True
+
+
+class TestTierStatusText:
+    """DEC-RANKING-SPLUS-TIER-001: the ONE server-built tier display string."""
+
+    def test_splus_reads_exceptional(self) -> None:
+        assert ov.tier_status_text("S+") == "S+ — exceptional (all axes passed)"
+        # An S+ verdict carries no blockers by construction; a defensive
+        # blocked list on the wire never changes the S+ copy.
+        assert ov.tier_status_text("S+", blocked_next=("junk",)) == (
+            "S+ — exceptional (all axes passed)"
+        )
+
+    def test_s_names_the_splus_blockers(self) -> None:
+        assert ov.tier_status_text("S", blocked_next=("win_rate", "stop_too_wide")) == (
+            "S — blocked from S+: win_rate, stop_too_wide"
+        )
+
+    def test_a_names_the_s_blockers(self) -> None:
+        assert ov.tier_status_text("A", blocked_next=("min_trades",)) == (
+            "A — blocked from S: min_trades"
+        )
+
+    def test_bare_labels_without_blockers(self) -> None:
+        assert ov.tier_status_text("S") == "S"
+        assert ov.tier_status_text("A") == "A"
+
+    def test_null_label_reads_not_tiered(self) -> None:
+        assert ov.tier_status_text(None) == "not tiered"
+        assert ov.tier_status_text(None, blocked_next=("expectancy_headroom",)) == (
+            "not tiered — blocked from A: expectancy_headroom"
+        )
+
+    def test_unknown_label_reads_the_honest_dash(self) -> None:
+        assert ov.tier_status_text("B") == "—"
+        assert ov.tier_status_text("splus") == "—"
+
+    def test_gross_note_is_the_one_pinned_constant(self) -> None:
+        # The persistent honesty chip: templates render THIS constant
+        # verbatim (as its &amp; entity form) beside the tier.
+        assert ov.TIER_GROSS_NOTE == ("tier on gross signal P&L; worst-case-fill re-sim deferred")

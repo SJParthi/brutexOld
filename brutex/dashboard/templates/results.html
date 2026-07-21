@@ -110,6 +110,10 @@
   .cascbadge.pass { color:var(--green); border-color:var(--green-dim); }
   .cascbadge.prov { color:var(--yellow); border-color:var(--yellow); }
   .cascbadge.fail { color:var(--red); border-color:var(--red); }
+  /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier badge (green S+/S, neutral A). */
+  .tierbadge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
+    font-weight:700; border:1px solid var(--border); color:var(--muted); white-space:nowrap; }
+  .tierbadge.good { color:var(--green); border-color:var(--green-dim); }
   .erabanner { display:none; margin:12px 24px 0; padding:10px 14px; border:1px solid var(--yellow);
     border-radius:var(--r-md); background:rgba(255,183,77,.09); color:var(--yellow);
     font-size:13px; line-height:1.6; }
@@ -489,6 +493,18 @@ function benchCell(r) {
    main's landed DEC-RESULTS-CASCADE-VERDICT-JOIN-001 badge (above, server-built
    status text) is the ONE cascade badge; the marker keys still feed
    cascadeDsrCell ("DSR @ search N") — the datum the join does not carry. */
+/* DEC-RANKING-SPLUS-TIER-001: the joined S+/S/A tier badge. The cell shows
+   the raw label TOKEN (r.tier — data, not prose); an explicitly-judged
+   null-label row shows the SERVER-built tier_status_text ("not tiered …" —
+   no tier prose is ever composed here); the title carries the full server
+   text. An unjoined row reads "—" (EMIT-ON-PRESENT — absence is honest). */
+function tierBadge(r) {
+  const txt = r.tier_status_text;
+  if (txt == null) return "—";
+  const cls = r.tier === "S+" || r.tier === "S" ? "tierbadge good" : "tierbadge";
+  const label = r.tier == null ? String(txt) : String(r.tier);
+  return '<span class="' + cls + '" title="' + esc(String(txt)) + '">' + esc(label) + "</span>";
+}
 
 /* The sortable columns: key → (header label, cell renderer). The server already
    ranked by the chosen metric; client-side sort re-orders the fetched page only. */
@@ -538,6 +554,10 @@ const COLS = [
      unjoined (EMIT-ON-PRESENT keys — absence is honest, never 0). The ONE
      Cascade badge (club S2 fold — 1459's duplicate marker badge dropped). */
   ["cascade_status", "Cascade", (r) => cascadeBadge(r)],
+  /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier joined from the newest
+     run's top100 artifact — sorts by the raw label token (tier); "—" when
+     unjoined (EMIT-ON-PRESENT keys — absence is honest, never a tier). */
+  ["tier", "Tier", (r) => tierBadge(r)],
   ["cpcv_pass_pct", "CPCV %", (r) => metric(r.cpcv_pass_pct)],
   ["composite_score", "Composite", (r) => metric(r.composite_score)],
   ["drill", "", (r) =>

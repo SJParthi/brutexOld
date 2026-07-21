@@ -101,6 +101,12 @@ from brutex.ranking.presets import (
     RankRecord,
     sort_by_preset,
 )
+from brutex.ranking.tiers import (
+    DEFAULT_TIER_CONFIG,
+    TierInputs,
+    classify_tier,
+    tier_config_payload,
+)
 from brutex.vocabulary.describe import matched_condition_names
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -360,6 +366,11 @@ class Top100Artifact:
     baselines: Mapping[str, str]
     entries: tuple[Mapping[str, object], ...]
     cascade_join: Mapping[str, object] | None = None
+    #: ADDITIVE root meta (DEC-RANKING-SPLUS-TIER-001): the tier-threshold
+    #: values the writer classified with (``tier_config_payload`` — the
+    #: artifact is self-describing); ``None`` on a pre-change artifact read
+    #: back by :func:`load_top100` (the key is then simply not re-emitted).
+    tier_config: Mapping[str, object] | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Render the artifact's deterministic JSON payload (B5 shape)."""
@@ -373,6 +384,8 @@ class Top100Artifact:
         }
         if self.cascade_join is not None:
             payload["cascade_join"] = dict(self.cascade_join)
+        if self.tier_config is not None:
+            payload["tier_config"] = dict(self.tier_config)
         return payload
 
     def rendered_bytes(self) -> bytes:
@@ -685,6 +698,56 @@ def _cascade_payload(
     }, verdict.cpcv_pass_rate
 
 
+def _tier_payload(candidate: Top100Candidate, *, cascade_status: str) -> dict[str, object]:
+    """One entry's ADDITIVE ``tier`` object (DEC-RANKING-SPLUS-TIER-001).
+
+    ANNOTATION-ONLY — classified strictly AFTER ranking, over the SAME joined
+    cascade status the entry's ``cascade`` object carries (threaded, never a
+    report re-read). Every input is an EXISTING persisted value
+    (``ResultRow`` ⋈ ``ComboAggregate`` + the owning tuple's arm);
+    ``avg_entry_price`` is Decimal RUPEES on the 2dp tick grid
+    (``results_store._PRICE_FIELDS``), so ``× 100`` is an EXACT int-paisa
+    projection (a non-positive price degrades to ``None`` — the classifier's
+    honest ``missing_input:avg_entry_price``).
+    """
+    row = candidate.row
+    agg = candidate.agg
+    entry_paisa = int(row.avg_entry_price * 100)
+    verdict = classify_tier(
+        TierInputs(
+            total_trades=row.total_trades,
+            win_rate=row.win_rate,
+            win_loss_ratio=agg.win_loss_ratio,
+            losing_trades=row.losing_trades,
+            profit_factor=row.profit_factor,
+            gross_loss_paisa=row.gross_loss_paisa,
+            expectancy_paisa=row.expectancy_paisa,
+            sl_paisa=candidate.sl_paisa,
+            entry_price_paisa=entry_paisa if entry_paisa > 0 else None,
+            mae_1m_worst_paisa=agg.mae_1m_worst_paisa,
+            trades_with_1m=agg.trades_with_1m,
+            equity_status=agg.equity_status,
+            max_drawdown_pct=row.max_drawdown_pct,
+            # SCALE LAW (hostile-review round-1 MAJOR-1): the agg's
+            # ``max_dd_minute_path_pct`` is a 0-1 FRACTION
+            # (``minute_path.py`` ``drop / peak`` — the bx-oneclick.js
+            # bxMinutePathDdText ×100 display law), while the classifier's
+            # ``max_minute_dd_pct`` ceilings (7.5 / 15.0) are PERCENTAGE
+            # POINTS like the sibling ``max_drawdown_pct`` (which compute.py
+            # already ×100s). Fed verbatim, a 40% intraday dip read 0.40 ≤
+            # 7.5 and the axis could NEVER fire — scale ×100 HERE (an exact
+            # unit projection, never a rounding).
+            max_dd_minute_path_pct=(
+                None if agg.max_dd_minute_path_pct is None else agg.max_dd_minute_path_pct * 100.0
+            ),
+            max_consecutive_losses=agg.max_consecutive_losses,
+            cascade_status=cascade_status,
+        ),
+        config=DEFAULT_TIER_CONFIG,
+    )
+    return {"label": verdict.tier, "blocked_next": list(verdict.blocked_next)}
+
+
 def _entry_payload(
     rank: int,
     candidate: Top100Candidate,
@@ -724,6 +787,10 @@ def _entry_payload(
         "margin_roi": None if margin_roi is None else dict(margin_roi),
         "equity_ref": {"tuple": candidate.tuple_ref, "sidecar": "equity"},
         "cascade": cascade,
+        # DEC-RANKING-SPLUS-TIER-001: writer-ALWAYS-emitted, reader-OPTIONAL
+        # (deliberately NOT in ENTRY_REQUIRED_KEYS — old artifacts stay
+        # loadable). Classified over the SAME joined cascade status above.
+        "tier": _tier_payload(candidate, cascade_status=str(cascade["status"])),
     }
     return project_resilience_annotation(entry, candidate.resilience)
 
@@ -988,6 +1055,9 @@ def build_top100(
         baselines=dict(baselines),
         entries=tuple(entries),
         cascade_join=cascade_meta,
+        # DEC-RANKING-SPLUS-TIER-001: the self-describing threshold echo —
+        # writer-ALWAYS-emitted, reader-OPTIONAL (the cascade_join law).
+        tier_config=tier_config_payload(DEFAULT_TIER_CONFIG),
     )
     _LOG.info(
         "top100.built",
@@ -1155,6 +1225,7 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
     # re-emitted on a round-trip); a non-object value is dropped, never a
     # reject (the entries + stamp already proved integrity above).
     cascade_join_raw = payload.get("cascade_join")
+    tier_config_raw = payload.get("tier_config")
     return Top100Artifact(
         schema_version=TOP100_SCHEMA_VERSION,
         run_id=run_id,
@@ -1163,4 +1234,5 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
         baselines={str(key): str(value) for key, value in baselines.items()},
         entries=tuple(entries),
         cascade_join=cascade_join_raw if isinstance(cascade_join_raw, dict) else None,
+        tier_config=tier_config_raw if isinstance(tier_config_raw, dict) else None,
     )

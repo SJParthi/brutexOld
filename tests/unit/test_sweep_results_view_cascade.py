@@ -488,3 +488,104 @@ class TestRowKeyEmitOnPresentEdges:
         load = load_cascade_join_file(tmp_path / "sweeps", token=None)
         assert load.state == "absent"
         assert srv._JOIN_MEMO is None
+
+
+# ---------------------------------------------------------------------------
+# DEC-RANKING-SPLUS-TIER-001 — the tier row keys over the SAME newest-run index
+# ---------------------------------------------------------------------------
+
+
+class TestTierRowKeys:
+    def _index(
+        self,
+        tier_by_run_id: dict[str, dict[str, Any]],
+        *,
+        by_run_id: dict[str, float] | None = None,
+        state: str = "joined",
+    ) -> CompositeIndex:
+        return CompositeIndex(
+            by_run_id=by_run_id or {},
+            run_id="grid" + "0" * 60,
+            state=state,
+            scored_rows=len(by_run_id or {}),
+            skipped_files=0,
+            dropped_values=0,
+            tier_by_run_id=tier_by_run_id,
+        )
+
+    def test_tier_keys_emit_on_present_only(self, tmp_path: Path) -> None:
+        _seed_rows(tmp_path, [1, 2, 3])
+        index = self._index(
+            {
+                _run_id(1): {
+                    "label": "S",
+                    "blocked_next": ["win_rate"],
+                    "status_text": "S — blocked from S+: win_rate",
+                },
+                _run_id(2): {
+                    "label": None,
+                    "blocked_next": ["expectancy_headroom"],
+                    "status_text": "not tiered — blocked from A: expectancy_headroom",
+                },
+            }
+        )
+        board = build_sweep_leaderboard(tmp_path, composite=index).to_dict()
+        rows = {r["run_id"]: r for r in board["rows"]}
+        one = rows[_run_id(1)]
+        assert one["tier"] == "S"
+        assert one["tier_blocked_next"] == ["win_rate"]
+        assert one["tier_status_text"] == "S — blocked from S+: win_rate"
+        # An explicitly-judged null label still emits (data, never hidden)…
+        two = rows[_run_id(2)]
+        assert two["tier"] is None
+        assert two["tier_blocked_next"] == ["expectancy_headroom"]
+        # …while an unjoined row emits NOTHING (honest absence).
+        three = rows[_run_id(3)]
+        assert not any(k.startswith("tier") for k in three)
+
+    def test_no_artifact_payload_byte_identical(self, tmp_path: Path) -> None:
+        # A joined index whose artifact predates tiers (empty tier map) adds
+        # ZERO tier keys — and an absent index reproduces the legacy payload
+        # byte-for-byte (the #1749 json-equality law).
+        _seed_rows(tmp_path, [1, 2])
+        legacy = build_sweep_leaderboard(tmp_path).to_dict()
+        absent = CompositeIndex(
+            by_run_id={},
+            run_id=None,
+            state="absent",
+            scored_rows=0,
+            skipped_files=0,
+            dropped_values=0,
+        )
+        decorated = build_sweep_leaderboard(tmp_path, composite=absent).to_dict()
+        assert json.dumps(decorated, sort_keys=True) == json.dumps(legacy, sort_keys=True)
+        pre_tier = self._index({})  # joined, tier-less artifact
+        rows = build_sweep_leaderboard(tmp_path, composite=pre_tier).to_dict()["rows"]
+        assert all(not any(k.startswith("tier") for k in row) for row in rows)
+
+    def test_tier_annotation_never_reranks(self, tmp_path: Path) -> None:
+        # The R13 pin at the /results projection: a tiered and a tier-less
+        # index produce the IDENTICAL rank order (tier keys are stamped
+        # strictly after ordering — annotation, never a sort input).
+        _seed_rows(tmp_path, [1, 2, 3, 4])
+        bare = build_sweep_leaderboard(tmp_path, composite=self._index({})).to_dict()
+        tiered = build_sweep_leaderboard(
+            tmp_path,
+            composite=self._index(
+                {
+                    _run_id(n): {"label": "S+", "blocked_next": [], "status_text": "S+"}
+                    for n in (1, 2, 3, 4)
+                }
+            ),
+        ).to_dict()
+        assert [r["run_id"] for r in bare["rows"]] == [r["run_id"] for r in tiered["rows"]]
+        assert [r["rank"] for r in bare["rows"]] == [r["rank"] for r in tiered["rows"]]
+
+    def test_malformed_blocked_next_degrades_to_empty_list(self, tmp_path: Path) -> None:
+        _seed_rows(tmp_path, [1])
+        index = self._index({_run_id(1): {"label": "A", "blocked_next": "junk"}})
+        board = build_sweep_leaderboard(tmp_path, composite=index).to_dict()
+        (row,) = board["rows"]
+        assert row["tier"] == "A"
+        assert row["tier_blocked_next"] == []
+        assert row["tier_status_text"] is None
