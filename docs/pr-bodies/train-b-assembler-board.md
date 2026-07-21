@@ -230,3 +230,54 @@ refresh — any golden movement found in the delta = assembler defect, flag loud
 fold-derived rollup×`regime_robust` seam + the composed cascade-overrides dict (cli.py)
 + the stage_stamp one-oracle double-seam are labeled in the merge body; board commits are
 non-member (dropped at freeze).
+
+## 2026-07-21 — #1578 folded (wave-3 2/3) · S+ / S / A strategy tier classifier
+
+**Anchor:** origin/integration/train-b == the #1578 fold spine `83b67cc5a..HEAD` — merge
+commit **9dd2a1f18** (`Merge claude/splus-tier-classifier into integration/train-b (fold PR
+#1578: S+ tier classifier — DEC-RANKING-SPLUS-TIER-001, ledger #1832→#2063 provisional)`;
+parents woven-base **83b67cc5a** + member **acdde4c97**) + one labeled non-member
+fold-reconcile commit **6355b5ecc** (`test(golden): re-derive the top100 display golden on
+the woven tree (fold #1578 reconcile — REDERIVE-ON-FOLD; member literal never adopted)`) +
+this board entry (board commit = this commit; the push-verified final SHA goes in the
+assembler report). **Fold identity:** branch `claude/splus-tier-classifier` @ acdde4c97;
+DEC-RANKING-SPLUS-TIER-001 (MIGRATION.md **#2063**, PROVISIONAL — renumbered #1832 → #2063
+at the 2026-07-21 train-b fold; #1832 held by DEC-DASHBOARD-COLD-IO-DEADLINE-001; the census
+draw refinement in the base-refresh anchor above already carries #1578 as the #2063 slot,
+renumber-at-draw if the ratified number differs). `validate_ledger_numbering.py` green —
+**1501 unique entry headers**; `validate_dec_ids.py` green; `test_claude_md_branch_
+consistency.py` 10/10. Member #1832 sweep = the ONE MIGRATION entry line (→ #2063) + the 3
+CLAUDE.md blurb refs (hdr/§1/§3 all → #2063 with the renumber parenthetical); zero member
+#1832 leftover; the woven `^1832.` (DEC-DASHBOARD-COLD-IO-DEADLINE-001) byte-untouched.
+
+**Firewall verdict (battery executed at this anchor):** RUN-ID pair
+`715212…62fc9`/`f588194…5921a` byte-stable in `test_engine_sweep_run_golden.py`;
+`af3bf465…` (content @:251) + `b0a3bed9…` (futures @:133) + `c3f1fb8f…` (temporal @:259)
+byte-stable; digest pin `7a0120c1123b44c6` live in `test_engine_sweep_orchestrator.py` +
+`sweep_identity.py`; `vocab_golden_vectors.json` sha256 `19640054…831a3a` byte-UNTOUCHED
+(diff vs woven base empty); forbidden `caf0…`/`23eb…` = **ZERO** tree-wide. **The ONE
+sanctioned golden movement this fold:** the top100 DISPLAY golden
+`test_top100_artifact_golden.py` **9fa6a166 → fcd0ebc0** — REDERIVE-ON-FOLD (member's
+6f83b322 was byte-invalid off the pre-refresh base c890213a and was NEVER adopted textually;
+three-way fork base c890213a → woven 9fa6a166 → fold fcd0ebc0). **ADDITIVE-ONLY proven** —
+the strip-pin `test_engine_top100_artifact.py::test_no_kwarg_build_is_additive_only_vs_
+frozen_pre_change_fixture` GREEN (stripping root `tier_config` + per-entry `tier` reproduces
+the woven 9fa6a166 bytes; delta = added tier keys, no value drift). **L1 latent break
+closed** (woven-in-merge): both `schema_version: 1` reader-gate fixture pins
+(`test_dashboard_composite_join.py` + `test_dashboard_results_route.py`) re-derived to `2`
+in the merge weave.
+
+**Battery (this anchor, wheels: .venv all 8 import OK):** firewall goldens 16+6+3+4 +
+orchestrator 132; member set (mergebase 6b9947d9..acdde4c97, 11 test files) ALL GREEN —
+`test_ranking_tiers` **86** · top100 golden 4 · oneclick_top100_writer_reader 23 ·
+composite_join 20 · operator_portal 165 · results_route 30 · screener_math 60 ·
+engine_top100_artifact 115 · oneclick_artifacts 284 · oneclick_view 80 ·
+sweep_results_view_cascade 31; load-bearing rollup_serve 26 + results_rollup 109; `node
+--check` all 5 fold JS OK (bx-explain/bx-oneclick/bx-screener-panel/bx-screener/
+bx-strategy-panel); `ruff check brutex tests` clean + `mypy --strict brutex` 0 issues / 580
+files; full-chain rehearsal **20/20** (594.48s coordinator probe / 660.09s local run, exit
+0 — the 300 s ceiling binds the FIRST PASS under the woven MC budget, green).
+
+**Push-gate note:** wave-3 2/3 anchor push under the operator's Event-2 go; full firewall
+evidence above; the #2063 census draw is PROVISIONAL (renumber-at-draw). Non-member board
++ golden-reconcile commits drop at freeze.
