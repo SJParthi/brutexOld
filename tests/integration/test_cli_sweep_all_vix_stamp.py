@@ -293,6 +293,7 @@ def _sweep_verify_recount(
     *,
     start: str = _START,
     end: str = _END,
+    directions: str = "BUY",
 ) -> int:
     return cli.cmd_sweep_verify(
         lake_root=lake_root,
@@ -304,7 +305,7 @@ def _sweep_verify_recount(
         intervals=_INTERVAL,
         start=start,
         end=end,
-        directions="BUY",
+        directions=directions,
         k="1",
         conditions="0,1,2",
         sl="80",
@@ -406,6 +407,93 @@ def test_recount_after_a_vix_lake_move_warns_precisely_never_condemns(
     assert "recount_vix_divergence" in out
     assert "India-VIX lake moved" in out
     assert "CORRUPT" not in out
+
+
+def test_recount_reads_the_recorded_temporal_regime_never_the_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 recount law: the RECORDED channel wins.
+
+    The launcher ships with the ``observe`` default, so the tree's stores
+    carry the four emit-on-present period-stats columns. A recount run under
+    a DIFFERENT verify-time env (``BRUTEX_TEMPORAL=off``) must still
+    round-trip CLEAN — the shadow re-sweep threads the tree's OWN recorded
+    ``SWEEP_START`` ``temporal_gate`` config, never the environment. A
+    regression to env/default resolution (or to no threading at all — the
+    2026-07-19 CI shard-3/-4 reds) re-sweeps temporal-less, byte-diverges on
+    the columns, and false-condemns every store as CORRUPT here.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)
+    assert _sweep_all(lake_root, catalog_path, results_root) == 0  # observe default
+
+    monkeypatch.setenv("BRUTEX_TEMPORAL", "off")  # the hostile verify-time env
+    rc = _sweep_verify_recount(lake_root, catalog_path, results_root, tmp_path / "scratch")
+
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_OK
+    assert "recount_divergence" not in out
+    assert "CORRUPT" not in out
+
+
+def test_recount_of_a_temporal_off_tree_under_an_observe_env_stays_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The symmetric arm: a ``--temporal-mode off`` tree (no period-stats
+    columns recorded) recounts CLEAN even though the verify-time env default
+    would resolve ``observe`` — the shadow must NOT add the columns."""
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)
+    assert _sweep_all(lake_root, catalog_path, results_root, temporal_mode="off") == 0
+
+    monkeypatch.setenv("BRUTEX_TEMPORAL", "observe")  # the hostile verify-time env
+    rc = _sweep_verify_recount(lake_root, catalog_path, results_root, tmp_path / "scratch")
+
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_OK
+    assert "recount_divergence" not in out
+    assert "CORRUPT" not in out
+
+
+def test_recount_of_a_mixed_temporal_history_is_inconclusive_never_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A MIXED per-tuple temporal history degrades the recount to INCONCLUSIVE.
+
+    The completion sentinel excludes the gate config (the ledgered resume
+    envelope), so one root can legitimately hold tuples recorded under
+    DIFFERENT regimes — here a BUY tuple under the ``observe`` default and a
+    SELL tuple under ``off``. ONE shadow config cannot reproduce that
+    per-tuple capture, so the recount must refuse as a context mismatch
+    (exit ``EXIT_VERIFY_INCONCLUSIVE``) — never run a meaningless byte-diff
+    that condemns the healthy tree as CORRUPT.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)
+    assert _sweep_all(lake_root, catalog_path, results_root, directions="BUY") == 0
+    assert (
+        _sweep_all(lake_root, catalog_path, results_root, directions="SELL", temporal_mode="off")
+        == 0
+    )
+
+    rc = _sweep_verify_recount(
+        lake_root, catalog_path, results_root, tmp_path / "scratch", directions="BUY,SELL"
+    )
+
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_VERIFY_INCONCLUSIVE
+    assert "MIXED temporal-gate configs" in out
+    # The literal token "CORRUPT" legitimately appears in the refusal's own
+    # "(INCONCLUSIVE, never CORRUPT)" wording — pin the verdict/finding
+    # renders instead.
+    assert "verdict: CORRUPT" not in out
+    assert "[CORRUPT]" not in out
 
 
 def test_cmd_sweep_all_relaunch_after_vix_move_warns_and_exits_nonzero(

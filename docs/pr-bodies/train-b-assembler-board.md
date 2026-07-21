@@ -281,3 +281,63 @@ files; full-chain rehearsal **20/20** (594.48s coordinator probe / 660.09s local
 **Push-gate note:** wave-3 2/3 anchor push under the operator's Event-2 go; full firewall
 evidence above; the #2063 census draw is PROVISIONAL (renumber-at-draw). Non-member board
 + golden-reconcile commits drop at freeze.
+
+## 2026-07-21 — #1458-salvage folded (wave-3 3/3) · sweep-verify RECORDED-temporal-regime recount
+
+**Anchor:** origin/integration/train-b == the salvage tip on the #1578 fold spine — parent
+woven base **1b03be3fc** (`docs(board): #1578 fold anchor entry`). The #1458-salvage is a
+HAND RE-DERIVATION (raw `git merge` FORBIDDEN; donor is CLOSE-NOT-MERGE and SURVIVES per the
+#1848 steward citation), so it lands as **ONE `feat(engine,cli)` commit** (NOT a merge) that
+carries the 5 fold source/doc files + this board entry; the push-verified final SHA goes in
+the assembler report. **Fold identity:** donor `claude/sweep-temporal-robustness` @
+**9cdb93bb** (PR #1458); DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001 (MIGRATION.md **#2064**,
+PROVISIONAL — #2063 is claimed by the #1578 fold, so the salvage takes #2064 in fold order;
+renumber-at-landing per DEC-LEDGER-RENUMBER-001). NO member DEC re-added — `DEC-SWEEP-
+TEMPORAL-ROBUSTNESS-001` (#1848) STANDS as the donor citation (dup-DEC forbidden); no fresh
+handle minted. **Salvage law:** verify/recount-plane ONLY — the RECOVERY half of the
+pre-named follow-up; the RECORD half already landed on the woven tree in **d5a297475**
+(`sweep_run.py`:2112 emits `start_payload["temporal_gate"]`). SUPERSEDES the #1851
+reconcile-round-2 ENV-ONLY interim (decision R1 — the verify-side env-only block DELETED;
+recorded channel is the ONE source). Launch-side args + `resolve_temporal_config` +
+`cmd_sweep_all` kwargs + both `_dispatch` threadings were ALREADY superseded on the woven
+tree (via the #1848/d5a297475 lineage) — the salvage folds ONLY the verify/recount residue
+(0 `recorded_temporal_from_audit` on the woven `cli.py`/`sweep_verify.py` pre-fold).
+
+**Firewall verdict (battery executed at this anchor):** the salvage's changed-file set is
+EXACTLY 5 — `brutex/cli.py` · `brutex/engine/sweep_verify.py` · `docs/MIGRATION.md` +
+`tests/integration/test_cli_sweep_all_vix_stamp.py` · `tests/unit/test_engine_sweep_verify.py`
+— which contains **NO `tests/golden/**` and NO fixture parquet**, so every firewall golden is
+byte-stable UNMOVED by construction: RUN-ID pair `715212…62fc9`/`f588194…5921a`
+(`test_engine_sweep_run_golden.py`), `af3bf465…` (content) + `b0a3bed9…` (futures) +
+`c3f1fb8f…` (temporal `test_sweep_temporal_gate_golden.py`), digest `7a0120c1123b44c6`
+(`sweep_identity.py` LIVE), and `vocab_golden_vectors.json` sha256 `19640054…831a3a` all
+byte-UNTOUCHED (the changed set does not include any of them). Forbidden #1709-era literals
+= **ZERO** over the 4-file code/test delta (per-file grep of the 14-literal set:
+`715212|f588194|af3bf465|b0a3bed9|c3f1fb8f|ee874356|011a494c|fdc92094|5d8f4384|7a0120c1|
+5b020e89|caf0cb63|23ebaf1c|19640054` = 0 hits each). The lone `c3f1fb8f` in the MIGRATION.md
+#2064 delta is a documentary CITATION of the UNMOVED `_GOLDEN_TEMPORAL_CONTENT_HASH` (it
+documents the golden is unchanged), not a re-baseline. Ledger: exactly ONE `2064.` numbered
+entry + ONE `## DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001` header in the working tree, ZERO on
+HEAD (the line-7300 mention is entry #1848's prose forward-reference to the pre-named
+follow-up — a documented cross-ref, not a duplicate).
+
+**Battery (this anchor, wheels: .venv all import OK):** golden trio + full sweep_verify unit
+= **271 passed**; new `TestRecordedTemporalFromAudit` = **13 passed**; launch-side
+`test_cli_sweep_temporal.py` = **14 passed**; integration `test_cli_sweep_all_vix_stamp.py`
+(incl. the 3 new recount pins + 3 #1851 recount round-trips) = **7 passed** (595.65s); the
+#1851 obligation pin `test_sweep_all_futures_launch.py::test_sweep_verify_recount_round_
+trips_a_futures_tree` = **1 passed** (2.70s); `ruff check brutex tests` clean +
+`ruff format --check` 4/4 already-formatted; `mypy --strict brutex` **0 issues / 580 files**.
+Full-chain **rehearsal SKIPPED** as rehearsal-NEUTRAL — the salvage touches
+`cmd_sweep_verify` + a `sweep_verify.py` reader (the verify/recount plane), NOT `cmd_sweep_all`
+/ `sweep_run.py` (the launch chain the rehearsal exercises), and adds no launch-side code.
+
+**Push-gate note:** wave-3 3/3 anchor push under the operator's Event-2 go; full firewall
+evidence above; the #2064 census draw is **PROVISIONAL** (census-co-sign-HELD — the steward
+deferred temporal-recount ratification to a "tail PR"; the board co-sign HOLD is where that
+is granted; renumber-at-draw if the ratified number differs). **OWED (surfaced to the
+coordinator):** the CLAUDE.md §1/§3 Active-branch blurb rewrite for this fold is DEFERRED to
+coordinator co-sign (STEP D scoped the ledger to MIGRATION+validators; the validators do not
+mandate the blurb; context-thrash discipline discourages the header rewrite mid-fold) — the
+DEC-ID is the stable handle, the blurb lands at co-sign. Non-member board entry drops at
+freeze.
