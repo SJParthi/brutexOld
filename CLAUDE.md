@@ -38,6 +38,17 @@ DEC-LEDGER-RENUMBER-001. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. This header carries the pointer, never
 the story — the full record lives in the §1 Active-branch blurb +
 MIGRATION.md #2065.)
+Earlier: 2026-07-15 (DEC-SCOPE-MINIMAL-CORE-001, MIGRATION.md #1835 —
+the minimal-core SCOPE DECISION pack, ADR-0024 + DEC #1835–#1839: engine +
+lake = NIFTY/BANKNIFTY/SENSEX + NSE-INDIAVIX reference-only; index F&O
+retained in the lake; the ~750-stock universe · single-stock F&O ingest ·
+the crossverify S3 producer · the backup S3/B2 remote proposed RETIRED
+(backup goes LOCAL-ONLY restic); SSM auth STAYS — "no S3" ≠ "no AWS".
+PROPOSED — DOCS-ONLY, zero code/behavior change; acceptance = the operator's
+merge of the draft PR; code narrowing lands in Phase B after the merge train
+drains. This header carries the pointer, never the story — the record lives
+in the §1 Active-branch blurb + MIGRATION.md #1835–#1839.)
+
 Earlier: 2026-07-18 (DEC-FILL-EXEC-GRID-1M-001 +
 DEC-OPTIONS-EXEC-FEEDBACK-001, MIGRATION.md #1989–#1990 / ADR-0025, branch
 `claude/fill-1m-exec-grid` — PR-B: THE 1-MINUTE EXECUTION GRID + the
