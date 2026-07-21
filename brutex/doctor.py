@@ -656,6 +656,14 @@ _BRUTEX_LAKE_WHEEL = _WheelSpec(
 )
 
 
+_BRUTEX_IDENTITY_WHEEL = _WheelSpec(
+    check_name="wheel_freshness_brutex_identity",
+    package="brutex_identity",
+    compiled_submodule="_brutex_identity",
+    crate_dir="rust/brutex-identity",
+)
+
+
 def _check_one_wheel_freshness(
     spec: _WheelSpec,
     fingerprint_file: Path | None = None,
@@ -885,6 +893,31 @@ def check_brutex_lake_wheel_freshness(
     return _check_one_wheel_freshness(_BRUTEX_LAKE_WHEEL, fingerprint_file, env)
 
 
+def check_brutex_identity_wheel_freshness(
+    fingerprint_file: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel-source freshness handshake for the brutex_identity wheel.
+
+    DEC-RUST-RUNID-STORES-001 (independent refuter round 2) — the
+    run-identity + stores kernel is the THIRD hard-imported wheel
+    (``brutex.strategies.combo`` / ``brutex.engine`` /
+    ``brutex.data.window_ledger_store`` import it unconditionally; the
+    Python computation bodies were deleted in the same lane), so it joins
+    the SAME common freshness helper the trading_core/fno_math wheels ride.
+
+    Parameters
+    ----------
+    fingerprint_file
+        Explicit path to the expected-fingerprint JSON. ``None`` = the
+        ``EXPECTED_BUILD.json`` next to the installed ``brutex_identity``
+        package (which IS the repo copy under ``maturin develop``).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_freshness(_BRUTEX_IDENTITY_WHEEL, fingerprint_file, env)
+
+
 def _default_crate_root(spec: _WheelSpec) -> Path:
     """Repo-checkout crate directory for ``spec`` (``rust/<crate>``).
 
@@ -1038,6 +1071,14 @@ _BRUTEX_LAKE_SOURCE_DIGEST = _WheelSpec(
 )
 
 
+_BRUTEX_IDENTITY_SOURCE_DIGEST = _WheelSpec(
+    check_name="wheel_source_digest_brutex_identity",
+    package=_BRUTEX_IDENTITY_WHEEL.package,
+    compiled_submodule=_BRUTEX_IDENTITY_WHEEL.compiled_submodule,
+    crate_dir=_BRUTEX_IDENTITY_WHEEL.crate_dir,
+)
+
+
 def check_wheel_source_digest(
     crate_root: Path | None = None,
     env: Mapping[str, str] | None = None,
@@ -1108,6 +1149,30 @@ def check_brutex_lake_wheel_source_digest(
     return _check_one_wheel_source_digest(_BRUTEX_LAKE_SOURCE_DIGEST, crate_root, env)
 
 
+def check_brutex_identity_wheel_source_digest(
+    crate_root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel source-digest handshake for the brutex_identity wheel.
+
+    The brutex_identity twin of :func:`check_wheel_source_digest`, bound to
+    the SAME common helper (DEC-RUST-SOURCE-DIGEST-TWIN-001 mechanism;
+    DEC-RUST-RUNID-STORES-001 independent refuter round 2 — added together
+    with the freshness stage so the third hard-imported wheel gets BOTH
+    drift nets).
+
+    Parameters
+    ----------
+    crate_root
+        Explicit crate directory to digest. ``None`` = the repo checkout's
+        ``rust/brutex-identity`` resolved next to the installed ``brutex``
+        package (absent → honest SKIP).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_source_digest(_BRUTEX_IDENTITY_SOURCE_DIGEST, crate_root, env)
+
+
 def run_doctor(
     audit_file: Path | None = None,
     audit_dir: Path = DEFAULT_AUDIT_DIR,
@@ -1118,9 +1183,11 @@ def run_doctor(
     wheel_fingerprint_file: Path | None = None,
     fno_math_wheel_fingerprint_file: Path | None = None,
     brutex_lake_wheel_fingerprint_file: Path | None = None,
+    brutex_identity_wheel_fingerprint_file: Path | None = None,
     wheel_source_crate_root: Path | None = None,
     fno_math_wheel_source_crate_root: Path | None = None,
     brutex_lake_wheel_source_crate_root: Path | None = None,
+    brutex_identity_wheel_source_crate_root: Path | None = None,
 ) -> DoctorReport:
     """Run all health checks and return the aggregated report.
 
@@ -1158,6 +1225,14 @@ def run_doctor(
         the ``EXPECTED_BUILD.json`` shipped next to the installed
         ``brutex_lake`` package (an absent wheel reads the stage's advisory
         WARN, never a FAIL).
+    brutex_identity_wheel_fingerprint_file
+        Explicit expected-fingerprint JSON for the brutex_identity
+        wheel-freshness stage (DEC-RUST-RUNID-STORES-001). ``None`` = the
+        ``EXPECTED_BUILD.json`` shipped next to the installed
+        ``brutex_identity`` package.
+    brutex_identity_wheel_source_crate_root
+        Explicit crate directory for the brutex_identity wheel-source-digest
+        stage. ``None`` = the repo checkout's ``rust/brutex-identity``.
     wheel_source_crate_root
         Explicit crate directory for the trading_core wheel-source-digest
         stage (DEC-RUST-SOURCE-DIGEST-TWIN-001). ``None`` = the repo
@@ -1205,7 +1280,17 @@ def run_doctor(
         check_brutex_lake_wheel_freshness(fingerprint_file=brutex_lake_wheel_fingerprint_file)
     )
     report.add(
+        check_brutex_identity_wheel_freshness(
+            fingerprint_file=brutex_identity_wheel_fingerprint_file
+        )
+    )
+    report.add(
         check_brutex_lake_wheel_source_digest(crate_root=brutex_lake_wheel_source_crate_root)
+    )
+    report.add(
+        check_brutex_identity_wheel_source_digest(
+            crate_root=brutex_identity_wheel_source_crate_root
+        )
     )
     return report
 
@@ -1220,9 +1305,11 @@ def main(
     wheel_fingerprint_file: Path | None = None,
     fno_math_wheel_fingerprint_file: Path | None = None,
     brutex_lake_wheel_fingerprint_file: Path | None = None,
+    brutex_identity_wheel_fingerprint_file: Path | None = None,
     wheel_source_crate_root: Path | None = None,
     fno_math_wheel_source_crate_root: Path | None = None,
     brutex_lake_wheel_source_crate_root: Path | None = None,
+    brutex_identity_wheel_source_crate_root: Path | None = None,
 ) -> int:
     """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
     report = run_doctor(
@@ -1235,9 +1322,11 @@ def main(
         wheel_fingerprint_file=wheel_fingerprint_file,
         fno_math_wheel_fingerprint_file=fno_math_wheel_fingerprint_file,
         brutex_lake_wheel_fingerprint_file=brutex_lake_wheel_fingerprint_file,
+        brutex_identity_wheel_fingerprint_file=brutex_identity_wheel_fingerprint_file,
         wheel_source_crate_root=wheel_source_crate_root,
         fno_math_wheel_source_crate_root=fno_math_wheel_source_crate_root,
         brutex_lake_wheel_source_crate_root=brutex_lake_wheel_source_crate_root,
+        brutex_identity_wheel_source_crate_root=brutex_identity_wheel_source_crate_root,
     )
     print(report.format())
     return 0 if report.ok else 1

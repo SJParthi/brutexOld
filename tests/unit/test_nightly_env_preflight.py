@@ -22,11 +22,21 @@ def _flag_names() -> set[str]:
 
 
 class TestRegistry:
-    def test_registry_carries_the_two_designed_rows(self) -> None:
+    def test_registry_carries_the_designed_rows(self) -> None:
         by_name = {row.name: row for row in REMOVED_ENV_FLAGS}
         assert by_name["BRUTEX_FILL_MODE"].tier == "removed"
         assert "DEC-FILL-WORST-CASE-ONLY-001" in by_name["BRUTEX_FILL_MODE"].removed_by
         assert by_name["BRUTEX_SKIP_WHEEL_FRESHNESS"].tier == "active_escape"
+        # The retired ledger-render flag joined at the DEC-RUST-RUNID-STORES-001
+        # (#1962, renumbered from #1954) merge-forward reconcile — the FILL_MODE "removed" class.
+        assert by_name["BRUTEX_LAKE_RUST_LEDGER_RENDER"].tier == "removed"
+        assert "DEC-RUST-RUNID-STORES-001" in by_name["BRUTEX_LAKE_RUST_LEDGER_RENDER"].removed_by
+
+    def test_ledger_render_registry_row_matches_the_live_refuser(self) -> None:
+        # The registry-named flag IS the store-entry refuser (the FILL_MODE twin).
+        from brutex.data.window_ledger_store import LEDGER_RENDER_ENV
+
+        assert LEDGER_RENDER_ENV in _flag_names()
 
     def test_every_row_has_remediation_text(self) -> None:
         # §10 test 14(f) — a future retired flag cannot ship without remediation.

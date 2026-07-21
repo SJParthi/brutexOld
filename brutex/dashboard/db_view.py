@@ -6329,7 +6329,8 @@ def _ledger_cache_stamp(ledger_file: Path) -> tuple[int, tuple[str, ...]]:
 
 #: The window-ledger fold identity — the leading 5 columns of the ledger schema
 #: (the ``row[0:5]`` key ``load_window_ledger``'s Python dict fold uses). MUST
-#: equal ``window_ledger_store._COLUMNS[:5]`` — pinned by test, not imported
+#: equal the ``brutex_identity`` kernel's ``LEDGER_COLUMNS[:5]`` (the ledger
+#: schema authority — DEC-RUST-RUNID-STORES-001) — pinned by test, not imported
 #: (the :data:`_LEDGER_DELTAS_DIRNAME` precedent: this module deliberately
 #: carries no module-level ``window_ledger_store`` edge).
 _WINDOW_KEY_COLUMNS: Final[tuple[str, ...]] = (
@@ -6867,7 +6868,10 @@ def _window_counts_since(
 
 
 #: The canonical 17-column ledger row projection, in ``LedgerRowTuple`` order
-#: (DEC-DB-LATENCY-HARDENING-001). MUST equal ``window_ledger_store._COLUMNS``
+#: (DEC-DB-LATENCY-HARDENING-001; ``streak_provenance`` appended LAST per
+#: DEC-STREAK-PROVENANCE-001 #1512). MUST equal the ``brutex_identity`` kernel's
+#: ``LEDGER_COLUMNS`` (the ledger schema authority — DEC-RUST-RUNID-STORES-001;
+#: the former ``window_ledger_store._COLUMNS`` global is gone)
 #: — pinned by test, not imported (the :data:`_WINDOW_KEY_COLUMNS` precedent:
 #: this module deliberately carries no module-level ``window_ledger_store``
 #: edge — CodeQL ``py/cyclic-import``).
@@ -6892,11 +6896,11 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
     """Coerce ONE DuckDB ledger page row to the canonical ``LedgerRowTuple`` shape.
 
     DEC-DB-LATENCY-HARDENING-001: the EXACT per-cell coercion the legacy Python
-    parse applies (``window_ledger_store._rows_to_records`` — ``str``/``int`` on
-    the required cells, ``None``-passthrough on the optional
-    ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` /
-    ``streak_provenance`` columns), so the fast path's tuples are byte-equal to
-    :func:`window_ledger_rows_cached`'s. A
+    parse applies (since DEC-RUST-RUNID-STORES-001 that parse lives in the
+    ``brutex_identity`` ledger codec — ``str``/``int`` on the required cells,
+    ``None``-passthrough on the optional ``bars_net_new`` / ``empty_retries`` /
+    ``transient_retries`` / ``streak_provenance`` columns), so the fast
+    path's tuples are byte-equal to :func:`window_ledger_rows_cached`'s. A
     ``None`` in ANY column the legacy parse either requires or DERIVES
     (``empty_streak`` / ``in_pull_fetches`` carry legacy per-row derivation
     rules this projection deliberately does not duplicate) raises ``ValueError``

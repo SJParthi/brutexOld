@@ -220,7 +220,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -272,7 +272,7 @@ jobs:
           # rust-brutex-ops · rust-brutex-pull-state · rust-brutex-refine) +
           # brutex-lake (gated via this required build-wheels job + the
           # ci-ok kernel verify).
-          key: rust-wheels-v2-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-calendar/**', 'rust/brutexd/**', 'rust/brutex-ops/**', 'rust/brutex-pull-state/**', 'rust/brutex-lake/**', 'rust/brutex-refine/**') }}
+          key: rust-wheels-v2-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-calendar/**', 'rust/brutexd/**', 'rust/brutex-ops/**', 'rust/brutex-pull-state/**', 'rust/brutex-lake/**', 'rust/brutex-refine/**', 'rust/brutex-identity/**') }}
       - name: Install Rust toolchain (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -290,7 +290,7 @@ jobs:
           workspaces: rust/brutex-lake -> target
           shared-key: brutex-lake-wheel
           key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
-      - name: Build the seven maturin wheels (cache miss only)
+      - name: Build the eight maturin wheels (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: |
           # Belt-and-suspenders crates.io flake guard (the same 3-attempt
@@ -323,14 +323,18 @@ jobs:
           # (LakeRustWavedUnavailableError) and every lake suite would FAIL,
           # not skip.
           build_with_retry ./rust/brutex-lake
+          # brutex_identity (DEC-RUST-RUNID-STORES-001): the run-identity +
+          # store kernel — a HARD import of brutex/engine/snapshot_hash.py,
+          # brutex/engine/results_store.py and brutex/data/window_ledger_store.py.
+          build_with_retry ./rust/brutex-identity
       - name: Verify the wheels import (runs on the cache-hit arm too)
         # A corrupt/stale cache entry must fail HERE, loudly, not in a
         # dozen downstream jobs.
         run: |
           ls -l wheelhouse/
-          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 7
-          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
-          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_refine, brutex_pull_state, brutex_lake; print('all seven kernels import OK')"
+          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 8
+          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_refine, brutex_pull_state, brutex_lake, brutex_identity; print('all eight kernels import OK')"
       - name: Upload wheels artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -420,7 +424,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
       - name: Compute this shard's file list (deterministic partition)
         run: |
           set -euo pipefail
@@ -538,7 +542,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
       - name: Strict per-module 100% coverage gate (Golden Rule #12)
         # New modules ship at 100% line + 100% branch from the start.
         # Add modules to this list as they reach 100%. Legacy modules
@@ -3301,7 +3305,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
@@ -3449,7 +3453,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
       - name: Download shard coverage data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -3577,7 +3581,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -3646,7 +3650,7 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_refine + brutex_pull_state)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_refine + brutex_pull_state + brutex_identity)
         # EXACTLY the wheel subset this job needs — a superset install
         # could flip wheel-gated skip tests, so each job's subset is
         # deliberate. DEC-FEED-RUST-MATERIALIZE-002: brutex_feed JOINS this
@@ -3661,7 +3665,7 @@ jobs:
         # home stays the `test:` job's coverage pass. DEC-RUST-STAGE3-REFINE-001:
         # brutex_refine ALSO joins this job's subset — the stage3_wire
         # byte-identical-tree determinism oracle needs the refine wheel here.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
       # DEC-RUST-LAKE-WAVED-001 W-6a: NO brutex_lake wheel here — every
       # lake property suite is polars/pyarrow-guarded and module-skips in
       # this [dev]-only job; the wheel-armed execution home for
@@ -3768,7 +3772,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3838,7 +3842,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement.
         run: |
@@ -4426,6 +4430,10 @@ jobs:
           # are deleted — the L3 boot sweep + every lake read refuses loudly
           # without it), so the make-run set builds it too (Makefile twin).
           install_with_retry ./rust/brutex-lake
+          # brutex_identity is a HARD import of brutex.engine/data
+          # (DEC-RUST-RUNID-STORES-001) — run-smoke's `import brutex.engine`
+          # line below crashes without it.
+          install_with_retry ./rust/brutex-identity
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
           python -c "import trading_core, fno_math, brutex_pull_state; print('kernels OK')"
@@ -4505,7 +4513,7 @@ jobs:
         # DELETED — the wheel is a HARD prerequisite (the typed
         # LakeRustWavedUnavailableError otherwise; a WIDENING of the
         # pre-shard subset forced by the endgame, not a convenience).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -4588,7 +4596,7 @@ jobs:
         # DELETED — the wheel is a HARD prerequisite (the typed
         # LakeRustWavedUnavailableError otherwise; a WIDENING of the
         # pre-shard subset forced by the endgame, not a convenience).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
       - name: Run the full-chain rehearsal + byte-identity proof
         # -s so the measured `rehearsal.<leg>.seconds` lines land in the raw
         # log (the runtime budget stays evidence-backed on every push).
@@ -5063,7 +5071,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -5479,7 +5487,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
       - name: Revert fix to merge-base + run shipped tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

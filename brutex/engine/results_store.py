@@ -133,6 +133,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+import brutex_identity
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
@@ -1508,18 +1509,22 @@ def _validate_run_id(run_id: str) -> None:
 
     Canonical = exactly :data:`COMBO_HASH_HEX_LEN` lowercase hex chars, matching
     ``brutex.strategies.combo.combo_hash(...)``'s ``.hex()`` output so the dedup
-    key is unambiguous (no upper/lower aliasing).
+    key is unambiguous (no upper/lower aliasing). The LAW runs in the
+    ``brutex_identity`` kernel (DEC-RUST-RUNID-STORES-001); the repr-bearing
+    arms are re-rendered here with CPython ``repr`` so the message bytes match
+    the retired body exactly (the kernel renders Rust ``{:?}`` quoting).
+    Disclosed narrowing: a same-length string that only ``bytes.fromhex``'s
+    whitespace tolerance accepted (e.g. embedded spaces) is now rejected —
+    reject-only on garbage, no real BLAKE3 hex is affected.
     """
-    if len(run_id) != COMBO_HASH_HEX_LEN:
-        raise ResultsStoreError(
-            f"run_id must be {COMBO_HASH_HEX_LEN}-char BLAKE3 hex, got {len(run_id)} chars"
-        )
-    if run_id != run_id.lower():
+    message = brutex_identity.validate_run_id_error(run_id, COMBO_HASH_HEX_LEN)
+    if message is None:
+        return
+    if message.startswith("run_id must be lowercase hex"):
         raise ResultsStoreError(f"run_id must be lowercase hex, got {run_id!r}")
-    try:
-        bytes.fromhex(run_id)
-    except ValueError as exc:
-        raise ResultsStoreError(f"run_id {run_id!r} is not valid hex") from exc
+    if message.endswith("is not valid hex"):
+        raise ResultsStoreError(f"run_id {run_id!r} is not valid hex")
+    raise ResultsStoreError(message)
 
 
 def _merge_nullable_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
@@ -1725,6 +1730,89 @@ def _field_getter(name: str) -> Callable[[ResultRow], float]:
         return getattr(row, name)  # type: ignore[no-any-return]
 
     return _get
+
+
+#: The marshalled :class:`ResultRow` FFI shape — dataclass field order with the
+#: derived ``condition_names`` LAST; prices as their exact ``str(Decimal)``
+#: texts (post-snap the 2dp text is canonical, so string equality ≡ numeric
+#: equality). ONE tuple builder feeds every kernel decision.
+_ResultRowFfi = tuple[
+    str,
+    str,
+    str,
+    str,
+    str,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    str,
+    str,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    str,
+]
+
+
+def _price_ffi_text(value: Decimal) -> str:
+    """Render a price for the kernel's TEXT comparison, signed-zero normalised.
+
+    The kernel compares prices as strings, and the retired dataclass ``__eq__``
+    compared them NUMERICALLY — under which ``Decimal("-0.00")`` equals
+    ``Decimal("0.00")``. ``abs()`` on the zero class drops the sign while
+    preserving the scale text, so a signed-zero price stays the numeric-law
+    no-op instead of flipping into a false run-identity conflict (the
+    hostile-review MINOR of DEC-RUST-RUNID-STORES-001). Non-zero values pass
+    through verbatim — ``round_money`` fixes their scale at construction, so
+    text equality matches numeric equality for every producible price.
+    """
+    return str(abs(value) if value == 0 else value)
+
+
+def _row_to_ffi(row: ResultRow) -> _ResultRowFfi:
+    """Marshal one row for the kernel append decision."""
+    return (
+        row.run_id,
+        row.instrument,
+        row.tf,
+        row.direction,
+        row.mode,
+        row.mask_bits,
+        row.net_pnl_paisa,
+        row.gross_profit_paisa,
+        row.gross_loss_paisa,
+        row.max_drawdown_paisa,
+        row.expectancy_paisa,
+        row.total_trades,
+        row.winning_trades,
+        row.losing_trades,
+        row.sharpe_ratio,
+        row.sortino_ratio,
+        row.calmar_ratio,
+        row.profit_factor,
+        row.win_rate,
+        row.max_drawdown_pct,
+        _price_ffi_text(row.avg_entry_price),
+        _price_ffi_text(row.avg_exit_price),
+        row.deflated_sharpe,
+        row.vix_mean,
+        row.vix_min,
+        row.vix_max,
+        row.condition_names,
+    )
 
 
 def _encode_limb(mask: int, *, hi: bool) -> int:

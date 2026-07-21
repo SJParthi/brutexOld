@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-20 (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md
+_Last updated: 2026-07-21 (DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065,
+branch `claude/rust-runid-stores` — the run-identity-CONSUMPTION + stores
+COMPUTATION plane re-hosted on the NEW `rust/brutex-identity` crate (pyo3 0.29
+abi3-py312; blake3 + parquet-rs only): `engine/snapshot_hash.py` · run-id
+validation + the u128 limb codec in `engine/results_store.py` ·
+`data/window_ledger_store.py`. Landed as OPTION B' — the woven Python
+append/merge/top_k/render store law is KEPT and the Rust store kernel is
+DEMOTED to run-id validation / the u128 limb codec / the classic-rank arm +
+the exported `classify_result_append` differential cross-check, so store BYTES
+stay Python-rendered and the frozen store-hash + run-id goldens are UNMOVED BY
+CONSTRUCTION (firewall CLEAN); the kernel's new-family blindness is the named
+follow-up DEC-RUST-RUNID-STORES-002. Subsumes #1918's render-plane arm
+(parquet-rs canonical render the ONE writer; flag seam + pyarrow oracle
+RETIRED) + preserves the #1898 inode guard. Renumbered #1962 -> #2065 at the
+2026-07-21 train-b wave-3 #1644 fold — #1962 held by
+DEC-RUST-CALENDAR-LEAVES-001; DEC-IDs are the stable handles per
+DEC-LEDGER-RENUMBER-001. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #2065.)
+Earlier: 2026-07-20 (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md
 #1758 + DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1817 — both numbers KEPT at
 the train-b wave-3 fold (zero collision on the woven ledger) — branch
 `claude/dedup-gate-provenance-serving`: gate-scoped `/results` serving over the
@@ -816,7 +836,11 @@ oracle, flag OFF is byte-identical + never-imports-crate; twin-lake
 reader-parity + the crash/resume state-convergence NAMED MERGE GATE executed
 on the real merged wheel. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
 per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1918 —
-this header carries the pointer, never the story.)
+this header carries the pointer, never the story. [RENDER-PLANE ARM
+SUPERSEDED-IN-PART by DEC-RUST-RUNID-STORES-001 (#1962, ex-#1954) per the coordinator
+ruling of 2026-07-18 — the option-iii re-baseline stands; premise void: zero
+recorded runs. The full record lives in MIGRATION.md #1962 + the #1918
+in-entry note.])
 Earlier: 2026-07-17 (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939,
 branch `claude/box-autodeploy-lane` — the nightly BOX AUTO-DEPLOY leg + the
 standalone `brutex box-update` mouth: `cmd_nightly_run` gains a PRE-CHAIN
@@ -4560,7 +4584,36 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dedup-gate-provenance-serving` (**DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+- **Active branch:** `claude/rust-runid-stores`
+  (**DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065** — the
+  run-identity-CONSUMPTION + stores COMPUTATION plane re-hosted on the NEW
+  `rust/brutex-identity` crate (pyo3 0.29 abi3-py312; blake3 + parquet-rs
+  only). Landed as **OPTION B'** at the #1644 fold: the woven Python
+  append / VIX-merge / top_k / `_render_bytes` store law (incl. the #1467
+  `gate_provenance` LAST column + its backfill-FIRST merge, the temporal /
+  growth / recency / selection tails) is KEPT VERBATIM, and the member's Rust
+  store kernel is DEMOTED to run-id validation (`validate_run_id_error`), the
+  u128 limb codec (`mask_to_limbs`/`mask_from_limbs`, adopted only where
+  bit-identical to the woven Python codec), the classic-rank `rank_top_k` arm
+  for non-None keys, and the EXPORTED `classify_result_append` differential
+  cross-check on the CORE-FAMILY plane ONLY — the kernel is deliberately BLIND
+  to the 13 woven tail families (incl. `gate_provenance`), the named follow-up
+  DEC-RUST-RUNID-STORES-002. Because the store bytes flow through the woven
+  `_render_bytes` (Python `df.write_parquet`, limb columns, conditional gate
+  column LAST), the frozen store-hash / run-id goldens are UNMOVED BY
+  CONSTRUCTION (firewall CLEAN — 0 hash-literal moves, the vocab sha unmoved).
+  Subsumes #1918's render-plane arm (parquet-rs canonical render is the ONE
+  writer; the flag seam + pyarrow oracle RETIRED, a SET flag refuses loudly;
+  the brutex-lake handshake drops `render_ledger_parquet_from_ipc` 29->28) and
+  preserves the #1898 inode guard on the ledger reads (`read_regular_bytes` /
+  `read_regular_text`). The wheel is a REQUIRED install (ci.yml build-wheels
+  7 -> 8 · scheduled workflows · Makefile · bootstrap Step 6b). Renumbered
+  #1962 -> #2065 at the 2026-07-21 train-b wave-3 #1644 fold — #1962 held by
+  DEC-RUST-CALENDAR-LEAVES-001; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001. ENGINE semantics UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; no new
+  routes, no new env vars.)
+  Earlier: `claude/dedup-gate-provenance-serving` (**DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
   MIGRATION.md #1758** (renumbered #1724 → #1758 to the drain-steward reservation) — gate-scoped
   `/results` serving + the row/store gate-provenance carrier: the dedup audit's residual arms after
   #1715 re-keyed the store ADDRESS per gate config — `ResultRow.gate_provenance` (Ruling-5 optional
@@ -6818,7 +6871,7 @@ hostile-review pass._
   keep working.
   Self-test `tests/unit/test_aws_hermeticity_belt.py` (12 tests — belt
   active/loud/source-pinned-autouse + fakes-still-work); AST sweep of every
-  `BackgroundPullJob(` in tests/ recorded in #1954 (the reaching set:
+  `BackgroundPullJob(` in tests/ recorded in #1962 (the reaching set:
   the two fixed tests + the `test_pull_jobs.py` on_finally/heartbeat classes
   + `test_pull_jobs_singleflight.py`'s no-resolver block + route-driven
   starts — ALL belt-covered). HONEST: prevents FUTURE exposure from the test
@@ -6935,7 +6988,16 @@ hostile-review pass._
   not speed; ships INERT — a default flip needs its own DEC; the gate class is
   deliberately WEAKER than PR-1's byte gate for this ONE module (the ruled
   standard, disclosed). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-  lake/schema/scope/vocab/rate change; run identity untouched.)
+  lake/schema/scope/vocab/rate change; run identity untouched.
+  [RENDER-PLANE ARM SUPERSEDED-IN-PART by DEC-RUST-RUNID-STORES-001 (#1962, ex-#1954)
+  per the coordinator ruling of 2026-07-18 — the option-iii golden
+  re-baseline stands (the 2026-07-16 forbidding ruling's stored-history
+  premise is VOID: zero recorded runs); the flag seam + pyarrow oracle are
+  RETIRED (a SET `BRUTEX_LAKE_RUST_LEDGER_RENDER` now REFUSES loudly), the
+  twin-lake reader-parity + state-convergence gates are ADAPTED onto the
+  kernel render (canonical-vs-legacy twins; the row fixed point stays the
+  binding law). The full record lives in MIGRATION.md #1962 + the #1918
+  in-entry note.])
   Earlier: `claude/box-autodeploy-lane`
   (**DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939** — entry
   coordinator-reserved above the live-main ceiling #1932 at tip c220870;
@@ -14438,7 +14500,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/dedup-gate-provenance-serving`
+- **Active feature branch:** `claude/rust-runid-stores`
+  (DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065 — the
+  run-identity-CONSUMPTION + stores COMPUTATION plane on the NEW
+  `rust/brutex-identity` crate (pyo3 0.29 abi3-py312; blake3 + parquet-rs
+  only); landed as OPTION B' — the woven Python append/merge/top_k/render
+  store law is KEPT VERBATIM (incl. the #1467 `gate_provenance` LAST column)
+  so store bytes stay Python-rendered and the frozen store-hash / run-id
+  goldens are UNMOVED by construction; the Rust kernel is demoted to run-id
+  validation / the u128 limb codec / the classic-rank arm + the exported
+  `classify_result_append` differential (kernel new-family blindness = the
+  named follow-up DEC-RUST-RUNID-STORES-002); subsumes #1918's render-plane
+  arm + preserves the #1898 inode guard; the brutex_identity wheel is a
+  REQUIRED install; renumbered #1962 -> #2065 at the 2026-07-21 train-b
+  wave-3 #1644 fold; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #2065 for the full blurb)
+  Earlier: `claude/dedup-gate-provenance-serving`
   (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md #1758 (renumbered
   #1724 → #1758 to the drain-steward reservation) — gate-scoped `/results`
   serving + the row/store gate-provenance carrier + the d1 L2 cache-key
@@ -15102,8 +15179,11 @@ hostile-review pass._
   crash/resume/re-pull state-convergence NAMED MERGE GATE EXECUTED on the
   real merged wheel; the #1917 bytes-probe pins reconciled not broken; ships
   INERT — a default flip needs its own DEC; ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1918 for the full blurb)
+  NIFTY/BANKNIFTY/SENSEX; see §1 + MIGRATION.md #1918 for the full blurb
+  [RENDER-PLANE ARM SUPERSEDED-IN-PART by DEC-RUST-RUNID-STORES-001 (#1962, ex-#1954)
+  per the coordinator ruling of 2026-07-18 — the option-iii re-baseline
+  stands; premise void: zero recorded runs; see the §1 blurb's supersession
+  note])
   Earlier: `claude/box-autodeploy-lane`
   (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939 — the nightly BOX
   AUTO-DEPLOY leg + the standalone `brutex box-update` mouth: the pre-chain

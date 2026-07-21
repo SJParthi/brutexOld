@@ -273,8 +273,11 @@ class WheelSpec:
 
 #: The CANONICAL box wheel set — MIRRORED from the Makefile ``run-raw``
 #: target's build list (Makefile run-raw: fno-math, trading-core, brutex-lake,
-#: brutex-feed, brutex-refine, brutex-pull-state — the pull-state decision
-#: plane is Rust-only + fail-closed), drift-pinned by a test that PARSES the
+#: brutex-identity — the HARD-import run-identity/stores kernel, joined at the
+#: DEC-RUST-RUNID-STORES-001 (MIGRATION.md #2065; the #1644 fold) merge-forward
+#: reconcile — brutex-feed, brutex-refine, brutex-pull-state — the pull-state
+#: decision plane is Rust-only + fail-closed), drift-pinned by a test that
+#: PARSES the
 #: Makefile's ``cd rust/<crate> && … maturin develop`` lines and asserts set
 #: equality (§10 test 16).  Runtime behavior stays a deterministic constant
 #: (the lane must run mid-update on a possibly-broken tree); CI catches drift.
@@ -305,6 +308,7 @@ WHEEL_SET: Final[tuple[WheelSpec, ...]] = (
     WheelSpec("fno_math", "rust/fno-math", required=True),
     WheelSpec("trading_core", "rust/trading-core", required=True),
     WheelSpec("brutex_lake", "rust/brutex-lake", required=True),
+    WheelSpec("brutex_identity", "rust/brutex-identity", required=True),
     WheelSpec("brutex_feed", "rust/brutex-feed", required=False),
     WheelSpec("brutex_refine", "rust/brutex-refine", required=True),
     WheelSpec("brutex_pull_state", "rust/brutex-pull-state", required=True),

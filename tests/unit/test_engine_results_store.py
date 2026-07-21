@@ -410,9 +410,10 @@ class TestTopK:
             store.top_k(1, by="avg_entry_price")  # price columns are not rankable
 
     def test_ranks_money_above_2_53_exactly(self) -> None:
-        # int64 paisa above 2**53 must rank EXACTLY — `_field_getter` returns the
-        # raw int (no float() coercion that would tie 2**53 and 2**53 + 1). This
-        # guards a reproducibility-critical property (and kills the float mutant).
+        # int64 paisa above 2**53 must rank EXACTLY — the kernel's rank_top_k
+        # receives the raw int (the retired `_field_getter` helper's law: no
+        # float() coercion that would tie 2**53 and 2**53 + 1). This guards a
+        # reproducibility-critical property (and kills the float mutant).
         big = 2**53
         store = ResultsStore(path=Path("unused.parquet"))
         store.extend(
@@ -982,3 +983,40 @@ class TestSelectionFields:
         for name in ("pareto_member", "selection_basis"):
             with pytest.raises(ResultsStoreError, match="unknown ranking field"):
                 store.top_k(1, by=name)
+
+
+class TestSignedZeroPriceNoop:
+    """The kernel's TEXT price compare must keep the retired NUMERIC law on zeros.
+
+    ``Decimal("-0.00")`` passes the ``price >= 0`` validation and equals
+    ``Decimal("0.00")`` NUMERICALLY, so the retired dataclass ``__eq__`` read an
+    identical re-append as a silent no-op. ``_price_ffi_text`` normalises the
+    sign wrapper-side (the hostile-review MINOR of DEC-RUST-RUNID-STORES-001) —
+    without it the text compare would flip this into a false run-identity
+    conflict.
+    """
+
+    def test_signed_zero_price_reappend_is_noop_not_conflict(self) -> None:
+        from dataclasses import replace
+        from decimal import Decimal
+
+        store = ResultsStore(path=Path("unused.parquet"))
+        stored = _row(avg_entry_price=Decimal("0.00"))
+        incoming = replace(stored, avg_entry_price=Decimal("-0.00"))
+        assert stored == incoming  # the retired NUMERIC law: equal rows
+        appended = store.append(stored)
+        assert appended is True
+        reappended = store.append(incoming)
+        assert reappended is False  # noop — never a conflict
+        assert len(store) == 1
+
+    def test_price_ffi_text_normalises_only_zero(self) -> None:
+        from decimal import Decimal
+
+        from brutex.engine.results_store import _price_ffi_text
+
+        assert _price_ffi_text(Decimal("-0.00")) == "0.00"
+        assert _price_ffi_text(Decimal("0.00")) == "0.00"
+        assert _price_ffi_text(Decimal("123.45")) == "123.45"
+        # Scale text preserved on the zero class (only the SIGN is dropped).
+        assert _price_ffi_text(Decimal("-0")) == "0"

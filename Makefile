@@ -102,6 +102,11 @@ run-raw: preflight
 		$(VPIP) install maturin; \
 		cd rust/brutex-lake && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
 	}
+	@$(VPY) -c "import brutex_identity" 2>/dev/null || { \
+		echo "==> brutex_identity kernel not importable — building it (one-time; needs cargo; DEC-RUST-RUNID-STORES-001)"; \
+		$(VPIP) install maturin; \
+		cd rust/brutex-identity && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
+	}
 	@$(VPY) -c "import brutex_feed" 2>/dev/null || { \
 		echo "==> brutex_feed kernel not importable — building it (optional; DEC-FEED-RUST-CORE-001)"; \
 		$(VPIP) install maturin; \
