@@ -20,17 +20,28 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # tests/golden/fixtures/*.tsv are byte-exact GOLDEN DATA (firewall):
+      # many rows carry meaningful trailing TABS (empty trailing TSV columns).
+      # Stripping them would corrupt the goldens + drift them from origin/main
+      # — the "raw bytes, not text" class main already excludes for fuzz seeds
+      # (DEC-HOOK-HYGIENE-MAIN-001). These only enter the hook diff on a
+      # far-behind merge-forward push; exclude the fixture tree from the
+      # file-MODIFYING fixers to keep it byte-identical (DEC-RUST-SWEEP-OPS-001
+      # merge-forward — firewall protection, not a firewall touch).
       - id: trailing-whitespace
+        exclude: ^tests/golden/fixtures/
       - id: end-of-file-fixer
         # Fuzzer corpus seeds are raw INPUT BYTES, not text — "fixing" the
         # trailing newline rewrites the seed (e.g. the 2-byte \n\n
         # crash-2-byte-header-underflow seed would shrink to 1 byte and no
         # longer reproduce its crash). docs/design/sweep_core/ is design-doc
         # measurement tooling + raw transcripts, outside the production
-        # gates (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001.
-        exclude: ^(rust/brutex-feed/fuzz/seeds/|docs/design/sweep_core/)
+        # gates (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001. The golden
+        # fixture tree is likewise byte-exact firewall data.
+        exclude: ^(rust/brutex-feed/fuzz/seeds/|docs/design/sweep_core/|tests/golden/fixtures/)
       - id: mixed-line-ending
         args: [--fix=lf]
+        exclude: ^tests/golden/fixtures/
       - id: check-yaml
       - id: check-toml
       - id: check-json
