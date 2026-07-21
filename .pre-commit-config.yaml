@@ -21,6 +21,11 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        # tests/golden/fixtures/*.tsv: FROZEN kernel-case tables whose
+        # trailing TABS are DATA (empty trailing TSV cells — the TRAIN A
+        # pull_outcome/pull_scope kernel fixtures ship on main with them);
+        # "fixing" them rewrites the golden bytes.
+        exclude: ^tests/golden/fixtures/.*\.tsv$
       - id: end-of-file-fixer
         # Fuzzer corpus seeds are raw INPUT BYTES, not text — "fixing" the
         # trailing newline rewrites the seed (e.g. the 2-byte \n\n
