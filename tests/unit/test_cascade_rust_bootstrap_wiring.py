@@ -41,7 +41,11 @@ class TestBootstrapWiring:
         never the optional brutex_feed warn shape (the law is deleted; there is
         no Python degrade to fall back to)."""
         text = BOOTSTRAP.read_text(encoding="utf-8")
-        match = re.search(r"brutex_cascade Rust extension.*?(?=# ─+ 6c\.)", text, flags=re.DOTALL)
+        # Anchor the block END on the NEXT "# ───" section header WHATEVER its
+        # number (or end-of-file), never a hardcoded neighbour label — the
+        # Train A fold renumbered the surrounding sections (6c. → 6c2.) and a
+        # literal "6c." lookahead went stale without any real wiring change.
+        match = re.search(r"brutex_cascade Rust extension.*?(?=\n# ─+|\Z)", text, flags=re.DOTALL)
         assert match is not None, "the brutex_cascade bootstrap block is missing"
         block = match.group(0)
         assert "exit 1" in block, (
