@@ -28,7 +28,12 @@ repos:
         # longer reproduce its crash). docs/design/sweep_core/ is design-doc
         # measurement tooling + raw transcripts, outside the production
         # gates (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001.
-        exclude: ^(rust/brutex-feed/fuzz/seeds/|docs/design/sweep_core/)
+        # tests/golden/fixtures/*.tsv are FROZEN kernel-case tables whose
+        # trailing TABS are DATA (empty trailing TSV cells — e.g. the TRAIN A
+        # pull_outcome/pull_scope kernel fixtures, committed on main with
+        # them); "fixing" them rewrites the golden bytes, the same
+        # raw-input-bytes class as the fuzz seeds above.
+        exclude: ^(rust/brutex-feed/fuzz/seeds/|docs/design/sweep_core/|tests/golden/fixtures/.*\.tsv$)
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-yaml
