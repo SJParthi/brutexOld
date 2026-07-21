@@ -269,6 +269,36 @@ jobs:
             done
           done
 
+      - name: Install the brutex-lake wheel + align polars to its crate pin
+        # DEC-RUST-LAKE-WAVED-001 W-6a MERGE COLLISION: main's Wave-D endgame
+        # DELETED the reconcile Python cores, so the flag-ON leg's
+        # tests/integration/test_sweep_pull_concurrency.py (the #1785 sweep-vs-pull
+        # lock-composition EXTRA GATE) — which drives a real cmd_sweep_all →
+        # load_sweep_slice → reconcile_catalog_from_lake → reconcile_file_via_rust
+        # — now HARD-requires the brutex_lake crate (brutex/data/lake_rust_waved.py
+        # _require_crate: import + API handshake + a runtime polars-version lockstep
+        # guard). The lane must therefore build+install the crate AND align the
+        # installed polars wheel to the crate's pin, exactly like
+        # .github/workflows/lake-rust-parity.yml / ci.yml's test job do. The
+        # existing @stable toolchain satisfies the brutex-lake rustc floor (>= 1.97);
+        # maturin/pip is already installed above. Same crates.io/git flake-retry
+        # idiom as the fno_math/trading_core step (CARGO_NET_GIT_FETCH_WITH_CLI is
+        # set in the lane env for the pinned polars git rev).
+        run: |
+          n=0
+          until pip install ./rust/brutex-lake; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-lake failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-lake failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+          pin="$(python -c 'import brutex_lake; print(brutex_lake.pinned_polars_version())')"
+          echo "aligning installed polars to the brutex-lake crate pin: $pin"
+          pip install "polars==${pin}"
+
       - name: Facade matrix + real-wheel parity suite
         # With the wheel installed the parity suite cannot module-skip —
         # -rs surfaces any skip reason in the log as belt-and-suspenders.
