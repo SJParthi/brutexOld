@@ -125,11 +125,17 @@ def _gate_config_fragment_python(grid: _GateConfigInput) -> dict[str, Any] | Non
     fragment: dict[str, Any] = {}
     overfit = grid.overfit
     if overfit is not None:
+        # Explicit float() normalization: the recount-recovery reader
+        # (sweep_verify.recorded_overfit_from_audit) reconstructs this leg
+        # from the audit JSON as floats, so a future int-carrying
+        # OverfitGateConfig (e.g. weight=0) must not mint an int here and
+        # split the digest from the recovered replay
+        # (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 review-fix NIT).
         fragment["overfit"] = [
-            overfit.dsr_min,
-            overfit.weight,
-            overfit.default_skew,
-            overfit.default_excess_kurtosis,
+            float(overfit.dsr_min),
+            float(overfit.weight),
+            float(overfit.default_skew),
+            float(overfit.default_excess_kurtosis),
         ]
     if grid.stage3_enable:
         # The Stage-3 knobs matter to the result ONLY when the pass runs; a

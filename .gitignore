@@ -151,6 +151,11 @@ Cargo.lock
 # (DEC-RUST-SWEEP-OPS-001 — a NEW crate needs its own negation to be
 # addable; the FRESH lock is committed, never a copy of a sibling's).
 !rust/brutex-sweep-ops/Cargo.lock
+# brutex-calendar (the calendar-leaf decision-law crate,
+# DEC-RUST-CALENDAR-LEAVES-001) is likewise an application extension crate:
+# track its lockfile for reproducibility (Golden Rule #4) + the
+# security-audit Cargo.lock trigger.
+!rust/brutex-calendar/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.
@@ -171,6 +176,9 @@ abs-bench/
 # results-store GOLDEN is a committed, frozen REAL store file — exempt it
 # (exact path only) from the runtime-lake *.parquet ignore above.
 !tests/golden/fixtures/results_store_pre_extension_v1.parquet
+# DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (G5): the capture-ON temporal-columns
+# results-store GOLDEN — the extension-side frozen twin, same exemption.
+!tests/golden/fixtures/results_store_temporal_v1.parquet
 # Headless-browser truth-suite failure artifacts (DEC-DASHBOARD-BROWSER-TRUTH-001):
 # Playwright traces/screenshots/ledgers saved on test FAILURE only — never committed.
 test-artifacts/

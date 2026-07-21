@@ -22,12 +22,18 @@ scanner)::
 
 LAWS (each pinned by ``tests/unit/test_crossverify_owed.py``):
 
-* **names-only scan** — the OWED verdict is carried by the marker file's
-  NAME, never its bytes: :func:`list_owed_days` is one ``os.scandir`` of
-  entry names (no ``open`` of any entry ⇒ a planted FIFO / device symlink
-  can never hang the route poll), so a corrupt / non-regular / tampered
-  marker still reads OWED — owed-unknown degrades to owed, never to a
-  silent de-arm;
+* **names-only scan, STRICT canonical name** — the OWED verdict is carried
+  by the marker file's NAME, never its bytes: :func:`list_owed_days` is one
+  ``os.scandir`` of entry names (no ``open`` of any entry ⇒ a planted FIFO
+  / device symlink can never hang the route poll), so a corrupt /
+  non-regular / tampered marker still reads OWED — owed-unknown degrades to
+  owed, never to a silent de-arm; a name is a marker IFF its stem
+  round-trips ``date.fromisoformat(stem).isoformat() == stem`` (exactly
+  the ``<YYYY-MM-DD>`` the write/clear path produces — a basic-ISO /
+  week-date spelling is junk-warned, never an immortal un-clearable owed
+  day; refuter round-3 MINOR-1), and dotfile-prefixed names (an in-flight
+  mark's ``.brutex-write-*`` atomic temp) are skipped silently (refuter
+  round-3 NIT-1);
 * **content is forensics only** — :func:`load_owed_marker` (used by the
   run-time scan for its honesty WARN) reads through the shared
   regular-file-only fd-capped loader
@@ -114,7 +120,12 @@ def mark_owed(lake_root: Path, day: date, *, source: str) -> bool:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_simple(dest, lambda tmp: tmp.write_bytes(body))
-    except Exception as exc:  # best-effort sentinel — never fail the pull
+    except OSError as exc:
+        # Best-effort sentinel — never fail the pull. NARROW (round-1
+        # hostile review NIT, the sibling clear_owed's discipline): mkdir +
+        # the guard-free atomic_write_simple raise only OSError classes
+        # here (the payload is plain json.dumps-able data); a genuine code
+        # bug still propagates loudly.
         _LOG.warning(
             "crossverify.owed_mark_failed",
             day=day.isoformat(),
@@ -139,8 +150,13 @@ def mark_owed_for_pull(
     logs ONE WARN and marks nothing: a tail that will read ``not_configured``
     owes nothing a catchup could complete) and skips marking under the
     ``BRUTEX_CROSSVERIFY=off`` kill switch (markers must never accumulate
-    while the feature is deliberately off). Returns ``True`` iff a marker was
-    durably written.
+    while the feature is deliberately off) AND under
+    ``BRUTEX_CROSSVERIFY_PUBLISH=off`` — the mark/auto-clearer PARITY law
+    (round-1 hostile review MINOR-1): the D3 owed catchup runs only on the
+    publish path (``run.py``'s ``config.publish and not config.dry_run``
+    gate), so a marker written in staged-only mode would be surfaced forever
+    yet never auto-completed. Returns ``True`` iff a marker was durably
+    written.
     """
     from brutex.crossverify.config import resolve_crossverify_config
 
@@ -161,6 +177,18 @@ def mark_owed_for_pull(
             day=day.isoformat(),
             source=source,
             reason="disabled (BRUTEX_CROSSVERIFY=off)",
+        )
+        return False
+    if not config.publish:
+        # Mark/auto-clearer parity: the D3 catchup that COMPLETES an owed
+        # day sits behind run.py's publish gate — staged-only mode must not
+        # accumulate markers no automatic pass will ever clear.
+        _LOG.info(
+            "crossverify.owed_mark_skipped",
+            day=day.isoformat(),
+            source=source,
+            reason="publish disabled (BRUTEX_CROSSVERIFY_PUBLISH=off) — the "
+            "D3 catchup only completes days on the publish path",
         )
         return False
     return mark_owed(lake_root, day, source=source)
@@ -195,13 +223,24 @@ def list_owed_days(lake_root: Path) -> list[date]:
     """Every owed marker day, ascending — NAMES-only, never raises, never opens.
 
     One ``os.scandir`` of :func:`owed_dir`; an entry is owed iff its NAME
-    parses as ``<YYYY-MM-DD>.json`` (the entry's inode TYPE never matters —
-    a planted FIFO/symlink/directory still reads owed and is never opened,
-    so the route poll can never hang). A junk name logs ONE
-    ``crossverify.owed_junk_entry`` WARN per scan entry and is skipped
-    (no day to attribute); an unreadable/absent owed dir logs ONE
-    ``crossverify.owed_scan_failed`` WARN (absent stays silent — the normal
-    empty case) and reads as no owed days.
+    is EXACTLY the canonical ``<YYYY-MM-DD>.json`` the write/clear path
+    produces — the stem must ROUND-TRIP ``date.fromisoformat(stem)
+    .isoformat() == stem`` (refuter round-3 MINOR-1: since Python 3.11
+    ``fromisoformat`` also accepts basic ISO ``20260714`` and ISO week
+    dates ``2026-W28-1``, so a foreign-planted basic-ISO name would read
+    owed FOREVER — ``clear_owed`` unlinks only the canonical name — and a
+    canonical+basic pair would list the same day TWICE; the strict
+    round-trip routes every non-canonical spelling to the junk WARN). The
+    entry's inode TYPE never matters — a planted FIFO/symlink/directory
+    still reads owed and is never opened, so the route poll can never
+    hang. A dotfile-prefixed name is skipped SILENTLY before any judgment
+    (refuter round-3 NIT-1: a scan racing an in-flight :func:`mark_owed`
+    sees the ``.brutex-write-*`` atomic-write temp — not junk, not a
+    marker). Any other junk name logs ONE ``crossverify.owed_junk_entry``
+    WARN per scan entry and is skipped (no day to attribute); an
+    unreadable/absent owed dir logs ONE ``crossverify.owed_scan_failed``
+    WARN (absent stays silent — the normal empty case) and reads as no
+    owed days.
     """
     root = owed_dir(lake_root)
     days: list[date] = []
@@ -219,9 +258,17 @@ def list_owed_days(lake_root: Path) -> list[date]:
         return []
     for entry in entries:
         name = entry.name
+        if name.startswith("."):
+            # An in-flight mark_owed's atomic-write temp (`.brutex-write-*`)
+            # racing this scan — a production-reachable shape (panel poll vs
+            # a pull's mark; refuter round-3 NIT-1). Not a marker, not junk:
+            # skipped SILENTLY (the rename either lands it as a canonical
+            # marker or the cleanup removes it — the next scan sees truth).
+            continue
         if name.endswith(_MARKER_SUFFIX):
+            stem = name[: -len(_MARKER_SUFFIX)]
             try:
-                marker_day: date | None = date.fromisoformat(name[: -len(_MARKER_SUFFIX)])
+                marker_day: date | None = date.fromisoformat(stem)
             except ValueError:
                 # A ``.json`` entry whose stem is not a calendar date is NOT
                 # a marker (no day to attribute) — deliberately routed to the
@@ -229,6 +276,14 @@ def list_owed_days(lake_root: Path) -> list[date]:
                 # (`date.fromisoformat` raises exactly ValueError) + observable
                 # (the WARN below is this arm's log line, pinned by
                 # ``test_junk_names_warned_and_skipped``).
+                marker_day = None
+            if marker_day is not None and marker_day.isoformat() != stem:
+                # STRICT canonical round-trip (refuter round-3 MINOR-1):
+                # fromisoformat accepts basic-ISO/week-date spellings the
+                # write/clear path never produces — a foreign-planted
+                # `20260714.json` would be IMMORTALLY owed (clear_owed
+                # unlinks only `2026-07-14.json`) and would double-list a
+                # day beside its canonical twin. Non-canonical ⇒ junk.
                 marker_day = None
             if marker_day is not None:
                 days.append(marker_day)

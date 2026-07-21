@@ -1,0 +1,1034 @@
+{
+  "host": "sandbox x86 container, Intel Xeon @2.80GHz, 4 vCPU (NOT the M4 Pro)",
+  "python": "3.12.3",
+  "rayon_threads": 4,
+  "parallel_work_threshold": 1048576,
+  "wheels": {
+    "fno_math": "0.3.0 cp312-abi3-manylinux_2_34_x86_64 sha256=6397ca9d89935397daaf0941ae8094e34ec014a10a9015fb9caf3cc11832363d",
+    "trading_core": "0.3.1 cp312-abi3-manylinux_2_34_x86_64 sha256=abbd38b648a9e53d96d8cc84cc7c9f5e10cdab829c4d203c8d56c548c86f10ed"
+  },
+  "fixture": {
+    "n_bars_max": 604485,
+    "sha256": "7249c7a388e4ad9fbe8af0a50180d02bc646dd265049d9b84cdf1f89fe1578f9",
+    "kind": "synthetic 1m-shaped, 374 bars/session, weekdays from 2020-01-02, seed 20260709"
+  },
+  "sl_paisa": 800,
+  "tp_paisa": 1200,
+  "density_targets": [
+    5,
+    45,
+    250,
+    700,
+    1400
+  ],
+  "cells": [
+    {
+      "trades_per_mask": 5.0,
+      "serial_count": {
+        "us_best": 287.4524000162637,
+        "us_median": 296.0439000162296,
+        "rel_spread": 0.09264107727632653,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 75.91136627895118,
+        "us_median": 76.54851162897103,
+        "rel_spread": 0.1783460744907029,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 287.92789998988155,
+        "us_median": 291.8313999998645,
+        "rel_spread": 0.03142245001180969,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 76.57577907065028,
+        "us_median": 78.48202907087736,
+        "rel_spread": 0.05139793883412676,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 310.1710999999341,
+        "us_median": 315.6602999752067,
+        "rel_spread": 0.04367976245296577,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 89.80338371963816,
+        "us_median": 91.98226744205766,
+        "rel_spread": 0.06569267410373351,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "n_bars": 48620,
+      "target": 5,
+      "chunk": 86
+    },
+    {
+      "trades_per_mask": 43.5,
+      "serial_count": {
+        "us_best": 289.41189998477057,
+        "us_median": 306.85910001011507,
+        "rel_spread": 0.33074624789329654,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 77.51379650979416,
+        "us_median": 82.87431395210872,
+        "rel_spread": 0.36226641727059533,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 297.6724000291142,
+        "us_median": 306.00290001530084,
+        "rel_spread": 0.056299475471621965,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 88.08680814148151,
+        "us_median": 93.34091278951958,
+        "rel_spread": 0.22763703430191676,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 413.2275000301888,
+        "us_median": 422.56779997842386,
+        "rel_spread": 0.10692802383493681,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 197.9964534886549,
+        "us_median": 200.24948837227532,
+        "rel_spread": 0.0896538844536615,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "n_bars": 48620,
+      "target": 45,
+      "chunk": 86
+    },
+    {
+      "trades_per_mask": 244.5,
+      "serial_count": {
+        "us_best": 297.25159997724404,
+        "us_median": 310.48820001160493,
+        "rel_spread": 0.3216594966327681,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 81.46509302404475,
+        "us_median": 91.26405813921612,
+        "rel_spread": 0.19117654611428073,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 327.1366999797465,
+        "us_median": 342.38560001540463,
+        "rel_spread": 0.09120315765377976,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 139.9692209313502,
+        "us_median": 143.30529651234366,
+        "rel_spread": 0.14652652454269466,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 931.222200006232,
+        "us_median": 940.5032000358915,
+        "rel_spread": 0.10773390067565138,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 807.643819767733,
+        "us_median": 818.396843021938,
+        "rel_spread": 1.2382715665378772,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "n_bars": 48620,
+      "target": 250,
+      "chunk": 86
+    },
+    {
+      "trades_per_mask": 683.9,
+      "serial_count": {
+        "us_best": 315.211699989959,
+        "us_median": 318.0830000019341,
+        "rel_spread": 0.02565355276119865,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 84.75697093006094,
+        "us_median": 88.14464534986845,
+        "rel_spread": 0.14912555384485623,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 399.0291999798501,
+        "us_median": 411.4900999866222,
+        "rel_spread": 0.04702487941408994,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 264.65404069968764,
+        "us_median": 286.7100058136752,
+        "rel_spread": 0.1245739528913926,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 2190.8693000114,
+        "us_median": 2231.342000004588,
+        "rel_spread": 0.09467944984035957,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 2503.6901337216477,
+        "us_median": 3450.6294069763308,
+        "rel_spread": 0.4642967034626591,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "n_bars": 48620,
+      "target": 700,
+      "chunk": 86
+    },
+    {
+      "trades_per_mask": 1401.3,
+      "serial_count": {
+        "us_best": 335.99299999877985,
+        "us_median": 352.6256999975885,
+        "rel_spread": 0.10815612230085338,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 90.25839534747637,
+        "us_median": 94.96145348960052,
+        "rel_spread": 0.1955483236742481,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 503.42859999545914,
+        "us_median": 506.1631999979,
+        "rel_spread": 0.07568878682689424,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 549.0264651159524,
+        "us_median": 563.3370465121453,
+        "rel_spread": 0.07893912472185431,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 4681.7964000183565,
+        "us_median": 4808.115400010138,
+        "rel_spread": 0.0917936969571007,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 5989.5559883745045,
+        "us_median": 6231.507220929923,
+        "rel_spread": 0.2116295231843924,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "n_bars": 48620,
+      "target": 1400,
+      "chunk": 86
+    },
+    {
+      "trades_per_mask": 43.5,
+      "serial_count": {
+        "us_best": 298.13539999850036,
+        "us_median": 299.7285000219563,
+        "rel_spread": 0.017032864942390483,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 80.6882790684963,
+        "us_median": 82.08378488519841,
+        "rel_spread": 0.183456589777225,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 310.8011000222177,
+        "us_median": 320.66909998320625,
+        "rel_spread": 0.03542522847331746,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 87.94281395535637,
+        "us_median": 89.10959883884739,
+        "rel_spread": 0.0409851433503497,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 456.91969999097637,
+        "us_median": 485.86640000394254,
+        "rel_spread": 0.35221856265370566,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 199.24604069718382,
+        "us_median": 244.21104651114442,
+        "rel_spread": 0.4199535755640974,
+        "n_masks": 172,
+        "n_calls": 2
+      },
+      "n_bars": 48620,
+      "target": "control_sl80_tp120",
+      "chunk": 86
+    },
+    {
+      "trades_per_mask": 4.9,
+      "serial_count": {
+        "us_best": 569.1055000170309,
+        "us_median": 575.0754000018787,
+        "rel_spread": 0.07123002675227635,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 151.73836363725388,
+        "us_median": 192.8848295475208,
+        "rel_spread": 0.5433737767383894,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 585.6138000126521,
+        "us_median": 591.7758000123285,
+        "rel_spread": 0.02939257921140794,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 157.34086364008445,
+        "us_median": 157.97652272650257,
+        "rel_spread": 0.021577645954381046,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 598.6737000057474,
+        "us_median": 618.0372000017087,
+        "rel_spread": 0.05391100362507609,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 162.68952273115,
+        "us_median": 164.98422727098924,
+        "rel_spread": 0.034110776226903776,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "n_bars": 93874,
+      "target": 5,
+      "chunk": 44
+    },
+    {
+      "trades_per_mask": 43.8,
+      "serial_count": {
+        "us_best": 550.2049999904557,
+        "us_median": 558.378999994602,
+        "rel_spread": 0.07672867380304527,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 151.926795457381,
+        "us_median": 164.50467045491348,
+        "rel_spread": 0.5088752372787836,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 562.8435000289755,
+        "us_median": 578.1232000117598,
+        "rel_spread": 0.04639566764210987,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 158.67650000183693,
+        "us_median": 169.26771590678155,
+        "rel_spread": 0.12880967364373633,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 741.461799998433,
+        "us_median": 747.5141000213625,
+        "rel_spread": 0.028059840746891704,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 267.9117386399164,
+        "us_median": 288.1790454539028,
+        "rel_spread": 0.266625715796817,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "n_bars": 93874,
+      "target": 45,
+      "chunk": 44
+    },
+    {
+      "trades_per_mask": 244.1,
+      "serial_count": {
+        "us_best": 586.7772000328841,
+        "us_median": 610.4197000240674,
+        "rel_spread": 0.2263141784861786,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 146.30514772823682,
+        "us_median": 158.51320454823343,
+        "rel_spread": 0.2563066156851887,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 613.2195000191132,
+        "us_median": 613.9183999948727,
+        "rel_spread": 0.07526896976032976,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 203.5027840902744,
+        "us_median": 229.3832727259955,
+        "rel_spread": 0.25616519094740847,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 1408.109300018623,
+        "us_median": 1429.8928999778582,
+        "rel_spread": 0.036531610159579016,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 1027.5273636363056,
+        "us_median": 1079.307602274391,
+        "rel_spread": 2.0288259520810024,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "n_bars": 93874,
+      "target": 250,
+      "chunk": 44
+    },
+    {
+      "trades_per_mask": 680.0,
+      "serial_count": {
+        "us_best": 609.2080000144051,
+        "us_median": 631.8306000139273,
+        "rel_spread": 0.11135983105751636,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 166.05446591132602,
+        "us_median": 196.99477272442064,
+        "rel_spread": 0.25223186283969756,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 684.5394000265514,
+        "us_median": 768.6694000312855,
+        "rel_spread": 0.1553865270174199,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 352.50999999644506,
+        "us_median": 360.8291477286746,
+        "rel_spread": 0.15262497390725258,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 2869.7593999822857,
+        "us_median": 2950.773600014145,
+        "rel_spread": 0.06299566439231466,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 2710.9443863599317,
+        "us_median": 2863.1600340893533,
+        "rel_spread": 1.1255616784309939,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "n_bars": 93874,
+      "target": 700,
+      "chunk": 44
+    },
+    {
+      "trades_per_mask": 1359.9,
+      "serial_count": {
+        "us_best": 633.8542000321468,
+        "us_median": 648.1464999978925,
+        "rel_spread": 0.04481708882573441,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 219.81001136530475,
+        "us_median": 235.90227272569047,
+        "rel_spread": 0.12977839694440862,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 813.3916000133468,
+        "us_median": 850.6201000272995,
+        "rel_spread": 0.0971819723262288,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 664.2313863639257,
+        "us_median": 673.9330454531063,
+        "rel_spread": 0.043751166122115104,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 5120.475200010333,
+        "us_median": 5191.259000002901,
+        "rel_spread": 0.04588831911022272,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 5070.588670455642,
+        "us_median": 7140.528159094505,
+        "rel_spread": 0.4675276283532698,
+        "n_masks": 88,
+        "n_calls": 2
+      },
+      "n_bars": 93874,
+      "target": 1400,
+      "chunk": 44
+    },
+    {
+      "trades_per_mask": 4.9,
+      "serial_count": {
+        "us_best": 1777.3076000139554,
+        "us_median": 1792.713399981949,
+        "rel_spread": 0.015679953182972557,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 558.3228076969905,
+        "us_median": 563.526423093208,
+        "rel_spread": 0.022748557421895674,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 1773.3527000018512,
+        "us_median": 1778.5943000035331,
+        "rel_spread": 0.032694962498272105,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 567.3812307717386,
+        "us_median": 574.1896922979952,
+        "rel_spread": 0.015056692330371496,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 1819.012499981909,
+        "us_median": 2748.7899999869114,
+        "rel_spread": 0.6205692374591643,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 590.6707307566159,
+        "us_median": 676.1071153960074,
+        "rel_spread": 0.49911498917641667,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "n_bars": 299948,
+      "target": 5,
+      "chunk": 13
+    },
+    {
+      "trades_per_mask": 43.9,
+      "serial_count": {
+        "us_best": 1783.03570000935,
+        "us_median": 1797.9356000068947,
+        "rel_spread": 0.01965541126868226,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 569.1947692412214,
+        "us_median": 569.9844999841074,
+        "rel_spread": 0.009541752103102848,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 1799.1805000292516,
+        "us_median": 1808.0653999732021,
+        "rel_spread": 0.05399058068130541,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 583.5495769238499,
+        "us_median": 621.8067307704936,
+        "rel_spread": 0.28353882529347835,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 1949.1506000122172,
+        "us_median": 1955.1970000065921,
+        "rel_spread": 0.0050366041490035275,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 715.1272692191504,
+        "us_median": 724.2161923211545,
+        "rel_spread": 0.08861182270936048,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "n_bars": 299948,
+      "target": 45,
+      "chunk": 13
+    },
+    {
+      "trades_per_mask": 242.8,
+      "serial_count": {
+        "us_best": 1791.6080000304646,
+        "us_median": 1800.1874000219686,
+        "rel_spread": 0.0178869484695653,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 568.297000007498,
+        "us_median": 571.4768076883886,
+        "rel_spread": 0.018844561328032798,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 1862.7136999839422,
+        "us_median": 1966.4266999825488,
+        "rel_spread": 0.10204729797624051,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 620.2581153922018,
+        "us_median": 629.8303076863914,
+        "rel_spread": 1.3246599383761746,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 2681.260500003191,
+        "us_median": 2684.554500001468,
+        "rel_spread": 0.005472127770076771,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 1464.7355384603054,
+        "us_median": 1511.7153846124263,
+        "rel_spread": 0.09596568285217089,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "n_bars": 299948,
+      "target": 250,
+      "chunk": 13
+    },
+    {
+      "trades_per_mask": 680.1,
+      "serial_count": {
+        "us_best": 1803.4086000170646,
+        "us_median": 1812.718999963181,
+        "rel_spread": 0.008864325043453183,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 570.2932692202012,
+        "us_median": 576.6424615278363,
+        "rel_spread": 0.02064032509101533,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 1907.4447000093642,
+        "us_median": 1936.2697999895317,
+        "rel_spread": 0.03996571957632929,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 737.021846152157,
+        "us_median": 755.8977307640956,
+        "rel_spread": 0.05536747473843264,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 4216.3811000136775,
+        "us_median": 4267.553799991219,
+        "rel_spread": 0.030135487514060883,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 3188.910499987357,
+        "us_median": 3212.344076928275,
+        "rel_spread": 0.09769191366264307,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "n_bars": 299948,
+      "target": 700,
+      "chunk": 13
+    },
+    {
+      "trades_per_mask": 1360.4,
+      "serial_count": {
+        "us_best": 1833.0602999867551,
+        "us_median": 1848.3793000086735,
+        "rel_spread": 0.013981427667588267,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 575.9825000075999,
+        "us_median": 583.5290000084989,
+        "rel_spread": 0.30928884389730554,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 2072.094000004654,
+        "us_median": 2080.3798000088136,
+        "rel_spread": 0.028817466786690057,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 930.0703461576632,
+        "us_median": 1004.5798846231963,
+        "rel_spread": 0.4755584037732046,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 6836.514199994781,
+        "us_median": 6872.737399999096,
+        "rel_spread": 0.0210374755028994,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 6113.747000007117,
+        "us_median": 6259.708923065633,
+        "rel_spread": 0.03358262188953694,
+        "n_masks": 26,
+        "n_calls": 2
+      },
+      "n_bars": 299948,
+      "target": 1400,
+      "chunk": 13
+    },
+    {
+      "trades_per_mask": 5.0,
+      "serial_count": {
+        "us_best": 3684.0683999798784,
+        "us_median": 3700.236299982862,
+        "rel_spread": 0.007664298531439118,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 1247.0424166698042,
+        "us_median": 1321.4868333382885,
+        "rel_spread": 0.23746291976582187,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 3675.2652999894053,
+        "us_median": 3714.9692000184587,
+        "rel_spread": 0.051920224638774826,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 1245.5200833301205,
+        "us_median": 1284.2971666486847,
+        "rel_spread": 0.10595988650697073,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 3770.355599999675,
+        "us_median": 3792.35619998326,
+        "rel_spread": 0.01079956490959767,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 1269.6579999934936,
+        "us_median": 1284.8299999935382,
+        "rel_spread": 0.04300121242545185,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "n_bars": 604485,
+      "target": 5,
+      "chunk": 6
+    },
+    {
+      "trades_per_mask": 43.9,
+      "serial_count": {
+        "us_best": 3682.6464000114356,
+        "us_median": 3702.3662000137847,
+        "rel_spread": 0.02177477587419798,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 1240.8298333260366,
+        "us_median": 1256.86691668155,
+        "rel_spread": 0.07331256410179043,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 3673.6603999997897,
+        "us_median": 3758.7228000120376,
+        "rel_spread": 0.13339156227578233,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 1251.6031666791605,
+        "us_median": 1348.579750015233,
+        "rel_spread": 0.2717561969135611,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 3859.158599971124,
+        "us_median": 3892.2953000110283,
+        "rel_spread": 0.015532090342252156,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 1397.6883333270962,
+        "us_median": 1505.8685000137,
+        "rel_spread": 0.48716577253059345,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "n_bars": 604485,
+      "target": 45,
+      "chunk": 6
+    },
+    {
+      "trades_per_mask": 242.9,
+      "serial_count": {
+        "us_best": 3680.3972000143403,
+        "us_median": 3725.8228000155214,
+        "rel_spread": 0.017423880226262296,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 1228.8771666438454,
+        "us_median": 1294.6773333245194,
+        "rel_spread": 0.11604353463141386,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 3737.5454000084574,
+        "us_median": 3817.552800001067,
+        "rel_spread": 0.07490777235944171,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 1288.6506666518471,
+        "us_median": 1631.234583328478,
+        "rel_spread": 0.5140743470495133,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 4704.600900004152,
+        "us_median": 4798.118000007889,
+        "rel_spread": 0.37580318449421835,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 2202.2732500014777,
+        "us_median": 2311.771583360193,
+        "rel_spread": 0.1631102467942863,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "n_bars": 604485,
+      "target": 250,
+      "chunk": 6
+    },
+    {
+      "trades_per_mask": 680.1,
+      "serial_count": {
+        "us_best": 3698.141700033375,
+        "us_median": 3763.7511999946582,
+        "rel_spread": 0.03188779921212922,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 1281.749333315929,
+        "us_median": 1311.1795000213533,
+        "rel_spread": 0.1139575392851475,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 3949.4083999670697,
+        "us_median": 4080.9308999996574,
+        "rel_spread": 0.09307459821159378,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 1434.6650000334193,
+        "us_median": 1471.201249993707,
+        "rel_spread": 11.807003841475417,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 6320.176100007302,
+        "us_median": 6403.391100002409,
+        "rel_spread": 0.032230162070425054,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 4106.871166679109,
+        "us_median": 4172.300000012304,
+        "rel_spread": 0.06440547785536618,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "n_bars": 604485,
+      "target": 700,
+      "chunk": 6
+    },
+    {
+      "trades_per_mask": 1361.5,
+      "serial_count": {
+        "us_best": 3752.581399976407,
+        "us_median": 3757.347300006586,
+        "rel_spread": 0.01144305623662015,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_count": {
+        "us_best": 1329.6009166576066,
+        "us_median": 1369.0796666878668,
+        "rel_spread": 0.03837366990990518,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_raw": {
+        "us_best": 4081.8710000166907,
+        "us_median": 4113.0803000214655,
+        "rel_spread": 0.03927960976004721,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_raw": {
+        "us_best": 1680.2517500309477,
+        "us_median": 1809.1865833487948,
+        "rel_spread": 0.47873019618831136,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "serial_wrapper": {
+        "us_best": 8998.787400014407,
+        "us_median": 9091.982100017049,
+        "rel_spread": 0.03555991332347791,
+        "n_masks": 10,
+        "n_calls": 10
+      },
+      "prod_wrapper": {
+        "us_best": 7212.452750006075,
+        "us_median": 7617.817999971521,
+        "rel_spread": 0.13358869722295294,
+        "n_masks": 12,
+        "n_calls": 2
+      },
+      "n_bars": 604485,
+      "target": 1400,
+      "chunk": 6
+    }
+  ]
+}
