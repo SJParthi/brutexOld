@@ -421,7 +421,7 @@
 {"d":"2021-02-21","td":false,"tdc":"false","s":null,"sc":null,"m":false,"w":false,"p":"2021-02-19","h":false,"hc":"false","we":true},
 {"d":"2021-02-22","td":true,"tdc":"true","s":{"t":"regular","o":"09:15:00","c":"15:30:00"},"sc":{"t":"regular","o":"09:15:00","c":"15:30:00"},"m":false,"w":false,"p":"2021-02-19","h":false,"hc":"false","we":false},
 {"d":"2021-02-23","td":true,"tdc":"true","s":{"t":"regular","o":"09:15:00","c":"15:30:00"},"sc":{"t":"regular","o":"09:15:00","c":"15:30:00"},"m":false,"w":false,"p":"2021-02-22","h":false,"hc":"false","we":false},
-{"d":"2021-02-24","td":true,"tdc":"true","s":{"t":"regular","o":"09:15:00","c":"15:30:00"},"sc":{"t":"regular","o":"09:15:00","c":"15:30:00"},"m":false,"w":false,"p":"2021-02-23","h":false,"hc":"false","we":false},
+{"d":"2021-02-24","td":true,"tdc":"true","s":{"t":"regular","o":"09:15:00","c":"17:00:00"},"sc":{"t":"regular","o":"09:15:00","c":"17:00:00"},"m":false,"w":false,"p":"2021-02-23","h":false,"hc":"false","we":false},
 {"d":"2021-02-25","td":true,"tdc":"true","s":{"t":"regular","o":"09:15:00","c":"15:30:00"},"sc":{"t":"regular","o":"09:15:00","c":"15:30:00"},"m":false,"w":false,"p":"2021-02-24","h":false,"hc":"false","we":false},
 {"d":"2021-02-26","td":true,"tdc":"true","s":{"t":"regular","o":"09:15:00","c":"15:30:00"},"sc":{"t":"regular","o":"09:15:00","c":"15:30:00"},"m":false,"w":false,"p":"2021-02-25","h":false,"hc":"false","we":false},
 {"d":"2021-02-27","td":false,"tdc":"false","s":null,"sc":null,"m":false,"w":false,"p":"2021-02-26","h":false,"hc":"false","we":true},

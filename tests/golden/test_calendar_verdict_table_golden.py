@@ -75,7 +75,7 @@ from tests.golden._calendar_verdict_harness import (
 #: SHA-256 manifest over the RAW fixture bytes (fixtures/README.md convention).
 #: Updating this constant is the reviewed-edit chokepoint every regeneration
 #: must pass through — together with its own ledgered calendar-data DEC.
-_EXPECTED_SHA256: Final[str] = "a0e59ddf50743907de7116af38755be72ee03eabd595b0b0a88ccece7285a8ee"
+_EXPECTED_SHA256: Final[str] = "8d6b65793fabef2bd7bd7222ce43a79ac5c33ad5bbc77bb6a951b72e41822e0c"
 
 _EXPECTED_DAY_COUNT: Final[int] = 2557
 _YEARS: Final[tuple[int, ...]] = (2020, 2021, 2022, 2023, 2024, 2025, 2026)
