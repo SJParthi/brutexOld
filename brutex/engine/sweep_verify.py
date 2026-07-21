@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.data.guarded_read import read_parquet_schema_regular, read_regular_bytes
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
 from brutex.engine.results_store import (
     EXIT_QUALITY_FIELDS,
     GROWTH_FIELDS,
@@ -516,17 +517,28 @@ def _schedules_from_entries(
 
 
 def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path) -> None:
-    """Refuse a scoped generation whose recorded fill mode is not worst-case.
+    """Refuse a scoped generation whose recorded fill law is not the current one.
 
-    DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is the
-    ONLY fill model and every post-DEC ``SWEEP_START``/``SWEEP_LAUNCH`` line's
+    Enforces the TWO distinct fill-law refusals that together identify a
+    verifiable tree; either arm refuses LOUDLY, and the remediation for both
+    is a fresh sweep:
+
+    DEC-FILL-WORST-CASE-ONLY-001 (the fill-MODE arm): worst-case is the ONLY
+    fill model and every post-DEC ``SWEEP_START``/``SWEEP_LAUNCH`` line's
     ``params`` carries the UNCONDITIONAL ``"fill_mode": "worst_case"`` key
     (``canonical_trade_params`` emits it always). A context entry with NO key
     is a precise-era line (the retired elide law recorded PRECISE by key
     absence), and a literal ``"precise"`` token is the retired mode spelled
     out — either way the generation's stores hold fills the deleted mode
     produced, and verifying them as worst-case would launder precise-priced
-    results. Refuse LOUDLY; the remediation is a fresh worst-case sweep.
+    results.
+
+    DEC-FILL-EXEC-GRID-1M-001 (the fill-GRID twin): the 1-minute execution
+    grid is the ONLY fill grid and every post-DEC line's ``params`` ALSO
+    carries the UNCONDITIONAL ``"execution_grid": "1m_next_bar"`` key. An
+    absent key (or any other token) is a decision-TF-era line whose stores
+    hold fills resolved on the DECISION bar, and verifying them as 1m-grid
+    results would launder pre-grid prices.
 
     GENERATION-SCOPED: *entries* are the ONE generation's context entries
     :func:`recorded_audit_facts` already selects — never the whole audit file.
@@ -534,9 +546,12 @@ def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path)
     Raises
     ------
     SweepVerifyError
-        If any scoped entry lacks the key or records anything other than
-        ``"worst_case"`` (a junk token refuses identically — tampered or
-        legacy, the tree is not verifiable under the one fill law).
+        If any scoped entry lacks the ``"fill_mode"`` key or records anything
+        other than ``"worst_case"`` (the DEC-FILL-WORST-CASE-ONLY-001 arm), OR
+        lacks the ``"execution_grid"`` key or records anything other than
+        ``"1m_next_bar"`` (the DEC-FILL-EXEC-GRID-1M-001 arm). A junk token
+        refuses identically on either arm — tampered or legacy, the tree is
+        not verifiable under the current fill laws.
     """
     expected = FillMode.WORST_CASE.value
     for entry in entries:
@@ -549,6 +564,23 @@ def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path)
                 f"worst_case is the only fill model; this generation's stores "
                 f"were priced under the deleted mode machinery and cannot be "
                 f"verified. Re-run the sweep to produce a worst-case tree"
+            )
+        # DEC-FILL-EXEC-GRID-1M-001 (the fill_mode law's twin): every
+        # post-DEC context line's params ALSO carries the unconditional
+        # "execution_grid": "1m_next_bar" key. An absent key (or any other
+        # token) identifies a decision-TF-era generation whose stores hold
+        # fills resolved on the DECISION bar — verifying them as 1m-grid
+        # results would launder pre-grid prices. Refuse LOUDLY; the
+        # remediation is a fresh sweep.
+        raw_grid = params.get("execution_grid") if isinstance(params, dict) else None
+        if raw_grid is None or str(raw_grid) != EXECUTION_GRID_1M_NEXT_BAR:
+            raise SweepVerifyError(
+                f"decision-TF-era sweep tree refused (DEC-FILL-EXEC-GRID-1M-001): "
+                f"{audit_path} (seq {entry.seq}) records "
+                f"execution_grid={raw_grid!r} — the 1-minute execution grid is "
+                f"the only fill grid; this generation's stores were priced on "
+                f"the retired decision-TF grid and cannot be verified. Re-run "
+                f"the sweep to produce a 1m-grid tree"
             )
 
 
@@ -596,11 +628,14 @@ def recorded_audit_facts(
     schedules disagreeing is real corruption (the resume gate refuses a
     schedule-only drift at launch), not any sanctioned cadence.
 
-    The scoped generation is additionally REQUIRED to record the one fill
-    law (DEC-FILL-WORST-CASE-ONLY-001): every context entry's ``params`` must
-    carry ``"fill_mode": "worst_case"`` — a precise-era generation (absent
-    key, the retired elide law, or a literal ``"precise"`` token) REFUSES
-    loudly via :func:`_require_worst_case_entries` before any tier runs.
+    The scoped generation is additionally REQUIRED to record BOTH current
+    fill laws (each a distinct enforced refusal): every context entry's
+    ``params`` must carry ``"fill_mode": "worst_case"``
+    (DEC-FILL-WORST-CASE-ONLY-001) AND ``"execution_grid": "1m_next_bar"``
+    (DEC-FILL-EXEC-GRID-1M-001). A precise-era generation (absent/``"precise"``
+    ``fill_mode``) or a decision-TF-era generation (absent/other
+    ``execution_grid``) REFUSES loudly via
+    :func:`_require_worst_case_entries` before any tier runs.
 
     Returns ``(None, {}, ())`` when the audit file is absent, and
     ``(None, {}, other_generations)`` when the explicit flags match no
@@ -613,7 +648,8 @@ def recorded_audit_facts(
         If the audit log is unreadable/corrupt, a context-bearing payload is
         malformed, the SCOPED generation's schedules disagree, or the scoped
         generation is a refused precise-era tree
-        (DEC-FILL-WORST-CASE-ONLY-001).
+        (DEC-FILL-WORST-CASE-ONLY-001) or decision-TF-era tree
+        (DEC-FILL-EXEC-GRID-1M-001).
     """
     if not audit_path.exists():
         return None, {}, ()

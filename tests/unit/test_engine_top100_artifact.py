@@ -1204,6 +1204,305 @@ class TestCascadeJoinAtWriter:
         assert loaded.cascade_join == artifact.cascade_join
         assert loaded.entries[0]["cascade"] == artifact.entries[0]["cascade"]
 
+
+# ── `DEC-OPTIONS-EXEC-FEEDBACK-001` / DEC-FILL-EXEC-GRID-1M-001: the exec-sim
+#    provider seams + the net_after_cost preset at the writer ─────────────────
+
+
+def _priced_verdict(net: int) -> dict[str, object]:
+    """A minimal PRICED options-exec verdict (headline net, int64 paisa)."""
+    return {"status": "priced", "net_after_cost_paisa": net, "window": "2024-10-01.."}
+
+
+class TestExecProviderNoneByteIdentity:
+    """The LOAD-BEARING pin: ALL providers ``None`` ⇒ pre-change bytes.
+
+    `DEC-OPTIONS-EXEC-FEEDBACK-001` / DEC-FILL-EXEC-GRID-1M-001's emit-on-wired
+    law — a build with every provider kwarg ``None`` (explicit OR defaulted)
+    must be BYTE-IDENTICAL to the pre-change output: no ``options_exec`` /
+    ``futures_exec`` / ``fill_sensitivity`` entry key, no ``*_wired`` source
+    flag, anywhere.
+    """
+
+    def _pair(self) -> list[Top100Candidate]:
+        return [
+            make_candidate(1, fingerprint=fingerprint_seed(1)),
+            make_candidate(
+                2, fingerprint=fingerprint_seed(2), row_overrides={"max_drawdown_pct": 20.0}
+            ),
+        ]
+
+    def test_default_build_equals_explicit_all_none_providers_byte_for_byte(self) -> None:
+        default = _build(self._pair())
+        explicit = _build(
+            self._pair(),
+            options_exec_provider=None,
+            futures_exec_provider=None,
+            fill_sensitivity_provider=None,
+        )
+        assert default.to_payload() == explicit.to_payload()
+        # The json BYTE law itself, not just dict equality.
+        assert json.dumps(default.to_payload(), sort_keys=True) == json.dumps(
+            explicit.to_payload(), sort_keys=True
+        )
+        assert default.rendered_bytes() == explicit.rendered_bytes()
+
+    def test_provider_none_artifact_carries_no_new_keys_anywhere(self) -> None:
+        artifact = _build(
+            self._pair(),
+            options_exec_provider=None,
+            futures_exec_provider=None,
+            fill_sensitivity_provider=None,
+        )
+        assert artifact.entries  # anti-vacuous: there ARE entries to inspect
+        for entry in artifact.entries:
+            assert "options_exec" not in entry
+            assert "futures_exec" not in entry
+            assert "fill_sensitivity" not in entry
+        for flag in ("options_exec_wired", "futures_exec_wired", "fill_sensitivity_wired"):
+            assert flag not in artifact.source
+        # Belt: the tokens appear NOWHERE in the rendered bytes.
+        rendered = artifact.rendered_bytes()
+        for token in (b"options_exec", b"futures_exec", b"fill_sensitivity"):
+            assert token not in rendered
+
+
+class TestExecProvidersWired:
+    """Wired providers: exact objects on matching entries + emit-on-wired flags."""
+
+    def test_wired_providers_stamp_the_exact_objects_and_flags(self) -> None:
+        a = make_candidate(1, fingerprint=fingerprint_seed(1))
+        b = make_candidate(2, fingerprint=fingerprint_seed(2))
+        options_by_id: dict[str, dict[str, object]] = {
+            a.row.run_id: _priced_verdict(12_345),
+            b.row.run_id: {"status": "not_priced", "reason": "no_option_chain"},
+        }
+        futures_by_id: dict[str, dict[str, object]] = {
+            a.row.run_id: {"status": "priced", "net_pnl_paisa": 999},
+            b.row.run_id: {"status": "not_priced", "reason": "lot_size_unknown"},
+        }
+        fill_by_id: dict[str, dict[str, object]] = {
+            a.row.run_id: {"status": "priced", "net_delta_paisa": -40},
+            b.row.run_id: {"status": "not_priced", "reason": "no_1m_bars"},
+        }
+        artifact = _build(
+            [a, b],
+            options_exec_provider=lambda c: options_by_id[c.row.run_id],
+            futures_exec_provider=lambda c: futures_by_id[c.row.run_id],
+            fill_sensitivity_provider=lambda c: fill_by_id[c.row.run_id],
+        )
+        by_run = {entry["run_id"]: entry for entry in artifact.entries}
+        for cand in (a, b):
+            rid = cand.row.run_id
+            # The objects are dict(...)-copied onto the entry — EQUALITY is
+            # the contract (identity cannot survive the copy, by design).
+            assert by_run[rid]["options_exec"] == options_by_id[rid]
+            assert by_run[rid]["futures_exec"] == futures_by_id[rid]
+            assert by_run[rid]["fill_sensitivity"] == fill_by_id[rid]
+        assert artifact.source["options_exec_wired"] is True
+        assert artifact.source["futures_exec_wired"] is True
+        assert artifact.source["fill_sensitivity_wired"] is True
+        # The pre-existing UNCONDITIONAL flags are untouched beside the new ones.
+        assert artifact.source["reasons_wired"] is False
+        assert artifact.source["margin_roi_wired"] is False
+
+    def test_futures_and_fill_per_candidate_none_leaves_that_entry_keyless(self) -> None:
+        """The ``_entry_payload`` ``is not None`` guard, pinned AS-IS.
+
+        The provider aliases document TOTAL-when-wired; the runtime tolerance
+        beyond that contract is the entry-level guard — a wired futures/fill
+        provider whose return for ONE candidate is ``None`` leaves THAT entry
+        key-less while the source flag stays True (wiredness is the
+        PROVIDER's presence, never per-entry). Deliberately NOT exercised for
+        the OPTIONS provider: its returns feed the ``net_after_cost_of`` fold
+        (``verdict.get``), so TOTAL is load-bearing there and a ``None``
+        return is a contract violation, not a behavior to pin.
+        """
+        a = make_candidate(1, fingerprint=fingerprint_seed(1))
+        b = make_candidate(2, fingerprint=fingerprint_seed(2))
+        futures_map: dict[str, dict[str, object]] = {
+            a.row.run_id: {"status": "priced", "net_pnl_paisa": 1}
+        }
+        fill_map: dict[str, dict[str, object]] = {a.row.run_id: {"status": "not_priced"}}
+        artifact = _build(
+            [a, b],
+            futures_exec_provider=lambda c: futures_map.get(c.row.run_id),
+            fill_sensitivity_provider=lambda c: fill_map.get(c.row.run_id),
+        )
+        by_run = {entry["run_id"]: entry for entry in artifact.entries}
+        assert by_run[a.row.run_id]["futures_exec"] == {"status": "priced", "net_pnl_paisa": 1}
+        assert by_run[a.row.run_id]["fill_sensitivity"] == {"status": "not_priced"}
+        assert "futures_exec" not in by_run[b.row.run_id]
+        assert "fill_sensitivity" not in by_run[b.row.run_id]
+        assert artifact.source["futures_exec_wired"] is True
+        assert artifact.source["fill_sensitivity_wired"] is True
+        # options stayed unwired here — no key, no flag.
+        assert "options_exec" not in by_run[a.row.run_id]
+        assert "options_exec_wired" not in artifact.source
+
+    def test_providers_resolve_once_per_representative_only(self) -> None:
+        # "resolved ONCE per gate-passing representative BEFORE ranking":
+        # a gate-FAILER and a family-COLLAPSED twin are never offered to the
+        # providers — only the shipped representative, exactly once each seam.
+        simple = make_candidate(
+            2, fingerprint=fingerprint_seed(9), row_overrides={"mask_bits": 0b1}
+        )
+        complex_twin = make_candidate(
+            1, fingerprint=fingerprint_seed(9), row_overrides={"mask_bits": 0b111}
+        )
+        failer = make_candidate(
+            3, fingerprint=fingerprint_seed(3), row_overrides={"profit_factor": 1.0}
+        )
+        families = group_twins(
+            [
+                TwinCandidate(
+                    run_id=c.row.run_id,
+                    mask_bits=c.row.mask_bits,
+                    fingerprint=c.agg.fingerprint,
+                    entry_ts_us=frozenset({1, 2, 3}),
+                )
+                for c in (simple, complex_twin)
+            ]
+        )
+        calls: list[str] = []
+
+        def provider(c: Top100Candidate) -> dict[str, object]:
+            calls.append(c.row.run_id)
+            return {"status": "not_priced", "reason": "n/a"}
+
+        artifact = _build(
+            [simple, complex_twin, failer],
+            families=families,
+            options_exec_provider=provider,
+            futures_exec_provider=provider,
+            fill_sensitivity_provider=provider,
+        )
+        assert [e["run_id"] for e in artifact.entries] == [simple.row.run_id]
+        # Three seams × the ONE representative — never the failer/twin.
+        assert calls == [simple.row.run_id] * 3
+
+    def test_fill_sensitivity_resolved_only_for_ranked_entries(self) -> None:
+        # DEC-FILL-EXEC-GRID-1M-001: each fill call is one O(bars) re-sim, so
+        # it resolves ONLY for the RANKED entries — while the options seam
+        # resolves for EVERY representative (its nets feed ranking).
+        many = [
+            make_candidate(
+                n,
+                fingerprint=fingerprint_seed(n),
+                row_overrides={"max_drawdown_pct": float(n % 29) + 0.5},
+            )
+            for n in range(1, TOP100_LIMIT + 6)
+        ]
+        options_calls: list[str] = []
+        fill_calls: list[str] = []
+
+        def options_provider(c: Top100Candidate) -> dict[str, object]:
+            options_calls.append(c.row.run_id)
+            return {"status": "not_priced", "reason": "n/a"}
+
+        def fill_provider(c: Top100Candidate) -> dict[str, object]:
+            fill_calls.append(c.row.run_id)
+            return {"status": "not_priced", "reason": "n/a"}
+
+        artifact = _build(
+            many, options_exec_provider=options_provider, fill_sensitivity_provider=fill_provider
+        )
+        assert len(artifact.entries) == TOP100_LIMIT
+        assert sorted(options_calls) == sorted(c.row.run_id for c in many)  # every rep
+        ranked_ids = [str(e["run_id"]) for e in artifact.entries]
+        assert sorted(fill_calls) == sorted(ranked_ids)  # ranked only
+        assert len(fill_calls) == TOP100_LIMIT
+
+    def test_wired_artifact_round_trips_through_write_and_load(self, tmp_path: Path) -> None:
+        # ENTRY_REQUIRED_KEYS is untouched, so the presence-tolerant reader
+        # round-trips the wired keys verbatim.
+        cand = make_candidate(1, fingerprint=fingerprint_seed(1))
+        artifact = _build(
+            [cand],
+            options_exec_provider=lambda c: _priced_verdict(777),
+            futures_exec_provider=lambda c: {"status": "not_priced", "reason": "n/a"},
+            fill_sensitivity_provider=lambda c: {"status": "not_priced", "reason": "n/a"},
+        )
+        write_top100(tmp_path, artifact)
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.to_payload() == artifact.to_payload()
+        assert loaded.entries[0]["options_exec"] == _priced_verdict(777)
+        assert loaded.source["options_exec_wired"] is True
+
+
+class TestNetAfterCostPresetAtWriter:
+    """build_top100(preset="net_after_cost") over a wired options-exec map."""
+
+    def test_ranks_priced_desc_then_unpriced_by_run_id_asc(self) -> None:
+        # Hand-derived expected order (net_after_cost: reverse=True, int-exact,
+        # unpriced entries LAST):
+        #   run 3 — priced net +2_000_000            → rank 1 (largest net)
+        #   run 1 — priced net    -50_000            → rank 2 (negative but
+        #                                              PRICED beats unpriced)
+        #   run 2 — status "not_priced" (its embedded 9_999_999 int MUST be
+        #           ignored — the status gate)       → unpriced pool
+        #   run 4 — status "priced" but a FLOAT net (9.9e15): the isinstance
+        #           int gate refuses it              → unpriced pool
+        #   the unpriced pool orders by run_id ASC → run 2 (…02) before run 4.
+        rich = make_candidate(3, fingerprint=fingerprint_seed(3))
+        modest = make_candidate(1, fingerprint=fingerprint_seed(1))
+        hostile_not_priced = make_candidate(2, fingerprint=fingerprint_seed(2))
+        float_net = make_candidate(4, fingerprint=fingerprint_seed(4))
+        verdicts: dict[str, dict[str, object]] = {
+            rich.row.run_id: _priced_verdict(2_000_000),
+            modest.row.run_id: _priced_verdict(-50_000),
+            hostile_not_priced.row.run_id: {
+                "status": "not_priced",
+                "reason": "no_option_chain",
+                "net_after_cost_paisa": 9_999_999,
+            },
+            float_net.row.run_id: {"status": "priced", "net_after_cost_paisa": 9.9e15},
+        }
+        artifact = _build(
+            [modest, hostile_not_priced, rich, float_net],
+            preset="net_after_cost",
+            options_exec_provider=lambda c: verdicts[c.row.run_id],
+        )
+        assert artifact.preset == "net_after_cost"
+        assert [e["rank"] for e in artifact.entries] == [1, 2, 3, 4]
+        assert [e["run_id"] for e in artifact.entries] == [
+            rich.row.run_id,
+            modest.row.run_id,
+            hostile_not_priced.row.run_id,
+            float_net.row.run_id,
+        ]
+        # The SAME resolved verdicts land on the entries (never a double resolve).
+        by_run = {e["run_id"]: e for e in artifact.entries}
+        assert by_run[rich.row.run_id]["options_exec"] == _priced_verdict(2_000_000)
+        assert by_run[float_net.row.run_id]["options_exec"] == {
+            "status": "priced",
+            "net_after_cost_paisa": 9.9e15,
+        }
+
+    def test_wired_options_nets_are_inert_under_min_dd_first(self) -> None:
+        # The nets feed ONLY the net_after_cost preset's key — a huge net on
+        # the WORSE-drawdown candidate must not rerank min_dd_first, and the
+        # wired order equals the unwired build's (R13: annotation never
+        # reranks).
+        calm = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"max_drawdown_pct": 5.0}
+        )
+        deep = make_candidate(
+            2, fingerprint=fingerprint_seed(2), row_overrides={"max_drawdown_pct": 25.0}
+        )
+        verdicts: dict[str, dict[str, object]] = {
+            calm.row.run_id: _priced_verdict(-1),
+            deep.row.run_id: _priced_verdict(10**15),
+        }
+        unwired = _build([calm, deep])
+        wired = _build([calm, deep], options_exec_provider=lambda c: verdicts[c.row.run_id])
+        assert (
+            [e["run_id"] for e in wired.entries]
+            == [e["run_id"] for e in unwired.entries]
+            == [calm.row.run_id, deep.row.run_id]
+        )
+
     def test_to_payload_elides_cascade_join_when_none(self) -> None:
         """A ``cascade_join=None`` artifact ELIDES the root key (EMIT-ON-PRESENT).
 

@@ -69,6 +69,7 @@ per-trade work, honestly stated, never an O(1)-total claim.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -800,6 +801,18 @@ class FuturesRuleResult:
     n_winners: int
     n_losers: int
     n_vix_missing: int = 0
+    #: The R45 differential verdict, PERSISTED on the result row
+    #: (`DEC-OPTIONS-EXEC-FEEDBACK-001` — pre-change these were LOCAL
+    #: variables inside :func:`execute_futures_sim`, logged + audited but
+    #: never returned, so no downstream consumer could surface them).
+    #: Defaulted trailing fields (the optional-column back-compat template) —
+    #: every existing constructor call is unchanged;
+    #: :func:`execute_futures_sim` stamps them via ``dataclasses.replace``.
+    #: A ``suspect=True`` result still persists, FLAGGED (the R13
+    #: annotation-never-hides analog) — the flag ships on the wire for a
+    #: downstream consumer to render (no display reads it today).
+    suspect: bool = False
+    differential_checked: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -813,6 +826,7 @@ class FuturesRuleResult:
             "n_winners",
             "n_losers",
             "n_vix_missing",
+            "differential_checked",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"FuturesRuleResult.{name} must be >= 0")
@@ -1090,7 +1104,12 @@ def execute_futures_sim(
                 "suspect": suspect,
             },
         )
-    return result
+    # Stamp the R45 differential verdict ONTO the returned row
+    # (`DEC-OPTIONS-EXEC-FEEDBACK-001` — the persistence fix: pre-change the
+    # verdict lived only in the log + audit payload, so a caller persisting
+    # the result silently dropped it). ``replace`` keeps the frozen row's
+    # every other field byte-identical.
+    return dataclasses.replace(result, suspect=suspect, differential_checked=n_checked)
 
 
 def _deterministic_sample(

@@ -100,7 +100,9 @@ def _speedup(
     monkeypatch: pytest.MonkeyPatch, bars: list[CandleBar], trades: list[ClosedTrade]
 ) -> float:
     def _run() -> ResultMetrics:
-        return metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        return metrics_from_trades(
+            bars, trades, start_equity_paisa=10_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
 
     # Explicit "0" (not delenv): the OFF arm stays the Python tail regardless
     # of SWEEP_RUST_METRICS_DEFAULT — flip-proof (DEC-SWEEP-EXIT-INDEX-FASTPATH-001).

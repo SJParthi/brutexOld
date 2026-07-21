@@ -54,6 +54,7 @@ from brutex.engine import sweep_run as run_mod
 from brutex.engine import sweep_supervisor as supervisor_mod
 from brutex.engine import trade_sim as trade_sim_mod
 from brutex.engine import validation as validation_mod
+from brutex.engine.exec_grid import build_exec_grid_map
 from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultsStore
@@ -196,32 +197,40 @@ def _capture_kwarg(
 class TestResidentTradeSimStamping:
     def test_default_reference_stamper_is_none(self) -> None:
         bar_bits = build_bar_bits(_BARS)
-        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1)
+        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS)
         assert sim.reference_stamper is None
 
     def test_property_returns_the_bound_stamper(self) -> None:
         bar_bits = build_bar_bits(_BARS)
-        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        sim = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=_STAMPER
+        )
         assert sim.reference_stamper is _STAMPER
 
     def test_rust_batch_trades_are_stamped(self) -> None:
         bar_bits = build_bar_bits(_BARS)
-        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        sim = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=_STAMPER
+        )
         assert sim.rust_active  # the compiled kernel serves; the stamp is Python-side
         (trades,) = sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
         _assert_trades_stamped(trades)
 
     def test_rust_batch_without_stamper_stamps_none(self) -> None:
         bar_bits = build_bar_bits(_BARS)
-        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1)
+        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS)
         (trades,) = sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
         assert trades
         assert all(t.vix_at_entry is None and t.vix_at_exit is None for t in trades)
 
     def test_fallback_arm_stamps_identically_to_rust_arm(self) -> None:
         bar_bits = build_bar_bits(_BARS)
-        rust_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
-        py_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        rust_sim = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=_STAMPER
+        )
+        py_sim = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=_STAMPER
+        )
         py_sim._rust = None  # force the pure-Python oracle arm
         (rust_trades,) = rust_sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
         (py_trades,) = py_sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
@@ -230,8 +239,10 @@ class TestResidentTradeSimStamping:
 
     def test_stamped_output_otherwise_byte_identical(self) -> None:
         bar_bits = build_bar_bits(_BARS)
-        plain = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1)
-        stamped = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        plain = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS)
+        stamped = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=_STAMPER
+        )
         (plain_trades,) = plain.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
         (stamped_trades,) = stamped.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
         assert len(plain_trades) == len(stamped_trades)
@@ -258,10 +269,14 @@ class TestResidentTradeSimStamping:
         (stamping is a pure trade-field decoration, never an index input).
         """
         bar_bits = build_bar_bits(_BARS)
-        rust_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
-        py_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        rust_sim = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=_STAMPER
+        )
+        py_sim = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=_STAMPER
+        )
         py_sim._rust = None  # force the pure-Python oracle arm
-        plain_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1)
+        plain_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS)
         assert rust_sim.rust_active
         ((rust_trades, rust_idx),) = rust_sim.simulate_masks_with_exit_indices(
             [0], direction=Side.BUY, take_profit_paisa=50
@@ -296,7 +311,9 @@ class TestResidentTradeSimStamping:
             ]
         )
         bar_bits = build_bar_bits(_BARS)
-        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=sparse)
+        sim = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=sparse
+        )
         with capture_logs() as logs:
             (trades,) = sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
         assert trades
@@ -330,7 +347,9 @@ class TestOracleEqualsBatchStructural:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bar_bits = build_bar_bits(_BARS)
-        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        sim = ResidentTradeSim(
+            _BARS, bar_bits, tf_minutes=1, exec_bars_1m=_BARS, reference_stamper=_STAMPER
+        )
         # The batch spine is `simulate_masks_with_exit_counts` since the
         # DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage-B counter rewire (the
         # earlier `simulate_masks_with_exit_indices` + `simulate_masks` are
@@ -372,6 +391,8 @@ class TestOracleEqualsBatchStructural:
                 "bull",
                 ValueError("batch boom"),
                 lambda mask: "0" * 64,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
+                exec_map=None,
                 reference_stamper=_STAMPER,
             )
         # Every oracle replay of the chunk carried the sim's stamper.
@@ -390,6 +411,7 @@ class TestSweepDriverSeam:
             0,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_BARS,  # tf==1m fixed point
             stop_loss_paisa=80,
             take_profit_paisa=50,
             start_equity_paisa=10_000_000,
@@ -419,6 +441,7 @@ class TestSweepDriverSeam:
                 0,
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 take_profit_paisa=50,
                 reference_stamper=_STAMPER,
             )
@@ -433,6 +456,7 @@ class TestSweepDriverSeam:
                 [0, 1 << BIT_BAR_BULLISH],
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 take_profit_paisa=50,
                 reference_stamper=_STAMPER,
             )
@@ -447,6 +471,7 @@ class TestSweepDriverSeam:
                 [0],
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 take_profit_paisa=50,
                 reference_stamper=_STAMPER,
             )
@@ -460,6 +485,7 @@ class TestSweepDriverSeam:
                 1,
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 take_profit_paisa=50,
                 min_hits=0,
                 reference_stamper=_STAMPER,
@@ -476,6 +502,7 @@ class TestSweepDriverSeam:
                 0,
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=bars,  # tf==1m fixed point
                 take_profit_paisa=50,
                 train_days=3,
                 test_days=1,
@@ -494,6 +521,7 @@ class TestSweepDriverSeam:
                 [0],
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=bars,  # tf==1m fixed point
                 take_profit_paisa=50,
                 train_days=3,
                 test_days=1,
@@ -516,6 +544,7 @@ class TestStage3ValidatorsSeam:
                 0,
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 take_profit_paisa=50,
                 reference_stamper=_STAMPER,
             )
@@ -528,6 +557,7 @@ class TestStage3ValidatorsSeam:
                 0,
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 take_profit_paisa=50,
                 reference_stamper=_STAMPER,
             )
@@ -546,6 +576,7 @@ class TestStage3ValidatorsSeam:
                 [],
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 take_profit_paisa=50,
                 reference_stamper=_STAMPER,
             )
@@ -556,7 +587,7 @@ class TestStage3ValidatorsSeam:
 def _ranked_combo() -> RankedCombo:
     """A gates-independent ranked combo over the small fixture (mask 0)."""
     metrics = driver_mod.evaluate_combo(
-        _BARS, 0, direction=Side.BUY, tf_minutes=1, take_profit_paisa=50
+        _BARS, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=_BARS, take_profit_paisa=50
     )
     return RankedCombo(mask=0, metrics=metrics, composite_score=0.0, deflated_sharpe=None)
 
@@ -574,6 +605,7 @@ class TestSweepReportSeam:
                 instrument="NIFTY",
                 tf_label="1m",
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 direction=Side.BUY,
                 condition_bits=[0, 1],
                 k=1,
@@ -601,6 +633,7 @@ class TestSweepReportSeam:
             instrument="NIFTY",
             tf_label="1m",
             tf_minutes=1,
+            exec_bars_1m=_BARS,  # tf==1m fixed point
             direction=Side.BUY,
             condition_bits=[0, 1],
             k=1,
@@ -614,6 +647,7 @@ class TestSweepReportSeam:
             instrument="NIFTY",
             tf_label="1m",
             tf_minutes=1,
+            exec_bars_1m=_BARS,  # tf==1m fixed point
             direction=Side.BUY,
             condition_bits=[0, 1],
             k=1,
@@ -632,6 +666,7 @@ class TestSweepReportSeam:
                 ranked,
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 stop_loss_paisa=None,
                 take_profit_paisa=50,
                 start_equity_paisa=10_000_000,
@@ -649,6 +684,7 @@ class TestSweepReportSeam:
                 ranked,
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 stop_loss_paisa=None,
                 take_profit_paisa=50,
                 start_equity_paisa=10_000_000,
@@ -694,6 +730,7 @@ def _run_sweep(
             store=store,
             dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
             audit=audit,
+            exec_bars_1m=_BARS_BIG,  # tf==1m fixed point
             reference_stamper=reference_stamper,
         )
     return summary, (tmp / f"{name}.parquet").read_bytes()
@@ -715,6 +752,7 @@ class TestSweepRunSeam:
                 bars=_BARS,
                 bar_bits=bar_bits,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
                 sl_paisa=None,
                 tp_paisa=50,
                 reference_stamper=_STAMPER,
@@ -758,7 +796,13 @@ class TestSweepRunSeam:
         bar_bits = build_bar_bits(_BARS)
         with capture_logs() as logs:
             sim = run_mod._build_trade_sim(
-                _BARS, bar_bits, _run_cfg(), "bull", reference_stamper=_STAMPER
+                _BARS,
+                bar_bits,
+                _run_cfg(),
+                "bull",
+                exec_bars_1m=_BARS,  # tf==1m fixed point
+                exec_map=None,
+                reference_stamper=_STAMPER,
             )
         assert sim.reference_stamper is _STAMPER
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
@@ -812,6 +856,7 @@ class TestSweepRunSeam:
             bars=_BARS,
             bar_bits=bar_bits,
             tf_minutes=1,
+            exec_bars_1m=_BARS,  # tf==1m fixed point
             sl_paisa=None,
             tp_paisa=50,
             reference_stamper=_STAMPER,
@@ -821,6 +866,7 @@ class TestSweepRunSeam:
             run_mod.mask_to_entry_signals(bar_bits, rc.mask),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_BARS,  # tf==1m fixed point
             stop_loss_paisa=None,
             take_profit_paisa=50,
             reference_stamper=_STAMPER,
@@ -968,7 +1014,7 @@ class TestParallelSeam:
         monkeypatch.setattr(parallel_mod, "_WORKER_CTX", ctx)
         (tuple_,) = list(orch_mod.iter_sweep_tuples(grid))
         with _capture_kwarg(monkeypatch, parallel_mod, "run_one_tuple") as captured:
-            parallel_mod._run_tuple_in_worker(0, tuple_, _BARS)
+            parallel_mod._run_tuple_in_worker(0, tuple_, _BARS, _BARS)
         assert captured == [_STAMPER]
 
     def test_two_worker_stamped_tree_equals_stamped_sequential_tree(self, tmp_path: Path) -> None:
@@ -1147,7 +1193,7 @@ class TestVixConflictTupleSkip:
             grid=grid, root=tmp_path / "out", reference_stamper=_STAMPER_BIG
         )
         monkeypatch.setattr(parallel_mod, "_WORKER_CTX", ctx_first)
-        first = parallel_mod._run_tuple_in_worker(0, tuple_, _BARS_BIG)
+        first = parallel_mod._run_tuple_in_worker(0, tuple_, _BARS_BIG, _BARS_BIG)
         assert first.failed_error is None
         assert first.summary is not None and first.summary.persisted > 0
         self._unsentinel(tmp_path / "out")
@@ -1156,7 +1202,7 @@ class TestVixConflictTupleSkip:
             grid=grid, root=tmp_path / "out", reference_stamper=_alt_stamper()
         )
         monkeypatch.setattr(parallel_mod, "_WORKER_CTX", ctx_redo)
-        second = parallel_mod._run_tuple_in_worker(1, tuple_, _BARS_BIG)
+        second = parallel_mod._run_tuple_in_worker(1, tuple_, _BARS_BIG, _BARS_BIG)
         # The failed MARKER comes back — the future never breaks, so the
         # parent pool skips this tuple instead of tearing the whole grid down.
         assert second.summary is None
@@ -1252,6 +1298,8 @@ class TestStage3WireSeam:
                 mask=0,
                 side=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=_BARS,  # tf==1m fixed point
+                exec_map=build_exec_grid_map(_BARS, _BARS, tf_minutes=1),
                 start_equity_paisa=10_000_000,
                 reference_stamper=_STAMPER,
                 # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-ONLY-001): the stamper wiring
@@ -1287,6 +1335,7 @@ class TestCascadeStreamsUnstamped:
             "bar_bits": build_bar_bits(_BARS),
             "direction_label": "bull",
             "tf_minutes": 1,
+            "exec_bars_1m": _BARS,  # tf==1m fixed point
             "sl_paisa": None,
             "tp_paisa": 50,
             "start_equity_paisa": 10_000_000,

@@ -145,10 +145,60 @@ class TestSpecFillModeManifestLaw:
 
         assert "fill_mode" not in {f.name for f in fields(cw.CascadeTupleSpec)}
 
+
+class TestSpecExecGridManifestLaw:
+    """DEC-FILL-EXEC-GRID-1M-001: the unconditional manifest token + the
+    decision-TF-era refusal law (the fill_mode law's twin — the 1-minute
+    execution grid is the ONLY fill grid)."""
+
+    def test_spec_dict_carries_the_permanent_grid_token(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        assert payload["execution_grid"] == "1m_next_bar"
+        assert cw._spec_from_dict(payload) == _spec()
+
+    def test_absent_key_refuses_as_decision_tf_era(self) -> None:
+        # Fails-before pin: a PR-A manifest (no execution_grid key) must
+        # refuse LOUDLY naming the DEC, never replay under the wrong grid.
+        payload = cw._spec_to_dict(_spec())
+        del payload["execution_grid"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"decision-TF-era cascade manifest refused \(DEC-FILL-EXEC-GRID-1M-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_junk_grid_token_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["execution_grid"] = "decision_bar"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"re-run the sweep to produce a 1m-grid manifest",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_fill_mode_refusal_takes_precedence_when_both_laws_fail(self) -> None:
+        # Per-entry check ORDER pin: fill_mode is validated FIRST.
+        payload = cw._spec_to_dict(_spec())
+        del payload["fill_mode"]
+        del payload["execution_grid"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_spec_carries_no_execution_grid_field(self) -> None:
+        # Killed-token pin: the grid is a global law, never a per-spec knob.
+        from dataclasses import fields
+
+        assert "execution_grid" not in {f.name for f in fields(cw.CascadeTupleSpec)}
+
     def test_candidates_for_spec_runs_the_one_law_deterministically(self) -> None:
+        # tf==1minute fixed point (DEC-FILL-EXEC-GRID-1M-001): the same list
+        # serves as decision AND 1m execution stream throughout this suite.
         bars = _session_bars()
-        a = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
-        b = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        a = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars, exec_bars_1m=bars)
+        b = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars, exec_bars_1m=bars)
         assert len(a) == 1
         assert a[0].returns == b[0].returns  # no hidden mode input survives
 
@@ -241,15 +291,37 @@ def _lockbox_intraday_history() -> list[CandleBar]:
     bar (every trade 0-pnl → flat complement equity → an undefined train
     Sharpe). Alternating up/down days with in-day ±6-point ranges give the
     lockbox split REAL in-day trade variance on BOTH sides of the window.
+
+    SECOND repair for DEC-FILL-EXEC-GRID-1M-001 (the 1m execution grid):
+    under the §2.4 same-bar deferral the ±6 shape yields an EXACTLY
+    2-day-periodic per-bar return sequence (each up/down day pair closes
+    (−600, −600, −600) / (−600, −600, −100)), so the 10-day train complement
+    (5 whole periods) and the 12-day full series (6 periods) had IDENTICAL
+    Sharpe — the separation the R2-SR-F1 regression keys on vanished. The
+    two LOCKBOX-WINDOW days (n >= 10) now use a SHALLOW ±3 range so neither
+    ±500-paisa leg can trigger and each window day closes ONE 0-pnl trade —
+    hand-derived under the dual-feed law (SL/TP 500, mask-0 entry on every
+    bar; bars i: o=base+i, up-day high=o+3/low=o−1, down-day
+    high=o+1/low=o−3, 6 bars/day):
+      * day 10 (up): b0 arms → entry fills b1 HIGH = base+4; SL base−1 /
+        TP base+9; b1 defers (§2.4); b2..b5 lows (base+1..base+4) never
+        reach base−1, highs (base+5..base+8) never reach base+9 → the
+        session guard closes at b5's adverse LOW = base+4 → pnl 0;
+      * day 11 (down): entry fills b1 HIGH = base'+2; SL base'−3 / TP
+        base'+7; b2..b5 lows (base'−1..base'+2) / highs (base'+3..base'+6)
+        never touch → end_of_data at b5's adverse LOW = base'+2 → pnl 0.
+    The window days' 12 zero-return bars shift the full series' mean/std off
+    the train complement's, restoring ``sharpe(train) != sharpe(full)``.
     """
     bars: list[CandleBar] = []
     for n, day in enumerate(_FIB_TRADING_DAYS):
         base_px = 10_000 + 25 * n
         base_ts = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_IST)
         up_day = n % 2 == 0
+        depth = 3 if n >= 10 else 6  # shallow lockbox-window days (see above)
         for i in range(6):
             o = base_px + i
-            high, low = (o + 6, o - 1) if up_day else (o + 1, o - 6)
+            high, low = (o + depth, o - 1) if up_day else (o + 1, o - depth)
             bars.append(
                 _bar_at(base_ts + timedelta(minutes=i), str(o), str(high), str(low), str(o))
             )
@@ -331,6 +403,7 @@ def _fat_tailed_candidate() -> Any:
         bar_bits=bar_bits,
         direction_label="bull",
         tf_minutes=1,
+        exec_bars_1m=bars,  # tf==1m fixed point — same list, both streams
         sl_paisa=500,
         tp_paisa=200,
         start_equity_paisa=10_000_000,
@@ -550,7 +623,7 @@ class TestBuildCandidateInput:
     def test_reconstructs_bull_candidate(self) -> None:
         bars = _session_bars()
         spec = _spec()
-        cand = cw.candidates_for_spec(spec, bars)[0]
+        cand = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)[0]
         assert cand.candidate_id == _rid(1)
         # Per-bar return series is the equal-length pool axis (one per bar).
         assert len(cand.returns) == len(bars)
@@ -563,17 +636,18 @@ class TestBuildCandidateInput:
 
     def test_reconstructs_bear_candidate(self) -> None:
         bars = _session_bars()
-        cand = cw.candidates_for_spec(_spec(direction_label="bear"), bars)[0]
+        cand = cw.candidates_for_spec(_spec(direction_label="bear"), bars, exec_bars_1m=bars)[0]
         assert cand.candidate_id == _rid(1)
         assert cand.mc_n_bars == len(bars)
 
     def test_candidates_for_spec_with_proximity(self) -> None:
         bars = _session_bars()
-        cands = cw.candidates_for_spec(_spec(proximity_bps=(10, 10, 10)), bars)
+        cands = cw.candidates_for_spec(_spec(proximity_bps=(10, 10, 10)), bars, exec_bars_1m=bars)
         assert len(cands) == 1
 
     def test_candidates_for_spec_empty_winners(self) -> None:
-        assert cw.candidates_for_spec(_spec(winners=()), _session_bars()) == []
+        bars = _session_bars()
+        assert cw.candidates_for_spec(_spec(winners=()), bars, exec_bars_1m=bars) == []
 
     def test_candidates_for_spec_uses_the_swept_fib_anchor(self) -> None:
         """A ROLLING_WEEKLY spec re-scores against rolling-weekly Fib levels (MAJOR fix).
@@ -600,7 +674,7 @@ class TestBuildCandidateInput:
             spec = _spec(winners=((_rid(1), mask),), fib_anchor=anchor)
             # The wire reconstructs a real CandidateInput from the spec (smoke: a
             # non-empty candidate is produced for the swept anchor).
-            assert cw.candidates_for_spec(spec, bars)
+            assert cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)
             # The winner's entry signals are the SUPERSET-match of the mask over
             # the reconstructed bar_bits at the spec's anchor — count them via the
             # same builder + predicate the wire uses internally.
@@ -631,6 +705,7 @@ class TestBuildCandidateInput:
             cw.candidates_for_spec(
                 _spec(winners=((_rid(1), mask),), fib_anchor=FibAnchorKind.ROLLING_WEEKLY),
                 bars,
+                exec_bars_1m=bars,
             )
         finally:
             stage1a.build_bar_bits = original  # type: ignore[assignment]
@@ -652,14 +727,14 @@ class TestBuildCandidateInput:
         original = stage1a.build_bar_bits
         stage1a.build_bar_bits = spy  # type: ignore[assignment]
         try:
-            cw.candidates_for_spec(_spec(winners=((_rid(1), mask),)), bars)
+            cw.candidates_for_spec(_spec(winners=((_rid(1), mask),)), bars, exec_bars_1m=bars)
         finally:
             stage1a.build_bar_bits = original  # type: ignore[assignment]
         assert captured == [FibAnchorKind.PREV_DAY]
 
     def test_mc_evaluate_returns_finite_or_nan(self) -> None:
         bars = _session_bars()
-        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars)[0]
+        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars, exec_bars_1m=bars)[0]
         # Many entries → at least one trade closes → a (possibly defined) Sharpe.
         many = cand.mc_evaluate(np.array([0, 1, 2, 3], dtype=np.intp))
         assert isinstance(many, float)
@@ -693,6 +768,7 @@ class TestBuildCandidateInput:
             signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=500,
             take_profit_paisa=200,
         )
@@ -730,6 +806,7 @@ class TestBuildCandidateInput:
             bar_bits=bar_bits,
             direction_label="bull",
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             sl_paisa=20,
             tp_paisa=20,
             start_equity_paisa=10_000_000,
@@ -740,6 +817,7 @@ class TestBuildCandidateInput:
             signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=20,
             take_profit_paisa=20,
         )
@@ -807,6 +885,7 @@ class TestLockboxTrainingSplit:
             "bar_bits": bar_bits,
             "direction_label": "bull",
             "tf_minutes": 1,
+            "exec_bars_1m": bars,  # tf==1m fixed point
             "sl_paisa": None,
             "tp_paisa": None,
             "start_equity_paisa": 10_000_000,
@@ -844,6 +923,7 @@ class TestLockboxTrainingSplit:
             mask_to_entry_signals(bar_bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=500,
             take_profit_paisa=500,
         )
@@ -879,13 +959,14 @@ class TestLockboxTrainingSplit:
         from brutex.calendars.nse import IST
 
         bars = _session_bars()
-        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars)[0]
+        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars, exec_bars_1m=bars)[0]
         bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
         trades = simulate_trades(
             bars,
             mask_to_entry_signals(bar_bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=50,
             take_profit_paisa=50,
         )
@@ -913,6 +994,7 @@ class TestLockboxTrainingSplit:
             mask_to_entry_signals(bar_bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=None,
             take_profit_paisa=None,
         )
@@ -1021,6 +1103,50 @@ class TestRunCascadeOverSpecs:
         )
         assert report.groups == ()
 
+    def test_skips_pool_with_no_exec_stream_loudly(self) -> None:
+        """DEC-FILL-EXEC-GRID-1M-001: a pool without its 1-MINUTE execution
+        stream cannot re-simulate under the dual-feed law — the pool SKIPS
+        with ONE loud WARN, never a decision-TF-era fallback. A coarse-tf
+        spec makes the two ``bars_for`` keys distinct: the decision key
+        serves bars, the exec key serves none."""
+        decision = _session_bars()
+
+        def loader(instrument: str, tf_label: str) -> list[CandleBar]:
+            if (instrument, tf_label) == ("NIFTY", "5minute"):
+                return decision
+            return []  # NO "1minute" exec stream
+
+        with capture_logs() as logs:
+            report = cw.run_cascade_over_specs(
+                [_spec(tf_label="5minute", tf_minutes=5)],
+                bars_for=loader,
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+            )
+        assert report.groups == ()
+        assert report.n_input == 0
+        warned = [e for e in logs if e["event"] == "cascade_wire.pool_skipped_no_exec_stream"]
+        assert len(warned) == 1
+        assert warned[0]["instrument"] == "NIFTY"
+        assert warned[0]["tf"] == "5minute"
+        assert "1minute" in str(warned[0]["remedy"])
+
+    def test_injected_exec_map_matches_the_derive_when_none_path(self) -> None:
+        """`candidates_for_spec`/`build_candidate_input` accept a prebuilt
+        :class:`ExecGridMap` (the run_cascade_over_specs one-map-per-pool
+        path) and produce the SAME candidate as the derive-when-``None`` arm
+        (the map is a pure function of (decision, exec, tf))."""
+        from brutex.engine.exec_grid import build_exec_grid_map
+
+        bars = _session_bars()
+        spec = _spec(sl_paisa=50, tp_paisa=50)
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
+        derived = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)[0]
+        injected = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, exec_map=exec_map)[0]
+        assert injected.returns == derived.returns
+        assert injected.sharpe_ratio == derived.sharpe_ratio
+        assert injected.total_trades == derived.total_trades
+
 
 # ── ADR-0012 futures roll-schedule carriage (review round-1) ─────────────────
 
@@ -1042,6 +1168,8 @@ class TestFuturesRollScheduleCarriage:
             spec: cw.CascadeTupleSpec,
             bars: Sequence[CandleBar],
             *,
+            exec_bars_1m: Sequence[CandleBar],
+            exec_map: object = None,
             lockbox_default_window_days: int,
             lockbox_min_trades: int,
             roll_schedule: tuple[int, ...] | None = None,
@@ -1350,6 +1478,62 @@ def _manifest(specs: tuple[cw.CascadeTupleSpec, ...] | None = None) -> cw.Cascad
         ),
         specs=(_spec(),) if specs is None else specs,
     )
+
+
+class TestManifestSnapshotHashExecCoords:
+    """DEC-FILL-EXEC-GRID-1M-001: the G7 snapshot hash covers the 1m EXEC slices.
+
+    The manifest carries the execution-grid law BY DERIVATION — the hashed
+    coordinate set is the specs' ``(instrument, tf_label)`` pairs UNIONED
+    with ``(instrument, "1minute")`` — so a lake whose 1-minute execution
+    slice healed/changed since the sweep is auto-refused exactly like a
+    decision slice.
+    """
+
+    def test_coords_include_the_1minute_exec_pair(self) -> None:
+        requested: list[tuple[str, str]] = []
+        bars = _session_bars()
+
+        def loader(instrument: str, tf_label: str) -> list[CandleBar]:
+            requested.append((instrument, tf_label))
+            return bars
+
+        manifest = _manifest(specs=(_spec(tf_label="5minute", tf_minutes=5),))
+        digest = cw.manifest_snapshot_hash(manifest, bars_for=loader)
+        assert len(digest) == 64
+        assert sorted(requested) == [("NIFTY", "1minute"), ("NIFTY", "5minute")]
+
+    def test_a_changed_1minute_slice_moves_the_hash(self) -> None:
+        # The widening has teeth: mutating ONLY the exec slice re-keys the
+        # digest (pre-PR-B the 1m slice was invisible to the G7 gate for a
+        # coarse-tf manifest).
+        decision = _session_bars()
+        exec_a = _session_bars()
+        exec_b = _session_bars()[:-1]  # one bar shorter → different content
+
+        def loader_for(exec_bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
+            def loader(_instrument: str, tf_label: str) -> list[CandleBar]:
+                return exec_bars if tf_label == "1minute" else decision
+
+            return loader
+
+        manifest = _manifest(specs=(_spec(tf_label="5minute", tf_minutes=5),))
+        hash_a = cw.manifest_snapshot_hash(manifest, bars_for=loader_for(exec_a))
+        hash_b = cw.manifest_snapshot_hash(manifest, bars_for=loader_for(exec_b))
+        assert hash_a != hash_b
+
+    def test_tf_1minute_pair_collapses_to_one_key(self) -> None:
+        # At tf==1minute the decision and exec coordinates are ONE key — the
+        # loader is consulted once per distinct pair, never doubled.
+        requested: list[tuple[str, str]] = []
+        bars = _session_bars()
+
+        def loader(instrument: str, tf_label: str) -> list[CandleBar]:
+            requested.append((instrument, tf_label))
+            return bars
+
+        cw.manifest_snapshot_hash(_manifest(), bars_for=loader)
+        assert requested == [("NIFTY", "1minute")]
 
 
 class TestManifestSerialisation:

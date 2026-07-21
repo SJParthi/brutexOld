@@ -854,3 +854,138 @@ class TestWorstCaseFloorLaw:
             source=_Source(window=_window()),
         )
         assert not clean.suspect
+
+
+class TestR45ResultPersistence:
+    """The R45 differential verdict PERSISTED on the RETURNED result.
+
+    DEC-OPTIONS-EXEC-FEEDBACK-001: pre-change ``suspect`` /
+    ``differential_checked`` were LOCAL variables inside
+    ``execute_futures_sim`` — logged + audited but dropped from the return —
+    and ``FuturesRuleResult`` had no such fields. The defaults test below
+    therefore FAILS on the pre-change dataclass (unexpected-attribute
+    TypeError at construction / AttributeError on read) — the fails-before
+    evidence for this class.
+    """
+
+    def _result(self, **overrides: Any) -> FuturesRuleResult:
+        kwargs: dict[str, Any] = {
+            "instrument": "NIFTY",
+            "direction": "bull",
+            "n_signals": 1,
+            "n_accepted": 1,
+            "n_rejected_lot_size_unknown": 0,
+            "n_rejected_cost_regime_unverified": 0,
+            "n_rejected_no_contract": 0,
+            "n_rejected_no_data": 0,
+            "n_rejected_stale_bar": 0,
+            "gross_pnl_paisa": 100,
+            "total_charges_paisa": 0,
+            "net_pnl_paisa": 100,
+            "n_winners": 1,
+            "n_losers": 0,
+        }
+        kwargs.update(overrides)
+        return FuturesRuleResult(**kwargs)
+
+    def test_defaulted_fields_back_compat(self) -> None:
+        # The optional-column back-compat template: every pre-existing
+        # constructor call (no suspect/differential_checked kwargs) yields
+        # the honest defaults.
+        result = self._result()
+        assert result.suspect is False
+        assert result.differential_checked == 0
+
+    def test_explicit_fields_carried(self) -> None:
+        result = self._result(suspect=True, differential_checked=3)
+        assert result.suspect is True
+        assert result.differential_checked == 3
+
+    def test_negative_differential_checked_refused(self) -> None:
+        # differential_checked joined the __post_init__ negative-count loop.
+        with pytest.raises(ValueError, match="differential_checked must be >= 0"):
+            self._result(differential_checked=-1)
+
+    def test_clean_run_returns_persisted_differential(self) -> None:
+        # The RETURNED result (not just the audit payload) carries the R45
+        # outcome: one signal differentially checked, not suspect.
+        audit = _Audit()
+        result = execute_futures_sim(
+            [_signal()],
+            instrument="NIFTY",
+            direction=TradeDirection.BULL,
+            run_id="persist-clean",
+            resolver=_Resolver(),
+            source=_Source(window=_window()),
+            audit=audit,
+        )
+        assert result.suspect is False
+        assert result.differential_checked == 1
+        assert result.differential_checked > 0
+        # The audit payload and the returned result agree (one truth).
+        assert audit.rows[0][2]["suspect"] is result.suspect
+        assert audit.rows[0][2]["differential_checked"] == result.differential_checked
+
+    def test_mismatch_run_returns_suspect_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The divergent naive stub trips SUSPECT — and the flag now rides
+        # the RETURNED result row (flagged, never hidden).
+        monkeypatch.setattr(reference_sim, "naive_reference_futures_pnl", lambda *a, **k: 42)
+        result = execute_futures_sim(
+            [_signal()],
+            instrument="NIFTY",
+            direction=TradeDirection.BULL,
+            run_id="persist-suspect",
+            resolver=_Resolver(),
+            source=_Source(window=_window()),
+        )
+        assert result.suspect is True
+        assert result.differential_checked == 1
+
+    def test_disabled_differential_returns_zero_checked(self) -> None:
+        # spot_check_k=0 disables the sample — the returned result reads the
+        # honest 0-checked / not-suspect, never a fabricated verdict.
+        result = execute_futures_sim(
+            [_signal()],
+            instrument="NIFTY",
+            direction=TradeDirection.BULL,
+            run_id="persist-disabled",
+            resolver=_Resolver(),
+            source=_Source(window=_window()),
+            spot_check_k=0,
+        )
+        assert result.suspect is False
+        assert result.differential_checked == 0
+
+
+class TestMaterializeGateArms:
+    """The two materialize-time gate arms this file previously exercised only
+    at the primitive level (``futures_lot_size`` / ``select_futures_leg``) —
+    driven here through ``materialize_futures_trade`` itself so the single-file
+    executor gate stays 100% line+branch."""
+
+    def test_gate1_lot_size_unknown_rejects_before_any_io(self) -> None:
+        # A 2020-dated signal precedes the recorded lot history (floor
+        # 2021-01-01) → the NARROW Gate-1 except arm returns the counted
+        # LOT_SIZE_UNKNOWN reject BEFORE any resolver/source I/O.
+        resolver = _Resolver()
+        source = _Source(window=_window())
+        entry = datetime(2020, 6, 1, 9, 16, tzinfo=_IST)
+        out = materialize_futures_trade(
+            _signal(entry_ts=entry, exit_ts=entry + timedelta(hours=6)),
+            resolver=resolver,
+            source=source,
+        )
+        assert isinstance(out, RejectedFuturesTrade)
+        assert out.reason is FuturesRejectReason.LOT_SIZE_UNKNOWN
+        assert out.leg is None
+        assert resolver.calls == []
+        assert source.calls == []
+
+    def test_gate3_no_contract_reject_passes_through(self) -> None:
+        # Gate 3: an empty-calendar resolver's NO_CONTRACT reject is returned
+        # verbatim by materialize_futures_trade — the source is never read.
+        source = _Source(window=_window())
+        out = materialize_futures_trade(_signal(), resolver=_Resolver(symbol=None), source=source)
+        assert isinstance(out, RejectedFuturesTrade)
+        assert out.reason is FuturesRejectReason.NO_CONTRACT
+        assert source.calls == []

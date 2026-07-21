@@ -47,8 +47,10 @@ class TestPresetVocabulary:
         # and "win_rate_safe" appended LAST
         # (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) — each a sanctioned
         # additive vocabulary extension.
-        # DEC-ALPHA-BUYHOLD-METRIC-001: "alpha" APPENDED LAST (additive —
-        # every pre-existing token + the default keep their positions).
+        # DEC-ALPHA-BUYHOLD-METRIC-001: "alpha" APPENDED (additive — every
+        # pre-existing token + the default keep their positions).
+        # DEC-OPTIONS-EXEC-FEEDBACK-001: "net_after_cost" APPENDED LAST — the
+        # options-exec headline net after the full cost stack, unpriced last.
         assert PRESET_NAMES == (
             "min_dd_first",
             "composite",
@@ -60,6 +62,7 @@ class TestPresetVocabulary:
             "recent",
             "recent_decay",
             "alpha",
+            "net_after_cost",
         )
         assert DEFAULT_PRESET == PRESET_MIN_DD_FIRST == "min_dd_first"
         assert PRESET_WIN_RATE_SAFE == "win_rate_safe"
@@ -307,8 +310,16 @@ class TestWinRateSafeLaw:
         # Stage C appended the two recency presets AFTER win_rate_safe (each
         # generation strictly after the previous — the appended-LAST law);
         # DEC-ALPHA-BUYHOLD-METRIC-001 then appended "alpha" LAST (the
-        # 2026-07-20 train-b wave-2b fold reconciliation of this pin).
-        assert PRESET_NAMES[-4:] == (PRESET_WIN_RATE_SAFE, "recent", "recent_decay", "alpha")
+        # 2026-07-20 train-b wave-2b fold reconciliation of this pin), and the
+        # TRAIN-B LAST fold DEC-OPTIONS-EXEC-FEEDBACK-001 (#1990) appended
+        # "net_after_cost" LAST — so win_rate_safe now heads the 5-preset tail.
+        assert PRESET_NAMES[-5:] == (
+            PRESET_WIN_RATE_SAFE,
+            "recent",
+            "recent_decay",
+            "alpha",
+            "net_after_cost",
+        )
         assert PRESETS[PRESET_WIN_RATE_SAFE].key is win_rate_safe_key
 
 
@@ -418,3 +429,83 @@ class TestAlphaPreset:
         # The defaulted-LAST field law: a pre-alpha construction site (no
         # alpha_pct kwarg) yields the honest None — never a fabricated 0.
         assert _rec("a" * 64).alpha_pct is None
+
+
+class TestNetAfterCost:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001` — the INT-EXACT ``net_after_cost`` preset.
+
+    The key is ``(value_present, paisa)`` on raw Python ints: paisa sums can
+    exceed the float64 53-bit mantissa, so the value must NEVER round-trip
+    through float (the ``_composite_key``-style ``(1, float(value))`` shape
+    would collapse a one-paisa distinction at 2**53); unpriced (``None``)
+    entries rank AFTER every priced one under ``reverse=True``; ties fall to
+    the ``run_id``-ASC stable pre-sort.
+    """
+
+    def test_reverse_flag_is_true(self) -> None:
+        assert PRESETS["net_after_cost"].reverse is True
+
+    def test_key_shape(self) -> None:
+        from brutex.ranking.presets import _net_after_cost_key
+
+        assert _net_after_cost_key(_rec("a" * 64, net_after_cost_paisa=123)) == (1, 123)
+        # The defaulted trailing field: no override == honestly unpriced.
+        assert _net_after_cost_key(_rec("a" * 64)) == (0, 0)
+
+    def test_key_is_int_exact_beyond_the_float_mantissa(self) -> None:
+        """``2**53`` vs ``2**53 + 1`` produce DISTINCT, correctly-ORDERED keys.
+
+        WHY float would collapse them: float64 carries a 53-bit mantissa, so
+        ``float(2**53) == float(2**53 + 1)`` — any float round-trip of the
+        paisa would read the two nets as a TIE and hand the order to the
+        run_id tie law instead of the money. Python int tuple comparison is
+        exact at any magnitude (the /results exact-int-not-float precedent).
+        """
+        from brutex.ranking.presets import _net_after_cost_key
+
+        assert float(2**53) == float(2**53 + 1)  # the trap being avoided
+        lo = _net_after_cost_key(_rec("a" * 64, net_after_cost_paisa=2**53))
+        hi = _net_after_cost_key(_rec("b" * 64, net_after_cost_paisa=2**53 + 1))
+        assert lo != hi
+        assert hi > lo
+        assert lo == (1, 2**53)
+        assert hi == (1, 2**53 + 1)
+
+    def test_one_paisa_distinction_survives_the_sort_at_2_53(self) -> None:
+        # ADVERSARIAL run_ids: the RICHER record carries the LATER run_id, so
+        # a float-collapsed tie would flip the order to run_id ASC (poorer
+        # first) — the int-exact key must keep the richer one first.
+        poorer = _rec("a" * 64, net_after_cost_paisa=2**53)
+        richer = _rec("b" * 64, net_after_cost_paisa=2**53 + 1)
+        assert PRESETS["net_after_cost"].sort_records([poorer, richer]) == (richer, poorer)
+
+    def test_negative_net_beats_unpriced_none(self) -> None:
+        # None == honestly unpriced (no options-exec verdict) — it ranks
+        # AFTER every priced entry, even a deeply NEGATIVE net; never coerced
+        # to a fake 0 that would outrank a real loss.
+        unpriced = _rec("a" * 64)  # defaulted None
+        negative = _rec("b" * 64, net_after_cost_paisa=-1_000_000)
+        assert PRESETS["net_after_cost"].sort_records([unpriced, negative]) == (
+            negative,
+            unpriced,
+        )
+
+    def test_net_tie_falls_to_run_id_asc(self) -> None:
+        first = _rec("1" * 64, net_after_cost_paisa=500)
+        second = _rec("2" * 64, net_after_cost_paisa=500)
+        assert PRESETS["net_after_cost"].sort_records([second, first]) == (first, second)
+
+    def test_locked_four_record_order(self) -> None:
+        # Hand-derived (descending on the int-exact net, unpriced last):
+        #   01: 2**53 + 1  → rank 1 (one paisa above 00 — must NOT tie)
+        #   00: 2**53      → rank 2
+        #   02: -100       → rank 3 (priced loss beats unpriced)
+        #   03: None       → rank 4 (unpriced last)
+        records = [
+            _rec("00" + "0" * 62, net_after_cost_paisa=2**53),
+            _rec("01" + "0" * 62, net_after_cost_paisa=2**53 + 1),
+            _rec("02" + "0" * 62, net_after_cost_paisa=-100),
+            _rec("03" + "0" * 62),  # defaulted None — unpriced
+        ]
+        ordered = PRESETS["net_after_cost"].sort_records(list(reversed(records)))
+        assert [record.run_id[:2] for record in ordered] == ["01", "00", "02", "03"]

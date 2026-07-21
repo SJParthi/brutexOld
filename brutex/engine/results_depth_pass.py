@@ -94,6 +94,7 @@ from brutex.engine.alpha_metric import (
 )
 from brutex.engine.baseline import baseline_filename, compute_baseline, write_baseline
 from brutex.engine.combo_aggregates import ComboAggregate, aggregate_combo
+from brutex.engine.exec_grid import build_exec_grid_map
 from brutex.engine.minute_path import MinuteIndex
 from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.resilience_streaks import (
@@ -135,10 +136,16 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
     from brutex.data.models import CandleBar
     from brutex.engine.cascade_join import CascadeJoin
+    from brutex.engine.exec_grid import ExecGridMap
     from brutex.engine.results_store import ResultRow
     from brutex.engine.session_lens import SessionLens
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
-    from brutex.engine.top100_artifact import MarginRoiProvider, ReasonProvider
+    from brutex.engine.top100_artifact import (
+        FuturesExecProvider,
+        MarginRoiProvider,
+        OptionsExecProvider,
+        ReasonProvider,
+    )
     from brutex.engine.trade_capture import ComboCapture
 
 _LOG = structlog.get_logger("brutex.engine.results_depth_pass")
@@ -293,6 +300,7 @@ class _InstrumentContext:
     """Per-instrument reference context, built once and reused across tuples."""
 
     minute_index: MinuteIndex | None
+    minute_bars: Sequence[CandleBar]
     lens: SessionLens
 
 
@@ -571,6 +579,19 @@ def _build_tuple_sidecars(
         vwap_source=tuple_.price_source.vwap_source,
         ema_source=tuple_.price_source.ema_source,
     )
+    # DEC-FILL-EXEC-GRID-1M-001: the re-simulation prices on the SAME
+    # 1-minute execution stream the sweep filled on — the minute bars already
+    # loaded for MAE/MFE double as the exec stream (one load, two consumers).
+    # An absent 1m stream makes the 1m-grid re-sim IMPOSSIBLE — refuse loudly
+    # (the per-tuple fence records tuples_errored), never re-sim on a
+    # fabricated stream (correct-or-absent).
+    if not context.minute_bars:
+        raise ResultsDepthError(
+            f"no 1-minute bars for {tuple_.instrument!r} — the 1m execution-grid "
+            "re-simulation (DEC-FILL-EXEC-GRID-1M-001) requires the same 1-minute "
+            "stream the sweep filled on; re-pull the 1-minute lake"
+        )
+    exec_map = build_exec_grid_map(bars, context.minute_bars, tf_minutes=tuple_.tf.minutes)
     captures: list[ComboCapture] = []
     aggs: list[ComboAggregate] = []
     for row in rows:
@@ -581,6 +602,8 @@ def _build_tuple_sidecars(
             tf_minutes=tuple_.tf.minutes,
             sl_paisa=tuple_.sl_paisa,
             tp_paisa=tuple_.tp_paisa,
+            exec_bars_1m=context.minute_bars,
+            exec_map=exec_map,
             minute_index=context.minute_index,
             stamper=stamper,
             start_equity_paisa=grid.start_equity_paisa,
@@ -737,6 +760,15 @@ def _load_agg_records(paths: SidecarPaths) -> list[ComboAggregate]:
     records: list[ComboAggregate] = []
     for record in df.iter_rows(named=True):
         record.setdefault("exits_session_gap", 0)
+        # The DEC-FILL-EXEC-GRID-1M-001 counter family rides the SAME
+        # presence-tolerant template: a pre-1m-grid aggs sidecar predates the
+        # deferral/collision/slide machinery entirely, so 0 is factually the
+        # true count of those EVENTS in that old artifact (never fabricated).
+        record.setdefault("exits_deferred", 0)
+        record.setdefault("signals_dropped_collision", 0)
+        record.setdefault("fill_slid_minutes", 0)
+        record.setdefault("exit_fill_slid_minutes", 0)
+        record.setdefault("forced_fill_slid_minutes", 0)
         records.append(ComboAggregate(**record))
     return records
 
@@ -832,6 +864,166 @@ def _pool_tuple(
     tallies.stores_pooled += 1
 
 
+class _FillSensitivityResolver:
+    """The RANKED-entry fill-sensitivity provider (DEC-FILL-EXEC-GRID-1M-001).
+
+    One reference re-sim per annotated entry: the candidate's finalist is
+    re-simulated on the pure-Python oracle (:func:`capture_combo` — the SAME
+    worst-case 1m-grid law the sweep priced under, parity-toothed against the
+    stored row) and its trades are folded against the INDEPENDENT
+    open-anchored re-price (:func:`brutex.engine.fill_sensitivity.
+    fill_sensitivity_verdict`). Resolved ONLY for the ≤100 ranked entries
+    inside :func:`build_top100` — the disclosed O(|top100|·bars) run-end
+    envelope, never the whole pool, never the mask hot path. Deterministic +
+    resume-independent: a fresh and a stamped-current (resumed) tuple's entry
+    annotate IDENTICALLY, so the artifact bytes stay a pure function of the
+    sources (the rebuild-converges law).
+
+    Every degrade is the NAMED ``not_priced`` object — an absent replay
+    context / 1m stream, a failed or parity-diverged re-sim — never a
+    fabricated verdict; global stops (KeyboardInterrupt/SystemExit/
+    MemoryError) always re-raise raw. ``bar_bits`` + the exec map are
+    memoised per :class:`SweepTuple` (mask-independent — shared by every
+    entry of the same tuple).
+    """
+
+    def __init__(
+        self,
+        *,
+        bars_of: Callable[[str, str], Sequence[CandleBar]],
+        context_of: Callable[[str], _InstrumentContext],
+        tuple_of: Mapping[str, SweepTuple],
+        grid: SweepGridConfig,
+    ) -> None:
+        self._bars_of = bars_of
+        self._context_of = context_of
+        self._tuple_of = tuple_of
+        self._grid = grid
+        self._bar_bits_memo: dict[SweepTuple, Sequence[int]] = {}
+        self._exec_map_memo: dict[SweepTuple, ExecGridMap] = {}
+
+    def _bar_bits_for(self, tuple_: SweepTuple, bars: Sequence[CandleBar]) -> Sequence[int]:
+        """Return this tuple's Stage-1A ``bar_bits``, memoised per :class:`SweepTuple`.
+
+        Builds the per-decision-bar truth-vectors once for the tuple's
+        proximity / fib-anchor / price-source coordinates (via
+        :func:`~brutex.engine.stage1a.build_bar_bits`) and caches them, so a
+        pool with many finalists sharing one tuple pays the build a single
+        time.
+
+        Parameters
+        ----------
+        tuple_
+            The sweep-cell coordinate whose indicator parameters key the build.
+        bars
+            The decision-TF bars for the finalist's ``(instrument, interval)``.
+
+        Returns
+        -------
+        Sequence[int]
+            The Stage-1A ``bar_bits`` aligned with ``bars``.
+        """
+        cached = self._bar_bits_memo.get(tuple_)
+        if cached is None:
+            cached = build_bar_bits(
+                bars,
+                proximity=tuple_.proximity,
+                prior_n=self._grid.prior_n,
+                fib_anchor=tuple_.fib_anchor,
+                vwap_source=tuple_.price_source.vwap_source,
+                ema_source=tuple_.price_source.ema_source,
+            )
+            self._bar_bits_memo[tuple_] = cached
+        return cached
+
+    def _exec_map_for(
+        self,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        minute_bars: Sequence[CandleBar],
+    ) -> ExecGridMap:
+        """Return this tuple's :class:`ExecGridMap`, memoised per :class:`SweepTuple`.
+
+        Derives the decision→1m execution-grid mapping once for the tuple's
+        timeframe (via
+        :func:`~brutex.engine.exec_grid.build_exec_grid_map`) and caches it, so
+        every finalist sharing the tuple reuses the same map instead of
+        re-deriving it per fill-sensitivity re-simulation
+        (DEC-FILL-EXEC-GRID-1M-001).
+
+        Parameters
+        ----------
+        tuple_
+            The sweep-cell coordinate whose ``tf`` keys the mapping.
+        bars
+            The decision-TF bars (the signal domain).
+        minute_bars
+            The 1-minute execution stream (the fill/walk domain).
+
+        Returns
+        -------
+        ExecGridMap
+            The close-instant decision→1m fill mapping for this stream pair.
+        """
+        cached = self._exec_map_memo.get(tuple_)
+        if cached is None:
+            cached = build_exec_grid_map(bars, minute_bars, tf_minutes=tuple_.tf.minutes)
+            self._exec_map_memo[tuple_] = cached
+        return cached
+
+    def __call__(self, candidate: Top100Candidate) -> Mapping[str, object]:
+        from brutex.engine.fill_sensitivity import (
+            fill_sensitivity_not_priced,
+            fill_sensitivity_verdict,
+        )
+
+        run_id = candidate.row.run_id
+        tuple_ = self._tuple_of.get(run_id)
+        if tuple_ is None:
+            # Defensive totality: every pooled candidate records its tuple —
+            # an unmapped candidate is out-of-band input, degraded honestly.
+            return fill_sensitivity_not_priced("no_replay_context")
+        context = self._context_of(tuple_.instrument)
+        if not context.minute_bars:
+            return fill_sensitivity_not_priced("no_1m_data")
+        try:
+            bars = self._bars_of(tuple_.instrument, tuple_.tf.label)
+            capture = capture_combo(
+                candidate.row,
+                bars=bars,
+                bar_bits=self._bar_bits_for(tuple_, bars),
+                tf_minutes=tuple_.tf.minutes,
+                sl_paisa=tuple_.sl_paisa,
+                tp_paisa=tuple_.tp_paisa,
+                exec_bars_1m=context.minute_bars,
+                exec_map=self._exec_map_for(tuple_, bars, context.minute_bars),
+                # No 1m-excursion / VIX work — this re-sim exists ONLY for
+                # the fill-sensitivity fold; the entry's real depth stats
+                # come from the sidecar pipeline (one law, one home).
+                minute_index=None,
+                stamper=None,
+                start_equity_paisa=self._grid.start_equity_paisa,
+            )
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:
+            _LOG.warning(
+                "results_depth.fill_sensitivity_resim_failed",
+                run_id=run_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return fill_sensitivity_not_priced("resim_failed")
+        if not capture.parity_ok:
+            return fill_sensitivity_not_priced("resim_parity_mismatch")
+        return fill_sensitivity_verdict(
+            capture.trades,
+            context.minute_bars,
+            sl_paisa=tuple_.sl_paisa,
+            tp_paisa=tuple_.tp_paisa,
+        )
+
+
 def run_results_depth_pass(
     *,
     out_root: Path,
@@ -844,6 +1036,9 @@ def run_results_depth_pass(
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
     cascade_join: CascadeJoin | None = None,
+    options_exec_provider: OptionsExecProvider | None = None,
+    futures_exec_provider: FuturesExecProvider | None = None,
+    fill_sensitivity: bool = False,
     expected_missing: int | None = None,
     quarantined_labels: frozenset[str] | None = None,
     alpha_gate: bool | None = None,
@@ -883,6 +1078,20 @@ def run_results_depth_pass(
         there); ``None`` (the default — every pre-change caller) means no
         report was threaded. The fence law is unchanged: a pass failure
         never fails the sweep.
+    options_exec_provider, futures_exec_provider
+        The `DEC-OPTIONS-EXEC-FEEDBACK-001` post-sweep exec-sim verdict
+        seams, threaded VERBATIM to :func:`build_top100` (the emit-on-wired
+        entry law + the ``net_after_cost`` rank threading live there);
+        ``None`` (the default — every pre-change caller) is byte-identical.
+    fill_sensitivity
+        DEC-FILL-EXEC-GRID-1M-001 (R13): ``True`` builds the
+        :class:`_FillSensitivityResolver` over the pass's own bar caches +
+        pooled tuples and threads it as ``build_top100``'s
+        ``fill_sensitivity_provider`` — every RANKED entry then carries the
+        additive ``fill_sensitivity`` object (one O(bars) open-anchored
+        reference re-sim per entry, the disclosed O(|top100|·bars) run-end
+        envelope). ``False`` (the default — every pre-change caller) emits
+        no key: artifact bytes byte-identical.
     expected_missing
         The caller-known RUN-SCOPED **FAILED-only** allowance
         (``tuples_failed`` from the sweep's own summary) —
@@ -976,6 +1185,9 @@ def run_results_depth_pass(
     pool: list[Top100Candidate] = []
     twins: list[TwinCandidate] = []
     instruments_pooled: list[str] = []
+    # run_id → the owning grid tuple (the fill-sensitivity resolver's replay
+    # context; run identity folds the tuple's arm, so the map is one-to-one).
+    tuple_by_run_id: dict[str, SweepTuple] = {}
 
     def _bars(instrument: str, tf_label: str) -> Sequence[CandleBar]:
         key = (instrument, tf_label)
@@ -999,7 +1211,11 @@ def run_results_depth_pass(
             )
         daily_bars = None if daily_bars_for is None else daily_bars_for(instrument)
         lens = build_session_lens(daily_bars if daily_bars else (), instrument=instrument)
-        context = _InstrumentContext(minute_index=minute_index, lens=lens)
+        context = _InstrumentContext(
+            minute_index=minute_index,
+            minute_bars=tuple(minute_bars) if minute_bars else (),
+            lens=lens,
+        )
         contexts[instrument] = context
         return context
 
@@ -1178,6 +1394,9 @@ def run_results_depth_pass(
                 twins=twins,
                 resilience_available=resilience_ok,
             )
+            if fill_sensitivity:
+                for row in rows:
+                    tuple_by_run_id[row.run_id] = tuple_
             if tuple_.instrument not in instruments_pooled:
                 instruments_pooled.append(tuple_.instrument)
         except (KeyboardInterrupt, SystemExit, MemoryError):
@@ -1241,6 +1460,16 @@ def run_results_depth_pass(
     families_collapsed = 0
     try:
         families = group_twins(twins)
+        fill_sensitivity_provider = (
+            _FillSensitivityResolver(
+                bars_of=_bars,
+                context_of=_context,
+                tuple_of=tuple_by_run_id,
+                grid=grid,
+            )
+            if fill_sensitivity
+            else None
+        )
         artifact = build_top100(
             pool,
             run_id=run_id,
@@ -1260,6 +1489,9 @@ def run_results_depth_pass(
             alpha_baselines=alpha_baselines,
             start_equity_paisa=grid.start_equity_paisa,
             alpha_gate=alpha_gate_enabled,
+            options_exec_provider=options_exec_provider,
+            futures_exec_provider=futures_exec_provider,
+            fill_sensitivity_provider=fill_sensitivity_provider,
         )
         write_top100(runs_dir, artifact)
         top100_written = True

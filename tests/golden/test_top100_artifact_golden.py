@@ -208,3 +208,116 @@ def test_golden_corrupt_artifact_is_detected_and_rebuilds_to_locked_bytes(
     reloaded = load_top100(tmp_path, _RUN)
     assert reloaded is not None
     assert reloaded.rendered_bytes() == pristine
+
+
+def test_wired_exec_provider_arm_is_additive_only_vs_the_unwired_golden() -> None:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001` / DEC-FILL-EXEC-GRID-1M-001: the wired
+    arm over the SAME frozen fixture differs from the unwired golden ONLY
+    additively (the #1749 additive-only-diff pattern — the cascade strip pin
+    in test_engine_top100_artifact.py).
+
+    Mechanism: ``_fixture_artifact`` is driven through a capturing wrapper so
+    the EXACT candidates + kwargs the golden was built from are re-invoked
+    with deterministic providers added — no fixture duplication, no fixture
+    file touched, and the captured unwired build is asserted to be the LOCKED
+    golden bytes (anti-vacuous). Then: stripping EXACTLY the new keys
+    (per-entry ``options_exec`` / ``futures_exec`` / ``fill_sensitivity`` +
+    the ``*_wired`` source flags) reproduces the unwired payload byte-for-byte
+    under the deterministic JSON law, and every new key is enumerated.
+    """
+    import json
+    from typing import Any
+    from unittest import mock
+
+    from brutex.engine.top100_artifact import Top100Candidate
+    from brutex.engine.top100_artifact import build_top100 as _real_build
+
+    captured: dict[str, Any] = {}
+
+    def _capture(candidates: Any, **kwargs: Any) -> Top100Artifact:
+        captured["candidates"] = list(candidates)
+        captured["kwargs"] = dict(kwargs)
+        return _real_build(candidates, **kwargs)
+
+    with mock.patch(f"{__name__}.build_top100", _capture):
+        unwired = _fixture_artifact()
+    # Anti-vacuous: the captured rebuild IS the locked golden bytes.
+    assert hashlib.sha256(unwired.rendered_bytes()).hexdigest() == _GOLDEN_TOP100_SHA256
+
+    # Deterministic providers — pure functions of the candidate's run_id.
+    def _options(c: Top100Candidate) -> dict[str, object]:
+        return {
+            "status": "priced",
+            "net_after_cost_paisa": 10_000 + int(c.row.run_id, 16),
+            "window": "2024-10-01..",
+        }
+
+    def _futures(c: Top100Candidate) -> dict[str, object]:
+        return {"status": "not_priced", "reason": f"deferred:{c.row.run_id[-2:]}"}
+
+    def _fill(c: Top100Candidate) -> dict[str, object]:
+        return {"status": "priced", "net_delta_paisa": -int(c.row.run_id, 16)}
+
+    wired = _real_build(
+        captured["candidates"],
+        **captured["kwargs"],
+        options_exec_provider=_options,
+        futures_exec_provider=_futures,
+        fill_sensitivity_provider=_fill,
+    )
+    unwired_payload = unwired.to_payload()
+    wired_payload = wired.to_payload()
+
+    # The additive delta, ENUMERATED exactly — root level: no new root keys.
+    assert set(wired_payload) == set(unwired_payload)
+    # Source: exactly the three emit-on-wired flags, all True.
+    new_source_flags = {"options_exec_wired", "futures_exec_wired", "fill_sensitivity_wired"}
+    wired_source = wired_payload["source"]
+    unwired_source = unwired_payload["source"]
+    assert isinstance(wired_source, dict)
+    assert isinstance(unwired_source, dict)
+    assert set(wired_source) - set(unwired_source) == new_source_flags
+    assert all(wired_source[flag] is True for flag in new_source_flags)
+    # Entries: same count + order; each entry gains EXACTLY the three keys,
+    # carrying the deterministic providers' objects verbatim.
+    new_entry_keys = {"options_exec", "futures_exec", "fill_sensitivity"}
+    wired_entries = wired_payload["entries"]
+    unwired_entries = unwired_payload["entries"]
+    assert isinstance(wired_entries, list)
+    assert isinstance(unwired_entries, list)
+    assert len(wired_entries) == len(unwired_entries) == 3
+    ranked_ids = [f"{3:064x}", f"{1:064x}", f"{4:064x}"]  # the locked golden order
+    assert [entry["run_id"] for entry in wired_entries] == ranked_ids
+    for entry, unwired_entry in zip(wired_entries, unwired_entries, strict=True):
+        run_id = entry["run_id"]
+        assert isinstance(run_id, str)
+        assert set(entry) - set(unwired_entry) == new_entry_keys
+        assert entry["options_exec"] == {
+            "status": "priced",
+            "net_after_cost_paisa": 10_000 + int(run_id, 16),
+            "window": "2024-10-01..",
+        }
+        assert entry["futures_exec"] == {
+            "status": "not_priced",
+            "reason": f"deferred:{run_id[-2:]}",
+        }
+        assert entry["fill_sensitivity"] == {
+            "status": "priced",
+            "net_delta_paisa": -int(run_id, 16),
+        }
+
+    # Every PRE-EXISTING key/value byte-identical: stripping EXACTLY the new
+    # keys reproduces the unwired golden payload under the deterministic JSON
+    # rendering law (sorted, compact — the artifact's own byte law).
+    stripped = dict(wired_payload)
+    stripped["source"] = {k: v for k, v in wired_source.items() if k not in new_source_flags}
+    stripped["entries"] = [
+        {k: v for k, v in entry.items() if k not in new_entry_keys} for entry in wired_entries
+    ]
+
+    def _dumps_law(payload: object) -> str:
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+
+    assert _dumps_law(stripped) == _dumps_law(unwired_payload)

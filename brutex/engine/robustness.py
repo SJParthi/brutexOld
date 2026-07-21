@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import mask_to_entry_signals
+from brutex.engine.exec_grid import ExecGridMap
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA
 from brutex.engine.trade_sim import simulate_trades
@@ -49,6 +50,8 @@ def combo_returns(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -108,6 +111,8 @@ def combo_returns(
         entry_signals,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         reference_stamper=reference_stamper,

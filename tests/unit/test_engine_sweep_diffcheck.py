@@ -1,12 +1,15 @@
 """Unit tests — :mod:`brutex.engine.sweep_diffcheck` (R45 differential spot-check).
 
-Rule-by-rule hand fixtures for the naive reference simulator (entry /
-same-session gate / session-gap boundary close / forced exit / SL-TP
-touch + SL-first tie / AT_LEVEL fills / MFE-MAE / end-of-data), the
-deterministic sampler pins, the tristate + fail-loud env resolution, the
-AST import-ban pin, the
-deliberately-BROKEN reference clone ⇒ SUSPECT teeth test, and the
-never-adopt pin (design D-11 / I-4).
+Rule-by-rule hand fixtures for the naive reference simulator on the PR-B
+1-minute execution grid (DEC-FILL-EXEC-GRID-1M-001): entry / the same-bar
+DEFERRAL law / same-session gate / the independent §6b 1day restatement /
+session-gap boundary close + the B3 terminal CLOSE carve-out / forced exit /
+SL-TP touch + SL-first tie / adverse-max fills / MFE-MAE / end-of-data — every
+fixture at the tf=1 FIXED POINT (the SAME list serves both streams) unless
+noted; the deterministic sampler pins, the tristate + fail-loud env
+resolution, the AST import-ban pin (now including ``brutex.engine.exec_grid``
+— design §3.11), the deliberately-BROKEN reference clone ⇒ SUSPECT teeth
+test, and the never-adopt pin (design D-11 / I-4).
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ TRACEABILITY: dict[str, tuple[str, ...]] = {
     "test_r45_forced_exit_overrides_everything": ("R45",),
     "test_r45_sl_tp_touch_and_sl_first_tie": ("R45",),
     "test_r45_end_of_data_closes_at_last_bar_adverse_extreme": ("R45",),
+    "test_r45_tf375_1day_arms_nothing": ("R45",),
     "test_r45_sampler_same_identity_same_masks": ("R45",),
     "test_r45_sampler_different_snapshot_hash_different_masks": ("R45",),
     "test_r45_ast_import_ban": ("R45",),
@@ -92,65 +96,99 @@ def _flat_bars(n: int, price_p: int = 10_000, *, anchor: datetime = _OPEN_UTC) -
     return [_bar(m, price_p, price_p, price_p, price_p, anchor=anchor) for m in range(n)]
 
 
+def _ref(
+    bars: Sequence[CandleBar],
+    fires: Sequence[bool],
+    *,
+    direction: str = "BUY",
+    tf_minutes: int = 1,
+    sl: int | None = None,
+    tp: int | None = None,
+    exec_bars: Sequence[CandleBar] | None = None,
+) -> list[RefTrade]:
+    """The tf=1 FIXED-POINT helper (DEC-FILL-EXEC-GRID-1M-001 design §6):
+    the SAME list serves both the decision and the 1m execution stream
+    unless an explicit ``exec_bars`` overrides it (the dual-feed shape)."""
+    return reference_simulate(
+        bars,
+        fires,
+        direction=direction,
+        tf_minutes=tf_minutes,
+        sl_paisa=sl,
+        tp_paisa=tp,
+        exec_bars=bars if exec_bars is None else exec_bars,
+    )
+
+
 # ── Reference simulator: validation ────────────────────────────────────────
 
 
 class TestReferenceSimulateValidation:
     def test_unknown_direction_rejected(self) -> None:
+        bars = _flat_bars(2)
         with pytest.raises(ValueError, match="direction"):
             reference_simulate(
-                _flat_bars(2),
+                bars,
                 [True, False],
                 direction="HOLD",
                 tf_minutes=1,
                 sl_paisa=None,
                 tp_paisa=None,
+                exec_bars=bars,
             )
 
     def test_tf_minutes_below_one_rejected(self) -> None:
+        bars = _flat_bars(2)
         with pytest.raises(ValueError, match="tf_minutes"):
             reference_simulate(
-                _flat_bars(2),
+                bars,
                 [True, False],
                 direction="BUY",
                 tf_minutes=0,
                 sl_paisa=None,
                 tp_paisa=None,
+                exec_bars=bars,
             )
 
     @pytest.mark.parametrize("bad", [0, -10])
     def test_non_positive_sl_rejected(self, bad: int) -> None:
+        bars = _flat_bars(2)
         with pytest.raises(ValueError, match="sl_paisa"):
             reference_simulate(
-                _flat_bars(2),
+                bars,
                 [True, False],
                 direction="BUY",
                 tf_minutes=1,
                 sl_paisa=bad,
                 tp_paisa=None,
+                exec_bars=bars,
             )
 
     @pytest.mark.parametrize("bad", [0, -1])
     def test_non_positive_tp_rejected(self, bad: int) -> None:
+        bars = _flat_bars(2)
         with pytest.raises(ValueError, match="tp_paisa"):
             reference_simulate(
-                _flat_bars(2),
+                bars,
                 [True, False],
                 direction="SELL",
                 tf_minutes=1,
                 sl_paisa=None,
                 tp_paisa=bad,
+                exec_bars=bars,
             )
 
     def test_length_mismatch_rejected(self) -> None:
+        bars = _flat_bars(2)
         with pytest.raises(ValueError, match="entry_fires length 1 != bars length 2"):
             reference_simulate(
-                _flat_bars(2),
+                bars,
                 [True],
                 direction="BUY",
                 tf_minutes=1,
                 sl_paisa=None,
                 tp_paisa=None,
+                exec_bars=bars,
             )
 
 
@@ -160,20 +198,20 @@ class TestReferenceSimulateValidation:
 class TestReferenceSimulateRules:
     def test_r45_entry_fills_next_bar_adverse_extreme(self) -> None:
         """Signal on bar 0 ⇒ enter at bar 1's HIGH (BUY, worst-case); the
-        entry bar's range folds MFE/MAE (DEC-FILL-WORST-CASE-ONLY-001)."""
+        entry bar's range folds MFE/MAE (DEC-FILL-WORST-CASE-ONLY-001 on the
+        tf=1 fixed point — decision 0's close instant 09:16 maps to bar 1).
+
+        Hand-derivation: entry = bar1 HIGH 10_030; entry-bar fold fav
+        10_030−10_030=0 / adv 10_030−10_000=30; bar2 fold fav 10_050−10_030=20
+        / adv 10_030−9_990=40; end-of-data close at bar2 LOW 9_990 →
+        pnl 9_990−10_030 = −40; holding = 2−1+1 = 2.
+        """
         bars = [
             _bar(0, 10_000, 10_005, 9_995, 10_000),
             _bar(1, 10_010, 10_030, 10_000, 10_020),
             _bar(2, 10_020, 10_050, 9_990, 10_040),
         ]
-        trades = reference_simulate(
-            bars,
-            [True, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=None,
-        )
+        trades = _ref(bars, [True, False, False])
         assert len(trades) == 1
         trade = trades[0]
         assert trade.entry_idx == 1
@@ -189,63 +227,56 @@ class TestReferenceSimulateRules:
         assert trade.exit_reason == "end_of_data"
 
     def test_r45_end_of_data_closes_at_last_bar_adverse_extreme(self) -> None:
+        """EOD close prices at the last MANAGED bar's adverse extreme (SELL).
+
+        Restructured for DEC-FILL-EXEC-GRID-1M-001: the pre-PR-B 2-bar shape
+        (entry bar == last bar) now takes the B3 terminal CLOSE carve-out —
+        pinned separately — so a MANAGED last bar (bar2) carries this test's
+        adverse-extreme intent. Hand-derivation (SELL): entry = bar1 LOW
+        10_008; entry-bar fold fav 10_008−10_008=0 / adv 10_012−10_008=4;
+        bar2 fold fav 10_008−10_006=2 / adv 10_015−10_008=7; EOD cover at
+        bar2 HIGH 10_015 → pnl = 10_008 − 10_015 = −7; holding = 2−1+1 = 2.
+        """
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
             _bar(1, 10_010, 10_012, 10_008, 10_011),
+            _bar(2, 10_011, 10_015, 10_006, 10_010),
         ]
-        trades = reference_simulate(
-            bars, [True, False], direction="SELL", tf_minutes=1, sl_paisa=None, tp_paisa=None
-        )
+        trades = _ref(bars, [True, False, False], direction="SELL")
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "end_of_data"
-        # SELL: entry at bar1 LOW 10_008; EOD cover at bar1 HIGH 10_012.
-        assert trade.exit_paisa == 10_012
-        assert trade.pnl_paisa == 10_008 - 10_012  # SELL: entry − exit == −4
-        assert trade.holding_bars == 1
-        assert trade.mfe_paisa == 0  # SELL fav = entry − low = 10_008 − 10_008
-        assert trade.mae_paisa == 4  # SELL adv = high − entry = 10_012 − 10_008
+        assert trade.exit_idx == 2
+        assert trade.exit_paisa == 10_015  # bar2 HIGH — the SELL adverse extreme
+        assert trade.pnl_paisa == 10_008 - 10_015  # SELL: entry − exit == −7
+        assert trade.holding_bars == 2
+        assert trade.mfe_paisa == 2  # SELL fav = entry 10_008 − bar2 low 10_006
+        assert trade.mae_paisa == 7  # SELL adv = bar2 high 10_015 − entry 10_008
 
     def test_no_signal_no_trades(self) -> None:
-        trades = reference_simulate(
-            _flat_bars(5),
-            [False] * 5,
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=None,
-        )
-        assert trades == []
+        assert _ref(_flat_bars(5), [False] * 5) == []
 
     def test_signal_on_last_bar_never_fills(self) -> None:
-        trades = reference_simulate(
-            _flat_bars(3),
-            [False, False, True],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=None,
-        )
-        assert trades == []
+        # Decision bar 2's close instant (09:18) is past the stored 1m tail
+        # → the mapping's tail break — the signal simply never fills.
+        assert _ref(_flat_bars(3), [False, False, True]) == []
 
     def test_r45_sl_tp_touch_and_sl_first_tie(self) -> None:
         """SL/TP touch on [low, high]; a bar spanning BOTH fills the stop (SL-first).
 
         The FLAT entry bar keeps the levels at open ± 50 (worst-case entry ==
         the flat bar's high == its open); the next bar spans BOTH levels and
-        the stop wins, filling at min(level 9_950, bar low 9_940) = 9_940.
-        (A LONG TP can never trigger on its own entry bar under the
-        adverse-max law — entry == the bar high — so the tie is only
-        reachable on a later bar.)
+        the stop wins, filling at min(level 9_950, bar low 9_940) = 9_940 →
+        pnl −60. (The entry 1m bar itself runs NO exit detection — the
+        same-bar deferral law §2.4 — so the tie is only reachable on a later
+        bar by construction.)
         """
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
             _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry: worst == open
             _bar(2, 10_000, 10_060, 9_940, 10_000),  # spans BOTH levels
         ]
-        trades = reference_simulate(
-            bars, [True, False, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=50
-        )
+        trades = _ref(bars, [True, False, False], sl=50, tp=50)
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "stop_loss"  # SL-first tie, hardcoded
@@ -265,9 +296,7 @@ class TestReferenceSimulateRules:
             _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
             _bar(2, 10_000, 10_010, 9_950, 10_000),  # low == sl level exactly
         ]
-        trades = reference_simulate(
-            bars, [True, False, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=None
-        )
+        trades = _ref(bars, [True, False, False], sl=50)
         assert len(trades) == 1
         assert trades[0].exit_reason == "stop_loss"
         assert trades[0].pnl_paisa == -50
@@ -278,9 +307,7 @@ class TestReferenceSimulateRules:
             _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry (level 9_950)
             _bar(2, 10_000, 10_010, 9_951, 10_000),  # low = sl + 1: no touch
         ]
-        trades = reference_simulate(
-            bars, [True, False, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=None
-        )
+        trades = _ref(bars, [True, False, False], sl=50)
         assert len(trades) == 1
         assert trades[0].exit_reason == "end_of_data"
 
@@ -293,9 +320,7 @@ class TestReferenceSimulateRules:
             _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
             _bar(2, 10_000, 10_030, 9_990, 10_010),
         ]
-        trades = reference_simulate(
-            bars, [True, False, False], direction="BUY", tf_minutes=1, sl_paisa=100, tp_paisa=30
-        )
+        trades = _ref(bars, [True, False, False], sl=100, tp=30)
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "take_profit"
@@ -305,21 +330,23 @@ class TestReferenceSimulateRules:
     def test_sell_mirror_levels(self) -> None:
         """SELL: stop above (high >= sl), target below (low <= tp).
 
-        Worst-case SELL entry = bar1 LOW 9_995 → sl level 10_045; bar1's own
-        high 10_050 breaches it same-bar; cover = max(level, high) = 10_050.
+        Rewritten for the same-bar deferral (DEC-FILL-EXEC-GRID-1M-001 §2.4
+        retires the pre-PR-B same-bar breach): the FLAT entry bar anchors
+        SELL entry = LOW 10_000 → sl level 10_050 / tp level 9_800; bar2's
+        high 10_050 breaches the stop (>=), cover = max(level 10_050, high
+        10_050) = 10_050 → pnl = 10_000 − 10_050 = −50.
         """
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
-            _bar(1, 10_000, 10_050, 9_995, 10_020),
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
+            _bar(2, 10_000, 10_050, 9_995, 10_020),  # high == sl level exactly
         ]
-        trades = reference_simulate(
-            bars, [True, False], direction="SELL", tf_minutes=1, sl_paisa=50, tp_paisa=200
-        )
+        trades = _ref(bars, [True, False, False], direction="SELL", sl=50, tp=200)
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "stop_loss"
         assert trade.exit_paisa == 10_050
-        assert trade.pnl_paisa == 9_995 - 10_050  # SELL: entry − exit == −55
+        assert trade.pnl_paisa == 10_000 - 10_050  # SELL: entry − exit == −50
 
     def test_sell_take_profit_below(self) -> None:
         # Flat entry (SELL at 10_000, tp level 9_970); the trigger bar's low
@@ -330,38 +357,40 @@ class TestReferenceSimulateRules:
             _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
             _bar(2, 10_000, 10_005, 9_970, 9_980),
         ]
-        trades = reference_simulate(
-            bars, [True, False, False], direction="SELL", tf_minutes=1, sl_paisa=None, tp_paisa=30
-        )
+        trades = _ref(bars, [True, False, False], direction="SELL", tp=30)
         assert len(trades) == 1
         assert trades[0].exit_reason == "take_profit"
         assert trades[0].pnl_paisa == 10_000 - 10_005
 
     def test_entry_ignored_while_open_and_on_exit_bar(self) -> None:
-        """Single position: signals while open + on the exit bar are consumed."""
+        """Single position: dues while open + on the exit bar are consumed.
+
+        Signals on EVERY bar (tf=1 fixed point: bar N's signal arms bar
+        N+1). Hand-derivation: entry fills at bar1 (flat HIGH 10_000, sl
+        level 9_950); bar2's due (from bar1's signal) is ignored — the
+        position is OPEN; bar3's low 9_940 trips the stop → fill
+        min(9_950, 9_940) = 9_940, pnl −60 — and bar3's due (from bar2's
+        signal) is consumed ON the exit bar; bar4 fills bar3's signal at
+        HIGH 10_000, is the LAST bar → B3 end_of_data at its CLOSE 10_000,
+        pnl 0.
+        """
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),  # arm
-            _bar(1, 10_000, 10_010, 9_940, 10_000),  # entry + SL exit (same bar)
-            _bar(2, 10_000, 10_000, 10_000, 10_000),  # exit-bar signal? no — bar1 was exit
-            _bar(3, 10_000, 10_000, 10_000, 10_000),
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # entry (flat)
+            _bar(2, 10_000, 10_000, 10_000, 10_000),  # due ignored while open
+            _bar(3, 10_000, 10_010, 9_940, 10_000),  # SL exit; due consumed
+            _bar(4, 10_000, 10_000, 10_000, 10_000),  # re-entry fill (last bar)
         ]
-        # Signals on EVERY bar: bar1's signal is ignored (a trade closed on it);
-        # bar2 re-arms; bar3 fills; end-of-data closes at bar3.
-        trades = reference_simulate(
-            bars,
-            [True, True, True, True],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=50,
-            tp_paisa=None,
-        )
-        assert [t.entry_idx for t in trades] == [1, 3]
-        assert [t.exit_idx for t in trades] == [1, 3]
+        trades = _ref(bars, [True, True, True, True, True], sl=50)
+        assert [t.entry_idx for t in trades] == [1, 4]
+        assert [t.exit_idx for t in trades] == [3, 4]
         assert trades[0].exit_reason == "stop_loss"
+        assert trades[0].pnl_paisa == -60  # min(9_950, 9_940) − entry 10_000
         assert trades[1].exit_reason == "end_of_data"
+        assert trades[1].pnl_paisa == 0  # B3: entry-bar CLOSE 10_000 − 10_000
 
     def test_r45_forced_exit_overrides_everything(self) -> None:
-        """The 15:20 IST bar force-closes at its ADVERSE EXTREME, folding (open, open) only."""
+        """The 15:20 IST 1m bar force-closes at its ADVERSE EXTREME, folding (open, open) only."""
         anchor = datetime(2024, 1, 2, 9, 47, tzinfo=UTC)  # 15:17 IST
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=anchor),  # 15:17 arm
@@ -369,13 +398,11 @@ class TestReferenceSimulateRules:
             _bar(2, 10_005, 10_040, 9_980, 10_030, anchor=anchor),  # 15:19 range
             _bar(3, 10_035, 10_100, 9_900, 10_050, anchor=anchor),  # 15:20 FORCED
         ]
-        trades = reference_simulate(
+        trades = _ref(
             bars,
             [True, False, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=90,
-            tp_paisa=90,  # bar3's wicks would touch both — forced wins
+            sl=90,
+            tp=90,  # bar3's wicks would touch both — forced wins
         )
         assert len(trades) == 1
         trade = trades[0]
@@ -394,25 +421,39 @@ class TestReferenceSimulateRules:
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=anchor),  # 15:18 arm
             _bar(1, 10_010, 10_015, 10_005, 10_012, anchor=anchor),  # 15:19 entry
         ]
-        trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=1, sl_paisa=None, tp_paisa=None
-        )
+        trades = _ref(bars, [True, False])
         assert len(trades) == 1
         assert trades[0].exit_reason == "end_of_data"  # filled + survived to EOD
         assert trades[0].entry_idx == 1
 
-    def test_tf_straddle_forces_coarse_bar(self) -> None:
-        """A 15m bar opening 15:15 IST runs to 15:30 — its window straddles 15:20."""
+    def test_coarse_tf_fill_lands_on_1m_grid_forced_is_per_1m_bar(self) -> None:
+        """tf=15: the fill lands at label+15min on the 1m stream; FORCED-ness
+        is judged per 1-MINUTE bar (DEC-FILL-EXEC-GRID-1M-001 — retires the
+        pre-PR-B law where the COARSE bar's own 15:15→15:30 window straddling
+        15:20 dropped the entry).
+
+        Flat 1m stream 15:00..15:21 IST; decision labels 15:00 (fires) and
+        15:15. Decision 0's close instant 15:15 → 1m index 15, whose
+        [15:15, 15:16) window does NOT pass 15:20 → the entry FILLS at the
+        flat HIGH 10_000; bars 15:16..15:19 are managed (no levels); the
+        15:20 bar (index 20) is forced → close at its LOW 10_000, pnl 0,
+        holding = 20 − 15 + 1 = 6.
+        """
         anchor = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST
-        bars = [
+        decision = [
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=anchor),  # 15:00 arm
-            _bar(15, 10_005, 10_010, 10_000, 10_008, anchor=anchor),  # 15:15 entry?
+            _bar(15, 10_005, 10_010, 10_000, 10_008, anchor=anchor),  # 15:15
         ]
-        # The 15:15 fill bar IS a forced-exit bar for tf=15 → the entry is DROPPED.
-        trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=15, sl_paisa=None, tp_paisa=None
-        )
-        assert trades == []
+        exec_1m = [_bar(m, 10_000, 10_000, 10_000, 10_000, anchor=anchor) for m in range(22)]
+        trades = _ref(decision, [True, False], tf_minutes=15, exec_bars=exec_1m)
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade.entry_idx == 15  # the 1m bar at label + 15min (15:15)
+        assert trade.entry_paisa == 10_000
+        assert trade.exit_reason == "forced_1520"
+        assert trade.exit_idx == 20  # the 15:20 1m bar
+        assert trade.pnl_paisa == 0
+        assert trade.holding_bars == 6
 
     def test_entry_armed_on_last_usable_bar_is_dropped(self) -> None:
         anchor = datetime(2024, 1, 2, 9, 49, tzinfo=UTC)  # 15:19 IST
@@ -420,13 +461,10 @@ class TestReferenceSimulateRules:
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=anchor),  # 15:19 arm
             _bar(1, 10_010, 10_010, 10_010, 10_010, anchor=anchor),  # 15:20 forced
         ]
-        trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=1, sl_paisa=None, tp_paisa=None
-        )
-        assert trades == []
+        assert _ref(bars, [True, False]) == []
 
     def test_r45_overnight_gap_entry_is_dropped(self) -> None:
-        """R2-OC-2: a fill bar on a LATER IST session date drops the entry."""
+        """R2-OC-2 on the arm map: a fill bar on a LATER IST session date drops."""
         day1 = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST Tue
         day2 = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 09:15 IST Wed
         bars = [
@@ -435,84 +473,106 @@ class TestReferenceSimulateRules:
             _bar(1, 10_100, 10_100, 10_100, 10_100, anchor=day2),
         ]
         # Signal on day-1 bar: its fill bar is next day → DROPPED. The day-2
-        # signal (bar index 1) fills on bar index 2 (same date).
-        trades = reference_simulate(
-            bars,
-            [True, True, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=None,
-        )
+        # signal (bar index 1) fills on bar index 2 (same date). B3: the
+        # entry bar is the last bar → end_of_data at its CLOSE (flat 10_100).
+        trades = _ref(bars, [True, True, False])
         assert len(trades) == 1
         assert trades[0].entry_idx == 2
         assert trades[0].entry_paisa == 10_100
 
+    def test_r45_tf375_1day_arms_nothing(self) -> None:
+        """The independent §6b restatement: tf=375 (1day) NEVER arms.
+
+        A derived 1day decision bar is labelled midnight IST; the reference's
+        OWN ``_SESSION_TRADING_MINUTES``→``_DAY_WALL_MINUTES`` conversion
+        (never imported from exec_grid — the §3.11 AST ban) makes its close
+        instant the NEXT midnight, so the fill candidate is the NEXT
+        session's 09:15 → a different IST date → cross-session DROP. A
+        mutant using 375 verbatim would close at 06:15 IST and FILL at the
+        SAME day's 09:15 bar (producing a trade) — this pin kills it.
+        """
+        midnight_utc = datetime(2024, 1, 1, 18, 30, tzinfo=UTC)  # 2024-01-02 00:00 IST
+        decision = [_bar(0, 10_000, 10_000, 10_000, 10_000, anchor=midnight_utc)]
+        day2_open = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 2024-01-03 09:15 IST
+        exec_1m = [_bar(m, 10_000, 10_010, 9_990, 10_000) for m in range(3)] + [
+            _bar(0, 10_000, 10_010, 9_990, 10_000, anchor=day2_open)
+        ]
+        assert _ref(decision, [True], tf_minutes=375, exec_bars=exec_1m) == []
+
     def test_r45_session_gap_closes_at_prior_session_last_bar(self) -> None:
-        """(A2): an open position closes at the PRIOR session's last bar.
+        """(A2): an open position closes at the PRIOR session's last MANAGED bar.
 
         The boundary bar is NEVER managed — its wild range would trip the
-        SL (and fold huge excursions) if it were; the reference must close
-        FIRST at the day-1 last bar's CLOSE/ts/idx under ``session_gap``
-        (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743 — the
-        session-boundary law re-derived spec-side for the R45 reference).
+        SL (and fold huge excursions) if it were; the reference closes FIRST
+        at the day-1 last managed bar's adverse extreme/ts/idx under
+        ``session_gap`` (DEC-TRADESIM-OPEN-SESSION-GUARD-001 on the 1m
+        stream). Hand-derivation: entry = bar1 HIGH 10_030 (sl level 9_980);
+        bar2 managed — fold fav 10_035−10_030=5 / adv 10_030−10_000=30, no
+        SL touch (low 10_000 > 9_980), retro basis = its LOW 10_000; the
+        day-2 boundary bar closes the position at bar2: exit 10_000, pnl
+        10_000−10_030 = −30, holding = 2−1+1 = 2.
         """
         day1 = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST Tue
         day2 = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 09:15 IST Wed
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=day1),  # arm
-            _bar(1, 10_010, 10_030, 10_005, 10_020, anchor=day1),  # entry + day-1 LAST
+            _bar(1, 10_010, 10_030, 10_005, 10_020, anchor=day1),  # entry
+            _bar(2, 10_020, 10_035, 10_000, 10_010, anchor=day1),  # day-1 LAST
             _bar(0, 9_000, 12_000, 8_000, 9_500, anchor=day2),  # boundary (wild)
             _bar(1, 9_500, 9_500, 9_500, 9_500, anchor=day2),
         ]
-        trades = reference_simulate(
+        trades = _ref(
             bars,
-            [True, False, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=50,  # would fill stop_loss IF the boundary bar were managed
-            tp_paisa=None,
+            [True, False, False, False, False],
+            sl=50,  # would fill stop_loss IF the boundary bar were managed
         )
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "session_gap"
         assert trade.entry_idx == 1
-        assert trade.exit_idx == 1  # the day-1 last stored bar, NOT the boundary bar
-        assert trade.exit_ts == bars[1].timestamp
-        assert trade.exit_paisa == 10_005  # day-1 last bar LOW — the finish() pricing
-        assert trade.pnl_paisa == 10_005 - 10_030  # entry = bar1 HIGH 10_030
-        assert trade.holding_bars == 1
+        assert trade.exit_idx == 2  # the day-1 last MANAGED bar, NOT the boundary
+        assert trade.exit_ts == bars[2].timestamp
+        assert trade.exit_paisa == 10_000  # bar2 LOW — the retroactive adverse extreme
+        assert trade.pnl_paisa == 10_000 - 10_030  # entry = bar1 HIGH 10_030
+        assert trade.holding_bars == 2
         # NO excursion fold from the boundary bar (day-1 evidence only).
-        assert trade.mfe_paisa == 0  # entry IS bar1's high — nothing above it
-        assert trade.mae_paisa == 25  # entry 10_030 − bar1 low 10_005
+        assert trade.mfe_paisa == 5  # bar2 high 10_035 − entry 10_030
+        assert trade.mae_paisa == 30  # entry 10_030 − bar2 low 10_000
 
-    def test_session_gap_boundary_bar_never_arms_next_bar_fills(self) -> None:
-        """The boundary bar's own signal never arms; earliest re-arm i+1, fill i+2."""
+    def test_session_gap_boundary_never_fills_but_its_signal_arms_next_bar(self) -> None:
+        """The boundary bar never FILLS an entry; its OWN decision signal arms
+        the NEXT 1m bar (DEC-FILL-EXEC-GRID-1M-001 — the pure mapping law
+        retires the pre-PR-B "earliest re-arm i+1, fill i+2" walker rule:
+        bar2's signal maps to bar3 = label + 1min, same session).
+
+        Hand-derivation: trade 1 enters at bar1 (day-1 last, flat 10_000) —
+        the day-2 boundary closes it under B3 at the entry bar's CLOSE
+        10_000 (never managed), pnl 0; the boundary's due (armed by bar1's
+        day-1 signal) was already cross-session-DROPPED by the map; bar2's
+        own signal arms bar3 → trade 2 enters at bar3 HIGH 10_100, bar4
+        managed (fold fav 10_150−10_100=50), EOD at bar4 LOW 10_150 →
+        pnl +50.
+        """
         day1 = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST Tue
         day2 = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 09:15 IST Wed
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=day1),  # arm
             _bar(1, 10_000, 10_000, 10_000, 10_000, anchor=day1),  # entry + day-1 LAST
-            _bar(0, 10_100, 10_100, 10_100, 10_100, anchor=day2),  # boundary: fires, no arm
-            _bar(1, 10_100, 10_100, 10_100, 10_100, anchor=day2),  # re-arm (i+1)
-            _bar(2, 10_150, 10_150, 10_150, 10_150, anchor=day2),  # fill (i+2)
+            _bar(0, 10_100, 10_100, 10_100, 10_100, anchor=day2),  # boundary: fires
+            _bar(1, 10_100, 10_100, 10_100, 10_100, anchor=day2),  # fill of bar2's arm
+            _bar(2, 10_150, 10_150, 10_150, 10_150, anchor=day2),
         ]
-        trades = reference_simulate(
-            bars,
-            [True, False, True, True, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=None,
-        )
+        trades = _ref(bars, [True, False, True, True, False])
         assert len(trades) == 2
         assert trades[0].exit_reason == "session_gap"
         assert trades[0].exit_idx == 1
-        # The boundary bar (idx 2) armed nothing — the second trade fills at
-        # idx 4 off the idx-3 arm, never at idx 3 off the boundary's signal.
-        assert trades[1].entry_idx == 4
-        assert trades[1].entry_paisa == 10_150
+        assert trades[0].exit_paisa == 10_000  # B3: the never-managed entry bar's CLOSE
+        # The boundary bar (idx 2) never fills; bar2's OWN signal arms bar3.
+        assert trades[1].entry_idx == 3
+        assert trades[1].entry_paisa == 10_100
         assert trades[1].exit_reason == "end_of_data"
+        assert trades[1].exit_idx == 4
+        assert trades[1].pnl_paisa == 10_150 - 10_100  # EOD at bar4 LOW 10_150
 
     def test_in_coverage_non_session_date_uses_default_boundary(self) -> None:
         """A Saturday (in-coverage, no session) falls back to the 15:20 default."""
@@ -521,9 +581,7 @@ class TestReferenceSimulateRules:
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=saturday),
             _bar(1, 10_020, 10_025, 10_015, 10_022, anchor=saturday),
         ]
-        trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=1, sl_paisa=None, tp_paisa=None
-        )
+        trades = _ref(bars, [True, False])
         assert len(trades) == 1
         assert trades[0].entry_idx == 1
         assert trades[0].exit_reason == "end_of_data"
@@ -534,26 +592,27 @@ class TestReferenceSimulateRules:
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=far_future),
             _bar(1, 10_000, 10_000, 10_000, 10_000, anchor=far_future),
         ]
+        # The ARM MAP is signal-independent (mirrors build_exec_grid_map's
+        # contract): decision 0's same-date candidate needs the B6 session
+        # close bound, so the out-of-coverage weekday raises even with NO
+        # signal fired anywhere.
         with pytest.raises(HolidayDataUnavailableError):
-            reference_simulate(
-                bars,
-                [True, False],
-                direction="BUY",
-                tf_minutes=1,
-                sl_paisa=None,
-                tp_paisa=None,
-            )
+            _ref(bars, [False, False])
 
-    def test_idle_feed_never_touches_the_calendar(self) -> None:
-        """No signals ⇒ no session resolution ⇒ out-of-coverage dates are fine."""
+    def test_idle_out_of_coverage_tail_never_touches_the_calendar(self) -> None:
+        """An idle out-of-coverage TAIL resolves no session (calendar-free).
+
+        Rewritten for DEC-FILL-EXEC-GRID-1M-001: the arm map runs regardless
+        of signals, so a whole out-of-coverage feed now raises (previous
+        test). Calendar-freedom survives where the map needs no B6 bound:
+        the 2050 bar is only ever (a) a CROSS-SESSION candidate for decision
+        2 (a pure date compare — dropped) and (b) the last decision bar,
+        whose close instant is past the stored tail (the break precedes the
+        calendar arm); the WALK is idle (no due, no position) throughout.
+        """
         far_future = datetime(2050, 1, 3, 3, 45, tzinfo=UTC)
-        bars = _flat_bars(3, anchor=far_future)
-        assert (
-            reference_simulate(
-                bars, [False] * 3, direction="BUY", tf_minutes=1, sl_paisa=None, tp_paisa=None
-            )
-            == []
-        )
+        bars = [*_flat_bars(3), _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=far_future)]
+        assert _ref(bars, [False] * 4) == []
 
     def test_paisa_snap_half_up(self) -> None:
         """The re-derived rupee→paisa snap rounds half AWAY from zero at 2dp."""
@@ -569,9 +628,7 @@ class TestReferenceSimulateRules:
                 open_interest=None,
             ),
         ]
-        trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=1, sl_paisa=None, tp_paisa=None
-        )
+        trades = _ref(bars, [True, False])
         assert trades[0].entry_paisa == 10_001
 
 
@@ -595,12 +652,38 @@ def _ref_trade(exit_idx: int, pnl: int) -> RefTrade:
     )
 
 
+class TestReferenceArmMap:
+    """Direct pins on the reference's OWN §3.11 arming fold (B4/B6 arms)."""
+
+    def test_b6_fill_at_or_after_session_close_is_refused(self) -> None:
+        # Decision bar at 15:28 IST (minute 373), tf=5 ⇒ close_instant 15:33;
+        # the only same-date candidate sits at 15:35 IST — at/after the
+        # 15:30 session close, so the arm is REFUSED (B6), never a late fill.
+        bars = [_bar(373, 100, 100, 100, 100)]
+        exec_bars = [_bar(0, 100, 100, 100, 100), _bar(380, 100, 100, 100, 100)]
+        armed = sweep_diffcheck._reference_arm_map(bars, exec_bars, tf_minutes=5)
+        assert armed == [-1, -1]
+
+    def test_b4_earliest_armed_decision_bar_wins_the_shared_fill(self) -> None:
+        # Two decision bars (minutes 0 and 1) both map onto the ONE stored 1m
+        # bar at minute 2 (the minute-1 bar is missing) — the EARLIEST-armed
+        # decision bar wins (B4); the later one's claim is dropped.
+        bars = [_bar(0, 100, 100, 100, 100), _bar(1, 100, 100, 100, 100)]
+        exec_bars = [_bar(0, 100, 100, 100, 100), _bar(2, 100, 100, 100, 100)]
+        armed = sweep_diffcheck._reference_arm_map(bars, exec_bars, tf_minutes=1)
+        assert armed == [-1, 0]
+
+
 class TestReferenceDrawdown:
     def test_hand_computed_exact(self) -> None:
-        # start 1000; pnl +100 @1, −300 @3 ⇒ equity [1000,1100,1100,800,800]
-        # peak 1100; max drop 300; pct 300/1100; below-peak run = bars 3..4.
+        # 1-minute decision labels (minutes 0..4): each trade's exit_ts is
+        # exactly its owning label. start 1000; pnl +100 @ts min 1, −300
+        # @ts min 3 ⇒ equity [1000,1100,1100,800,800]; peak 1100; max drop
+        # 300; pct 300/1100; below-peak run = bars 3..4.
         stats = reference_drawdown(
-            [_ref_trade(1, 100), _ref_trade(3, -300)], n_bars=5, start_equity_paisa=1000
+            [_ref_trade(1, 100), _ref_trade(3, -300)],
+            bars=_flat_bars(5),
+            start_equity_paisa=1000,
         )
         max_dd, max_pct, max_bars, ulcer = stats
         assert max_dd == 300
@@ -609,30 +692,57 @@ class TestReferenceDrawdown:
         expected_ulcer = ((2 * (300 / 1100) ** 2) / 5) ** 0.5 * 100.0
         assert ulcer == pytest.approx(expected_ulcer, rel=1e-12)
 
+    def test_interior_exit_ts_folds_onto_owning_bucket(self) -> None:
+        # Coarse-TF labels every 5 minutes (0, 5, 10); a trade exiting at
+        # minute 7 (an INTERIOR instant of bucket 1 — a 1m-grid exit inside
+        # a coarse bucket, design §3.8) lands on the LAST label <= exit_ts:
+        # bisect([0,5,10], 7) − 1 = owner 1. pnl −100 ⇒ equity
+        # [1000, 900, 900]; peak 1000; drop 100 at bars 1..2 ⇒ max_dd 100,
+        # pct 10.0, dd_bars 2; ulcer = sqrt((0.1² + 0.1²)/3) × 100.
+        bars = [_bar(5 * m, 10_000, 10_000, 10_000, 10_000) for m in range(3)]
+        stats = reference_drawdown([_ref_trade(7, -100)], bars=bars, start_equity_paisa=1000)
+        max_dd, max_pct, max_bars, ulcer = stats
+        assert max_dd == 100
+        assert max_pct == 10.0
+        assert max_bars == 2
+        assert ulcer == pytest.approx(((2 * 0.1**2) / 3) ** 0.5 * 100.0, rel=1e-12)
+
     def test_flat_equity_is_all_zero(self) -> None:
-        assert reference_drawdown([], n_bars=4, start_equity_paisa=1000) == (0, 0.0, 0, 0.0)
+        assert reference_drawdown([], bars=_flat_bars(4), start_equity_paisa=1000) == (
+            0,
+            0.0,
+            0,
+            0.0,
+        )
 
     def test_non_positive_peak_contributes_no_percentage(self) -> None:
         # start 0 → peak stays 0 for the whole scan (never > 0): the paisa
         # drop is REAL but no percentage/ulcer contribution is fabricated.
-        stats = reference_drawdown([_ref_trade(1, -150)], n_bars=3, start_equity_paisa=0)
+        stats = reference_drawdown([_ref_trade(1, -150)], bars=_flat_bars(3), start_equity_paisa=0)
         assert stats == (150, 0.0, 2, 0.0)
 
     def test_percentage_unclamped_above_100(self) -> None:
         # start 100; −150 at bar1 ⇒ equity [100, −50]; drop 150 / peak 100.
-        stats = reference_drawdown([_ref_trade(1, -150)], n_bars=2, start_equity_paisa=100)
+        stats = reference_drawdown(
+            [_ref_trade(1, -150)], bars=_flat_bars(2), start_equity_paisa=100
+        )
         max_dd, max_pct, max_bars, _ulcer = stats
         assert max_dd == 150
         assert max_pct == 150.0  # unclamped > 100% — real, gate-relevant
         assert max_bars == 1
 
-    def test_n_bars_zero_rejected(self) -> None:
-        with pytest.raises(ValueError, match="n_bars"):
-            reference_drawdown([], n_bars=0, start_equity_paisa=1000)
+    def test_empty_bars_rejected(self) -> None:
+        with pytest.raises(ValueError, match="bars must be non-empty"):
+            reference_drawdown([], bars=[], start_equity_paisa=1000)
 
-    def test_exit_idx_out_of_range_rejected(self) -> None:
-        with pytest.raises(ValueError, match="exit_idx 5 out of range"):
-            reference_drawdown([_ref_trade(5, 10)], n_bars=3, start_equity_paisa=1000)
+    def test_exit_ts_before_first_label_rejected(self) -> None:
+        # The ts-bisect fold replaced the pre-PR-B exit_idx fold
+        # (DEC-FILL-EXEC-GRID-1M-001 §3.8): the out-of-window refusal is now
+        # an exit_ts PRECEDING the first decision label. Labels start at
+        # minute 5; the trade exits at minute 1.
+        late_bars = _flat_bars(3, anchor=_OPEN_UTC + timedelta(minutes=5))
+        with pytest.raises(ValueError, match="precedes the first decision label"):
+            reference_drawdown([_ref_trade(1, 10)], bars=late_bars, start_equity_paisa=1000)
 
 
 class TestDrawdownBitKey:
@@ -772,6 +882,9 @@ class TestAstImportBan:
             "brutex.engine.rust_metrics",
             "brutex.metrics.compute",
             "brutex.engine.exit_index",
+            # The production signal→1m mapping (DEC-FILL-EXEC-GRID-1M-001
+            # design §3.11): importing it would kill the mapping independence.
+            "brutex.engine.exec_grid",
         }
         module_file = sweep_diffcheck.__file__
         assert module_file is not None
@@ -840,6 +953,7 @@ def _matching_production_simulate(
     tf_minutes: int,
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
+    exec_bars: Sequence[CandleBar],
 ) -> Sequence[RefTrade]:
     """A production stub that agrees with the reference by construction."""
     return reference_simulate(
@@ -849,6 +963,7 @@ def _matching_production_simulate(
         tf_minutes=tf_minutes,
         sl_paisa=stop_loss_paisa,
         tp_paisa=take_profit_paisa,
+        exec_bars=exec_bars,
     )
 
 
@@ -861,7 +976,7 @@ def _matching_production_drawdown(
 ) -> tuple[int, float, int, float]:
     return reference_drawdown(
         cast("Sequence[RefTrade]", trades),
-        n_bars=len(bars),
+        bars=bars,
         start_equity_paisa=start_equity_paisa,
     )
 
@@ -893,7 +1008,7 @@ class TestDiffCheckHook:
     def test_budget_zero_returns_empty_report(self) -> None:
         bars, bits = _bars_and_bits()
         report = _hook(_SuspectStub()).run_for_tuple(
-            bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=0
+            bars=bars, bar_bits=bits, exec_bars=bars, tuple_=_Tuple(), grid=_Grid(), budget_left=0
         )
         assert report == DiffCheckReport(checked=0, mismatches=0, masks_mismatched=())
 
@@ -901,7 +1016,7 @@ class TestDiffCheckHook:
         bars, bits = _bars_and_bits()
         sink = _SuspectStub()
         report = _hook(sink).run_for_tuple(
-            bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=10
+            bars=bars, bar_bits=bits, exec_bars=bars, tuple_=_Tuple(), grid=_Grid(), budget_left=10
         )
         # bits (0,1,2) at k=2: {0,1} is a CONFLICT pair (pruned) → 2 masks left.
         assert report == DiffCheckReport(checked=2, mismatches=0, masks_mismatched=())
@@ -910,7 +1025,7 @@ class TestDiffCheckHook:
     def test_budget_bounds_checked_exactly(self) -> None:
         bars, bits = _bars_and_bits()
         report = _hook(_SuspectStub()).run_for_tuple(
-            bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=1
+            bars=bars, bar_bits=bits, exec_bars=bars, tuple_=_Tuple(), grid=_Grid(), budget_left=1
         )
         assert report.checked == 1
 
@@ -928,6 +1043,7 @@ class TestDiffCheckHook:
             tf_minutes: int,
             sl_paisa: int | None,
             tp_paisa: int | None,
+            exec_bars: Sequence[CandleBar],
         ) -> list[RefTrade]:
             trades = real(
                 bars,
@@ -936,6 +1052,7 @@ class TestDiffCheckHook:
                 tf_minutes=tf_minutes,
                 sl_paisa=sl_paisa,
                 tp_paisa=tp_paisa,
+                exec_bars=exec_bars,
             )
             # The plant: one paisa of drift on the first trade.
             return [
@@ -948,7 +1065,12 @@ class TestDiffCheckHook:
         sink = _SuspectStub()
         with capture_logs() as logs:
             report = _hook(sink).run_for_tuple(
-                bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=10
+                bars=bars,
+                bar_bits=bits,
+                exec_bars=bars,
+                tuple_=_Tuple(),
+                grid=_Grid(),
+                budget_left=10,
             )
         assert report.checked == 2
         assert report.mismatches == 2
@@ -976,6 +1098,7 @@ class TestDiffCheckHook:
             tf_minutes: int,
             stop_loss_paisa: int | None,
             take_profit_paisa: int | None,
+            exec_bars: Sequence[CandleBar],
         ) -> Sequence[RefTrade]:
             trades = _matching_production_simulate(
                 b,
@@ -984,6 +1107,7 @@ class TestDiffCheckHook:
                 tf_minutes=tf_minutes,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
+                exec_bars=exec_bars,
             )
             produced.append(trades)
             return trades
@@ -992,7 +1116,7 @@ class TestDiffCheckHook:
         sink = _SuspectStub()
         hook = _hook(sink, production_simulate=counting_production)
         report = hook.run_for_tuple(
-            bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=10
+            bars=bars, bar_bits=bits, exec_bars=bars, tuple_=_Tuple(), grid=_Grid(), budget_left=10
         )
         assert report.mismatches == 0
         assert bits == bits_before  # inputs never mutated
@@ -1006,6 +1130,7 @@ class TestDiffCheckHook:
             tf_minutes=1,
             stop_loss_paisa=None,
             take_profit_paisa=None,
+            exec_bars=bars,
         )
         assert produced[0] == fresh
 
@@ -1017,7 +1142,7 @@ class TestDiffCheckHook:
             production_simulate=lambda *a, **k: [],  # production "loses" every trade
         )
         report = hook.run_for_tuple(
-            bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=10
+            bars=bars, bar_bits=bits, exec_bars=bars, tuple_=_Tuple(), grid=_Grid(), budget_left=10
         )
         assert report.mismatches == 2
         assert sink.mismatches[0].field == "n_trades"
@@ -1037,7 +1162,7 @@ class TestDiffCheckHook:
             ),
         )
         report = hook.run_for_tuple(
-            bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=10
+            bars=bars, bar_bits=bits, exec_bars=bars, tuple_=_Tuple(), grid=_Grid(), budget_left=10
         )
         assert report.mismatches == 2
         assert sink.mismatches[0].field == "drawdown"
@@ -1049,7 +1174,7 @@ class TestDiffCheckHook:
         hook = _hook(sink, production_simulate=lambda *a, **k: [])
         grid = _Grid(condition_bits=(2, 3, 4, 5, 6, 7, 8))  # C(7,2)=21 masks
         report = hook.run_for_tuple(
-            bars=bars, bar_bits=bar_bits, tuple_=_Tuple(), grid=grid, budget_left=12
+            bars=bars, bar_bits=bar_bits, exec_bars=bars, tuple_=_Tuple(), grid=grid, budget_left=12
         )
         assert report.checked == 12
         assert report.mismatches == 12
@@ -1067,7 +1192,12 @@ class TestDiffCheckHook:
         )
         with capture_logs() as logs:
             report = hook.run_for_tuple(
-                bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=10
+                bars=bars,
+                bar_bits=bits,
+                exec_bars=bars,
+                tuple_=_Tuple(),
+                grid=_Grid(),
+                budget_left=10,
             )
         assert report.mismatches == 2  # counting survived the dead sink
         warns = [e for e in logs if e["event"] == "sweep_diffcheck.on_mismatch_failed"]
@@ -1085,7 +1215,12 @@ class TestDiffCheckHook:
         hook = _hook(sink, production_simulate=exploding)
         with capture_logs() as logs:
             report = hook.run_for_tuple(
-                bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=10
+                bars=bars,
+                bar_bits=bits,
+                exec_bars=bars,
+                tuple_=_Tuple(),
+                grid=_Grid(),
+                budget_left=10,
             )
         assert report == DiffCheckReport(checked=0, mismatches=0, masks_mismatched=())
         warns = [e for e in logs if e["event"] == "sweep_diffcheck.error"]
@@ -1109,11 +1244,17 @@ class TestDiffCheckHook:
                 tf_minutes=1,
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
+                exec_bars=cast("Sequence[CandleBar]", kw["exec_bars"]),
             )
 
         hook = _hook(_SuspectStub(), production_simulate=spying_production)
         report = hook.run_for_tuple(
-            bars=bars, bar_bits=bits, tuple_=_Tuple(), grid=_Grid(), budget_left=100
+            bars=bars,
+            bar_bits=bits,
+            exec_bars=bars,
+            tuple_=_Tuple(),
+            grid=_Grid(),
+            budget_left=100,
         )
         assert report.checked == 2  # C(3,2)=3 minus the (0,1) conflict
         # Projection re-derived inline: masks 0b101 and 0b110 over the bits.
@@ -1168,6 +1309,7 @@ class TestExecutedPopulation:
                 s,
                 direction="BUY",
                 tf_minutes=1,
+                exec_bars=cast("Sequence[CandleBar]", kw.get("exec_bars", b)),
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
             )
@@ -1183,6 +1325,7 @@ class TestExecutedPopulation:
         report = hook.run_for_tuple(
             bars=bars,
             bar_bits=bits,
+            exec_bars=bars,
             tuple_=_Tuple(),
             grid=_Grid(),
             budget_left=100,
@@ -1201,6 +1344,7 @@ class TestExecutedPopulation:
         report = hook.run_for_tuple(
             bars=bars,
             bar_bits=bits,
+            exec_bars=bars,
             tuple_=_Tuple(),
             grid=_Grid(),
             budget_left=100,
@@ -1218,6 +1362,7 @@ class TestExecutedPopulation:
             report = _hook(sink).run_for_tuple(
                 bars=bars,
                 bar_bits=bits,
+                exec_bars=bars,
                 tuple_=_Tuple(),
                 grid=_Grid(),
                 budget_left=100,
@@ -1240,6 +1385,7 @@ class TestExecutedPopulation:
             report = _hook(_SuspectStub()).run_for_tuple(
                 bars=bars,
                 bar_bits=bits,
+                exec_bars=bars,
                 tuple_=_Tuple(),
                 grid=_Grid(),
                 budget_left=100,
@@ -1260,6 +1406,7 @@ class TestExecutedPopulation:
         report = hook.run_for_tuple(
             bars=bars,
             bar_bits=bits,
+            exec_bars=bars,
             tuple_=_Tuple(),
             grid=_Grid(),
             budget_left=100,
@@ -1283,6 +1430,7 @@ class TestExecutedPopulation:
             report = hook.run_for_tuple(
                 bars=bars,
                 bar_bits=bits,
+                exec_bars=bars,
                 tuple_=_Tuple(),
                 grid=_Grid(),
                 budget_left=2,
@@ -1301,6 +1449,7 @@ class TestExecutedPopulation:
         report = _hook(_SuspectStub()).run_for_tuple(
             bars=bars,
             bar_bits=bits,
+            exec_bars=bars,
             tuple_=_Tuple(),
             grid=_Grid(),
             budget_left=10,
@@ -1314,7 +1463,10 @@ class TestExecutedPopulation:
 
 
 class TestReferenceSimulateWorstCase:
-    """Rule-by-rule hand fixtures for the worst-case (adverse-max) fill arm."""
+    """Rule-by-rule hand fixtures for the worst-case (adverse-max) fill arm
+    on the 1m execution grid (tf=1 fixed point; same-bar exits DEFER —
+    DEC-FILL-EXEC-GRID-1M-001 §2.4 — and a retroactive close whose last
+    managed bar IS the entry bar prices at that bar's CLOSE, §3.12 B3)."""
 
     def test_worst_case_entry_fills_bar_extreme(self) -> None:
         # BUY entry fills at the entry bar's HIGH (not its open); SELL at LOW.
@@ -1324,14 +1476,7 @@ class TestReferenceSimulateWorstCase:
             _bar(2, 10_020, 10_050, 9_990, 10_040),
         ]
         for direction, expected_entry in (("BUY", 10_030), ("SELL", 10_000)):
-            trades = reference_simulate(
-                bars,
-                [True, False, False],
-                direction=direction,
-                tf_minutes=1,
-                sl_paisa=None,
-                tp_paisa=None,
-            )
+            trades = _ref(bars, [True, False, False], direction=direction)
             assert len(trades) == 1
             assert trades[0].entry_paisa == expected_entry, direction
 
@@ -1343,14 +1488,7 @@ class TestReferenceSimulateWorstCase:
             _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry: worst == open
             _bar(2, 9_990, 9_990, 9_900, 9_950),  # gaps far through sl = 9_950
         ]
-        trades = reference_simulate(
-            bars,
-            [True, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=50,
-            tp_paisa=None,
-        )
+        trades = _ref(bars, [True, False, False], sl=50)
         assert len(trades) == 1
         assert trades[0].exit_reason == "stop_loss"
         assert trades[0].exit_paisa == 9_900  # min(9_950, 9_900) = the LOW
@@ -1365,14 +1503,7 @@ class TestReferenceSimulateWorstCase:
             _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
             _bar(2, 10_100, 10_120, 10_090, 10_110),  # entirely above tp = 10_050
         ]
-        trades = reference_simulate(
-            bars,
-            [True, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=50,
-        )
+        trades = _ref(bars, [True, False, False], tp=50)
         assert len(trades) == 1
         assert trades[0].exit_reason == "take_profit"
         assert trades[0].exit_paisa == 10_050  # clamped AT the level
@@ -1386,14 +1517,7 @@ class TestReferenceSimulateWorstCase:
             _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry (SELL at low=open)
             _bar(2, 10_060, 10_150, 10_060, 10_100),  # gaps through sl = 10_050
         ]
-        trades = reference_simulate(
-            bars,
-            [True, False, False],
-            direction="SELL",
-            tf_minutes=1,
-            sl_paisa=50,
-            tp_paisa=None,
-        )
+        trades = _ref(bars, [True, False, False], direction="SELL", sl=50)
         assert len(trades) == 1
         assert trades[0].exit_reason == "stop_loss"
         assert trades[0].exit_paisa == 10_150  # max(10_050, high 10_150)
@@ -1409,14 +1533,7 @@ class TestReferenceSimulateWorstCase:
             _bar(2, 10_010, 10_040, 9_980, 10_020, anchor=anchor),  # in-position
             _bar(3, 10_030, 10_090, 9_900, 10_050, anchor=anchor),  # 15:20 forced
         ]
-        trades = reference_simulate(
-            bars,
-            [True, False, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=None,
-        )
+        trades = _ref(bars, [True, False, False, False])
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "forced_1520"
@@ -1426,25 +1543,75 @@ class TestReferenceSimulateWorstCase:
         assert trade.mae_paisa == 20  # entry 10_000 − bar2 low 9_980 (NOT 9_900)
 
     def test_worst_case_end_of_data_closes_at_last_bar_extreme(self) -> None:
+        # A MANAGED last bar closes at its adverse extreme (the entry-bar-is-
+        # last shape takes the B3 CLOSE carve-out — the next test). Hand-
+        # derivation: entry = bar1 HIGH 10_040 (fold fav 0 / adv
+        # 10_040−9_995=45); bar2 fold fav max(0, 10_030−10_040)=0 / adv
+        # 10_040−9_990=50; EOD at bar2 LOW 9_990 ⇒ pnl 9_990−10_040 = −50.
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000),
+            _bar(1, 10_010, 10_040, 9_995, 10_020),
+            _bar(2, 10_020, 10_030, 9_990, 10_000),
+        ]
+        trades = _ref(bars, [True, False, False])
+        assert len(trades) == 1
+        assert trades[0].exit_reason == "end_of_data"
+        assert trades[0].exit_idx == 2
+        assert trades[0].exit_paisa == 9_990  # bar2 LOW — the adverse extreme
+        assert trades[0].pnl_paisa == -50
+        assert trades[0].mfe_paisa == 0
+        assert trades[0].mae_paisa == 50
+
+    def test_worst_case_b3_end_of_data_entry_bar_closes_at_close(self) -> None:
+        # THE B3 TERMINAL CARVE-OUT (DEC-FILL-EXEC-GRID-1M-001 §3.12 —
+        # retires the pre-PR-B adverse-extreme pricing on this shape): the
+        # entry bar IS the last stored bar, so the retroactive end_of_data
+        # close prices at its CLOSE 10_020 (the extreme would BE the
+        # full-range phantom loss the same-bar deferral kills). Entry = bar1
+        # HIGH 10_040 ⇒ pnl = 10_020 − 10_040 = −20; the entry-bar fold
+        # still runs: mfe 0 / mae 10_040 − 9_995 = 45; holding 1.
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
             _bar(1, 10_010, 10_040, 9_995, 10_020),
         ]
-        trades = reference_simulate(
-            bars,
-            [True, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=None,
-        )
+        trades = _ref(bars, [True, False])
         assert len(trades) == 1
-        assert trades[0].exit_reason == "end_of_data"
-        assert trades[0].exit_paisa == 9_995  # last bar LOW (PRECISE: close 10_020)
-        # Worst entry = bar 1 HIGH 10_040 ⇒ pnl = 9_995 − 10_040.
-        assert trades[0].pnl_paisa == -45
+        trade = trades[0]
+        assert trade.exit_reason == "end_of_data"
+        assert trade.exit_idx == 1
+        assert trade.exit_paisa == 10_020  # the entry bar's CLOSE, not its LOW
+        assert trade.pnl_paisa == -20
+        assert trade.mfe_paisa == 0
+        assert trade.mae_paisa == 45
+        assert trade.holding_bars == 1
 
     def test_worst_case_session_gap_closes_at_prior_last_bar_extreme(self) -> None:
+        # A MANAGED day-1 last bar prices the session_gap close at its
+        # adverse extreme. Hand-derivation: entry = bar1 HIGH 10_030; bar2
+        # managed (retro basis = its LOW 10_000); the day-2 boundary closes
+        # at bar2: exit 10_000, pnl 10_000 − 10_030 = −30.
+        day1 = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST Tue
+        day2 = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 09:15 IST Wed
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=day1),  # arm
+            _bar(1, 10_010, 10_030, 10_005, 10_020, anchor=day1),  # entry
+            _bar(2, 10_015, 10_020, 10_000, 10_010, anchor=day1),  # day-1 LAST
+            _bar(0, 9_000, 12_000, 8_000, 9_500, anchor=day2),  # boundary (wild)
+        ]
+        trades = _ref(bars, [True, False, False, False])
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade.exit_reason == "session_gap"
+        assert trade.exit_idx == 2
+        assert trade.exit_paisa == 10_000  # bar2 LOW — the adverse extreme
+        assert trade.entry_paisa == 10_030  # worst entry = day-1 bar1 HIGH
+        assert trade.pnl_paisa == -30
+
+    def test_worst_case_b3_session_gap_entry_bar_closes_at_close(self) -> None:
+        # B3 on the session-gap arm: the entry bar is the day-1 LAST stored
+        # bar (never managed), so the retroactive session_gap close prices
+        # at its CLOSE 10_020 — pnl = 10_020 − 10_030 = −10 (the pre-PR-B
+        # adverse-extreme pricing 10_005 is retired on this shape).
         day1 = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST Tue
         day2 = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 09:15 IST Wed
         bars = [
@@ -1452,20 +1619,15 @@ class TestReferenceSimulateWorstCase:
             _bar(1, 10_010, 10_030, 10_005, 10_020, anchor=day1),  # entry + day-1 LAST
             _bar(0, 9_000, 12_000, 8_000, 9_500, anchor=day2),  # boundary (wild)
         ]
-        trades = reference_simulate(
-            bars,
-            [True, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=None,
-            tp_paisa=None,
-        )
+        trades = _ref(bars, [True, False, False])
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "session_gap"
         assert trade.exit_idx == 1
-        assert trade.exit_paisa == 10_005  # day-1 last bar LOW (PRECISE: 10_020)
-        assert trade.entry_paisa == 10_030  # worst entry = day-1 bar HIGH
+        assert trade.exit_paisa == 10_020  # the entry bar's CLOSE (B3)
+        assert trade.entry_paisa == 10_030
+        assert trade.pnl_paisa == -10
+        assert trade.holding_bars == 1
 
     def test_worst_case_levels_anchor_on_the_worst_entry_fill(self) -> None:
         # The documented honest interaction: SL/TP levels anchor on the
@@ -1477,14 +1639,7 @@ class TestReferenceSimulateWorstCase:
             _bar(1, 10_000, 10_030, 10_000, 10_010),  # entry: worst 10_030
             _bar(2, 10_000, 10_010, 9_975, 10_000),
         ]
-        worst = reference_simulate(
-            bars,
-            [True, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=50,
-            tp_paisa=None,
-        )
+        worst = _ref(bars, [True, False, False], sl=50)
         assert worst[0].exit_reason == "stop_loss"
         assert worst[0].exit_paisa == 9_975  # min(level 9_980, low 9_975)
 
@@ -1492,7 +1647,8 @@ class TestReferenceSimulateWorstCase:
         # TEST-SIDE oracle join (the module's own import ban binds the
         # PRODUCTION file, not this test): the naive worst-case arm agrees
         # bit-for-bit with the production walker under the SAME mode on a
-        # mixed fixture (range bars, SL+TP, forced tail).
+        # mixed fixture (range bars, SL+TP, forced tail) — tf=1 fixed
+        # point, the SAME list threaded as both streams on BOTH legs.
         from brutex.engine.trade_sim import simulate_trades
         from brutex.strategies.types import Side
 
@@ -1511,6 +1667,7 @@ class TestReferenceSimulateWorstCase:
                 fires,
                 direction=direction,
                 tf_minutes=1,
+                exec_bars_1m=bars,
                 stop_loss_paisa=60,
                 take_profit_paisa=60,
             )
@@ -1521,6 +1678,7 @@ class TestReferenceSimulateWorstCase:
                 tf_minutes=1,
                 sl_paisa=60,
                 tp_paisa=60,
+                exec_bars=bars,
             )
             assert len(prod) == len(ref), direction
             for p, r in zip(prod, ref, strict=True):

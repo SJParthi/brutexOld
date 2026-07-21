@@ -910,12 +910,14 @@ class RunCoreHandles:
             tf_minutes: int,
             stop_loss_paisa: int | None,
             take_profit_paisa: int | None,
+            exec_bars: Sequence[Any],
         ) -> Sequence[Any]:
             return simulate_trades(
                 bars,
                 entry_signals,
                 direction=Side(direction),
                 tf_minutes=tf_minutes,
+                exec_bars_1m=exec_bars,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
                 # DEC-VIX-STAMP-WIRE-001 (Golden Rule #3): the production leg
@@ -958,6 +960,7 @@ class RunCoreHandles:
             *,
             bars: Sequence[Any],
             bar_bits: Sequence[int],
+            exec_bars: Sequence[Any],
             tuple_: Any,
             grid: Any,
             mask_population: Sequence[int] | None = None,
@@ -972,6 +975,7 @@ class RunCoreHandles:
             report = hook.run_for_tuple(
                 bars=bars,
                 bar_bits=bar_bits,
+                exec_bars=exec_bars,
                 tuple_=tuple_,
                 grid=grid,
                 budget_left=give,

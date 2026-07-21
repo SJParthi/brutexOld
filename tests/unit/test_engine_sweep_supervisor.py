@@ -248,18 +248,20 @@ class TestIdentity:
             top_k=10,
             min_hits=30,
         )
-        # Re-locked TWICE by design: DEC-NIFTY-FIB-AXIS-001 (the fib_anchors
-        # axis entered the descriptor), then DEC-FILL-WORST-CASE-ONLY-001 —
-        # the descriptor + tuple-cache params now fold the permanent
-        # ``fill_mode: worst_case`` token UNCONDITIONALLY, so both digests
-        # moved off the precise-era bytes (the anti-aliasing pin below keeps
-        # the retired constants dead).
+        # Re-locked THRICE by design: DEC-NIFTY-FIB-AXIS-001 (the fib_anchors
+        # axis entered the descriptor), DEC-FILL-WORST-CASE-ONLY-001 (the
+        # permanent ``fill_mode: worst_case`` token), then
+        # DEC-FILL-EXEC-GRID-1M-001 — the descriptor + tuple-cache params now
+        # ALSO fold ``execution_grid: 1m_next_bar`` UNCONDITIONALLY (blake3
+        # over the params dict now carrying execution_grid), so both digests
+        # moved off the pre-grid bytes (the anti-aliasing pin below keeps the
+        # retired constants dead).
         assert (
             grid_identity(grid)
-            == "158df7d010e38f392ae1c5dccc785989c77ea06ad5c4759b1640c48d83b5addb"
+            == "dfcff2a2dcb6c3be385a489af086134930af9f1c8048b2461892e1ab6e5563cc"
         )
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
-        assert key.hex() == "ae16c106ca9f3001c9f9a3b54cb10c345d22eaf6582478845d75d6f303885131"
+        assert key.hex() == "115b40775657d00050f81212c8c2ac8dd56834ea4f0c4bbbe0d7203838418bc1"
 
     def test_one_law_identity_never_aliases_the_precise_era(self) -> None:
         # DEC-FILL-WORST-CASE-ONLY-001 anti-aliasing pin: the one-law grid
@@ -409,17 +411,21 @@ class TestParallelReexports:
         RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001: the original hex
         (``a840ae68…baac92``) was captured on pre-mode main over the old
         ``_grid()`` fixture (sl=80/tp=50, no fill_mode token). The one-law
-        key now folds the permanent ``fill_mode: worst_case`` token
+        key folds the permanent ``fill_mode: worst_case`` token
         UNCONDITIONALLY and the suite fixture rides EOD-only exits, so the
         bytes moved BY DESIGN (precise-era dedup stores must never be
-        served — the refusal law owns that). The hex below was captured on
-        THIS tree; the dynamic rebuild test above still proves the
-        structural-kwargs convention reproduces the private path exactly.
+        served — the refusal law owns that). RE-LOCKED AGAIN for
+        DEC-FILL-EXEC-GRID-1M-001: the tuple-cache params now ALSO fold the
+        permanent ``execution_grid: 1m_next_bar`` token (blake3 over the
+        params dict now carrying execution_grid), retiring the pre-grid hex
+        (``4d95be51…8474cd``). The hex below was captured on THIS tree; the
+        dynamic rebuild test above still proves the structural-kwargs
+        convention reproduces the private path exactly.
         """
         grid = _grid()
         tuple_ = next(iter_sweep_tuples(grid))
         assert tuple_cache_key(tuple_, grid).hex() == (
-            "4d95be5165c0595fb202a36051ed2fb70fc4c95480531191a0782c78008474cd"
+            "5c8e9362e8d24c78ee0215d1cf1cc87a198edbd281d14729b6f9728fd5a6381e"
         )
 
 

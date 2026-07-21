@@ -27,6 +27,18 @@ import fno_math
 import pytest
 
 
+def _arm(n: int) -> list[int]:
+    """The tf==1 fixed-point ``arm_source`` for an ``n``-bar exec stream.
+
+    At ``tf_minutes == 1`` the OHLC columns ARE their own execution grid, so
+    1m bar ``j`` is the next-1m fill of decision bar ``j - 1``
+    (``exec_idx(N) = N + 1`` — DEC-FILL-EXEC-GRID-1M-001) and bar 0 arms
+    nothing. Mirrors ``_tf1_arm_source`` in
+    ``tests/bench/test_exec_grid_dual_feed_bench.py``.
+    """
+    return [-1, *range(n - 1)]
+
+
 def _flat_window(
     n: int, bar_bits: list[int]
 ) -> tuple[list[int], list[int], list[int], list[int], list[bool], list[int]]:
@@ -43,7 +55,7 @@ def _flat_window(
 
 def _u128_sim(bar_bits: list[int]) -> fno_math.ResidentSweepSimU128:
     o, h, lo, c, forced, sess = _flat_window(len(bar_bits), bar_bits)
-    return fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, bar_bits)
+    return fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, _arm(len(bar_bits)), bar_bits)
 
 
 class TestU128FfiExtractionEnvelope:
@@ -63,7 +75,7 @@ class TestU128FfiExtractionEnvelope:
     def test_out_of_range_bar_bits_raise_overflow_error(self, bad: int) -> None:
         o, h, lo, c, forced, sess = _flat_window(2, [0, 0])
         with pytest.raises(OverflowError):
-            fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, [0, bad])
+            fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, _arm(2), [0, bad])
 
     @pytest.mark.parametrize("bad", [1 << 128, -1])
     def test_out_of_range_mask_raises_overflow_error(self, bad: int) -> None:
@@ -86,9 +98,19 @@ class TestU128WideMasksThroughTheWheel:
         # → pnl −300, mfe 0, mae 300, holding 3 (the one law).
         assert out[0] == [(-300, 0, 300, 3, 1, 3)]
         assert out[1] == out[0]
-        # Bit-127 mask fires bar2 → entry at high[3], end-of-data at low[3]
-        # (the flat window folds the same −300 adverse depth on the entry bar).
-        assert out[2] == [(-300, 0, 300, 1, 3, 3)]
+        # Bit-127 mask fires bar2 (the LAST bar) → the position opens and
+        # immediately hits end_of_data with no next bar, so exit_idx==entry_idx==3
+        # (the degenerate same-bar terminal). bar[3] = open 10_000, high 10_150,
+        # low 9_850, close 10_000; worst-case BUY entry @high[3]=10_150.
+        # DEC-FILL-EXEC-GRID-1M-001 (#1989) §1 — the legalized exit_idx==entry_idx
+        # degenerate terminal prices the entry bar's CLOSE (the #1743 finish()-idiom
+        # forced mark-to-close on end_of_data/session_gap), NOT the adverse LOW:
+        # exit @close[3]=10_000 ⇒ pnl = 10_000 − 10_150 = −150. The prior −300
+        # (adverse-LOW) was #1825's correct PRE-B3 value; it hid behind a TypeError
+        # until the Class-1 signature fix a81c5a29 made this test collectable — a
+        # stale golden, not a kernel bug. The other two −300 literals (non-degenerate)
+        # remain adverse-LOW and unchanged.
+        assert out[2] == [(-150, 0, 300, 1, 3, 3)]
         assert sim.count_trades([(1 << 63) | (1 << 64), 1 << 64, 1 << 127], True, None, None) == [
             1,
             1,
@@ -105,8 +127,8 @@ class TestU128BridgeMatchesU64KernelAtFfi:
     def test_simulate_masks_and_count_trades_field_identical(self) -> None:
         bar_bits = [1, 0, 1, 1 << 63, 0]
         o, h, lo, c, forced, sess = _flat_window(5, bar_bits)
-        s64 = fno_math.ResidentSweepSim(o, h, lo, c, forced, sess, bar_bits)
-        s128 = fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, bar_bits)
+        s64 = fno_math.ResidentSweepSim(o, h, lo, c, forced, sess, _arm(5), bar_bits)
+        s128 = fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, _arm(5), bar_bits)
         masks = [0, 1, 1 << 63]
         assert s64.simulate_masks(masks, True, 80, 120) == s128.simulate_masks(masks, True, 80, 120)
         assert s64.count_trades(masks, True, 80, 120) == s128.count_trades(masks, True, 80, 120)
@@ -116,15 +138,24 @@ class TestU128ValidationNamesTheWideClass:
     """ValueErrors from the wide kernel name ResidentSweepSimU128 (never the u64 twin)."""
 
     def test_length_mismatch_valueerror(self) -> None:
+        # Under DEC-FILL-EXEC-GRID-1M-001 ``bar_bits`` is DECISION-length,
+        # decoupled from the 1m EXECUTION columns, so a short ``bar_bits`` is
+        # legal; the length-locked set (OHLC/forced/session/arm_source) is what
+        # ``build_columns`` rejects. Trigger the mismatch on a length-locked
+        # column (short ``high``) — mirrors the Rust
+        # ``u128_build_rejects_length_mismatch_naming_the_class`` — to keep
+        # pinning the class-named error.
         o, h, lo, c, forced, sess = _flat_window(2, [0, 0])
         with pytest.raises(ValueError, match="ResidentSweepSimU128: column length mismatch"):
-            fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, [0])
+            fno_math.ResidentSweepSimU128(o, h[:1], lo, c, forced, sess, _arm(2), [0, 0])
 
     def test_price_out_of_range_valueerror(self) -> None:
         ceiling = (2**63 - 1) // 8  # MAX_PRICE_PAISA — re-derived independently
         _o, h, lo, c, forced, sess = _flat_window(2, [0, 0])
         with pytest.raises(ValueError, match="ResidentSweepSimU128: open value"):
-            fno_math.ResidentSweepSimU128([ceiling + 1, 10_000], h, lo, c, forced, sess, [0, 0])
+            fno_math.ResidentSweepSimU128(
+                [ceiling + 1, 10_000], h, lo, c, forced, sess, _arm(2), [0, 0]
+            )
 
     def test_sl_tp_out_of_range_valueerror(self) -> None:
         ceiling = (2**63 - 1) // 8

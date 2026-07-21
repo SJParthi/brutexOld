@@ -89,6 +89,7 @@ def _sweep(n_masks: int) -> int:
             [_IMPOSSIBLE_MASK] * n_masks,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_BARS,
             train_days=5,
             test_days=5,
             step_days=5,

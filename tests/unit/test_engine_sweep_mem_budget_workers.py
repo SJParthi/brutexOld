@@ -290,10 +290,17 @@ class _CaptureExecutor:
         return False
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
+        # ``exec_bars`` mirrors the real dispatch (DEC-FILL-EXEC-GRID-1M-001:
+        # the driver hands the worker the 1-minute EXECUTION stream too).
         fut: Future[mod.TupleWorkResult] = Future()
-        fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
+        fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars, exec_bars))
         return fut
 
 
@@ -423,7 +430,9 @@ class TestNoDoubleDivisionAfterScaleGuardsDedupe:
         store = ResultsStore(path=tmp_path / "nodouble.parquet")
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
         with AuditWriter.open(tmp_path / "nodouble.jsonl") as audit:
-            run_persisted_sweep(_mini_bars(), cfg, store=store, dedup=dedup, audit=audit)
+            run_persisted_sweep(
+                _mini_bars(), cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=_mini_bars()
+            )
 
         total = 8 * _GIB  # 48 GiB × 1/6 — the undivided whole-machine figure
         assert captured == [total // 8]  # main's ÷ pool_size, EXACTLY (1 GiB)

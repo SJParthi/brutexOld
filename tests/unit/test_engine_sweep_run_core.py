@@ -1434,10 +1434,12 @@ def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
     bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
         assert core.diffcheck is not None
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        # DEC-FILL-EXEC-GRID-1M-001 tf==1minute fixed point: the SAME list is
+        # both the decision and the 1m execution stream.
+        core.diffcheck(bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid)
         assert core.suspect is False  # production == reference on real data
         # Budget exhausted (2 checked) → the next call is a zero-cost no-op.
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        core.diffcheck(bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid)
         run_id = core.run_id
     ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
     assert len(ok_rows) == 1
@@ -1511,7 +1513,8 @@ def test_r45_diffcheck_production_leg_carries_the_bound_run_stamper(
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
         assert core.diffcheck is not None
         core.bind_reference_stamper(stamper)
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        # tf==1minute fixed point: exec stream == decision stream.
+        core.diffcheck(bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid)
         # Compare-neutral: production (stamped) still matches the reference.
         assert core.suspect is False
     assert captured == [stamper, stamper]  # both sampled masks bound the stamper
@@ -1524,7 +1527,10 @@ def test_diffcheck_zero_checked_records_nothing(tmp_path: Path) -> None:
     tuple_ = next(iter_sweep_tuples(grid))
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
         assert core.diffcheck is not None
-        core.diffcheck(bars=_BARS, bar_bits=[0] * len(_BARS), tuple_=tuple_, grid=grid)
+        # tf==1minute fixed point: exec stream == decision stream.
+        core.diffcheck(
+            bars=_BARS, bar_bits=[0] * len(_BARS), exec_bars=_BARS, tuple_=tuple_, grid=grid
+        )
         run_id = core.run_id
     assert not [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
 
@@ -1540,7 +1546,14 @@ def test_r45_diffcheck_closure_forwards_the_executed_population(tmp_path: Path) 
     bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
     with _core(tmp_path, grid, diffcheck_k=4) as (core, _s):
         assert core.diffcheck is not None
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[0b100])
+        core.diffcheck(
+            bars=_BARS,
+            bar_bits=bits,
+            exec_bars=_BARS,
+            tuple_=tuple_,
+            grid=grid,
+            mask_population=[0b100],
+        )
         run_id = core.run_id
     ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
     assert len(ok_rows) == 1
@@ -1561,8 +1574,10 @@ def test_r45_diffcheck_closure_empty_population_skips_and_spends_no_budget(
     bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
         assert core.diffcheck is not None
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[])
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        core.diffcheck(
+            bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid, mask_population=[]
+        )
+        core.diffcheck(bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid)
         run_id = core.run_id
     ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
     assert len(ok_rows) == 1  # the skip recorded nothing; the second call ran
@@ -1864,11 +1879,15 @@ def test_r45_run_one_tuple_invokes_diffcheck_post_persist(tmp_path: Path) -> Non
         *,
         bars: Sequence[CandleBar],
         bar_bits: Sequence[int],
+        exec_bars: Sequence[CandleBar],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
         mask_population: Sequence[int] | None = None,
     ) -> None:
         assert len(bar_bits) == len(bars)
+        # DEC-FILL-EXEC-GRID-1M-001: run_one_tuple threads the 1m execution
+        # stream to the hook; at tf==1minute it is the SAME bars_for feed.
+        assert list(exec_bars) == list(bars)
         assert mask_population is None  # legacy arm — the kwarg is never passed
         calls.append(len(bar_bits))
 

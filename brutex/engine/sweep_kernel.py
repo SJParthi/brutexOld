@@ -127,8 +127,9 @@ class ResidentSweepKernel:
         "_bar_bits",
         "_bars",
         "_ema_source",
+        "_exec_bars_1m",
+        "_exec_columns",
         "_fib_anchor",
-        "_kernel_columns",
         "_resident",
         "_roll_schedule",
         "_vwap_source",
@@ -145,10 +146,14 @@ class ResidentSweepKernel:
         ema_source: PriceSource = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
+        exec_bars_1m: Sequence[CandleBar] | None = None,
     ) -> None:
         if not bars:
             raise ValueError("ResidentSweepKernel: bars must be non-empty")
         self._bars: tuple[CandleBar, ...] = tuple(bars)
+        self._exec_bars_1m: tuple[CandleBar, ...] | None = (
+            None if exec_bars_1m is None else tuple(exec_bars_1m)
+        )
         self._fib_anchor: FibAnchorKind = fib_anchor
         self._vwap_source: PriceSource = vwap_source
         self._ema_source: PriceSource = ema_source
@@ -165,9 +170,10 @@ class ResidentSweepKernel:
             apply_1day_mask=apply_1day_mask,
         )
         self._resident: ResidentBarBuffer = ResidentBarBuffer(self._bar_bits)
-        # Lazily-derived tf-independent trade-sim columns (the W2 rider of
-        # DEC-STAGE1A-RUST-BATCH-001) — see :attr:`kernel_columns`.
-        self._kernel_columns: PriceColumns | None = None
+        # Lazily-derived trade-sim EXECUTION columns (the W2 rider of
+        # DEC-STAGE1A-RUST-BATCH-001, rebased onto the 1m execution stream by
+        # DEC-FILL-EXEC-GRID-1M-001) — see :attr:`exec_columns`.
+        self._exec_columns: PriceColumns | None = None
 
     @property
     def bars(self) -> tuple[CandleBar, ...]:
@@ -205,20 +211,36 @@ class ResidentSweepKernel:
         return self._bar_bits
 
     @property
-    def kernel_columns(self) -> PriceColumns:
-        """The tf-independent trade-sim input columns for this bar window.
+    def exec_bars_1m(self) -> tuple[CandleBar, ...] | None:
+        """The 1-minute EXECUTION stream this kernel was built with (or ``None``).
+
+        DEC-FILL-EXEC-GRID-1M-001: carried so the sweep spine reuses ONE
+        stream + column set per ``(instrument, tf, proximity, prior_n)``
+        coordinate; ``None`` (a legacy caller that supplied no exec stream)
+        simply means the trade sim derives its own columns locally.
+        """
+        return self._exec_bars_1m
+
+    @property
+    def exec_columns(self) -> PriceColumns | None:
+        """The trade-sim EXECUTION-stream input columns for this window.
 
         Derived LAZILY via ONE
         :func:`~brutex.engine.rust_trade_sim.derive_price_columns` call per
-        kernel lifetime (the W2 rider of DEC-STAGE1A-RUST-BATCH-001) and
-        memoised, so every ``(direction, K, sl, tp)`` tuple reusing this
-        kernel hands its :class:`~brutex.engine.rust_trade_sim.ResidentTradeSim`
-        pre-derived columns instead of re-paying the 4×-Decimal-snap pass —
+        kernel lifetime over ``exec_bars_1m`` (the W2 rider of
+        DEC-STAGE1A-RUST-BATCH-001, rebased onto the EXECUTION stream by
+        DEC-FILL-EXEC-GRID-1M-001) and memoised, so every ``(direction, K,
+        sl, tp)`` tuple reusing this kernel hands its
+        :class:`~brutex.engine.rust_trade_sim.ResidentTradeSim` pre-derived
+        1m columns instead of re-paying the 4×-Decimal-snap pass —
         byte-identical by construction (the SAME seam derives both).
+        ``None`` iff the kernel was built without an execution stream.
         """
-        if self._kernel_columns is None:
-            self._kernel_columns = derive_price_columns(self._bars)
-        return self._kernel_columns
+        if self._exec_bars_1m is None:
+            return None
+        if self._exec_columns is None:
+            self._exec_columns = derive_price_columns(self._exec_bars_1m)
+        return self._exec_columns
 
     @property
     def n_bars(self) -> int:
@@ -363,6 +385,7 @@ class ResidentKernelCache:
         ema_source: PriceSource = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
+        exec_bars_1m: Sequence[CandleBar] | None = None,
     ) -> ResidentSweepKernel:
         """Return the kernel for ``(instrument, tf_label, proximity, prior_n, fib_anchor, sources, roll_schedule)``, building on miss.
 
@@ -405,6 +428,11 @@ class ResidentKernelCache:
         apply_1day_mask
             D12 honesty flag — a pure function of ``(instrument, tf_label)``,
             both already in the key, so it needs no key slot of its own.
+        exec_bars_1m
+            The instrument's 1-minute EXECUTION stream
+            (DEC-FILL-EXEC-GRID-1M-001; used only on a miss) — like ``bars``
+            it is a pure function of the key's ``instrument`` under the
+            deterministic ``bars_for`` contract, so it needs no key slot.
 
         Returns
         -------
@@ -435,6 +463,7 @@ class ResidentKernelCache:
             ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
+            exec_bars_1m=exec_bars_1m,
         )
         self._builds += 1
         self._cache[key] = kernel

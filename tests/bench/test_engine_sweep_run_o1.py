@@ -148,6 +148,8 @@ class TestAuditCountIsComboIndependent:
             dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
             audit_path = tmp_path / f"{tag}.jsonl"
             with AuditWriter.open(audit_path) as audit:
-                run_persisted_sweep(bars, _config(k), store=store, dedup=dedup, audit=audit)
+                run_persisted_sweep(
+                    bars, _config(k), store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+                )
             counts.append(verify_chain(audit_path))
         assert counts == [3, 3]

@@ -120,8 +120,12 @@ class TestOptionsSimBuildsNoStamper:
         """
         for fn in (
             cli.cmd_options_sim,
-            cli._maybe_run_options_sim_on_winners,
+            # Renamed from `_maybe_run_options_sim_on_winners` when the hook
+            # widened to options+futures (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+            cli._maybe_run_exec_sims_on_winners,
             cli._options_sim_for_row,
             cli._replay_spot_signals_for_row,
+            cli._replay_spot_trades_for_row,
+            cli._futures_sim_for_row,
         ):
             assert "build_vix_stamper" not in inspect.getsource(fn)

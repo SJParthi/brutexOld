@@ -124,7 +124,14 @@ def test_sidecar_year_pnl_equals_stored_year_cells(tmp_path: Path) -> None:
     with AuditWriter(path=audit_path) as audit:
         store = load_or_create_store(store_path)
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
-        run_persisted_sweep(bars, tuple_.to_run_config(grid), store=store, dedup=dedup, audit=audit)
+        run_persisted_sweep(
+            bars,
+            tuple_.to_run_config(grid),
+            store=store,
+            dedup=dedup,
+            audit=audit,
+            exec_bars_1m=bars,
+        )
 
     report = run_results_depth_pass(
         out_root=out_root,

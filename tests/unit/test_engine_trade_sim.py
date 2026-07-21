@@ -1,21 +1,40 @@
-"""Unit tests for the Stage-2 spot trade-simulation walker (`brutex.engine.trade_sim`).
+"""Unit tests for the Stage-2 trade-sim walker on the 1-MINUTE execution grid.
 
-100% line + branch coverage of the signal-only walker that turns a
-``bool``-per-bar entry stream + a ``CandleBar`` feed into int64-paisa
-:class:`~brutex.metrics.types.ClosedTrade` round-trips (DEC-TRADESIM-001). Covers:
+100% line + branch coverage (with the three sibling files) of
+:mod:`brutex.engine.trade_sim` under DEC-FILL-EXEC-GRID-1M-001 — the dual-feed
+walker that projects decision-TF signals onto their next-1-minute fill bars
+(via :class:`brutex.engine.exec_grid.ExecGridMap`) and walks the 1m stream
+into int64-paisa :class:`~brutex.metrics.types.ClosedTrade` round-trips.
+Covers:
 
 * construction validation (HOLD, bad ``tf_minutes`` / SL / TP);
-* entry @ the next bar's ADVERSE EXTREME; SL / TP adverse-max fills
-  (DEC-FILL-WORST-CASE-ONLY-001 — worst-case is the ONLY fill law);
-* same-bar SL+TP tie-break (SL-first, hardcoded — the retired TP_FIRST
-  optimism knob is deleted);
-* the 15:20 IST forced exit (entry-skip near close + mid-trade override);
-* Mode-B signal exit (next-bar adverse-extreme fill);
-* end-of-data close at the adverse extreme; MFE / MAE tracking; holding-bar
-  counts;
-* the single-position rule + the "ignore an entry signal on the exit bar";
-* the streaming ``push`` / ``finish`` API and the ``run`` / ``simulate_trades``
-  batch wrappers; the ``_levels`` SL/TP-optionality matrix.
+* the dual-feed batch API (`run` / `run_with_exit_indices` /
+  `simulate_trades`) — signal-length + exec-map dimension validation, the
+  injected-map path, the B4 collision-loser signal drop;
+* entry at the mapped next-1m bar's ADVERSE EXTREME; SL/TP detection + the
+  adverse-max-vs-level fill per 1m bar (DEC-FILL-WORST-CASE-ONLY-001);
+* the §2.4 same-bar deferral (the entry 1m bar folds its range but NEVER
+  exits; ``exits_deferred`` counts an entry-bar level touch) + the B3
+  terminal CLOSE carve-out (``end_of_data`` / ``session_gap`` on the trade's
+  own entry bar price at that bar's CLOSE, never its adverse extreme);
+* the session-aware forced exit on the 1m grid (regular 15:20, Muhurat /
+  half-day boundaries, the missing-boundary-minute SLID forced fill) + the
+  out-of-coverage loud refusal;
+* Mode-B signal exits (mapped next-1m adverse-extreme fill; the entry-bar
+  deferral into ``_pending_exit``; signal-beats-forced precedence);
+* the open-position session-boundary guard (``session_gap``, the finish()
+  idiom, pending subsumption, the boundary bar never arms);
+* the widened SLID-fill counter family (``fill_slid_minutes`` /
+  ``exit_fill_slid_minutes`` / ``forced_fill_slid_minutes``) +
+  ``signals_dropped_collision``;
+* the streaming ``push_1m`` / ``finish`` API, coarse-TF (decision 15m/5m over
+  a real 1m stream) scenarios, VIX stamping, and the exit-index fast path.
+
+At ``tf_minutes == 1`` with contiguous 1-minute bars the SAME sequence is
+passed as ``decision_bars`` AND ``exec_bars_1m`` — the §6 degenerate fixed
+point where the mapping fills a signal on decision bar N at 1m bar N+1
+(exactly the historical next-bar law), so hand-derived fixtures carry over.
+Every expected value is HAND-DERIVED in its test's comment.
 """
 
 from __future__ import annotations
@@ -27,6 +46,7 @@ import pytest
 from brutex.calendars.nse import IST, SessionType, TradingSession
 from brutex.data.models import CandleBar
 from brutex.engine import trade_sim as ts_mod
+from brutex.engine.exec_grid import build_exec_grid_map
 from brutex.engine.trade_sim import (
     TradeSimWalker,
     simulate_trades,
@@ -55,9 +75,33 @@ def _bar(hh: int, mm: int, o: str, h: str, lo: str, c: str, *, day: date = _DAY)
     )
 
 
-def _flat(hh: int, mm: int) -> CandleBar:
-    """A flat doji bar (O=H=L=C=100.00 → 10000 paisa entry) at IST ``hh:mm``."""
-    return _bar(hh, mm, "100", "100", "100", "100")
+def _flat(hh: int, mm: int, *, day: date = _DAY) -> CandleBar:
+    """A flat doji bar (O=H=L=C=100.00 → 10000 paisa) at IST ``hh:mm``."""
+    return _bar(hh, mm, "100", "100", "100", "100", day=day)
+
+
+def _sim(
+    bars: list[CandleBar],
+    entry: list[bool],
+    *,
+    direction: Side = Side.BUY,
+    sl: int | None = None,
+    tp: int | None = None,
+    exits: list[bool] | None = None,
+    sink: list[ts_mod.TradeDetail] | None = None,
+) -> list[ClosedTrade]:
+    """tf==1 degenerate batch: the SAME bars are decision AND execution stream."""
+    return simulate_trades(
+        bars,
+        entry,
+        direction=direction,
+        tf_minutes=1,
+        exec_bars_1m=bars,
+        stop_loss_paisa=sl,
+        take_profit_paisa=tp,
+        exit_signals=exits,
+        detail_sink=sink,
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -82,13 +126,21 @@ class TestInit:
         with pytest.raises(ValueError, match="take_profit_paisa must be > 0"):
             TradeSimWalker(direction=Side.BUY, tf_minutes=1, take_profit_paisa=-5)
 
-    def test_valid_construction_with_no_legs(self) -> None:
+    def test_valid_construction_with_no_legs_and_empty_feed(self) -> None:
         walker = TradeSimWalker(direction=Side.SELL, tf_minutes=5)
-        assert walker.run([], []) == []
+        assert walker.run([], [], []) == []
+
+    def test_counters_start_at_zero(self) -> None:
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        assert walker.exits_deferred == 0
+        assert walker.signals_dropped_collision == 0
+        assert walker.fill_slid_minutes == 0
+        assert walker.exit_fill_slid_minutes == 0
+        assert walker.forced_fill_slid_minutes == 0
 
 
 # ────────────────────────────────────────────────────────────────────────
-# run() input validation
+# run() input validation + the exec_map injection seam
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -96,29 +148,65 @@ class TestRunValidation:
     def test_entry_signal_length_mismatch(self) -> None:
         walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
         with pytest.raises(ValueError, match="entry_signals length"):
-            walker.run([_flat(9, 15)], [True, False])
+            walker.run([_flat(9, 15)], [_flat(9, 15)], [True, False])
 
     def test_exit_signal_length_mismatch(self) -> None:
         walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
         with pytest.raises(ValueError, match="exit_signals length"):
-            walker.run([_flat(9, 15)], [True], [True, False])
+            walker.run([_flat(9, 15)], [_flat(9, 15)], [True], [True, False])
+
+    def test_exec_map_n_decision_mismatch_rejected(self) -> None:
+        # A map built for a 2-decision stream refuses a 1-decision run.
+        bars = [_flat(9, 15), _flat(9, 16)]
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        with pytest.raises(ValueError, match="exec_map covers"):
+            walker.run([_flat(9, 15)], bars, [True], exec_map=exec_map)
+
+    def test_exec_map_n_exec_mismatch_rejected(self) -> None:
+        bars = [_flat(9, 15), _flat(9, 16)]
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        with pytest.raises(ValueError, match="exec_map covers"):
+            walker.run(bars, [_flat(9, 15)], [True, False], exec_map=exec_map)
+
+    def test_supplied_exec_map_is_used_never_rebuilt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The preload-scoped memo path: a matching injected map short-circuits
+        # the build (the module-level builder must NOT be called) and yields
+        # the identical trades.
+        bars = [
+            _flat(9, 15),
+            _bar(9, 16, "100", "100", "100", "100"),
+            _bar(9, 17, "100", "100.50", "99.80", "100.30"),
+        ]
+        signals = [True, False, False]
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
+        derived = _sim(bars, signals)
+
+        def _bomb(*args: object, **kwargs: object) -> object:
+            raise AssertionError("build_exec_grid_map must not be called with an injected map")
+
+        monkeypatch.setattr(ts_mod, "build_exec_grid_map", _bomb)
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        injected = walker.run(bars, bars, signals, exec_map=exec_map)
+        assert injected == derived
 
     def test_empty_feed_returns_no_trades(self) -> None:
-        assert simulate_trades([], [], direction=Side.BUY, tf_minutes=1) == []
+        assert _sim([], []) == []
 
     def test_no_signal_never_opens(self) -> None:
         bars = [_flat(9, 15), _flat(9, 16), _flat(9, 17)]
-        assert simulate_trades(bars, [False, False, False], direction=Side.BUY, tf_minutes=1) == []
+        assert _sim(bars, [False, False, False]) == []
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Entry @ next-open + SL / TP at level + long / short P&L
+# Entry @ the mapped next-1m adverse extreme + SL / TP adverse-max fills
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestEntryAndLevelExits:
     def test_long_take_profit_at_level(self) -> None:
-        # signal@09:15 → enter @09:16 (flat bar — HIGH 100.00, the adverse
+        # signal@09:15 → fill @09:16 (flat — HIGH 100.00, the adverse
         # extreme); TP +50 → level 100.50; @09:17 high 101 triggers it but the
         # adverse-max fill is min(level 100.50, bar low 99.50) = 99.50
         # (DEC-FILL-WORST-CASE-ONLY-001) → pnl −50, holding 2 bars.
@@ -128,13 +216,7 @@ class TestEntryAndLevelExits:
             _bar(9, 17, "100", "101", "99.50", "100.40"),
             _flat(9, 18),
         ]
-        trades = simulate_trades(
-            bars,
-            [True, False, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            take_profit_paisa=50,
-        )
+        trades = _sim(bars, [True, False, False, False], tp=50)
         assert trades == [
             ClosedTrade(
                 pnl_paisa=-50,  # worst-case: exit at the bar LOW 99.50
@@ -156,9 +238,7 @@ class TestEntryAndLevelExits:
             _bar(9, 17, "100", "100.20", "99.50", "99.80"),
             _flat(9, 18),
         ]
-        trades = simulate_trades(
-            bars, [True, False, False, False], direction=Side.BUY, tf_minutes=1, stop_loss_paisa=30
-        )
+        trades = _sim(bars, [True, False, False, False], sl=30)
         assert len(trades) == 1
         assert trades[0].pnl_paisa == -50  # exit at the bar LOW, not the level
         assert trades[0].mae_paisa == 50  # low 99.50
@@ -173,13 +253,7 @@ class TestEntryAndLevelExits:
             _bar(9, 17, "100", "100.30", "99.50", "99.70"),
             _flat(9, 18),
         ]
-        trades = simulate_trades(
-            bars,
-            [True, False, False, False],
-            direction=Side.SELL,
-            tf_minutes=1,
-            take_profit_paisa=40,
-        )
+        trades = _sim(bars, [True, False, False, False], direction=Side.SELL, tp=40)
         assert trades[0].pnl_paisa == -30  # covered at the bar HIGH, not the level
         assert trades[0].mfe_paisa == 50  # short profits as price falls (low 99.50)
         assert trades[0].mae_paisa == 30  # high 100.30 is adverse for a short
@@ -193,28 +267,42 @@ class TestEntryAndLevelExits:
             _bar(9, 17, "100", "100.50", "99.80", "100.20"),
             _flat(9, 18),
         ]
-        trades = simulate_trades(
-            bars, [True, False, False, False], direction=Side.SELL, tf_minutes=1, stop_loss_paisa=25
-        )
+        trades = _sim(bars, [True, False, False, False], direction=Side.SELL, sl=25)
         assert trades[0].pnl_paisa == -50
 
-    def test_stop_loss_on_entry_bar_holds_one(self) -> None:
-        # The entry bar itself breaches the SL intrabar → holding 1. (Under
-        # the adverse-max law a LONG TP can never fire on its own entry bar —
-        # entry = the bar HIGH, so the TP level sits above it by
-        # construction — hence the entry-bar-exit branch is pinned on the SL
-        # leg, DEC-FILL-WORST-CASE-ONLY-001.)
+    def test_entry_bar_level_touch_defers_no_same_bar_exit(self) -> None:
+        # §2.4 same-bar deferral (mirrors the Rust
+        # ``entry_bar_level_touch_defers_no_same_bar_exit``): the entry bar's
+        # range breaches the SL level but the entry bar NEVER exits — the
+        # touch is COUNTED (exits_deferred) and detection begins on the next
+        # 1m bar. Entry @09:16 HIGH 101.00; SL 100 → level 100.00; the entry
+        # bar's low 99.00 ≤ 100.00 → deferred. @09:17 (flat 100): low
+        # 100.00 ≤ 100.00 → SL fires, fill min(100.00, 100.00) = 100.00 →
+        # pnl 10000 − 10100 = −100, holding 2 (NEVER 1).
         bars = [
             _flat(9, 15),
-            _bar(9, 16, "100", "101", "99", "100.50"),  # entry HIGH 101; low 99
+            _bar(9, 16, "100", "101", "99", "100.50"),  # entry HIGH 101; low 99 touches
             _flat(9, 17),
         ]
-        trades = simulate_trades(
-            bars, [True, False, False], direction=Side.BUY, tf_minutes=1, stop_loss_paisa=100
-        )
-        # SL level = 101.00 − 1.00 = 100.00; fill = min(100.00, low 99.00).
-        assert trades[0].holding_bars == 1
-        assert trades[0].pnl_paisa == 9900 - 10100
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1, stop_loss_paisa=100)
+        trades = walker.run(bars, bars, [True, False, False])
+        assert walker.exits_deferred == 1
+        assert trades[0].holding_bars == 2  # entry bar never exits
+        assert trades[0].pnl_paisa == 10_000 - 10_100
+        assert trades[0].mae_paisa == 200  # entry-bar low 99.00 vs entry 101.00
+
+    def test_entry_bar_no_touch_counts_no_deferral(self) -> None:
+        # The deferral counter stays 0 when the entry bar's range never
+        # touches a level (the untriggered arm of the exits_deferred count).
+        bars = [
+            _flat(9, 15),
+            _bar(9, 16, "100", "100.10", "99.90", "100"),
+            _flat(9, 17),
+        ]
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1, stop_loss_paisa=1000)
+        trades = walker.run(bars, bars, [True, False, False])
+        assert walker.exits_deferred == 0
+        assert len(trades) == 1
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -233,188 +321,338 @@ class TestSameBarTieBreak:
         ]
 
     def test_sl_first_tie_hardcoded(self) -> None:
-        # The tie is SL-first ALWAYS (DEC-FILL-WORST-CASE-ONLY-001 — the
-        # retired SameBarTie.TP_FIRST optimism knob is deleted). Fill =
-        # min(level 99.00, bar low 98.00) = 98.00; entry = the flat @09:16
-        # bar's HIGH 100.00.
-        trades = simulate_trades(
-            self._bars(),
-            [True, False, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            stop_loss_paisa=100,
-            take_profit_paisa=100,
-        )
+        # The tie is SL-first ALWAYS (DEC-FILL-WORST-CASE-ONLY-001). Entry =
+        # the flat @09:16 bar's HIGH 100.00 (10000). SL level = 100.00 - 1.00
+        # = 99.00 (9900); TP level = 100.00 + 1.00 = 101.00 (10100). On the
+        # @09:17 bar (low 98.00 / high 102.00) BOTH levels fire — low 9800 <=
+        # SL 9900 AND high 10200 >= TP 10100 — a GENUINE both-levels-touched
+        # tie. The worst-case level fill is min(level, low): SL -> min(9900,
+        # 9800) = 9800, TP -> min(10100, 9800) = 9800, so pnl == -200 is
+        # INVARIANT under either leg — the DISTINGUISHING observable is
+        # exit_reason, which MUST read stop_loss (SL-first). A test that pins
+        # only pnl is vacuous w.r.t. its stated purpose (hostile-review
+        # coverage-honesty; the same SL-first tie is hardcoded in the Rust
+        # kernel — pinned in tests/golden/test_trade_sim_rust_golden.py).
+        sink: list[ts_mod.TradeDetail] = []
+        trades = _sim(self._bars(), [True, False, False, False], sl=100, tp=100, sink=sink)
         assert trades[0].pnl_paisa == 9800 - 10000  # SL first, at the bar LOW
+        assert sink[0].exit_reason == "stop_loss"  # pins SL over TP on the genuine tie
 
     def test_short_same_bar_sl_first(self) -> None:
-        # SELL mirror: entry at the flat bar's LOW 100.00; SL level 101.00;
-        # cover = max(level 10100, bar high 10200) = 10200.
-        trades = simulate_trades(
+        # SELL mirror: entry at the flat @09:16 bar's LOW 100.00 (10000). SL
+        # level = 100.00 + 1.00 = 101.00 (10100, above); TP level = 100.00 -
+        # 1.00 = 99.00 (9900, below). On the @09:17 bar (low 98.00 / high
+        # 102.00) BOTH fire — high 10200 >= SL 10100 AND low 9800 <= TP 9900 —
+        # a GENUINE tie. Cover = max(level, high): SL -> max(10100, 10200) =
+        # 10200, TP -> max(9900, 10200) = 10200, so pnl == -200 is INVARIANT;
+        # exit_reason MUST read stop_loss (SL-first).
+        sink: list[ts_mod.TradeDetail] = []
+        trades = _sim(
             self._bars(),
             [True, False, False, False],
             direction=Side.SELL,
-            tf_minutes=1,
-            stop_loss_paisa=100,
-            take_profit_paisa=100,
+            sl=100,
+            tp=100,
+            sink=sink,
         )
         assert trades[0].pnl_paisa == 10000 - 10200
+        assert sink[0].exit_reason == "stop_loss"  # pins SL over TP on the genuine tie
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Forced 15:20 IST exit
+# Forced session-close exit on the 1m grid
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestForcedExit:
     def test_forced_exit_overrides_open_position(self) -> None:
         # Enter @15:18, ride to the 15:20 bar → forced exit at its LOW
-        # (100.00 — the adverse extreme, DEC-FILL-WORST-CASE-ONLY-001).
+        # (100.00 — the adverse extreme). The boundary minute is STORED →
+        # forced_fill_slid_minutes stays 0.
         bars = [
-            _bar(15, 17, "100", "100", "100", "100"),
-            _bar(15, 18, "100", "100", "100", "100"),
-            _bar(15, 19, "100", "100", "100", "100"),
+            _flat(15, 17),
+            _flat(15, 18),
+            _flat(15, 19),
             _bar(15, 20, "100.30", "101", "100", "100.50"),
         ]
-        trades = simulate_trades(
-            bars,
-            [True, False, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            stop_loss_paisa=1000,
-            take_profit_paisa=1000,
+        walker = TradeSimWalker(
+            direction=Side.BUY, tf_minutes=1, stop_loss_paisa=1000, take_profit_paisa=1000
         )
+        trades = walker.run(bars, bars, [True, False, False, False])
         assert trades[0].pnl_paisa == 0  # exit at the forced bar's LOW 100.00
         assert trades[0].exit_ts == _ts(15, 20)
         assert trades[0].holding_bars == 3  # 15:18, 15:19, 15:20
+        assert walker.forced_fill_slid_minutes == 0
 
-    def test_entry_skipped_when_next_bar_is_forced(self) -> None:
-        # signal @15:19 → entry would be @15:20 (forced) → no position opens.
+    def test_entry_skipped_when_fill_bar_is_forced(self) -> None:
+        # signal @15:19 → the mapped fill bar is @15:20 (forced) → the
+        # walker's forced entry gate drops it; no position ever opens.
         bars = [
-            _bar(15, 19, "100", "100", "100", "100"),
+            _flat(15, 19),
             _bar(15, 20, "100", "105", "95", "100"),
             _bar(15, 21, "100", "105", "95", "100"),
         ]
-        trades = simulate_trades(
-            bars, [True, False, False], direction=Side.BUY, tf_minutes=1, take_profit_paisa=10
-        )
+        trades = _sim(bars, [True, False, False], tp=10)
         assert trades == []
 
-    def test_forced_exit_is_tf_aware(self) -> None:
-        # A 15-minute bar opening 15:15 IST spans to 15:30 → forced (tf-aware fix).
+    def test_missing_boundary_minute_slides_the_forced_fill(self) -> None:
+        # §2.5/§5.2: the exact 15:20 minute is NOT stored — the first stored
+        # at-or-after bar (15:21) takes the forced close, counted
+        # forced_fill_slid_minutes. Fill at that bar's LOW 100.00 → pnl 0.
         bars = [
-            _bar(15, 0, "100", "100", "100", "100"),
-            _bar(15, 15, "100.40", "101", "99", "100.80"),
+            _flat(15, 17),
+            _flat(15, 18),
+            _flat(15, 19),
+            _bar(15, 21, "100.30", "101", "100", "100.50"),  # 15:20 missing
         ]
-        trades = simulate_trades(
-            bars, [True, False], direction=Side.BUY, tf_minutes=15, take_profit_paisa=10_000
-        )
-        # Enter @15:15 open? No — entry is next-open; here the signal is on the
-        # 15:00 bar so entry is the 15:15 bar, which IS forced → entry skipped.
-        assert trades == []
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        trades = walker.run(bars, bars, [True, False, False, False])
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(15, 21)
+        assert trades[0].pnl_paisa == 0
+        assert walker.forced_fill_slid_minutes == 1
 
-    def test_forced_exit_mid_trade_coarse_tf(self) -> None:
-        # signal @14:30 (15m) → enter @14:45 bar; 15:15 bar straddles 15:20 → forced.
-        bars = [
-            _bar(14, 30, "100", "100", "100", "100"),
+    def test_coarse_tf_forced_exit_on_the_1m_grid(self) -> None:
+        # tf=15 decision bars over a REAL 1m stream: the forced classification
+        # is per 1-MINUTE bar (tf=1 in the walker), so the position closes on
+        # the 15:20 1m bar exactly — never a straddling 15m-bar rule. Signal
+        # on the 15:00 decision bar → close instant 15:15 → entry at the
+        # 15:15 1m bar's HIGH 100.00; forced at the 15:20 1m bar's LOW 99.90.
+        decision = [
             _bar(14, 45, "100", "100", "100", "100"),
-            _bar(15, 0, "100", "100", "100", "100"),
-            _bar(15, 15, "100.20", "100.30", "99.90", "100.10"),
+            _flat(15, 0),  # signal here (close instant 15:15)
+        ]
+        exec_1m = [
+            _flat(15, 14),
+            _flat(15, 15),  # entry fill bar
+            _flat(15, 16),
+            _flat(15, 17),
+            _flat(15, 18),
+            _flat(15, 19),
+            _bar(15, 20, "100.20", "100.30", "99.90", "100.10"),  # forced 1m bar
         ]
         trades = simulate_trades(
-            bars,
-            [True, False, False, False],
+            decision,
+            [False, True],
             direction=Side.BUY,
             tf_minutes=15,
+            exec_bars_1m=exec_1m,
             take_profit_paisa=9999,
         )
-        assert trades[0].pnl_paisa == -10  # forced at the 15:15 bar LOW 99.90
-        assert trades[0].holding_bars == 3
+        assert len(trades) == 1
+        assert trades[0].entry_ts == _ts(15, 15)
+        assert trades[0].exit_ts == _ts(15, 20)
+        assert trades[0].pnl_paisa == -10  # forced at the 15:20 1m bar's LOW 99.90
+        assert trades[0].holding_bars == 6  # 1m bars 15:15..15:20 inclusive
+
+    def test_coarse_tf_entry_mapped_onto_forced_bar_is_dropped(self) -> None:
+        # tf=15 signal on the 15:05 decision bar → close instant 15:20 → the
+        # mapped fill bar IS the forced 15:20 1m bar → the entry never fills.
+        decision = [_flat(15, 5)]
+        exec_1m = [_flat(15, 19), _bar(15, 20, "100", "105", "95", "100"), _flat(15, 21)]
+        trades = simulate_trades(
+            decision, [True], direction=Side.BUY, tf_minutes=15, exec_bars_1m=exec_1m
+        )
+        assert trades == []
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Mode-B signal exit + NEXT_OPEN level fill
+# Mode-B signal exit (mapped next-1m adverse-extreme fill + §2.4 deferral)
 # ────────────────────────────────────────────────────────────────────────
 
 
-class TestSignalExitAndNextOpenFill:
-    def test_signal_exit_fills_next_open(self) -> None:
-        # Enter @09:16; exit signal @09:17 → fill at @09:18 OPEN 100.70 → +70.
+class TestModeBSignalExit:
+    def test_signal_exit_fills_at_mapped_bar_adverse_extreme(self) -> None:
+        # Enter @09:16; exit signal on decision @09:17 → fill @09:18 at that
+        # bar's LOW (the adverse extreme for a BUY exit) 100.60 → +60.
         bars = [
             _flat(9, 15),
             _bar(9, 16, "100", "100", "100", "100"),
             _bar(9, 17, "100", "100.90", "99.90", "100.80"),
-            _bar(9, 18, "100.70", "100.70", "100.70", "100.70"),
+            _bar(9, 18, "100.70", "100.90", "100.60", "100.70"),
             _flat(9, 19),
         ]
-        trades = simulate_trades(
+        sink: list[ts_mod.TradeDetail] = []
+        trades = _sim(
             bars,
             [True, False, False, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            exit_signals=[False, False, True, False, False],
+            exits=[False, False, True, False, False],
+            sink=sink,
         )
-        assert trades[0].pnl_paisa == 70  # @09:18 open 100.70
+        assert [d.exit_reason for d in sink] == ["signal"]
+        assert trades[0].pnl_paisa == 60  # @09:18 LOW 100.60 − entry 100.00
         assert trades[0].exit_ts == _ts(9, 18)
         assert trades[0].holding_bars == 3
 
-    # The retired ``LevelFill.NEXT_OPEN`` deferral tests are DELETED with the
-    # knob (DEC-FILL-WORST-CASE-ONLY-001): an SL/TP always fills on its trigger
-    # bar under the adverse-max law — pinned in test_engine_trade_sim_fill_mode.
+    def test_exit_due_on_own_entry_bar_defers_to_the_successor(self) -> None:
+        # §2.4 (mirrors the Rust ``mode_b_deferred_pending_fills_on_the_
+        # successor``): entry AND exit signals on the same decision bar map
+        # both dues onto the SAME 1m bar — the entry fills there (HIGH
+        # 105.00) and the exit DEFERS into the pending slot, filling on the
+        # successor at its LOW 96.00 with the (open, open) fold. pnl = 9600 −
+        # 10500 = −900; mae = entry-bar fold 10500 − 9800 = 700 (the
+        # successor folds (9900, 9900) → adverse 600 < 700); holding 2.
+        bars = [
+            _flat(9, 15),
+            _bar(9, 16, "100", "105", "98", "100"),  # entry bar; exit_due defers
+            _bar(9, 17, "99", "101", "96", "100"),  # pending fills at LOW 96
+        ]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = _sim(bars, [True, False, False], exits=[True, False, False], sink=sink)
+        assert [d.exit_reason for d in sink] == ["signal"]
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=-900,
+                mfe_paisa=0,
+                mae_paisa=700,
+                holding_bars=2,
+                entry_ts=_ts(9, 16),
+                exit_ts=_ts(9, 17),
+                direction=Side.BUY,
+            )
+        ]
+
+    def test_deferred_pending_at_end_of_data_closes_at_close_basis(self) -> None:
+        # Mirrors the Rust ``mode_b_deferred_pending_at_end_of_data_closes_
+        # at_close_basis``: an exit_due on the entry bar defers; with NO
+        # successor the pending is IGNORED by finish(), which closes
+        # end_of_data at the entry bar's CLOSE (the B3 basis). Entry HIGH
+        # 105.00, close 100.00 → pnl −500, holding 1; mae = 10500 − 9800.
+        bars = [
+            _flat(9, 15),
+            _bar(9, 16, "100", "105", "98", "100"),  # entry AND last stored bar
+        ]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = _sim(bars, [True, False], exits=[True, False], sink=sink)
+        assert [d.exit_reason for d in sink] == ["end_of_data"]
+        assert trades[0].pnl_paisa == -500  # CLOSE 100.00 − entry HIGH 105.00
+        assert trades[0].mae_paisa == 700
+        assert trades[0].holding_bars == 1
+        assert sink[0].exit_fill_paisa == 10_000  # the CLOSE, never the LOW 9800
+
+    def test_exit_due_beats_forced_on_the_same_bar(self) -> None:
+        # Precedence pin (mirrors the Rust ``mode_b_exit_due_beats_forced_on_
+        # the_same_bar``): a bar that is BOTH the mapped exit-fill bar AND a
+        # forced 1m bar closes via the SIGNAL arm — same adverse fill, but
+        # the reason reads "signal", never "forced_1520". Exit signal on the
+        # 15:19 decision bar → exit_due at the forced 15:20 bar. Entry
+        # @15:18 HIGH 105.00; fill at the 15:20 bar's LOW 97.00 → −800; the
+        # fold on the fill bar is (open, open) = (99, 99) → adverse 600 <
+        # the entry-bar 700 → mae 700.
+        bars = [
+            _flat(15, 17),
+            _bar(15, 18, "100", "105", "98", "100"),  # entry HIGH 105
+            _bar(15, 19, "100", "104", "99", "100"),
+            _bar(15, 20, "99", "101", "97", "100"),  # forced AND exit_due
+        ]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = _sim(
+            bars, [True, False, False, False], exits=[False, False, True, False], sink=sink
+        )
+        assert [d.exit_reason for d in sink] == ["signal"]
+        assert trades[0].pnl_paisa == 9700 - 10_500
+        assert trades[0].mae_paisa == 700
+        assert trades[0].holding_bars == 3
+
+    def test_exit_due_while_flat_does_nothing(self) -> None:
+        # An exit signal with no open position maps its due bar but the
+        # walker is flat there — nothing happens (the cheap path skips it).
+        bars = [_flat(9, 15), _flat(9, 16), _flat(9, 17)]
+        trades = _sim(bars, [False, False, False], exits=[True, False, False])
+        assert trades == []
 
 
 # ────────────────────────────────────────────────────────────────────────
-# End-of-data close + the single-position / exit-bar rules
+# End-of-data close, the B3 terminal carve-out + the position rules
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestEndOfDataAndPositionRules:
     def test_open_position_closes_at_end_of_data(self) -> None:
         # No SL/TP/forced → rides to the end → closes at the last bar's LOW
-        # (the adverse extreme for a BUY, DEC-FILL-WORST-CASE-ONLY-001).
+        # (the adverse extreme for a BUY): 99.80 − entry 100.00 = −20.
         bars = [
             _flat(9, 15),
             _bar(9, 16, "100", "100", "100", "100"),
             _bar(9, 17, "100", "100.50", "99.80", "100.30"),
         ]
-        trades = simulate_trades(bars, [True, False, False], direction=Side.BUY, tf_minutes=1)
+        trades = _sim(bars, [True, False, False])
         assert trades[0].pnl_paisa == -20  # last bar LOW 99.80
         assert trades[0].holding_bars == 2
         assert trades[0].exit_ts == _ts(9, 17)
 
-    def test_signals_ignored_while_in_position(self) -> None:
-        # A signal every bar but only ONE position is open at a time.
+    def test_end_of_data_sell_closes_at_last_bar_high(self) -> None:
+        # SELL mirror: entry at the flat bar's LOW 100.00; EOD covers at the
+        # last bar's HIGH 100.50 → −50.
         bars = [
             _flat(9, 15),
             _bar(9, 16, "100", "100", "100", "100"),
-            _bar(9, 17, "100", "100", "100", "100"),
-            _bar(9, 18, "100", "100", "100", "100"),
+            _bar(9, 17, "100", "100.50", "99.80", "100.30"),
         ]
-        trades = simulate_trades(bars, [True, True, True, True], direction=Side.BUY, tf_minutes=1)
-        # One open across the whole window, closed at EOD.
+        trades = _sim(bars, [True, False, False], direction=Side.SELL)
+        assert trades[0].pnl_paisa == -50
+
+    def test_b3_terminal_entry_bar_is_last_bar_closes_at_close(self) -> None:
+        # The B3 terminal carve-out (mirrors the Rust ``terminal_close_on_
+        # entry_bar_prices_at_close_not_extreme``): the entry bar IS the
+        # stream's last stored bar → the end_of_data fill is that bar's
+        # CLOSE 100.45, never the adverse LOW 100.10 (the full-range phantom
+        # loss). Entry HIGH 100.60 → pnl = 10045 − 10060 = −15, holding 1.
+        bars = [
+            _flat(9, 15),
+            _bar(9, 16, "100.20", "100.60", "100.10", "100.45"),
+        ]
+        sink: list[ts_mod.TradeDetail] = []
+        trades = _sim(bars, [True, False], sink=sink)
+        assert [d.exit_reason for d in sink] == ["end_of_data"]
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=-15,
+                mfe_paisa=0,  # entry IS the bar high — nothing above it
+                mae_paisa=50,  # low 100.10 vs entry 100.60
+                holding_bars=1,
+                entry_ts=_ts(9, 16),
+                exit_ts=_ts(9, 16),
+                direction=Side.BUY,
+            )
+        ]
+        assert sink[0].exit_fill_paisa == 10_045
+
+    def test_b3_terminal_sell_closes_at_close(self) -> None:
+        # SELL twin (mirrors the Rust ``terminal_close_on_entry_bar_sell_
+        # prices_at_close``): entry at the bar's LOW 100.10; close basis
+        # 100.45 → pnl = 10010 − 10045 = −35; mae = high 100.60 − 100.10.
+        bars = [
+            _flat(9, 15),
+            _bar(9, 16, "100.20", "100.60", "100.10", "100.45"),
+        ]
+        trades = _sim(bars, [True, False], direction=Side.SELL)
+        assert trades[0].pnl_paisa == -35
+        assert trades[0].mae_paisa == 50
+        assert trades[0].holding_bars == 1
+
+    def test_signals_ignored_while_in_position(self) -> None:
+        # A signal every bar but only ONE position is open at a time.
+        bars = [_flat(9, 15), _flat(9, 16), _flat(9, 17), _flat(9, 18)]
+        trades = _sim(bars, [True, True, True, True])
         assert len(trades) == 1
         assert trades[0].holding_bars == 3  # 09:16, 09:17, 09:18
 
-    def test_entry_signal_on_exit_bar_is_ignored(self) -> None:
-        # TP closes @09:17 AND a signal fires @09:17 → no immediate re-entry; the
+    def test_entry_due_on_exit_bar_is_ignored(self) -> None:
+        # TP closes @09:17 AND an entry is due @09:17 (signal on the 09:16
+        # decision bar) → no immediate re-entry on the consumed exit bar; the
         # next signal (@09:18) re-enters @09:19.
         bars = [
             _flat(9, 15),
             _bar(9, 16, "100", "100", "100", "100"),
             _bar(9, 17, "100", "101", "100", "100.60"),  # TP +50 closes here
-            _bar(9, 18, "100", "100", "100", "100"),
-            _bar(9, 19, "100", "100", "100", "100"),
-            _bar(9, 20, "100", "100", "100", "100"),
+            _flat(9, 18),
+            _flat(9, 19),
+            _flat(9, 20),
         ]
-        trades = simulate_trades(
-            bars,
-            [True, False, True, True, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            take_profit_paisa=50,
-        )
+        trades = _sim(bars, [True, True, False, True, False, False], tp=50)
         assert len(trades) == 2
-        assert trades[0].exit_ts == _ts(9, 17)  # first: TP
+        assert trades[0].exit_ts == _ts(9, 17)  # first: TP (fill min(10050, 10000))
         # second: signal@09:18 → enter@09:19 → EOD close@09:20.
         assert trades[1].entry_ts == _ts(9, 19)
 
@@ -431,45 +669,42 @@ class TestLevelsMatrix:
         [(30, 50), (30, None), (None, 50), (None, None)],
     )
     def test_levels_optionality(self, direction: Side, sl: int | None, tp: int | None) -> None:
-        # A calm 4-bar window that never breaches a ±$1 band → every variant
-        # rides to EOD (exercising every _levels branch without an early exit).
+        # A calm window that never breaches a ±30-paisa band → every variant
+        # rides to EOD (exercising every _levels branch without an early
+        # exit). ±0.10 moves stay inside both bands.
         bars = [
             _flat(9, 15),
             _bar(9, 16, "100", "100.10", "99.90", "100"),
             _bar(9, 17, "100", "100.10", "99.90", "100"),
         ]
-        trades = simulate_trades(
-            bars,
-            [True, False, False],
-            direction=direction,
-            tf_minutes=1,
-            stop_loss_paisa=sl,
-            take_profit_paisa=tp,
-        )
+        trades = _sim(bars, [True, False, False], direction=direction, sl=sl, tp=tp)
         assert len(trades) == 1
         assert trades[0].holding_bars == 2
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Streaming push / finish API
+# Streaming push_1m / finish API
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestStreamingAPI:
     def test_push_finish_matches_run(self) -> None:
+        # The batch path is the streaming path + the map projection: driving
+        # push_1m manually from the map's arm_source reproduces run() exactly.
         bars = [
             _flat(9, 15),
             _bar(9, 16, "100", "100", "100", "100"),
             _bar(9, 17, "100", "100.50", "99.80", "100.30"),
         ]
         signals = [True, False, False]
+        batch = _sim(bars, signals)
 
-        batch = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
-
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
         walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
         streamed: list[ClosedTrade] = []
-        for bar, sig in zip(bars, signals, strict=True):
-            closed = walker.push(bar, entry_signal=sig)
+        for j, bar in enumerate(bars):
+            src = exec_map.arm_source[j]
+            closed = walker.push_1m(bar, entry_due=src >= 0 and signals[src])
             if closed is not None:
                 streamed.append(closed)
         tail = walker.finish()
@@ -479,7 +714,7 @@ class TestStreamingAPI:
 
     def test_finish_on_flat_walker_is_none(self) -> None:
         walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
-        walker.push(_flat(9, 15), entry_signal=False)
+        assert walker.push_1m(_flat(9, 15), entry_due=False) is None
         assert walker.finish() is None
 
 
@@ -497,30 +732,26 @@ class TestExcursions:
             _bar(9, 16, "100", "100.30", "99.80", "100"),
             _bar(9, 17, "100", "100.90", "99.60", "100.20"),
         ]
-        trades = simulate_trades(bars, [True, False, False], direction=Side.BUY, tf_minutes=1)
+        trades = _sim(bars, [True, False, False])
         assert trades[0].mfe_paisa == 60  # 100.90 − entry 100.30
         assert trades[0].mae_paisa == 70  # entry 100.30 − 99.60
 
     def test_mfe_mae_short(self) -> None:
         # Short entry = the @09:16 bar's LOW 99.80 (adverse extreme). Profit
-        # is price falling: best low 99.60 → MFE 20; worst high 100.90 → MAE 110.
+        # is price falling: best low 99.60 → MFE 20; worst high 100.90 → MAE
+        # 110.
         bars = [
             _flat(9, 15),
             _bar(9, 16, "100", "100.30", "99.80", "100"),
             _bar(9, 17, "100", "100.90", "99.60", "100.20"),
         ]
-        trades = simulate_trades(bars, [True, False, False], direction=Side.SELL, tf_minutes=1)
+        trades = _sim(bars, [True, False, False], direction=Side.SELL)
         assert trades[0].mfe_paisa == 20  # entry 99.80 − 99.60
         assert trades[0].mae_paisa == 110  # 100.90 − entry 99.80
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Session-aware forced exit (DEC-SESSION-FORCED-EXIT-001)
-#
-# The forced-exit boundary is the bar SESSION's own close − 10min: 15:20 IST
-# on a regular day (unchanged regression), the early close − 10min on a
-# half-day / Muhurat session. Each case drives the REAL ``TradeSimWalker.push``
-# production path and asserts the resolved exit timestamp.
+# Session-aware forced exit (DEC-SESSION-FORCED-EXIT-001 on the 1m grid)
 # ────────────────────────────────────────────────────────────────────────
 
 # Real in-scope short sessions (verified from ``MUHURAT_SESSIONS``):
@@ -532,30 +763,28 @@ _AFTERNOON_MUHURAT = date(2025, 10, 21)  # 13:45-14:45 IST → forced 14:35
 _EXTENDED_OUTAGE = date(2021, 2, 24)
 
 
-def _trade_with_signal_then_ride(
-    bars: list[CandleBar], *, tf_minutes: int = 1
-) -> list[ClosedTrade]:
-    """Signal on bar[0], then ride flat: a position opens at bar[1]'s open and is
-    only ever closed by the session forced exit (huge SL/TP disable the legs)."""
+def _trade_with_signal_then_ride(bars: list[CandleBar]) -> list[ClosedTrade]:
+    """Signal on bar[0] → position opens at bar[1] and is only ever closed by
+    the session forced exit / end of data (huge SL/TP disable the legs)."""
     signals = [i == 0 for i in range(len(bars))]
     return simulate_trades(
         bars,
         signals,
         direction=Side.BUY,
-        tf_minutes=tf_minutes,
+        tf_minutes=1,
+        exec_bars_1m=bars,
         stop_loss_paisa=100_000,
         take_profit_paisa=100_000,
     )
 
 
 class TestSessionAwareForcedExit:
-    def test_regular_day_still_exits_at_1520_unchanged(self) -> None:
-        # Regression: a regular trading day forces out at 15:20 IST exactly.
+    def test_regular_day_still_exits_at_1520(self) -> None:
         bars = [
-            _bar(15, 18, "100", "100", "100", "100"),
-            _bar(15, 19, "100", "100", "100", "100"),
+            _flat(15, 18),
+            _flat(15, 19),
             _bar(15, 20, "100.30", "101", "100", "100.50"),
-            _bar(15, 21, "100", "100", "100", "100"),
+            _flat(15, 21),
         ]
         trades = _trade_with_signal_then_ride(bars)
         assert len(trades) == 1
@@ -563,12 +792,12 @@ class TestSessionAwareForcedExit:
         assert trades[0].pnl_paisa == 0  # filled at the bar LOW 100.00
 
     def test_regular_day_no_premature_exit_before_1520(self) -> None:
-        # A bar at 15:19 (one minute BEFORE the 15:20 boundary) does NOT force out;
+        # A bar at 15:19 (one minute BEFORE the boundary) does NOT force out;
         # the 15:20 bar does.
         bars = [
-            _bar(15, 17, "100", "100", "100", "100"),
-            _bar(15, 18, "100", "100", "100", "100"),
-            _bar(15, 19, "100", "100", "100", "100"),  # NOT forced (close 15:20 ≯ 15:20)
+            _flat(15, 17),
+            _flat(15, 18),
+            _flat(15, 19),  # NOT forced (close 15:20 not strictly after 15:20)
             _bar(15, 20, "100.70", "101", "100", "100.90"),  # forced here
         ]
         trades = _trade_with_signal_then_ride(bars)
@@ -577,13 +806,12 @@ class TestSessionAwareForcedExit:
         assert trades[0].holding_bars == 3  # 15:18, 15:19, 15:20
 
     def test_evening_muhurat_exits_at_close_minus_10_not_1520(self) -> None:
-        # The 2021 evening Diwali Muhurat runs 18:15-19:15 IST → forced exit 19:05.
-        # On origin/main this trade would force out IMMEDIATELY on the first
-        # managed bar (every evening bar is "≥ 15:20"); the fix exits at 19:05.
+        # The 2021 evening Diwali Muhurat runs 18:15-19:15 IST → forced 19:05
+        # (session-resolved; a hardcoded 15:20 would force out immediately).
         bars = [
-            _bar(18, 30, "100", "100", "100", "100", day=_EVENING_MUHURAT),
-            _bar(18, 31, "100", "100", "100", "100", day=_EVENING_MUHURAT),
-            _bar(19, 4, "100", "100", "100", "100", day=_EVENING_MUHURAT),  # NOT forced
+            _flat(18, 30, day=_EVENING_MUHURAT),
+            _flat(18, 31, day=_EVENING_MUHURAT),
+            _flat(19, 4, day=_EVENING_MUHURAT),  # NOT forced
             _bar(19, 5, "100.40", "101", "100", "100.60", day=_EVENING_MUHURAT),  # forced
         ]
         trades = _trade_with_signal_then_ride(bars)
@@ -592,10 +820,10 @@ class TestSessionAwareForcedExit:
         assert trades[0].pnl_paisa == 0  # forced at the 19:05 bar LOW 100.00
 
     def test_afternoon_muhurat_2025_exits_at_close_minus_10(self) -> None:
-        # The 2025 afternoon Muhurat runs 13:45-14:45 IST → forced exit 14:35.
+        # The 2025 afternoon Muhurat runs 13:45-14:45 IST → forced 14:35.
         bars = [
-            _bar(14, 0, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
-            _bar(14, 34, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),  # NOT forced
+            _flat(14, 0, day=_AFTERNOON_MUHURAT),
+            _flat(14, 34, day=_AFTERNOON_MUHURAT),  # NOT forced
             _bar(14, 35, "100.20", "101", "100", "100.30", day=_AFTERNOON_MUHURAT),  # forced
         ]
         trades = _trade_with_signal_then_ride(bars)
@@ -660,6 +888,7 @@ class TestSessionAwareForcedExit:
             signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=100_000,
             take_profit_paisa=100_000,
             detail_sink=sink,
@@ -712,11 +941,9 @@ class TestSessionAwareForcedExit:
         assert trades[0].mfe_paisa == 20
 
     def test_position_open_exactly_at_forced_minute_exits_that_bar(self) -> None:
-        # A position still open exactly AT the forced-exit boundary bar exits on
-        # THAT bar (at its adverse extreme), not the next.
         bars = [
-            _bar(14, 33, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
-            _bar(14, 34, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _flat(14, 33, day=_AFTERNOON_MUHURAT),
+            _flat(14, 34, day=_AFTERNOON_MUHURAT),
             _bar(14, 35, "100.50", "101", "100", "100.90", day=_AFTERNOON_MUHURAT),  # boundary
             _bar(14, 36, "200", "200", "200", "200", day=_AFTERNOON_MUHURAT),  # never reached
         ]
@@ -728,11 +955,11 @@ class TestSessionAwareForcedExit:
     def test_half_day_session_exits_at_early_close_minus_10(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # No real HALF_DAY date exists in 2021-2026 (NSE retired pre-festival
-        # half-days; the enum is forward-compat). Drive a genuine HALF_DAY
-        # session (12:30 early close → forced 12:20) through the production
-        # ``get_session_checked`` seam so the real ``_forced_exit_seconds``
-        # resolver runs.
+        # No real HALF_DAY date exists in 2020-2026 (the enum is
+        # forward-compat). Drive a genuine HALF_DAY session (12:30 early
+        # close → forced 12:20) through the production ``get_session_checked``
+        # seam so the real ``_forced_exit_seconds`` resolver runs. Only the
+        # WALKER's seam is patched — the map build keeps the real calendar.
         half_day = date(2024, 1, 2)
         session = TradingSession(
             date=half_day,
@@ -746,8 +973,8 @@ class TestSessionAwareForcedExit:
             lambda d: session if d == half_day else None,
         )
         bars = [
-            _bar(12, 0, "100", "100", "100", "100", day=half_day),
-            _bar(12, 19, "100", "100", "100", "100", day=half_day),  # NOT forced
+            _flat(12, 0, day=half_day),
+            _flat(12, 19, day=half_day),  # NOT forced
             _bar(12, 20, "100.10", "101", "100", "100.30", day=half_day),  # forced @ 12:20
         ]
         trades = _trade_with_signal_then_ride(bars)
@@ -756,12 +983,11 @@ class TestSessionAwareForcedExit:
         assert trades[0].pnl_paisa == 0  # forced-bar LOW 100.00 (worst-case)
 
     def test_session_with_no_reachable_forced_exit_closes_at_end_of_data(self) -> None:
-        # A short Muhurat feed that ENDS before the 19:05 boundary never force-
-        # exits — it closes deterministically at the last bar's LOW (no crash,
-        # the standard end-of-data path at the adverse extreme).
+        # A short Muhurat feed that ENDS before the 19:05 boundary never
+        # force-exits — it closes at the last bar's LOW (end of data).
         bars = [
-            _bar(18, 30, "100", "100", "100", "100", day=_EVENING_MUHURAT),
-            _bar(18, 31, "100", "100", "100", "100", day=_EVENING_MUHURAT),
+            _flat(18, 30, day=_EVENING_MUHURAT),
+            _flat(18, 31, day=_EVENING_MUHURAT),
             _bar(18, 45, "100", "100.50", "99.80", "100.40", day=_EVENING_MUHURAT),
         ]
         trades = _trade_with_signal_then_ride(bars)
@@ -772,15 +998,13 @@ class TestSessionAwareForcedExit:
     def test_non_session_date_falls_back_to_1520_no_crash(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A bar dated on an IN-COVERAGE date with NO trading session
-        # (get_session_checked → None) must not crash; the resolver returns None
-        # and is_forced_exit_bar falls back to the standard 15:20 boundary. A
-        # contiguous real feed never hits this. (An OUT-of-coverage weekday now
-        # raises instead — see TestOutOfCoverageDateRefusesLoudly.)
+        # An IN-COVERAGE date with NO trading session (get_session_checked →
+        # None) must not crash: the resolver caches None and
+        # is_forced_exit_bar falls back to the standard 15:20 boundary.
         monkeypatch.setattr(ts_mod, "get_session_checked", lambda d: None)
         bars = [
-            _bar(15, 18, "100", "100", "100", "100"),
-            _bar(15, 19, "100", "100", "100", "100"),
+            _flat(15, 18),
+            _flat(15, 19),
             _bar(15, 20, "100.30", "101", "100", "100.50"),
         ]
         trades = _trade_with_signal_then_ride(bars)
@@ -789,9 +1013,9 @@ class TestSessionAwareForcedExit:
         assert trades[0].pnl_paisa == 0  # forced-bar LOW 100.00 (worst-case)
 
     def test_boundary_cache_resolves_once_per_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # O(1)-per-bar / O(1)-space: the boundary is resolved ONCE per IST date
-        # and memoised (1-slot, last-date), so a 3-bar single-day feed calls
-        # get_session_checked exactly once.
+        # O(1)-per-bar / O(1)-space: the boundary is resolved ONCE per IST
+        # date and memoised (1-slot). Bar 0 (flat, no entry due) never
+        # resolves; bar 1 (entry due) resolves; bar 2 (position) hits cache.
         calls: list[date] = []
         real_get_session = ts_mod.get_session_checked
 
@@ -801,28 +1025,26 @@ class TestSessionAwareForcedExit:
 
         monkeypatch.setattr(ts_mod, "get_session_checked", _counting_get_session)
         bars = [
-            _bar(15, 17, "100", "100", "100", "100"),
-            _bar(15, 18, "100", "100", "100", "100"),
+            _flat(15, 17),
+            _flat(15, 18),
             _bar(15, 20, "100.30", "101", "100", "100.50"),
         ]
         _trade_with_signal_then_ride(bars)
-        # All three bars are the same IST date → one resolve (the rest hit cache).
         assert calls == [_DAY]
 
     def test_multi_day_feed_re_resolves_boundary_per_date(self) -> None:
-        # A SINGLE simulate_trades call over a feed spanning TWO distinct IST
-        # dates pins the 1-slot cache RE-RESOLVE-on-date-change branch: day-1 is
-        # a regular day (forced 15:20), day-2 is the 2025 afternoon Muhurat
-        # (forced 14:35). Two independent trades, each force-exiting at its OWN
-        # session's boundary, prove the boundary is re-resolved on the date step.
+        # ONE batch call over TWO IST dates pins the 1-slot cache's
+        # re-resolve-on-date-change branch: day-1 regular (forced 15:20),
+        # day-2 the 2025 afternoon Muhurat (forced 14:35). Two independent
+        # trades, each forced at its OWN session's boundary. (Day-1's
+        # 15:20-decision signal is structurally inert: its fill candidate
+        # lands on day 2 → the map's cross-session gate drops it.)
         bars = [
-            # Day-1 (regular): signal @15:17 → enter @15:18 → forced @15:20.
-            _bar(15, 17, "100", "100", "100", "100"),
-            _bar(15, 18, "100", "100", "100", "100"),
+            _flat(15, 17),
+            _flat(15, 18),
             _bar(15, 20, "100.30", "101", "100", "100.50"),
-            # Day-2 (afternoon Muhurat): signal @14:33 → enter @14:34 → forced @14:35.
-            _bar(14, 33, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
-            _bar(14, 34, "100", "100", "100", "100", day=_AFTERNOON_MUHURAT),
+            _flat(14, 33, day=_AFTERNOON_MUHURAT),
+            _flat(14, 34, day=_AFTERNOON_MUHURAT),
             _bar(14, 35, "100.10", "101", "100", "100.30", day=_AFTERNOON_MUHURAT),
         ]
         signals = [True, False, False, True, False, False]
@@ -831,6 +1053,7 @@ class TestSessionAwareForcedExit:
             signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=100_000,
             take_profit_paisa=100_000,
         )
@@ -842,35 +1065,27 @@ class TestSessionAwareForcedExit:
 
 
 class TestOutOfCoverageDateRefusesLoudly:
-    """Calendar-correctness pack: the OLD silent fabrication is GONE.
-
-    A bar dated on a weekday OUTSIDE the published holiday span used to get a
-    silently-FABRICATED regular 15:20 forced-exit boundary (``get_session``
-    treats an unknown weekday as a trading day). The walker now resolves the
-    session via the strict ``get_session_checked``, so the same feed raises
-    ``HolidayDataUnavailableError`` — loud (quarantined per tuple by
-    DEC-ENGINE-TUPLE-SKIP-RESILIENT-001), never a silent wrong boundary.
+    """Calendar-correctness: a weekday OUTSIDE the published holiday span
+    raises ``HolidayDataUnavailableError`` at the walker's session resolve
+    (via the strict ``get_session_checked``) — loud, never a silently
+    fabricated 15:20 boundary. Driven through the STREAMING seam: the batch
+    path's map build would raise the same class first, so ``push_1m`` is the
+    walker-owned raise site.
     """
 
-    _OUT_DAY = date(2027, 1, 4)  # Monday, above the 2026 coverage ceiling
+    _OUT_DAY = date(2030, 1, 2)  # Wednesday, above the 2026 coverage ceiling
 
     def test_out_of_coverage_weekday_bar_raises_loud(self) -> None:
         from brutex.calendars.nse import HolidayDataUnavailableError
 
-        bars = [
-            _bar(9, 15, "100", "100", "100", "100", day=self._OUT_DAY),
-            _bar(9, 16, "100", "100", "100", "100", day=self._OUT_DAY),
-        ]
-        # The forced-exit check (and thus the session resolve) runs the moment a
-        # pending entry needs managing — the second push hits the resolver.
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
         with pytest.raises(HolidayDataUnavailableError):
-            _trade_with_signal_then_ride(bars)
+            walker.push_1m(_flat(9, 15, day=self._OUT_DAY), entry_due=True)
 
     def test_in_coverage_behaviour_unchanged(self) -> None:
-        # Byte-identical regression on an in-coverage regular day.
         bars = [
-            _bar(15, 18, "100", "100", "100", "100"),
-            _bar(15, 19, "100", "100", "100", "100"),
+            _flat(15, 18),
+            _flat(15, 19),
             _bar(15, 20, "100.30", "101", "100", "100.50"),
         ]
         trades = _trade_with_signal_then_ride(bars)
@@ -880,180 +1095,11 @@ class TestOutOfCoverageDateRefusesLoudly:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Cross-session pending-entry drop (R2-OC-2 — the overnight-entry leak)
+# Open-position session-boundary close (session_gap on the 1m stream)
 # ────────────────────────────────────────────────────────────────────────
 
 _NEXT_DAY = date(2024, 1, 3)  # the next NSE session (Wednesday)
 _FRIDAY = date(2024, 1, 5)  # a regular NSE trading Friday
-_MONDAY = date(2024, 1, 8)  # the Monday after the weekend gap
-
-
-class TestCrossSessionPendingEntryDrop:
-    """R2-OC-2: a pending entry never fills across a trading-day boundary.
-
-    Pre-fix, a signal on a session's LAST stored bar (e.g. 15:29 IST) armed
-    ``_pending_entry`` and the next pushed bar — the NEXT session's 09:15 open,
-    ~18h later — opened the position, silently capturing the whole overnight
-    gap at zero slippage. The fill gate now drops a pending entry whose fill
-    bar falls on a different IST session date than its signal bar.
-    """
-
-    @pytest.mark.parametrize("direction", [Side.BUY, Side.SELL])
-    def test_last_bar_signal_does_not_fill_next_session(self, direction: Side) -> None:
-        # THE regression: signal on day-1's last stored bar (15:29 IST); the
-        # feed then steps to day-2's 09:15 open with a 19-point overnight gap.
-        # Pre-fix: one trade entering at 119.00 next-session open. Now: NO trade.
-        bars = [
-            _bar(15, 28, "100", "101", "99", "100"),
-            _bar(15, 29, "100", "101", "99", "100"),  # signal on the session's last bar
-            _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),  # +19 gap
-            _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
-        ]
-        signals = [False, True, False, False]
-        trades = simulate_trades(bars, signals, direction=direction, tf_minutes=1)
-        assert trades == []
-
-    def test_1528_signal_still_dropped_by_forced_rule(self) -> None:
-        # Regression 2 — the PRE-EXISTING forced-bar drop is untouched: a signal
-        # at 15:28 arms, its fill bar 15:29 is >= 15:20 (a forced-exit bar) so
-        # the entry drops SAME-session; nothing may fill on day-2 either.
-        bars = [
-            _bar(15, 28, "100", "101", "99", "100"),  # signal
-            _bar(15, 29, "100", "101", "99", "100"),  # forced bar → drop (existing rule)
-            _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),
-            _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
-        ]
-        signals = [True, False, False, False]
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
-        assert trades == []
-
-    def test_mid_day_signal_unchanged_exact_trade(self) -> None:
-        # Regression 3 — a mid-session signal takes the untouched same-session
-        # fill path: entry at the next bar's HIGH (worst-case), forced exit at
-        # 15:20 at that bar's LOW, exact ClosedTrade pinned field-by-field.
-        bars = [
-            _bar(11, 0, "100", "101", "99", "100"),  # signal
-            _bar(11, 1, "100.50", "102", "100", "101"),  # entry @ HIGH 102.00
-            _bar(11, 2, "101", "103", "100.25", "102"),  # ride
-            _bar(15, 20, "104", "105", "103", "104.50"),  # forced @ LOW 103.00
-            _bar(9, 15, "90", "91", "89", "90", day=_NEXT_DAY),  # next session
-        ]
-        signals = [True, False, False, False, False]
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
-        assert trades == [
-            ClosedTrade(
-                pnl_paisa=100,  # forced fill 10300 (bar LOW) − entry 10200
-                mfe_paisa=200,  # the forced bar's (open, open) fold 10400
-                mae_paisa=200,  # bar 11:01 low 100.00 vs entry 102.00
-                holding_bars=3,
-                entry_ts=_ts(11, 1),
-                exit_ts=_ts(15, 20),
-                direction=Side.BUY,
-            )
-        ]
-
-    def test_single_session_feed_unchanged_exact_trade(self) -> None:
-        # A single-session feed takes the same-session fill path every prior
-        # test exercises — worst-case: entry at the bar HIGH, EOD at the LOW.
-        bars = [
-            _bar(10, 0, "100", "101", "99", "100"),  # signal
-            _bar(10, 1, "100.20", "101", "100", "100.80"),  # entry @ HIGH 101.00
-            _bar(10, 2, "100.80", "101.50", "100.50", "101"),  # end-of-data LOW 100.50
-        ]
-        signals = [True, False, False]
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
-        assert trades == [
-            ClosedTrade(
-                pnl_paisa=-50,  # EOD low 10050 − entry 10100
-                mfe_paisa=50,  # high 101.50 vs entry 101.00
-                mae_paisa=100,  # entry-bar low 100.00 vs entry 101.00
-                holding_bars=2,
-                entry_ts=_ts(10, 1),
-                exit_ts=_ts(10, 2),
-                direction=Side.BUY,
-            )
-        ]
-
-    def test_signal_on_final_feed_bar_never_opens(self) -> None:
-        # A signal on the WHOLE feed's last bar has no next bar at all: the
-        # pending entry evaporates at finish() (pre-existing path, kept pinned).
-        bars = [
-            _bar(10, 0, "100", "101", "99", "100"),
-            _bar(10, 1, "100.20", "101", "100", "100.80"),  # signal, then feed ends
-        ]
-        signals = [False, True]
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
-        assert trades == []
-
-    @pytest.mark.parametrize(
-        ("day1", "day2"),
-        [(_DAY, _NEXT_DAY), (_FRIDAY, _MONDAY)],
-        ids=["one-calendar-day", "weekend-gap"],
-    )
-    def test_gap_width_is_irrelevant_both_drop(self, day1: date, day2: date) -> None:
-        # The drop keys on SESSION-date inequality, not gap width: a Tue→Wed
-        # step and a Fri→Mon weekend step both drop the pending entry.
-        bars = [
-            _bar(15, 29, "100", "101", "99", "100", day=day1),  # signal
-            _bar(9, 15, "119", "120", "118", "119", day=day2),
-            _bar(9, 16, "119.50", "120.50", "119", "119.50", day=day2),
-        ]
-        signals = [True, False, False]
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
-        assert trades == []
-
-    def test_next_session_signal_still_fills_within_its_session(self) -> None:
-        # The drop never eats a GENUINE next-session signal: day-1's last-bar
-        # signal drops at day-2's 09:15 bar, but a signal ON that 09:15 bar
-        # re-arms (on a bar that ran the forced check — the resolved-date reuse
-        # path in (C)) and fills at 09:16 within its own session.
-        bars = [
-            _bar(15, 29, "100", "101", "99", "100"),  # day-1 signal → armed
-            _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),  # drop; signal → re-arm
-            _bar(9, 16, "119.50", "120.50", "119", "119.60", day=_NEXT_DAY),  # entry
-            _bar(9, 17, "119.80", "120.80", "119.30", "120", day=_NEXT_DAY),
-        ]
-        signals = [True, True, False, False]
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
-        assert len(trades) == 1
-        assert trades[0].entry_ts == _ts(9, 16, day=_NEXT_DAY)
-        assert trades[0].pnl_paisa == -120  # EOD low 119.30 − entry HIGH 120.50
-
-    def test_streaming_push_drops_cross_session_like_run(self) -> None:
-        # The streaming push/finish path shares the state machine: the drop
-        # behaves identically bar-by-bar.
-        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
-        assert walker.push(_bar(15, 29, "100", "101", "99", "100"), entry_signal=True) is None
-        assert (
-            walker.push(_bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY), entry_signal=False)
-            is None
-        )
-        assert (
-            walker.push(
-                _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
-                entry_signal=False,
-            )
-            is None
-        )
-        assert walker.finish() is None
-
-
-# ────────────────────────────────────────────────────────────────────────
-# Open-position session-boundary close (DEC-TRADESIM-OPEN-SESSION-GUARD-001)
-#
-# The OPEN-position twin of R2-OC-2: pre-fix, a position left open because its
-# session's stored bars ended BEFORE any forced-exit-window bar (a session-tail
-# data hole) silently survived the overnight gap and closed against the NEXT
-# session's prices — a pending next-open exit filled at the next session's
-# open, SL/TP triggered against the gap, or the next day's 15:20 bar forced it
-# out — folding the whole overnight move into pnl AND the gap bar's range into
-# MFE/MAE (executed repro: +30000/+50000 paisa fabricated per trade on a +₹500
-# gap). Now the first bar of the new session closes the position retroactively
-# at the PRIOR session's last stored bar (the finish() idiom) under the
-# ``session_gap`` reason. Fixtures mirror the executed repro: day D =
-# 2024-01-02 bars 11:10-11:14 (tail hole — nothing at/after 15:20), day D+1 =
-# 2024-01-03 opening ₹600 (+₹500 overnight gap).
-# ────────────────────────────────────────────────────────────────────────
 
 
 def _gap_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
@@ -1062,34 +1108,26 @@ def _gap_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
 
 
 class TestOpenPositionSessionGapClose:
-    """An open position never survives an IST session-date change."""
+    """An open position never survives an IST session-date change (1m stream)."""
 
     def _day_d_hold(self) -> list[CandleBar]:
-        """Signal @11:10 → entry @11:11 open ₹100; flat hold through 11:14."""
+        """Signal @11:10 → entry @11:11 (flat, 100.00); flat hold through 11:14."""
         return [
-            _bar(11, 10, "100", "100", "100", "100"),  # signal
-            _bar(11, 11, "100", "100", "100", "100"),  # entry @ open 100.00
-            _bar(11, 12, "100", "100", "100", "100"),
-            _bar(11, 13, "100", "100", "100", "100"),
-            _bar(11, 14, "100", "100", "100", "100"),  # day-D's LAST stored bar
+            _flat(11, 10),  # signal
+            _flat(11, 11),  # entry @ HIGH 100.00
+            _flat(11, 12),
+            _flat(11, 13),
+            _flat(11, 14),  # day-D's LAST stored bar
         ]
 
     def test_v1_gap_bar_tp_hit_becomes_session_gap_close(self) -> None:
-        # V1 (executed repro): the gap bar's range "hits" the ₹300 TP level —
-        # pre-fix a take_profit fill at 400.00 on day D+1 (+30000 paisa
-        # fabricated). Now: session_gap close at day-D's 11:14 close, pnl 0,
-        # and the gap bar's range NEVER enters MFE/MAE.
+        # V1: the gap bar's range "hits" the ₹300 TP level — the boundary
+        # guard closes FIRST at day-D's 11:14 bar (flat → LOW 100.00), pnl 0;
+        # the gap bar's range NEVER enters MFE/MAE.
         bars = [*self._day_d_hold(), _gap_bar(9, 15, "600", "601", "599", "600")]
         signals = [True, False, False, False, False, False]
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(
-            bars,
-            signals,
-            direction=Side.BUY,
-            tf_minutes=1,
-            take_profit_paisa=30_000,
-            detail_sink=sink,
-        )
+        trades = _sim(bars, signals, tp=30_000, sink=sink)
         assert trades == [
             ClosedTrade(
                 pnl_paisa=0,
@@ -1102,12 +1140,11 @@ class TestOpenPositionSessionGapClose:
             )
         ]
         assert [d.exit_reason for d in sink] == ["session_gap"]
-        assert sink[0].exit_fill_paisa == 10_000  # day-D 11:14 CLOSE
+        assert sink[0].exit_fill_paisa == 10_000  # day-D 11:14 adverse LOW
 
     def test_v1b_next_day_forced_bar_becomes_session_gap_close(self) -> None:
-        # V1b: pre-fix the position rode all of day D+1 to its 15:20 forced
-        # bar (+50000 paisa fabricated). The guard fires at day D+1's FIRST
-        # bar — the forced flag never gets a say (never forced_1520 on D+1).
+        # The guard fires at day D+1's FIRST bar — the position never rides
+        # to D+1's 15:20 forced bar.
         bars = [
             *self._day_d_hold(),
             _gap_bar(9, 15, "600", "601", "599", "600"),
@@ -1115,146 +1152,114 @@ class TestOpenPositionSessionGapClose:
         ]
         signals = [True] + [False] * 6
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        trades = _sim(bars, signals, sink=sink)
         assert len(trades) == 1
         assert trades[0].exit_ts == _ts(11, 14)
         assert trades[0].pnl_paisa == 0
         assert [d.exit_reason for d in sink] == ["session_gap"]
 
     def test_v1b_boundary_bar_itself_forced_still_session_gap(self) -> None:
-        # Edge pin (§8.6): day D+1's FIRST stored bar is itself ≥ 15:20 — the
-        # guard fires before the forced branch can, so the close is still the
-        # session_gap close at day-D's last bar, never a forced fill at 600.
+        # Day D+1's FIRST stored bar is itself ≥ 15:20 — the (A2) guard fires
+        # BEFORE the forced branch can; the close is still session_gap at
+        # day-D's last bar, never a forced fill at 600.
         bars = [*self._day_d_hold(), _gap_bar(15, 20, "600", "601", "599", "600")]
         signals = [True] + [False] * 5
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        trades = _sim(bars, signals, sink=sink)
         assert len(trades) == 1
         assert trades[0].exit_ts == _ts(11, 14)
         assert trades[0].pnl_paisa == 0
         assert [d.exit_reason for d in sink] == ["session_gap"]
 
-    # The V2 NEXT_OPEN-pending shape is DELETED with the knob
-    # (DEC-FILL-WORST-CASE-ONLY-001): an SL always fills on its trigger bar
-    # now, so only the Mode-B SIGNAL pending (V3 below) can arm on a session's
-    # last stored bar.
-
-    def test_v3_pending_signal_exit_is_subsumed(self) -> None:
-        # V3: a Mode-B SIGNAL exit armed on day-D's last stored bar pre-fix
-        # filled at day D+1's open. Same subsumption as V2.
-        bars = [*self._day_d_hold(), _gap_bar(9, 15, "600", "601", "599", "600")]
-        entry = [True] + [False] * 5
-        exits = [False, False, False, False, True, False]  # signal on 11:14
+    def test_pending_exit_armed_on_entry_bar_is_subsumed_at_the_boundary(self) -> None:
+        # The ONLY way a pending Mode-B exit survives to a session boundary:
+        # entry AND exit due on the SAME 1m bar (the §2.4 deferral) where
+        # that bar is the session's LAST stored bar. The boundary bar then
+        # SUBSUMES the pending and closes session_gap at the entry bar's
+        # CLOSE (the B3 carve-out: last_idx == entry_idx). Entry HIGH
+        # 100.60; close 100.45 → pnl −15, holding 1.
+        bars = [
+            _flat(11, 13),  # entry + exit signals here
+            _bar(11, 14, "100.20", "100.60", "100.10", "100.45"),  # entry AND last bar
+            _gap_bar(9, 15, "600", "601", "599", "600"),  # boundary
+        ]
+        entry = [True, False, False]
+        exits = [True, False, False]
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(
-            bars,
-            entry,
-            direction=Side.BUY,
-            tf_minutes=1,
-            exit_signals=exits,
-            detail_sink=sink,
-        )
-        assert len(trades) == 1
-        assert trades[0].exit_ts == _ts(11, 14)
-        assert trades[0].pnl_paisa == 0
+        trades = _sim(bars, entry, exits=exits, sink=sink)
         assert [d.exit_reason for d in sink] == ["session_gap"]
+        assert trades[0].pnl_paisa == 10_045 - 10_060  # CLOSE − entry HIGH
+        assert trades[0].exit_ts == _ts(11, 14)
+        assert trades[0].holding_bars == 1
+        assert sink[0].exit_fill_paisa == 10_045  # B3 close basis, never LOW 10010
 
-    def test_cross_session_stale_pending_exit_never_reaches_a_new_position(self) -> None:
-        """The (A2) pending-exit CLEAR has teeth (the Rust directed test's Python twin).
+    def test_subsumed_pending_never_reaches_a_new_position(self) -> None:
+        """The (A2) pending-exit CLEAR has teeth.
 
-        After the boundary close, a NEW day-D+1 position must ride normally to
-        end of data — under a mutant that drops the ``self._pending_exit =
-        None`` clear in the (A2) guard, the stale day-D pending exit would
-        close the new position instantly at its first managed bar (its own
-        ENTRY bar, managed same-push) with the stale reason. The ONE
-        ``_pending_exit`` slot is armed here by a Mode-B SIGNAL exit on
-        day-D's LAST stored bar (the only surviving pending kind —
-        DEC-FILL-WORST-CASE-ONLY-001 deleted the ``LevelFill.NEXT_OPEN``
-        deferral; V3 pins the boundary-close fill, this test pins the CLEAR
-        itself).
+        Under a mutant that drops the ``self._pending_exit = None`` clear,
+        the stale day-D pending exit would close the NEW day-D+1 position on
+        its first managed bar with the stale ``signal`` reason. Correct: the
+        new position rides to end_of_data.
         """
         bars = [
-            _bar(11, 10, "100", "101", "99", "100"),  # signal
-            _bar(11, 11, "104", "104", "103.50", "104"),  # entry @ HIGH 104.00
-            # Mode-B exit signal fires here → pending armed on day-D's LAST
-            # stored bar.
-            _bar(11, 12, "101", "104.50", "100", "101"),
+            _flat(11, 13),  # entry + exit signals (deferral arms the pending)
+            _bar(11, 14, "100.20", "100.60", "100.10", "100.45"),  # entry AND last bar
             _gap_bar(9, 15, "600", "601", "599", "600"),  # boundary → session_gap
             _gap_bar(9, 16, "600", "601", "599", "600"),  # signal → earliest re-arm
             _gap_bar(9, 17, "605", "606", "604", "605"),  # NEW entry @ HIGH 606.00
             _gap_bar(9, 18, "607", "608", "606", "607.50"),  # rides → EOD close
         ]
-        signals = [True, False, False, False, True, False, False]
-        exits = [False, False, True, False, False, False, False]
+        entry = [True, False, False, True, False, False]
+        exits = [True, False, False, False, False, False]
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(
-            bars,
-            signals,
-            direction=Side.BUY,
-            tf_minutes=1,
-            exit_signals=exits,
-            detail_sink=sink,
-        )
+        trades = _sim(bars, entry, exits=exits, sink=sink)
         assert len(trades) == 2
-        # Trade 1: the session_gap close at day-D's last stored bar's LOW
-        # (100.00 — the adverse extreme; entry was bar 11:11's HIGH 104.00).
-        assert trades[0].exit_ts == _ts(11, 12)
-        assert trades[0].pnl_paisa == 10_000 - 10_400
-        # The NEW position rides to end of data — never an instant
-        # stale-pending close at its first managed bar (which would read
-        # exit_ts == entry_ts with the stale ``signal`` reason). EOD closes
-        # at the last bar's LOW 606.00 (adverse extreme); entry at HIGH 606.00.
+        assert [d.exit_reason for d in sink] == ["session_gap", "end_of_data"]
         assert trades[1].entry_ts == _ts(9, 17, day=_NEXT_DAY)
         assert trades[1].exit_ts == _ts(9, 18, day=_NEXT_DAY)
-        assert trades[1].pnl_paisa == 60_600 - 60_600  # EOD low 606.00 − entry high 606.00
+        assert trades[1].pnl_paisa == 60_600 - 60_600  # EOD LOW 606.00 − entry HIGH 606.00
         assert trades[1].holding_bars == 2
-        assert [d.exit_reason for d in sink] == ["session_gap", "end_of_data"]
 
     def test_sell_direction_symmetric_session_gap_close(self) -> None:
-        # SELL variant of V1 (§8.9): a short pre-fix would have "profited" the
-        # inverse gap; the boundary close is direction-aware through _close.
+        # SELL variant: the boundary close is direction-aware through _close
+        # (a short would otherwise have "profited" the inverse gap).
         bars = [*self._day_d_hold(), _gap_bar(9, 15, "600", "601", "599", "600")]
         signals = [True] + [False] * 5
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(bars, signals, direction=Side.SELL, tf_minutes=1, detail_sink=sink)
+        trades = _sim(bars, signals, direction=Side.SELL, sink=sink)
         assert len(trades) == 1
         assert trades[0].direction is Side.SELL
-        assert trades[0].pnl_paisa == 0  # entry 100.00 − day-D close 100.00
+        assert trades[0].pnl_paisa == 0  # entry 100.00 − day-D HIGH 100.00 (flat)
         assert trades[0].exit_ts == _ts(11, 14)
         assert [d.exit_reason for d in sink] == ["session_gap"]
 
-    def test_boundary_bar_never_arms_earliest_rearm_next_bar(self) -> None:
-        # §2.2 pinned law: the boundary bar EMITS the close, so step (C)'s
-        # `closed is None` gate suppresses arming ON it. A signal on the
-        # boundary bar produces nothing; the earliest re-arm is bar i+1 and
-        # the earliest new fill is bar i+2 (same-session, unforced).
-        bars = [
-            *self._day_d_hold(),
-            _gap_bar(9, 15, "600", "601", "599", "600"),  # boundary (i) — signal ignored
-            _gap_bar(9, 16, "600", "601", "599", "600"),  # i+1 — earliest re-arm
-            _gap_bar(9, 17, "605", "606", "604", "605"),  # i+2 — earliest new fill
-            _gap_bar(9, 18, "607", "608", "606", "607.50"),
-        ]
-        signals = [True, False, False, False, False, True, True, False, False]
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
-        assert len(trades) == 2
-        assert trades[0].exit_ts == _ts(11, 14)  # the session_gap close
-        assert trades[1].entry_ts == _ts(9, 17, day=_NEXT_DAY)  # fill at i+2, never i/i+1
-        assert trades[1].pnl_paisa == 60_600 - 60_600  # EOD low 606.00 − entry HIGH 606.00
+    def test_boundary_bar_never_fills_even_when_entry_due(self) -> None:
+        # The boundary bar EMITS the session_gap close, so the (A) gate's
+        # ``closed is None`` clause suppresses an entry due ON it. (Via the
+        # batch path such a due is structurally impossible — the map's
+        # cross-session gate drops it — so the STREAMING seam pins the
+        # walker-level defense.)
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        for j, bar in enumerate(self._day_d_hold()):
+            assert walker.push_1m(bar, entry_due=j == 1) is None
+        closed = walker.push_1m(_gap_bar(9, 15, "600", "601", "599", "600"), entry_due=True)
+        assert closed is not None  # the session_gap close, priced at day-D's 11:14
+        assert closed.exit_ts == _ts(11, 14)
+        assert closed.pnl_paisa == 0
+        assert walker.finish() is None  # NO new position opened on the boundary bar
 
     def test_multi_session_hole_fires_once_same_fill(self) -> None:
-        # §8.1: the compare is date INEQUALITY, not adjacency — a k → k+2
-        # step (day-D → Friday, skipping Wednesday+Thursday... here Tue → Fri)
+        # The compare is date INEQUALITY, not adjacency: a Tue → Fri step
         # fires the guard exactly once with the identical fill.
         bars = [
-            _bar(11, 10, "100", "100", "100", "100", day=_DAY),
-            _bar(11, 11, "100", "100", "100", "100", day=_DAY),
-            _bar(11, 12, "100", "100.30", "99.90", "100.10", day=_DAY),
+            _flat(11, 10),
+            _flat(11, 11),
+            _bar(11, 12, "100", "100.30", "99.90", "100.10"),
             _bar(9, 15, "600", "601", "599", "600", day=_FRIDAY),  # 3 calendar days later
         ]
         signals = [True, False, False, False]
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        trades = _sim(bars, signals, sink=sink)
         assert trades == [
             ClosedTrade(
                 pnl_paisa=-10,  # 11:12 LOW 99.90 − entry 100.00 (adverse extreme)
@@ -1268,22 +1273,23 @@ class TestOpenPositionSessionGapClose:
         ]
         assert [d.exit_reason for d in sink] == ["session_gap"]
 
-    def test_entry_on_sessions_last_stored_bar_degenerate_close(self) -> None:
-        # §8.7: entry fills ON day-D's last stored bar → holding_bars == 1 and
-        # pnl = that bar's LOW − its HIGH (worst-case entry at the HIGH, the
-        # session_gap close at the same bar's LOW — the degenerate one-bar
-        # close under the adverse-max law).
+    def test_entry_on_sessions_last_stored_bar_closes_at_close_basis(self) -> None:
+        # The B3 terminal carve-out on the session_gap arm (mirrors the Rust
+        # ``session_gap_on_entry_bar_prices_at_close_basis``): the entry
+        # fills ON day-D's last stored bar → holding 1 and the fill is that
+        # bar's CLOSE 100.45 (never the adverse LOW 100.10 — the full-range
+        # phantom loss). pnl = 10045 − entry HIGH 10060 = −15.
         bars = [
-            _bar(11, 13, "100", "100", "100", "100"),  # signal
-            _bar(11, 14, "100.20", "100.60", "100.10", "100.45"),  # entry AND last stored bar
+            _flat(11, 13),  # signal
+            _bar(11, 14, "100.20", "100.60", "100.10", "100.45"),  # entry AND last stored
             _gap_bar(9, 15, "600", "601", "599", "600"),
         ]
         signals = [True, False, False]
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        trades = _sim(bars, signals, sink=sink)
         assert trades == [
             ClosedTrade(
-                pnl_paisa=-50,  # LOW 100.10 − entry HIGH 100.60
+                pnl_paisa=-15,  # CLOSE 100.45 − entry HIGH 100.60
                 mfe_paisa=0,  # entry IS the bar high — nothing above it
                 mae_paisa=50,  # low 100.10 vs entry 100.60
                 holding_bars=1,
@@ -1293,44 +1299,27 @@ class TestOpenPositionSessionGapClose:
             )
         ]
         assert [d.exit_reason for d in sink] == ["session_gap"]
-
-    def test_streaming_push_emits_the_boundary_close_on_the_boundary_bar(self) -> None:
-        # Streaming twin: push() returns the session_gap trade ON the boundary
-        # bar (emitted there, priced at day-D's last stored bar); finish() then
-        # has nothing left.
-        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
-        for bar in self._day_d_hold():
-            assert walker.push(bar, entry_signal=bar.timestamp == _ts(11, 10)) is None
-        closed = walker.push(_gap_bar(9, 15, "600", "601", "599", "600"), entry_signal=False)
-        assert closed is not None
-        assert closed.exit_ts == _ts(11, 14)
-        assert closed.pnl_paisa == 0
-        assert walker.finish() is None
+        assert sink[0].exit_fill_paisa == 10_045
 
     def test_entry_day_is_the_ist_session_date_not_the_utc_date(self) -> None:
-        """The (A) fill stamps ``entry_day_ist`` from the IST session date, never
-        the UTC calendar date (refuter round 4, directed mutant pin).
+        """The (A) fill stamps ``entry_day_ist`` from the IST session date,
+        never the UTC calendar date (defense-in-depth mutant pin).
 
-        The ``bar.timestamp.date()`` (UTC-date) mutant at the ``_open_position``
-        call survived the suite because the mismatch is domain-bounded — no NSE
-        session bar exists before 05:30 IST post-ingest-filter, so IST and UTC
-        dates always agree on real lake bars. The guard's DOCUMENTED semantics
-        are the IST session date, so this pins that law beyond the NSE trading
-        window (defense-in-depth; the domain never produces such bars): an
-        entry fill at IST 2024-01-02 01:00 is UTC 2024-01-01 19:30 — under the
-        mutant ``entry_day_ist`` reads 2024-01-01 and the (A2) guard
-        phantom-session_gap-closes the just-opened position on its OWN entry
-        bar; the correct IST stamp HOLDS through the later same-IST-session bar
-        (IST 05:00 = UTC 2024-01-01 23:30) to the honest end_of_data finish.
+        An entry fill at IST 2024-01-02 01:00 is UTC 2024-01-01 19:30 — under
+        a ``bar.timestamp.date()`` (UTC-date) mutant ``entry_day_ist`` reads
+        2024-01-01 and the (A2) guard phantom-closes the just-opened position
+        on a later same-IST-session bar. The correct IST stamp HOLDS through
+        IST 05:00 (UTC 2024-01-01 23:30) to the honest end_of_data finish.
+        (The 00:55 signal's fill slides 00:56 → 01:00 — a counted slid fill.)
         """
         bars = [
             _flat(0, 55),  # signal — IST date 2024-01-02, UTC date 2024-01-01
-            _flat(1, 0),  # entry fill @ open — UTC date still 2024-01-01
+            _flat(1, 0),  # entry fill (slid from 00:56) — UTC date still 2024-01-01
             _flat(5, 0),  # same IST session date — the position must HOLD
         ]
-        signals = [True, False, False]
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        trades, _ = walker.run_with_exit_indices(bars, bars, [True, False, False])
         assert trades == [
             ClosedTrade(
                 pnl_paisa=0,
@@ -1343,62 +1332,58 @@ class TestOpenPositionSessionGapClose:
             )
         ]
         assert [d.exit_reason for d in sink] == ["end_of_data"]
+        assert walker.fill_slid_minutes == 1  # the 00:56 → 01:00 slide
 
     def test_backward_session_date_change_still_closes_session_gap(self) -> None:
         """The (A2) compare is an EQUALITY law: ANY IST session-date CHANGE
-        closes the open position — either direction, not only forward (the
-        Python defense-in-depth twin of the Rust r8 M14 ``!=``→``>`` mutant
-        killer ``cross_session_backward_session_ordinal_still_closes_boundary``).
+        closes the open position — either direction, not only forward.
 
-        ``push()`` derives each bar's session date from that bar's OWN
-        timestamp and enforces no monotonicity ("chronologically ordered" is a
-        documented input contract, not a checked one — verified before adding
-        this test), so a backward-dated bar IS API-reachable; production sweep
-        feeds are chronological (Catalog/ReplayFeed sorted), hence
-        LOW/defense-in-depth. Under a ``day_ist > pos.entry_day_ist`` mutant
-        the earlier-dated bar folds into the open position and it rides to a
-        wrong end_of_data finish at the backward bar's close instead of the
-        session_gap boundary close.
+        The batch path now REFUSES a decreasing-timestamp stream at the map
+        build, so the backward-dated bar is driven through the STREAMING
+        seam (``push_1m`` derives each bar's session date from its own
+        timestamp and enforces no monotonicity). The entry bar is the last
+        managed bar, so the close takes the B3 CLOSE basis: entry HIGH
+        102.00, close 101.00 → pnl −100.
         """
-        bars = [
-            _bar(11, 10, "100", "100", "100", "100", day=_NEXT_DAY),  # signal
-            _bar(11, 11, "100", "102", "99", "101", day=_NEXT_DAY),  # entry @ HIGH 102.00
-            _bar(11, 12, "100", "101", "99", "100", day=_DAY),  # EARLIER IST date
-        ]
-        signals = [True, False, False]
         sink: list[ts_mod.TradeDetail] = []
-        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
-        assert trades == [
-            ClosedTrade(
-                pnl_paisa=-300,  # 11:11 LOW 99.00 − entry HIGH 102.00
-                mfe_paisa=0,  # entry IS the bar high — nothing above it
-                mae_paisa=300,  # low 99.00 vs entry 102.00
-                holding_bars=1,
-                entry_ts=_ts(11, 11, day=_NEXT_DAY),
-                exit_ts=_ts(11, 11, day=_NEXT_DAY),  # never the backward bar
-                direction=Side.BUY,
-            )
-        ]
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        assert (
+            walker.push_1m(_bar(11, 10, "100", "100", "100", "100", day=_NEXT_DAY), entry_due=False)
+            is None
+        )
+        assert (
+            walker.push_1m(_bar(11, 11, "100", "102", "99", "101", day=_NEXT_DAY), entry_due=True)
+            is None
+        )
+        closed = walker.push_1m(_bar(11, 12, "100", "101", "99", "100"), entry_due=False)
+        assert closed == ClosedTrade(
+            pnl_paisa=-100,  # B3 close basis 101.00 − entry HIGH 102.00
+            mfe_paisa=0,
+            mae_paisa=300,  # entry-bar low 99.00 vs entry 102.00
+            holding_bars=1,
+            entry_ts=_ts(11, 11, day=_NEXT_DAY),
+            exit_ts=_ts(11, 11, day=_NEXT_DAY),  # never the backward bar
+            direction=Side.BUY,
+        )
         assert [d.exit_reason for d in sink] == ["session_gap"]
-        assert sink[0].exit_fill_paisa == 9_900  # day-D+1 11:11 LOW (adverse extreme)
+        assert sink[0].exit_fill_paisa == 10_100  # the entry bar's CLOSE
 
 
 class TestSessionGapFinishEquivalence:
     """The finish()-equivalence pin (suffix independence by construction).
 
-    The SAME day-D prefix closed by (a) the (A2) boundary guard when the feed
-    continues into day D+1 vs (b) ``finish()`` when the feed truncates at
-    day-D's last stored bar emits a bit-equal ``ClosedTrade`` AND exit index;
-    ONLY ``TradeDetail.exit_reason`` differs (``session_gap`` vs
-    ``end_of_data``) — DEC-TRADESIM-OPEN-SESSION-GUARD-001 §5.2. VIX stamps
-    ride the same (entry_ts, exit_ts) pair in both worlds, so they are
-    deterministic and identical too (§8.10).
+    The SAME day-D prefix closed by (a) the (A2) boundary guard when the
+    feed continues into day D+1 vs (b) ``finish()`` when the feed truncates
+    at day-D's last stored bar emits a bit-equal ``ClosedTrade`` AND exit
+    index; ONLY ``TradeDetail.exit_reason`` differs (``session_gap`` vs
+    ``end_of_data``). VIX stamps ride the same (entry_ts, exit_ts) pair in
+    both worlds.
     """
 
     def _prefix(self) -> list[CandleBar]:
         return [
             _bar(11, 10, "100", "101", "99", "100"),  # signal
-            _bar(11, 11, "100.50", "102", "100", "101"),  # entry @ 100.50
+            _bar(11, 11, "100.50", "102", "100", "101"),  # entry @ HIGH 102.00
             _bar(11, 12, "101", "103", "100.25", "102"),  # day-D's last stored bar
         ]
 
@@ -1416,6 +1401,7 @@ class TestSessionGapFinishEquivalence:
             [True, False, False, False],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=continued,
             reference_stamper=stamper,
             detail_sink=sink_full,
         )
@@ -1425,6 +1411,7 @@ class TestSessionGapFinishEquivalence:
             [True, False, False],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=prefix,
             reference_stamper=stamper,
             detail_sink=sink_trunc,
         )
@@ -1432,6 +1419,7 @@ class TestSessionGapFinishEquivalence:
         assert full_idx == trunc_idx == [2]  # same TRUE exit index
         assert [d.exit_reason for d in sink_full] == ["session_gap"]
         assert [d.exit_reason for d in sink_trunc] == ["end_of_data"]
+        # Exit fill = the 11:12 bar's adverse LOW 100.25 in both worlds.
         assert sink_full[0].exit_fill_paisa == sink_trunc[0].exit_fill_paisa == 10_025
         assert full_trades[0].vix_at_exit == Decimal("15.30")
 
@@ -1450,92 +1438,64 @@ class TestVixStamp:
     """The reference-series stamper wires the India VIX level onto each trade.
 
     India VIX is REFERENCE ONLY (CLAUDE.md §1/§3): stamped for downstream
-    filter analysis, never a signal input. ``None`` on a missing VIX bar is the
-    no-hallucination contract (Golden Rule #1).
+    filter analysis, never a signal input. ``None`` on a missing VIX bar is
+    the no-hallucination contract (Golden Rule #1).
     """
 
     def _index_bars(self) -> list[CandleBar]:
-        # signal @09:15 → enter @09:16 OPEN → end-of-data exit @09:17 CLOSE.
+        # signal @09:15 → enter @09:16 → end-of-data exit @09:17.
         return [
             _bar(9, 15, "100", "100", "100", "100"),
             _bar(9, 16, "101", "101", "101", "101"),
             _bar(9, 17, "102", "102", "102", "102"),
         ]
 
-    def test_no_stamper_leaves_vix_none(self) -> None:
-        """Without a stamper, the engine output is byte-identical (both VIX None)."""
-        trades = simulate_trades(
-            self._index_bars(), [True, False, False], direction=Side.BUY, tf_minutes=1
+    def _stamped(self, vix: list[CandleBar]) -> list[ClosedTrade]:
+        from brutex.engine.reference_series import TradeReferenceStamper
+
+        return simulate_trades(
+            self._index_bars(),
+            [True, False, False],
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=self._index_bars(),
+            reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
         )
+
+    def test_no_stamper_leaves_vix_none(self) -> None:
+        trades = _sim(self._index_bars(), [True, False, False])
         assert len(trades) == 1
         assert trades[0].vix_at_entry is None
         assert trades[0].vix_at_exit is None
 
     def test_stamp_present_at_entry_and_exit(self) -> None:
-        """A VIX bar at both the entry (09:16) and exit (09:17) instant is stamped."""
-        from brutex.engine.reference_series import TradeReferenceStamper
-
+        # Entry fills at 09:16, exit at 09:17 — the stamp tracks those 1m
+        # instants, NOT the 09:15 signal bar.
         vix = [_vix_bar(9, 15, "15.10"), _vix_bar(9, 16, "15.20"), _vix_bar(9, 17, "15.30")]
-        trades = simulate_trades(
-            self._index_bars(),
-            [True, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
-        )
-        assert len(trades) == 1
-        # Entry fills at 09:16, exit at 09:17 — the stamp tracks those instants,
-        # NOT the 09:15 signal bar.
+        trades = self._stamped(vix)
         assert trades[0].vix_at_entry == Decimal("15.20")
         assert trades[0].vix_at_exit == Decimal("15.30")
 
     def test_stamp_missing_at_entry_is_none(self) -> None:
-        """No VIX bar at the 09:16 entry instant → ``vix_at_entry`` is None (not faked)."""
-        from brutex.engine.reference_series import TradeReferenceStamper
-
         vix = [_vix_bar(9, 15, "15.10"), _vix_bar(9, 17, "15.30")]  # no 09:16
-        trades = simulate_trades(
-            self._index_bars(),
-            [True, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
-        )
+        trades = self._stamped(vix)
         assert trades[0].vix_at_entry is None
         assert trades[0].vix_at_exit == Decimal("15.30")
 
     def test_stamp_missing_at_exit_is_none(self) -> None:
-        """No VIX bar at the 09:17 exit instant → ``vix_at_exit`` is None."""
-        from brutex.engine.reference_series import TradeReferenceStamper
-
         vix = [_vix_bar(9, 15, "15.10"), _vix_bar(9, 16, "15.20")]  # no 09:17
-        trades = simulate_trades(
-            self._index_bars(),
-            [True, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
-        )
+        trades = self._stamped(vix)
         assert trades[0].vix_at_entry == Decimal("15.20")
         assert trades[0].vix_at_exit is None
 
     def test_stamp_missing_at_both_is_none(self) -> None:
-        """A timestamp-misaligned / empty VIX series → both fields None, trade still emitted."""
-        from brutex.engine.reference_series import TradeReferenceStamper
-
-        trades = simulate_trades(
-            self._index_bars(),
-            [True, False, False],
-            direction=Side.BUY,
-            tf_minutes=1,
-            reference_stamper=TradeReferenceStamper.from_vix_bars([]),
-        )
+        trades = self._stamped([])
         assert len(trades) == 1
         assert trades[0].vix_at_entry is None
         assert trades[0].vix_at_exit is None
 
     def test_stamp_via_streaming_finish_path(self) -> None:
-        """The end-of-data ``finish`` close path is also stamped (it routes via ``_close``)."""
+        """The end-of-data ``finish`` close is also stamped (routes via _close)."""
         from brutex.engine.reference_series import TradeReferenceStamper
 
         vix = [_vix_bar(9, 15, "15.10"), _vix_bar(9, 16, "15.20"), _vix_bar(9, 17, "15.30")]
@@ -1545,8 +1505,7 @@ class TestVixStamp:
             reference_stamper=TradeReferenceStamper.from_vix_bars(vix),
         )
         bars = self._index_bars()
-        signals = [True, False, False]
-        closed = [walker.push(b, entry_signal=s) for b, s in zip(bars, signals, strict=True)]
+        closed = [walker.push_1m(b, entry_due=j == 1) for j, b in enumerate(bars)]
         assert all(c is None for c in closed)  # ends open → closes in finish()
         final = walker.finish()
         assert final is not None
@@ -1555,7 +1514,7 @@ class TestVixStamp:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# DEC-SWEEP-EXIT-INDEX-FASTPATH-001 — exit-index-carrying walk
+# DEC-SWEEP-EXIT-INDEX-FASTPATH-001 — exit-index-carrying walk (1m indices)
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -1563,26 +1522,36 @@ class TestExitIndices:
     """run_with_exit_indices / simulate_trades_with_exit_indices."""
 
     def _bars(self) -> list[CandleBar]:
-        """Two closed trades: a TP exit on bar 2 and an end-of-data close on bar 4."""
+        """Two closed trades: a TP exit on bar 2 and a B3 terminal close on bar 4."""
         return [
-            _bar(9, 16, "100", "100", "100", "100"),  # signal arms here
-            _bar(9, 17, "100", "100", "100", "100"),  # entry at open
-            _bar(9, 18, "100", "101", "100", "101"),  # TP +50 hits (exit idx 2)
-            _bar(9, 19, "100", "100", "100", "100"),  # signal arms again
-            _bar(9, 20, "100", "100", "100", "100"),  # entry; end-of-data close (idx 4)
+            _flat(9, 16),  # signal arms here
+            _flat(9, 17),  # entry @ HIGH 100.00
+            _bar(9, 18, "100", "101", "100", "101"),  # TP +50 fires (exit idx 2)
+            _flat(9, 19),  # signal arms again
+            _flat(9, 20),  # entry AND last bar → B3 close (idx 4)
         ]
 
     def _signals(self) -> list[bool]:
         return [True, False, False, True, False]
 
-    def test_indices_align_with_the_trades(self) -> None:
-        trades, exit_indices = ts_mod.simulate_trades_with_exit_indices(
-            self._bars(),
-            self._signals(),
+    def _run(
+        self, bars: list[CandleBar], signals: list[bool]
+    ) -> tuple[list[ClosedTrade], list[int] | None]:
+        return ts_mod.simulate_trades_with_exit_indices(
+            bars,
+            signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             take_profit_paisa=50,
         )
+
+    def test_indices_align_with_the_trades(self) -> None:
+        # Trade 1: entry 09:17 @10000, TP level 10050, bar 09:18 high 10100
+        # fires → fill min(10050, low 10000) = 10000 → pnl 0, exit idx 2.
+        # Trade 2: entry 09:20 (the last bar) → B3 close at its CLOSE 10000
+        # → pnl 0, exit idx 4.
+        trades, exit_indices = self._run(self._bars(), self._signals())
         assert exit_indices is not None
         assert len(trades) == 2
         assert exit_indices == [2, 4]
@@ -1590,20 +1559,8 @@ class TestExitIndices:
         assert trades[1].exit_ts == self._bars()[4].timestamp
 
     def test_trades_are_byte_identical_to_simulate_trades(self) -> None:
-        plain = simulate_trades(
-            self._bars(),
-            self._signals(),
-            direction=Side.BUY,
-            tf_minutes=1,
-            take_profit_paisa=50,
-        )
-        with_idx, _ = ts_mod.simulate_trades_with_exit_indices(
-            self._bars(),
-            self._signals(),
-            direction=Side.BUY,
-            tf_minutes=1,
-            take_profit_paisa=50,
-        )
+        plain = _sim(self._bars(), self._signals(), tp=50)
+        with_idx, _ = self._run(self._bars(), self._signals())
         assert plain == with_idx
 
     def test_uncertified_window_returns_none_indices(self) -> None:
@@ -1612,13 +1569,7 @@ class TestExitIndices:
         bars = self._bars()
         bars.append(bars[-1])  # duplicate final timestamp
         signals = [*self._signals(), False]
-        trades, exit_indices = ts_mod.simulate_trades_with_exit_indices(
-            bars,
-            signals,
-            direction=Side.BUY,
-            tf_minutes=1,
-            take_profit_paisa=50,
-        )
+        trades, exit_indices = self._run(bars, signals)
         assert exit_indices is None
         assert len(trades) == 2
 
@@ -1628,6 +1579,7 @@ class TestExitIndices:
             [False] * 5,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=self._bars(),
         )
         assert trades == []
         assert exit_indices == []
@@ -1635,16 +1587,16 @@ class TestExitIndices:
     def test_run_with_exit_indices_validates_signal_lengths(self) -> None:
         walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
         with pytest.raises(ValueError, match="entry_signals length"):
-            walker.run_with_exit_indices(self._bars(), [True])
+            walker.run_with_exit_indices(self._bars(), self._bars(), [True])
         with pytest.raises(ValueError, match="exit_signals length"):
-            walker.run_with_exit_indices(self._bars(), [False] * 5, [True])
+            walker.run_with_exit_indices(self._bars(), self._bars(), [False] * 5, [True])
 
     def test_run_delegates_to_the_index_walk(self) -> None:
         """run() is the thin delegate — same trades, indices dropped."""
         walker_a = TradeSimWalker(direction=Side.BUY, tf_minutes=1, take_profit_paisa=50)
         walker_b = TradeSimWalker(direction=Side.BUY, tf_minutes=1, take_profit_paisa=50)
-        via_run = walker_a.run(self._bars(), self._signals())
-        via_pair, _ = walker_b.run_with_exit_indices(self._bars(), self._signals())
+        via_run = walker_a.run(self._bars(), self._bars(), self._signals())
+        via_pair, _ = walker_b.run_with_exit_indices(self._bars(), self._bars(), self._signals())
         assert via_run == via_pair
 
 
@@ -1730,7 +1682,9 @@ class TestExitReasonCounters:
                 take_profit_paisa=tp,
                 detail_sink=sink,
             )
-            trades = walker.run(bars, signals)
+            # DEC-FILL-EXEC-GRID-1M-001 (#1989): degenerate 1m identity
+            # (``tf_minutes=1`` — the decision grid IS the 1m execution grid).
+            trades = walker.run(bars, bars, signals)
             counts = walker.exit_reason_counts
             assert sum(counts) == len(trades) == 1, reason
             assert self._count_for(reason, counts) == 1, reason
@@ -1739,7 +1693,10 @@ class TestExitReasonCounters:
     def test_signal_exit_reason_slot(self) -> None:
         bars = [_flat(9, 15), _flat(9, 16), _flat(9, 17), _flat(9, 18), _flat(9, 19)]
         walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        # DEC-FILL-EXEC-GRID-1M-001 (#1989): degenerate 1m identity
+        # (``tf_minutes=1`` — the decision grid IS the 1m execution grid).
         trades = walker.run(
+            bars,
             bars,
             [True, False, False, False, False],
             [False, False, True, False, False],  # Mode-B signal exit @ 9:17
@@ -1763,7 +1720,9 @@ class TestExitReasonCounters:
         ]
         signals = [True, False, False, True, False, False, True, False]
         walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1, stop_loss_paisa=100)
-        trades = walker.run(bars, signals)
+        # DEC-FILL-EXEC-GRID-1M-001 (#1989): degenerate 1m identity
+        # (``tf_minutes=1`` — the decision grid IS the 1m execution grid).
+        trades = walker.run(bars, bars, signals)
         counts = walker.exit_reason_counts
         assert len(trades) == 3
         assert sum(counts) == 3
@@ -1780,11 +1739,23 @@ class TestExitReasonCounters:
             _flat(9, 19),
         ]
         signals = [True, False, False, True, False]
+        # DEC-FILL-EXEC-GRID-1M-001 (#1989): degenerate 1m identity
+        # (``tf_minutes=1`` — the decision grid IS the 1m execution grid).
         trades3, idx3, counts = ts_mod.simulate_trades_with_exit_counts(
-            bars, signals, direction=Side.BUY, tf_minutes=1, take_profit_paisa=100
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            take_profit_paisa=100,
         )
         trades2, idx2 = ts_mod.simulate_trades_with_exit_indices(
-            bars, signals, direction=Side.BUY, tf_minutes=1, take_profit_paisa=100
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            take_profit_paisa=100,
         )
         assert trades3 == trades2
         assert idx3 == idx2
@@ -1794,9 +1765,226 @@ class TestExitReasonCounters:
     def test_counted_spine_uncertified_window_still_counts(self) -> None:
         """A duplicate timestamp withholds indices (None) — counters unaffected."""
         bars = [_flat(9, 15), _flat(9, 16), _flat(9, 17), _flat(9, 17)]
+        # DEC-FILL-EXEC-GRID-1M-001 (#1989): degenerate 1m identity
+        # (``tf_minutes=1`` — the decision grid IS the 1m execution grid).
         trades, exit_indices, counts = ts_mod.simulate_trades_with_exit_counts(
-            bars, [True, False, False, False], direction=Side.BUY, tf_minutes=1
+            bars, [True, False, False, False], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
         )
         assert exit_indices is None
         assert sum(counts) == len(trades) == 1
         assert self._count_for("end_of_data", counts) == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# The widened SLID-fill counter family + B4 collision signal drops (§5.2)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSlidFillCounters:
+    def test_entry_fill_on_slid_bar_counts_fill_slid_minutes(self) -> None:
+        # Signal on the 09:16 decision bar → close instant 09:17 — that
+        # minute is NOT stored, so the fill slides to 09:18 (the next stored
+        # same-session minute) and is COUNTED. Entry @ the 09:18 bar's HIGH
+        # 102.00; EOD at the 09:19 flat bar's LOW 100.00 → −200.
+        bars = [_flat(9, 15), _flat(9, 16), _bar(9, 18, "100", "102", "99", "101"), _flat(9, 19)]
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        trades, _ = walker.run_with_exit_indices(bars, bars, [False, True, False, False])
+        assert walker.fill_slid_minutes == 1
+        assert walker.exit_fill_slid_minutes == 0
+        assert len(trades) == 1
+        assert trades[0].entry_ts == _ts(9, 18)
+        assert trades[0].pnl_paisa == -200
+
+    def test_direct_mode_b_exit_on_slid_bar_counts_exit_fill_slid(self) -> None:
+        # Entry @09:16 (not slid). Exit signal on the 09:17 decision bar →
+        # close instant 09:18 is missing → the exit fill slides to 09:19 and
+        # is counted exit_fill_slid_minutes (the direct consumption arm).
+        bars = [_flat(9, 15), _flat(9, 16), _flat(9, 17), _bar(9, 19, "100", "101", "99.50", "100")]
+        sink: list[ts_mod.TradeDetail] = []
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        trades, _ = walker.run_with_exit_indices(
+            bars, bars, [True, False, False, False], [False, False, True, False]
+        )
+        assert walker.fill_slid_minutes == 0
+        assert walker.exit_fill_slid_minutes == 1
+        assert [d.exit_reason for d in sink] == ["signal"]
+        assert trades[0].pnl_paisa == 9950 - 10_000  # fill at the slid bar's LOW
+
+    def test_deferred_exit_on_slid_entry_bar_counts_both(self) -> None:
+        # Entry AND exit due on the SAME slid bar: the entry fill counts
+        # fill_slid_minutes and the exit — deferred onto the entry bar's
+        # successor — counts exit_fill_slid_minutes at the slid arm bar.
+        bars = [_flat(9, 15), _flat(9, 16), _bar(9, 18, "100", "102", "99", "101"), _flat(9, 19)]
+        sink: list[ts_mod.TradeDetail] = []
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+        trades, _ = walker.run_with_exit_indices(
+            bars, bars, [False, True, False, False], [False, True, False, False]
+        )
+        assert walker.fill_slid_minutes == 1
+        assert walker.exit_fill_slid_minutes == 1
+        assert [d.exit_reason for d in sink] == ["signal"]  # pending fills @09:19
+        assert trades[0].exit_ts == _ts(9, 19)
+
+    def test_slid_arm_bar_with_no_signal_counts_nothing(self) -> None:
+        # The arm is mask-independent — a slid arm bar whose decision bar
+        # carries NO signal consumes nothing and counts nothing.
+        bars = [_flat(9, 15), _flat(9, 16), _flat(9, 18), _flat(9, 19)]
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        trades, _ = walker.run_with_exit_indices(bars, bars, [False] * 4, [False] * 4)
+        assert trades == []
+        assert walker.fill_slid_minutes == 0
+        assert walker.exit_fill_slid_minutes == 0
+
+    def test_collision_loser_drops_entry_and_exit_signals_counted(self) -> None:
+        # B4: two decision bars map onto ONE 1m fill bar (decision closes
+        # 09:16 and 09:17 both slide to the 09:20 exec bar) — the
+        # earliest-armed (idx 0) wins; the loser (idx 1) drops its entry AND
+        # exit signal, each counted.
+        decision = [_flat(9, 15), _flat(9, 16)]
+        exec_1m = [_flat(9, 15), _flat(9, 20)]
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        trades, _ = walker.run_with_exit_indices(decision, exec_1m, [False, True], [False, True])
+        assert walker.signals_dropped_collision == 2
+        assert trades == []  # the winner (idx 0) carried no signal
+
+    def test_collision_loser_without_signals_drops_nothing(self) -> None:
+        # A loser with no live signal drops nothing; the WINNER's entry
+        # fills normally (on the slid shared bar).
+        decision = [_flat(9, 15), _flat(9, 16)]
+        exec_1m = [_flat(9, 15), _bar(9, 20, "100", "100.50", "99.80", "100.20")]
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        trades, _ = walker.run_with_exit_indices(decision, exec_1m, [True, False])
+        assert walker.signals_dropped_collision == 0
+        assert walker.fill_slid_minutes == 1  # the winner's fill is a slid fill
+        assert len(trades) == 1  # B3 terminal close on the shared bar
+        assert trades[0].entry_ts == _ts(9, 20)
+
+    # ── Two-consecutive-slid-bars dedupe (fix-round-6 fill-law-1) ──────────
+    #
+    # A DEFERRED Mode-B exit (entry + exit on ONE decision bar) is counted at
+    # its MAPPED arm bar (design law 6: exec_idx(N) = the arm bar, NOT the
+    # §2.4 landing successor). When it physically lands on a slid successor
+    # whose OWN decision bar ALSO carries an exit signal, the direct arm must
+    # NOT re-count the same physical fill — a single exit fill contributes AT
+    # MOST ONE to exit_fill_slid_minutes (law 9 / §5.2: EVERY slid FILL is
+    # counted — a fill, once). tf=2 grid: decision [09:15, 09:17] (close
+    # instants 09:17 / 09:19); exec [09:15, 09:18, 09:20] → arm_source
+    # (-1, 0, 1), arm_slid (False, True, True) — the entry arm bar 09:18 AND
+    # the exit's landing 09:20 both slid.
+
+    def _two_slid_streams(self) -> tuple[list[CandleBar], list[CandleBar]]:
+        decision = [_flat(9, 15), _flat(9, 17)]
+        exec_1m = [_flat(9, 15), _flat(9, 18), _bar(9, 20, "100", "101", "99.50", "100")]
+        emap = build_exec_grid_map(decision, exec_1m, tf_minutes=2)
+        assert emap.arm_source == (-1, 0, 1)
+        assert emap.arm_slid == (False, True, True)
+        return decision, exec_1m
+
+    def test_deferred_exit_on_two_consecutive_slid_bars_counts_once(self) -> None:
+        # Entry+exit on decision 0 (slid arm 09:18) → deferred exit lands on
+        # the slid 09:20 successor, whose own decision (idx 1) ALSO fires exit.
+        # The deferred exit is counted ONCE (at its mapped arm bar), NOT twice.
+        decision, exec_1m = self._two_slid_streams()
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=2)
+        trades, idxs = walker.run_with_exit_indices(decision, exec_1m, [True, False], [True, True])
+        assert len(trades) == 1
+        assert walker.fill_slid_minutes == 1
+        assert walker.exit_fill_slid_minutes == 1  # was 2 pre-dedupe
+        assert trades[0].entry_ts == _ts(9, 18)
+        assert trades[0].exit_ts == _ts(9, 20)
+        assert idxs == [2]
+
+    def test_deferred_exit_second_signal_is_pure_noop_on_fill(self) -> None:
+        # The second (successor) exit signal only ever moved the COUNTER — the
+        # physical trade is byte-identical to the single-exit run, proving the
+        # dedupe touches nothing but the observability count.
+        decision, exec_1m = self._two_slid_streams()
+        w2 = TradeSimWalker(direction=Side.BUY, tf_minutes=2)
+        t2, _ = w2.run_with_exit_indices(decision, exec_1m, [True, False], [True, True])
+        w1 = TradeSimWalker(direction=Side.BUY, tf_minutes=2)
+        t1, _ = w1.run_with_exit_indices(decision, exec_1m, [True, False], [True, False])
+        # Same single deferred exit fill on the slid 09:20 successor either way.
+        assert w1.exit_fill_slid_minutes == 1
+        assert w2.exit_fill_slid_minutes == 1
+        assert len(t1) == len(t2) == 1
+        assert t1[0].pnl_paisa == t2[0].pnl_paisa
+        assert t1[0].entry_ts == t2[0].entry_ts == _ts(9, 18)
+        assert t1[0].exit_ts == t2[0].exit_ts == _ts(9, 20)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Coarse decision TF over a REAL 1m execution stream
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestCoarseTf:
+    def _decision(self) -> list[CandleBar]:
+        # Two 5-minute decision bars (bucket-START labels 09:15 / 09:20).
+        return [
+            _bar(9, 15, "100", "101", "99", "100"),
+            _bar(9, 20, "100", "101", "99", "100"),
+        ]
+
+    def _exec_1m(self) -> list[CandleBar]:
+        return [
+            _flat(9, 15),
+            _flat(9, 16),
+            _flat(9, 17),
+            _flat(9, 18),
+            _flat(9, 19),
+            _bar(9, 20, "100.20", "100.50", "100.10", "100.30"),  # the mapped fill bar
+            _bar(9, 21, "100.30", "100.40", "100.00", "100.05"),  # SL fires here
+            _flat(9, 22),
+        ]
+
+    def test_tf5_signal_fills_at_close_instant_1m_bar(self) -> None:
+        # Signal on the 09:15 5m decision bar → close instant 09:20 → entry
+        # at the 09:20 1m bar's HIGH 100.50. SL 40 → level 100.10; the entry
+        # bar's own low 100.10 touches it → DEFERRED (counted). The 09:21
+        # bar's low 100.00 ≤ 100.10 → SL fills min(100.10, 100.00) = 100.00.
+        # pnl = 10000 − 10050 = −50, holding 2 (1m bars 09:20, 09:21);
+        # mae = entry 10050 − low 10000 = 50.
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=5, stop_loss_paisa=40)
+        trades, exit_idx = walker.run_with_exit_indices(
+            self._decision(), self._exec_1m(), [True, False]
+        )
+        assert walker.exits_deferred == 1
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=-50,
+                mfe_paisa=0,
+                mae_paisa=50,
+                holding_bars=2,
+                entry_ts=_ts(9, 20),
+                exit_ts=_ts(9, 21),
+                direction=Side.BUY,
+            )
+        ]
+        assert exit_idx == [6]  # 1-MINUTE index within exec_bars_1m
+        # No look-ahead: the fill instant is at/after the decision close.
+        assert trades[0].entry_ts >= self._decision()[0].timestamp
+
+    def test_decision_bar_prices_are_signal_domain_only(self) -> None:
+        # Mutating the DECISION bars' OHLC (same timestamps) changes NO fill:
+        # prices come exclusively from the 1m execution stream.
+        mutated = [
+            _bar(9, 15, "500", "999", "1", "42"),
+            _bar(9, 20, "500", "999", "1", "42"),
+        ]
+        base = simulate_trades(
+            self._decision(),
+            [True, False],
+            direction=Side.BUY,
+            tf_minutes=5,
+            exec_bars_1m=self._exec_1m(),
+            stop_loss_paisa=40,
+        )
+        moved = simulate_trades(
+            mutated,
+            [True, False],
+            direction=Side.BUY,
+            tf_minutes=5,
+            exec_bars_1m=self._exec_1m(),
+            stop_loss_paisa=40,
+        )
+        assert base == moved

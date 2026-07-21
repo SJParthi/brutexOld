@@ -81,7 +81,16 @@ _EXPECTED_SNAPSHOT_HASH = "1a8f36dd8d04452a77a49ba878dd2c473bc6d5418cdabf7323486
 # now carries the UNCONDITIONAL ``fill_mode: worst_case`` token AND the
 # snapshot moved with the re-crafted fixture — the run identity moved by
 # design (the precise-era digest f6a08f4c…b1b4c9 is permanently unreachable).
-_EXPECTED_RUN_ID = "2aa8c684565a5e250a86d59b8161e8bfed3e1e94fbc0f8a91fce128c1ce020ca"
+# RE-LOCKED for DEC-FILL-EXEC-GRID-1M-001 (2026-07-18): the ONE preimage
+# change is that ``canonical_trade_params`` now UNCONDITIONALLY emits the
+# additive ``execution_grid: "1m_next_bar"`` key into the canonical params
+# dict (the anti-aliasing token vs PR-A run_ids), so the blake3 run-identity
+# digest moved by design. Every OTHER identity input is byte-unchanged —
+# the snapshot-hash literal above still passes UNMODIFIED, and
+# mask/direction/instrument/tf/mode/indicator_version/code_commit_sha are
+# the same literals (the PR-A digest 2aa8c684…020ca is permanently
+# unreachable).
+_EXPECTED_RUN_ID = "31b6fd548d03df1fd591b4550d7844e01e26e124e7586768935eb26829457aa6"
 
 #: The frozen end-to-end store content hash (polars/zstd-build sensitive —
 #: see the module docstring).
@@ -96,41 +105,28 @@ _EXPECTED_RUN_ID = "2aa8c684565a5e250a86d59b8161e8bfed3e1e94fbc0f8a91fce128c1ce0
 # RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): worst-case fills
 # over the re-crafted fixture — regenerated on THIS tree, two-run
 # byte-determinism pinned in the literal test below.
-# RE-LOCKED for the W2 metrics-depth fold (MIGRATION.md #1974–#1976, the
-# #1976 census fold of main ace41c7e0 — regenerated 2026-07-19 on the
-# folded tree with a FRESH hand-audit under worst-case fill semantics; the
-# house law: goldens are re-derived, never merged textually; the pre-fold
-# sl_hit_rate/recency audit values were PRE-worst-case HISTORY and are
-# superseded by the figures below). AUDITED DELTA CLASS — schema-additive
-# ONLY, proven against a live main-baseline worktree at ace41c7e0 (which
-# reproduces its literal `8670c7f6…74a0` exactly): the SAME 3 rows with
-# byte-stable run_ids, the SAME 28-column prefix in the SAME order with
-# EVERY old column value byte-equal, plus EXACTLY the lane's 8
-# appended-LAST nullable columns (the growth trio + sl_hit_rate + the
-# recency four). WORST-CASE HAND-AUDIT of the mask bit-0 row (142 trades =
-# 122 TP wins × +50 → gross_profit 6_100, + 20 SL stop-outs → gross_loss
-# 2_210 across the two bearish-bar depths, avg −110.5; net +3_890):
-# loss_rate = 20/142 = 0.14084507042253522; every loss is an SL fill under
-# worst-case → sl_hit_rate = 20/142 (== loss_rate — all wins are TP);
-# kelly = p − q/b with p = 122/142, b = 50/110.5 → 0.5478873239436619 and
-# g(f*/2) = 0.055308117989589976; the 5-session Jun-2025 stitched slice
-# sits wholly inside the 24-month trailing window AND decay bucket 0 →
-# trailing_net_pnl_paisa == decay_weighted_net_paisa == net (+3_890) and
-# trailing sharpe/pf equal the full-history columns.
-# → RE-LOCKED AGAIN for DEC-RANK-PARETO-PERSIST-001 /
-# DEC-RANK-QUOTA-PERSIST-1000-001 (RE-DERIVED at the 2026-07-20 train-b
-# wave-2b fold, MIGRATION.md #2059/#2060): the persisted schema ALSO gained
-# the two appended-LAST nullable selection-provenance columns
-# (`pareto_member` Boolean + `selection_basis` Utf8 — at the fold strictly
-# AFTER the W2 recency family) and the persist union stamps them — the byte
-# stream moved by design while `_EXPECTED_RUN_ID` above is byte-identical
-# (run identity untouched; persistence-side only). The two parent re-locks
-# over the SAME pre-fold base `8670c7f6…74a0` (W2's `1022bebf…7728`; the
-# lane's `e98221de…68d5`) each covered only its OWN column set, so neither
-# literal can reproduce on the UNION tree — this literal was regenerated on
-# the FOLDED tree (the house law: goldens are re-derived, never merged
-# textually), determinism pinned below.
-_EXPECTED_STORE_HASH = "b0a3bed9369163cc69129cd3e9722e70ebb7a722c32d7e566e18475034851bae"
+# RE-LOCKED for DEC-FILL-EXEC-GRID-1M-001 × TRAIN-B FOLD: the persisted store
+# is the UNION of the member's exec-grid identity and the woven additive
+# columns. (1) Every row's ``run_id`` re-keys on the additive
+# ``execution_grid: "1m_next_bar"`` params token — the same preimage change as
+# ``_EXPECTED_RUN_ID`` above; the TRADES are unchanged: a per-mask walker probe
+# over this exact stitched slice (masks 1/2/4/8/16, SL 80 / TP 50) measured
+# ``exits_deferred == 0`` on every mask (no entry 1m bar here touches a level,
+# so the §2.4 same-bar deferral is inert and the B3 carve-out never applies) —
+# the 142-trade worst-case shape (122 TP × +50 + 20 SL stop-outs, net +3_890)
+# survives (loss_rate = 20/142; every loss is an SL fill under worst-case →
+# sl_hit_rate == loss_rate). (2) The ResultRow schema carries the woven W2
+# metrics-depth family (8 appended-LAST nullable columns: the growth trio +
+# sl_hit_rate + the recency four, MIGRATION.md #1974–#1976) PLUS the LANE-W1
+# selection-provenance pair (`pareto_member` Boolean + `selection_basis` Utf8,
+# #2059/#2060; TAGS only at `top_k=None`, `_EXPECTED_RUN_ID` byte-identical).
+# So NEITHER parent literal reproduces on the folded tree (train-b's
+# `b0a3bed9…1bae` lacked the exec-grid run_ids; the member's `7671178b…02ec`
+# lacked the additive columns) — RE-DERIVED FRESH in the Train-B integrity pass
+# (the house law: goldens are re-derived, never merged textually; two-run
+# byte-determinism + persisted>0 pinned below, polars/zstd-build sensitive per
+# the module docstring).
+_EXPECTED_STORE_HASH = "e9dd823a17f215f5db9e55d176c739e8226aa5f231e0bf050f42c541d8f37bc0"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:
@@ -249,7 +245,12 @@ def _run(tmp_path: Path, tag: str, bars: list[CandleBar], cfg: SweepRunConfig) -
     store = ResultsStore(path=tmp_path / f"{tag}.parquet")
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
-        return run_persisted_sweep(bars, cfg, store=store, dedup=dedup, audit=audit)
+        # The stitched slice IS the real 1-minute stream (interval "1minute",
+        # tf_minutes == 1) — the §6 fixed point: it is passed as BOTH the
+        # decision and the execution feed (DEC-FILL-EXEC-GRID-1M-001).
+        return run_persisted_sweep(
+            bars, cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+        )
 
 
 # ────── the frozen chain ──────

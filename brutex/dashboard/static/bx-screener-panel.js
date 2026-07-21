@@ -236,6 +236,10 @@ function bxHarvestFilterOptions(rows) {
     if (inst) { filters.instrument = inst; }
     var tier = byId('scTierSel').value;
     if (tier) { filters.tier = tier; }
+    /* Executability selection (`DEC-OPTIONS-EXEC-FEEDBACK-001`) — inactive
+       ("" = All) sends no key, so absent-object rows are untouched. */
+    var ex = byId('scExec').value;
+    if (ex) { filters.executability = ex; }
     var minWin = num('scMinWin');
     if (minWin !== null) { filters.min_win_rate = minWin; }
     var minPf = num('scMinPf');
@@ -459,8 +463,9 @@ function bxHarvestFilterOptions(rows) {
       clearTimeout(renderDebounceTimer);
       renderDebounceTimer = setTimeout(render, 200);
     }
-    ['scTf', 'scDir', 'scInstrument', 'scTierSel', 'scMinWin', 'scMinPf',
+    ['scTf', 'scDir', 'scInstrument', 'scTierSel', 'scExec', 'scMinWin', 'scMinPf',
      'scMinTrades', 'scMinDsr', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+
       byId(id).addEventListener('input', renderDebounced);
     });
     byId('scShowAll').addEventListener('click', function () {

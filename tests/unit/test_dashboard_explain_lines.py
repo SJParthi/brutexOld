@@ -272,3 +272,38 @@ class TestModeText:
         """Never an invented sentence — the note names where the phrasing lands."""
         out = _node_call('E.modeText("beginner", "PDH_CROSS_UP", null)')
         assert out == "PDH_CROSS_UP (plain-English phrasing lands with the P3 phrase table)"
+
+
+class TestExecExplainEntries:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001`: the two exec-column hover lines.
+
+    The screener's "Opt net" / "Fut net" columns hover to FIXED lines (the
+    R27 lookup law — never generated text); both pinned verbatim so the UI
+    copy cannot drift. (The file pins no exact entry COUNT — the screener
+    column-coverage test above already walks S.COLUMNS, which now includes
+    both explain keys.)
+    """
+
+    def test_options_net_after_cost_line_pinned_verbatim(self) -> None:
+        out = _node_call('E.explain("options_net_after_cost")')
+        assert out == (
+            "Net P&L after translating each spot signal to its ATM option and "
+            "charging the full Indian cost stack (brokerage · STT · ETC · SEBI · "
+            "IPFT · stamp · GST). Priceable only within the verified ETC window "
+            "(from 2024-10-01) — '—' means the options sim did not price this "
+            "strategy; see the coverage % in the entry's options_exec object."
+        )
+
+    def test_futures_net_line_pinned_verbatim(self) -> None:
+        out = _node_call('E.explain("futures_net")')
+        assert out == (
+            "Net P&L re-priced on the front-month futures contract (index futures "
+            "are cost-free — net equals gross). '—' means the futures sim did not "
+            "run for this strategy."
+        )
+
+    def test_both_keys_are_wired_screener_columns(self) -> None:
+        """The explain keys are exactly the two exec columns' hover tokens."""
+        out = _node_call("S.COLUMNS.map((c) => c.explain)")
+        assert "options_net_after_cost" in out
+        assert "futures_net" in out

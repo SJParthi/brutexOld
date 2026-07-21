@@ -229,7 +229,11 @@ class TestEngineIdenticalCleanVsPoisoned:
                 bars = arrow_table_to_bars(_get_bars(cat, lake_root))
             bar_bits = build_bar_bits(bars)
             entry_signals = mask_to_entry_signals(bar_bits, 0)
-            trades = simulate_trades(bars, entry_signals, direction=Side.BUY, tf_minutes=1)
+            # tf==1 fixed point (DEC-FILL-EXEC-GRID-1M-001): the deduped 1m
+            # read IS both the decision and the execution stream.
+            trades = simulate_trades(
+                bars, entry_signals, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+            )
             outputs[label] = (bar_bits, entry_signals, trades)
 
         clean_bits, clean_signals, clean_trades = outputs["clean"]

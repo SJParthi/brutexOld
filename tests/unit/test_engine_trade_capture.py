@@ -88,11 +88,18 @@ _TP = 50
 
 def _oracle_trades(direction: Side = Side.BUY) -> list[ClosedTrade]:
     signals = [bool(b & _MASK == _MASK) for b in _BAR_BITS]
+    # tf==1minute fixed point (DEC-FILL-EXEC-GRID-1M-001): the SAME list is the
+    # decision AND the 1m execution stream. No trade in this fixture exits on
+    # its own entry bar (hand-checked: trade 1 entry bar 09:16 touches neither
+    # 100.60 TP nor 99.80 SL; trade 2 entry bar 09:19 low 99.90 > 99.75 SL;
+    # trade 3 entry bar 15:18 touches neither level), so the §2.4 same-bar
+    # deferral changes nothing and every PR-A expected number stands.
     return simulate_trades(
         _BARS,
         signals,
         direction=direction,
         tf_minutes=1,
+        exec_bars_1m=_BARS,
         stop_loss_paisa=_SL,
         take_profit_paisa=_TP,
     )
@@ -142,6 +149,7 @@ class TestCaptureParityPass:
             _row(),
             bars=_BARS,
             bar_bits=_BAR_BITS,
+            exec_bars_1m=_BARS,
             tf_minutes=1,
             sl_paisa=_SL,
             tp_paisa=_TP,
@@ -194,6 +202,7 @@ class TestCaptureParityPass:
             _row(direction="bear"),
             bars=_BARS,
             bar_bits=_BAR_BITS,
+            exec_bars_1m=_BARS,
             tf_minutes=1,
             sl_paisa=_SL,
             tp_paisa=_TP,
@@ -209,6 +218,7 @@ class TestCaptureParityPass:
             _row(),
             bars=_BARS,
             bar_bits=_BAR_BITS,
+            exec_bars_1m=_BARS,
             tf_minutes=1,
             sl_paisa=_SL,
             tp_paisa=_TP,
@@ -236,6 +246,7 @@ class TestCaptureParityPass:
             _row(),
             bars=_BARS,
             bar_bits=_BAR_BITS,
+            exec_bars_1m=_BARS,
             tf_minutes=1,
             sl_paisa=_SL,
             tp_paisa=_TP,
@@ -277,6 +288,7 @@ class TestCaptureParityPass:
             signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_BARS,  # tf==1m fixed point — same list, both streams
             stop_loss_paisa=_SL,
             take_profit_paisa=_TP,
             reference_stamper=stamper,
@@ -287,6 +299,7 @@ class TestCaptureParityPass:
             _row(),
             bars=_BARS,
             bar_bits=_BAR_BITS,
+            exec_bars_1m=_BARS,
             tf_minutes=1,
             sl_paisa=_SL,
             tp_paisa=_TP,
@@ -316,6 +329,7 @@ class TestCaptureParityPass:
             row,
             bars=_BARS,
             bar_bits=_BAR_BITS,
+            exec_bars_1m=_BARS,
             tf_minutes=1,
             sl_paisa=_SL,
             tp_paisa=_TP,
@@ -337,6 +351,7 @@ class TestCaptureParityFail:
                 row,
                 bars=_BARS,
                 bar_bits=_BAR_BITS,
+                exec_bars_1m=_BARS,
                 tf_minutes=1,
                 sl_paisa=_SL,
                 tp_paisa=_TP,
@@ -357,6 +372,7 @@ class TestCaptureParityFail:
             _row(net=999_999),
             bars=_BARS,
             bar_bits=_BAR_BITS,
+            exec_bars_1m=_BARS,
             tf_minutes=1,
             sl_paisa=_SL,
             tp_paisa=_TP,
@@ -375,6 +391,7 @@ class TestReentryPinAsFound:
             _row(),
             bars=_BARS,
             bar_bits=_BAR_BITS,
+            exec_bars_1m=_BARS,
             tf_minutes=1,
             sl_paisa=_SL,
             tp_paisa=_TP,
@@ -482,6 +499,10 @@ class TestSessionGapExitBarFullRangeFold:
             _gap_row(),
             bars=_GAP_BARS,
             bar_bits=_GAP_BAR_BITS,
+            # tf==1m fixed point: same list, both streams. The exit bar (09:17)
+            # is NOT the entry bar (09:16), so the B3 CLOSE carve-out does not
+            # apply — the session_gap fill stays the exit bar's adverse LOW.
+            exec_bars_1m=_GAP_BARS,
             tf_minutes=1,
             sl_paisa=None,  # Mode B — no SL/TP leg fires on the wide exit bar
             tp_paisa=None,
@@ -669,7 +690,11 @@ class TestCaptureOverRealSweepStore:
         store = ResultsStore(path=tmp_path / "store.parquet")
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
         with AuditWriter(path=tmp_path / "audit.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=dedup, audit=audit)
+            # tf==1m fixed point: the same list serves both streams
+            # (DEC-FILL-EXEC-GRID-1M-001).
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+            )
         assert summary.persisted > 0
         rows = ResultsStore.load(tmp_path / "store.parquet").rows()
         assert len(rows) == summary.persisted
@@ -682,6 +707,7 @@ class TestCaptureOverRealSweepStore:
                 row,
                 bars=bars,
                 bar_bits=bar_bits,
+                exec_bars_1m=bars,
                 tf_minutes=cfg.tf_minutes,
                 sl_paisa=cfg.sl_paisa,
                 tp_paisa=cfg.tp_paisa,

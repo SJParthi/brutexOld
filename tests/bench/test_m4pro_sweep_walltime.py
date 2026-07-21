@@ -195,11 +195,19 @@ def _make_sim(n_bars: int) -> ResidentSweepSim:
         bar_time = dt_time(hour=total_minutes // 60, minute=total_minutes % 60)
         is_forced.append(is_forced_exit_bar(bar_time, 1))
         session_idx.append(i // _SESSION_MINUTES)
+    # Dual-feed exec-grid ctor (DEC-FILL-EXEC-GRID-1M-001, #1989): this 1-minute
+    # window IS its own execution grid — the tf==1 fixed point where decision
+    # bar j-1 fills on 1m bar j (`arm_source[j] = j-1`, bar 0 unarmed), exactly
+    # the `ExecGridMap.arm_source` a contiguous decision==exec stream yields at
+    # tf_minutes == 1. Mirrors `test_trade_sim_throughput._make_sim` /
+    # `test_exec_grid_dual_feed_bench._tf1_arm_source`. `bar_bits` stays the
+    # per-decision (== per-1m at tf=1) firing bits already built above.
+    arm_source: list[int] = [-1, *range(n_bars - 1)]
     # `fno_math` is the importorskip runtime variable, so the constructor's return
     # is `Any` to mypy; capture it in a precisely-typed local before returning
     # (the no-`# type: ignore` pattern of DEC-M4PRO-BENCH-SURFACE-001 #979).
     sim: ResidentSweepSim = fno_math.ResidentSweepSim(
-        open_p, high_p, low_p, close_p, is_forced, session_idx, bar_bits
+        open_p, high_p, low_p, close_p, is_forced, session_idx, arm_source, bar_bits
     )
     return sim
 

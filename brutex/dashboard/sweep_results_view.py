@@ -431,15 +431,30 @@ RANKABLE_COLUMNS: Final[tuple[str, ...]] = (
 #: persisted on ``ResultRow`` — permanently inert on /results (a
 #: ``?preset=alpha`` view orders by nothing but the ``run_id`` tie law and
 #: says so honestly; the /results read-time join is the named follow-up
-#: DEC-ALPHA-RESULTS-JOIN-001).
+#: DEC-ALPHA-RESULTS-JOIN-001). ``net_after_cost_paisa``
+#: (`DEC-OPTIONS-EXEC-FEEDBACK-001`) ships DISCLOSED-INERT on /results:
+#: ``?preset=net_after_cost`` is accepted (the writer-side top100 build ranks
+#: by it for real) but /results rows come from ``ResultsStore`` rows carrying
+#: NO options-exec verdict — the axis is constant-``None`` per row, ordering
+#: falls through to ``run_id`` ASC, and the payload names it inert. Dynamic
+#: activation (reading the newest run's top100 ``options_exec`` objects — the
+#: ``composite_join`` pattern) is the named follow-up
+#: `DEC-NETCOST-RESULTS-JOIN-001`.
 PRESET_INERT_AXES: Final[tuple[str, ...]] = (
     "composite_score",
     "max_consecutive_losses",
     "alpha_pct",
+    "net_after_cost_paisa",
 )
 
-#: The effective inert axes once the composite index joined non-empty.
-_INERT_AXES_COMPOSITE_ACTIVE: Final[tuple[str, ...]] = ("max_consecutive_losses", "alpha_pct")
+#: The effective inert axes once the composite index joined non-empty
+#: (composite activation removes ``composite_score``; it does NOT activate
+#: the alpha or net-cost axes).
+_INERT_AXES_COMPOSITE_ACTIVE: Final[tuple[str, ...]] = (
+    "max_consecutive_losses",
+    "alpha_pct",
+    "net_after_cost_paisa",
+)
 
 
 @dataclass(frozen=True, slots=True)

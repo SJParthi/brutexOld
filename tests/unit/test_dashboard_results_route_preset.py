@@ -125,11 +125,16 @@ class TestPresetParam:
         assert payload["preset"] == "min_dd_first"
         # DEC-ALPHA-BUYHOLD-METRIC-001: alpha_pct joins the inert set — an
         # ARTIFACT-level metric never persisted on ResultRow (honest
-        # disclosure, the Golden-Rule-#10 law).
+        # disclosure, the Golden-Rule-#10 law). net_after_cost_paisa likewise
+        # joins PRESET_INERT_AXES as a DISCLOSED-INERT axis per
+        # DEC-OPTIONS-EXEC-FEEDBACK-001 (#1990) — see
+        # brutex/dashboard/sweep_results_view.py PRESET_INERT_AXES; dynamic
+        # activation deferred to DEC-NETCOST-RESULTS-JOIN-001.
         assert payload["preset_inert_axes"] == [
             "composite_score",
             "max_consecutive_losses",
             "alpha_pct",
+            "net_after_cost_paisa",
         ]
         assert [r["max_drawdown_pct"] for r in payload["rows"]] == [2.0, 25.0]
 

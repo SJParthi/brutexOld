@@ -105,6 +105,11 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
+from brutex.engine.exec_grid import (
+    EXECUTION_GRID_1M_NEXT_BAR,
+    ExecGridMap,
+    build_exec_grid_map,
+)
 from brutex.engine.period_stats import (
     encode_judged_years,
     encode_period_stats,
@@ -941,6 +946,16 @@ def canonical_trade_params(
     # verify/recount law is now "fill_mode key MUST be present and MUST read
     # 'worst_case' — anything else is a refused legacy artifact".
     params["fill_mode"] = FillMode.WORST_CASE.value
+    # DEC-FILL-EXEC-GRID-1M-001 (design §4.2): the 1-minute execution grid is
+    # the ONLY fill grid, and its key is emitted UNCONDITIONALLY beside the
+    # fill_mode key with the same anti-aliasing rationale — without it a
+    # tf=1minute run under the PR-B law would ALIAS its PR-A-era identity
+    # (same bars, same params, same snapshot) while the trades DIFFER (the
+    # §2.4 same-bar deferral changes results even in the degenerate case).
+    # The verify/recount law is the fill_mode law's twin: "execution_grid MUST
+    # be present and MUST read '1m_next_bar' — anything else is a refused
+    # decision-TF-era artifact".
+    params["execution_grid"] = EXECUTION_GRID_1M_NEXT_BAR
     return params
 
 
@@ -1124,6 +1139,8 @@ def ranked_combo_to_result_row(
     tf_minutes: int,
     sl_paisa: int | None,
     tp_paisa: int | None,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
     temporal: TemporalRobustnessConfig | None = None,
     temporal_judged_years: Sequence[int] | None = None,
@@ -1160,8 +1177,11 @@ def ranked_combo_to_result_row(
     * **Representative price anchors from REAL OHLC (Golden Rule #1).**
       ``ResultMetrics`` carries no per-trade fill prices, so the finalist's
       trades are re-simulated here and ``avg_entry_price`` / ``avg_exit_price``
-      are the mean of the real ``open`` (at each trade's entry bar) / ``close``
-      (at each trade's exit bar), snapped to the 2dp tick grid via
+      are the mean of the real ``open`` (at each trade's entry 1m bar) /
+      ``close`` (at each trade's exit 1m bar) — read over the EXECUTION
+      stream (DEC-FILL-EXEC-GRID-1M-001 §Q1: the fills resolve on 1m bars,
+      so the anchors read the bars that actually filled; open/close anchor
+      semantics KEPT), snapped to the 2dp tick grid via
       :func:`brutex.money.round_money`. These are HONEST anchors drawn from real
       bars, never fabricated. Threading the exact fill price through
       :class:`~brutex.metrics.types.ClosedTrade` is a tracked follow-up. A
@@ -1260,6 +1280,8 @@ def ranked_combo_to_result_row(
         mask_to_entry_signals(bar_bits, rc.mask),
         direction=side,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
         reference_stamper=reference_stamper,
@@ -1269,7 +1291,9 @@ def ranked_combo_to_result_row(
         # comprehension is silently LAST-wins on a duplicated bar timestamp, so
         # a poisoned-era duplicate would swap the REAL entry/exit price anchor
         # for the re-stated one. The COMMON gate keeps the first bar + WARNs.
-        ts_to_bar = bars_by_ts_first(bars, source=f"sweep_run:{instrument}/{tf}/{direction}")
+        ts_to_bar = bars_by_ts_first(
+            exec_bars_1m, source=f"sweep_run:{instrument}/{tf}/{direction}"
+        )
         entries = [ts_to_bar[t.entry_ts].open for t in trades]
         exits = [ts_to_bar[t.exit_ts].close for t in trades]
         avg_entry = round_money(sum(entries, Decimal("0")) / len(entries))
@@ -1459,6 +1483,8 @@ def _build_trade_sim(
     cfg: SweepRunConfig,
     direction_label: str,
     *,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None,
     reference_stamper: TradeReferenceStamper | None,
     kernel_columns: PriceColumns | None = None,
 ) -> ResidentTradeSim:
@@ -1489,18 +1515,21 @@ def _build_trade_sim(
     EXPLICIT stamping decision for the trades this sim will emit — the
     one-kwarg revert lever the coordinator ruling demands.
 
-    ``kernel_columns`` (the W2 rider of DEC-STAGE1A-RUST-BATCH-001) threads a
+    ``kernel_columns`` (the W2 rider of DEC-STAGE1A-RUST-BATCH-001, rebased
+    onto the 1m EXECUTION stream by DEC-FILL-EXEC-GRID-1M-001) threads a
     :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel`'s once-per-window
-    :class:`~brutex.engine.rust_trade_sim.PriceColumns` into the sim so a
-    kernel-reusing tuple skips the per-tuple 4×-Decimal-snap derivation;
-    ``None`` (the default — every kernel-less caller) derives locally,
-    byte-identical.
+    EXECUTION-stream :class:`~brutex.engine.rust_trade_sim.PriceColumns` into
+    the sim so a kernel-reusing tuple skips the per-tuple 4×-Decimal-snap
+    derivation over the (much longer) 1m stream; ``None`` (the default —
+    every kernel-less caller) derives locally, byte-identical.
     """
     try:
         sim = ResidentTradeSim(
             bars,
             bar_bits,
             tf_minutes=cfg.tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             reference_stamper=reference_stamper,
             precomputed_columns=kernel_columns,
         )
@@ -1535,6 +1564,8 @@ def _reattribute_chunk_failure(
     batch_exc: Exception,
     run_id_of: Callable[[int], str],
     *,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None,
     reference_stamper: TradeReferenceStamper | None,
 ) -> NoReturn:
     """A batched trade-sim chunk raised — attribute the culprit mask, then fail LOUD.
@@ -1582,6 +1613,8 @@ def _reattribute_chunk_failure(
                 mask,
                 direction=cfg.direction,
                 tf_minutes=cfg.tf_minutes,
+                exec_bars_1m=exec_bars_1m,
+                exec_map=exec_map,
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
@@ -1695,6 +1728,11 @@ def _iter_mask_metrics(
                 direction_label,
                 exc,
                 run_id_of,
+                # The sim's OWN exec stream + map ride into the oracle replay
+                # (DEC-FILL-EXEC-GRID-1M-001): the replay walks the EXACT
+                # dual feed the failed batch walked.
+                exec_bars_1m=sim.exec_bars,
+                exec_map=sim.exec_map,
                 reference_stamper=sim.reference_stamper,
             )
         for mask, (trades, exit_indices, exit_counts) in zip(chunk, chunk_triples, strict=True):
@@ -1723,6 +1761,8 @@ def _iter_mask_metrics(
                     trades,
                     start_equity_paisa=cfg.start_equity_paisa,
                     tf_minutes=cfg.tf_minutes,
+                    exec_bars_1m=sim.exec_bars,
+                    exec_map=sim.exec_map,
                     exit_indices=exit_indices,
                     exit_reason_counts=exit_counts,
                     # The loaded bar range's END instant — one value per launch
@@ -1823,6 +1863,8 @@ def run_persisted_sweep(
     store: ResultsStore,
     dedup: DedupSink,
     audit: AuditSink,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     kernel: ResidentSweepKernel | None = None,
     trial_stats_digest: str | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
@@ -1999,6 +2041,23 @@ def run_persisted_sweep(
     """
     if not bars:
         raise ValueError("run_persisted_sweep: bars must be non-empty")
+    if not exec_bars_1m:
+        # DEC-FILL-EXEC-GRID-1M-001 (design §3.3): a decision slice without
+        # its 1-minute execution stream is not "partial coverage" — it is an
+        # unrunnable coordinate. Refuse LOUDLY, never a silent single-feed
+        # degrade (the launch preflight refuses earlier with the remedy;
+        # this is the spine-level belt).
+        raise ValueError(
+            f"run_persisted_sweep: exec_bars_1m must be non-empty — the 1-minute "
+            f"execution stream for {cfg.instrument!r} is REQUIRED "
+            f"(DEC-FILL-EXEC-GRID-1M-001); pull/prebuild the 1minute slice"
+        )
+    if exec_map is None:
+        # ONE map per tuple (mask-independent; the launcher threads its
+        # preload-scoped per-coordinate memo instead — design §1.5). Derived
+        # BEFORE the look-ahead guard wraps `bars` (the map build is a
+        # sequential O(N) two-pointer pass, not a strategy read).
+        exec_map = build_exec_grid_map(bars, exec_bars_1m, tf_minutes=cfg.tf_minutes)
     # Opt-in runtime look-ahead barrier (DEC-SWEEP-LOOKAHEAD-GUARD-001): the
     # env flag is resolved ONCE here at setup — never inside any per-bar loop.
     # OFF (the default) returns the SAME `bars` object (identity), so the hot
@@ -2134,6 +2193,14 @@ def run_persisted_sweep(
             raise ValueError(
                 f"run_persisted_sweep: kernel has {kernel.n_bars} bars but {len(bars)} "
                 f"bars were supplied — the kernel must be built from this tuple's bars"
+            )
+        # DEC-FILL-EXEC-GRID-1M-001 twin of the n_bars guard: a kernel built
+        # with a DIFFERENT execution stream would hand misaligned 1m columns.
+        if kernel.exec_bars_1m is not None and len(kernel.exec_bars_1m) != len(exec_bars_1m):
+            raise ValueError(
+                f"run_persisted_sweep: kernel holds {len(kernel.exec_bars_1m)} execution "
+                f"bars but {len(exec_bars_1m)} were supplied — the kernel must be built "
+                f"from this tuple's 1-minute execution stream"
             )
         # R-1 (DEC-NIFTY-FIB-AXIS-001): the pre-built ``bar_bits`` matrix is
         # anchor-SPECIFIC, so a kernel built for a different Fib anchor would make
@@ -2467,11 +2534,17 @@ def run_persisted_sweep(
             bar_bits,
             cfg,
             direction_label,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             reference_stamper=None,
             # The W2 rider (DEC-STAGE1A-RUST-BATCH-001): a kernel-reusing
             # tuple hands its once-per-window columns; the kernel=None arm
             # derives locally (byte-identical).
-            kernel_columns=kernel.kernel_columns if kernel is not None else None,
+            # The W2 rider rebased onto the EXECUTION stream
+            # (DEC-FILL-EXEC-GRID-1M-001): a kernel built WITH the exec
+            # stream hands its once-per-window 1m columns; a kernel without
+            # one (or kernel=None) derives locally, byte-identical.
+            kernel_columns=kernel.exec_columns if kernel is not None else None,
         )
         for mask, metrics in _iter_mask_metrics(
             sim,
@@ -2584,6 +2657,8 @@ def run_persisted_sweep(
             tf_minutes=cfg.tf_minutes,
             sl_paisa=cfg.sl_paisa,
             tp_paisa=cfg.tp_paisa,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the finalist
             # re-simulation feeds the persisted row, so the run's stamper
             # lands here.

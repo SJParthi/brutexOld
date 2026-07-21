@@ -30,6 +30,18 @@ that lock the two end-of-session exit paths:
   adv 60), exit at the final LOW ₹72999.80 ⇒
   **pnl −60, mfe 10, mae 60, holding 2**.
 
+Re-locked UNCHANGED for the 1-minute execution grid
+(DEC-FILL-EXEC-GRID-1M-001): both fixtures are real 1-minute bars run at the
+``tf_minutes == 1`` fixed point (the same list passed as decision AND
+execution stream — fill on 1m bar N+1, the historical timing), and the two
+new laws are provably inert here — the FORCED fixture's ENTRY bar range
+[99.95, 100.20] (₹100 scale) touches neither the SL level 99.90
+(= 100.20 − 0.30) nor the TP level 100.70 (= 100.20 + 0.50), so the §2.4
+same-bar deferral changes nothing; the EOD fixture has no SL/TP legs at all,
+and its last stored bar (@09:32) is NOT the entry bar (@09:31), so the B3
+terminal-CLOSE carve-out never applies (the fill stays the adverse LOW).
+``holding_bars`` is now a 1-MINUTE count — numerically identical here.
+
 Track-1 spot is signal-only → NO brokerage (CLAUDE.md §7), so the paisa pnl IS
 the net. Any walker regression (forced-exit override, end-of-data fallback,
 MFE/MAE folding, the worst-case fill law) breaks these literal expectations
@@ -113,11 +125,13 @@ _EOD_EXPECTED = [
 def test_forced_exit_overrides_at_circuit_close() -> None:
     """P-09: the 15:20 bar forces an exit at its adverse LOW, overriding the
     would-be TP at that bar's high."""
+    # tf==1 fixed point: the same list is decision AND execution stream.
     trades = simulate_trades(
         _FORCED_BARS,
         _FORCED_SIGNALS,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=_FORCED_BARS,
         stop_loss_paisa=30,
         take_profit_paisa=50,
     )
@@ -127,11 +141,13 @@ def test_forced_exit_overrides_at_circuit_close() -> None:
 def test_open_position_at_end_of_data_closes_at_last_close() -> None:
     """Robustness: a never-triggered Mode-B long closes at the final bar's
     ADVERSE extreme (BUY → LOW) under the one law."""
+    # tf==1 fixed point: the same list is decision AND execution stream.
     trades = simulate_trades(
         _EOD_BARS,
         _EOD_SIGNALS,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=_EOD_BARS,
     )
     assert trades == _EOD_EXPECTED
 
@@ -143,10 +159,13 @@ def test_net_equals_gross_for_signal_only_spot() -> None:
         _FORCED_SIGNALS,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=_FORCED_BARS,
         stop_loss_paisa=30,
         take_profit_paisa=50,
     )
-    eod = simulate_trades(_EOD_BARS, _EOD_SIGNALS, direction=Side.BUY, tf_minutes=1)
+    eod = simulate_trades(
+        _EOD_BARS, _EOD_SIGNALS, direction=Side.BUY, tf_minutes=1, exec_bars_1m=_EOD_BARS
+    )
     gross = forced[0].pnl_paisa + eod[0].pnl_paisa
     assert gross == -80  # −20 (forced) + −60 (eod), exact int64 paisa
     assert isinstance(gross, int)

@@ -225,6 +225,11 @@ def test_constructed_closed_trade_carries_vix_stamp() -> None:
         [True, False, False],
         direction=Side.BUY,
         tf_minutes=1,
+        # tf==1m fixed point (DEC-FILL-EXEC-GRID-1M-001): same list, both
+        # streams — entry still fills on bar 1, end_of_data still exits on
+        # bar 2 (not the entry bar, so no B3 carve-out), so the stamped
+        # instants (and hence the golden VIX levels) are unchanged.
+        exec_bars_1m=spot,
         reference_stamper=TradeReferenceStamper.from_vix_bars(_vix_candlebars()),
     )
     assert len(trades) == 1

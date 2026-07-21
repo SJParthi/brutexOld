@@ -53,6 +53,16 @@ def _m4pro_abs_active() -> bool:
     return os.environ.get(_ENV_M4PRO_ABS, "").strip() == "1"
 
 
+def _tf1_arm_source(n_bars: int) -> list[int]:
+    """The contiguous tf==1 fixed-point projection (DEC-FILL-EXEC-GRID-1M-001).
+
+    1m bar ``j`` is the next-1m fill bar of decision bar ``j - 1`` (bar 0 is
+    unarmed) — the exact ``ExecGridMap.arm_source`` a contiguous
+    decision == exec stream yields at ``tf_minutes == 1``.
+    """
+    return [-1, *range(n_bars - 1)]
+
+
 def _make_sim(n_bars: int) -> ResidentSweepSim:
     """Deterministic resident sim: a gently oscillating window, sparse bar_bits."""
     seed = 0x9E3779B97F4A7C15
@@ -73,10 +83,12 @@ def _make_sim(n_bars: int) -> ResidentSweepSim:
         # A few condition bits per bar so masks fire intermittently.
         bar_bits.append((seed * (i + 7)) & 0x000F_FFFF)
     # Single synthetic session (no forced bars either) — session_idx all-0 keeps
-    # the bench window shape identical to the pre-session-gate kernel.
+    # the bench window shape identical to the pre-session-gate kernel. The
+    # dual-feed ctor (DEC-FILL-EXEC-GRID-1M-001) takes the 1m EXECUTION columns
+    # + the arm_source projection; this window IS the tf==1 fixed point.
     session_idx: list[int] = [0] * n_bars
     return fno_math.ResidentSweepSim(
-        open_p, high_p, low_p, close_p, is_forced, session_idx, bar_bits
+        open_p, high_p, low_p, close_p, is_forced, session_idx, _tf1_arm_source(n_bars), bar_bits
     )
 
 
@@ -259,14 +271,16 @@ def test_resident_trade_sim_wired_vs_fallback_speedup() -> None:
     ) -> ResidentTradeSim:
         """Kernel-disabled twin — the same instance-level ``_rust = None``
         factory seam the unit/golden `_forced_fallback_sim` fakes use."""
-        sim = ResidentTradeSim(bars, bits, tf_minutes=tf_minutes)
+        # tf==1 fixed point: the same window is decision AND execution stream.
+        sim = ResidentTradeSim(bars, bits, tf_minutes=tf_minutes, exec_bars_1m=bars)
         sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
         return sim
 
     bars, bits = _make_candle_window(6_000)
     masks = _make_masks(24)
     sl, tp = 8_000, 12_000
-    sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+    # tf==1 fixed point: the same window is decision AND execution stream.
+    sim = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars)
     assert sim.rust_active, "wheel is built in CI — the wired arm must engage the kernel"
     fallback = _forced_fallback_trade_sim(bars, bits, tf_minutes=1)
     assert not fallback.rust_active
@@ -327,11 +341,19 @@ def _make_sim_u128(n_bars: int) -> ResidentSweepSimU128:
         low_p.append(o - 150)
         close_p.append(o + (wobble % 30))
         bar_bits.append(((seed * (i + 7)) & 0x000F_FFFF) | (1 << (64 + (i % 50))))
+    # The same dual-feed ctor shape as `_make_sim` (tf==1 fixed point).
     session_idx: list[int] = [0] * n_bars
     return cast(
         "ResidentSweepSimU128",
         fno_math.ResidentSweepSimU128(
-            open_p, high_p, low_p, close_p, is_forced, session_idx, bar_bits
+            open_p,
+            high_p,
+            low_p,
+            close_p,
+            is_forced,
+            session_idx,
+            _tf1_arm_source(n_bars),
+            bar_bits,
         ),
     )
 

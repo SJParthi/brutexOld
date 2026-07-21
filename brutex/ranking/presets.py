@@ -178,14 +178,26 @@ class RankRecord:
     #: ranks AFTER every real value under the ``alpha`` preset (the
     #: None-after-scored law), never coerced to a fake number.
     alpha_pct: float | None = None
+    #: The joined ``options_exec`` headline net-after-cost figure (int64
+    #: paisa, `DEC-OPTIONS-EXEC-FEEDBACK-001`) — ``None`` = honestly unpriced
+    #: (no options-exec verdict for this run_id; ranks LAST under the
+    #: ``net_after_cost`` preset, never coerced). Defaulted trailing field —
+    #: every pre-change constructor is unchanged (the optional-column
+    #: back-compat template).
+    net_after_cost_paisa: int | None = None
 
 
 #: A preset sort key — the 4-part BANDED min-DD ascending key
 #: (DEC-RANK-DD-BAND-ORDER-001 — band index first), the 5-part
-#: win-rate-safe ascending key, or the ``(value_present, raw_value)``
-#: descending key of the single-metric alternates.
+#: win-rate-safe ascending key, the ``(value_present, raw_value)``
+#: descending key of the single-metric float alternates, or the INT-EXACT
+#: ``(value_present, paisa)`` descending key of ``net_after_cost``
+#: (`DEC-OPTIONS-EXEC-FEEDBACK-001` — paisa can exceed 2**53, never float).
 type PresetKey = (
-    tuple[int, int, float, int] | tuple[int, float] | tuple[float, int, float, int, float]
+    tuple[int, int, float, int]
+    | tuple[int, float]
+    | tuple[float, int, float, int, float]
+    | tuple[int, int]
 )
 
 
@@ -310,6 +322,21 @@ def _alpha_key(record: RankRecord) -> tuple[int, float]:
     return (1, alpha)
 
 
+def _net_after_cost_key(record: RankRecord) -> tuple[int, int]:
+    """``(value_present, paisa)`` — INT-EXACT (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+
+    Never through float: paisa sums can exceed ``2**53`` (the /results
+    exact-int precedent), and Python tuple comparison on ints is exact at any
+    magnitude. Under ``reverse=True`` an unpriced entry (``None`` — no
+    options-exec verdict) ranks LAST via the presence flag, never coerced to
+    a fake number (the ``_composite_key`` None-after-scored law).
+    """
+    value = record.net_after_cost_paisa
+    if value is None:
+        return (0, 0)
+    return (1, value)
+
+
 @dataclass(frozen=True, slots=True)
 class RankingPreset:
     """One named ranking law: a sort key + its direction.
@@ -426,6 +453,19 @@ PRESETS: Final[Mapping[str, RankingPreset]] = {
         ),
         reverse=True,
         key=_alpha_key,
+    ),
+    # DEC-OPTIONS-EXEC-FEEDBACK-001 — APPENDED (additive; the default token
+    # and every existing preset's position are byte-identical).
+    "net_after_cost": RankingPreset(
+        name="net_after_cost",
+        describe=(
+            "options-execution net P&L after the full Indian cost stack, descending "
+            "(ATM rule; unpriced entries rank last — only the replayed top-K winner "
+            "set is priced; priceable only within the verified ETC window "
+            "— see each entry's options_exec.window)"
+        ),
+        reverse=True,
+        key=_net_after_cost_key,
     ),
 }
 

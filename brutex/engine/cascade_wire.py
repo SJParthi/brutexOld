@@ -106,6 +106,12 @@ from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
 from brutex.data.guarded_read import read_regular_bytes
 from brutex.data.sidecar_read import read_sidecar_bytes
+from brutex.engine.exec_grid import (
+    EXEC_INTERVAL_LABEL,
+    EXECUTION_GRID_1M_NEXT_BAR,
+    ExecGridMap,
+    build_exec_grid_map,
+)
 from brutex.engine.pool_union import union_select_rows
 from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
@@ -832,6 +838,8 @@ def _max_drawdown_return_units(returns: Sequence[float]) -> float:
 def _make_mc_evaluate(
     *,
     bars: Sequence[CandleBar],
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap,
     side: object,
     tf_minutes: int,
     sl_paisa: int | None,
@@ -861,6 +869,12 @@ def _make_mc_evaluate(
             signals,
             direction=side,  # type: ignore[arg-type]
             tf_minutes=tf_minutes,
+            # The dual-feed law (DEC-FILL-EXEC-GRID-1M-001): the relocated
+            # signals fill on the SAME 1-minute execution stream through the
+            # SAME precomputed map — the map is signal-independent, so one
+            # build serves every permutation.
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
             # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
@@ -894,6 +908,8 @@ def build_candidate_input(
     bar_bits: Sequence[int],
     direction_label: str,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     sl_paisa: int | None,
     tp_paisa: int | None,
     start_equity_paisa: int,
@@ -920,6 +936,12 @@ def build_candidate_input(
         The slice's bars + the pre-built Stage-1A matrix (built once per slice).
     direction_label
         ``"bull"`` / ``"bear"``.
+    exec_bars_1m, exec_map
+        The slice's 1-minute EXECUTION stream (+ optional precomputed
+        :class:`~brutex.engine.exec_grid.ExecGridMap`; derived once here when
+        ``None``) every fill resolves on — DEC-FILL-EXEC-GRID-1M-001,
+        REQUIRED so the re-simulation reproduces the persisted finalist's
+        dual-feed law (never a decision-TF-era fill).
     tf_minutes, sl_paisa, tp_paisa, start_equity_paisa
         The tuple's trade-sim knobs (must match what produced the finalist).
     lockbox_default_window_days, lockbox_min_trades
@@ -981,6 +1003,10 @@ def build_candidate_input(
 
     side = Side.BUY if direction_label == "bull" else Side.SELL
     entry_signals = mask_to_entry_signals(bar_bits, mask)
+    if exec_map is None:
+        # Derived ONCE per candidate when the pool loop did not thread its
+        # memoised map (mask-independent — design §1.5).
+        exec_map = build_exec_grid_map(bars, exec_bars_1m, tf_minutes=tf_minutes)
 
     def _trades_for_legs(leg_sl: int | None, leg_tp: int | None) -> list[ClosedTrade]:
         """The ONE re-simulation law: this mask's trades for one (sl, tp) pair.
@@ -990,7 +1016,9 @@ def build_candidate_input(
         so the two can never drift and the VIX AST pin's exact literal count
         (``tests/unit/test_vix_stamper_binding_pin.py``) is unchanged.
         Reproduces the persisted finalist under the ONE hardcoded worst-case
-        fill law (DEC-FILL-WORST-CASE-ONLY-001).
+        fill law on the 1m execution grid (DEC-FILL-WORST-CASE-ONLY-001 +
+        DEC-FILL-EXEC-GRID-1M-001) — the same dual feed (``exec_bars_1m`` +
+        the mask-independent ``exec_map``) the persistence spine threaded.
 
         HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
         re-simulation's trades are a DISCARDED stream — every observable
@@ -1013,6 +1041,8 @@ def build_candidate_input(
             entry_signals,
             direction=side,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             stop_loss_paisa=leg_sl,
             take_profit_paisa=leg_tp,
             reference_stamper=None,
@@ -1022,7 +1052,10 @@ def build_candidate_input(
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
-    metrics = compute_metrics(trades, equity, total_bars=len(bars))
+    # total_bars = the EXECUTION-stream count (design §7.2 hard obligation):
+    # holding_bars is a 1-MINUTE count post-PR-B, so time_in_market_pct's
+    # denominator must be the 1m bar count or the ratio silently clamps > 1.
+    metrics = compute_metrics(trades, equity, total_bars=len(exec_bars_1m))
 
     per_bar = _per_bar_returns(equity.equity_paisa, start_equity_paisa)
 
@@ -1205,6 +1238,8 @@ def build_candidate_input(
         mc_n_entries=n_entries,
         mc_evaluate=_make_mc_evaluate(
             bars=bars,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             side=side,
             tf_minutes=tf_minutes,
             sl_paisa=sl_paisa,
@@ -1219,6 +1254,8 @@ def candidates_for_spec(
     spec: CascadeTupleSpec,
     bars: Sequence[CandleBar],
     *,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
     roll_schedule: tuple[int, ...] | None = None,
@@ -1316,6 +1353,10 @@ def candidates_for_spec(
                 dropped=dropped,
             )
             family = truncated
+    if exec_map is None:
+        # ONE map per spec pool (mask-independent — design §1.5); the pooled
+        # caller threads its memoised map so this derives at most once.
+        exec_map = build_exec_grid_map(bars, exec_bars_1m, tf_minutes=spec.tf_minutes)
     return [
         build_candidate_input(
             run_id=run_id,
@@ -1324,6 +1365,8 @@ def candidates_for_spec(
             bar_bits=bar_bits,
             direction_label=spec.direction_label,
             tf_minutes=spec.tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             sl_paisa=spec.sl_paisa,
             tp_paisa=spec.tp_paisa,
             start_equity_paisa=spec.start_equity_paisa,
@@ -1443,6 +1486,23 @@ def run_cascade_over_specs(
         bars = bars_for(instrument, tf_label)
         if not bars:
             continue
+        # The pool's 1-minute EXECUTION stream (DEC-FILL-EXEC-GRID-1M-001):
+        # the SAME bars_for contract under the "1minute" label — at
+        # tf=1minute the two calls are one key, so one object serves both.
+        exec_bars = bars_for(instrument, EXEC_INTERVAL_LABEL)
+        if not exec_bars:
+            # A pool without its exec stream cannot re-simulate under the
+            # dual-feed law — skip LOUDLY, never a decision-TF-era fallback
+            # (the G7 snapshot gate refuses a drifted lake before this; a
+            # missing 1m slice here is a partial/hand-built bars_for).
+            _LOG.warning(
+                "cascade_wire.pool_skipped_no_exec_stream",
+                instrument=instrument,
+                tf=tf_label,
+                n_specs=len(grouped[(instrument, tf_label)]),
+                remedy="load the instrument's 1-minute slice (interval '1minute')",
+            )
+            continue
         roll_schedule = None if roll_schedules is None else roll_schedules.get(instrument)
         if roll_schedule is not None and not is_futures_series_symbol(instrument):
             # The POSITIVE direction of the presence ⟺ alias invariant
@@ -1491,12 +1551,18 @@ def run_cascade_over_specs(
         embargo_bars = resolve_cascade_embargo_bars(
             next(iter(group_tf_minutes)), config.wfo_embargo
         )
+        # DEC-FILL-EXEC-GRID-1M-001: ONE map per pool (mask/SL/TP-independent —
+        # design §1.5): every spec in the group shares (instrument, tf_label),
+        # hence tf_minutes.
+        pool_exec_map = build_exec_grid_map(bars, exec_bars, tf_minutes=group_specs[0].tf_minutes)
         candidates: list[CandidateInput] = []
         for spec in group_specs:
             candidates.extend(
                 candidates_for_spec(
                     spec,
                     bars,
+                    exec_bars_1m=exec_bars,
+                    exec_map=pool_exec_map,
                     # The ONE config drives BOTH sides of the train/holdout
                     # split (R2-SR-F1 review A1): the wire's training-reference
                     # complement AND filter #8's gate window — a non-default
@@ -1878,6 +1944,12 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         # twin) — the reader REFUSES a manifest without it (precise-era) so a
         # manual replay can never re-score precise-priced winners.
         "fill_mode": FillMode.WORST_CASE.value,
+        # DEC-FILL-EXEC-GRID-1M-001: the manifest carries the law BY
+        # DERIVATION, never payload (design §4.2/Q2) — the execution_grid key
+        # is the ONE schema addition; the reader REFUSES a manifest without
+        # it (decision-TF-era) so a manual replay can never re-score winners
+        # under the retired decision-TF fill grid.
+        "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
         # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via the ONE
         # COMMON fragment (CLAUDE.md §11): the price-source keys are written only
         # when non-default, so a baseline manifest is byte-identical to a pre-axis one
@@ -1916,6 +1988,24 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
             "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): "
             f"fill_mode={raw.get('fill_mode')!r} — worst_case is the only fill "
             "model; re-run the sweep to produce a worst-case manifest"
+        )
+    if (
+        raw.get("execution_grid") is None
+        or str(raw["execution_grid"]) != EXECUTION_GRID_1M_NEXT_BAR
+    ):
+        # DEC-FILL-EXEC-GRID-1M-001 legacy-artifact refusal (the fill_mode
+        # law's twin): the 1-minute execution grid is the ONLY fill grid and
+        # every post-DEC manifest carries the unconditional
+        # "execution_grid": "1m_next_bar" key. An ABSENT key identifies a
+        # decision-TF-era manifest whose winners were ranked under fills
+        # resolved on the DECISION bar — re-scoring them here would silently
+        # launder decision-TF-priced results as 1m-grid results. Refuse
+        # LOUDLY; the remediation is a fresh sweep.
+        raise CascadeWireError(
+            "decision-TF-era cascade manifest refused (DEC-FILL-EXEC-GRID-1M-001): "
+            f"execution_grid={raw.get('execution_grid')!r} — the 1-minute "
+            "execution grid is the only fill grid; re-run the sweep to produce "
+            "a 1m-grid manifest"
         )
     try:
         proximity = raw["proximity_bps"]
@@ -2531,7 +2621,15 @@ def manifest_snapshot_hash(
     """
     from brutex.engine.snapshot_hash import data_snapshot_hash
 
-    pairs = sorted({(spec.instrument, spec.tf_label) for spec in manifest.specs})
+    # The exec coordinates derive as instruments × "1minute" (design §4.2/Q2,
+    # DEC-FILL-EXEC-GRID-1M-001): the manifest carries the law BY DERIVATION,
+    # never payload — so the G7 gate auto-refuses a lake whose 1-minute
+    # EXECUTION slice healed/changed since the sweep, exactly like a decision
+    # slice (at tf=1minute the pair collapses to one key).
+    pairs = sorted(
+        {(spec.instrument, spec.tf_label) for spec in manifest.specs}
+        | {(spec.instrument, EXEC_INTERVAL_LABEL) for spec in manifest.specs}
+    )
     slices = {(instrument, tf): list(bars_for(instrument, tf)) for instrument, tf in pairs}
     ctx = manifest.bars_context
     return data_snapshot_hash(
@@ -3142,7 +3240,13 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
 
     ctx = manifest.bars_context
     catalog = catalog_path if catalog_path is not None else lake_root / "catalog.duckdb"
-    coords = {(spec.instrument, spec.tf_label) for spec in manifest.specs}
+    # Decision coordinates PLUS the derived exec coordinates — instruments ×
+    # "1minute" (design §4.2/Q2, DEC-FILL-EXEC-GRID-1M-001): the replay loads
+    # the 1-minute EXECUTION stream through the SAME guarded loader so the
+    # cascade re-simulates under the dual-feed law (at tf=1minute one key).
+    coords = {(spec.instrument, spec.tf_label) for spec in manifest.specs} | {
+        (spec.instrument, EXEC_INTERVAL_LABEL) for spec in manifest.specs
+    }
     # ADR-0012 replay-consistency gate (review round-2 findings 1/4/9): resolve
     # the futures alias ONCE over the manifest's window, REFUSE loudly when the
     # re-derived schedule drifted from the manifest's FROZEN one, and pass the
