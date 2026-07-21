@@ -55,6 +55,18 @@ _RUN = "a1" * 32
 #: (strip ``tier_config`` + per-entry ``tier`` → the frozen fixture bytes).
 #: Readers stay presence-tolerant; committed pre-change artifact fixtures
 #: load byte-untouched.
+#: FOLD RE-DERIVE (2026-07-21 train-b #1578 — REDERIVE-ON-FOLD): re-derived
+#: on the train-b woven tree to
+#: fcd0ebc0a3cda664d88f781680bf5dd72db47dbf4149eb23a4d1c76da460cac8. The
+#: member's expected 6f83b322 was derived off the pre-refresh base c890213a
+#: and is byte-INVALID on the fold, so it was NEVER adopted. Three-way hash
+#: fork: base c890213a → woven before-state 9fa6a166 (Train-A resilience
+#: re-lock + the #1959 schema_version 1→2 bump) → fold fcd0ebc0 (the tier
+#: delta ON TOP). ADDITIVE-ONLY at digest level: stripping the root
+#: ``tier_config`` + per-entry ``tier`` from ``to_payload()`` and
+#: re-rendering reproduces the woven before-state 9fa6a166 EXACTLY (the
+#: strip-pin teeth,
+#: ``test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture``).
 #: Prior lock history:
 #: RE-LOCKED at the 2026-07-15 club-O integration merge of
 #: DEC-RESILIENCE-STREAKS-001 (#1395) with main: the merged writer emits the
@@ -75,7 +87,7 @@ _RUN = "a1" * 32
 #: (zero-count on this fixture — the wp5 fixture aggs carry no session-gap
 #: closes). Readers stay presence-tolerant, so every committed pre-change
 #: artifact fixture still loads byte-untouched.
-_GOLDEN_TOP100_SHA256 = "6f83b322fb0ffdf50fd6a9defeef0291818adb0079a2fc069f732397a8318e2c"
+_GOLDEN_TOP100_SHA256 = "fcd0ebc0a3cda664d88f781680bf5dd72db47dbf4149eb23a4d1c76da460cac8"
 
 
 def _fixture_artifact() -> Top100Artifact:
