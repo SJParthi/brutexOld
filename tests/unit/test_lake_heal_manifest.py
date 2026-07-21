@@ -17,11 +17,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from brutex.data import lake_manifest as lm
 from brutex.data.lake_heal import _BatchState, _quarantine_move
 from brutex.data.option_parquet_writer import OptionParquetWriter
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.window_ledger_store import ledger_path
+
+
+@pytest.fixture(autouse=True)
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the ONE (Rust) heal/scan arm — W-6a deleted the Python cores."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
 
 
 def test_quarantine_move_invalidates_manifest(tmp_path: Path) -> None:

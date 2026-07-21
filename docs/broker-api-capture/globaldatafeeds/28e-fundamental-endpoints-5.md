@@ -60,7 +60,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -91,7 +91,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                        
+        Response
         |
 
         | :------------ |
@@ -103,11 +103,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GetEODStatsResponse_xml.zip)  
+        Response](https://globaldatafeeds.in/resources/GetEODStatsResponse_xml.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GetEodStatsresponse_csv.zip)  
+        Response](https://globaldatafeeds.in/resources/GetEodStatsresponse_csv.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be
@@ -220,7 +220,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -251,7 +251,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                   
+        Response
         |
 
         | :------------ |
@@ -263,11 +263,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetBhavCopyCMResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetBhavCopyCMResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetBhavCopyCMResponse_CSV.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetBhavCopyCMResponse_CSV.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be
@@ -558,7 +558,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -593,7 +593,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                   
+        Response
         |
 
         | :------------ |
@@ -605,11 +605,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetBhavCopyFOResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetBhavCopyFOResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetBhavCopyFOResponse_CSV.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetBhavCopyFOResponse_CSV.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be
@@ -904,7 +904,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -937,7 +937,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                          
+        Response
         |
 
         | :------------ |
@@ -949,11 +949,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetFuturesAndOptionsResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetFuturesAndOptionsResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetFuturesAndOptionsResponse_CSV.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetFuturesAndOptionsResponse_CSV.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be
@@ -1216,7 +1216,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1478,7 +1478,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**            
+            >▶️ **'Try It' now ! Actual data is returned as on 27th February 2025**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -1507,7 +1507,7 @@ paths:
 
 
         | Response Type | Sample
-        Response                                                                                             
+        Response
         |
 
         | :------------ |
@@ -1519,11 +1519,11 @@ paths:
         |
 
         | XML           | [Download XML
-        Response](https://globaldatafeeds.in/resources/GFDL_GetCircuitFilterDetailsResponse_XML.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetCircuitFilterDetailsResponse_XML.zip)
         |
 
         | CSV           | [Download CSV
-        Response](https://globaldatafeeds.in/resources/GFDL_GetCircuitFilterDetailsResponse_CSV.zip)  
+        Response](https://globaldatafeeds.in/resources/GFDL_GetCircuitFilterDetailsResponse_CSV.zip)
         |
 
         | CSVContent    | The file containing values in CSV format will be

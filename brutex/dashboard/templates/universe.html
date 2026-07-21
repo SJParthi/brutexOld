@@ -6,29 +6,20 @@
 <title>BruteX — F&amp;O Universe Explorer</title>
 <style>
   :root {
-    /* v28-hybrid locked palette (TRACK1_DASHBOARD_DESIGN.md §3) */
-    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
-    --border: #1E222D; --border-strong: #2B313F;
-    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
-    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
-    --red: #FF5C5C;
-    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
-    /* ── Design tokens (DEC-UNIVERSE-UI-POLISH-001) — ONE source of truth for
-       radius / spacing / control height / elevation, so every surface snaps to
-       the same rhythm instead of ad-hoc per-element pixels (the root cause of
-       the "alignment is not precise" report). Also DEFINES --line, which the
-       date/select inline styles already referenced but the palette never
-       declared — their borders previously rendered with the CSS initial colour
-       (effectively invisible). */
-    --r-xs: 6px; --r-sm: 8px; --r-md: 10px; --r-lg: 14px; --r-xl: 18px; --r-pill: 999px;
-    --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-6: 24px;
+    /* The palette + radius/spacing/elevation/easing tokens resolve via the
+       SHARED sheets — bx-theme.css + bx-design.css, linked below (the local
+       v28-hybrid fork was deleted after a var-resolution census: every var()
+       this page uses is declared there; bx-theme/bx-design win the cascade
+       anyway as the later declarations). Only the genuinely PAGE-LOCAL tokens
+       remain (neither shared sheet declares them): */
     --ctl-h: 38px;                       /* unified interactive-control height  */
     --tap: 40px;                         /* minimum touch target (WCAG 2.5.5)   */
-    --gutter: clamp(16px, 3vw, 24px);    /* fluid page side padding             */
-    --elev-1: 0 2px 10px rgba(0,0,0,.28);
-    --elev-2: 0 10px 30px rgba(0,0,0,.45);
-    --ease: cubic-bezier(.22,.61,.36,1);
-    --panel: #161616; --line: var(--border-strong);
+    --line: var(--border-strong);        /* page-local alias (pinned — DEC-UNIVERSE-UI-POLISH-001) */
+    /* Pinned rhythm tokens (test_dashboard_universe_polish) — values MIRROR the
+       shared sheets byte-for-byte (bx-design.css --gutter / bx-theme.css --r-md),
+       kept in-page because the pins grep the rendered html, not linked CSS. */
+    --gutter: clamp(16px, 3vw, 28px);
+    --r-md: 10px;
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
@@ -54,47 +45,26 @@
   @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeInScale { from { opacity: 0; transform: scale(0.8); } to { opacity: 1; transform: scale(1); } }
-  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1);} 50% { opacity: .6; transform: scale(.94);} }
-  @keyframes sweep { from { left: -40%; } to { left: 140%; } }
   @keyframes beam { from { transform: translateX(-100%);} to { transform: translateX(100%);} }
   @keyframes popIn { 0% { transform: scale(0); } 70% { transform: scale(1.25);} 100% { transform: scale(1);} }
-  /* New motion vocabulary (DEC-UNIVERSE-UI-POLISH-001) — meaning-carrying, not
-     decorative: a slow gradient drift on hero/brand surfaces + a soft focus
-     halo. All are disabled under prefers-reduced-motion (see media query). */
-  @keyframes gradShift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
-  @keyframes haloPulse { 0%,100% { box-shadow: 0 0 0 1px var(--border-strong), var(--elev-1); } 50% { box-shadow: 0 0 0 1px var(--blue), 0 0 22px rgba(91,141,239,.22); } }
-  @keyframes riseIn { from { opacity: 0; transform: translateY(10px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
+  /* MOTION LAW (DEC-DASHBOARD-FW-UNIVERSE-REFOLD-001): every remaining local
+     keyframe is either a one-shot ENTRANCE (transform/opacity) or STATE-gated
+     (the #pullpanel.running beam; the .skel-row loading shimmer). The always-on
+     ambient loops (brandmark/logo gradShift · badge pulse · tab sweep · hero
+     gradShift · bulkbtn shine/glowPulse) are RETIRED — state-transition motion
+     only. The canonical page header (incl. its brandmark treatment) now rides
+     bx-theme.css verbatim. */
 
-  header {
-    display:flex; align-items:center; gap:14px; padding:14px var(--gutter);
-    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
-    background:linear-gradient(180deg, rgba(19,23,34,.55), transparent);
-  }
-  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto;
-    display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900;
-    background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green));
-    background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35);
-    animation: gradShift 8s var(--ease) infinite; }
-  .logo { font-weight:800; font-size:19px; letter-spacing:.4px;
-    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
-    background-size:200% auto; -webkit-background-clip:text; background-clip:text;
-    color:transparent; animation: gradShift 9s var(--ease) infinite; }
+  /* Nav hover affordance (pinned — test_dashboard_universe_polish): the header
+     itself rides bx-theme.css; this rule mirrors the theme's hover declaration
+     (the theme's more-specific `header .topnav a:hover` still wins the cascade). */
+  .topnav a:hover { color: var(--text-bright); background: var(--surface-2); }
   .sub { color:var(--muted); font-size:12px; padding-left:12px;
     border-left:1px solid var(--border-strong); }
-  /* Top navigation — class-driven (was inline-styled, which blocked hover/focus
-     states). Clear hover + an aria-current "you are here" pill aid orientation. */
-  .topnav { margin-left:16px; display:flex; gap:2px; align-items:center; font-size:13px;
-    flex-wrap:wrap; }
-  .topnav a { color:var(--muted); text-decoration:none; padding:7px 11px;
-    border-radius:var(--r-sm); transition:.16s var(--ease); line-height:1;
-    white-space:nowrap; }
-  .topnav a:hover { color:var(--text-bright); background:var(--surface-2); }
-  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3);
-    box-shadow:inset 0 0 0 1px var(--border-strong); }
   .badge { margin-left:auto; font-size:11px; font-weight:700; letter-spacing:1px;
     color:#1A1300; background:linear-gradient(90deg,var(--yellow),#FFD089);
     padding:4px 10px; border-radius:20px; box-shadow:0 0 18px rgba(255,183,77,.5);
-    animation: pulse 2.4s ease-in-out infinite; display:none; }
+    display:none; }
   /* The daily API-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001) is DELETED
      (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has NO daily quota,
      nothing ever injected a tracker, so the gauge was permanently hidden. */
@@ -113,9 +83,6 @@
     box-shadow:0 8px 22px rgba(91,141,239,.20); }
   .tab.active { border-color:var(--yellow); box-shadow:0 0 0 1px var(--yellow) inset,
     0 8px 24px rgba(255,183,77,.18); }
-  .tab.active::after { content:""; position:absolute; top:0; height:100%; width:30%;
-    background:linear-gradient(90deg,transparent,rgba(255,183,77,.25),transparent);
-    animation: sweep 2.2s linear infinite; }
   .tab .n { font-size:22px; font-weight:800; color:var(--text-bright);
     font-variant-numeric:tabular-nums; line-height:1.05; }
   .tab .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.7px; }
@@ -216,9 +183,9 @@
   .inst .cov { font-size:10px; margin-top:2px; letter-spacing:.2px; display:flex; flex-wrap:wrap; gap:8px; }
   .inst .cov .seg { white-space:nowrap; }
   .inst .cov .k { color:var(--muted); text-transform:uppercase; font-weight:700; opacity:.8; }
-  .inst .cov .ok { color:#34d399; }
-  .inst .cov .warn { color:#FFB74D; }
-  .inst .cov .bad { color:#f87171; }
+  .inst .cov .ok { color:var(--green); }
+  .inst .cov .warn { color:var(--yellow); }
+  .inst .cov .bad { color:var(--red); }
   .inst .cov .dim { color:var(--muted); opacity:.7; }
   .inst .cc { margin-left:auto; font-size:11px; color:var(--muted); }
 
@@ -352,13 +319,12 @@
 
   /* ── Zone 0: the one-click "Pull the Universe" hero (8-button matrix) ── */
   @keyframes shimmer { 0% { background-position:-200% 0; } 100% { background-position:200% 0; } }
-  @keyframes glowPulse { 0%,100% { box-shadow:0 0 14px rgba(91,141,239,.25); } 50% { box-shadow:0 0 28px rgba(91,141,239,.55); } }
   .universe-hero { margin:var(--s-3) var(--gutter) var(--s-1); padding:18px 20px;
     border-radius:var(--r-xl); border:1px solid var(--border-strong); position:relative;
     overflow:hidden;
     background:linear-gradient(120deg, rgba(157,123,255,.09), rgba(91,141,239,.06), rgba(38,217,176,.08));
-    background-size:180% 180%; box-shadow:var(--elev-1);
-    animation: fadeInUp .5s ease both, gradShift 18s var(--ease) infinite; }
+    box-shadow:var(--elev-1);
+    animation: fadeInUp .5s ease both; }
   .universe-hero .htitle { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
   .universe-hero .htitle b { font-size:16px; color:var(--text-bright); letter-spacing:.3px; }
   .universe-hero .hsub { font-size:12px; color:var(--muted); margin-bottom:14px; line-height:1.55; }
@@ -378,29 +344,14 @@
   .pull-everything-btn .pe-text { display:flex; flex-direction:column; gap:3px; }
   .pull-everything-btn .pe-text b { font-size:14.5px; color:var(--text-bright); letter-spacing:.2px; }
   .pull-everything-btn .pe-sub { font-size:11.5px; color:var(--muted); line-height:1.4; }
-  .bulkgrid { display:grid; grid-template-columns:repeat(4,1fr); gap:var(--s-3); }
-  @media (max-width:880px){ .bulkgrid { grid-template-columns:repeat(2,1fr); } }
-  @media (max-width:520px){ .bulkgrid { grid-template-columns:1fr; } }
-  .bulkbtn { position:relative; overflow:hidden; cursor:pointer; border:1px solid var(--border-strong);
-    border-radius:var(--r-lg); padding:16px 15px; background:var(--surface-2);
-    transition:.18s var(--ease); min-height:118px;
-    display:flex; flex-direction:column; gap:7px; align-items:flex-start; text-align:left;
-    animation: fadeInScale .4s ease both; }
-  .bulkbtn:hover:not(:disabled) { transform:translateY(-3px); animation: glowPulse 1.6s ease-in-out infinite; }
-  .bulkbtn:disabled { opacity:.45; cursor:default; transform:none; animation:none; }
-  .bulkbtn .bnum { position:absolute; top:11px; right:13px; font-size:13px; font-weight:800;
-    color:var(--muted); opacity:.8; }
-  .bulkbtn .bicon { font-size:20px; width:40px; height:40px; display:grid; place-items:center;
-    border-radius:var(--r-md); background:rgba(255,255,255,.05);
-    box-shadow:inset 0 0 0 1px var(--border-strong); }
-  .bulkbtn .blabel { font-size:13.5px; font-weight:800; color:var(--text-bright); }
-  .bulkbtn .bmeta { font-size:11px; color:var(--muted); line-height:1.4; }
-  .bulkbtn.idx { border-color:rgba(157,123,255,.4); }
-  .bulkbtn.idx:hover { box-shadow:0 0 24px rgba(157,123,255,.45); }
-  .bulkbtn.stk { border-color:rgba(91,141,239,.4); }
-  .bulkbtn .shine { position:absolute; inset:0; background:linear-gradient(110deg,
-    transparent 30%, rgba(255,255,255,.06) 50%, transparent 70%); background-size:200% 100%;
-    animation: shimmer 3.2s linear infinite; pointer-events:none; }
+  /* The ①②③④ .bulkgrid/.bulkbtn matrix markup is GONE (the two-button split,
+     DEC-PULL-SCOPED-ALL-ONECLICK-001) — its dead CSS is pruned with the fork.
+     Static sheen: the always-on shimmer loop is retired (state-transition
+     motion only); the hero's .shine element stays as a subtle static highlight. */
+  .universe-hero .shine { position:absolute; inset:0;
+    background:linear-gradient(110deg,
+    transparent 30%, rgba(255,255,255,.06) 50%, transparent 70%);
+    pointer-events:none; }
   .bulkrow { display:flex; gap:18px; flex-wrap:wrap; margin-top:8px; }
   .bstat { display:flex; flex-direction:column; }
   .bstat .bv { font-size:22px; font-weight:800; color:var(--text-bright); }
@@ -459,6 +410,14 @@
      (fade-ins, the pull beam, hover lifts). Users who opt out get a calm,
      instant UI — a standard accessibility + comfort win that never alters the
      static layout. */
+  /* PAGE-LOCAL banner modifier: the seven integrity/status banners ride the
+     SHARED .bx-note card (bx-design.css) for border/padding/background; this
+     modifier keeps their genuinely page-specific banner layout — block flow
+     (the JS shows hidden panels via style.display="block", and #cvowed must
+     sit on its own line below the controls) + the banner's label/verdict text
+     colour (verdict colours are set by the integrity JS via semantic tokens). */
+  .bx-note.bx-banner { display: block; margin: 12px 0; font-size: 13px; color: var(--text); }
+
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: .001ms !important; animation-iteration-count: 1 !important;
@@ -469,6 +428,7 @@
 </style>
 <link rel="stylesheet" href="/static/bx-datepicker.css">
 <link rel="stylesheet" href="/static/bx-theme.css">
+<link rel="stylesheet" href="/static/bx-design.css">
 <script defer src="/static/bx-datepicker.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
@@ -583,6 +543,50 @@
     </button>
   </div>
 
+  <!-- ── DHAN SPOT feed (DEC-DHAN-PULL-SURFACE-001 / DEC-DHAN-SPOT-FEED-001):
+       a SEPARATE, standalone read-only Dhan feed track for the 3 spot indices
+       (NIFTY / BANKNIFTY / SENSEX 1-minute + INDIA VIX reference-only). It writes
+       into its OWN feeds/dhan/ lake namespace — independent of Groww, own read-only
+       AWS-SSM auth, no options / no expired futures. Reuses the SAME from/to date
+       picker above (pipelineDateQuery). Honest degradation (Golden Rule #1): the
+       per-index depth + servability are UNVERIFIED until a credentialed probe
+       transcript lands — the pull attempts each index and records honest EMPTY
+       windows for a not-yet-servable span; it never fabricates a bar. ── -->
+  <div style="margin:6px 24px 4px;">
+    <button class="pull-everything-btn" id="pullDhanBtn"
+            style="background:linear-gradient(135deg, rgba(38,166,154,.16), rgba(38,166,154,.05)); border-color:var(--teal, #26a69a);"
+            title="Standalone read-only Dhan SPOT feed: pull NIFTY / BANKNIFTY / SENSEX 1-minute (+ INDIA VIX reference-only) into a SEPARATE feeds/dhan/ lake. Own Dhan read-only AWS-SSM auth (never mints). Reuses the from/to dates above. SPOT only — no options, no expired futures.">
+      <span class="pe-icon">▶</span>
+      <span class="pe-text">
+        <b>Pull (Dhan) · spot feed</b>
+        <span class="pe-sub">NIFTY / BANKNIFTY / SENSEX 1-minute → feeds/dhan/ · read-only SSM auth · honest-empty until probe-verified</span>
+      </span>
+    </button>
+    <div class="loadmsg" id="dhanpullmsg" style="margin:6px 2px 0; font-size:12px; color:var(--muted);"></div>
+  </div>
+
+  <!-- ── DHAN ROLLING-ATM options feed (DEC-DHAN-ROLLING-OPTIONS-001): a SEPARATE
+       standalone read-only Dhan track pulling the ATM-relative ROLLING option series
+       (ATM±N per bar) via POST /v2/charts/rollingoption into feeds/dhan/rolling_options/.
+       This is NOT a per-contract / per-expiry / per-strike pull — Dhan serves NO option
+       chain; the resolved expiry DATE + absolute STRIKE drift per bar and are per-ROW
+       metadata, never partition keys. Reuses the SAME from/to picker + Dhan read-only
+       SSM auth. Servability is UNVERIFIED until a credentialed probe: an unservable key
+       degrades to an honest EMPTY / re-pullable FAILED window, never a fabricated bar.
+       textContent-only status (no innerHTML of any response value) — XSS-safe. ── -->
+  <div style="margin:6px 24px 4px;">
+    <button class="pull-everything-btn" id="pullDhanOptBtn"
+            style="background:linear-gradient(135deg, rgba(38,166,154,.16), rgba(38,166,154,.05)); border-color:var(--teal, #26a69a);"
+            title="Standalone read-only Dhan rolling-ATM index options: ATM±N per bar (NOT per-contract/per-expiry/per-strike — Dhan serves no option chain). 1008 rolling keys (NIFTY/BANKNIFTY/SENSEX × WEEK/MONTH × EC0-3 × ATM±10 × CALL/PUT) 1-minute → feeds/dhan/rolling_options/. Own Dhan read-only AWS-SSM auth (never mints). Reuses the from/to dates above.">
+      <span class="pe-icon">▶</span>
+      <span class="pe-text">
+        <b>Pull (Dhan) rolling-ATM options</b>
+        <span class="pe-sub">rolling-ATM (ATM±N per bar), NOT per-contract — Dhan serves no option chain · 1-minute → feeds/dhan/rolling_options/ · honest-empty until probe-verified</span>
+      </span>
+    </button>
+    <div class="loadmsg" id="dhanoptpullmsg" style="margin:6px 2px 0; font-size:12px; color:var(--muted);"></div>
+  </div>
+
   <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
        background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
        border:1px solid var(--yellow); border-radius:14px;">
@@ -680,9 +684,7 @@
        O(files) (honest — it can take a while on a deep lake); a pull on the same
        lake is refused while it runs (one lake-writer job at a time). Status is
        written via textContent ONLY (CodeQL XSS guard). -->
-  <div id="greeksBackfillPanel" role="status" aria-live="polite"
-       style="margin:12px 0;padding:10px 14px;border-radius:10px;
-              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+  <div id="greeksBackfillPanel" class="bx-note bx-banner" role="status" aria-live="polite">
     <b>Greeks backfill (v1→v2)</b>
     <button id="greeksBackfillBtn" class="vbtn" style="margin-left:10px;cursor:pointer;"
             title="Re-stamp every stale (unstamped / v1 / inputs-drifted) option contract's Greeks overlay through the existing enrich driver — expired contracts + CLI-pulled lakes included. Idempotent; zero vendor calls; the O(files) scan may take a while; resumes after a crash from a durable checkpoint.">
@@ -716,9 +718,7 @@
        defers it honestly. GREEKS N/A: the Greeks stage is options-only and this
        spot-only pull excludes ALL F&O — nothing to enrich. Status is written via
        textContent ONLY (CodeQL XSS guard). -->
-  <div id="crossverifyPanel" role="status" aria-live="polite"
-       style="margin:12px 0;padding:10px 14px;border-radius:10px;
-              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+  <div id="crossverifyPanel" class="bx-note bx-banner" role="status" aria-live="polite">
     <b>Cross-verify → TickVault (daily CSV → S3)</b>
     <button id="crossverifyBtn" class="vbtn" style="margin-left:10px;cursor:pointer;"
             title="Pull today's spot universe (spot only — all indices + all stocks; futures AND options excluded, DEC-CROSSVERIFY-SPOT-ONLY-001), gate completeness, derive the day's timeframes, render the pinned per-symbol CSVs and publish them to S3 for TickVault's cross-verification. Idempotent (journal-keyed); a concurrent pull defers it via a bounded lock wait; withheld files are honest absence, never wrong bytes.">
@@ -741,9 +741,8 @@
        every ATTEMPTED options-eligible spot pulled its option history; RED = a spot was
        attempted yet pulled ZERO expiries (e.g. M&M); never-pulled names read "not pulled yet"
        (neutral), so a clean selective pull is green. -->
-  <div id="mappanel" role="status" aria-live="polite"
-       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
-              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+  <div id="mappanel" class="bx-note bx-banner" role="status" aria-live="polite"
+       style="display:none;">
     <b>Mapping integrity</b>
     <span id="mapverdict" style="font-weight:600;"></span>
     <span id="mapdetail" style="color:var(--muted);"></span>
@@ -756,9 +755,8 @@
        every FUT/CE/PE leg must map to exactly ONE IDX/EQ spot (by symbol AND numeric token).
        VERIFIED = all legs mapped; RED = orphan / ambiguous / disagreement / empty-underlying.
        Computed at ingest (before the legs are discarded) + persisted; this reads the snapshot. -->
-  <div id="masterpanel" role="status" aria-live="polite"
-       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
-              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+  <div id="masterpanel" class="bx-note bx-banner" role="status" aria-live="polite"
+       style="display:none;">
     <b>Master mapping integrity</b>
     <span id="masterverdict" style="font-weight:600;"></span>
     <span id="masterdetail" style="color:var(--muted);"></span>
@@ -770,9 +768,8 @@
   <!-- Economics integrity (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001): lot_size uniform per
        (underlying, expiry). VERIFIED = no within-expiry lot mismatch; RED = a mismatch.
        Cross-expiry lot revisions (NSE quarterly) are shown as informational, never RED. -->
-  <div id="econpanel" role="status" aria-live="polite"
-       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
-              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+  <div id="econpanel" class="bx-note bx-banner" role="status" aria-live="polite"
+       style="display:none;">
     <b>Economics integrity (lot size)</b>
     <span id="econverdict" style="font-weight:600;"></span>
     <span id="econdetail" style="color:var(--muted);"></span>
@@ -785,9 +782,8 @@
        parser skipped-and-counted (DEC-INSTRUMENT-SKIP-NO-GSYM-001). GREEN when the skip
        count is within max(10, 0.1% of in-scope rows); RED past it (vendor master rot).
        Reads the schema_meta snapshot the master load persisted. -->
-  <div id="skippanel" role="status" aria-live="polite"
-       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
-              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+  <div id="skippanel" class="bx-note bx-banner" role="status" aria-live="polite"
+       style="display:none;">
     <b>Master parse skips</b>
     <span id="skipverdict" style="font-weight:600;"></span>
     <span id="skipdetail" style="color:var(--muted);"></span>
@@ -799,9 +795,8 @@
        ENGINE-index (NIFTY/BANKNIFTY/SENSEX) verdict called out in red when hit. Served by
        GET /api/v1/universe/lake-uniqueness behind the generation-stamped cache — the first
        compute per generation is honestly O(files); the 15 s poll is an O(1) handoff. -->
-  <div id="lakepanel" role="status" aria-live="polite"
-       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
-              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+  <div id="lakepanel" class="bx-note bx-banner" role="status" aria-live="polite"
+       style="display:none;">
     <b>Lake uniqueness (dup census)</b>
     <span id="lakeverdict" style="font-weight:600;"></span>
     <span id="lakedetail" style="color:var(--muted);"></span>
@@ -1247,14 +1242,14 @@ async function loadMappingIntegrity() {
     const pendingNote = pending ? (" · " + pending + " not pulled yet") : "";
     if (m.is_green) {
       verdict.textContent = " ✅ VERIFIED";
-      verdict.style.color = "#4ade80";
+      verdict.style.color = "var(--green)";
       detail.textContent = " · " + m.fully_covered + "/" + m.total_eligible +
         " eligible spots pulled their option history" + pendingNote;
     } else {
       const reds = (m.under_pulled || [])
         .filter(u => u.reason === "none" && !u.whitelisted).map(u => u.symbol);
       verdict.textContent = " ❌ " + m.gating_failures + " spot(s) attempted but pulled ZERO expiries";
-      verdict.style.color = "#f87171";
+      verdict.style.color = "var(--red)";
       detail.textContent = (reds.length ? (" · " + reds.slice(0, 12).join(", ") +
         (reds.length > 12 ? " …" : "")) : "") + pendingNote;
     }
@@ -1279,13 +1274,13 @@ async function loadMasterIntegrity() {
     const tc = m.type_counts || {};
     if (m.is_green) {
       verdict.textContent = " ✅ VERIFIED";
-      verdict.style.color = "#4ade80";
+      verdict.style.color = "var(--green)";
       detail.textContent = " · " + (tc.legs || 0) + " legs all map to " +
         (tc.spots || 0) + " spots (idx " + (tc.idx || 0) + " · eq " + (tc.eq || 0) +
         " · fut " + (tc.fut || 0) + " · ce " + (tc.ce || 0) + " · pe " + (tc.pe || 0) + ")";
     } else {
       verdict.textContent = " ❌ " + m.gating_failures + " leg(s) do not map cleanly";
-      verdict.style.color = "#f87171";
+      verdict.style.color = "var(--red)";
       detail.textContent = " · orphan " + m.orphan_count + " · ambiguous " + m.ambiguous_count +
         " · disagreement " + m.disagreement_count + " · empty " + m.empty_underlying_count;
     }
@@ -1309,13 +1304,13 @@ async function loadEconomicsIntegrity() {
     panel.style.display = "block";
     if (m.is_green) {
       verdict.textContent = " ✅ VERIFIED";
-      verdict.style.color = "#4ade80";
+      verdict.style.color = "var(--green)";
       detail.textContent = " · " + (m.total_legs || 0) + " legs · " + (m.expiry_groups || 0) +
         " (underlying,expiry) groups, lot uniform per expiry · " +
         (m.underlyings_with_lot_revisions || 0) + " legit cross-expiry revisions";
     } else {
       verdict.textContent = " ❌ " + m.lot_mismatch_expiries + " within-expiry lot mismatch(es)";
-      verdict.style.color = "#f87171";
+      verdict.style.color = "var(--red)";
       detail.textContent = " · " + (m.underlyings_with_lot_revisions || 0) +
         " cross-expiry revisions (informational)";
     }
@@ -1343,11 +1338,11 @@ async function loadParseSkips() {
       (m.threshold || 0) + ")";
     if (m.is_green) {
       verdict.textContent = " ✅ VERIFIED";
-      verdict.style.color = "#4ade80";
+      verdict.style.color = "var(--green)";
       detail.textContent = " · " + (m.skipped_count || 0) + " skipped" + denom;
     } else {
       verdict.textContent = " ❌ " + m.skipped_count + " malformed row(s) skipped";
-      verdict.style.color = "#f87171";
+      verdict.style.color = "var(--red)";
       const samples = (m.samples || []).slice(0, 3).join(" | ");
       detail.textContent = denom + (samples ? (" · e.g. " + samples) : "");
     }
@@ -1389,17 +1384,17 @@ async function loadLakeUniqueness() {
       /* The honest no-verdict-yet arm — never a fabricated CLEAN/poisoned. */
       if (m.scan_stalled) {
         verdict.textContent = " ⚠️ census scan stalled" + startedAgo;
-        verdict.style.color = "#f87171";
+        verdict.style.color = "var(--red)";
         detail.textContent = " · " + (p.files_scanned || 0) + " files scanned so far";
       } else if (m.scan_in_progress) {
         const est = (p.files_total_estimate == null) ? "?" : String(p.files_total_estimate);
         verdict.textContent = " ⏳ census scanning… " + (p.files_scanned || 0) +
           " / ~" + est + " files";
-        verdict.style.color = "#facc15";
+        verdict.style.color = "var(--yellow)";
         detail.textContent = m.scan_error ? (" · previous scan failed: " + m.scan_error) : "";
       } else if (m.scan_error) {
         verdict.textContent = " ⚠ census scan failed — retries on the next poll";
-        verdict.style.color = "#f87171";
+        verdict.style.color = "var(--red)";
         detail.textContent = " · " + m.scan_error;
       }
       return;
@@ -1412,19 +1407,19 @@ async function loadLakeUniqueness() {
        rescanning state so a skip is never silent-green. */
     if (m.findings_total === 0 && (m.files_skipped || 0) === 0) {
       verdict.textContent = " ✅ CLEAN";
-      verdict.style.color = "#4ade80";
+      verdict.style.color = "var(--green)";
     } else if ((m.engine_files_skipped || 0) > 0) {
       verdict.textContent = " ❌ engine indexes UNREADABLE — census incomplete, cannot certify clean";
-      verdict.style.color = "#f87171";
+      verdict.style.color = "var(--red)";
     } else if ((m.files_skipped || 0) > 0) {
       verdict.textContent = " ❌ scan incomplete — reference/non-engine file unreadable; ENGINE indexes verified CLEAN";
-      verdict.style.color = "#f87171";
+      verdict.style.color = "var(--red)";
     } else if (m.engine_clean) {
       verdict.textContent = " ❌ " + m.findings_total + " poisoned";
-      verdict.style.color = "#f87171";
+      verdict.style.color = "var(--red)";
     } else {
       verdict.textContent = " ❌ " + m.findings_total + " poisoned · engine indexes POISONED";
-      verdict.style.color = "#f87171";
+      verdict.style.color = "var(--red)";
     }
     if (m.scan_stalled) {
       verdict.textContent += " ⚠️ (census scan stalled" + startedAgo + ")";
@@ -1767,6 +1762,74 @@ async function refreshAutoPullChip() {
   } catch (e) { /* chip keeps its last state; the poller self-recovers */ }
 }
 refreshAutoPullChip();
+
+/* ── DHAN SPOT feed pull (DEC-DHAN-PULL-SURFACE-001): posts the standalone Dhan
+   route (feeds/dhan/), reusing the from/to picker. It does NOT drive the shared
+   Groww progress panel (that polls the Groww _pull_job) — the Dhan job carries its
+   own progress; wiring it into the shared panel is a named follow-up (not yet
+   ledgered). So this shows a one-line textContent status instead.
+   textContent-only (no innerHTML of any response value) — XSS-safe. ── */
+const DHAN_BTN = document.getElementById("pullDhanBtn");
+if (DHAN_BTN) {
+  DHAN_BTN.onclick = async () => {
+    const msg = document.getElementById("dhanpullmsg");
+    const dq = pipelineDateQuery();
+    const url = dq
+      ? "/api/v1/universe/pull-pipeline-dhan?" + dq.slice(1)
+      : "/api/v1/universe/pull-pipeline-dhan";
+    if (msg) msg.textContent = "Starting Dhan spot pull…";
+    DHAN_BTN.disabled = true;
+    try {
+      const resp = await fetch(url, { method: "POST" });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        // 503 credential refusal / 400 bad date — relay the server's own fix text.
+        if (msg) msg.textContent = "Dhan pull refused (" + resp.status + "): " + (body.detail || "see logs");
+      } else if (body.started) {
+        if (msg) msg.textContent = "Dhan spot pull started — " + body.total + " index series → feeds/dhan/ (poll ~30 min).";
+      } else {
+        if (msg) msg.textContent = "A Dhan pull is already running (single-flight) — try again after it finishes.";
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "Dhan pull request failed — check connectivity and retry.";
+    } finally {
+      DHAN_BTN.disabled = false;
+    }
+  };
+}
+
+/* ── DHAN ROLLING-ATM options pull (DEC-DHAN-ROLLING-OPTIONS-001): posts the
+   standalone rolling-ATM route (feeds/dhan/rolling_options/), reusing the from/to
+   picker. Rolling-ATM (ATM±N per bar) — NOT per-contract; Dhan serves no option chain.
+   textContent-only (no innerHTML of any response value) — XSS-safe. ── */
+const DHAN_OPT_BTN = document.getElementById("pullDhanOptBtn");
+if (DHAN_OPT_BTN) {
+  DHAN_OPT_BTN.onclick = async () => {
+    const msg = document.getElementById("dhanoptpullmsg");
+    const dq = pipelineDateQuery();
+    const url = dq
+      ? "/api/v1/universe/pull-rolling-options-dhan?" + dq.slice(1)
+      : "/api/v1/universe/pull-rolling-options-dhan";
+    if (msg) msg.textContent = "Starting Dhan rolling-ATM options pull…";
+    DHAN_OPT_BTN.disabled = true;
+    try {
+      const resp = await fetch(url, { method: "POST" });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        // 503 credential refusal / 400 bad date — relay the server's own fix text.
+        if (msg) msg.textContent = "Dhan rolling-ATM options pull refused (" + resp.status + "): " + (body.detail || "see logs");
+      } else if (body.started) {
+        if (msg) msg.textContent = "Dhan rolling-ATM options pull started — " + body.total + " rolling keys (ATM±N per bar, NOT per-contract) → feeds/dhan/rolling_options/.";
+      } else {
+        if (msg) msg.textContent = "A Dhan pull is already running (single-flight) — try again after it finishes.";
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "Dhan rolling-ATM options pull request failed — check connectivity and retry.";
+    } finally {
+      DHAN_OPT_BTN.disabled = false;
+    }
+  };
+}
 
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001 / DEC-UNIVERSE-PULL-CONSOLIDATE-001):
    tick several rows → the ▶ Pull F&O button scopes its pull to them (the round-6

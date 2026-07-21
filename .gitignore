@@ -139,6 +139,10 @@ Cargo.lock
 # stay tracked; a NEW crate needs its own negation to be addable).
 !rust/brutex-feed/Cargo.lock
 !rust/brutex-feed/fuzz/Cargo.lock
+# Same law for the brutex-observability decision-law kernel
+# (DEC-RUST-OBSERVABILITY-001 — a NEW crate needs its own negation to be
+# addable; the lock is the reproducible-build + security-audit trigger).
+!rust/brutex-observability/Cargo.lock
 # Same law for the brutex-strategies combo byte-law kernel
 # (DEC-STRATEGIES-RUST-COMBO-001 — a NEW crate needs its own negation to be
 # addable; the FRESH lock is committed, never a copy of a sibling's).
@@ -151,11 +155,21 @@ Cargo.lock
 # (DEC-RUST-SWEEP-OPS-001 — a NEW crate needs its own negation to be
 # addable; the FRESH lock is committed, never a copy of a sibling's).
 !rust/brutex-sweep-ops/Cargo.lock
+# Same law for the brutex-ops unified ops decision kernel
+# (DEC-BACKUP-RUST-OPS-001 review-round fold — the ops-rust-parity lane runs
+# cargo `--locked`, so the lock MUST be tracked; the original push left it
+# gitignored by the global rule above and the lane failed on exactly that).
+!rust/brutex-ops/Cargo.lock
 # brutex-calendar (the calendar-leaf decision-law crate,
 # DEC-RUST-CALENDAR-LEAVES-001) is likewise an application extension crate:
 # track its lockfile for reproducibility (Golden Rule #4) + the
 # security-audit Cargo.lock trigger.
 !rust/brutex-calendar/Cargo.lock
+# brutex-pull-state (the pull-state decision kernel, DEC-RUST-PULL-STATE-001
+# lane) is likewise an application extension crate: its lockfile is tracked
+# for reproducible builds (Golden Rule #4) + the security-audit Cargo.lock
+# trigger.
+!rust/brutex-pull-state/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.

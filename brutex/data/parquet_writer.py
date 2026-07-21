@@ -125,6 +125,12 @@ from brutex.data.partition import (
     partition_for_timestamp,
 )
 from brutex.data.partition_lock import BoundedLockRegistry, partition_write_lock
+from brutex.data.write_domain import (
+    WriteDomain,
+    assert_profile_free_dest,
+    assert_write_domain,
+    resolve_profile_free_root,
+)
 from brutex.money import round_money
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -564,20 +570,65 @@ class ParquetWriter:
         INFO rotated the whole fetch-phase audit trail away in ~26 minutes).
         Event NAME + FIELDS are identical at either level — only the level
         moves; any other value raises :class:`WriterError` (fail-closed).
+    write_domain
+        The Pin D1-1 caller binding (DEC-WRITE-DOMAIN-CALLER-BINDING-001,
+        ADR-0021 §2.5): when a :class:`~brutex.data.write_domain.WriteDomain`
+        is supplied, EVERY :meth:`write` asserts its minted dest inside the
+        domain BEFORE any directory/lock/byte is touched — a cross-domain
+        dest is the typed
+        :class:`~brutex.data.write_domain.WriteDomainError`, never a
+        keep-first merge. ``None`` (the default — every maintenance /
+        profile-free lane) keeps every legitimate dest byte-identical to the
+        pre-binding writer BUT carries the profile-free MASQUERADE pin
+        instead (:func:`~brutex.data.write_domain.assert_profile_free_dest`
+        — a domain-less writer must never silently write under ``feeds/``;
+        nothing legitimate writes there today, so the default path is
+        byte-identical in practice, pinned). Cost either way: one guarded
+        ``Path.resolve`` + one ``lstat`` per write — MEASURED at a median
+        114.5 µs/write against a 3539.5 µs total fresh-partition write
+        (~3.2%; 2026-07-16 sandbox medians), arms indistinguishable
+        (masquerade 3568.8 vs domain 3577.3 µs/write, 1.002×) and O(1) in
+        lake size — bench-pinned by
+        ``tests/bench/test_write_domain_pin_cost.py``.
     """
 
-    def __init__(self, *, lake_root: Path, partition_log_level: str = "info") -> None:
+    def __init__(
+        self,
+        *,
+        lake_root: Path,
+        partition_log_level: str = "info",
+        write_domain: WriteDomain | None = None,
+    ) -> None:
         if partition_log_level not in ("info", "debug"):
             raise WriterError(
                 f"unknown partition_log_level {partition_log_level!r}; expected 'info' or 'debug'"
             )
         self._lake_root = lake_root
         self._partition_log = _LOG.debug if partition_log_level == "debug" else _LOG.info
+        self._write_domain = write_domain
+        #: Lazily-resolved lake root for the profile-free masquerade pin —
+        #: resolved ONCE on the first write (never at construction: a
+        #: construct-but-never-write caller keeps today's behavior even on an
+        #: unresolvable root), then cached for every later write.
+        self._profile_free_root: Path | None = None
 
     @property
     def lake_root(self) -> Path:
         """Return the configured top-level lake directory path."""
         return self._lake_root
+
+    def _resolved_profile_free_root(self) -> Path:
+        """Resolve + cache the lake root ONCE for the masquerade pin.
+
+        Profile-free writers only (``write_domain=None``); a domain-carrying
+        writer's root was resolved at domain registration. Lazy so a
+        construct-but-never-write caller pays nothing and keeps today's
+        behavior even on an unresolvable root
+        (DEC-WRITE-DOMAIN-CALLER-BINDING-001).
+        """
+        if self._profile_free_root is None:
+            self._profile_free_root = resolve_profile_free_root(self._lake_root)
+        return self._profile_free_root
 
     def write(
         self,
@@ -624,6 +675,12 @@ class ParquetWriter:
         WriterError
             If *bars* is empty, spans multiple partitions, or *merge_mode* is
             not a recognised value.
+        brutex.data.write_domain.WriteDomainError
+            Pin D1-1 (DEC-WRITE-DOMAIN-CALLER-BINDING-001): the minted dest
+            fell outside the writer's ``write_domain`` — or, for a
+            profile-FREE writer, under the ``feeds/`` prefix (the masquerade
+            pin). Raised BEFORE any directory/lock/byte is touched; the dest
+            is never written.
 
         Notes
         -----
@@ -686,6 +743,20 @@ class ParquetWriter:
             year=year,
             month=month,
         )
+        # WRITE-DOMAIN BINDING (Pin D1-1, DEC-WRITE-DOMAIN-CALLER-BINDING-001;
+        # landed under direct in-session user approval 2026-07-16): the minted
+        # `dest` is asserted BEFORE any directory/lock/byte is touched. A
+        # domain-CARRYING writer refuses a cross-domain dest typed
+        # (`assert_write_domain` — never a keep-first merge of a foreign
+        # vendor's bytes); a profile-FREE writer carries the MASQUERADE pin
+        # instead (`assert_profile_free_dest` — a domain-less writer must
+        # never silently write under `feeds/`; NG4E-1's domain-less arm).
+        # Every legitimate dest passes silently — the A/B byte-identity is
+        # pinned in tests/unit/test_parquet_writer_write_domain.py.
+        if self._write_domain is not None:
+            assert_write_domain(dest, self._write_domain)
+        else:
+            assert_profile_free_dest(dest, self._resolved_profile_free_root())
         # First-creating a BRAND-NEW partition directory on a full volume raises a raw
         # OSError(ENOSPC) (`exist_ok=True` keeps the re-pull no-op free). Wrap it in
         # `lake_write_guard()` so a disk-full here maps to a `LakeWriteHalt("disk_full")`

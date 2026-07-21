@@ -44,3 +44,26 @@ def test_results_status_note_surfaces_run_id_conflicts() -> None:
     assert "board.run_id_conflicts" in html
     assert "run-id conflict(s)" in html
     assert "first-wins, logged" in html
+
+
+def test_results_store_error_renders_distinct_card_not_empty_hero() -> None:
+    """A ``store_error_payload`` degrade renders its OWN error card, never the hero.
+
+    Guards the display half of the DEC-SWEEP-RESULTS-DEPTH-001 Ruling-10/C3
+    degrade: the backend serves a 200 carrying explicit ``error`` /
+    ``error_type`` markers for a corrupt/unreadable ResultsStore precisely so
+    the fault can never masquerade as the friendly "No sweeps yet" empty hero.
+    The template must consume BOTH markers into a distinct store-error card
+    that NAMES the error_type (built via createElement/textContent — never
+    innerHTML), while the genuine no-sweeps case keeps the hero.
+    """
+    html = _render_results_html()
+    # The degrade markers are consumed…
+    assert "board.error" in html
+    assert "board.error_type" in html
+    # …into a DISTINCT error card naming the error_type (textContent-only build).
+    assert "renderStoreError" in html
+    assert '"results store error (" + errType + ")"' in html
+    assert "not an empty leaderboard: the sweep store could not be read." in html
+    # The genuine no-sweeps empty hero survives for the available:false-no-error case.
+    assert "No sweeps yet" in html

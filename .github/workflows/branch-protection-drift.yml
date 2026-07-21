@@ -99,7 +99,11 @@ jobs:
           # below, and ci-ok fails if ANY of its needs is red, so every ci-ok need
           # is transitively enforced through that one aggregate context even when it
           # is not its own direct required context. The 12 ci-ok needs deliberately
-          # enforced VIA ci-ok (and therefore intentionally ABSENT from this set) are:
+          # enforced VIA ci-ok (and therefore intentionally ABSENT from this set) are
+          # (no-dhan-guard's ENFORCEMENT is retired — DEC-DHAN-GUARD-RETIRE-002,
+          # ADR-0022, operator GO 869e340a — but the job survives as a
+          # trivially-green STUB still in ci-ok's needs until the operator's
+          # branch-protection settings change removes it):
           #   actionlint, rust-trading-core, ledger-numbering, no-dhan-guard,
           #   zplus-pr-guard, definition-of-ready, dec-id-validator,
           #   bugfix-regression-scan, no-hallucination-scan, conv-commits,

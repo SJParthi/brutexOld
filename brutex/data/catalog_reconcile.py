@@ -22,18 +22,33 @@ and makes no O(1)-total claim. It is additive (upsert-only): partitions whose
 Parquet file was deleted out from under the lake are left as stale catalog rows
 (this append-only lake does not delete partitions); callers reading a missing
 file get the catalog's existing missing-file error, unchanged.
+
+Wave-D core (ADR-0020 §6, DEC-RUST-LAKE-WAVED-001 ENDGAME): the PER-FILE
+read/hash/classify body (the ``timestamp``-column read + row count + min/max
+span + the run-identity ``sha256`` + the L1 dup/foreign classification) is
+OWNED by the ``brutex_lake`` crate via
+:func:`brutex.data.lake_rust_waved.reconcile_file_via_rust` — the Python
+``_scan_file`` oracle is DELETED. A crate-side refusal (a corrupt file, an
+out-of-envelope timestamp shape, a crate panic) raises ``ValueError`` naming
+the file — a member of this loop's GAP-#9 skip set — so the pinned per-file
+``catalog.reconcile.parquet_skip`` verdict survives with the Rust-rendered
+reason (the ruled endgame semantics). The ``raw_hash`` sha256 is byte-equal
+by the crate's own hashlib-vector pins (Golden Rule #4 — it feeds the
+FR-CAT-004 catalog rollup). The LOOP — enumeration, ``parse_partition_path``,
+the stat-cache branch, ``CatalogEntry`` build + upsert, the drift fold, all
+logging — stays here. An absent/stale wheel raises the typed
+:class:`~brutex.data.errors.LakeRustWavedUnavailableError` (the
+REQUIRED-wheel law).
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-import polars as pl
 import structlog
 
 from brutex.data.catalog import Catalog
@@ -41,15 +56,15 @@ from brutex.data.errors import (
     CatalogError,
     PartitionError,
     datetime_out_of_range_errors,
+    parquet_read_skip_errors,
 )
-from brutex.data.guarded_read import read_parquet_regular, read_regular_bytes
 from brutex.data.lake_invariants import (
     LakeFinding,
     PartitionCoords,
-    classify_bar_keys,
     detect_legacy_drift,
     log_lake_finding,
 )
+from brutex.data.lake_rust_waved import reconcile_file_via_rust
 from brutex.data.models import CatalogEntry
 from brutex.data.partition import BAR_DIR_NAME, parse_partition_path
 
@@ -71,23 +86,6 @@ __all__ = ["ReconcileResult", "reconcile_catalog_from_lake"]
 #: residual R2N-06.
 _LOG = structlog.get_logger("brutex.data.catalog_reconcile")
 
-#: Exception set for the per-file min/max Parquet read below: a
-#: :class:`polars.exceptions.PolarsError` decode fault OR a stored
-#: out-of-``datetime``-range timestamp conversion fault
-#: (:func:`datetime_out_of_range_errors` — the round-18
-#: DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 fold, present-but-unreadable in effect).
-#: Hoisted to a module-level constant explicitly typed
-#: ``tuple[type[BaseException], ...]`` so the ``except`` site is a plain tuple of
-#: exception classes — mypy ``--strict`` rejects a ``*``-unpacked variadic tuple
-#: written inline in an ``except`` clause. Behaviour is identical to the inline
-#: ``(pl.exceptions.PolarsError, *datetime_out_of_range_errors())``:
-#: ``datetime_out_of_range_errors()`` returns a constant tuple, so building it
-#: once at import equals rebuilding it per file.
-_PARQUET_UNREADABLE_ERRORS: tuple[type[BaseException], ...] = (
-    pl.exceptions.PolarsError,
-    *datetime_out_of_range_errors(),
-)
-
 
 @dataclass(frozen=True)
 class ReconcileResult:
@@ -107,20 +105,22 @@ class ReconcileResult:
     unreadable
         Absolute paths of the CORRUPT / PRESENT-but-unreadable Parquet
         partition files — the distinct data-LOSS subset of ``skipped``
-        (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1924). Populated
-        by (a) the ``except pl.exceptions.PolarsError`` arm (a corrupt /
-        version-incompatible decode) AND (b) the ``except OSError`` arm for
-        every NON-``FileNotFoundError`` OS fault — a data-bearing DIRECTORY
-        named ``<mm>.parquet/`` (``IsADirectoryError``), a chmod-000 /
-        wrong-owner file (``PermissionError``), an ``EIO`` device fault — each
-        holds REAL data the sweep would silently skip (review round 2 M3
-        REVERSED the round-1 "all OSError → benign" carve-out, which holed the
-        launch for present-but-unreadable data). ONLY three classes stay
-        benignly on ``skipped`` and NEVER reach here (the false-refuse guard,
-        "absent != corrupt"): a ``PartitionError`` (unparseable path) and a
-        ``FileNotFoundError`` VANISHED file (ENOENT from a concurrent heal/fetch
-        racing the glob — the escape-less launch refusal must not abort on a
-        transient glitch). A PRESENT, readable, EXACTLY-0-row partition is a
+        (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1924). On the
+        Wave-D arm (DEC-RUST-LAKE-WAVED-001) the crate wire folds every
+        per-file refusal into ONE ``ValueError`` — a corrupt /
+        version-incompatible decode, a data-bearing DIRECTORY named
+        ``<mm>.parquet/``, a chmod-000 / wrong-owner file, an ``EIO`` device
+        fault — each holds REAL data the sweep would silently skip (review
+        round 2 M3 REVERSED the round-1 "all OSError → benign" carve-out,
+        which holed the launch for present-but-unreadable data), so the guard
+        arm classifies with a post-hoc existence probe: a still-PRESENT path
+        lands here. ONLY two classes stay benignly on ``skipped`` and NEVER
+        reach here (the false-refuse guard, "absent != corrupt"): a
+        ``PartitionError`` (unparseable path) and a VANISHED file (ENOENT from
+        a concurrent heal/fetch racing the glob — the escape-less launch
+        refusal must not abort on a transient glitch); the probe-after-refusal
+        TOCTOU window is the disclosed #1594-envelope residual. A PRESENT,
+        readable, EXACTLY-0-row partition is a
         DISTINCT anomaly class handled on ``empty_partitions`` (below), never
         here (it is readable, not corrupt). Populated so the
         ``brutex sweep-all`` launch can REFUSE loudly on such a month — an
@@ -336,111 +336,11 @@ def reconcile_catalog_from_lake(
                 # shared heal/census callers pass stat_cache=False (never skip).
                 stat_cache_hits += 1
                 continue
+        partition_coords: PartitionCoords | None = None
         if check_invariants:
             symbol_dirs.setdefault(
                 (cast(str, coords["exchange"]), cast(str, coords["segment"])), set()
             ).add(cast(str, coords["symbol"]))
-        # GAP #9: a single unreadable Parquet file (a polars PolarsError decode
-        # failure, or an OSError fault) must NOT crash the whole reconcile — which
-        # runs at the START of every sweep load + F&O window derivation. Log + skip that
-        # one file (counted in `skipped`) and continue; every readable partition still
-        # reconciles. NARROW set (the three arms below): a genuine code bug still
-        # propagates (Golden Rule #1). The three arms split the fault by MEANING:
-        # PolarsError + `datetime_out_of_range_errors` (the round-18
-        # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 fold: a hand-planted Datetime column
-        # holding an out-of-`datetime`-range i64 value, e.g. 2**62 µs, makes
-        # `min()`/`max()` raise OverflowError — pre-fix ONE such bars file crashed
-        # the whole reconcile, and with it every sweep load; if min/max convert,
-        # the downstream `classify_bar_keys` min/max convert too, so the ONE guard
-        # covers the L1 piggyback as well) + non-ENOENT OSError are
-        # present-but-unreadable (→ `unreadable` → launch REFUSES), while
-        # FileNotFoundError alone is a benign vanished-file skip.
-        try:
-            # Guarded literal read of ONE concrete walked file
-            # (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15
-            # metachar law — held by construction inside read_parquet_regular
-            # — a `[`-carrying symbol dir must never glob-read a sibling's
-            # rows into this row's reconcile stats; +
-            # DEC-LAKE-READ-INODE-GUARD-001 fd validation).
-            timestamps = read_parquet_regular(path, columns=("timestamp",)).get_column("timestamp")
-            row_count = timestamps.len()
-            if row_count == 0:
-                # DEC-LAKE-STATS-MANIFEST-001 residual R2N-06: a PRESENT, readable,
-                # EXACTLY-0-row partition is NOT a benign absence — no BruteX writer
-                # emits a valid 0-row parquet (write() raises WriterError on empty
-                # input; the all-filtered heal quarantine-UNLINKS the partition; a
-                # footer-last crash truncates → PolarsError above), so a present
-                # 0-row file is externally-forged / anomalous. Skip-and-COUNT it
-                # (an empty partition IS a skip) AND record its path DISTINCTLY on
-                # ``empty_partitions`` + one loud WARN, so the sweep launch can
-                # REFUSE the month (else the whole month silently vanishes with a
-                # data_snapshot_hash bit-identical to the drop, Golden Rule #4).
-                # A legitimately data-less month has NO file (benign ENOENT); a
-                # legitimately THIN present month has real rows > 0 and is
-                # untouched — a row-COUNT density oracle is DEFERRED
-                # (DEC-RECONCILE-ROW-DENSITY-ORACLE-001, follow-up only).
-                _LOG.warning("catalog.reconcile.empty_partition", path=str(path))
-                skipped += 1
-                empty_partitions.append(str(path))
-                continue
-            first_ts = timestamps.min()
-            last_ts = timestamps.max()
-            # Guarded raw-hash read (DEC-LAKE-READ-INODE-GUARD-001, the
-            # lake-guards fold): read_regular_bytes fd-validates the SAME inode
-            # before hashing — a planted non-regular inode raises
-            # NotRegularFileError (an OSError → the unreadable arm below),
-            # never a hang.
-            raw_hash = hashlib.sha256(read_regular_bytes(path)).hexdigest()
-        except _PARQUET_UNREADABLE_ERRORS as exc:
-            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1924): a CORRUPT /
-            # version-incompatible partition file — or one whose Datetime column
-            # holds an out-of-range value (the round-18 OverflowError class, folded
-            # into THIS unreadable arm at the club-S1 merge: present-but-unreadable
-            # in effect, the same interior-hole class) — is an INTERIOR data hole,
-            # not a benign absence — record its absolute path DISTINCTLY so the
-            # sweep launch can REFUSE loudly (a silent skip poisons the
-            # PDH/PDL/pivot/Fib anchors + hashes the holed series as canonical,
-            # Golden Rule #4). The ``PartitionError`` (unparseable path) +
-            # zero-row skips above stay benign ``skipped`` counts and never reach
-            # here (the false-refuse guard).
-            _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
-            skipped += 1
-            unreadable.append(str(path))
-            continue
-        except FileNotFoundError as exc:
-            # #1924 review round 2 (M3): ``FileNotFoundError`` (ENOENT) ONLY is a
-            # genuine VANISHED file — a concurrent heal/fetch raced the glob and the
-            # partition was gone by read time — data ABSENCE, not data LOSS. Count it
-            # a benign ``skipped`` (WARN kept) and NEVER on ``unreadable``: the
-            # escape-less sweep-launch refusal must not abort a multi-day launch on a
-            # transient glitch ("absent != corrupt"). This is the ONLY OSError subclass
-            # treated benignly — every other is present-but-unreadable (the arm below).
-            _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
-            skipped += 1
-            continue
-        except OSError as exc:
-            # #1924 review round 2 (M3): a NON-ENOENT OSError is a PRESENT-but-
-            # UNREADABLE partition, NOT absence — the exact silent-partial class this
-            # refusal exists to close. Concrete shapes: a data-bearing DIRECTORY named
-            # ``<mm>.parquet/`` (the fd-validated readers raise
-            # ``NotRegularFileError``/``IsADirectoryError`` — the #1558 FIX-ROUND-8
-            # dataset-directory shape); a planted non-regular inode
-            # (``NotRegularFileError``, DEC-LAKE-READ-INODE-GUARD-001); a chmod-000 /
-            # wrong-owner file (``PermissionError``); an ``EIO`` device fault. Each
-            # (bar the planted inode) holds REAL data the
-            # sweep would silently skip (poisoning the PDH/PDL/pivot/Fib anchors while
-            # ``data_snapshot_hash`` stamps the holed series canonical), so it joins
-            # ``unreadable`` and REFUSES the launch loudly (present != absent). This
-            # REVERSES the round-1 "all OSError → benign" carve-out, which holed the
-            # launch for present-but-unreadable data.
-            _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
-            skipped += 1
-            unreadable.append(str(path))
-            continue
-        if check_invariants:
-            # DEC-LAKE-HEAL-001 L1: classification rides the timestamp column this
-            # loop ALREADY read — zero extra I/O (spy-pinned), only the n_unique
-            # hash pass. overlap_rows stays None (no canonical-sibling read here).
             partition_coords = PartitionCoords(
                 exchange=cast(str, coords["exchange"]),
                 segment=cast(str, coords["segment"]),
@@ -449,11 +349,72 @@ def reconcile_catalog_from_lake(
                 year=cast(int, coords["year"]),
                 month=cast(int, coords["month"]),
             )
-            for finding in classify_bar_keys(partition_coords, timestamps):
-                if finding is not None:
-                    located = replace(finding, path=path)
-                    log_lake_finding(located)
-                    findings.append(located)
+        # GAP #9: a single corrupt / version-incompatible Parquet file (a polars
+        # PolarsError, or an OSError fault) must NOT crash the whole reconcile — which
+        # runs at the START of every sweep load + F&O window derivation. Log + skip that
+        # one file (counted in `skipped`) and continue; every readable partition still
+        # reconciles. NARROW set (the ONE guard arm below): a genuine code bug still
+        # propagates (Golden Rule #1). On the Wave-D arm the crate wire folds every
+        # per-file refusal — corrupt decode, the round-18
+        # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 out-of-`datetime`-range class (a
+        # hand-planted 2**62-µs stamp; pre-fix ONE such bars file crashed the whole
+        # reconcile, and with it every sweep load), a directory-shaped
+        # `<mm>.parquet/`, a permission/EIO fault, a vanished file — into ONE
+        # ValueError; the #1924 present-vs-vanished split happens INSIDE the arm
+        # (the post-hoc existence probe): a still-PRESENT path joins `unreadable`
+        # (→ launch REFUSES), a vanished one stays a benign counted skip.
+        try:
+            # The Wave-D core (module docstring): the per-file body is
+            # crate-owned; a crate refusal raises ValueError into THIS
+            # guard's skip set (the ruled endgame semantics).
+            scan = reconcile_file_via_rust(path=str(path), coords=partition_coords)
+        except (*parquet_read_skip_errors(), *datetime_out_of_range_errors()) as exc:
+            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1924), re-derived on the
+            # Wave-D arm at this merge: the crate wire folds EVERY per-file
+            # refusal (corrupt decode, out-of-range Datetime, directory-shaped
+            # ``<mm>.parquet/``, permission/EIO fault, vanished file) into ONE
+            # ValueError, so the #1924 review-round-2 (M3) vanished-vs-present
+            # split is a post-hoc existence probe below: a still-PRESENT path is
+            # the present-but-unreadable refusal class (→ ``unreadable`` — the
+            # sweep launch REFUSES loudly; a silent skip poisons the
+            # PDH/PDL/pivot/Fib anchors + hashes the holed series as canonical,
+            # Golden Rule #4), while an ENOENT-VANISHED file (a concurrent
+            # heal/fetch raced the glob) is data ABSENCE, not loss — a benign
+            # counted ``skipped``, NEVER ``unreadable`` (the escape-less launch
+            # refusal must not abort a multi-day launch on a transient glitch;
+            # "absent != corrupt"). The probe-after-refusal TOCTOU window is the
+            # disclosed #1594-envelope residual.
+            _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
+            skipped += 1
+            if path.exists():
+                unreadable.append(str(path))
+            continue
+        if scan is None:
+            # DEC-LAKE-STATS-MANIFEST-001 residual R2N-06 (#1924, kept verbatim
+            # on the Wave-D arm — the crate's zero-row ``None`` wire IS this
+            # verdict): a PRESENT, readable, EXACTLY-0-row partition is NOT a
+            # benign absence — no BruteX writer emits a valid 0-row parquet
+            # (write() raises WriterError on empty input; the all-filtered heal
+            # quarantine-UNLINKS the partition; a footer-last crash truncates →
+            # the unreadable arm above), so a present 0-row file is
+            # externally-forged / anomalous. Skip-and-COUNT it (an empty
+            # partition IS a skip) AND record its path DISTINCTLY on
+            # ``empty_partitions`` + one loud WARN, so the sweep launch can
+            # REFUSE the month (else the whole month silently vanishes with a
+            # data_snapshot_hash bit-identical to the drop, Golden Rule #4). A
+            # legitimately data-less month has NO file (benign ENOENT); a
+            # legitimately THIN present month has real rows > 0 and is
+            # untouched — a row-COUNT density oracle is DEFERRED
+            # (DEC-RECONCILE-ROW-DENSITY-ORACLE-001, follow-up only).
+            _LOG.warning("catalog.reconcile.empty_partition", path=str(path))
+            skipped += 1
+            empty_partitions.append(str(path))
+            continue
+        row_count, first_ts, last_ts, raw_hash, file_findings = scan
+        for finding in file_findings:
+            located = replace(finding, path=path)
+            log_lake_finding(located)
+            findings.append(located)
         entry = CatalogEntry(
             exchange=cast(str, coords["exchange"]),
             segment=cast(str, coords["segment"]),

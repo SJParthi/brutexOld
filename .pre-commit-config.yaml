@@ -19,20 +19,18 @@ repos:
   # ── Generic file hygiene ───────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
-    # docs/design/sweep_core/ holds MAIN-AUTHORED perf-measurement scratch
-    # (byte-identical to origin/main) that lacks trailing newlines and is OUTSIDE
-    # every CI gate scope. It only enters the hook diff on a far-behind merge-forward
-    # push (whole main delta in range). Exclude it from the file-MODIFYING fixers so
-    # the pre-push hook matches CI — the same posture the pyproject ruff extend-exclude
-    # documents (DEC-RUST-SWEEP-OPS-001 merge-forward).
     hooks:
       - id: trailing-whitespace
-        exclude: ^docs/design/sweep_core/
       - id: end-of-file-fixer
-        exclude: ^docs/design/sweep_core/
+        # Fuzzer corpus seeds are raw INPUT BYTES, not text — "fixing" the
+        # trailing newline rewrites the seed (e.g. the 2-byte \n\n
+        # crash-2-byte-header-underflow seed would shrink to 1 byte and no
+        # longer reproduce its crash). docs/design/sweep_core/ is design-doc
+        # measurement tooling + raw transcripts, outside the production
+        # gates (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^(rust/brutex-feed/fuzz/seeds/|docs/design/sweep_core/)
       - id: mixed-line-ending
         args: [--fix=lf]
-        exclude: ^docs/design/sweep_core/
       - id: check-yaml
       - id: check-toml
       - id: check-json
@@ -56,8 +54,16 @@ repos:
       - id: ruff
         name: ruff check
         args: [--fix, --exit-non-zero-on-fix]
+        # Design-doc measurement tooling (standalone one-shot scripts +
+        # raw transcripts), outside the production gates — T201/S101 etc.
+        # are appropriate there (coordinator ruling).
+        # DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^docs/design/sweep_core/
       - id: ruff-format
         name: ruff format
+        # Same design-doc measurement-tooling carve-out as ruff check
+        # above (coordinator ruling). DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^docs/design/sweep_core/
 
   # ── Python: mypy --strict (only changed files) ──────────────────
   # rev MUST track the pyproject `mypy>=1.10,<3.0` toolchain (the same law
@@ -89,8 +95,20 @@ repos:
           - polars>=1.0,<2.0
           # blake3 ships py.typed + a .pyi; without it the hook env degrades
           # blake3.blake3(...).hexdigest() to Any → phantom no-any-return on
-          # files like sweep_supervisor.py (the same class as polars above).
+          # files like sweep_supervisor.py (the same class as polars above;
+          # landed independently on main AND via the crossverify lane).
           - blake3>=1.0
+          # starlette: the same wheel-less-env phantom class — without it the
+          # hook env degrades TrustedHostMiddleware to Any (misc subclass
+          # error on trusted_host.py) at the pre-push stage of a
+          # merge-forward, while the BINDING venv-faithful `mypy --strict
+          # brutex` is clean (2026-07-19 incident, the crossverify lane).
+          # starlette ships py.typed; without it the hook env degrades
+          # TrustedHostMiddleware to Any → a phantom [misc]
+          # cannot-subclass-Any on dashboard/trusted_host.py (the same
+          # wheel-less-env class as polars/blake3 above; the venv-faithful
+          # `mypy --strict brutex` is clean on the file).
+          - starlette>=0.40
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust

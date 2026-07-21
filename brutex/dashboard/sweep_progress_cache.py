@@ -321,7 +321,7 @@ class SweepProgressCache(NonBlockingFileMemoBase[dict[str, Any]]):
         self._payload: dict[str, Any] | None = None
 
     def read(self, path: Path) -> dict[str, Any] | None:
-        """Return the stamped file-bridge payload for *path*, bounded, never raising.
+        """Return the stamped file-bridge payload for *path*, bounded.
 
         The ``file_read`` seam :meth:`DashboardState.sweep_progress_view
         <brutex.dashboard.app.DashboardState.sweep_progress_view>` accepts:
@@ -330,8 +330,14 @@ class SweepProgressCache(NonBlockingFileMemoBase[dict[str, Any]]):
         through to the in-process / idle arms" (missing file, or a cold-start
         wedge with nothing memoised). Bounded on every path — TTL hit and
         follower serves are O(1) in-memory, an owner refresh is capped by the
-        deadline guard. Only ``KeyboardInterrupt`` / ``SystemExit`` propagate
-        (with the single-flight flag released first).
+        deadline guard. Never raises EXCEPT ``KeyboardInterrupt`` /
+        ``SystemExit`` (with the single-flight flag released first) and the
+        fail-closed pull-state kernel errors below: the three-arm serve
+        DECISION now routes through :func:`brutex.pull_state_rust.
+        rust_memo_serve_arm` (via the shared
+        :meth:`~brutex.dashboard.rate_bridge_cache.NonBlockingFileMemoBase.
+        _serve_bounded`), so a wheel-absent/stale/poisoned kernel propagates
+        its typed error out of this read (DEC-RUST-PULL-STATE-001 flip phase).
 
         Parameters
         ----------
@@ -342,6 +348,15 @@ class SweepProgressCache(NonBlockingFileMemoBase[dict[str, Any]]):
         -------
         dict[str, Any] | None
             A stamped COPY of the file payload, or ``None``.
+
+        Raises
+        ------
+        brutex.pull_state_rust.PullStateKernelError
+            Wheel absent/stale, kernel raise, or a poisoned serve arm —
+            fail-closed; raised BEFORE the single-flight ``_inflight`` is
+            taken, so the single-flight state never leaks.
+        brutex.pull_state_rust.PullStateFlagRemovedError
+            The removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
         """
         result = self._read_result(path)
         if result.payload is None:

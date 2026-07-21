@@ -79,7 +79,7 @@ pub const GREEKS_OVERLAY_FIELDS: [&str; 10] = [
 ];
 
 /// Per-second physical ticks for a datetime time unit.
-fn ticks_per_second(unit: TimeUnit) -> i64 {
+pub(crate) fn ticks_per_second(unit: TimeUnit) -> i64 {
     match unit {
         TimeUnit::Milliseconds => 1_000,
         TimeUnit::Microseconds => 1_000_000,
@@ -88,7 +88,7 @@ fn ticks_per_second(unit: TimeUnit) -> i64 {
 }
 
 /// Decode uncompressed Arrow IPC bytes to a DataFrame (empty payload refused).
-fn frame_from_ipc(ipc_bytes: &[u8]) -> PolarsResult<DataFrame> {
+pub(crate) fn frame_from_ipc(ipc_bytes: &[u8]) -> PolarsResult<DataFrame> {
     if ipc_bytes.is_empty() {
         return Err(polars_err!(ComputeError: "empty IPC payload — nothing to resample"));
     }
@@ -96,7 +96,7 @@ fn frame_from_ipc(ipc_bytes: &[u8]) -> PolarsResult<DataFrame> {
 }
 
 /// Encode a DataFrame to uncompressed Arrow IPC bytes.
-fn frame_to_ipc(df: &mut DataFrame) -> PolarsResult<Vec<u8>> {
+pub(crate) fn frame_to_ipc(df: &mut DataFrame) -> PolarsResult<Vec<u8>> {
     let mut buf: Vec<u8> = Vec::new();
     IpcWriter::new(&mut buf).finish(df)?;
     Ok(buf)
@@ -221,6 +221,73 @@ pub fn resample_1m_ipc_impl(
     frame_to_ipc(&mut out)
 }
 
+/// The trailing forming-bucket cutoff filter — the SESSION-tail law
+/// (DEC-LAKE-RUST-RESAMPLE-DAILY-001; the fold #1913 named as a follow-up).
+///
+/// Mirrors `brutex/data/fno_resample.py::resample_session_to_tf`'s Python
+/// filter OP-FOR-OP: a bucket labelled at IST minute-of-day `s` closes at
+/// `s + tf`; keep it only when fully closed at/under the cutoff
+/// (`s + tf <= cutoff_min`). The Python side computes
+/// `ist.dt.hour() * 60 + ist.dt.minute()` — calendar hour/minute are always
+/// non-negative, so the integer twin is `rem_euclid(per_day) / per_minute`
+/// (rem_euclid keeps a pre-1970 physical value non-negative; the division
+/// of a non-negative is floor == trunc, and bucket labels are whole
+/// minutes anyway). The filter runs over the WHOLE frame, not just the
+/// trailing bucket — exactly like the Python `.filter(...)` expression.
+pub fn filter_forming_buckets(
+    df: &DataFrame,
+    target_tf_minutes: u32,
+    cutoff_min: i64,
+) -> PolarsResult<DataFrame> {
+    let ts = df.column("ts_utc")?;
+    let unit = match ts.dtype() {
+        DataType::Datetime(unit, _tz) => *unit,
+        other => {
+            return Err(
+                polars_err!(ComputeError: "ts_utc must be a Datetime column, got {}", other),
+            );
+        }
+    };
+    let per_second = ticks_per_second(unit);
+    let per_minute = 60 * per_second;
+    let per_day = 86_400 * per_second;
+    let ist_offset = 19_800 * per_second; // +05:30
+    let tf = i64::from(target_tf_minutes);
+
+    let phys = ts.to_physical_repr();
+    let phys = phys.i64()?;
+    // Bucket labels come from `resample_frame` over a null-refused input, so
+    // no null can occur here; a null (defensive) maps to a null mask entry,
+    // which `filter` drops — never a panic.
+    let mask: BooleanChunked = phys
+        .iter()
+        .map(|opt| {
+            opt.map(|value| {
+                let ist = value + ist_offset;
+                let minute_of_day = ist.rem_euclid(per_day) / per_minute;
+                minute_of_day + tf <= cutoff_min
+            })
+        })
+        .collect();
+    df.filter(&mask)
+}
+
+/// Pure-Rust session face: resample + the forming-bucket cutoff in ONE
+/// crossing — the `/movers` per-session read path
+/// (`fno_resample.resample_session_to_tf` with a non-None `cutoff_min`).
+/// The Python composite (resample then filter) is the live parity oracle.
+pub fn resample_session_ipc_impl(
+    ipc_bytes: &[u8],
+    target_tf_minutes: u32,
+    oi_aware: bool,
+    cutoff_min: i64,
+) -> PolarsResult<Vec<u8>> {
+    let df = frame_from_ipc(ipc_bytes)?;
+    let resampled = resample_frame(&df, target_tf_minutes, oi_aware)?;
+    let mut out = filter_forming_buckets(&resampled, target_tf_minutes, cutoff_min)?;
+    frame_to_ipc(&mut out)
+}
+
 /// Pure-Rust batch face: ONE decode, one resample per requested TF — so a
 /// 21-TF derive pays a single Python→Rust crossing. Output order mirrors the
 /// input `tfs` order; any single TF's error fails the whole call (the facade
@@ -242,7 +309,7 @@ pub fn resample_all_ipc_impl(
 /// Map a caught resample result into Python bytes under the render seam's
 /// exact FFI conventions (panic boundary both around the compute AND around
 /// the result-buffer construction — a panic never crosses the FFI raw).
-fn ipc_result_to_pybytes(
+pub(crate) fn ipc_result_to_pybytes(
     py: Python<'_>,
     result: std::thread::Result<PolarsResult<Vec<u8>>>,
 ) -> PyResult<Py<PyBytes>> {
@@ -286,6 +353,27 @@ pub(crate) fn resample_1m_ipc(
 ) -> PyResult<Py<PyBytes>> {
     let result = py.detach(|| {
         std::panic::catch_unwind(|| resample_1m_ipc_impl(ipc_bytes, target_tf_minutes, oi_aware))
+    });
+    ipc_result_to_pybytes(py, result)
+}
+
+/// Resample a 1-minute frame (uncompressed Arrow IPC bytes) to ONE target
+/// timeframe AND drop every bucket not fully closed at/under *cutoff_min*
+/// (IST minute-of-day; the trailing forming-bucket law) — the session face.
+/// Same error/panic contract as [`resample_1m_ipc`] (the shared
+/// [`ipc_result_to_pybytes`] shell).
+#[pyfunction]
+pub(crate) fn resample_session_ipc(
+    py: Python<'_>,
+    ipc_bytes: &[u8],
+    target_tf_minutes: u32,
+    oi_aware: bool,
+    cutoff_min: i64,
+) -> PyResult<Py<PyBytes>> {
+    let result = py.detach(|| {
+        std::panic::catch_unwind(|| {
+            resample_session_ipc_impl(ipc_bytes, target_tf_minutes, oi_aware, cutoff_min)
+        })
     });
     ipc_result_to_pybytes(py, result)
 }
@@ -598,6 +686,123 @@ mod tests {
                 "output keeps the input unit (unit={unit:?})"
             );
         }
+    }
+
+    // ── T11 session tail (DEC-LAKE-RUST-RESAMPLE-DAILY-001) ────────────
+
+    #[test]
+    fn session_cutoff_drops_the_forming_trailing_bucket() {
+        // 09:15..09:22 IST at tf=5: buckets 09:15 (closed 09:20) and 09:20
+        // (closes 09:25). Cutoff 09:22 (562 IST minutes): the forming
+        // 09:20 bucket must drop, the closed 09:15 bucket must stay.
+        let df = frame(
+            &(0..8)
+                .map(|i| OPEN_0915_UTC_US + i * MINUTE_US)
+                .collect::<Vec<_>>(),
+            false,
+            false,
+        );
+        let mut src = df.clone();
+        let ipc = frame_to_ipc(&mut src).unwrap();
+        let out_bytes = resample_session_ipc_impl(&ipc, 5, true, 9 * 60 + 22).unwrap();
+        let out = frame_from_ipc(&out_bytes).unwrap();
+        assert_eq!(out.height(), 1);
+        assert_eq!(ts_us_of(&out, 0), OPEN_0915_UTC_US);
+    }
+
+    #[test]
+    fn session_cutoff_boundary_keeps_an_exactly_closed_bucket() {
+        // Cutoff 09:20 (560): the 09:15 bucket closes AT the cutoff
+        // (555 + 5 == 560) — the `<=` law KEEPS it; 09:20 (560 + 5 > 560)
+        // drops.
+        let df = frame(
+            &[OPEN_0915_UTC_US, OPEN_0915_UTC_US + 5 * MINUTE_US],
+            false,
+            false,
+        );
+        let mut src = df.clone();
+        let ipc = frame_to_ipc(&mut src).unwrap();
+        let out_bytes = resample_session_ipc_impl(&ipc, 5, true, 9 * 60 + 20).unwrap();
+        let out = frame_from_ipc(&out_bytes).unwrap();
+        assert_eq!(out.height(), 1);
+        assert_eq!(ts_us_of(&out, 0), OPEN_0915_UTC_US);
+    }
+
+    #[test]
+    fn session_cutoff_filters_every_late_bucket_not_just_the_last() {
+        // The Python filter is a WHOLE-frame expression: with cutoff 09:17
+        // (557) over tf=2, buckets 09:15 (closed 09:17, kept) / 09:17
+        // (forming) / 09:19 (past) BOTH later buckets drop.
+        let df = frame(
+            &(0..6)
+                .map(|i| OPEN_0915_UTC_US + i * MINUTE_US)
+                .collect::<Vec<_>>(),
+            false,
+            false,
+        );
+        let mut src = df.clone();
+        let ipc = frame_to_ipc(&mut src).unwrap();
+        let out_bytes = resample_session_ipc_impl(&ipc, 2, true, 9 * 60 + 17).unwrap();
+        let out = frame_from_ipc(&out_bytes).unwrap();
+        assert_eq!(out.height(), 1);
+        assert_eq!(ts_us_of(&out, 0), OPEN_0915_UTC_US);
+    }
+
+    #[test]
+    fn session_cutoff_carries_oi_and_keeps_empty_frames_empty() {
+        let df = frame(
+            &[OPEN_0915_UTC_US, OPEN_0915_UTC_US + MINUTE_US],
+            true,
+            false,
+        );
+        let mut src = df.clone();
+        let ipc = frame_to_ipc(&mut src).unwrap();
+        // Whole-day cutoff (15:29 close: 929 minutes) keeps the one bucket.
+        let out_bytes = resample_session_ipc_impl(&ipc, 5, true, 929).unwrap();
+        let out = frame_from_ipc(&out_bytes).unwrap();
+        assert_eq!(out.height(), 1);
+        let oi = out
+            .column("open_interest")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(oi, 1_001, "carry-last OI survives the cutoff filter");
+        // A cutoff BEFORE every bucket close yields an empty (schema-kept)
+        // frame — never an error.
+        let empty_bytes = resample_session_ipc_impl(&ipc, 5, true, 0).unwrap();
+        let empty = frame_from_ipc(&empty_bytes).unwrap();
+        assert_eq!(empty.height(), 0);
+        assert_eq!(
+            empty.get_column_names(),
+            [
+                "ts_utc",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "open_interest"
+            ]
+        );
+    }
+
+    #[test]
+    fn session_cutoff_minute_of_day_is_calendar_based_for_pre_epoch_labels() {
+        // rem_euclid keeps the IST minute-of-day CALENDAR-based for a
+        // negative physical value (pre-1970 label) — the `.dt.hour()`
+        // mirror. 1969-12-31 09:15 IST == 1969-12-31 03:45 UTC ==
+        // -(20h15m) == -72_900 s epoch.
+        let pre_epoch_0915 = -72_900 * 1_000_000i64;
+        let df = frame(&[pre_epoch_0915], false, false);
+        let mut src = df.clone();
+        let ipc = frame_to_ipc(&mut src).unwrap();
+        // Bucket 09:15 closes 09:20 (560): cutoff 560 keeps, 559 drops.
+        let kept_bytes = resample_session_ipc_impl(&ipc, 5, true, 560).unwrap();
+        assert_eq!(frame_from_ipc(&kept_bytes).unwrap().height(), 1);
+        let dropped_bytes = resample_session_ipc_impl(&ipc, 5, true, 559).unwrap();
+        assert_eq!(frame_from_ipc(&dropped_bytes).unwrap().height(), 0);
     }
 
     #[test]

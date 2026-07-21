@@ -25,7 +25,7 @@ The News API currently provides news coverage from the following sources:
 1.⁠ ⁠Business Standard
 2.⁠ ⁠⁠Economic Times
 3.⁠ ⁠⁠Money Control
-4.⁠ ⁠⁠Livemint 
+4.⁠ ⁠⁠Livemint
 5.⁠ ⁠⁠DailyForex
 
 :::warning[**Notes**]
@@ -73,7 +73,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now !**            
+            >▶️ **'Try It' now !**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -95,7 +95,7 @@ paths:
         Title ,link, date, summary, company, article type ,sentiment ,specific
         title, long Summary, source, created at, article id,
 
-        symbol, ISIN, scrip code 
+        symbol, ISIN, scrip code
 
 
         For details, please see [glossary](/glossary-1759055m0)
@@ -146,7 +146,7 @@ paths:
             "scrip_code": 500112
           },
             </Tab>
-            
+
           </Tabs>
         </div>
       tags:
@@ -176,8 +176,8 @@ paths:
         - name: scrip_codes
           in: query
           description: |-
-            Example:532921,500820,532215 
-            Note: Applicable  for BSE 
+            Example:532921,500820,532215
+            Note: Applicable  for BSE
           required: false
           example: 532921,500820,532215
           schema:
@@ -295,7 +295,7 @@ paths:
         <div style="display: flex; align-items: center; justify-content:
         space-between;">
           <div>
-            >▶️ **'Try It' now !**            
+            >▶️ **'Try It' now !**
           </div>
           <img src="https://api.apidog.com/api/v1/projects/866176/resources/353145/image-preview" alt="pointer.gif" width="80" />
         </div>
@@ -317,7 +317,7 @@ paths:
         Title ,link, date, summary, company, article type ,sentiment ,specific
         title, long Summary, source, created at, article id,
 
-        symbol, ISIN, scrip code 
+        symbol, ISIN, scrip code
 
 
         For details, please see [glossary](/glossary-1759055m0)
@@ -366,7 +366,7 @@ paths:
             "scrip_code": "N/A"
           },
             </Tab>
-            
+
           </Tabs>
         </div>
       tags:
@@ -383,11 +383,11 @@ paths:
           in: query
           description: >-
             Specifies the general  type for filtering news, which includes
-            Mutual Funds, Economy, Cryptocurrency, Fixed 
+            Mutual Funds, Economy, Cryptocurrency, Fixed
 
-            Income, Commodities, IPO, Indices, Equity, and 
+            Income, Commodities, IPO, Indices, Equity, and
 
-            Market News. 
+            Market News.
           required: false
           example: IPO
           schema:
@@ -519,7 +519,7 @@ security: []
         <tr><td>15</td><td>events</td><td> List of events subscribed for the webhook (e.g., article.published)<td></tr>
         <tr><td>15</td><td>secret</td><td>Secret key used to verify the authenticity of webhook requests.</td></tr>
 <tr><td>15</td><td>article_id</td><td>Unique identifier assigned to each news article, used to distinguish and reference a specific article in the system.</td></tr>
-        
+
     </table>
 </body>
 </html>

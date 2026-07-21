@@ -1,0 +1,327 @@
+{
+  "_comment": "Frozen rate-bridge-cache decision golden (DEC-RUST-PULL-STATE-001 Wave 3H) \u2014 captured from the PRE-conversion brutex/dashboard/rate_bridge_cache.py; regenerate ONLY under BRUTEX_REGEN_RATE_BRIDGE_CACHE_GOLDEN=1 with a ledgered reason.",
+  "serve": [
+    {
+      "age": null,
+      "arm": 2,
+      "arm_name": "owner_refresh",
+      "id": "cold_owner",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000000000"
+      },
+      "refresh_ran": true,
+      "source": "live",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": null,
+      "arm": 1,
+      "arm_name": "follower_unverified",
+      "id": "cold_follower",
+      "inflight": true,
+      "probe_age": null,
+      "refresh_ran": false,
+      "source": "unverified",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "000000000000f03f"
+      },
+      "arm": 0,
+      "arm_name": "cached_hit",
+      "id": "fresh_hit",
+      "inflight": false,
+      "probe_age": {
+        "bits": "000000000000f03f"
+      },
+      "refresh_ran": false,
+      "source": "cached",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "000000000000f03f"
+      },
+      "arm": 0,
+      "arm_name": "cached_hit",
+      "id": "fresh_hit_inflight_ttl_wins",
+      "inflight": true,
+      "probe_age": {
+        "bits": "000000000000f03f"
+      },
+      "refresh_ran": false,
+      "source": "cached",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "0000000000000040"
+      },
+      "arm": 2,
+      "arm_name": "owner_refresh",
+      "id": "boundary_exact_owner",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000000000"
+      },
+      "refresh_ran": true,
+      "source": "live",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "0000000000000040"
+      },
+      "arm": 1,
+      "arm_name": "follower_unverified",
+      "id": "boundary_exact_follower",
+      "inflight": true,
+      "probe_age": {
+        "bits": "0000000000000040"
+      },
+      "refresh_ran": false,
+      "source": "unverified",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "0000000000fcff3f"
+      },
+      "arm": 0,
+      "arm_name": "cached_hit",
+      "id": "just_under_boundary",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000fcff3f"
+      },
+      "refresh_ran": false,
+      "source": "cached",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "0000000000003840"
+      },
+      "arm": 2,
+      "arm_name": "owner_refresh",
+      "id": "stale_owner",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000000000"
+      },
+      "refresh_ran": true,
+      "source": "live",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "0000000000003840"
+      },
+      "arm": 1,
+      "arm_name": "follower_unverified",
+      "id": "stale_follower",
+      "inflight": true,
+      "probe_age": {
+        "bits": "0000000000003840"
+      },
+      "refresh_ran": false,
+      "source": "unverified",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "000000000000e03f"
+      },
+      "arm": 2,
+      "arm_name": "owner_refresh",
+      "id": "ttl_zero_owner",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000000000"
+      },
+      "refresh_ran": true,
+      "source": "live",
+      "ttl": {
+        "bits": "0000000000000000"
+      }
+    },
+    {
+      "age": {
+        "bits": "000000000000e03f"
+      },
+      "arm": 1,
+      "arm_name": "follower_unverified",
+      "id": "ttl_zero_follower",
+      "inflight": true,
+      "probe_age": {
+        "bits": "000000000000e03f"
+      },
+      "refresh_ran": false,
+      "source": "unverified",
+      "ttl": {
+        "bits": "0000000000000000"
+      }
+    },
+    {
+      "age": {
+        "bits": "000000000000e03f"
+      },
+      "arm": 2,
+      "arm_name": "owner_refresh",
+      "id": "ttl_negative_owner",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000000000"
+      },
+      "refresh_ran": true,
+      "source": "live",
+      "ttl": {
+        "bits": "000000000000f0bf"
+      }
+    },
+    {
+      "age": {
+        "bits": "000000000000e03f"
+      },
+      "arm": 2,
+      "arm_name": "owner_refresh",
+      "id": "ttl_nan_owner",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000000000"
+      },
+      "refresh_ran": true,
+      "source": "live",
+      "ttl": {
+        "bits": "000000000000f87f"
+      }
+    },
+    {
+      "age": {
+        "bits": "0000000000003840"
+      },
+      "arm": 0,
+      "arm_name": "cached_hit",
+      "id": "ttl_inf_hit",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000003840"
+      },
+      "refresh_ran": false,
+      "source": "cached",
+      "ttl": {
+        "bits": "000000000000f07f"
+      }
+    },
+    {
+      "age": {
+        "bits": "0000000000000000"
+      },
+      "arm": 0,
+      "arm_name": "cached_hit",
+      "id": "skew_future_probe_clamps_hit",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000000000"
+      },
+      "refresh_ran": false,
+      "source": "cached",
+      "ttl": {
+        "bits": "0000000000000040"
+      }
+    },
+    {
+      "age": {
+        "bits": "0000000000000000"
+      },
+      "arm": 2,
+      "arm_name": "owner_refresh",
+      "id": "skew_future_ttl_zero_owner",
+      "inflight": false,
+      "probe_age": {
+        "bits": "0000000000000000"
+      },
+      "refresh_ran": true,
+      "source": "live",
+      "ttl": {
+        "bits": "0000000000000000"
+      }
+    }
+  ],
+  "token": [
+    {
+      "id": "first_probe_reads",
+      "prior": null,
+      "revalidates": false,
+      "token": "t1"
+    },
+    {
+      "id": "unchanged_revalidates",
+      "prior": "t1",
+      "revalidates": true,
+      "token": "t1"
+    },
+    {
+      "id": "changed_rereads",
+      "prior": "t1",
+      "revalidates": false,
+      "token": "t2"
+    },
+    {
+      "id": "probe_error_rereads",
+      "prior": "t1",
+      "revalidates": false,
+      "token": null
+    },
+    {
+      "id": "both_none_rereads",
+      "prior": null,
+      "revalidates": false,
+      "token": null
+    },
+    {
+      "id": "equal_empty_revalidates",
+      "prior": "",
+      "revalidates": true,
+      "token": ""
+    },
+    {
+      "id": "empty_vs_token_rereads",
+      "prior": "",
+      "revalidates": false,
+      "token": "t1"
+    },
+    {
+      "id": "token_vs_empty_rereads",
+      "prior": "t1",
+      "revalidates": false,
+      "token": ""
+    },
+    {
+      "id": "unicode_equal_revalidates",
+      "prior": "\u03bc:1",
+      "revalidates": true,
+      "token": "\u03bc:1"
+    }
+  ]
+}

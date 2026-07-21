@@ -10,12 +10,15 @@ module gate).
 
 from __future__ import annotations
 
+import sys
 from datetime import date, datetime, time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from brutex.calendars import auto_pull_gate
+from brutex import pull_state_rust
+from brutex.calendars import auto_pull_gate, settle_evidence
 from brutex.calendars.auto_pull_gate import (
     DEFAULT_PULL_ALL_SETTLE_IST,
     MUHURAT_POST_MARGIN,
@@ -243,9 +246,19 @@ def test_gate_in_coverage_trading_day_no_coverage_warn() -> None:
 
 def test_gate_market_hours_belt_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     """The step-4 BELT is structurally unreachable while the settle floor holds
-    (every in-window minute is already before_settle) — monkeypatch the guard
-    predicate to prove a future settle-law change cannot open a hole."""
-    monkeypatch.setattr(auto_pull_gate, "pull_allowed_default", lambda *, now: False)
+    (every in-window minute is already before_settle) — post-flip
+    (DEC-RUST-PULL-STATE-001) the kernel computes the belt INTERNALLY from
+    the crate's ONE market-hours core (cargo
+    ``market_hours_belt_stays_reachable`` pins its reachability), so this pin
+    plants a kernel VERDICT to prove the consumer's code → verdict-builder
+    mapping cannot open a hole: the served arm + its single-source detail."""
+    monkeypatch.setitem(
+        sys.modules,
+        "brutex_pull_state",
+        SimpleNamespace(
+            auto_gate_decision=lambda *a: (pull_state_rust.GATE_CODE_MARKET_HOURS_BLOCKED, False)
+        ),
+    )
     v = auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env=_NO_EVID)
     assert (v.allowed, v.reason) == (False, "market_hours_blocked")
     assert v.detail == "inside the NSE market-hours pull window — deferred"
@@ -518,7 +531,6 @@ def test_gate_default_path_corrupt_falls_back_17_30_one_warn(
     """A corrupt file at the DEFAULT path degrades to the conservative 17:30
     with ONE ``settle_evidence.invalid`` WARN — never a raise, never a boot
     crash (the r6/r7 posture through the whole gate)."""
-    from brutex.calendars import settle_evidence
 
     settle_evidence._reset_evidence_memo_for_tests()  # pyright: ignore[reportPrivateUsage]
     corrupt = tmp_path / "settle_evidence.json"
@@ -592,7 +604,6 @@ def test_resolution_no_evidence_is_byte_identical(
     ``resolve_settle_time`` over the full env matrix (default + every
     valid/junk token) equals the pre-#1793 values — this PR changes NOTHING
     until an evidence file lands."""
-    from brutex.calendars import settle_evidence
 
     valid_expectations: list[tuple[str | None, time]] = [
         (None, time(17, 30)),

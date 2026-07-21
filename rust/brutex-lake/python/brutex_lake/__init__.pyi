@@ -2,7 +2,32 @@
 # Mirrors rust/brutex-lake/src/lib.rs — keep in lockstep with the
 # `#[pymodule]` registration block there.
 
+__all__ = [
+    "SOURCE_DIGEST",
+    "__version__",
+    "atomic_commit_replace",
+    "classify_partial_window_verdict",
+    "classify_window_status",
+    "date_isoformat",
+    "interior_barless_runs",
+    "linked_zstd_version",
+    "lock_release",
+    "lock_try_exclusive",
+    "merge_decision_from_ipc",
+    "pinned_polars_version",
+    "raw_integrity_blake2b_hex",
+    "render_ledger_parquet_from_ipc",
+    "render_parquet_defaults_from_ipc",
+    "render_parquet_from_ipc",
+    "render_stats_shard_json",
+    "resample_1m_ipc",
+    "resample_all_ipc",
+]
+
+SOURCE_DIGEST: str
 __version__: str
+__build_crate_version__: str
+__source_digest__: str
 
 def render_parquet_from_ipc(ipc_bytes: bytes) -> bytes:
     """Render uncompressed Arrow IPC bytes to parquet bytes.
@@ -15,9 +40,16 @@ def render_parquet_from_ipc(ipc_bytes: bytes) -> bytes:
     at the FFI boundary — a panic never crosses raw).
     """
 
-def merge_decision_from_ipc(
-    stored_ipc: bytes, batch_ipc: bytes, keep_first: bool
-) -> list[int]:
+def render_parquet_defaults_from_ipc(ipc_bytes: bytes) -> bytes:
+    """Render uncompressed Arrow IPC bytes to parquet bytes — the options
+    ALL-DEFAULTS profile (ADR-0020 PR-2): ``Zstd(None)``, statistics
+    min/max/null_count ON, the streaming sink's 122,880-row default split.
+    Raises ``ValueError`` on an empty/undecodable payload or a polars render
+    error; ``RuntimeError`` if the render panicked (caught at the FFI
+    boundary — a panic never crosses raw).
+    """
+
+def merge_decision_from_ipc(stored_ipc: bytes, batch_ipc: bytes, keep_first: bool) -> list[int]:
     """Decide the merge fold — one action code per batch row (ADR-0020 PR-3).
 
     ``0=skip · 1=insert · 2=overwrite · 3=conflict`` against the stored
@@ -115,6 +147,36 @@ def date_isoformat(year: int, month: int, day: int) -> str:
     Raises ``ValueError`` on an out-of-range component (year 1..=9999,
     month 1..=12, day 1..=31 — structure only; production-unreachable
     through the facade, which passes real ``date`` fields).
+    """
+
+def raw_integrity_blake2b_hex(data: bytes, digest_size: int) -> str:
+    """RFC-7693 BLAKE2b hex digest of *data* at *digest_size* bytes (SLICE T24
+    PR-1, DEC-DATA-RUST-INTEGRITY-DETECTORS-001). Raises ``ValueError`` on an
+    out-of-range digest size; ``RuntimeError`` on a caught panic.
+    """
+
+def interior_barless_runs(
+    covered: list[int], interior_sessions: list[int]
+) -> list[tuple[int, int, int]]:
+    """Contiguous bar-less runs of *interior_sessions* against the *covered*
+    day-ordinal set — ``(run_start, run_end, run_len)`` triples, integers only
+    (SLICE T24 PR-1). ``RuntimeError`` on a caught panic.
+    """
+
+def classify_partial_window_verdict(
+    last_bar_ordinal: int | None,
+    window_end_ordinal: int,
+    today_ordinal: int,
+    expiry_ordinal: int | None,
+    coverage_ok: bool,
+    tolerance: int,
+    live_edge: int,
+    span_start_ordinal: int,
+    trading_flags: list[bool],
+) -> tuple[str, int | None, int | None, int] | None:
+    """The partial-window truncation decision tree over day ordinals (SLICE
+    T24 PR-1) — ``(reason, last_bar, expected, gap_sessions)`` or ``None``
+    (no truncation verdict). ``RuntimeError`` on a caught panic.
     """
 
 def render_ledger_parquet_from_ipc(ipc_bytes: bytes) -> bytes:

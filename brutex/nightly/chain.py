@@ -17,7 +17,13 @@ DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536).
 
 Deliberately stdlib-only + pure: every effect is injected (the link callables,
 the ``on_event`` sink, the clock), so the whole break-law matrix is unit- and
-property-testable without a lake, a vendor, or a filesystem.
+property-testable without a lake, a vendor, or a filesystem. (Module IMPORT
+stays stdlib-only; since DEC-NIGHTLY-RUST-CORE-001 the three pure laws —
+:func:`first_breaker` · :func:`exit_code_for` ·
+:func:`audit_reconcile_tripwire` — lazily consult the default-OFF
+``brutex.nightly.nightly_rust`` seam per call, and the verbatim bodies are
+RETAINED as the ``*_python`` live parity oracles the flag-OFF default and
+every degrade path serve.)
 """
 
 from __future__ import annotations
@@ -26,7 +32,10 @@ import enum
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 __all__ = [
     "EVENT_LINK_BLOCKED",
@@ -50,8 +59,11 @@ __all__ = [
     "OnEvent",
     "Tripwire",
     "audit_reconcile_tripwire",
+    "audit_reconcile_tripwire_python",
     "exit_code_for",
+    "exit_code_for_python",
     "first_breaker",
+    "first_breaker_python",
     "run_chain",
 ]
 
@@ -221,12 +233,40 @@ class ChainStep:
     also_declares: tuple[NightlyLink, ...] = ()
 
 
-def first_breaker(outcomes: Sequence[LinkOutcome]) -> LinkOutcome | None:
-    """Return the first ``REFUSED``/``FAILED`` outcome, or ``None``."""
+def first_breaker_python(outcomes: Sequence[LinkOutcome]) -> LinkOutcome | None:
+    """The retained pure body of :func:`first_breaker` (the parity oracle)."""
     for outcome in outcomes:
         if outcome.status in _BREAKERS:
             return outcome
     return None
+
+
+def first_breaker(outcomes: Sequence[LinkOutcome]) -> LinkOutcome | None:
+    """Return the first ``REFUSED``/``FAILED`` outcome, or ``None``.
+
+    Routed through the default-OFF ``brutex_ops`` seam
+    (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
+    retained oracle :func:`first_breaker_python`, byte-identical.
+    """
+    from brutex.nightly import nightly_rust
+
+    if not nightly_rust.nightly_rust_enabled():
+        return first_breaker_python(outcomes)
+
+    def _crate_value(crate: ModuleType) -> LinkOutcome | None:
+        index = crate.nightly_first_breaker_index([outcome.status.value for outcome in outcomes])
+        if index is None:
+            return None
+        if type(index) is not int or not 0 <= index < len(outcomes):
+            raise ValueError(f"first_breaker index refused: {index!r}")
+        return outcomes[index]
+
+    return nightly_rust.route_kernel(
+        "first_breaker",
+        crate_call=_crate_value,
+        python_call=lambda: first_breaker_python(outcomes),
+        validate=lambda value: value is None or isinstance(value, LinkOutcome),
+    )
 
 
 def _blocked_outcome(
@@ -398,17 +438,14 @@ def run_chain(
     return tuple(outcomes), tuple(tripwires)
 
 
-def exit_code_for(outcomes: Sequence[LinkOutcome], tripwires: Sequence[Tripwire]) -> int:
-    """The nightly exit-code law (cron-visible, spec §2.4).
+def exit_code_for_python(outcomes: Sequence[LinkOutcome], tripwires: Sequence[Tripwire]) -> int:
+    """The retained pure body of :func:`exit_code_for` (the parity oracle).
 
-    REFUSED breaker ⇒ :data:`EXIT_USER_ERROR`; FAILED breaker ⇒ its
-    ``exit_hint`` when set (the sweep's ``EXIT_SWEEP_TUPLE_FAILED`` = 6
-    pass-through) else :data:`EXIT_INTERNAL_ERROR`; all green ⇒
-    :data:`EXIT_OK`. ANY tripwire upgrades to at least
-    :data:`EXIT_INTERNAL_ERROR` — a SUSPECT run must be cron-RED, never a
-    green illusion (Golden Rule #1).
+    Verbatim except the ONE oracle-purity repoint: it consults
+    :func:`first_breaker_python` (never the routed public seam), so a
+    flag-ON burn-in compares against an all-Python chain.
     """
-    breaker = first_breaker(outcomes)
+    breaker = first_breaker_python(outcomes)
     if breaker is None:
         base = EXIT_OK
     elif breaker.status is LinkStatus.REFUSED:
@@ -424,7 +461,38 @@ def exit_code_for(outcomes: Sequence[LinkOutcome], tripwires: Sequence[Tripwire]
     return base
 
 
-def audit_reconcile_tripwire(
+def exit_code_for(outcomes: Sequence[LinkOutcome], tripwires: Sequence[Tripwire]) -> int:
+    """The nightly exit-code law (cron-visible, spec §2.4).
+
+    REFUSED breaker ⇒ :data:`EXIT_USER_ERROR`; FAILED breaker ⇒ its
+    ``exit_hint`` when set (the sweep's ``EXIT_SWEEP_TUPLE_FAILED`` = 6
+    pass-through) else :data:`EXIT_INTERNAL_ERROR`; all green ⇒
+    :data:`EXIT_OK`. ANY tripwire upgrades to at least
+    :data:`EXIT_INTERNAL_ERROR` — a SUSPECT run must be cron-RED, never a
+    green illusion (Golden Rule #1).
+
+    Routed through the default-OFF ``brutex_ops`` seam
+    (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
+    retained oracle :func:`exit_code_for_python`, byte-identical.
+    """
+    from brutex.nightly import nightly_rust
+
+    if not nightly_rust.nightly_rust_enabled():
+        return exit_code_for_python(outcomes, tripwires)
+
+    return nightly_rust.route_kernel(
+        "exit_code_for",
+        crate_call=lambda crate: crate.nightly_exit_code(
+            [outcome.status.value for outcome in outcomes],
+            [outcome.exit_hint for outcome in outcomes],
+            bool(tripwires),
+        ),
+        python_call=lambda: exit_code_for_python(outcomes, tripwires),
+        validate=nightly_rust.is_int,
+    )
+
+
+def audit_reconcile_tripwire_python(
     *,
     nightly_id: str,
     events: Sequence[tuple[str, str | None]],
@@ -466,6 +534,60 @@ def audit_reconcile_tripwire(
         name="audit_reconcile",
         link=None,
         detail=f"nightly {nightly_id} audit does not reconcile: " + "; ".join(problems),
+    )
+
+
+def audit_reconcile_tripwire(
+    *,
+    nightly_id: str,
+    events: Sequence[tuple[str, str | None]],
+    outcomes: Sequence[LinkOutcome],
+) -> Tripwire | None:
+    """The T2 reconcile law — see :func:`audit_reconcile_tripwire_python`.
+
+    Routed through the default-OFF ``brutex_ops`` seam
+    (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
+    retained oracle, byte-identical. On the routed arm the problem strings'
+    ``repr()`` renderings of the derived lists are PRE-FORMATTED here with
+    CPython's own ``repr`` (the lake_rust_stats "isoformat pinned both
+    arms" law — both arms consume identical strings; the crate owns the
+    DECISIONS: counts, dup/subset, sorted-multiset equality).
+    """
+    from brutex.nightly import nightly_rust
+
+    if not nightly_rust.nightly_rust_enabled():
+        return audit_reconcile_tripwire_python(
+            nightly_id=nightly_id, events=events, outcomes=outcomes
+        )
+
+    def _crate_value(crate: ModuleType) -> Tripwire | None:
+        link_starts = [link for action, link in events if action == "LINK_START"]
+        terminal = [link for action, link in events if action in ("LINK_DONE", "LINK_BLOCKED")]
+        attempted = {o.link.value for o in outcomes if o.started_utc is not None}
+        declared = [o.link.value for o in outcomes]
+        detail = crate.nightly_audit_reconcile_detail(
+            nightly_id,
+            [(action, link) for action, link in events],
+            declared,
+            [o.started_utc is not None for o in outcomes],
+            repr(link_starts),
+            repr(sorted(attempted)),
+            repr(terminal),
+            repr(declared),
+        )
+        if detail is None:
+            return None
+        if type(detail) is not str:
+            raise ValueError(f"audit reconcile detail shape refused: {type(detail).__name__}")
+        return Tripwire(name="audit_reconcile", link=None, detail=detail)
+
+    return nightly_rust.route_kernel(
+        "audit_reconcile_tripwire",
+        crate_call=_crate_value,
+        python_call=lambda: audit_reconcile_tripwire_python(
+            nightly_id=nightly_id, events=events, outcomes=outcomes
+        ),
+        validate=lambda value: value is None or isinstance(value, Tripwire),
     )
 
 

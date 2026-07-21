@@ -65,6 +65,8 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+from brutex.observability import observability_rust
+
 if TYPE_CHECKING:
     from brutex.observability.metrics import MetricRegistry
 
@@ -211,7 +213,7 @@ class WatchdogVerdict:
     stall_total_s: float = 0.0
 
 
-def check_once(
+def _check_once_python(
     now: float,
     last_beat: float,
     state: WatchdogState,
@@ -221,26 +223,14 @@ def check_once(
     relog_every_s: float = RELOG_EVERY_S_DEFAULT,
     realert_every_s: float = REALERT_EVERY_S_DEFAULT,
 ) -> WatchdogVerdict:
-    """One PURE watchdog decision: ``(now, last_beat, state) → verdict``.
+    """The verbatim :func:`check_once` law body — the LIVE parity oracle.
 
-    The whole OK→WARNED→CRITICAL→recovered state machine lives here —
-    injectable clock values, zero I/O, zero sleeps — so every branch is
-    deterministically testable. Laws:
-
-    * ``lag = max(0.0, now - last_beat)`` — a non-monotonic clock can never
-      yield a negative lag (mirrors the #920 floor's neutralization).
-    * Thresholds are ``>=`` (a lag exactly AT the threshold trips — a stall
-      is never under-reported by a boundary tie).
-    * A monitor thread that was ITSELF starved may observe the lag jumping
-      straight past ``critical_after_s`` — that sample fires the warn edge
-      AND the critical edge together (one episode, both actions).
-    * ``relog`` fires only on a NON-edge stalled sample ≥ ``relog_every_s``
-      after the last logged sample; ``realert`` only at CRITICAL tier on a
-      non-critical-edge sample ≥ ``realert_every_s`` after the last alert.
-    * Recovery (lag back under ``warn_after_s``) resets to a fresh
-      :class:`WatchdogState` (keeping ``episodes``) and reports
-      ``stall_total_s = max(0.0, last_beat - stall_started_beat)`` — the
-      resumed beat minus the stalled beat, honest to within one beat interval.
+    Moved token-for-token (the Slice-0 discipline) for the
+    DEC-RUST-OBSERVABILITY-001 seam: :func:`check_once` routes through
+    ``observability_rust`` (default-OFF Rust with this function as the
+    ``python_law`` oracle); flag-OFF returns this function's result
+    DIRECTLY, so the default path is byte-identical — including the OK→OK
+    arm's state OBJECT identity. See :func:`check_once` for the laws.
     """
     lag = max(0.0, now - last_beat)
     if lag >= critical_after_s:
@@ -284,6 +274,56 @@ def check_once(
         critical_edge=critical_edge,
         relog=relog,
         realert=realert,
+    )
+
+
+def check_once(
+    now: float,
+    last_beat: float,
+    state: WatchdogState,
+    *,
+    warn_after_s: float = WARN_AFTER_S_DEFAULT,
+    critical_after_s: float = CRITICAL_AFTER_S_DEFAULT,
+    relog_every_s: float = RELOG_EVERY_S_DEFAULT,
+    realert_every_s: float = REALERT_EVERY_S_DEFAULT,
+) -> WatchdogVerdict:
+    """One PURE watchdog decision: ``(now, last_beat, state) → verdict``.
+
+    The whole OK→WARNED→CRITICAL→recovered state machine lives here —
+    injectable clock values, zero I/O, zero sleeps — so every branch is
+    deterministically testable. Laws:
+
+    * ``lag = max(0.0, now - last_beat)`` — a non-monotonic clock can never
+      yield a negative lag (mirrors the #920 floor's neutralization).
+    * Thresholds are ``>=`` (a lag exactly AT the threshold trips — a stall
+      is never under-reported by a boundary tie).
+    * A monitor thread that was ITSELF starved may observe the lag jumping
+      straight past ``critical_after_s`` — that sample fires the warn edge
+      AND the critical edge together (one episode, both actions).
+    * ``relog`` fires only on a NON-edge stalled sample ≥ ``relog_every_s``
+      after the last logged sample; ``realert`` only at CRITICAL tier on a
+      non-critical-edge sample ≥ ``realert_every_s`` after the last alert.
+    * Recovery (lag back under ``warn_after_s``) resets to a fresh
+      :class:`WatchdogState` (keeping ``episodes``) and reports
+      ``stall_total_s = max(0.0, last_beat - stall_started_beat)`` — the
+      resumed beat minus the stalled beat, honest to within one beat interval.
+
+    The law body lives verbatim in :func:`_check_once_python` (the LIVE
+    parity oracle); this entry point is the branch-free router through the
+    default-OFF ``observability_rust`` facade (DEC-RUST-OBSERVABILITY-001
+    — ALL flag/guard/burn-in branching lives facade-side).
+    """
+    return observability_rust.routed_loop_check_once(
+        now,
+        last_beat,
+        state,
+        warn_after_s=warn_after_s,
+        critical_after_s=critical_after_s,
+        relog_every_s=relog_every_s,
+        realert_every_s=realert_every_s,
+        python_law=_check_once_python,
+        state_factory=WatchdogState,
+        verdict_factory=WatchdogVerdict,
     )
 
 
