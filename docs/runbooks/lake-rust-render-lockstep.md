@@ -67,6 +67,8 @@ them as directional; each one DISCLOSES a cost, never a speedup.
 Run ALL steps for ANY polars wheel bump. Nothing re-engages until step 8.
 
 1. **Pin the wheel deliberately.** Decide the target `polars==X.Y.Z`.
+   The pyproject `polars==` pin (the `data` extra —
+   DEC-CI-POLARS-LOCKSTEP-PIN-001) moves in the same commit.
    Resolve the git tag `py-X.Y.Z` to its COMMIT upstream
    (`git ls-remote --tags https://github.com/pola-rs/polars "py-X.Y.Z"` —
    the printed hash is the new rev; for an annotated tag take the `^{}`

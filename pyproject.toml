@@ -45,7 +45,13 @@ dependencies = [
 # "InvalidInputException: Required module 'pytz' failed to import".
 # Discovered + fixed in DEC-P0-004 recovery PR after CI test job failed.
 data = [
-    "polars>=1.0,<2.0",
+    # polars is PINNED EXACTLY to the rust/brutex-lake crate's wheel==crate
+    # lockstep (PINNED_POLARS_PY_VERSION in rust/brutex-lake/src/lib.rs) —
+    # DEC-CI-POLARS-LOCKSTEP-PIN-001: polars 1.43.0 (PyPI 2026-07-21) failed
+    # the fail-closed version guard on every fresh install. Bumps follow
+    # docs/runbooks/lake-rust-render-lockstep.md (crate rev + this pin +
+    # the parity corpus move TOGETHER, one commit).
+    "polars==1.42.1",
     "duckdb>=1.0,<2.0",
     "pyarrow>=16,<26",   # was <19; PyPI latest 24.0.0 (DEC-P0-012)
     "pytz>=2024.1",
