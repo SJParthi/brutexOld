@@ -3125,7 +3125,7 @@ jobs:
           # shim over the Rust-hosted serialisation + parse laws — 100% from
           # its stem suites + the frozen parity replay + the differential.
           if compgen -G "tests/unit/test_engine_cascade_wire.py" > /dev/null; then
-            pytest --cov=brutex.engine.cascade_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_cascade_wire.py tests/unit/test_engine_cascade_wire_runcore.py tests/unit/test_engine_cascade_wire_verdicts.py tests/golden/test_cascade_wire_golden.py tests/property/test_cascade_wire_properties.py tests/golden/test_cascade_wire_rust_parity_golden.py tests/property/test_cascade_wire_rust_differential.py
+            pytest --cov=brutex.engine.cascade_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_cascade_wire.py tests/unit/test_engine_cascade_wire_runcore.py tests/unit/test_engine_cascade_wire_verdicts.py tests/unit/test_engine_cascade_wire_extreme_vol.py tests/unit/test_engine_cascade_wire_regime_fragility.py tests/golden/test_cascade_wire_golden.py tests/property/test_cascade_wire_properties.py tests/golden/test_cascade_wire_rust_parity_golden.py tests/property/test_cascade_wire_rust_differential.py
           else
             echo "(brutex.engine.cascade_wire test file not present yet — gate inactive)"
           fi

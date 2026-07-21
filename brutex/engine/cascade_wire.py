@@ -154,7 +154,12 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.engine.results_store import ResultRow
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
     from brutex.engine.trial_stats import LeaderboardTrialStats
-    from brutex.metrics.cascade import CandidateInput, CascadeConfig, CascadeReport
+    from brutex.metrics.cascade import (
+        CandidateInput,
+        CandidateVerdict,
+        CascadeConfig,
+        CascadeReport,
+    )
 
 _LOG = structlog.get_logger("brutex.engine.cascade_wire")
 
@@ -1281,6 +1286,43 @@ def serialize_wire_report(report: CascadeWireReport) -> bytes:
         bytes,
         require_cascade_rust().serialize_wire_report(report, REPORT_VERSION),
     )
+
+
+def _verdict_to_dict(verdict: CandidateVerdict) -> dict[str, object]:
+    """Project ONE verdict through the crate-hosted projection law.
+
+    Train A's regime-evidence packs (DEC-REGIME-MUST-SURVIVE-STRATUM-001 +
+    DEC-REGIME-FRAGILITY-GATE-001) unit-test this private helper directly
+    (four main-landed test files pin the EMIT-ON-PRESENT
+    ``extreme_vol_*`` / ``regime_fragility_*`` keys + the defensive stats
+    copy through it). On the conversion branch the per-verdict projection
+    LAW lives in the Rust crate beside the rest of the report family
+    (DEC-RUST-CASCADE-RESULTS-001 — one source, never a Python twin), so
+    the name survives as a ZERO-LAW compatibility face: wrap *verdict* in a
+    minimal one-verdict report, run the ONE crate projection
+    (:func:`wire_report_to_dict`'s engine), unwrap the verdict dict. The
+    emitted keys and the freshly-minted (never aliased) stats dicts are
+    therefore the crate's own — this wrapper cannot drift from the serving
+    law. Test-facing compatibility only; no production caller.
+    """
+    from brutex.metrics.cascade import CascadeReport
+
+    report = CascadeReport(
+        verdicts=(verdict,),
+        survivor_ids=(verdict.candidate_id,) if verdict.passed else (),
+        n_input=1,
+        n_survived=1 if verdict.passed else 0,
+        stage_survivors={},
+    )
+    wire = CascadeWireReport(sweep_id="a" * 64, groups=(("NIFTY", "1minute", report),))
+    payload = cast(
+        "dict[str, object]",
+        require_cascade_rust().wire_report_to_dict(wire, REPORT_VERSION),
+    )
+    groups = cast("list[dict[str, object]]", payload["groups"])
+    inner = cast("dict[str, object]", groups[0]["report"])
+    verdicts = cast("list[dict[str, object]]", inner["verdicts"])
+    return verdicts[0]
 
 
 # ── Per-leaderboard trial-stats freeze (DEC-TRIAL-STATS-FREEZE-001) ──────────
