@@ -428,19 +428,6 @@ def validate_stage_stamp(
     # test_r42_always_recomputes_hash spy monkeypatches it by name).
     recomputed = content_hash_of(artifact)
     stamped_snapshot = stamp.extra.get(SNAPSHOT_EXTRA_KEY)
-    # DOUBLE-SEAM (base-refresh fold, main@cbc2f581b): BOTH conversion lanes
-    # extracted this same mismatch matrix and routed it through their OWN
-    # default-OFF Rust facade — the sweep-ops seam (DEC-RUST-SWEEP-OPS-001
-    # T15, `BRUTEX_SWEEP_OPS_RUST`) and the observability seam
-    # (DEC-RUST-OBSERVABILITY-001 law D2, `BRUTEX_OBSERVABILITY_RUST`).
-    # ONE oracle body (`_stamp_verdict_python`) serves both: the sweep-ops
-    # seam dispatches first when ITS flag is ON; otherwise the call rides
-    # the observability facade, whose default-OFF arm dispatches the python
-    # law directly — so with both flags OFF (the default) the verdict is the
-    # verbatim oracle, byte-identical, and each seam stays independently
-    # exercisable. `StampVerdict(token)` is an Enum VALUE-call — it returns
-    # the member SINGLETON, so consumers' `verdict is StampVerdict.OK`
-    # identity checks hold bit-for-bit.
     verdict_args = (
         recomputed,
         stamp.content_hash,
@@ -451,14 +438,24 @@ def validate_stage_stamp(
         stamped_snapshot,
         expected_snapshot_hash,
     )
-    if sweep_ops_rust_enabled():
-        token = routed_stamp_verdict(
-            *verdict_args, python_law=lambda: _stamp_verdict_python(*verdict_args)
-        )
-    else:
-        token = observability_rust.routed_stamp_verdict(
+
+    # The mismatch matrix routes through BOTH default-OFF facades, NESTED so
+    # each lane's flag engages independently: the sweep-ops facade
+    # (DEC-RUST-SWEEP-OPS-001) wraps the observability facade
+    # (DEC-RUST-OBSERVABILITY-001 law D2) as its oracle, with
+    # `_stamp_verdict_python` the innermost LIVE oracle. Flag-OFF for both
+    # collapses to `_stamp_verdict_python`. `StampVerdict(token)` is an Enum
+    # VALUE-call — it returns the member SINGLETON, so consumers'
+    # `verdict is StampVerdict.OK` identity checks hold bit-for-bit.
+    def _obs_law() -> str:
+        return observability_rust.routed_stamp_verdict(
             *verdict_args, python_law=_stamp_verdict_python
         )
+
+    if sweep_ops_rust_enabled():
+        token = routed_stamp_verdict(*verdict_args, python_law=_obs_law)
+    else:
+        token = _obs_law()
     return (StampVerdict(token), stamp)
 
 
