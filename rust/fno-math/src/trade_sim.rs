@@ -3252,19 +3252,27 @@ mod tests {
     #[test]
     fn exit_counts_session_gap_subsumes_pending_reason() {
         // The (A2) boundary close SUBSUMES a pending Mode-B exit — the close
-        // is counted session_gap, never the stale pending signal (mirrors
-        // `cross_session_boundary_clears_pending_exit_and_new_position_rides`,
-        // whose bars + trade records these are: trade 1 = the boundary close,
-        // trade 2 = the finish() end-of-data close).
+        // is counted session_gap, never the stale pending signal. Under the
+        // exec-grid mapping (DEC-FILL-EXEC-GRID-1M-001) a mapped `exit_due`
+        // fills ON its own bar (the mapping already did the next-1m timing),
+        // so the ONLY pending arm left is the §2.4 same-bar deferral —
+        // `exit_due` on the trade's OWN entry bar; the pre-re-key fixture
+        // (exit armed on a later in-session bar) now closes IN-session as a
+        // counted Signal and never reaches the boundary. Bars are
+        // `cross_session_boundary_clears_pending_exit_and_new_position_rides`'s
+        // verbatim (trade records re-verified identical there): entry +
+        // exit_due both on bar1 → pending armed; bar2 opens session 1 →
+        // trade 1 = the boundary close (session_gap — the pending signal
+        // subsumed, never counted); trade 2 = the session-1 entry (bar3)
+        // riding to the finish() end-of-data close.
         let mut w = Walker::new(true, None, None);
-        let bars: [(i64, i64, i64, i64, i64, bool, bool); 7] = [
-            (10000, 10050, 9900, 10000, 0, true, false),
-            (10000, 10060, 9960, 10010, 0, false, false),
-            (9990, 10000, 9940, 9980, 0, false, true),
+        let bars: [(i64, i64, i64, i64, i64, bool, bool); 5] = [
+            // (open, high, low, close, session, entry_due, exit_due)
+            (10000, 10050, 9900, 10000, 0, false, false),
+            (10000, 10060, 9960, 10010, 0, true, true),
             (11900, 12000, 11880, 11900, 1, false, false),
             (11910, 12010, 11890, 11910, 1, true, false),
             (11920, 12020, 11900, 11920, 1, false, false),
-            (11930, 12030, 11910, 11940, 1, false, false),
         ];
         let mut trades: Vec<TradeRecord> = Vec::new();
         for (i, &(o, h, l, c, sess, entry, exit)) in bars.iter().enumerate() {
