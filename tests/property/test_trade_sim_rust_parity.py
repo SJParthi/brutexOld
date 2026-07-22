@@ -1,217 +1,331 @@
-"""Property: the Rust trade-sim seam is byte-identical to the Python oracle.
+"""Property: the dual-feed Rust trade-sim kernel ≡ the Python walker, BIT-EXACT.
 
-DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). Over hypothesis-generated bar
-feeds (valid OHLC, varied start times so some windows cross the 15:20 forced
-exit), masks, SL/TP distances, directions and fill policies, the resident Rust
-kernel :class:`brutex.engine.rust_trade_sim.ResidentTradeSim` must emit exactly
-the same :class:`~brutex.metrics.types.ClosedTrade` lists as
-:func:`brutex.engine.trade_sim.simulate_trades` (Golden Rule #4). This is the
-look-ahead-free, determinism, and bit-exactness invariant for the kernel.
+DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563) on the DEC-FILL-EXEC-GRID-1M-001
+1-minute execution grid: over hypothesis-generated TWO-SESSION dual-stream
+windows (contiguous 1m bars over the real NSE sessions 2024-01-02/03,
+subsampled to create holes; decision bars either the 1m stream itself
+(``tf_minutes == 1``) or 3-minute bucket-START aggregates; windows starting at
+15:10 IST cross the forced-exit boundary; the last decision bar of session 1
+always carries a firing signal — the session-boundary / last-bar scenario),
+the kernel-served :class:`brutex.engine.rust_trade_sim.ResidentTradeSim` must
+emit exactly the same ``(trades, exit_indices)`` pairs as (a) the SAME seam
+forced onto its pure-Python oracle arm (``fno_math`` BLOCKED via a poisoned
+``sys.modules`` entry — ``import fno_math`` raises ImportError, so the seam
+constructs on the fallback) and (b) direct
+:func:`brutex.engine.trade_sim.simulate_trades` calls — for BOTH compiled
+kernel widths: the u64 ``fno_math.ResidentSweepSim`` (bar_bits < 2**60) and
+the u128 ``ResidentSweepSimU128`` (>64-bit bar_bits/masks — resident-wide AND
+lazily-promoted arms). Trades are compared FIELD-BY-FIELD (pnl_paisa,
+mfe_paisa, mae_paisa, holding_bars, entry_ts, exit_ts, direction) and the
+exit indices are additionally resolved against the EXECUTION stream (design
+§2.6 — 1-minute indices). This is the look-ahead-free, determinism, and
+bit-exactness invariant for the dual-feed kernel (Golden Rule #4).
 """
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
-from brutex.engine.combo_mask import mask_to_entry_signals
+from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
 from brutex.engine.rust_trade_sim import ResidentTradeSim
-from brutex.engine.stage1a import build_bar_bits
-from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trade_sim import (
+    STOP_LOSS_REASON_INDEX,
+    simulate_trades,
+    simulate_trades_with_exit_counts,
+)
+from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
+# The decision-bar aggregation law is SHARED with the unit suite (Golden Rule
+# #11 COMMON — one bucket-START labelling helper, never a second copy).
+from tests.unit.test_engine_rust_trade_sim import _aggregate_decision
+
 pytestmark = pytest.mark.property
 
-_DAY = date(2024, 1, 2)
-_DAY2 = date(2024, 1, 3)  # the next NSE session — two-session feeds (R2-OC-2)
-# Start IST times: 09:15 (no forced bars within ~1h) + 15:16 (windows quickly
-# cross the 15:20 forced exit), so the forced-exit branch is exercised too.
-_START_TIMES = [(9, 15), (15, 16)]
+_SESSION1 = date(2024, 1, 2)  # regular NSE Tuesday
+_SESSION2 = date(2024, 1, 3)  # the next NSE session (Wednesday)
+_OPEN_MINUTE = 9 * 60 + 15  # 09:15 IST — the session-open minute
+_LAST_MINUTE = 15 * 60 + 29  # 15:29 IST — the session's last stored minute
+# Start minutes: 09:15 (deep in-session) / 15:10 (the window quickly crosses
+# the 15:20 forced-exit boundary, so forced closes + forced-bar entry gates
+# are exercised).
+_START_MINUTES = (_OPEN_MINUTE, 15 * 60 + 10)
+
+# Vocabulary positions for bar_bits/masks: the u64 corpus stays inside
+# [0, 2**60) (today's production width); the wide corpus straddles the 63/64
+# limb boundary and reaches the top u128 bit.
+_U64_POSITIONS = (0, 1, 5, 33, 59)
+_WIDE_POSITIONS = (0, 1, 59, 63, 64, 100, 127)
+
+# The seven ClosedTrade fields the parity contract compares one by one.
+_TRADE_FIELDS = (
+    "pnl_paisa",
+    "mfe_paisa",
+    "mae_paisa",
+    "holding_bars",
+    "entry_ts",
+    "exit_ts",
+    "direction",
+)
+
+_Case = tuple[
+    list[CandleBar],  # decision bars
+    list[CandleBar],  # 1m execution bars
+    list[int],  # bar_bits (decision-length)
+    list[int],  # masks
+    Side,
+    int | None,  # sl paisa
+    int | None,  # tp paisa
+    int,  # tf_minutes
+]
 
 
-@st.composite
-def _feed_and_params(
-    draw: st.DrawFn,
-) -> tuple[list[CandleBar], list[int], Side, int | None, int | None]:
-    """Generate (bars, masks, direction, sl_paisa, tp_paisa).
-
-    Bars at index ``>= split`` roll to the NEXT session (day-2, restarting at
-    09:15 IST), so the corpus spans trading-day boundaries and the kernel's
-    cross-session pending-entry drop (R2-OC-2) is parity-checked too;
-    ``split in {0, n}`` degenerates to the original single-session feed.
-    """
-    n = draw(st.integers(min_value=1, max_value=30))
-    start_h, start_m = draw(st.sampled_from(_START_TIMES))
-    split = draw(st.integers(min_value=0, max_value=n))
-    bars: list[CandleBar] = []
-    for i in range(n):
-        low = draw(st.integers(min_value=9000, max_value=11000))
-        high = low + draw(st.integers(min_value=0, max_value=2000))
-        o = draw(st.integers(min_value=low, max_value=high))
-        c = draw(st.integers(min_value=low, max_value=high))
-        # IST wall-clock marching by one minute; stored UTC (bars are UTC).
-        # Bars from ``split`` onward step to day-2, restarting at 09:15 IST.
-        if i < split:
-            day = _DAY
-            minute_total = start_h * 60 + start_m + i
-        else:
-            day = _DAY2
-            minute_total = 9 * 60 + 15 + (i - split)
-        hh, mm = divmod(minute_total, 60)
-        ts = datetime(day.year, day.month, day.day, hh % 24, mm, tzinfo=IST).astimezone(UTC)
-        bars.append(
-            CandleBar(
-                timestamp=ts,
-                open=Decimal(o) / Decimal(100),
-                high=Decimal(high) / Decimal(100),
-                low=Decimal(low) / Decimal(100),
-                close=Decimal(c) / Decimal(100),
-                volume=0,
-                open_interest=None,
-            )
-        )
-    direction = draw(st.sampled_from([Side.BUY, Side.SELL]))
-    sl = draw(st.none() | st.integers(min_value=1, max_value=4000))
-    tp = draw(st.none() | st.integers(min_value=1, max_value=4000))
-    # Masks drawn from a small bit space so they actually fire on the feed.
-    masks = draw(
-        st.lists(st.integers(min_value=0, max_value=63), min_size=1, max_size=6, unique=True)
+def _bar_at(
+    day: date, minute_of_day: int, low_c: int, high_c: int, open_c: int, close_c: int
+) -> CandleBar:
+    """A 1-minute bar at IST ``minute_of_day`` on *day* (prices in cents/paisa-per-unit)."""
+    hh, mm = divmod(minute_of_day, 60)
+    ts = datetime(day.year, day.month, day.day, hh, mm, tzinfo=IST).astimezone(UTC)
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(open_c) / Decimal(100),
+        high=Decimal(high_c) / Decimal(100),
+        low=Decimal(low_c) / Decimal(100),
+        close=Decimal(close_c) / Decimal(100),
+        volume=0,
+        open_interest=None,
     )
-    return bars, masks, direction, sl, tp
-
-
-@given(case=_feed_and_params())
-@settings(max_examples=200, deadline=None)
-def test_rust_seam_equals_python_oracle(
-    case: tuple[list[CandleBar], list[int], Side, int | None, int | None],
-) -> None:
-    bars, masks, direction, sl, tp = case
-    bar_bits = build_bar_bits(bars)
-    sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
-    got = sim.simulate_masks(masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp)
-    expected = [
-        simulate_trades(
-            bars,
-            mask_to_entry_signals(bar_bits, m),
-            direction=direction,
-            tf_minutes=1,
-            stop_loss_paisa=sl,
-            take_profit_paisa=tp,
-        )
-        for m in masks
-    ]
-    assert got == expected
-
-
-# ── u128 domain parity (DEC-TRADE-SIM-U128-KERNEL-001) ────────────────────────
-#
-# The hostile >64-bit corpus: masks STRADDLING bit 63/64, all-zero-hi (u64-fit)
-# masks riding the WIDE path, the all-ones _U128_MASK, the top bit 127, and
-# random combinations — over bar_bits that are either widened (the u128 kernel
-# is resident) or u64-fit (the wide batch PROMOTES the u128 sibling). Every
-# example asserts byte-identity against the pure-Python simulate_trades oracle
-# AND that Rust genuinely served the batch (no call-fallback events — the
-# anti-vacuity teeth: an oracle-served run would trivially "match" itself).
-
-# Bit positions spanning both limbs: low bits that can fire on real Stage-1A
-# bar_bits, the 63/64 straddle pair, a mid-high bit, and the top bit 127.
-_WIDE_POSITIONS: list[int] = [0, 1, 62, 63, 64, 65, 100, 127]
-_U128_ALL_ONES = (1 << 128) - 1
 
 
 @st.composite
-def _wide_feed_and_params(
-    draw: st.DrawFn,
-) -> tuple[list[CandleBar], list[int], list[int], Side, int | None, int | None, bool]:
-    """Generate (bars, bar_bits, masks, direction, sl, tp, widen_bars).
+def _session_coords(draw: st.DrawFn) -> list[tuple[date, int]]:
+    """(day, minute) coordinates over one or two real sessions, holes included."""
+    coords: list[tuple[date, int]] = []
+    days = [_SESSION1, _SESSION2] if draw(st.booleans()) else [_SESSION1]
+    for day in days:
+        start = draw(st.sampled_from(_START_MINUTES))
+        n = draw(st.integers(min_value=3, max_value=25))
+        minutes = list(range(start, min(start + n, _LAST_MINUTE + 1)))
+        # Holes: drop a strict subset of the minutes, keeping >= 2 stored bars
+        # per session (the subsampled-lake shape the slide law exists for).
+        dropped = draw(st.sets(st.sampled_from(minutes), max_size=max(0, len(minutes) - 2)))
+        coords.extend((day, m) for m in minutes if m not in dropped)
+    return coords
 
-    ``widen_bars`` selects the resident-kernel width: True ORs drawn
-    >64-bit positions into the Stage-1A bar_bits (the u128 kernel serves from
-    construction); False keeps bar_bits u64-fit so a wide mask exercises the
-    LAZY promotion path instead. Masks always include at least one >64-bit
-    value plus the special corpus (straddler, all-zero-hi, all-ones).
+
+@st.composite
+def _dual_stream_case(draw: st.DrawFn, *, wide: bool) -> _Case:
+    """One generated dual-stream window + signal vocabulary + trade params.
+
+    ``wide=False`` keeps every bar_bits/mask value strictly below ``2**60``
+    (the u64 kernel domain). ``wide=True`` guarantees at least one >64-bit
+    value: either the bar_bits widen (the u128 kernel is RESIDENT from
+    construction) or a >64-bit NON-firing mask joins the batch over u64-fit
+    bar_bits (the LAZY-promotion arm — the whole batch routes through the
+    promoted u128 sibling).
     """
-    n = draw(st.integers(min_value=2, max_value=20))
-    start_h, start_m = draw(st.sampled_from(_START_TIMES))
-    bars: list[CandleBar] = []
-    for i in range(n):
-        low = draw(st.integers(min_value=9000, max_value=11000))
-        high = low + draw(st.integers(min_value=0, max_value=2000))
-        o = draw(st.integers(min_value=low, max_value=high))
-        c = draw(st.integers(min_value=low, max_value=high))
-        minute_total = start_h * 60 + start_m + i
-        hh, mm = divmod(minute_total, 60)
-        ts = datetime(_DAY.year, _DAY.month, _DAY.day, hh % 24, mm, tzinfo=IST).astimezone(UTC)
-        bars.append(
-            CandleBar(
-                timestamp=ts,
-                open=Decimal(o) / Decimal(100),
-                high=Decimal(high) / Decimal(100),
-                low=Decimal(low) / Decimal(100),
-                close=Decimal(c) / Decimal(100),
-                volume=0,
-                open_interest=None,
-            )
+    coords = draw(_session_coords())
+    exec_bars = [
+        _bar_at(
+            day,
+            minute,
+            low_c := draw(st.integers(min_value=9000, max_value=11000)),
+            high_c := low_c + draw(st.integers(min_value=0, max_value=1500)),
+            draw(st.integers(min_value=low_c, max_value=high_c)),
+            draw(st.integers(min_value=low_c, max_value=high_c)),
         )
-    widen_bars = draw(st.booleans())
-    bar_bits = build_bar_bits(bars)
-    if widen_bars:
-        for i in range(n):
-            extra = draw(st.sets(st.sampled_from(_WIDE_POSITIONS), min_size=0, max_size=4))
-            for pos in extra:
-                bar_bits[i] |= 1 << pos
-    # Random masks from the position pool (some fire, some never), plus the
-    # required specials: a 63/64 straddler, an all-zero-hi (u64-fit) mask that
-    # rides the SAME batch, and the all-ones u128 word.
-    masks: list[int] = [
-        (1 << 63) | (1 << 64),  # straddles the limb boundary
-        (1 << 63) | 1,  # all-zero hi — u64-fit, served on the wide path
-        _U128_ALL_ONES,  # all-ones
+        for day, minute in coords
     ]
-    n_random = draw(st.integers(min_value=1, max_value=4))
-    for _ in range(n_random):
-        positions = draw(st.sets(st.sampled_from(_WIDE_POSITIONS), min_size=1, max_size=5))
-        masks.append(sum(1 << pos for pos in positions))
+    tf_minutes = draw(st.sampled_from([1, 3]))
+    decision = _aggregate_decision(exec_bars, tf_minutes)
+    widen_bars = draw(st.booleans()) if wide else False
+    # bar_bits positions: only a RESIDENT-wide window may carry >63-bit words
+    # (the promotion arm needs u64-fit bar_bits by construction).
+    bit_positions = (
+        _WIDE_POSITIONS
+        if widen_bars
+        else tuple(p for p in (_WIDE_POSITIONS if wide else _U64_POSITIONS) if p <= 63)
+    )
+    fire_mask = sum(
+        1 << p for p in draw(st.sets(st.sampled_from(bit_positions), min_size=1, max_size=3))
+    )
+    if widen_bars:
+        fire_mask |= 1 << 100  # the firing mask itself is >64-bit
+    masks: list[int] = [fire_mask]
+    for _ in range(draw(st.integers(min_value=0, max_value=3))):
+        positions = draw(st.sets(st.sampled_from(bit_positions), min_size=1, max_size=3))
+        masks.append(sum(1 << p for p in positions))
+    if wide and not widen_bars:
+        # The lazy-promotion driver: a >64-bit mask over the u64 window.
+        masks.append((1 << 100) | (1 << 64))
+    bits = [
+        sum(1 << p for p in draw(st.sets(st.sampled_from(bit_positions), max_size=4)))
+        for _ in decision
+    ]
+    # Force firing signals on a drawn subset of decision bars PLUS the last
+    # decision bar of session 1 (the session-boundary / session-last-bar
+    # scenario: its fill candidate is the next session → the cross-session
+    # DROP, or — when session 2 is absent — the never-fills tail).
+    n_dec = len(decision)
+    fire_at = draw(
+        st.sets(st.integers(min_value=0, max_value=n_dec - 1), min_size=1, max_size=min(4, n_dec))
+    )
+    session1_last = max(
+        (i for i, b in enumerate(decision) if b.timestamp.astimezone(IST).date() == _SESSION1),
+        default=None,
+    )
+    if session1_last is not None:
+        fire_at.add(session1_last)
+    for i in fire_at:
+        bits[i] |= fire_mask
     direction = draw(st.sampled_from([Side.BUY, Side.SELL]))
-    sl = draw(st.none() | st.integers(min_value=1, max_value=4000))
-    tp = draw(st.none() | st.integers(min_value=1, max_value=4000))
-    return bars, bar_bits, masks, direction, sl, tp, widen_bars
+    sl = draw(st.none() | st.integers(min_value=1, max_value=3000))
+    tp = draw(st.none() | st.integers(min_value=1, max_value=3000))
+    return decision, exec_bars, bits, masks, direction, sl, tp, tf_minutes
 
 
-# The pre-existing `@given(case=_feed_and_params())` above carries the SAME
-# hypothesis-composite reportCallIssue finding (the local-baseline class);
-# this new instance is ignore-tagged so the pyright error count stays at
-# the pre-change baseline (0 new diagnostics).
-@given(case=_wide_feed_and_params())  # pyright: ignore[reportCallIssue]
-@settings(max_examples=150, deadline=None)
-def test_rust_u128_seam_equals_python_oracle(
-    case: tuple[list[CandleBar], list[int], list[int], Side, int | None, int | None, bool],
+def _python_oracle_sim(
+    decision: list[CandleBar], bits: list[int], tf_minutes: int, exec_bars: list[CandleBar]
+) -> ResidentTradeSim:
+    """Build the seam with ``fno_math`` BLOCKED → the pure-Python oracle arm.
+
+    ``sys.modules["fno_math"] = None`` makes ``import fno_math`` raise
+    ImportError inside the constructor (the wheel-absent posture), so the
+    returned instance provably serves every batch through
+    :class:`brutex.engine.trade_sim.TradeSimWalker`. The inline try/finally
+    (not the ``monkeypatch`` fixture) keeps hypothesis' function-scoped
+    fixture health check satisfied; ``capture_logs`` swallows the expected
+    per-example ``wheel_missing`` WARNING.
+    """
+    sentinel = object()
+    prior = sys.modules.get("fno_math", sentinel)
+    sys.modules["fno_math"] = None  # type: ignore[assignment]
+    try:
+        with capture_logs():
+            sim = ResidentTradeSim(decision, bits, tf_minutes=tf_minutes, exec_bars_1m=exec_bars)
+    finally:
+        if prior is sentinel:
+            sys.modules.pop("fno_math", None)
+        else:
+            sys.modules["fno_math"] = prior  # type: ignore[assignment]
+    assert sim.rust_active is False  # provably the oracle arm
+    return sim
+
+
+def _trade_fields(trade: ClosedTrade) -> tuple[object, ...]:
+    return tuple(getattr(trade, field) for field in _TRADE_FIELDS)
+
+
+def _assert_pairs_bit_equal(
+    got: list[tuple[list[ClosedTrade], list[int] | None]],
+    expected: list[tuple[list[ClosedTrade], list[int] | None]],
+    exec_bars: list[CandleBar],
 ) -> None:
-    """>64-bit masks/bar_bits: the Rust u128 path is bit-identical to the oracle."""
-    bars, bar_bits, masks, direction, sl, tp, _widen_bars = case
-    sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
-    assert sim.rust_active is True  # a compiled kernel holds the window
+    """Field-by-field ClosedTrade equality + exit-index equality per mask.
+
+    The generated execution streams are strictly increasing (unique minutes),
+    so BOTH arms must emit CERTIFIED (non-``None``) exit indices, and each
+    index must resolve to its trade's exit bar within the EXECUTION stream
+    (design §2.6 — 1-minute indices, never decision indices).
+    """
+    assert len(got) == len(expected)
+    for (g_trades, g_idx), (e_trades, e_idx) in zip(got, expected, strict=True):
+        assert [_trade_fields(t) for t in g_trades] == [_trade_fields(t) for t in e_trades]
+        assert g_idx is not None
+        assert e_idx is not None
+        assert g_idx == e_idx
+        for trade, idx in zip(g_trades, g_idx, strict=True):
+            assert exec_bars[idx].timestamp == trade.exit_ts
+
+
+def _run_parity_case(case: _Case, *, expect_wide_serving: bool) -> None:
+    """The shared parity body: kernel arm ≡ blocked-import oracle arm ≡ simulate_trades."""
+    decision, exec_bars, bits, masks, direction, sl, tp, tf_minutes = case
+    kernel_sim = ResidentTradeSim(decision, bits, tf_minutes=tf_minutes, exec_bars_1m=exec_bars)
+    assert kernel_sim.rust_active is True  # a compiled kernel holds the window
     with capture_logs() as logs:
-        got = sim.simulate_masks(
+        got = kernel_sim.simulate_masks_with_exit_indices(
             masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp
         )
-    # Anti-vacuity: Rust served the batch — no oracle fallback fired.
+    # Anti-vacuity: Rust genuinely served the batch — no oracle fallback fired
+    # (a wide batch may PROMOTE — an INFO, not a fallback).
     assert [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"] == []
-    expected = [
-        simulate_trades(
-            bars,
-            mask_to_entry_signals(bar_bits, m),
+    if expect_wide_serving:
+        # The wide corpus law: at least one >64-bit word crossed the FFI —
+        # either the resident window is wide or the batch promoted.
+        assert any(b > U64_MASK for b in bits) or any(m > U64_MASK for m in masks)
+
+    oracle_sim = _python_oracle_sim(decision, bits, tf_minutes, exec_bars)
+    expected = oracle_sim.simulate_masks_with_exit_indices(
+        masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp
+    )
+    _assert_pairs_bit_equal(got, expected, exec_bars)
+
+    # The seam ALSO equals direct simulate_trades calls (the one dual-feed
+    # walker law, mask by mask).
+    for mask, (trades, _) in zip(masks, got, strict=True):
+        direct = simulate_trades(
+            decision,
+            mask_to_entry_signals(bits, mask),
             direction=direction,
-            tf_minutes=1,
+            tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
         )
-        for m in masks
-    ]
-    assert got == expected
+        assert [_trade_fields(t) for t in trades] == [_trade_fields(t) for t in direct]
+
+    # Woven exit-reason counter parity (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    # Stage B, #1974): the kernel's per-mask exit-reason counters equal the
+    # Python walker's per reason and sum to the mask's trade count — the ONE
+    # guard feeding sl_hit_rate, preserved on the dual-feed 1m grid for BOTH
+    # widths (never a silently wrong loss-rate metric). Rust genuinely serves
+    # the counted batch (no call_fallback; a wide batch PROMOTES — INFO only),
+    # and the Python arm walks the same dual-feed law via
+    # simulate_trades_with_exit_counts.
+    with capture_logs() as count_logs:
+        triples = kernel_sim.simulate_masks_with_exit_counts(
+            masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp
+        )
+    assert [e for e in count_logs if e["event"] == "rust_trade_sim.call_fallback"] == []
+    for mask, (trades, _idx, counts) in zip(masks, triples, strict=True):
+        _py_trades, _py_idx, py_counts = simulate_trades_with_exit_counts(
+            decision,
+            mask_to_entry_signals(bits, mask),
+            direction=direction,
+            tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars,
+            stop_loss_paisa=sl,
+            take_profit_paisa=tp,
+        )
+        assert counts == py_counts
+        assert sum(counts) == len(trades)
+        # Under the ONE worst-case law (DEC-FILL-WORST-CASE-ONLY-001) an SL
+        # fill is adverse-clamped at/beyond the level, so every stop_loss
+        # close is a loss: sl_count <= losers.
+        losers = sum(1 for t in trades if t.pnl_paisa < 0)
+        assert counts[STOP_LOSS_REASON_INDEX] <= losers
+
+
+@given(case=_dual_stream_case(wide=False))  # pyright: ignore[reportCallIssue]
+@settings(max_examples=25, deadline=None)
+def test_u64_kernel_dual_stream_parity(case: _Case) -> None:
+    """u64 domain (bar_bits < 2**60): kernel ≡ oracle ≡ simulate_trades, bit-exact."""
+    _, _, bits, _, _, _, _, _ = case
+    assert all(0 <= b < 1 << 60 for b in bits)  # the generator's u64-domain law
+    _run_parity_case(case, expect_wide_serving=False)
+
+
+@given(case=_dual_stream_case(wide=True))  # pyright: ignore[reportCallIssue]
+@settings(max_examples=25, deadline=None)
+def test_u128_kernel_dual_stream_parity(case: _Case) -> None:
+    """>64-bit domain: the u128 kernel (resident OR lazily promoted) is bit-exact."""
+    _run_parity_case(case, expect_wide_serving=True)

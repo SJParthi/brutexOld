@@ -61,9 +61,18 @@ from collections.abc import Sequence
 #: in-repo ``EXPECTED_BUILD.json`` mirrors the non-dunder names; a test pins
 #: the two equal so they cannot drift.
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
+    # DEC-FEED-RUST-CORE-001 (the frozen original surface).
     "SOURCE_DIGEST",
     "__version__",
     "scan_bars",
+    # DEC-FEED-RUST-MATERIALIZE-002 (the wheel-REQUIRED extension —
+    # append-only registrations; the strict scan + the P-06 barrier core +
+    # the series decision arithmetic).
+    "BarrierCore",
+    "boundary_monotonic_break",
+    "expected_bar_instant",
+    "ownership_cut",
+    "scan_bars_strict",
 )
 
 
@@ -98,8 +107,13 @@ _assert_compiled_surface(_compiled)
 # wheel raises the actionable message, not a bare from-import failure.
 from ._brutex_feed import (  # noqa: E402
     SOURCE_DIGEST,
+    BarrierCore,
     __version__,
+    boundary_monotonic_break,
+    expected_bar_instant,
+    ownership_cut,
     scan_bars,
+    scan_bars_strict,
 )
 
 #: Crate version of the INSTALLED compiled kernel — derived at import from the
@@ -115,6 +129,11 @@ __source_digest__: str = SOURCE_DIGEST
 
 __all__ = [
     "SOURCE_DIGEST",
+    "BarrierCore",
     "__version__",
+    "boundary_monotonic_break",
+    "expected_bar_instant",
+    "ownership_cut",
     "scan_bars",
+    "scan_bars_strict",
 ]

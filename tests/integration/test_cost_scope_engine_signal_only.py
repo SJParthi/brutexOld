@@ -117,10 +117,14 @@ class TestEngineIndexPathIsSignalOnly:
     """The engine walker prices index spot + index futures with ZERO cost."""
 
     def _run_one_trade(self) -> int:
-        # Signal on bar 0 → enter at bar 1 (FLAT at ₹100.00 — under the one
-        # worst-case law, DEC-FILL-WORST-CASE-ONLY-001, the fill is the bar's
-        # adverse extreme, which on a flat bar IS ₹100.00); a Mode-B signal
-        # exit at bar 1 fills at bar 2 (flat at ₹110.00 — adverse extreme
+        # tf==1 dual-feed fixed point (DEC-FILL-EXEC-GRID-1M-001: the same
+        # list is decision AND execution stream — a decision-bar-N signal
+        # fills on 1m bar N+1, the historical timing). Signal on bar 0 →
+        # enter at bar 1 (FLAT at ₹100.00 — under the one worst-case law,
+        # DEC-FILL-WORST-CASE-ONLY-001, the fill is the bar's adverse
+        # extreme, which on a flat bar IS ₹100.00); the Mode-B exit signal on
+        # decision bar 1 maps to its next-1m fill bar 2 (NOT the entry bar —
+        # no §2.4 deferral), filling at that bar's adverse extreme (flat →
         # ₹110.00). Long P&L = +₹10.00 = 1000 paisa, RAW — no
         # brokerage/STT/slippage is ever subtracted by the signal-only walker.
         bars = [
@@ -135,6 +139,7 @@ class TestEngineIndexPathIsSignalOnly:
             entry,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             exit_signals=exit_sig,
         )
         assert len(trades) == 1

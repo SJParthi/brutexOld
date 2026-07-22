@@ -127,16 +127,21 @@ def test_run_identity_goldens_are_unmoved() -> None:
         _GOLDEN_RUN_ID,
     )
 
-    # Mirror literals refreshed at the 2026-07-18 club-O merge-forward onto
-    # main 3ee742b3: DEC-FILL-WORST-CASE-ONLY-001 (MIGRATION.md #1825, its own
-    # reviewed repo-wide golden re-lock) moved the CANONICAL frozen pair —
-    # _GOLDEN_RUN_ID f588194f… (the negative-pinned precise-era id, see
-    # _PRECISE_ERA_RUN_ID in the canonical suite) → 715212420d2c…, and
-    # _GOLDEN_CONTENT_HASH 18129707c1bf… → ee874356dcf6… . This pin's LAW is
-    # unchanged — the resilience annotation pass must mirror whatever the
-    # canonical frozen value is (the canonical suite itself is byte-untouched
-    # by this branch; these literals are copies OF it, never a re-lock of it).
-    assert _GOLDEN_RUN_ID == "715212420d2cca2dd998aa0f716ef5b658d551a212a61af135fe0cf6fae62fc9"
+    # Mirror literals — the resilience annotation pass NEVER touches ResultRow
+    # bytes, so this test only asserts the imported canonical frozen pair. At
+    # the TRAIN-B fold DEC-FILL-EXEC-GRID-1M-001 (MIGRATION.md #1989, the
+    # operator-approved SANCTIONED greenfield run-identity re-key over the
+    # 1-minute execution grid) moved the CANONICAL frozen pair — _GOLDEN_RUN_ID
+    # 715212420d2c… (the interim PR-A worst-case-only id, now negative-pinned
+    # _PRE_GRID_RUN_ID in the canonical suite) → caf0cb630c4a… — while the woven
+    # W2 metrics-depth (#1974–#1976) + LANE-W1 selection-provenance (#2059/#2060)
+    # additive columns moved the CANONICAL _GOLDEN_CONTENT_HASH to a value
+    # NEITHER parent literal reproduces (train-b's `af3bf465…bed9`; the member's
+    # `23ebaf1c…933f`) — RE-DERIVED FRESH on the folded tree (see the canonical
+    # suite). This pin's LAW is unchanged — the mirror must equal whatever the
+    # canonical frozen value is (these literals are copies OF the canonical
+    # suite's, never an independent re-lock of it).
+    assert _GOLDEN_RUN_ID == "caf0cb630c4a1c74d71605f23140a9f35d3b3da2e41543b918723e4a9c9390ca"
     assert (
-        _GOLDEN_CONTENT_HASH == "ee874356dcf6d81cf290eb7d8d7e0d516b668cfcf665c45fca94127ecd4c0789"
+        _GOLDEN_CONTENT_HASH == "6e15a6540c0ef8997d71daa3342ebeefb60006e56fb005b16c02744b2e22f7f9"
     )

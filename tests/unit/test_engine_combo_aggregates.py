@@ -716,6 +716,76 @@ class TestRecordShape:
         with pytest.raises(AttributeError):
             agg.n_trades = 5  # type: ignore[misc]
 
+    def test_agg_columns_is_55_with_the_grid_counters_in_pinned_order(self) -> None:
+        """The five 1m-grid counters sit AFTER ``exits_session_gap`` and BEFORE
+        ``max_consecutive_losses``, in the DEC-FILL-EXEC-GRID-1M-001 order —
+        the 50→55 append-in-place law (`trade_store.AGG_COLUMNS`)."""
+        names = [name for name, _ in AGG_COLUMNS]
+        assert len(names) == 55
+        anchor = names.index("exits_session_gap")
+        assert names[anchor + 1 : anchor + 6] == [
+            "exits_deferred",
+            "signals_dropped_collision",
+            "fill_slid_minutes",
+            "exit_fill_slid_minutes",
+            "forced_fill_slid_minutes",
+        ]
+        assert names[anchor + 6] == "max_consecutive_losses"
+
+    def test_capture_grid_counters_carry_through_to_the_record(self) -> None:
+        """`aggregate_combo` copies the walker's per-combo 1m-grid counter
+        family off the capture VERBATIM — never re-derived, never zeroed on a
+        healthy capture — and ``to_record()`` persists all five."""
+        trades = (_trade(_DAY, 0, 10),)
+        capture = replace(
+            _capture(trades),
+            exits_deferred=2,
+            signals_dropped_collision=1,
+            fill_slid_minutes=3,
+            exit_fill_slid_minutes=4,
+            forced_fill_slid_minutes=5,
+        )
+        agg = _aggregate(capture, _row([10]))
+        assert (
+            agg.exits_deferred,
+            agg.signals_dropped_collision,
+            agg.fill_slid_minutes,
+            agg.exit_fill_slid_minutes,
+            agg.forced_fill_slid_minutes,
+        ) == (2, 1, 3, 4, 5)
+        record = agg.to_record()
+        assert record["exits_deferred"] == 2
+        assert record["signals_dropped_collision"] == 1
+        assert record["fill_slid_minutes"] == 3
+        assert record["exit_fill_slid_minutes"] == 4
+        assert record["forced_fill_slid_minutes"] == 5
+
+    def test_default_capture_grid_counters_are_zero(self) -> None:
+        agg = _aggregate(_capture((_trade(_DAY, 0, 10),)), _row([10]))
+        assert (
+            agg.exits_deferred,
+            agg.signals_dropped_collision,
+            agg.fill_slid_minutes,
+            agg.exit_fill_slid_minutes,
+            agg.forced_fill_slid_minutes,
+        ) == (0, 0, 0, 0, 0)
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "exits_deferred",
+            "signals_dropped_collision",
+            "fill_slid_minutes",
+            "exit_fill_slid_minutes",
+            "forced_fill_slid_minutes",
+        ],
+    )
+    def test_validation_rejects_negative_grid_counter(self, field: str) -> None:
+        # The counters are EVENT tallies (deliberately not a partition of
+        # n_trades), so the only law is >= 0 — the __post_init__ arm.
+        with pytest.raises(ComboAggregateError, match="1m-grid counters"):
+            _agg_with(**{field: -1})
+
     def test_replace_keeps_validation_teeth(self) -> None:
         agg = _agg_with()
         with pytest.raises(ComboAggregateError, match="exit tallies"):

@@ -33,6 +33,7 @@ def _stub_dashboard_runtime(
     monkeypatch.setattr(uvicorn_mod, "run", fake_run)
     monkeypatch.setattr(cli, "_start_instrument_autoload", lambda store, log: None)
     monkeypatch.setattr(cli, "_start_auto_resume_on_boot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_start_lake_heal_sweep", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "_build_liveproof_autorun", lambda _root: None)
 
 

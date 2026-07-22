@@ -10,7 +10,7 @@
 #    the tests don't actually cover that logic branch. Runs on EVERY
 #    trigger (push to main, weekly schedule, manual dispatch).
 #
-# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 6-shard matrix,
+# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 8-shard matrix,
 #    engine-critical scope defined ONCE in rust/fno-math/.cargo/mutants.toml.
 #    Schedule + workflow_dispatch ONLY (see the job-level `if:` comment).
 #
@@ -56,6 +56,7 @@ on:
       - "rust/trading-core/**"
       - "rust/brutex-feed/**"
       - "rust/brutex-strategies/**"
+      - "rust/brutex-refine/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/mutation.yml"
@@ -225,6 +226,24 @@ jobs:
             echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_identity Rust extension (DEC-RUST-RUNID-STORES-001)
+        # The run-identity + store kernel: a HARD import of
+        # brutex/strategies/combo.py, brutex/engine/snapshot_hash.py,
+        # brutex/engine/results_store.py and brutex/data/window_ledger_store.py
+        # (the fno_math posture — the retired Python computation bodies have no
+        # oracle to degrade to). Belt-and-suspenders crates.io flake guard (see
+        # the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-identity; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-identity failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-identity failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install trading_core Rust extension
         # Belt-and-suspenders crates.io flake guard (see fno-math step).
         run: |
@@ -238,10 +257,11 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
-      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
-        # The feed_rust mutmut pair's wheel-gated FFI/engagement tests need
-        # the kernel importable to kill their mutants (absent wheel = those
-        # tests skip and the corresponding mutants would falsely survive).
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-MATERIALIZE-002)
+        # The wheel is REQUIRED for the feed_rust + feed/replay mutmut pairs:
+        # DEC-FEED-RUST-MATERIALIZE-002 deleted the Python oracle bodies, so
+        # an absent wheel makes those suites FAIL loudly (never skip) and the
+        # mutation loop could not run at all.
         # Belt-and-suspenders crates.io flake guard (see fno-math step).
         run: |
           n=0
@@ -309,12 +329,23 @@ jobs:
           #    (tests/property/test_ranking_gate_reasons_property.py) stays
           #    a CI-suite-only gate — deliberately NOT in this runner
           #    (per-mutant runtime + randomized-verdict determinism).
+          #    brutex/ranking/streaks.py + tests/unit/test_ranking_streaks.py
+          #    joined the pair at the W2 refuter round (#1975 pledge
+          #    extension, DEC-METRICS-KELLY-GROWTH-001): the derived Door-5
+          #    threshold core (the binomial-null quantile) + the new
+          #    door/guard branches in ranking/__init__.py are gate-load-
+          #    bearing statistics — zero-survivor to be proven by the next
+          #    scheduled run (never claimed before it executes green).
           #
           # Tests on these already hit 100% line coverage; mutmut verifies that
           # the coverage is *meaningful* (the tests detect a behaviour change).
+          #    brutex/ranking/cvar_gate.py (DEC-RANK-CVAR-TAIL-GATE-001) joins
+          #    the pass with its dedicated runner file
+          #    tests/unit/test_ranking_cvar_gate.py — the integer-exact CVaR
+          #    tail law + the kernel seam are tested ONLY there.
           mutmut run \
-            --paths-to-mutate brutex/metrics/deflated_sharpe.py,brutex/ranking/__init__.py,brutex/ranking/overfit.py \
-            --runner "sh -c 'pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py tests/unit/test_ranking_gate_reasons.py -x -q --no-header || exit 1'" \
+            --paths-to-mutate brutex/metrics/deflated_sharpe.py,brutex/ranking/__init__.py,brutex/ranking/overfit.py,brutex/ranking/streaks.py,brutex/ranking/cvar_gate.py \
+            --runner "sh -c 'pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py tests/unit/test_ranking_gate_reasons.py tests/unit/test_ranking_streaks.py tests/unit/test_ranking_cvar_gate.py -x -q --no-header || exit 1'" \
             --simple-output
           mutmut results | tee mutmut-results-math.txt
           if grep -qE "^[0-9]+" mutmut-results-math.txt; then
@@ -538,27 +569,36 @@ jobs:
             "brutex/data/lake_rust_resample_daily.py:tests/unit/test_lake_rust_resample_daily.py:" \
             "brutex/data/fno_symbol_rust.py:tests/unit/test_fno_symbol_rust.py:" \
             "brutex/money_rust.py:tests/unit/test_money_rust.py:" \
+            "brutex/models_rust.py:tests/unit/test_models_rust.py:" \
             "brutex/config/hardware_envelope_rust.py:tests/unit/test_hardware_envelope_rust.py:" \
             "brutex/config/seam_core.py:tests/unit/test_config_seam_core.py:" \
             "brutex/config/paths_rust.py:tests/unit/test_config_paths_rust.py:" \
             "brutex/config/dotenv_rust.py:tests/unit/test_config_dotenv_rust.py:" \
             "brutex/config/backup_env_rust.py:tests/unit/test_backup_env_rust.py:" \
             "brutex/data/lake_keys_rust.py:tests/unit/test_lake_keys_rust.py:" \
-            "brutex/data/lake_rust_ledger_render.py:tests/unit/test_lake_rust_ledger_render.py:" \
             "brutex/data/detectors_rust.py:tests/unit/test_detectors_rust.py:" \
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
             "brutex/notifications/notify_rust.py:tests/unit/test_notify_rust.py:" \
             "brutex/pull_state_rust.py:tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_state_fail_closed.py:" \
             "brutex/nightly/box_update.py:tests/unit/test_nightly_box_update.py:" \
             "brutex/nightly/env_preflight.py:tests/unit/test_nightly_env_preflight.py:" \
+            "brutex/optcost_rust.py:tests/unit/test_optcost_rust.py:" \
             "brutex/nightly/nightly_rust.py:tests/unit/test_nightly_rust.py:" \
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
+            "brutex/engine/results_rollup.py:tests/unit/test_engine_results_rollup.py:" \
             "brutex/acceptance/model.py:tests/unit/test_acceptance_model.py:" \
             "brutex/acceptance/sampling.py:tests/unit/test_acceptance_sampling.py:" \
             "brutex/acceptance/independent.py:tests/unit/test_acceptance_independent.py:" \
             "brutex/acceptance/report.py:tests/unit/test_acceptance_report.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
+            "brutex/meta/abstain.py:tests/unit/test_meta_abstain.py:" \
+            "brutex/meta/features.py:tests/unit/test_meta_features.py:" \
+            "brutex/meta/logistic.py:tests/unit/test_meta_logistic.py:" \
+            "brutex/meta/threshold.py:tests/unit/test_meta_threshold.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
+            "brutex/engine/rust_rank_select.py:tests/unit/test_engine_rust_rank_select.py:" \
+            "brutex/engine/pool_union.py:tests/unit/test_engine_pool_union.py:" \
+            "brutex/ranking/multi_select.py:tests/unit/test_ranking_multi_select.py:" \
             "brutex/observability/observability_rust.py:tests/unit/test_observability_rust.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/strategies/combo_rust.py:tests/unit/test_strategies_combo_rust.py:" \
@@ -582,8 +622,10 @@ jobs:
             # field is the module's 3-file discovery set (55 tests, min
             # baseline ~2.5-3.7 s local — inside the [1200, 20000] ms regime);
             # the 30 s wrap cap is MANDATORY, not optional: `_bars_from_scan`'s
-            # warn-drain and the oracle loop carry spin-capable loop mutants
-            # (the audit-mutant-173 wedge class). Measured 152 mutants
+            # warn-drain and the null-gate/decision-extraction loops carry
+            # spin-capable loop mutants (the audit-mutant-173 wedge class; the
+            # former Python oracle loop was DELETED by
+            # DEC-FEED-RUST-MATERIALIZE-002). Measured 152 mutants
             # (mutmut 2.5.1 list_mutations on this tree) ≈ ~6 min at the
             # ~2.3 s/mutant CI pace — noting honestly that the budget
             # arithmetic block above pre-dates the post-#1597 pair additions
@@ -761,7 +803,7 @@ jobs:
             });
 
   # ─────────────────────────────────────────────────────────────────
-  # Rust mutation — cargo-mutants over rust/fno-math/ (6-shard matrix)
+  # Rust mutation — cargo-mutants over rust/fno-math/ (8-shard matrix)
   #
   # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
@@ -771,7 +813,7 @@ jobs:
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
-    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/6)"
+    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/8)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003):
@@ -785,7 +827,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     defaults:
       run:
         working-directory: rust/fno-math
@@ -823,7 +865,7 @@ jobs:
         uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-mutants@27.1.0
-      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
+      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/8)
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
@@ -835,22 +877,38 @@ jobs:
           #   155 trade_sim + 81 stats/cpcv + 79 python + 10 mask_word + 9 lib;
           #   the 2026-07-08 post-merge HEAD measured 599 — the race-6 merge
           #   folded main's width-generic u128 trade_sim kernel, trade_sim
-          #   124->167; the pre-merge 2026-07-07 measurement was 556).
+          #   124->167; the pre-merge 2026-07-07 measurement was 556); +
+          #   optcost/*.rs (DEC-OPTCOST-TAILS-RUST-001 #2054, renumbered from #1962) = 1191 total
+          #   re-measured 2026-07-19 on the merge-reconciled tree under the
+          #   pinned 27.1.0 (692 + optcost 499 — per-file split in
+          #   rust/fno-math/.cargo/mutants.toml).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1597
+          #   wall-clock parallelism = this shard matrix (5->6 = the #1597
           #   pre-decided +1-shard dial, taken when the 599 re-measure pushed the
-          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin):
-          #   ceil(692/6)=116 mutants x 29-40 s/mutant serial (CI per-lane measured
-          #   4-9 s build + 25-31 s test) ~= 56-77 min + ~5.5 min baseline/setup
-          #   ~= 62-83 min nominal, ~100 at +20% on the worst end -> >= 20 min
-          #   margin per shard.
+          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin; at the
+          #   692-mutant tree ceil(692/6)=116 mutants x 29-40 s/mutant serial
+          #   (CI per-lane measured 4-9 s build + 25-31 s test) ~= 56-77 min +
+          #   ~5.5 min baseline/setup ~= 62-83 min nominal, ~100 at +20% on the
+          #   worst end -> >= 20 min margin per shard).
+          # - 6->8 shards (DEC-OPTCOST-TAILS-RUST-001 #2054 (was #1962), merge-reconciled
+          #   2026-07-19): the optcost scope (src/optcost/*.rs) grew the census
+          #   to 1191 measured on the merge-reconciled tree under the pinned
+          #   27.1.0 (`cargo mutants --list | wc -l`; = 692 + optcost 499, the
+          #   per-file split in rust/fno-math/.cargo/mutants.toml; the lane's
+          #   pre-merge measurement was 1177 on the pre-hoist tree). At 6 shards
+          #   that is ~199 mutants/shard vs the 113 the 65-min worst shard was
+          #   measured at (~0.575 min/mutant worst-shard) -> ~114 min actual /
+          #   ~137 min at the +20% band, PAST the 120-min cap — so the #1597
+          #   pre-decided +1-shard dial is taken TWICE: 1191/8 ~= 149/shard ->
+          #   ~86 min actual / ~103 min at +20%, restoring the >= 17-min margin
+          #   posture.
           cargo mutants \
             --in-place \
-            --shard ${{ matrix.shard }}/6 \
+            --shard ${{ matrix.shard }}/8 \
             --test-tool cargo \
             --no-shuffle \
             --timeout 300 \
@@ -1166,6 +1224,75 @@ jobs:
       # NO per-job issue step — the fan-in mutation-verdict job owns alerts.
 
   # ─────────────────────────────────────────────────────────────────
+  # brutex-refine deep mutation gate (DEC-RUST-STAGE3-REFINE-001) — the
+  # Stage-3 CMA-ES refinement driver's cargo-mutants pass. SINGLE job (no
+  # shard matrix): the scope is the six pure cores (rng/linalg/cmaes/
+  # refine/grid/select — scope + exclusions documented in
+  # rust/brutex-refine/.cargo/mutants.toml), a small dependency-free
+  # crate, so the whole pass fits far inside the 120-min cap.
+  # Zero-survivor is the standard.
+  # ─────────────────────────────────────────────────────────────────
+  rust-mutation-brutex-refine:
+    name: "Rust mutation (cargo-mutants, brutex-refine)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003)
+    # — see the rust-mutation job comment for the measured rationale.
+    if: github.event_name != 'push'
+    defaults:
+      run:
+        working-directory: rust/brutex-refine
+    steps:
+      # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-refine -> target
+          shared-key: "mutation-brutex-refine"
+          # cache-on-failure — see the fno-math twin.
+          cache-on-failure: true
+      - name: Install cargo-mutants
+        # Version PINNED — see the fno-math twin.
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Run cargo-mutants (the six pure Stage-3 cores, in-place)
+        run: |
+          # DEC-RUST-STAGE3-REFINE-001:
+          # - SCOPE lives in rust/brutex-refine/.cargo/mutants.toml (ONE
+          #   source of truth): src/{rng,linalg,cmaes,refine,grid,select}.rs
+          #   — python.rs (PyErr-constructing session wrappers cargo-mutants
+          #   cannot viably replace, gated end-to-end by the Python wheel
+          #   suites) + lib.rs (const/re-export only) documented OUT there.
+          # - --in-place: build.rs include!s ../source_digest_core.rs —
+          #   outside the crate dir, so copy-mode baselines break (the #1258
+          #   measured trading-core rationale, restated by the feed twin).
+          # - default features suffice: the six cores compile without pyo3.
+          cargo mutants \
+            --in-place \
+            --test-tool cargo \
+            --no-shuffle \
+            --timeout 300 \
+            --output cargo-mutants.out \
+            -- \
+            --release
+      - name: Upload cargo-mutants report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cargo-mutants-report-brutex-refine
+          path: rust/brutex-refine/cargo-mutants.out
+          retention-days: 14
+      # NO per-job issue step — the fan-in mutation-verdict job owns alerts.
+
+  # ─────────────────────────────────────────────────────────────────
   # Verdict (DEC-MUTATION-RUNTIME-003): ONE issue-filer per Rust gate
   # (per-shard create-only steps RACE the title dedup) + the zero-click
   # issue lifecycle: a fully-green SCHEDULED main run auto-closes every
@@ -1196,7 +1323,7 @@ jobs:
       contents: read
       issues: write # the fan-in filers + the scheduled-green auto-close below
     if: always()
-    needs: [python-mutation, rust-mutation, rust-mutation-trading-core, rust-mutation-brutex-feed, rust-mutation-brutex-pull-state, rust-mutation-brutex-strategies]
+    needs: [python-mutation, rust-mutation, rust-mutation-trading-core, rust-mutation-brutex-feed, rust-mutation-brutex-pull-state, rust-mutation-brutex-strategies, rust-mutation-brutex-refine]
     steps:
       - name: Open GitHub issue — fno-math gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result) && github.event_name != 'workflow_dispatch'
@@ -1303,6 +1430,27 @@ jobs:
               body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-STRATEGIES-RUST-COMBO-001 on the DEC-MUTATION-RUNTIME-003 machinery); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });
+      - name: Open GitHub issue — brutex-refine gate red
+        if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-refine.result) && github.event_name != 'workflow_dispatch'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const outcome = '${{ needs.rust-mutation-brutex-refine.result }}';
+            const sha7 = context.sha.substring(0, 7);
+            const title = `cargo-mutants: mutation gate red in brutex-refine on ${sha7}`;
+            const cause = outcome === 'cancelled'
+              ? 'The job hit the 120-minute timeout (conclusion cancelled). This is a RUNTIME/budget regression — NOT evidence of surviving mutants. Check whether the mutant count or per-mutant build cost grew.'
+              : 'The job failed: surviving (MISSED) mutants, per-mutant --timeout 300 timeouts, or a baseline/tooling break (cargo-mutants exit 4 = the BASELINE failed — a config/toolchain break, not survivors). The job log + report artifact distinguish them.';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'bug,mutation,rust',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo, title,
+              body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-RUST-STAGE3-REFINE-001 on the DEC-MUTATION-RUNTIME-003 machinery); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
+              labels: ['bug', 'mutation', 'rust', 'critical'],
+            });
       - name: Auto-close superseded mutation issues (green SCHEDULED main run only)
         if: >-
           github.event_name == 'schedule' && github.ref == 'refs/heads/main'
@@ -1312,6 +1460,7 @@ jobs:
           && needs.rust-mutation-brutex-feed.result == 'success'
           && needs.rust-mutation-brutex-pull-state.result == 'success'
           && needs.rust-mutation-brutex-strategies.result == 'success'
+          && needs.rust-mutation-brutex-refine.result == 'success'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
@@ -1361,6 +1510,7 @@ jobs:
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-feed.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-pull-state.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-strategies.result)
+          || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-refine.result)
         run: |
           echo "python:            ${{ needs.python-mutation.result }}"
           echo "fno-math:          ${{ needs.rust-mutation.result }}"
@@ -1368,4 +1518,5 @@ jobs:
           echo "brutex-feed:       ${{ needs.rust-mutation-brutex-feed.result }}"
           echo "brutex-pull-state: ${{ needs.rust-mutation-brutex-pull-state.result }}"
           echo "brutex-strategies: ${{ needs.rust-mutation-brutex-strategies.result }}"
+          echo "brutex-refine:     ${{ needs.rust-mutation-brutex-refine.result }}"
           exit 1

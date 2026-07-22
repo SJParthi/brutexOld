@@ -287,3 +287,62 @@ class TestWheelFreshnessAggregation:
         report = DoctorReport()
         report.add(check_wheel_freshness(env={"BRUTEX_SKIP_WHEEL_FRESHNESS": "1"}))
         assert report.ok is True
+
+
+# ────────────────────────────────────────────────────────────────────────
+# brutex_identity twin binding (DEC-RUST-RUNID-STORES-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestBrutexIdentityTwinBinding:
+    """The brutex_identity wrapper rides the SAME common helper (COMMON rule).
+
+    Added at the lane's independent refuter round 2: the third hard-imported
+    wheel (``brutex.strategies.combo`` / ``brutex.engine`` /
+    ``brutex.data.window_ledger_store`` → ``brutex_identity``) had no doctor
+    stage while the ``_WheelSpec`` docstring claimed "every PyO3 wheel".
+    """
+
+    def test_env_override_skips(self) -> None:
+        from brutex.doctor import check_brutex_identity_wheel_freshness
+
+        result = check_brutex_identity_wheel_freshness(env={"BRUTEX_SKIP_WHEEL_FRESHNESS": "1"})
+        assert result.name == "wheel_freshness_brutex_identity"
+        assert result.status == "SKIP"
+
+    def test_live_pass_via_default_fingerprint(self) -> None:
+        # The installed wheel vs the repo EXPECTED_BUILD.json (which IS the
+        # shipped fingerprint under `maturin develop`): PASS on a fresh
+        # build; a WARN here means a stale local wheel — rebuild via
+        # `maturin develop --release` in rust/brutex-identity. Version or
+        # symbol drift in a fresh build is a REAL regression (the doctor
+        # stage's whole point), so this asserts PASS outright.
+        from brutex.doctor import check_brutex_identity_wheel_freshness
+
+        result = check_brutex_identity_wheel_freshness(env={})
+        assert result.name == "wheel_freshness_brutex_identity"
+        assert result.status == "PASS", result.detail
+        assert "brutex_identity" in result.detail
+
+    def test_warn_when_not_importable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.doctor import check_brutex_identity_wheel_freshness
+
+        monkeypatch.setitem(sys.modules, "brutex_identity._brutex_identity", None)
+        result = check_brutex_identity_wheel_freshness(env={})
+        assert result.status == "WARN"
+        assert "brutex_identity wheel not importable" in result.detail
+        assert "rust/brutex-identity" in result.detail
+
+    def test_run_doctor_includes_both_identity_stages(self, tmp_path: Path) -> None:
+        report = run_doctor(
+            audit_file=None,
+            audit_dir=tmp_path / "no_audit",
+            runtime_file=tmp_path / "no_runtime.json",
+            lake_root=tmp_path / "no_lake",
+            wheel_fingerprint_file=None,
+            fno_math_wheel_fingerprint_file=None,
+            brutex_identity_wheel_fingerprint_file=None,
+        )
+        names = [c.name for c in report.checks]
+        assert "wheel_freshness_brutex_identity" in names
+        assert "wheel_source_digest_brutex_identity" in names

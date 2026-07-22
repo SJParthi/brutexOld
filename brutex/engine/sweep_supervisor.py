@@ -113,6 +113,7 @@ import blake3
 import structlog
 
 from brutex.data.guarded_read import read_regular_text
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR, ExecGridMap
 from brutex.engine.results_store import ResultsStoreSchemaError, VixTrioConflictError
 from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_cache import SweepCache, combo_digest
@@ -432,6 +433,10 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     # mirror) — eliding it would alias worst-case checkpoints with the frozen
     # precise-era grid identities, so a resume could adopt precise work.
     descriptor["fill_mode"] = FillMode.WORST_CASE.value
+    # DEC-FILL-EXEC-GRID-1M-001: the 1m-execution-grid twin of the fill_mode
+    # key — eliding it would alias PR-B checkpoints with the frozen
+    # decision-TF-era grid identities, so a resume could adopt pre-grid work.
+    descriptor["execution_grid"] = EXECUTION_GRID_1M_NEXT_BAR
     return descriptor
 
 
@@ -535,6 +540,10 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
     # without it would falsely skip a worst-case tuple as already-done
     # precise-era work (the fib_anchor precedent, elision retired).
     params["fill_mode"] = FillMode.WORST_CASE.value
+    # DEC-FILL-EXEC-GRID-1M-001: the execution-grid twin — a cache-skip keyed
+    # without it would falsely skip a 1m-grid tuple as already-done
+    # decision-TF-era work.
+    params["execution_grid"] = EXECUTION_GRID_1M_NEXT_BAR
     return params
 
 
@@ -644,6 +653,8 @@ def run_supervised_grid(
     store_path_for: Callable[[SweepTuple], Path] | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    rollup_hook: Callable[[SweepTuple], None] | None = None,
+    exec_map_for: Callable[[str, str], ExecGridMap] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
 
@@ -804,6 +815,12 @@ def run_supervised_grid(
         ONLY the three nullable ``vix_mean``/``vix_min``/``vix_max`` columns
         differ (Stage C persists the trio; the pre-Stage-C "byte-identical
         persisted output" wording was reconciled by the round-2 panel, MINOR).
+    rollup_hook
+        Optional per-tuple ``/results`` rollup merge seam
+        (DEC-RESULTS-TOPK-ROLLUP-001 Hook A — ``RollupMergeHook.merge_tuple``),
+        fired after each SUCCESSFUL tuple (after *on_tuple*). FENCED
+        INTERNALLY at BLOCKER-1 strength — never raises into the grid.
+        ``None`` (the default) is byte-identical to the pre-rollup driver.
 
     Returns
     -------
@@ -1152,6 +1169,7 @@ def run_supervised_grid(
                     store_quarantine=store_quarantine,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
+                    exec_map_for=exec_map_for,
                     hit_count_memo=hit_count_memo,
                 )
             except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
@@ -1254,6 +1272,11 @@ def run_supervised_grid(
             )
             if on_tuple is not None:
                 on_tuple(tuple_, summary)
+            if rollup_hook is not None:
+                # Hook A (DEC-RESULTS-TOPK-ROLLUP-001): merge THIS tuple's
+                # freshly flushed store into the /results rollup. Internally
+                # fenced — never raises into the grid (BLOCKER-1).
+                rollup_hook(tuple_)
 
         if guard_warns_suppressed:
             _LOG.warning(

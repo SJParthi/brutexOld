@@ -42,7 +42,8 @@ Determinism: every discovered collection is sorted; nothing depends on
 
 Usage::
 
-    python scripts/ci/coverage_gate_discovery.py [--base <ref>] [--list]
+    python scripts/ci/coverage_gate_discovery.py [--base <ref>] [--list] \
+        [--shard K/N]
 
 Exit codes: 0 = all touched modules at 100% (or none touched, or only
 warn-skipped modifications); 1 = a newly added module has no test OR a
@@ -50,6 +51,15 @@ verified module is below 100%; 2 = script/setup error (e.g. git
 unavailable / no merge base). Fail-closed, mirroring the sibling CI gates.
 ``--list`` prints the discovered plan and exits 0 without running coverage
 (a fast dry-run for the workflow log + local debugging).
+``--shard K/N`` (1-based) runs only the K-th deterministic round-robin
+slice of the discovered ``entries`` — the CI matrix seam, so a
+wide-touch PR (a merge train touching 100+ modules) fits the per-job
+wall clock by fanning the SAME plan across N parallel jobs. Slicing is
+``entries[K-1::N]`` over the sorted plan, so the N shards PARTITION the
+full plan (disjoint, union == whole — pinned by tests). A NEW module
+with no verified test still FAILS on EVERY shard (the fail-closed law is
+deliberately never sliced away), and the warn-skip list prints on every
+shard (harmless repetition beats a silent gap).
 """
 
 from __future__ import annotations
@@ -567,6 +577,40 @@ class Plan:
         return not (self.entries or self.missing_added or self.skipped_modified)
 
 
+def parse_shard(spec: str) -> tuple[int, int]:
+    """Parse a ``K/N`` shard spec (1-based) into ``(k, n)``.
+
+    Parameters
+    ----------
+    spec:
+        The ``--shard`` argument, e.g. ``"3/8"``.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(k, n)`` with ``1 <= k <= n``.
+
+    Raises
+    ------
+    DiscoveryError
+        On any malformed or out-of-range spec — the CLI maps this to the
+        setup-error exit code 2 (never a silent full/empty run: a typo'd
+        matrix expression must fail LOUDLY, not quietly re-run the whole
+        plan on every leg or run nothing anywhere).
+    """
+    head, sep, tail = spec.partition("/")
+    if not sep:
+        raise DiscoveryError(f"--shard must be 'K/N' (1-based), got {spec!r}")
+    try:
+        k = int(head)
+        n = int(tail)
+    except ValueError as exc:
+        raise DiscoveryError(f"--shard must be 'K/N' with integer K and N, got {spec!r}") from exc
+    if n < 1 or k < 1 or k > n:
+        raise DiscoveryError(f"--shard out of range: {spec!r} (need 1 <= K <= N)")
+    return k, n
+
+
 def build_plan(base: str) -> Plan:
     """Discover the coverage plan for the diff against *base*.
 
@@ -871,13 +915,45 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the discovered plan and exit (no coverage run)",
     )
+    parser.add_argument(
+        "--shard",
+        default=None,
+        help=(
+            "run only the K-th of N deterministic round-robin slices of the"
+            " discovered plan, as 'K/N' (1-based) — the CI matrix seam; a"
+            " NEW module with no test still fails on EVERY shard"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    # Validate the shard spec BEFORE any git work: a junk matrix expression
+    # must exit 2 immediately, never after an expensive discovery pass.
+    shard: tuple[int, int] | None = None
+    if args.shard is not None:
+        try:
+            shard = parse_shard(args.shard)
+        except DiscoveryError as exc:
+            print(f"ERROR: {exc}")
+            return 2
 
     try:
         plan = build_plan(args.base)
     except DiscoveryError as exc:
         print(f"ERROR: {exc}")
         return 2
+
+    if shard is not None:
+        k, n = shard
+        sliced = plan.entries[k - 1 :: n]
+        print(
+            f"coverage-gate discovery: shard {k}/{n} — "
+            f"{len(sliced)} of {len(plan.entries)} discovered module(s) in this slice"
+        )
+        plan = Plan(
+            entries=sliced,
+            missing_added=plan.missing_added,
+            skipped_modified=plan.skipped_modified,
+        )
 
     if plan.is_empty():
         print("coverage-gate discovery: no touched brutex modules — nothing to check (PASS)")

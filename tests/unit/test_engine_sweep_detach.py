@@ -410,3 +410,82 @@ def test_r7_probe_default_now_wall_is_wall_clock(tmp_path: Path) -> None:
         {"running": True, "wall_time_utc": time.time(), "pid": os.getpid()},
     )
     assert probe_handle(handle) is RunVerdict.RUNNING
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the probe cross-check fold (R7).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    behavior-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives) — the pid probe, the pidfile read and the spawn/env
+    sentinel machinery stay Python on both arms; only the pure verdict fold
+    routes, with ``progress_verdict``'s OUTPUT as an input token (the
+    slice-1b liveness tail is never double-routed).
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def _drive(self, root: Path) -> list[RunVerdict]:
+        handle = DetachedSweepHandle(pid=4321, run_id_hint=None, results_root=root, cmdline=("x",))
+        progress = root / "progress" / "sweep-progress.json"
+        verdicts: list[RunVerdict] = []
+        # 1. No progress file + dead pid → NOT_RUNNING.
+        verdicts.append(probe_handle(handle, pid_alive=lambda pid: False))
+        # 2. No progress file + alive pid → UNKNOWN (pid recycling).
+        verdicts.append(probe_handle(handle, pid_alive=lambda pid: True))
+        # 3. Fresh RUNNING progress carrying OUR pid → RUNNING.
+        now = time.time()
+        _write_progress(progress, {"running": True, "wall_time_utc": now, "pid": 4321})
+        verdicts.append(probe_handle(handle, now_wall=now, pid_alive=lambda pid: True))
+        # 4. Fresh RUNNING progress carrying a FOREIGN pid → UNKNOWN.
+        _write_progress(progress, {"running": True, "wall_time_utc": now, "pid": 9999})
+        verdicts.append(probe_handle(handle, now_wall=now, pid_alive=lambda pid: True))
+        return verdicts
+
+    def test_flag_on_matches_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        off = self._drive(tmp_path / "off")
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = self._drive(tmp_path / "on")
+        finally:
+            self._reset_facade()
+        assert on == off
+        assert on == [
+            RunVerdict.NOT_RUNNING,
+            RunVerdict.UNKNOWN,
+            RunVerdict.RUNNING,
+            RunVerdict.UNKNOWN,
+        ]
+
+
+def test_probe_decision_oracle_defensive_none_token_folds_unknown() -> None:
+    """Defensive totality — :func:`probe_handle` always supplies a token under
+    ``has_progress``; the impossible None shape folds fail-closed to UNKNOWN
+    (direct-unit-covered structural arm, never a live path)."""
+    from brutex.engine.sweep_detach import _probe_decision_python
+
+    assert _probe_decision_python(True, False, None, True) == RunVerdict.UNKNOWN.value

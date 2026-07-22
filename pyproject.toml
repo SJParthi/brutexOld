@@ -73,18 +73,13 @@ ui = [
 browser = [
     "playwright>=1.55,<2.0",
 ]
-# DEC-STAGE3-OPTIMIZE-EXTRA-001 (ADR-0007 condition 9, Stage-3 slice 1): the
-# BIPOP-CMA-ES refinement optimizer (pycma — PyPI name `cma`, numpy-only).
-# EXACT pin, deliberately violating the DEC-P0-012 "always latest" range
-# convention: optimizer version bumps silently change search trajectories,
-# and the refinement-run identity is blake3(... ‖ pycma/numpy versions), so
-# a bump invalidates every cached refinement run. Bumping is a deliberate,
-# decision-ID'd act; Renovate auto-bumps are carved out in renovate.json
-# (mirrors the python-data-lake lock-step precedent). Optuna is NOT adopted
-# (ADR-0007 condition 1 — the TPE outer layer selects nothing).
-optimize = [
-    "cma==4.4.4",
-]
+# DEC-RUST-STAGE3-REFINE-001: the retired `optimize` extra (exact-pinned
+# pycma, DEC-STAGE3-OPTIMIZE-EXTRA-001) is DELETED — the Stage-3 BIPOP-style
+# CMA-ES refinement now runs on the in-repo `brutex_refine` Rust wheel
+# (rust/brutex-refine; built by maturin exactly like the sibling kernels),
+# so no third-party optimizer dependency exists. The refinement-run identity
+# folds the crate version + its baked source digest instead of the retired
+# (pycma, numpy) pair.
 # DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009, 2026-06-12): the `groww` optional
 # extra is RE-ADDED for the Dhan → Groww re-migration, superseding the
 # DEC-DHAN-FINALIZE-001 removal. `growwapi` is the vendor SDK (verified present

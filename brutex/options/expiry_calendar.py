@@ -72,6 +72,7 @@ from bisect import bisect_right
 from datetime import date, timedelta
 from typing import Final
 
+from brutex import optcost_rust
 from brutex.options.lot_size_history import OptionsUnderlying
 
 # Day-of-week constants (matches Python's date.weekday() convention).
@@ -181,7 +182,31 @@ def _lookup_in_history(
     history: tuple[tuple[date, int], ...],
     on_date: date,
 ) -> int:
-    """Binary search the history table for the value in effect on `on_date`."""
+    """Binary search the history table for the value in effect on `on_date`.
+
+    DEC-OPTCOST-TAILS-RUST-001: with ``BRUTEX_OPTCOST_TAILS_RUST`` truthy the
+    bisect runs on the ``fno_math`` ``optcost_history_lookup`` kernel via
+    :mod:`brutex.optcost_rust` (the pre-history ``ValueError`` keeps its exact
+    message bytes); flag OFF — the default — is byte-identical.
+    """
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.history_value(
+            "expiry_dow",
+            history,
+            on_date,
+            prehistory_message=lambda: (
+                f"on_date {on_date} is before recorded history start ({history[0][0]})"
+            ),
+            python=lambda: _lookup_in_history_python(history, on_date),
+        )
+    return _lookup_in_history_python(history, on_date)
+
+
+def _lookup_in_history_python(
+    history: tuple[tuple[date, int], ...],
+    on_date: date,
+) -> int:
+    """The verbatim Python arm of :func:`_lookup_in_history` — the live oracle."""
     if on_date < history[0][0]:
         raise ValueError(f"on_date {on_date} is before recorded history start ({history[0][0]})")
     dates_only = [t[0] for t in history]
@@ -228,7 +253,24 @@ def next_weekly_expiry(
     Returns:
         Next weekly expiry date, or None if no weekly is available for the
         instrument on `on_or_after`. Doesn't account for holiday shifts.
+
+    DEC-OPTCOST-TAILS-RUST-001: flag-gated onto the ``fno_math``
+    ``optcost_next_weekly_expiry`` kernel; flag OFF is byte-identical.
     """
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.next_weekly(
+            _WEEKLY_BY_UNDERLYING[instrument],
+            on_or_after,
+            python=lambda: _next_weekly_expiry_python(instrument, on_or_after),
+        )
+    return _next_weekly_expiry_python(instrument, on_or_after)
+
+
+def _next_weekly_expiry_python(
+    instrument: OptionsUnderlying,
+    on_or_after: date,
+) -> date | None:
+    """The verbatim Python arm of :func:`next_weekly_expiry` — the live oracle."""
     target_dow = get_weekly_dow(instrument, on_or_after)
     if target_dow is None:
         return None
@@ -253,7 +295,26 @@ def next_monthly_expiry(
         Date of the next monthly expiry (no None — monthly is always defined).
 
     Doesn't account for NSE/BSE holiday shifts (downstream concern).
+
+    DEC-OPTCOST-TAILS-RUST-001: flag-gated onto the ``fno_math``
+    ``optcost_next_monthly_expiry`` kernel; flag OFF is byte-identical (the
+    December-9999 rollover the stdlib ``date`` refuses degrades to this
+    Python arm, which raises exactly as before).
     """
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.next_monthly(
+            _MONTHLY_BY_UNDERLYING[instrument],
+            on_or_after,
+            python=lambda: _next_monthly_expiry_python(instrument, on_or_after),
+        )
+    return _next_monthly_expiry_python(instrument, on_or_after)
+
+
+def _next_monthly_expiry_python(
+    instrument: OptionsUnderlying,
+    on_or_after: date,
+) -> date:
+    """The verbatim Python arm of :func:`next_monthly_expiry` — the live oracle."""
     # Use this month's regime first
     this_month_dow = get_monthly_dow(instrument, on_or_after)
     candidate = _last_dow_of_month(on_or_after.year, on_or_after.month, this_month_dow)

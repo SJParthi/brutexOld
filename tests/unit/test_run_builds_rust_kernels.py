@@ -176,6 +176,21 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
         "brutex/notifications/notify_rust.py",
         ".github/workflows/notify-rust-parity.yml",
     ),
+    # DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001: brutex_meta
+    # is the born-Rust meta gate kernel (P(win) scorer + abstain reason
+    # bitmasks). Consumed ONLY through the import-guarded facade
+    # brutex/meta/meta_rust.py behind the default-OFF BRUTEX_META_GATE flag —
+    # an absent/broken install serves the Python oracle with one loud WARN
+    # (the brutex_lake posture exactly). Deliberately NOT a build
+    # prerequisite: in NO cargo workspace, built by its own NON-required
+    # ci.yml lane (the rust-brutex-meta job — build + clippy + test + the
+    # wheel-backed Python parity arms). A module-top `import brutex_meta`
+    # anywhere in brutex/ would make a clean clone crash-prone — the inverse
+    # pin below forbids exactly that.
+    "brutex_meta": (
+        "brutex/meta/meta_rust.py",
+        ".github/workflows/ci.yml",
+    ),
     # DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940 / ADR-0020 slice T10):
     # brutex_data is the default-OFF data pure-law crate (the fno_symbol
     # structural grammar). It is consumed ONLY through the import-guarded
@@ -226,6 +241,21 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
     "brutex_strategies": (
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
+    ),
+    # DEC-RUST-SWEEP-OPS-001 (MIGRATION.md #2050): brutex_sweep_ops is the
+    # default-OFF sweep-ops decision-law crate. It is consumed ONLY through
+    # the import-guarded facade brutex/engine/sweep_ops_rust.py
+    # (`importlib.import_module("brutex_sweep_ops")` inside the guard — an
+    # absent or stale wheel latches the BRUTEX_SWEEP_OPS_RUST flag OFF with
+    # one loud WARN and the Python oracles serve, byte-identical). It is
+    # deliberately NOT a turnkey build prerequisite: in NO cargo workspace,
+    # built ONLY by its own CI lane
+    # (.github/workflows/sweep-ops-rust-parity.yml). A module-top
+    # `import brutex_sweep_ops` anywhere in brutex/ would make a clean clone
+    # crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_sweep_ops": (
+        "brutex/engine/sweep_ops_rust.py",
+        ".github/workflows/sweep-ops-rust-parity.yml",
     ),
     # DEC-RUST-OBSERVABILITY-001 (MIGRATION.md #1961): brutex_observability is
     # the observability decision-law crate behind a deliberately default-OFF
@@ -283,6 +313,25 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
     # clean clone crash-prone — the inverse pin below forbids exactly that.
     "brutex_calendar": (
         None,
+        ".github/workflows/ci.yml",
+    ),
+    # DEC-RUST-STAGE3-REFINE-001 (MIGRATION.md #2055): brutex_refine is the
+    # Stage-3 CMA-ES refinement kernel. Unlike the four default-OFF crates
+    # above it is DEFAULT-ON with NO Python fallback (the pycma oracle is
+    # deleted) — "optional" here means optional FOR BOOT only: it is NEVER
+    # module-top imported (the dashboard-boots-wheel-free law — Mode-A grid
+    # axes validate pure-Python) and is consumed ONLY through the typed-error
+    # facade brutex/engine/refine_rust.py
+    # (`importlib.import_module("brutex_refine")` inside `require_refine_rust`
+    # — an absent wheel raises the loud RefineRustUnavailableError naming the
+    # build step AT CALL TIME, never a silent degrade). It IS additionally in
+    # the turnkey build path (Makefile run-raw + bootstrap.sh step 6a2 —
+    # stage-3 sweeps need it at call time), which this class does not forbid:
+    # the OPTIONAL invariants pinned below are exactly
+    # never-module-top-imported + guarded-facade + own-CI-lane (the
+    # `rust-brutex-refine` job + the wheelhouse install steps in ci.yml).
+    "brutex_refine": (
+        "brutex/engine/refine_rust.py",
         ".github/workflows/ci.yml",
     ),
 }

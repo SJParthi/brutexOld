@@ -127,7 +127,12 @@ def _run_sweep(out_root: Path) -> None:
             store = load_or_create_store(tuple_store_path(out_root, tuple_, _grid()))
             dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
             run_persisted_sweep(
-                _BARS, tuple_.to_run_config(_grid()), store=store, dedup=dedup, audit=audit
+                _BARS,
+                tuple_.to_run_config(_grid()),
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                exec_bars_1m=_BARS,
             )
 
 

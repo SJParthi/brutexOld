@@ -33,6 +33,14 @@ from typing import Final
 
 from brutex.engine.sweep_exit_status import RunState
 
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade. The
+# `progress_verdict` decision TAIL (steps 3-5, after the payload typing + the
+# pid probe) gates on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
+# default path is byte-identical; `_liveness_tail_python` below is the live
+# oracle. The fail-closed UNKNOWN arm (Python-type introspection of an
+# untyped payload) + the `os.kill` probe stay Python by construction.
+from brutex.engine.sweep_ops_rust import routed_liveness_tail, sweep_ops_rust_enabled
+
 __all__ = [
     "DEFAULT_FRESH_SECONDS",
     "RunVerdict",
@@ -154,11 +162,37 @@ def progress_verdict(
         return RunVerdict.UNKNOWN
     if not running:
         return RunVerdict.NOT_RUNNING
-    if not pid_alive(pid):
-        return RunVerdict.NOT_RUNNING
-    if now_wall - float(wall) > fresh_seconds:
-        return RunVerdict.STALE
-    return RunVerdict.RUNNING
+    # Probe the pid exactly where the pre-conversion law did (only a
+    # running=True payload is ever probed — the injected-probe call count is
+    # part of the observable contract).
+    alive = pid_alive(pid)
+    wall_f = float(wall)
+    if sweep_ops_rust_enabled():
+        return RunVerdict(
+            routed_liveness_tail(
+                alive,
+                now_wall,
+                wall_f,
+                fresh_seconds,
+                python_law=lambda: _liveness_tail_python(alive, now_wall, wall_f, fresh_seconds),
+            )
+        )
+    return RunVerdict(_liveness_tail_python(alive, now_wall, wall_f, fresh_seconds))
+
+
+def _liveness_tail_python(alive: bool, now_wall: float, wall_f: float, fresh_seconds: float) -> str:
+    """The verbatim verdict tail (steps 3-5) — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip).
+
+    Returns the :class:`RunVerdict` wire value the caller re-wraps (a
+    ``StrEnum`` lookup returns the same singleton member the pre-conversion
+    branches returned directly).
+    """
+    if not alive:
+        return RunVerdict.NOT_RUNNING.value
+    if now_wall - wall_f > fresh_seconds:
+        return RunVerdict.STALE.value
+    return RunVerdict.RUNNING.value
 
 
 def exit_status_running(

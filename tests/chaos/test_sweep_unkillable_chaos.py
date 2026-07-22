@@ -289,8 +289,13 @@ def test_r42_kill_before_flush_resume_bit_identical(tmp_path: Path) -> None:
     calls = {"n": 0}
 
     def _crashing_bars(_i: str, _t: str) -> Sequence[CandleBar]:
+        # DEC-FILL-EXEC-GRID-1M-001: the dual-feed preload loads the decision
+        # TF AND the 1-minute execution stream through this seam (2 calls per
+        # tuple — this raw fake is not memoised), so tuple 1 consumes calls
+        # 1-2 and the crash lands at call 3: the start of tuple 2's load,
+        # the SAME logical boundary as the pre-grid single-feed `> 1`.
         calls["n"] += 1
-        if calls["n"] > 1:
+        if calls["n"] > 2:
             raise _SimulatedCrash("loader crash before tuple 2's flush")
         return _BARS
 

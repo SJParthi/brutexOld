@@ -387,3 +387,55 @@ def test_etc_boundary_date_constant_is_oct_2024() -> None:
     """The verified effective date of the CURRENT rates (NSE FA64232 / BSE
     notice 27-Sep-2024, per COSTS_VERIFIED §2/§15)."""
     assert date(2024, 10, 1) == constants.ETC_REGIME_OCT_2024_START
+
+
+# ── DEC-OPTCOST-TAILS-RUST-001: the flag-ON seam (ON == OFF, refusal bytes) ──
+
+
+class TestOptcostRustSeamOn:
+    """`rate_for_date` under `BRUTEX_OPTCOST_TAILS_RUST=1` — the kernel-routed
+    arm answers byte-identically to the Python oracle, refusal exceptions
+    included (VERIFIED-RATES-ONLY: type + message bytes preserved)."""
+
+    @pytest.fixture(autouse=True)
+    def _seam_on(self, monkeypatch: pytest.MonkeyPatch):
+        import brutex.optcost_rust as ocr
+
+        pytest.importorskip("fno_math")
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "1")
+        ocr.reset_optcost_rust_for_tests()  # burn-in armed — oracle runs beside
+        yield
+        ocr.reset_optcost_rust_for_tests()
+
+    def test_verified_rate_matches_the_oracle(self) -> None:
+        import brutex.optcost_rust as ocr
+
+        assert constants.rate_for_date(
+            constants._STT_OPTIONS_REGIMES, date(2024, 10, 1)
+        ) == constants._rate_for_date_python(
+            constants._STT_OPTIONS_REGIMES, date(2024, 10, 1), charge="cost regime", exchange=""
+        )
+        assert not ocr.optcost_rust_disabled()
+
+    def test_etc_refusal_bytes_are_identical_on_and_off(self) -> None:
+        import brutex.optcost_rust as ocr
+
+        on = date(2023, 6, 1)
+        with pytest.raises(UnverifiedCostRegimeError) as seam_exc:
+            constants.rate_for_date(
+                constants._NSE_ETC_OPTIONS_REGIMES, on, charge="etc", exchange="NSE"
+            )
+        with pytest.raises(UnverifiedCostRegimeError) as oracle_exc:
+            constants._rate_for_date_python(
+                constants._NSE_ETC_OPTIONS_REGIMES, on, charge="etc", exchange="NSE"
+            )
+        assert type(seam_exc.value) is type(oracle_exc.value)
+        assert str(seam_exc.value) == str(oracle_exc.value)
+        assert not ocr.optcost_rust_disabled()
+
+    def test_empty_and_prehistory_valueerror_bytes_match(self) -> None:
+        with pytest.raises(ValueError, match="^rate_for_date: empty regime table$"):
+            constants.rate_for_date((), date(2024, 1, 1))
+        unanchored = (RegimeRow(date(2024, 10, 1), 3_503, "test row"),)
+        with pytest.raises(ValueError, match="refusing to fabricate a rate"):
+            constants.rate_for_date(unanchored, date(2024, 9, 30))

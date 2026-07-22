@@ -165,7 +165,9 @@ def test_rerun_same_dirs_dedups_everything(tmp_path: Path) -> None:
 
     store1 = ResultsStore(path=store_path)
     with AuditWriter.open(audit_path) as audit:
-        first = run_persisted_sweep(bars, cfg, store=store1, dedup=dedup, audit=audit)
+        first = run_persisted_sweep(
+            bars, cfg, store=store1, dedup=dedup, audit=audit, exec_bars_1m=bars
+        )
     first_bytes = store_path.read_bytes()
 
     # Second run into the SAME store + dedup: resume the persisted store (the
@@ -173,7 +175,9 @@ def test_rerun_same_dirs_dedups_everything(tmp_path: Path) -> None:
     # already seen, nothing is re-evaluated, and the re-flush is byte-identical.
     store2 = ResultsStore.load(store_path)
     with AuditWriter.open(audit_path, resume=True) as audit:
-        second = run_persisted_sweep(bars, cfg, store=store2, dedup=dedup, audit=audit)
+        second = run_persisted_sweep(
+            bars, cfg, store=store2, dedup=dedup, audit=audit, exec_bars_1m=bars
+        )
 
     assert second.evaluated == 0
     assert second.skipped_dedup == first.enumerated - first.conflict_pruned
@@ -192,7 +196,7 @@ def test_rerun_fresh_dirs_identical_content_hash(tmp_path: Path) -> None:
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
         with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
             return run_persisted_sweep(
-                bars, cfg, store=store, dedup=dedup, audit=audit
+                bars, cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
             ).store_content_hash
 
     assert _run("a") == _run("b")

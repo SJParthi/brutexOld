@@ -210,6 +210,7 @@ import structlog
 
 from brutex.data.guarded_read import read_regular_text_deadline
 from brutex.engine.combo_mask import count_combos
+from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
 from brutex.engine.results_store import ResultsStoreSchemaError, VixTrioConflictError
 from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_identity import (
@@ -1390,6 +1391,7 @@ def _run_tuple_in_worker(
     index: int,
     tuple_: SweepTuple,
     bars: Sequence[CandleBar],
+    exec_bars: Sequence[CandleBar],
 ) -> TupleWorkResult:
     """Run ONE tuple's UNCHANGED per-tuple body inside a worker; return plain data.
 
@@ -1447,13 +1449,31 @@ def _run_tuple_in_worker(
     # (fail-safe, see _intern_bars' identity serve guard), and this tuple
     # must observe that disable (never a stale-kernel serve).
     bars = _intern_bars(tuple_.instrument, tuple_.tf.label, bars)
+    # DEC-FILL-EXEC-GRID-1M-001 × DEC-SWEEP-WORKER-KERNEL-CACHE-001: the
+    # dual-feed exec stream is a SECOND large freshly-pickled bars copy per
+    # dispatch, so it rides the SAME per-worker intern memo (keyed
+    # `(instrument, EXEC_INTERVAL_LABEL)`) — otherwise the A.4 memory bound is
+    # defeated for the 1-minute execution stream (each dispatch would retain
+    # its own copy) AND, at tf=1minute where `tf.label == EXEC_INTERVAL_LABEL`,
+    # the decision read itself flows through the exec branch of `bars_for`
+    # below, so the interned resident MUST be the object that reaches both the
+    # trade sim and the kernel (the FD-M1 intern-consumption invariant). At
+    # tf=1minute this is the SAME key as the decision intern (no extra memo
+    # entry, no capacity pressure); at a coarse decision TF it is a distinct
+    # resident, correctly bounding both streams' memory (a multi-instrument
+    # coarse-TF sweep may want `_BARS_MEMO_CAPACITY` raised — a tuning
+    # follow-up, never a correctness issue: a full memo fail-safe-DISABLES).
+    exec_bars = _intern_bars(tuple_.instrument, EXEC_INTERVAL_LABEL, exec_bars)
     kernel_cache = _WORKER_KERNEL_CACHE
     builds_before = kernel_cache.builds if kernel_cache is not None else 0
     try:
         summary = run_one_tuple(
             ctx.grid,
             tuple_,
-            bars_for=lambda _instrument, _tf: bars,
+            # The dual feed rides the SAME trivial loader (design §1.2 D1):
+            # the exec stream serves under the "1minute" label; at
+            # tf=1minute the dispatch passes ONE object for both.
+            bars_for=lambda _instrument, tf: exec_bars if tf == EXEC_INTERVAL_LABEL else bars,
             store_for=store_for,
             dedup=_NoDedup(),
             audit=collector,
@@ -1806,6 +1826,7 @@ class ParallelGridDriver:
         "_quarantined",
         "_reference_stamper",
         "_roll_schedule_by_instrument",
+        "_rollup_hook",
         "_root",
         "_should_stop",
         "_stall_min_mask_bars_per_sec",
@@ -1836,6 +1857,7 @@ class ParallelGridDriver:
         on_quarantine: Callable[[str, str], None] | None = None,
         roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
         reference_stamper: TradeReferenceStamper | None = None,
+        rollup_hook: Callable[[SweepTuple], None] | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -1932,6 +1954,16 @@ class ParallelGridDriver:
             the picklable :class:`_WorkerContext` so EVERY spawn worker binds
             the same stamper — parallel output stays byte-identical to the
             sequential run (regression-pinned).
+        rollup_hook
+            Optional per-tuple ``/results`` rollup merge seam
+            (DEC-RESULTS-TOPK-ROLLUP-001 Hook A —
+            ``RollupMergeHook.merge_tuple``), fired PARENT-SIDE from the
+            contiguous apply point (:meth:`_apply`, the one place tuple
+            outcomes land in canonical order — worker-side merges would
+            contend on the rollup flock and complicate determinism). The
+            hook is FENCED INTERNALLY at BLOCKER-1 strength — it never
+            raises into the grid. ``None`` (the default) is byte-identical
+            to the pre-rollup driver.
 
         Raises
         ------
@@ -1987,6 +2019,7 @@ class ParallelGridDriver:
             dict(roll_schedule_by_instrument) if roll_schedule_by_instrument is not None else None
         )
         self._reference_stamper = reference_stamper
+        self._rollup_hook = rollup_hook
         # Per-worker resident-kernel cache (DEC-SWEEP-WORKER-KERNEL-CACHE-001):
         # the flag + capacity are resolved ONCE here in the PARENT (no
         # worker-side env re-reads — deterministic across the pool) and travel
@@ -2476,7 +2509,8 @@ class ParallelGridDriver:
             # fall through to dispatch; the checkpoint-tier WARN (if any) is
             # not duplicated here.
         bars = self._bars_for(tuple_.instrument, tuple_.tf.label)
-        future = pool.submit(_run_tuple_in_worker, index, tuple_, bars)
+        exec_bars = self._bars_for(tuple_.instrument, EXEC_INTERVAL_LABEL)
+        future = pool.submit(_run_tuple_in_worker, index, tuple_, bars, exec_bars)
         pending[future] = _Dispatched(
             index=index, tuple_=tuple_, work=self._tuple_work(tuple_, len(bars))
         )
@@ -2882,6 +2916,12 @@ class ParallelGridDriver:
         # already in parent memory — no closure crosses the spawn boundary.
         if self._on_tuple is not None:
             self._on_tuple(outcome.tuple_, summary)
+        if self._rollup_hook is not None:
+            # Hook A (DEC-RESULTS-TOPK-ROLLUP-001): merge this tuple's durably
+            # written store into the /results rollup — parent-side, in
+            # canonical apply order. Internally fenced (BLOCKER-1): never
+            # raises into the grid.
+            self._rollup_hook(outcome.tuple_)
         return True
 
     def _quarantine_broken_pool(
@@ -3177,6 +3217,7 @@ def run_parallel_grid(
     on_quarantine: Callable[[str, str], None] | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    rollup_hook: Callable[[SweepTuple], None] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -3247,6 +3288,7 @@ def run_parallel_grid(
         on_quarantine=on_quarantine,
         roll_schedule_by_instrument=roll_schedule_by_instrument,
         reference_stamper=reference_stamper,
+        rollup_hook=rollup_hook,
     )
     return driver.run()
 

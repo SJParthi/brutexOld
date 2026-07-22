@@ -52,7 +52,7 @@ def _assert_engaged_and_live(logs: list[MutableMapping[str, Any]]) -> None:
 def test_golden_run_id_reproduces_flag_on() -> None:
     with capture_logs() as logs:
         sweep_golden.test_golden_run_id_is_byte_stable()
-        sweep_golden.test_golden_run_id_never_aliases_the_precise_era()
+        sweep_golden.test_golden_run_id_never_aliases_the_retired_eras()
     _assert_engaged_and_live(logs)
 
 

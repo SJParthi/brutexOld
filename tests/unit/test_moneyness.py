@@ -30,6 +30,9 @@ from brutex.data.moneyness import (
     MoneynessView,
     StepConfidence,
     StrikeStepResult,
+    _atm_offset_python,
+    _classify_graded_python,
+    _derive_strike_step_python,
     _format_label,
     _is_positive_finite,
     atm_offset,
@@ -568,3 +571,72 @@ class TestProperties:
             assert off >= 0
         elif strike < spot:
             assert off <= 0
+
+
+# ── DEC-OPTCOST-TAILS-RUST-001: the flag-ON seam (ON == OFF, never raises) ──
+
+
+class TestOptcostRustSeamOn:
+    """The graded classify / atm_offset / derive_strike_step decisions under
+    `BRUTEX_OPTCOST_TAILS_RUST=1` answer identically to the Python oracle
+    (byte-exact Decimal steps included) and preserve the module's
+    never-raises contract."""
+
+    @pytest.fixture(autouse=True)
+    def _seam_on(self, monkeypatch: pytest.MonkeyPatch):
+        import brutex.optcost_rust as ocr
+
+        pytest.importorskip("fno_math")
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "1")
+        ocr.reset_optcost_rust_for_tests()  # burn-in armed — oracle runs beside
+        yield
+        ocr.reset_optcost_rust_for_tests()
+
+    def test_classify_graded_matches_the_oracle(self) -> None:
+        import brutex.optcost_rust as ocr
+
+        for option_type, strike, spot, band in (
+            ("CE", Decimal("24000"), Decimal("24100"), None),
+            ("PE", Decimal("24000"), Decimal("24100"), None),
+            ("CE", Decimal("24025"), Decimal("24000"), Decimal("25")),  # inclusive band edge
+            ("PE", Decimal("24000.005"), Decimal("24100"), None),  # inexact paisa → oracle
+        ):
+            assert classify(option_type, strike, spot, atm_band=band) is _classify_graded_python(
+                option_type,
+                strike,
+                spot,
+                band if (band is not None and band >= 0) else Decimal(0),
+            )
+        # NA / UNKNOWN stay pre-FFI decisions
+        assert classify("FUT", Decimal("1"), Decimal("1")) is Moneyness.NA
+        assert classify("CE", None, Decimal("1")) is Moneyness.UNKNOWN
+        assert not ocr.optcost_rust_disabled()
+
+    def test_atm_offset_half_toward_zero_matches_the_oracle(self) -> None:
+        step = Decimal("50")
+        for strike, spot in (
+            (Decimal("24025"), Decimal("24000")),  # +half step → 0 (toward zero)
+            (Decimal("23975"), Decimal("24000")),  # -half step → 0 (toward zero)
+            (Decimal("24100"), Decimal("24000")),
+            (Decimal("23900"), Decimal("24000")),
+            (Decimal("24000.005"), Decimal("24000")),  # inexact paisa → oracle
+        ):
+            assert atm_offset(strike, spot, step) == _atm_offset_python(strike, spot, step)
+
+    def test_derive_strike_step_is_byte_exact_including_exponent(self) -> None:
+        int_ladder = [Decimal("24000"), Decimal("24050"), Decimal("24150")]
+        two_dp_ladder = [Decimal("24000.00"), Decimal("24050.00")]
+        mixed_ladder = [Decimal("24000"), Decimal("24050.0")]
+        for ladder in (int_ladder, two_dp_ladder, mixed_ladder):
+            seam = derive_strike_step(list(ladder))
+            oracle = _derive_strike_step_python(tuple(ladder))
+            assert seam is not None and oracle is not None
+            assert seam.as_tuple() == oracle.as_tuple()  # exponent-exact
+        assert derive_strike_step([Decimal("24000")]) is None
+
+    def test_resolve_strike_step_rides_the_gated_derive(self) -> None:
+        result = resolve_strike_step(
+            [Decimal("24050")], authoritative_strikes=[Decimal("24000"), Decimal("24100")]
+        )
+        assert result.step == Decimal("50")
+        assert result.confidence is StepConfidence.REGISTRY

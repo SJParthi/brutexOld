@@ -47,7 +47,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 if TYPE_CHECKING:
     from brutex.engine.sweep_supervisor import SupervisedGridSummary
@@ -320,14 +320,19 @@ from brutex.dashboard.sweep_results_view import (
     MAX_TOP_N as SWEEP_LEADERBOARD_MAX_TOP_N,
 )
 from brutex.dashboard.sweep_results_view import (
+    REGIME_ROBUST_PRESET,
     SWEEPS_DIRNAME,
+    RollupServe,
     SweepScan,
+    UnknownGateCoordinateError,
     build_sweep_leaderboard,
     load_cascade_join_file,
     load_sweep_scan,
+    load_sweep_scan_via_rollup,
     parse_filter_float,
     parse_filter_int,
     resolve_preset_param,
+    resolve_rank_by_param,
     store_error_payload,
 )
 from brutex.dashboard.sweep_runner import (
@@ -1253,6 +1258,31 @@ _SERVER_ERROR_FLOOR: Final[int] = 500
 
 #: 403 detail returned for a browser-initiated cross-site state change.
 _CROSS_ORIGIN_DETAIL: Final = "cross-origin request blocked"
+
+#: Cap for a reflected user token in a 400 detail — bounds an 8000-char hostile
+#: ``?gate=`` token to a sane length (info-leak / log-spam guard).
+_GATE_DETAIL_MAX_LEN: Final[int] = 64
+
+
+def _sanitize_gate_token(token: str) -> str:
+    """Bound + strip a user ``?gate=`` token for safe reflection in a 400 detail.
+
+    Non-printable characters are dropped per :meth:`str.isprintable` — every
+    character in the Unicode "Other" (Cc/Cf/Cs/Co/Cn) or "Separator"
+    (Zs/Zl/Zp) categories except the ASCII space, a BROADER drop than the
+    bare ASCII control set (``ord < 0x20`` plus DEL) — so a token cannot
+    smuggle newlines/escape sequences into a log line or error body, and the
+    result is truncated to :data:`_GATE_DETAIL_MAX_LEN` (with a trailing
+    ``…`` marker when it overflows) so an 8000-char hostile token cannot
+    spam the wire. The full raw token is never reflected — only this bounded, printable
+    form (the ``store_error_payload`` sibling suppresses ``str(exc)`` entirely;
+    the gate 400 must still name the offending coordinate, so it reflects this
+    sanitised slice rather than nothing).
+    """
+    cleaned = "".join(ch for ch in token if ch.isprintable())
+    if len(cleaned) > _GATE_DETAIL_MAX_LEN:
+        return cleaned[:_GATE_DETAIL_MAX_LEN] + "…"
+    return cleaned
 
 
 def _trusted_host_patterns(allowed_hosts: Sequence[str] | None) -> list[str]:
@@ -2399,6 +2429,18 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             floor_bytes=_SWEEP_LEADERBOARD_CACHE_FLOOR_BYTES,
         ),
     )
+    # The rollup serve-path log gates (DEC-RESULTS-TOPK-ROLLUP-001, MINOR-2):
+    # `sweep_results.rollup_fallback` / `rollup_stale_served` are deduped per
+    # (revision, reason) through ONE LRU-bounded gate (the #1711 OutageGate
+    # precedent — a poll loop against one bad state logs ONCE, never per
+    # poll), and the Hook-C serve-side rebuild fires at most once per
+    # revision through its own gate. LogGate lives in the COMMON stdlib-only
+    # leaf (the PR #1436 CodeQL bidirectional-cycle fix) — imported from
+    # there, never from the engine rollup module.
+    from brutex.observability.log_gate import LogGate as _RollupLogGate
+
+    _rollup_log_gate = _RollupLogGate()
+    _rollup_rebuild_gate = _RollupLogGate()
     # The one-click artifact read memo (DEC-OPERATOR-PAGE-REAL-001): every
     # `/api/v1/oneclick/*` read (runs listing, manifest, top100, events tail
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
@@ -7445,6 +7487,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             )
 
         def _work() -> dict[str, Any]:
+            """Serve the payload from the generation-keyed cache (threadpool worker).
+
+            The cache hit is O(1) per write generation; a miss/dirty poll pays
+            one ``_recompute`` scan, then projects the requested filter window.
+            """
             rows = _missing_sessions_cache.get_or_compute(
                 "coverage_missing_sessions",
                 generation=_summary_cache.generation,
@@ -9119,15 +9166,21 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         return _render_reports_html()
 
     @app.get("/movers", response_class=HTMLResponse)
-    async def movers_page() -> str:
+    async def movers_page() -> HTMLResponse:
         """GET /movers — the reference-only markets-screen-style movers page (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
         A point-in-time snapshot view (Spot / Futures / Options tabs; single date
         + timeframe + auto-filled time; click-to-sort on every column) over the
         ingested lake. The page loads on open + on every control change / manual
         Refresh (no auto-poll timer); each load is an O(P) one-time lake pass.
+
+        ``Cache-Control: no-store`` so a redeployed page is never shadowed by a
+        browser-cached older ``movers.html`` whose time-dropdown logic no longer
+        matches (DEC-MOVERS-TIME-SNAP-UX-001 — the operator's observed 09:15
+        reset was the stale pre-#1243 page served from the browser cache; the
+        exact ``/db`` precedent, DEC-DB-VIEWER-NOSTORE-001).
         """
-        return _render_movers_html()
+        return HTMLResponse(_render_movers_html(), headers={"Cache-Control": "no-store"})
 
     @app.get("/results", response_class=HTMLResponse)
     async def results_page() -> str:
@@ -9706,6 +9759,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         direction: str | None = Query(default=None),
         rank_by: str | None = Query(default=None),
         preset: str | None = Query(default=None),
+        gate: str | None = Query(default=None),
         top: int = Query(
             default=SWEEP_LEADERBOARD_DEFAULT_TOP_N, ge=1, le=SWEEP_LEADERBOARD_MAX_TOP_N
         ),
@@ -9751,6 +9805,20 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             operator choice must refuse loudly, never silently rank by
             something else). THIN adapter — the ranking logic lives entirely in
             ``brutex.ranking`` (this route only validates + threads the token).
+        gate
+            OPTIONAL gate coordinate to scope the served rows to
+            (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) — one of the payload's
+            ``gate_coordinates`` (``"ungated"``, a ``gate:<hash>`` config
+            tag, or the 0-row ``"gated"`` sentinel). Absent/blank applies the
+            deterministic default resolution (single coordinate → no scoping,
+            byte-identical rows; one gated + ungated → the GATED coordinate —
+            a zero-survivor gated re-run honestly serves the EMPTY set, never
+            the stale ungated rows; >1 known gated config → everything served
+            + labeled with ``mixed_gate_coordinates: true``, never a silent
+            pick). An UNKNOWN token is a clean 400 naming the available
+            coordinates (the ``preset`` precedent). Validation needs the
+            scanned coordinate set, so it runs inside the build — the raised
+            ``ValueError`` maps to the 400 at this route.
         top
             Leaderboard depth (1..500; default 50).
         min_trades, min_pf, min_dsr, max_abs_dd_pct
@@ -9814,25 +9882,61 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             f_max_abs_dd_pct = parse_filter_float("max_abs_dd_pct", max_abs_dd_pct)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # d1 cache-key-injection fix (DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+        # MIGRATION.md #1758): resolve rank_by to its EFFECTIVE column BEFORE
+        # it can enter the L2 cache key. The rank-time behaviour is UNCHANGED
+        # (build_sweep_leaderboard still receives the raw token and applies
+        # the identical allow-list fall-back), but the KEY must never carry
+        # the raw user-controlled string — a hostile rank_by like
+        # `sharpe_ratio|p=|g=ungated` could otherwise forge another request's
+        # key legs, and every unknown spelling would mint its own slot for
+        # the ONE default-ranked payload.
+        resolved_rank_by = resolve_rank_by_param(rank_by)
+        # Empty-filter-leg normalization (DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+        # round-2 LOW): the L2 key collapses '' and None to the same
+        # instrument/tf/direction slot (`quote((x or '').casefold())`), but
+        # ``build_sweep_leaderboard``'s ``_matches`` treats '' as an ACTIVE
+        # exclude-all filter while None = no filter — so two decode-identical
+        # keys computed DIFFERENT payloads (an order-dependent stale cross-serve
+        # for a hand-crafted client appending a blank ?instrument=/?tf=/?direction=).
+        # Normalize each leg to None-or-value ONCE and use it for BOTH the key
+        # leg AND every build call, so '' behaves as 'no filter' everywhere. The
+        # key bytes for a real (non-empty) value are UNCHANGED (`v or None` keeps
+        # any truthy string), so existing cache slots + goldens are untouched.
+        inst_n = instrument or None
+        tf_n = tf or None
+        dir_n = direction or None
 
         store = _require_store()
         store_path = getattr(store, "path", None)
         if not isinstance(store_path, Path):
             # No lake root wired → honest empty leaderboard (never a 500), mirroring
-            # the /api/v1/movers no-lake-root degrade.
-            empty = build_sweep_leaderboard(
-                Path("/nonexistent-lake"),
-                instrument=instrument,
-                tf=tf,
-                direction=direction,
-                rank_by=rank_by,
-                top_n=top,
-                preset=resolved_preset,
-                min_trades=f_min_trades,
-                min_pf=f_min_pf,
-                min_dsr=f_min_dsr,
-                max_abs_dd_pct=f_max_abs_dd_pct,
-            )
+            # the /api/v1/movers no-lake-root degrade. An EXPLICIT ?gate= token can
+            # never match the empty coordinate set → the same clean 400 as below.
+            try:
+                empty = build_sweep_leaderboard(
+                    Path("/nonexistent-lake"),
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
+                    rank_by=rank_by,
+                    top_n=top,
+                    preset=resolved_preset,
+                    gate=gate,
+                    min_trades=f_min_trades,
+                    min_pf=f_min_pf,
+                    min_dsr=f_min_dsr,
+                    max_abs_dd_pct=f_max_abs_dd_pct,
+                )
+            except UnknownGateCoordinateError as exc:
+                # An explicit ?gate= token can never match the empty coordinate
+                # set → the SAME sanitised, bounded 400 as the wired-store arm
+                # below (a genuine unexpected ValueError now surfaces as a 500,
+                # not a mislabelled client 400).
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown gate coordinate: {_sanitize_gate_token(exc.coordinate)}",
+                ) from exc
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
 
@@ -9883,19 +9987,36 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # The STABLE (revision-free) filter key. Casefold the filter
             # axes: build_sweep_leaderboard's _matches filters them
             # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
-            # leaderboard and must share ONE cache slot (rank_by stays raw — it
-            # is matched exactly against RANKABLE_COLUMNS, not casefolded; the
-            # RESOLVED preset token rides too — a preset-ranked payload must
-            # never share a slot with the default ordering, and blank/absent
-            # share ONE slot because both resolve to None).
+            # leaderboard and must share ONE cache slot. The |r= leg carries
+            # the RESOLVED rank column (resolve_rank_by_param above), never
+            # the raw query string — every rank_by spelling that resolves to
+            # one column shares ONE slot (the payload echoes the resolved
+            # value, so the shared slot is byte-exact); the RESOLVED preset
+            # token rides too — a preset-ranked payload must never share a
+            # slot with the default ordering, and blank/absent share ONE
+            # slot because both resolve to None.
+            # The |g= leg (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): the gate
+            # scope changes the served ROW SET, so an explicit ?gate= token
+            # (stripped raw — resolution needs the scan) must occupy its OWN
+            # L2 slot; absent/blank share ONE slot (the default resolution is
+            # deterministic per scan revision).
             # The RESOLVED B2a filter floors ride the key too
             # (DEC-RESULTS-TRUST-HONESTY-001: parsed values, so "30" and
             # " 30 " share one slot; absent floors read the stable empty
             # token = the legacy slot).
+            # Poisoning-safe by CONSTRUCTION (the d1 injection fix,
+            # MIGRATION.md #1758): EVERY user-controlled leg is percent-
+            # encoded (quote, safe='') before it enters the key, so the '|'
+            # and '=' delimiters can never be forged from a query value —
+            # two requests build the same key ONLY when every decoded leg is
+            # identical; a must-400 request can never alias a cached 200.
             lb_key = (
-                f"sweep_leaderboard|i={(instrument or '').casefold()}"
-                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
-                f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+                f"sweep_leaderboard|i={quote((inst_n or '').casefold(), safe='')}"
+                f"|tf={quote((tf_n or '').casefold(), safe='')}"
+                f"|d={quote((dir_n or '').casefold(), safe='')}"
+                f"|r={quote(resolved_rank_by, safe='')}"
+                f"|p={quote(resolved_preset or '', safe='')}"
+                f"|g={quote((gate or '').strip(), safe='')}|n={top}"
                 f"|casc={casc_rev or 'outage'}|comp={comp_rev or 'outage'}"
                 f"|mt={'' if f_min_trades is None else f_min_trades}"
                 f"|mp={'' if f_min_pf is None else f_min_pf!r}"
@@ -9906,12 +10027,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             def _fresh() -> dict[str, Any]:
                 return build_sweep_leaderboard(
                     lake_root,
-                    instrument=instrument,
-                    tf=tf,
-                    direction=direction,
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
                     rank_by=rank_by,
                     top_n=top,
                     preset=resolved_preset,
+                    gate=gate,
                     cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
                     composite=load_composite_index(sweeps_root),
                     min_trades=f_min_trades,
@@ -9941,11 +10063,6 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # instance's pull-time adaptive floor (bounded, logged stale
             # serves) instead of paying the full scan per poll.
             gen = revision_generation(rev)
-            scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
-                "sweep_scan",
-                generation=gen,
-                compute=lambda: load_sweep_scan(lake_root),
-            )
             # Level 1b (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, fix round 1):
             # ONE composite-index read per `composite_index_revision` token —
             # the slot's generation rides the ONE `revision_generation` digest
@@ -9958,12 +10075,177 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # (refuter-reproduced; now killed by the route regression). Any
             # aggs write moves a results-depth dir mtime → new token →
             # recompute; a sweeps-only move (store flush) leaves the cached
-            # index untouched.
+            # index untouched. HOISTED above the rollup arm at the
+            # DEC-RESULTS-TOPK-ROLLUP-001 merge-reconcile: the rollup serve
+            # predicate below must consult the ACTIVE composite state.
             composite_index: CompositeIndex = _sweep_leaderboard_cache.get_or_compute(
                 "composite_index",
                 generation=revision_generation(comp_rev or "outage"),
                 compute=lambda: load_composite_index(sweeps_root),
             )
+            # A JOINED non-empty composite index feeds preset ORDERING (the
+            # composite preset's primary axis AND e.g. min_dd_first's
+            # composite tiebreak — see _preset_rank_record), which the
+            # persisted rollup union structurally cannot cover (the joined
+            # score is NOT a persisted ResultRow field; the union axes are
+            # probed over composite_score=None records). The exact
+            # "de-inerting forces a conscious decision" class the rollup
+            # design named — decided at the merge-reconcile: preset-ordered
+            # polls stay LEGACY while the composite index is active.
+            composite_active = composite_index.state == "joined" and bool(composite_index.by_run_id)
+            # ── The rollup serve path (DEC-RESULTS-TOPK-ROLLUP-001) ──
+            # Serve predicate: ONLY the UNFILTERED leaderboard (instrument /
+            # tf / direction all ABSENT — an empty-string param is a
+            # DEGENERATE real filter and stays legacy), and ONLY orderings
+            # the persisted union covers: every rank_by (persisted-field
+            # DESC + run_id-ASC ties) always; a PRESET ordering only while
+            # the composite index is inactive (see composite_active above).
+            # top ≤ MAX_TOP_N=500 ≤ K=1000. The three-outcome ladder
+            # (fresh / stale-serve-with-note / legacy-fallback+rebuild) runs
+            # ONCE per revision generation (the stable level-1 slot below,
+            # generation-keyed per DEC-NAV-CACHES-FLOOR-REKEY-001 — the
+            # branch-era rev-in-key fold is superseded by the generation
+            # bridge); repeat polls are level-2 payload hits.
+            serve: RollupServe | None = None
+            if (
+                instrument is None
+                and tf is None
+                and direction is None
+                # MERGE-RECONCILE (the S2 club fold): the B2a serve floors
+                # (DEC-RESULTS-TRUST-HONESTY-001) are FILTERS under the
+                # UNFILTERED-only serve law — a floored request must take the
+                # legacy full scan (the K-union cannot answer a floored
+                # top-N); build_sweep_leaderboard's superset_only guard
+                # enforces the same invariant structurally.
+                and f_min_trades is None
+                and f_min_pf is None
+                and f_min_dsr is None
+                and f_max_abs_dd_pct is None
+                # #1467 fold seam (DEC-SWEEP-SERVING-GATE-PROVENANCE-001 ×
+                # DEC-RESULTS-TOPK-ROLLUP-001): gate-scoped serves bypass the
+                # rollup — a gate-coexistence lake (one run_id under two gate
+                # coordinates) structurally cannot be one run_id-keyed rollup
+                # store; the legacy scan owns gate serving (the composite-
+                # preset fallback precedent above). A blank ?gate= is the same
+                # degenerate-param class as the filter axes and stays legacy;
+                # the gate-None rollup serve carries the ROW-derived ungated
+                # coordinate (load_sweep_scan_via_rollup — any gated row in
+                # the union forces the legacy fallback there, so a superset
+                # scan is never gate-scoped and the rollup wire stays
+                # byte-identical to the legacy payload, parity-pinned).
+                and gate is None
+                # Train-A refresh fold seam (DEC-REGIME-REJECT-TIER-001 ×
+                # DEC-RESULTS-TOPK-ROLLUP-001): ``regime_robust`` is a
+                # MEMBERSHIP-changing preset (it filters rows by cascade
+                # verdicts before ranking), so it is a FILTER under the
+                # UNFILTERED-only serve law — applying the membership cut
+                # POST-union would silently under-serve (a row below the
+                # K-union cut that belongs in the filtered top-N never
+                # appears). It rides the legacy full scan, exactly the
+                # composite-preset + gate-scoped fallback precedents above;
+                # build_sweep_leaderboard's superset_only guard enforces the
+                # same invariant structurally (defense-in-depth).
+                and resolved_preset != REGIME_ROBUST_PRESET
+                and (resolved_preset is None or not composite_active)
+            ):
+                serve = _sweep_leaderboard_cache.get_or_compute(
+                    "sweep_rollup",
+                    generation=gen,
+                    compute=lambda: load_sweep_scan_via_rollup(
+                        lake_root, rev=rev, log_gate=_rollup_log_gate
+                    ),
+                )
+            if serve is not None and serve.scan is not None:
+                rollup_scan = serve.scan
+                behind = serve.behind_stores
+                conflict = serve.conflict_suspect
+                # The d1 cache-key-injection law (DEC-SWEEP-SERVING-GATE-
+                # PROVENANCE-001, MIGRATION.md #1758) applies HERE too: the
+                # |r= leg carries the RESOLVED rank column and every
+                # user-controlled leg is percent-encoded, so the '|'/'='
+                # delimiters can never be forged from a query value; the |g=
+                # leg mirrors the legacy lb_key (distinct ?gate= tokens can
+                # never alias one rollup slot).
+                rollup_key = (
+                    f"sweep_leaderboard|src=rollup"
+                    f"|r={quote(resolved_rank_by, safe='')}"
+                    f"|p={quote(resolved_preset or '', safe='')}"
+                    f"|g={quote((gate or '').strip(), safe='')}|n={top}"
+                    f"|b={behind}|c={int(conflict)}"
+                    f"|casc={casc_rev or 'outage'}|comp={comp_rev or 'outage'}"
+                )
+
+                def _rollup_payload() -> dict[str, Any]:
+                    # The rollup wire carries the SAME cascade + composite
+                    # decoration as the legacy level-2 build (the #1749 join
+                    # landed on main after the branch cut — a rollup serve
+                    # must never silently drop the verdicts/scores the legacy
+                    # wire carries). The composite index is the cached HOISTED
+                    # level-1b slot; a rollup-served row set never REORDERS on
+                    # the composite (see the predicate above).
+                    payload = build_sweep_leaderboard(
+                        lake_root,
+                        rank_by=rank_by,
+                        top_n=top,
+                        scan=rollup_scan,
+                        preset=resolved_preset,
+                        cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
+                        composite=composite_index,
+                    ).to_dict()
+                    # Honest additive staleness notes (MAJOR-1) — EMIT-ON-
+                    # nonzero/true so a FRESH serve's payload shape is
+                    # byte-identical to the legacy wire (parity-pinned).
+                    if behind > 0:
+                        payload["rollup_behind_stores"] = behind
+                    if conflict:
+                        payload["rollup_conflict_suspect"] = True
+                    return payload
+
+                return _sweep_leaderboard_cache.get_or_compute(
+                    rollup_key,
+                    generation=gen,
+                    compute=_rollup_payload,
+                    # The unfiltered coordinate's last-known pointer (the
+                    # probe-outage arm above serves lb_key).
+                    mru_prefix=lb_key,
+                )
+            # Hook-C freshness witness (the refold composition fix over
+            # DEC-NAV-CACHES-FLOOR-REKEY-001): the level-1 slot below can be
+            # FLOOR-SERVED stale during a running job, and
+            # `rebuild_rollup_from_scan_best_effort` stamps a FRESH glob +
+            # rev sweep — rebuilding from a floored (stale) scan would
+            # mis-stamp the rollup as covering stores its rows never folded
+            # (a later poll would then serve it FRESH). Hook C therefore
+            # fires ONLY when the legacy scan was genuinely COMPUTED in this
+            # request (the branch-era rev-in-key fold made that implicit; the
+            # generation bridge does not).
+            scan_computed = False
+
+            def _legacy_scan() -> SweepScan:
+                nonlocal scan_computed
+                scan_computed = True
+                return load_sweep_scan(lake_root)
+
+            scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
+                "sweep_scan",
+                generation=gen,
+                compute=_legacy_scan,
+            )
+            if (
+                serve is not None
+                and serve.scan is None
+                and scan_computed
+                and _rollup_rebuild_gate.should_emit(("rebuild", rev))
+            ):
+                # Hook C (DEC-RESULTS-TOPK-ROLLUP-001): the fallback poll just
+                # built the full legacy scan anyway — write the rollup FROM it
+                # as a best-effort byproduct (fenced inside; at most once per
+                # revision via the gate), so the NEXT revision serves rollup-
+                # first and the system converges with Hooks A/B as pure
+                # latency optimizations.
+                from brutex.engine.results_rollup import rebuild_rollup_from_scan_best_effort
+
+                rebuild_rollup_from_scan_best_effort(lake_root / SWEEPS_DIRNAME, scan)
             # Level 2: the ranked payload per stable filter key (same token
             # generation; `mru_prefix` records the last-known pointer the
             # probe-outage arm above serves; the cascade join parses ONCE per
@@ -9973,13 +10255,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 generation=gen,
                 compute=lambda: build_sweep_leaderboard(
                     lake_root,
-                    instrument=instrument,
-                    tf=tf,
-                    direction=direction,
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
                     rank_by=rank_by,
                     top_n=top,
                     scan=scan,
                     preset=resolved_preset,
+                    gate=gate,
                     cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
                     composite=composite_index,
                     min_trades=f_min_trades,
@@ -9992,6 +10275,23 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
         try:
             return JSONResponse(await _run_lake(_resolve))
+        except UnknownGateCoordinateError as exc:
+            # An UNKNOWN explicit ?gate= token (DEC-SWEEP-SERVING-GATE-
+            # PROVENANCE-001): the validation runs inside the build (it needs
+            # the scanned coordinate set, so it cannot be eager like preset's)
+            # and raises the TYPED UnknownGateCoordinateError carrying the
+            # offending token — mapped here to a clean 400 whose detail is
+            # SANITISED (control chars stripped) and LENGTH-BOUNDED, never the
+            # raw user string (info-leak / log-spam guard), mirroring the
+            # store_error_payload sibling's no-raw-str discipline. A genuine
+            # unexpected ValueError deep in the build is NO LONGER caught here —
+            # it propagates to the framework's 500, so a real server bug is
+            # never mislabelled a client 400. Nothing is cached for the refused
+            # key (the compute raised).
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown gate coordinate: {_sanitize_gate_token(exc.coordinate)}",
+            ) from exc
         except ResultsStoreError as exc:
             # C3 (DEC-SWEEP-RESULTS-DEPTH-001): a typed store fault escaping the
             # per-store skip net degrades to the honest error payload — 200 with

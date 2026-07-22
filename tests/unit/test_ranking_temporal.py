@@ -582,6 +582,155 @@ class TestRankCombosTemporalSeam:
             assert dsr == ungated_dsr[mask]  # bit-identical, never re-deflated
 
 
+class TestRankCombosTemporalDoorSix:
+    """Door 6 (``max_sl_hit_rate``) on the TEMPORAL arm (W2 re-integration R2).
+
+    The landed ``_temporal_survivors`` judged the hard doors via bare
+    ``passes_gates(m)``, so an ACTIVE ceiling combined with an ACTIVE temporal
+    gate silently skipped Door 6 on the batch temporal arm (while the bounded
+    arm's gate bits carried the ceiling from append time — divergent verdicts).
+    These cases pin the ONE-shared-verdict-body law: the temporal arm threads
+    the SAME kwarg into the SAME ``passes_gates`` the default arm uses.
+    """
+
+    def _mixed(self) -> list[tuple[int, ResultMetrics]]:
+        """under-ceiling · over-ceiling · under-ceiling (distinct masks/sharpes)."""
+        return [
+            (1 << 0, make_result_metrics(sharpe_ratio=1.0, sl_hit_rate=0.2)),
+            (1 << 1, make_result_metrics(sharpe_ratio=1.25, sl_hit_rate=0.8)),
+            (1 << 2, make_result_metrics(sharpe_ratio=1.5, sl_hit_rate=0.2)),
+        ]
+
+    def test_both_active_ceiling_drops_the_over_ceiling_temporal_survivor(self) -> None:
+        """(a) A temporal survivor violating the ceiling is DROPPED — and the
+        reason twin names exactly the Door-6 token for it."""
+        from brutex.ranking import GATE_SL_HIT_RATE, gate_reasons
+
+        candidates = self._mixed()
+        triples: list[TemporalTriple | None] = [_STEADY, _STEADY, _STEADY]
+        # Without the ceiling every steady-triple candidate survives.
+        assert sorted(
+            rc.mask for rc in rank_combos(candidates, temporal=_gate_input(list(triples)))
+        ) == [1 << 0, 1 << 1, 1 << 2]
+        ranked = rank_combos(candidates, temporal=_gate_input(list(triples)), max_sl_hit_rate=0.5)
+        assert sorted(rc.mask for rc in ranked) == [1 << 0, 1 << 2]
+        # The dropped candidate fails on exactly the Door-6 reason (twin law).
+        assert gate_reasons(candidates[1][1], max_sl_hit_rate=0.5) == (GATE_SL_HIT_RATE,)
+
+    def test_door_six_reject_is_a_door_kill_never_a_temporal_kill(self) -> None:
+        """Ordering parity with the bounded arm: a Door-6 reject dies at the
+        DOORS, before the temporal predicates — the temporal counters stay
+        clean (mirrors ``test_hard_door_rejects_never_reach_the_temporal_gate``
+        on the bounded suite)."""
+        stats = TemporalGateStats()
+        candidates = [
+            (1, make_result_metrics(sharpe_ratio=1.0, sl_hit_rate=0.2)),
+            (2, make_result_metrics(sharpe_ratio=1.25, sl_hit_rate=0.8)),
+        ]
+        # The over-ceiling candidate carries the LUCKY triple — if it reached
+        # the temporal gate it would be a temporal kill; it must not.
+        ranked = rank_combos(
+            candidates,
+            temporal=_gate_input([_STEADY, _LUCKY], stats=stats),
+            max_sl_hit_rate=0.5,
+        )
+        assert [rc.mask for rc in ranked] == [1]
+        assert stats.killed == 0  # died at Door 6, not at the temporal gate
+        assert stats.evaluated is True
+
+    def test_none_triple_on_a_door_six_reject_is_tolerated(self) -> None:
+        """A candidate Door 6 kills never reaches the triple lookup — its
+        missing fold is unobservable, exactly like every other door reject.
+        (Pre-threading this RAISED: bare ``passes_gates`` passed the candidate
+        and the ``None`` triple tripped the wiring guard — fails-before.)"""
+        candidates = [
+            (1, make_result_metrics(sharpe_ratio=1.0, sl_hit_rate=0.2)),
+            (2, make_result_metrics(sharpe_ratio=1.25, sl_hit_rate=0.8)),
+        ]
+        ranked = rank_combos(
+            candidates,
+            temporal=_gate_input([_STEADY, None]),
+            max_sl_hit_rate=0.5,
+        )
+        assert [rc.mask for rc in ranked] == [1]
+
+    def test_fail_closed_none_rate_gated_out_on_the_temporal_arm(self) -> None:
+        """(c) Active ceiling + an unmeasured (``None``) ``sl_hit_rate`` on the
+        temporal arm gates OUT (the lane's fail-closed law); the inactive knob
+        keeps the row."""
+        candidates = [
+            (1, make_result_metrics(sharpe_ratio=1.0, sl_hit_rate=0.2)),
+            (2, make_result_metrics(sharpe_ratio=1.25, sl_hit_rate=None)),
+        ]
+        triples: list[TemporalTriple | None] = [_STEADY, _STEADY]
+        assert sorted(
+            rc.mask for rc in rank_combos(candidates, temporal=_gate_input(list(triples)))
+        ) == [1, 2]
+        gated = rank_combos(candidates, temporal=_gate_input(list(triples)), max_sl_hit_rate=0.5)
+        assert [rc.mask for rc in gated] == [1]
+
+    def test_ceiling_inactive_is_byte_identical_to_the_landed_arm(self) -> None:
+        """(b) ``max_sl_hit_rate=None`` (the default): the temporal arm's
+        survivor selection equals an in-test VERBATIM oracle of the landed
+        ``_temporal_survivors`` body (bare ``passes_gates`` + the shared
+        ``apply_temporal_gate``), and the landed two-argument call shape still
+        works unchanged — every existing caller is untouched."""
+        from brutex.ranking import _temporal_survivors, passes_gates
+
+        candidates = [
+            *self._mixed(),
+            (1 << 3, make_result_metrics(total_trades=5, winning_trades=3, losing_trades=2)),
+        ]
+        triples: list[TemporalTriple | None] = [_STEADY, _LUCKY, _STEADY, None]
+
+        # The landed body, replicated verbatim as the oracle.
+        door_survivors = [
+            (index, pair) for index, pair in enumerate(candidates) if passes_gates(pair[1])
+        ]
+        survivor_triples: list[TemporalTriple] = []
+        for index, _ in door_survivors:
+            triple = triples[index]
+            assert triple is not None  # every bare-door survivor carries a fold here
+            survivor_triples.append(triple)
+        kept = apply_temporal_gate(
+            survivor_triples,
+            cfg=TemporalRobustnessConfig(),
+            n_judged_years=7,
+            stats=None,
+        )
+        expected = [door_survivors[position][1] for position in kept]
+
+        # The landed 2-arg call shape (no kwarg) — byte-identical selection.
+        assert _temporal_survivors(candidates, _gate_input(list(triples))) == expected
+        # The explicit default — same answer (the kwarg is inert at None).
+        assert (
+            _temporal_survivors(candidates, _gate_input(list(triples)), max_sl_hit_rate=None)
+            == expected
+        )
+        # And the full rank agrees end-to-end with the pre-threading result.
+        ranked = rank_combos(candidates, temporal=_gate_input(list(triples)))
+        assert [rc.mask for rc in ranked] == [rc.mask for rc in rank_combos(expected)]
+
+    def test_kwarg_is_kw_only_and_defaulted_none(self) -> None:
+        """Signature pin: the new parameter is kw-only with default ``None`` —
+        the landed positional call shape cannot have changed meaning."""
+        import inspect
+
+        from brutex.ranking import _temporal_survivors
+
+        parameter = inspect.signature(_temporal_survivors).parameters["max_sl_hit_rate"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is None
+
+    def test_reason_vocabulary_pin_unchanged(self) -> None:
+        """(e) The wire vocabulary is untouched by the threading: Door 6 stays
+        appended LAST in ``GATE_REASON_ORDER``."""
+        from brutex.ranking import GATE_REASON_ORDER, GATE_SL_HIT_RATE
+
+        assert GATE_REASON_ORDER[-1] == GATE_SL_HIT_RATE
+        assert len(set(GATE_REASON_ORDER)) == len(GATE_REASON_ORDER)
+
+
 def test_ranked_combo_type_reexport_sanity() -> None:
     """Belt: the seam returns ordinary RankedCombo objects (no new type)."""
     ranked = rank_combos(_candidates(1), temporal=_gate_input([_STEADY]))

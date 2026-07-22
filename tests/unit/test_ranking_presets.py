@@ -15,12 +15,14 @@ from brutex.ranking.presets import (
     DEFAULT_PRESET,
     PRESET_MIN_DD_FIRST,
     PRESET_NAMES,
+    PRESET_WIN_RATE_SAFE,
     PRESETS,
     RankingPreset,
     RankRecord,
     min_dd_first_key,
     resolve_preset,
     sort_by_preset,
+    win_rate_safe_key,
 )
 from structlog.testing import capture_logs
 
@@ -41,8 +43,29 @@ def _rec(run_id: str, **overrides: Any) -> RankRecord:
 
 class TestPresetVocabulary:
     def test_display_order_and_default(self) -> None:
-        assert PRESET_NAMES == ("min_dd_first", "composite", "profit_factor", "win_rate", "calmar")
+        # "growth" appended after the R30 five (DEC-METRICS-KELLY-GROWTH-001)
+        # and "win_rate_safe" appended LAST
+        # (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) — each a sanctioned
+        # additive vocabulary extension.
+        # DEC-ALPHA-BUYHOLD-METRIC-001: "alpha" APPENDED (additive — every
+        # pre-existing token + the default keep their positions).
+        # DEC-OPTIONS-EXEC-FEEDBACK-001: "net_after_cost" APPENDED LAST — the
+        # options-exec headline net after the full cost stack, unpriced last.
+        assert PRESET_NAMES == (
+            "min_dd_first",
+            "composite",
+            "profit_factor",
+            "win_rate",
+            "calmar",
+            "growth",
+            "win_rate_safe",
+            "recent",
+            "recent_decay",
+            "alpha",
+            "net_after_cost",
+        )
         assert DEFAULT_PRESET == PRESET_MIN_DD_FIRST == "min_dd_first"
+        assert PRESET_WIN_RATE_SAFE == "win_rate_safe"
 
     def test_every_preset_names_itself(self) -> None:
         for token, preset in PRESETS.items():
@@ -50,10 +73,13 @@ class TestPresetVocabulary:
             assert preset.describe.strip()
 
     def test_direction_flags(self) -> None:
-        # min_dd_first is the ONE ascending preset; the alternates all rank
-        # descending on the raw value (the ResultsStore.top_k law).
+        # min_dd_first + win_rate_safe are the multi-part ASCENDING presets
+        # (in-tuple sign flips, ONE reverse per preset); the single-metric
+        # alternates all rank descending on the raw value (the
+        # ResultsStore.top_k law).
         assert PRESETS["min_dd_first"].reverse is False
-        for token in ("composite", "profit_factor", "win_rate", "calmar"):
+        assert PRESETS["win_rate_safe"].reverse is False
+        for token in ("composite", "profit_factor", "win_rate", "calmar", "growth", "alpha"):
             assert PRESETS[token].reverse is True
 
     @pytest.mark.parametrize("token", PRESET_NAMES)
@@ -100,10 +126,51 @@ class TestMinDdFirstLaw:
         assert PRESETS["min_dd_first"].sort_records([second, first]) == (first, second)
 
     def test_key_shape(self) -> None:
+        # CONSCIOUSLY RE-LOCKED (DEC-RANK-DD-BAND-ORDER-001): key 1 is now the
+        # DD ε-BAND index, not the raw DD — hand-derivation: dd 10.0 at band
+        # width 0.5 → floor(10.0 / 0.5) = band 20 (was the raw 10.0 pre-W1).
         scored = min_dd_first_key(_rec("a" * 64, composite_score=2.0))
-        assert scored == (10.0, 0, -2.0, 3)
+        assert scored == (20, 0, -2.0, 3)
         unscored = min_dd_first_key(_rec("a" * 64, composite_score=None))
-        assert unscored == (10.0, 1, -0.0, 3)
+        assert unscored == (20, 1, -0.0, 3)
+
+    def test_composite_beats_tiny_dd_edge_within_band(self) -> None:
+        # [FB] The item-5 pathology killer: pre-band, Y (DD 4.99%, weak) sat
+        # ABOVE X (DD 5.01%, strong) forever on a 2bp DD edge. Both quantize
+        # to band 9 (floor(4.99/0.5) = floor(5.01/0.5) = 9... hand-derive:
+        # 4.99/0.5 = 9.98 → 9; 5.01/0.5 = 10.02 → 10 — DIFFERENT bands!) —
+        # so use a genuinely in-band pair: 5.01 vs 5.20 (bands 10, 10).
+        strong = _rec("a" * 64, max_drawdown_pct=5.20, composite_score=9.0)
+        weak = _rec("b" * 64, max_drawdown_pct=5.01, composite_score=0.1)
+        assert PRESETS["min_dd_first"].sort_records([weak, strong]) == (strong, weak)
+
+    def test_cross_band_smaller_band_still_wins(self) -> None:
+        # Across bands "least pain" holds: band 9 (DD 4.99) beats band 10
+        # (DD 5.01) even against a far stronger composite.
+        low_band = _rec("a" * 64, max_drawdown_pct=4.99, composite_score=0.1)
+        high_band = _rec("b" * 64, max_drawdown_pct=5.01, composite_score=9.0)
+        assert PRESETS["min_dd_first"].sort_records([high_band, low_band]) == (
+            low_band,
+            high_band,
+        )
+
+    def test_band_boundary_floor_rule(self) -> None:
+        from brutex.ranking.presets import DD_BAND_PCT, dd_band_index
+
+        assert DD_BAND_PCT == 0.5
+        # A DD exactly on a band edge joins the UPPER band via floor.
+        assert dd_band_index(0.0) == 0
+        assert dd_band_index(0.49) == 0
+        assert dd_band_index(0.5) == 1
+        assert dd_band_index(0.99) == 1
+        assert dd_band_index(5.0) == 10
+
+    def test_band_index_non_finite_refused(self) -> None:
+        from brutex.ranking.presets import dd_band_index
+
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError, match="must be finite"):
+                dd_band_index(bad)
 
 
 class TestDescendingPresets:
@@ -114,6 +181,9 @@ class TestDescendingPresets:
             ("profit_factor", "profit_factor"),
             ("win_rate", "win_rate"),
             ("calmar", "calmar_ratio"),
+            ("growth", "log_growth_at_half_kelly"),
+            ("recent", "trailing_sharpe_ratio"),
+            ("recent_decay", "decay_weighted_net_paisa"),
         ],
     )
     def test_higher_raw_value_first(self, token: str, field: str) -> None:
@@ -121,7 +191,10 @@ class TestDescendingPresets:
         high = _rec("b" * 64, **{field: 3.1})
         assert PRESETS[token].sort_records([low, high]) == (high, low)
 
-    @pytest.mark.parametrize("token", ["composite", "profit_factor", "win_rate", "calmar"])
+    @pytest.mark.parametrize(
+        "token",
+        ["composite", "profit_factor", "win_rate", "calmar", "growth", "recent", "recent_decay"],
+    )
     def test_value_tie_falls_to_run_id_asc(self, token: str) -> None:
         first = _rec("1" * 64)
         second = _rec("2" * 64)
@@ -132,6 +205,122 @@ class TestDescendingPresets:
         low = _rec("c" * 64, composite_score=-9.0)
         high = _rec("b" * 64, composite_score=2.0)
         assert PRESETS["composite"].sort_records([unscored, low, high]) == (high, low, unscored)
+
+    def test_growth_none_ranks_last(self) -> None:
+        # DEC-METRICS-KELLY-GROWTH-001: an unscored / pre-extension-store
+        # record (None log growth) ranks AFTER every scored one — the
+        # composite None-after-scored idiom, never a fabricated 0.
+        unscored = _rec("a" * 64, log_growth_at_half_kelly=None)
+        low = _rec("c" * 64, log_growth_at_half_kelly=-0.4)
+        high = _rec("b" * 64, log_growth_at_half_kelly=0.02)
+        assert PRESETS["growth"].sort_records([unscored, low, high]) == (high, low, unscored)
+
+    def test_rank_record_growth_field_defaults_none(self) -> None:
+        # Defaulted-last so pre-extension record builders stay valid.
+        assert _rec("a" * 64).log_growth_at_half_kelly is None
+
+    @pytest.mark.parametrize(
+        ("token", "field"),
+        [
+            ("recent", "trailing_sharpe_ratio"),
+            ("recent_decay", "decay_weighted_net_paisa"),
+        ],
+    )
+    def test_recency_none_ranks_last(self, token: str, field: str) -> None:
+        # DEC-METRICS-TRAILING-WINDOW-001: an unscored record (a
+        # pre-extension store row / anchor-less run / empty trailing window)
+        # ranks AFTER every scored one — the None-after-scored idiom.
+        unscored = _rec("a" * 64, **{field: None})
+        low = _rec("c" * 64, **{field: -5.0})
+        high = _rec("b" * 64, **{field: 2.0})
+        assert PRESETS[token].sort_records([unscored, low, high]) == (high, low, unscored)
+
+    def test_rank_record_recency_fields_default_none(self) -> None:
+        # Defaulted-LAST so pre-extension record builders stay valid.
+        record = _rec("a" * 64)
+        assert record.trailing_sharpe_ratio is None
+        assert record.decay_weighted_net_paisa is None
+
+
+class TestWinRateSafeLaw:
+    """DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: the win_rate_safe order."""
+
+    def test_higher_win_rate_wins(self) -> None:
+        low = _rec("a" * 64, win_rate=0.4, sl_hit_rate=0.0)
+        high = _rec("b" * 64, win_rate=0.9, sl_hit_rate=1.0)
+        # Win rate dominates — even a worse SL-hit rate cannot outrank it.
+        assert PRESETS["win_rate_safe"].sort_records([low, high]) == (high, low)
+
+    def test_lower_sl_hit_rate_breaks_win_rate_tie(self) -> None:
+        stopped = _rec("a" * 64, sl_hit_rate=0.8)
+        safe = _rec("b" * 64, sl_hit_rate=0.1)
+        assert PRESETS["win_rate_safe"].sort_records([stopped, safe]) == (safe, stopped)
+
+    def test_none_sl_hit_rate_ranks_after_every_concrete_one(self) -> None:
+        # A pre-extension row (None rate) ranks AFTER even an all-SL row
+        # within an equal win rate — None is "honestly unknown", never
+        # coerced to a fake 0.0 that would read "never hits SL".
+        unknown = _rec("a" * 64, sl_hit_rate=None)
+        all_sl = _rec("b" * 64, sl_hit_rate=1.0)
+        assert PRESETS["win_rate_safe"].sort_records([unknown, all_sl]) == (all_sl, unknown)
+
+    def test_higher_win_rate_outranks_unknown_penalty(self) -> None:
+        # The None penalty applies WITHIN an equal win rate only — a higher
+        # win rate with an unknown SL-hit rate still ranks first.
+        unknown_high = _rec("a" * 64, win_rate=0.9, sl_hit_rate=None)
+        concrete_low = _rec("b" * 64, win_rate=0.4, sl_hit_rate=0.0)
+        assert PRESETS["win_rate_safe"].sort_records([unknown_high, concrete_low]) == (
+            unknown_high,
+            concrete_low,
+        )
+
+    def test_composite_breaks_sl_hit_rate_tie_descending(self) -> None:
+        weak = _rec("a" * 64, sl_hit_rate=0.2, composite_score=0.5)
+        strong = _rec("b" * 64, sl_hit_rate=0.2, composite_score=2.5)
+        assert PRESETS["win_rate_safe"].sort_records([weak, strong]) == (strong, weak)
+
+    def test_none_composite_ranks_after_every_scored_one(self) -> None:
+        unscored = _rec("a" * 64, sl_hit_rate=0.2, composite_score=None)
+        negative = _rec("b" * 64, sl_hit_rate=0.2, composite_score=-4.0)
+        assert PRESETS["win_rate_safe"].sort_records([unscored, negative]) == (
+            negative,
+            unscored,
+        )
+
+    def test_full_tie_falls_to_run_id_asc(self) -> None:
+        first = _rec("1" * 64, sl_hit_rate=0.3)
+        second = _rec("2" * 64, sl_hit_rate=0.3)
+        assert PRESETS["win_rate_safe"].sort_records([second, first]) == (first, second)
+
+    def test_key_shape(self) -> None:
+        concrete = win_rate_safe_key(
+            _rec("a" * 64, win_rate=0.6, sl_hit_rate=0.25, composite_score=2.0)
+        )
+        assert concrete == (-0.6, 0, 0.25, 0, -2.0)
+        unknown = win_rate_safe_key(
+            _rec("a" * 64, win_rate=0.6, sl_hit_rate=None, composite_score=None)
+        )
+        assert unknown == (-0.6, 1, 0.0, 1, -0.0)
+
+    def test_rank_record_sl_hit_rate_field_defaults_none(self) -> None:
+        # Defaulted-LAST so pre-extension record builders stay valid.
+        assert _rec("a" * 64).sl_hit_rate is None
+
+    def test_registered_appended_last(self) -> None:
+        # Stage C appended the two recency presets AFTER win_rate_safe (each
+        # generation strictly after the previous — the appended-LAST law);
+        # DEC-ALPHA-BUYHOLD-METRIC-001 then appended "alpha" LAST (the
+        # 2026-07-20 train-b wave-2b fold reconciliation of this pin), and the
+        # TRAIN-B LAST fold DEC-OPTIONS-EXEC-FEEDBACK-001 (#1990) appended
+        # "net_after_cost" LAST — so win_rate_safe now heads the 5-preset tail.
+        assert PRESET_NAMES[-5:] == (
+            PRESET_WIN_RATE_SAFE,
+            "recent",
+            "recent_decay",
+            "alpha",
+            "net_after_cost",
+        )
+        assert PRESETS[PRESET_WIN_RATE_SAFE].key is win_rate_safe_key
 
 
 class TestSortByPresetGeneric:
@@ -212,3 +401,111 @@ class TestMinDdFirstLockedOrder:
             "00",  # dd 12.0
             "07",  # dd 29.9
         ]
+
+
+class TestAlphaPreset:
+    """DEC-ALPHA-BUYHOLD-METRIC-001 — the alpha axis + None-after-scored law."""
+
+    def test_orders_descending_on_raw_alpha(self) -> None:
+        low = _rec("b" * 64, alpha_pct=1.0)
+        high = _rec("a" * 64, alpha_pct=7.5)
+        negative = _rec("c" * 64, alpha_pct=-2.0)
+        ordered = PRESETS["alpha"].sort_records([low, negative, high])
+        assert [r.run_id for r in ordered] == [high.run_id, low.run_id, negative.run_id]
+
+    def test_none_alpha_ranks_after_every_scored_record(self) -> None:
+        scored_negative = _rec("a" * 64, alpha_pct=-99.0)
+        unscored = _rec("b" * 64)  # alpha_pct defaults to None (uncomputable)
+        ordered = PRESETS["alpha"].sort_records([unscored, scored_negative])
+        assert [r.run_id for r in ordered] == [scored_negative.run_id, unscored.run_id]
+
+    def test_none_ties_fall_to_run_id_asc(self) -> None:
+        first = _rec("a" * 64)
+        second = _rec("b" * 64)
+        ordered = PRESETS["alpha"].sort_records([second, first])
+        assert [r.run_id for r in ordered] == [first.run_id, second.run_id]
+
+    def test_default_field_keeps_existing_constructions_byte_identical(self) -> None:
+        # The defaulted-LAST field law: a pre-alpha construction site (no
+        # alpha_pct kwarg) yields the honest None — never a fabricated 0.
+        assert _rec("a" * 64).alpha_pct is None
+
+
+class TestNetAfterCost:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001` — the INT-EXACT ``net_after_cost`` preset.
+
+    The key is ``(value_present, paisa)`` on raw Python ints: paisa sums can
+    exceed the float64 53-bit mantissa, so the value must NEVER round-trip
+    through float (the ``_composite_key``-style ``(1, float(value))`` shape
+    would collapse a one-paisa distinction at 2**53); unpriced (``None``)
+    entries rank AFTER every priced one under ``reverse=True``; ties fall to
+    the ``run_id``-ASC stable pre-sort.
+    """
+
+    def test_reverse_flag_is_true(self) -> None:
+        assert PRESETS["net_after_cost"].reverse is True
+
+    def test_key_shape(self) -> None:
+        from brutex.ranking.presets import _net_after_cost_key
+
+        assert _net_after_cost_key(_rec("a" * 64, net_after_cost_paisa=123)) == (1, 123)
+        # The defaulted trailing field: no override == honestly unpriced.
+        assert _net_after_cost_key(_rec("a" * 64)) == (0, 0)
+
+    def test_key_is_int_exact_beyond_the_float_mantissa(self) -> None:
+        """``2**53`` vs ``2**53 + 1`` produce DISTINCT, correctly-ORDERED keys.
+
+        WHY float would collapse them: float64 carries a 53-bit mantissa, so
+        ``float(2**53) == float(2**53 + 1)`` — any float round-trip of the
+        paisa would read the two nets as a TIE and hand the order to the
+        run_id tie law instead of the money. Python int tuple comparison is
+        exact at any magnitude (the /results exact-int-not-float precedent).
+        """
+        from brutex.ranking.presets import _net_after_cost_key
+
+        assert float(2**53) == float(2**53 + 1)  # the trap being avoided
+        lo = _net_after_cost_key(_rec("a" * 64, net_after_cost_paisa=2**53))
+        hi = _net_after_cost_key(_rec("b" * 64, net_after_cost_paisa=2**53 + 1))
+        assert lo != hi
+        assert hi > lo
+        assert lo == (1, 2**53)
+        assert hi == (1, 2**53 + 1)
+
+    def test_one_paisa_distinction_survives_the_sort_at_2_53(self) -> None:
+        # ADVERSARIAL run_ids: the RICHER record carries the LATER run_id, so
+        # a float-collapsed tie would flip the order to run_id ASC (poorer
+        # first) — the int-exact key must keep the richer one first.
+        poorer = _rec("a" * 64, net_after_cost_paisa=2**53)
+        richer = _rec("b" * 64, net_after_cost_paisa=2**53 + 1)
+        assert PRESETS["net_after_cost"].sort_records([poorer, richer]) == (richer, poorer)
+
+    def test_negative_net_beats_unpriced_none(self) -> None:
+        # None == honestly unpriced (no options-exec verdict) — it ranks
+        # AFTER every priced entry, even a deeply NEGATIVE net; never coerced
+        # to a fake 0 that would outrank a real loss.
+        unpriced = _rec("a" * 64)  # defaulted None
+        negative = _rec("b" * 64, net_after_cost_paisa=-1_000_000)
+        assert PRESETS["net_after_cost"].sort_records([unpriced, negative]) == (
+            negative,
+            unpriced,
+        )
+
+    def test_net_tie_falls_to_run_id_asc(self) -> None:
+        first = _rec("1" * 64, net_after_cost_paisa=500)
+        second = _rec("2" * 64, net_after_cost_paisa=500)
+        assert PRESETS["net_after_cost"].sort_records([second, first]) == (first, second)
+
+    def test_locked_four_record_order(self) -> None:
+        # Hand-derived (descending on the int-exact net, unpriced last):
+        #   01: 2**53 + 1  → rank 1 (one paisa above 00 — must NOT tie)
+        #   00: 2**53      → rank 2
+        #   02: -100       → rank 3 (priced loss beats unpriced)
+        #   03: None       → rank 4 (unpriced last)
+        records = [
+            _rec("00" + "0" * 62, net_after_cost_paisa=2**53),
+            _rec("01" + "0" * 62, net_after_cost_paisa=2**53 + 1),
+            _rec("02" + "0" * 62, net_after_cost_paisa=-100),
+            _rec("03" + "0" * 62),  # defaulted None — unpriced
+        ]
+        ordered = PRESETS["net_after_cost"].sort_records(list(reversed(records)))
+        assert [record.run_id[:2] for record in ordered] == ["01", "00", "02", "03"]

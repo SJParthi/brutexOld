@@ -42,19 +42,30 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Final
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    from brutex.metrics.compute_rust import FoldWire, RecencyWire
 
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
 from brutex.metrics.pbo import pbo_probability
 from brutex.metrics.types import ClosedTrade, EquityCurve
 
 __all__ = [
+    "DECAY_BUCKET_DAYS",
+    "DECAY_HALF_LIFE_MONTHS",
+    "TRAILING_WINDOW",
     "Moments",
+    "RecencyFolds",
+    "RecencyMetrics",
     "ResultMetrics",
     "TradeFolds",
     "combine_metrics_from_folds",
+    "combine_recency_from_folds",
     "compute_metrics",
     "compute_metrics_from_scalars",
+    "fold_recency",
     "percentile",
     "with_stage4_statistics",
 ]
@@ -70,6 +81,30 @@ _MIN_SAMPLES_VARIANCE: Final[int] = 2
 #: (spec line 746) and ranking-stable — the Stage-4 z-score is clamped to
 #: [-3, +3] regardless. Recorded in DEC-METRICS-001 (MIGRATION #305).
 _CAGR_CAP_PCT: Final[float] = 1.0e9
+
+#: The trailing-recency window (DEC-METRICS-TRAILING-WINDOW-001): 24 months,
+#: implemented as a FIXED 730-day span (24 months (730 days) — a fixed
+#: day-count, not a calendar-month walk, so the cutoff instant is a pure
+#: ``anchor − timedelta`` subtraction that a Rust fold twin mirrors
+#: mechanically with zero calendar logic). Membership is judged by each
+#: trade's EXIT instant: ``exit_ts >= anchor − TRAILING_WINDOW`` (see
+#: :func:`fold_recency`).
+TRAILING_WINDOW: Final[timedelta] = timedelta(days=730)
+
+#: Default half-life (in age-month buckets) of the exponential recency decay
+#: (DEC-METRICS-TRAILING-WINDOW-001): a trade 12 bucket-months old at the
+#: global anchor contributes half its P&L to ``decay_weighted_net_paisa``.
+#: Configurable per call via the ``decay_half_life_months`` kw-only
+#: parameter (NO env var — an explicit parameter, never ambient state).
+DECAY_HALF_LIFE_MONTHS: Final[float] = 12.0
+
+#: Days per decay age bucket (DEC-METRICS-TRAILING-WINDOW-001): a bucket is
+#: one whole 30-day "month" of age at exit relative to the GLOBAL anchor —
+#: ``max(0, (anchor − exit_ts).days) // 30``, a pure-integer, deterministic
+#: key (deliberately NOT a calendar-month key: the integer form is exact,
+#: total, and trivially mirrored by the Rust fold twin). The 2020→2026 data
+#: span bounds the live bucket count at ~80.
+DECAY_BUCKET_DAYS: Final[int] = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +248,12 @@ class ResultMetrics:
     winning_trades: int
     losing_trades: int
     win_rate: float
+    #: The mirror of ``win_rate`` for the LOSING side
+    #: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001): ``losing_trades /
+    #: total_trades`` as a fraction — first-class so ranking/display never
+    #: re-derive it (scratch trades make ``1 − win_rate`` WRONG). ``0.0``
+    #: for the zero-trade row, exactly like ``win_rate``.
+    loss_rate: float
     profit_factor: float | None
     avg_winning_trade_paisa: int
     avg_losing_trade_paisa: int  # absolute, per spec line 564
@@ -231,6 +272,75 @@ class ResultMetrics:
     skewness: float | None
     kurtosis: float | None
     returns_std_dev: float | None
+
+    # ── Growth metrics (DEC-METRICS-KELLY-GROWTH-001) ────────────────
+    #: Kelly criterion fraction ``p − q/b`` (p = win probability over ALL
+    #: trades, q = 1 − p, b = avg win / avg loss payoff ratio). ``None``
+    #: when degenerate — no winners, no losers, or a zero avg-win/avg-loss
+    #: magnitude (no real payoff ratio exists). COMBINE-side by the
+    #: fold/combine libm law (DEC-METRICS-RUST-COMPUTE-FOLD-001): derived
+    #: from fold scalars only, NO new fold state.
+    kelly_fraction: float | None
+    #: Expected per-trade log growth at HALF Kelly staking — the scalar
+    #: closed form ``g(f) = p·ln(1 + f·b) + q·ln(1 − f)`` at ``f = f*/2``.
+    #: The fractional-staking growth rate the ``growth`` ranking preset
+    #: orders on. ``None`` when ``kelly_fraction`` is ``None`` or either
+    #: log argument is non-positive (a defensive totality arm — provably
+    #: dead for real fold outputs, see :func:`_kelly_growth`). COMBINE-side:
+    #: ``math.log`` is libm territory and MUST stay Python (the
+    #: fold/combine split's exactness law).
+    log_growth_at_half_kelly: float | None
+
+    # ── Exit quality (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ────
+    #: Stop-loss-exit share of all closed trades: ``sl_exit_count /
+    #: total_trades`` when the trade-sim's per-mask exit-reason counters were
+    #: threaded in (the sweep spine always threads them — the position under
+    #: ``brutex.engine.trade_sim.STOP_LOSS_REASON_INDEX``); ``0.0`` for the
+    #: zero-trade row (a vacuous truth — the ``win_rate`` precedent); and
+    #: ``None`` (the default) when the counters were NOT supplied — a caller
+    #: without reason attribution reads the honest unknown, never a
+    #: fabricated ``0.0`` (Golden Rule #1). COMBINE-side pure arithmetic
+    #: over the threaded scalar — NO new fold state (the Rust fold wire is
+    #: untouched). HONESTY NOTE: an SL exit is provably a LOSS only under
+    #: ``LevelFill.AT_LEVEL`` (the default policy — the worst-case fill law
+    #: clamps the fill at or beyond the level, so pnl <= −sl_distance < 0); a
+    #: ``LevelFill.NEXT_OPEN`` SL fill can gap PROFITABLE, so
+    #: ``sl_count <= losing_trades`` is NOT a universal invariant and is
+    #: deliberately not enforced here (property-pinned for the default
+    #: policy only).
+    sl_hit_rate: float | None = None
+
+    # ── Recency metrics (DEC-METRICS-TRAILING-WINDOW-001) ────────────
+    #: Sharpe ratio over ONLY the trades whose ``exit_ts`` falls inside the
+    #: trailing :data:`TRAILING_WINDOW` (24 months (730 days)) ending at the
+    #: GLOBAL ``trailing_anchor`` — the run's data-end instant, threaded as
+    #: a per-run parameter, NEVER derived per-combo (a combo that died in
+    #: 2023 must not read recent-strong). The SAME per-trade-return Sharpe
+    #: law as ``sharpe_ratio`` (windowed ``moments.mean / moments.std_dev``,
+    #: zero risk-free rate, NO annualisation multiplier — DEC-METRICS-001;
+    #: same ``start_equity_paisa`` return denominator, so the two figures
+    #: differ only in trade membership). ``None`` when the anchor was not
+    #: threaded (the honest legacy arm), the result has zero trades, the
+    #: window holds zero trades, or the windowed std-dev is 0/undefined.
+    trailing_sharpe_ratio: float | None = None
+    #: Profit factor over the same trailing window — the main
+    #: ``profit_factor`` law token-for-token on the windowed folds
+    #: (``None`` when the windowed gross loss is zero). ``None`` also when
+    #: the anchor is absent or the window holds zero trades.
+    trailing_profit_factor: float | None = None
+    #: Net P&L (int paisa, exact) over the same trailing window. ``None``
+    #: when the anchor is absent or the window holds zero trades (honest
+    #: absence — a windowed 0 means measured cancellation, never "no data").
+    trailing_net_pnl_paisa: int | None = None
+    #: WHOLE-HISTORY exponentially decay-weighted net P&L (paisa, float):
+    #: ``Σ_buckets pnl · 0.5^(age_months / half_life)`` over the integer
+    #: age-month buckets of :func:`fold_recency` (age from the GLOBAL
+    #: anchor; half-life :data:`DECAY_HALF_LIFE_MONTHS` by default). Decay
+    #: over the WHOLE history is a deliberate ALTERNATIVE to the hard
+    #: trailing cutoff — decaying only within the window would double-count
+    #: recency (window membership AND weight). ``None`` when the anchor is
+    #: absent or the result has zero trades.
+    decay_weighted_net_paisa: float | None = None
 
     # ── Statistical validity (Stage 4 only — NULL before then; spec 581-583) ──
     # Filled by with_stage4_statistics(); left None (NULL) by compute_metrics,
@@ -398,6 +508,7 @@ def _empty_metrics(drawdown: tuple[int, float, int, float]) -> ResultMetrics:
         winning_trades=0,
         losing_trades=0,
         win_rate=0.0,
+        loss_rate=0.0,
         profit_factor=None,
         avg_winning_trade_paisa=0,
         avg_losing_trade_paisa=0,
@@ -412,7 +523,75 @@ def _empty_metrics(drawdown: tuple[int, float, int, float]) -> ResultMetrics:
         skewness=None,
         kurtosis=None,
         returns_std_dev=None,
+        kelly_fraction=None,
+        log_growth_at_half_kelly=None,
+        # Zero trades ⇒ zero SL exits of zero trades — a vacuous truth, so
+        # 0.0 is honest here regardless of counter availability (the
+        # win_rate=0.0 precedent; DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
+        sl_hit_rate=0.0,
     )
+
+
+def _kelly_growth(
+    n_trades: int,
+    winners: int,
+    losers: int,
+    gross_profit_paisa: int,
+    gross_loss_abs_paisa: int,
+) -> tuple[float | None, float | None]:
+    """Return ``(kelly_fraction, log_growth_at_half_kelly)`` from fold scalars.
+
+    DEC-METRICS-KELLY-GROWTH-001. The Kelly criterion in the map's PINNED
+    sizing-overlay form ``f* = W − (1−W)/R`` with ``W`` the win rate and
+    ``R`` the win/loss (payoff) ratio — computed here in the algebraically
+    identical fold-scalar spelling: ``p = winners / n`` (ALL trades in the
+    denominator — scratch trades dilute the win probability exactly as they
+    dilute ``win_rate``), ``q = 1 − p``, ``b = (gross_profit / winners) /
+    (gross_loss / losers)``, ``kelly_fraction = p − q / b``. The companion
+    growth figure is the SCALAR CLOSED FORM ``g(f) = p·ln(1 + f·b) +
+    q·ln(1 − f)`` evaluated at half-Kelly ``f = f*/2`` (the standard
+    estimation-error safety factor) — O(1) per combo BY CONSTRUCTION, never
+    an O(trades) pass.
+
+    Degenerate arms (honest ``None``, never a fabricated number — Golden
+    Rule #1):
+
+    * no winners OR no losers → no payoff ratio ``b`` exists →
+      ``(None, None)``;
+    * a zero avg-win or avg-loss magnitude (reachable only through the
+      PUBLIC :func:`combine_metrics_from_folds` on a hand-built
+      :class:`TradeFolds` — :func:`_fold_trades` guarantees a winner has
+      ``pnl > 0`` and a loser ``pnl < 0``) → ``(None, None)``;
+    * either half-Kelly log argument non-positive →
+      ``(kelly_fraction, None)``. PROVABLY DEAD for any real fold output
+      (``p ∈ [0, 1]``, ``b > 0`` ⇒ ``1 + (f/2)·b = (1 + p + p·b)/2 ≥ 1/2``
+      and ``1 − f/2 ≥ 1/2`` since ``f ≤ p ≤ 1``) — kept as a DEFENSIVE
+      totality guard because :func:`combine_metrics_from_folds` is PUBLIC
+      over arbitrary hand-built folds (e.g. ``winners > n_trades`` puts
+      ``p > 1`` and can push either argument non-positive).
+
+    COMBINE-side by the fold/combine split's exactness law
+    (DEC-METRICS-RUST-COMPUTE-FOLD-001): ``math.log`` is libm territory
+    with no cross-libm bit guarantee, so it MUST stay Python; every input
+    is an existing fold scalar — NO new fold state, the Rust fold wire is
+    untouched.
+    """
+    if winners == 0 or losers == 0:
+        return None, None
+    avg_win = gross_profit_paisa / winners
+    avg_loss = gross_loss_abs_paisa / losers
+    if avg_win == 0.0 or avg_loss == 0.0:
+        return None, None
+    b = avg_win / avg_loss
+    p = winners / n_trades
+    q = 1.0 - p
+    kelly = p - q / b
+    half = kelly / 2.0
+    arg_win = 1.0 + half * b
+    arg_loss = 1.0 - half
+    if arg_win <= 0.0 or arg_loss <= 0.0:
+        return kelly, None
+    return kelly, p * math.log(arg_win) + q * math.log(arg_loss)
 
 
 def _skewness(moments: Moments) -> float | None:
@@ -449,6 +628,9 @@ def compute_metrics(
     benchmark_return_pct: float = 0.0,
     *,
     drawdown: tuple[int, float, int, float] | None = None,
+    sl_exit_count: int | None = None,
+    trailing_anchor: datetime | None = None,
+    decay_half_life_months: float = DECAY_HALF_LIFE_MONTHS,
 ) -> ResultMetrics:
     """Compute every per-result metric in the Track 1 Result Row Schema.
 
@@ -482,6 +664,23 @@ def compute_metrics(
         output for this curve; the sweep seam validates the kernel
         result before injecting (never a fabricated number,
         Golden Rule #1).
+    sl_exit_count
+        Optional stop-loss-exit counter for ``trades``
+        (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — threaded like
+        ``drawdown``; see :func:`combine_metrics_from_folds`). ``None``
+        (the default) yields the honest ``sl_hit_rate=None`` on a
+        non-empty trade set — never a fabricated ``0.0``.
+    trailing_anchor
+        The GLOBAL recency anchor (DEC-METRICS-TRAILING-WINDOW-001) — the
+        run's data-end instant, threaded as a per-run parameter (never
+        derived per-combo from the trades). ``None`` (the default) leaves
+        every recency field ``None`` — the honest legacy arm. Must be
+        tz-aware when supplied (see :func:`fold_recency`).
+    decay_half_life_months
+        The decay composite's half-life in age-month buckets
+        (:data:`DECAY_HALF_LIFE_MONTHS` by default; see
+        :func:`combine_recency_from_folds`). Read only when
+        ``trailing_anchor`` is supplied.
 
     Returns
     -------
@@ -491,7 +690,8 @@ def compute_metrics(
     Raises
     ------
     ValueError
-        If ``total_bars < 1``.
+        If ``total_bars < 1`` or ``sl_exit_count`` is out of range (see
+        :func:`combine_metrics_from_folds`).
 
     Notes
     -----
@@ -514,6 +714,9 @@ def compute_metrics(
         start_equity_paisa=equity.start_equity_paisa,
         span_years=equity.span_years,
         drawdown=drawdown,
+        sl_exit_count=sl_exit_count,
+        trailing_anchor=trailing_anchor,
+        decay_half_life_months=decay_half_life_months,
     )
 
 
@@ -525,6 +728,9 @@ def compute_metrics_from_scalars(
     start_equity_paisa: int,
     span_years: float,
     drawdown: tuple[int, float, int, float],
+    sl_exit_count: int | None = None,
+    trailing_anchor: datetime | None = None,
+    decay_half_life_months: float = DECAY_HALF_LIFE_MONTHS,
 ) -> ResultMetrics:
     """Curve-less :func:`compute_metrics`: scalars in place of an :class:`EquityCurve`.
 
@@ -543,11 +749,20 @@ def compute_metrics_from_scalars(
     pre-checks them and falls back to the curve path, which raises the
     curve's own messages):
 
+    ``sl_exit_count`` threads exactly as on :func:`compute_metrics`
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — the sweep's kernel-arm
+    tail passes the mask's stop-loss counter here), and so do
+    ``trailing_anchor`` / ``decay_half_life_months``
+    (DEC-METRICS-TRAILING-WINDOW-001 — the GLOBAL recency anchor +
+    half-life; ``None`` anchor = every recency field ``None``, the honest
+    legacy arm).
+
     Raises
     ------
     ValueError
         If ``start_equity_paisa <= 0``, ``span_years`` is not a strictly
-        positive finite float, or ``total_bars < 1``.
+        positive finite float, ``total_bars < 1``, or ``sl_exit_count`` is
+        out of range (see :func:`combine_metrics_from_folds`).
     """
     if start_equity_paisa <= 0:
         raise ValueError(
@@ -565,6 +780,9 @@ def compute_metrics_from_scalars(
         start_equity_paisa=start_equity_paisa,
         span_years=span_years,
         drawdown=drawdown,
+        sl_exit_count=sl_exit_count,
+        trailing_anchor=trailing_anchor,
+        decay_half_life_months=decay_half_life_months,
     )
 
 
@@ -711,14 +929,20 @@ def combine_metrics_from_folds(
     start_equity_paisa: int,
     span_years: float,
     drawdown: tuple[int, float, int, float],
+    sl_exit_count: int | None = None,
 ) -> ResultMetrics:
     """COMBINE a :class:`TradeFolds` into the :class:`ResultMetrics` row.
 
     The verbatim scalar tail of the pre-decomposition
-    :func:`_compute_metrics_impl` body — every expression below is
-    token-for-token the original, reading the fold intermediates from
+    :func:`_compute_metrics_impl` body — every pre-existing expression below
+    is token-for-token the original, reading the fold intermediates from
     ``folds`` instead of inline locals (the byte-parity golden suite pins
-    bit-identity; DEC-SWEEP-COMPUTE-FOLD-DECOMP-001). Requires
+    bit-identity; DEC-SWEEP-COMPUTE-FOLD-DECOMP-001). The ADDITIVE
+    ``loss_rate`` + Kelly/growth expressions
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001) are
+    combine-side by the same law — pure functions of existing fold scalars
+    (NO new fold state; the Rust fold wire is untouched), with the libm
+    ``math.log`` staying Python per the fold/combine exactness split. Requires
     ``folds.n_trades >= 1`` — the zero-trade row is
     :func:`_empty_metrics`, the caller's own arm (mirroring the sweep
     core's ``zero_trade`` arm in the design) — and that requirement is
@@ -731,11 +955,24 @@ def combine_metrics_from_folds(
     ``start_equity_paisa > 0``, finite positive ``span_years``) stays the
     caller's own boundary.
 
+    ``sl_exit_count`` (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is the
+    mask's stop-loss-exit counter — position
+    ``brutex.engine.trade_sim.STOP_LOSS_REASON_INDEX`` of the trade-sim's
+    per-mask exit-reason counters, extracted by the ENGINE caller (this
+    module stays below the engine layer, so the vocabulary position never
+    duplicates here). Threaded like the ``drawdown`` 4-tuple: a pure
+    COMBINE-side scalar, NO new fold state. ``None`` (the default — a
+    caller without reason attribution) yields the honest
+    ``sl_hit_rate=None``, never a fabricated ``0.0``.
+
     Raises
     ------
     ValueError
         If ``folds.n_trades < 1`` — the zero-trade row is
-        :func:`_empty_metrics`, computed by the caller.
+        :func:`_empty_metrics`, computed by the caller — or a supplied
+        ``sl_exit_count`` is outside ``[0, folds.n_trades]`` (the counters
+        sum to the trade count by construction, so an out-of-range value is
+        a threading bug, refused loudly — never a silently wrong rate).
 
     Spec citations live on the inline comments; conventions where the
     spec is silent are recorded in DEC-METRICS-001 (MIGRATION.md #305).
@@ -744,6 +981,12 @@ def combine_metrics_from_folds(
         raise ValueError(
             f"combine_metrics_from_folds: folds.n_trades must be >= 1, got "
             f"{folds.n_trades} — the zero-trade row is _empty_metrics, the caller's arm"
+        )
+    if sl_exit_count is not None and not 0 <= sl_exit_count <= folds.n_trades:
+        raise ValueError(
+            f"combine_metrics_from_folds: sl_exit_count={sl_exit_count} is outside "
+            f"[0, {folds.n_trades}] (n_trades) — the exit-reason counters sum to the "
+            f"trade count by construction, so this is a threading bug"
         )
     n_trades = folds.n_trades
     net_pnl = folds.net_pnl_paisa
@@ -800,6 +1043,10 @@ def combine_metrics_from_folds(
 
     # ── Trade quality (spec lines 557-568) ───────────────────────────
     win_rate = winners / n_trades  # fraction, per spec line 561
+    # loss_rate: the losing-side mirror of win_rate — same denominator, same
+    # fraction convention (DEC-METRICS-LOSSRATE-FIRSTCLASS-001; scratch
+    # trades count in neither numerator, so 1 − win_rate would be WRONG).
+    loss_rate = losers / n_trades
     # profit_factor = gross_profit / gross_loss (spec line 562). None when
     # there are no losing trades (no real denominator).
     profit_factor = _safe_ratio(float(gross_profit), float(gross_loss_abs))
@@ -864,6 +1111,19 @@ def combine_metrics_from_folds(
     skewness = _skewness(moments)
     kurtosis = _excess_kurtosis(moments)
 
+    # ── Growth metrics (DEC-METRICS-KELLY-GROWTH-001) ────────────────
+    # Kelly fraction + half-Kelly log growth from the SAME fold scalars —
+    # combine-side by the libm law (math.log; see _kelly_growth).
+    kelly_fraction, log_growth_at_half_kelly = _kelly_growth(
+        n_trades, winners, losers, gross_profit, gross_loss_abs
+    )
+
+    # ── Exit quality (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ───
+    # sl_hit_rate = SL exits / all closed trades — pure COMBINE arithmetic
+    # over the threaded counter; None (absent counters) stays the honest
+    # unknown, never a fabricated 0.0 (Golden Rule #1).
+    sl_hit_rate = None if sl_exit_count is None else sl_exit_count / n_trades
+
     return ResultMetrics(
         net_pnl_paisa=net_pnl,
         total_return_pct=total_return_pct,
@@ -888,6 +1148,7 @@ def combine_metrics_from_folds(
         winning_trades=winners,
         losing_trades=losers,
         win_rate=win_rate,
+        loss_rate=loss_rate,
         profit_factor=profit_factor,
         avg_winning_trade_paisa=avg_win,
         avg_losing_trade_paisa=avg_loss_abs,
@@ -902,6 +1163,373 @@ def combine_metrics_from_folds(
         skewness=skewness,
         kurtosis=kurtosis,
         returns_std_dev=std_dev,
+        kelly_fraction=kelly_fraction,
+        log_growth_at_half_kelly=log_growth_at_half_kelly,
+        sl_hit_rate=sl_hit_rate,
+    )
+
+
+def _resolve_folds(trades: Sequence[ClosedTrade], start_equity_paisa: int) -> TradeFolds:
+    """Serve the FOLD half from the flag-gated Rust kernel or the Python arm.
+
+    The ONE dispatch chokepoint of DEC-METRICS-RUST-COMPUTE-FOLD-001: with
+    ``BRUTEX_METRICS_RUST_FOLD`` OFF (the default) this is exactly the
+    verbatim :func:`_fold_trades` call the pre-seam composition made —
+    byte-identical by construction (the never-routes bomb-kernel spy pins
+    it). With the flag ON, :func:`brutex.metrics.compute_rust.
+    fold_wire_via_kernel` serves a bit-identical plain-data wire
+    (:func:`_folds_from_wire` builds the :class:`TradeFolds` HERE — the
+    seam leaf imports nothing from this module)
+    (burn-in self-checked, autorevert-latched) and ANY kernel fault —
+    missing/stale wheel, kernel raise, structurally invalid result, the
+    autorevert latch — degrades fail-closed to the SAME Python arm
+    (``MemoryError`` re-raises raw). The COMBINE tail is Python on both
+    arms, so the split's bit-parity is the fold's alone (the seam module
+    docstring carries the exactness argument).
+    """
+    # LAZY import (CodeQL py/cyclic-import — the #1533 lake_revision
+    # precedent): the seam leaf imports NOTHING from this module in any
+    # form (the plain-data FoldWire boundary + the injected oracle below),
+    # so this single lazy edge is cycle-free by construction. Function-
+    # local resolution is a sys.modules dict hit after the first call —
+    # the same per-call order as the env read the seam already performs.
+    from brutex.metrics import compute_rust
+
+    if not compute_rust.metrics_rust_fold_enabled():
+        return _fold_trades(trades, start_equity_paisa)
+    wire = compute_rust.fold_wire_via_kernel(
+        trades,
+        start_equity_paisa,
+        # The burn-in oracle, INJECTED (dependency inversion — the leaf
+        # never imports this module): the Python fold's wire projection
+        # for exactly these arguments.
+        oracle_wire=lambda: _fold_wire(_fold_trades(trades, start_equity_paisa)),
+    )
+    if wire is None:
+        return _fold_trades(trades, start_equity_paisa)
+    return _folds_from_wire(wire)
+
+
+def _fold_wire(folds: TradeFolds) -> FoldWire:
+    """Project a :class:`TradeFolds` onto the seam's plain-data wire shape.
+
+    The pure inverse pair of :func:`_folds_from_wire` (round-trip pinned by
+    the pair suite). ``downside_sum_sq`` is float-normalised here: the
+    Python fold legitimately holds the int ``0`` on an empty downside
+    (``sum([])``) where the kernel wire carries ``+0.0``; the two are
+    combine-equivalent (``0 / n == 0.0 / n == +0.0``, pinned by the golden
+    suite's ``scratch_only`` corpus case) and ``float(0)`` is ``+0.0``, so
+    the projection equates exactly that pair and nothing else.
+    """
+    moments = folds.moments
+    return (
+        (
+            folds.n_trades,
+            folds.winners,
+            folds.losers,
+            folds.max_holding_bars,
+            folds.largest_loss_paisa,
+            folds.max_consecutive_losses,
+            folds.max_consecutive_wins,
+        ),
+        (
+            folds.net_pnl_paisa,
+            folds.gross_profit_paisa,
+            folds.gross_loss_abs_paisa,
+            folds.sum_mfe_paisa,
+            folds.sum_mae_paisa,
+            folds.sum_holding_bars,
+        ),
+        (moments.n, moments.mean, moments.m2, moments.m3, moments.m4),
+        (float(folds.downside_sum_sq), folds.p95, folds.p5),
+    )
+
+
+def _folds_from_wire(wire: FoldWire) -> TradeFolds:
+    """Build the :class:`TradeFolds` a seam-served wire denotes.
+
+    THIS module owns the ``TradeFolds`` construction (the plain-data
+    boundary of DEC-METRICS-RUST-COMPUTE-FOLD-001 — the seam leaf speaks
+    only tuples and imports nothing from here). Values pass through
+    UNCHANGED — bit-identity is the seam's burn-in + the golden suites'
+    proof, never a re-derivation here.
+    """
+    counts, sums, moments_wire, floats = wire
+    return TradeFolds(
+        n_trades=counts[0],
+        net_pnl_paisa=sums[0],
+        gross_profit_paisa=sums[1],
+        gross_loss_abs_paisa=sums[2],
+        winners=counts[1],
+        losers=counts[2],
+        sum_mfe_paisa=sums[3],
+        sum_mae_paisa=sums[4],
+        sum_holding_bars=sums[5],
+        max_holding_bars=counts[3],
+        largest_loss_paisa=counts[4],
+        max_consecutive_losses=counts[5],
+        max_consecutive_wins=counts[6],
+        moments=Moments(
+            n=moments_wire[0],
+            mean=moments_wire[1],
+            m2=moments_wire[2],
+            m3=moments_wire[3],
+            m4=moments_wire[4],
+        ),
+        downside_sum_sq=floats[0],
+        p95=floats[1],
+        p5=floats[2],
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RecencyFolds:
+    """FOLD outputs of the recency pass (DEC-METRICS-TRAILING-WINDOW-001).
+
+    The Stage-C fold state, kept a SEPARATE additive structure — the frozen
+    :class:`TradeFolds` is untouched (the #1605 field-pairing obligation
+    binds its shape to the Rust fold wire; extending it would force a wire
+    re-key for state only the recency pass reads).
+
+    Attributes
+    ----------
+    trailing
+        A plain :class:`TradeFolds` over ONLY the trades whose ``exit_ts``
+        falls inside the trailing window (``exit_ts >= anchor −``
+        :data:`TRAILING_WINDOW`), or ``None`` when the window holds zero
+        trades. The SAME fold the main pass runs — a Rust twin reuses the
+        existing fold kernel over the filtered subsequence verbatim.
+    decay_buckets
+        The decay pass's ONLY new fold state: ``(age_month_bucket,
+        net_pnl_paisa)`` pairs, SORTED ascending by bucket key. Pure integer
+        accumulation (the fold/combine exactness law — no libm fold-side):
+        bucket key ``max(0, (anchor − exit_ts).days) //``
+        :data:`DECAY_BUCKET_DAYS`, value the exact int sum of the bucket's
+        ``pnl_paisa``. Sorted so the combine's float summation order is
+        DETERMINISTIC and independent of trade order / any future hash-map
+        Rust twin's iteration order.
+    """
+
+    trailing: TradeFolds | None
+    decay_buckets: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RecencyMetrics:
+    """COMBINE outputs of the recency pass — the four additive row values.
+
+    Field semantics are documented on the matching :class:`ResultMetrics`
+    fields (DEC-METRICS-TRAILING-WINDOW-001).
+    """
+
+    trailing_sharpe_ratio: float | None
+    trailing_profit_factor: float | None
+    trailing_net_pnl_paisa: int | None
+    decay_weighted_net_paisa: float
+
+
+def fold_recency(
+    trades: Sequence[ClosedTrade],
+    start_equity_paisa: int,
+    *,
+    trailing_anchor: datetime,
+) -> RecencyFolds:
+    """Run the recency FOLD pass (DEC-METRICS-TRAILING-WINDOW-001).
+
+    Window membership is judged on each trade's EXIT instant — the exact
+    timestamp compare ``exit_ts >= trailing_anchor − TRAILING_WINDOW``
+    (the simplest defensible law: exit-date semantics like the
+    year fold ``combo_aggregates`` keys on ``ist_trade_date(exit_ts)``, but
+    as an instant compare — no IST date truncation, so the cutoff boundary
+    is exact and tz-arithmetic-free; a trade exiting exactly AT the cutoff
+    instant is IN the window). ``trailing_anchor`` is the GLOBAL per-run
+    anchor (the loaded bar range's end), never a per-combo maximum.
+
+    The decay buckets accumulate exact INTEGER P&L sums keyed by whole
+    30-day months of age at exit (:data:`DECAY_BUCKET_DAYS`;
+    ``timedelta.days`` floors, and a defensively negative age — an exit at
+    or after the anchor — clamps to bucket 0). The exponential weights are
+    applied COMBINE-side (:func:`combine_recency_from_folds`) so the fold
+    stays libm-free and IEEE-exact — the bit-identity law the Rust fold
+    twin must satisfy.
+
+    Callers guarantee ``trades`` is non-empty and ``start_equity_paisa > 0``
+    (the zero-trade row is :func:`_empty_metrics`, the caller's arm —
+    mirroring :func:`_fold_trades`' contract), with ONE sanctioned
+    exception: :func:`_compute_metrics_impl`'s zero-trade arm invokes this
+    fold VALIDATION-ONLY over the empty series (the empty fold is
+    well-defined — ``trailing=None``, no buckets — and the result is
+    discarded) so the tz-aware anchor law fires on both arms.
+
+    Raises
+    ------
+    ValueError
+        If ``trailing_anchor`` is naive — ``ClosedTrade.exit_ts`` is
+        validated tz-aware, and a naive/aware comparison would raise a bare
+        ``TypeError`` deep in the loop; refused loudly at the boundary
+        instead.
+    """
+    if trailing_anchor.tzinfo is None:
+        raise ValueError(
+            f"fold_recency: trailing_anchor must be tz-aware (ClosedTrade.exit_ts is), "
+            f"got naive {trailing_anchor!r}"
+        )
+    cutoff = trailing_anchor - TRAILING_WINDOW
+    windowed = [trade for trade in trades if trade.exit_ts >= cutoff]
+    trailing = _fold_trades(windowed, start_equity_paisa) if windowed else None
+    buckets: dict[int, int] = {}
+    for trade in trades:
+        age_days = (trailing_anchor - trade.exit_ts).days
+        key = max(0, age_days) // DECAY_BUCKET_DAYS
+        buckets[key] = buckets.get(key, 0) + trade.pnl_paisa
+    return RecencyFolds(trailing=trailing, decay_buckets=tuple(sorted(buckets.items())))
+
+
+def _resolve_recency_folds(
+    trades: Sequence[ClosedTrade],
+    start_equity_paisa: int,
+    *,
+    trailing_anchor: datetime,
+) -> RecencyFolds:
+    """Serve the recency FOLD from the flag-gated Rust twin or the Python arm.
+
+    The recency dispatch chokepoint (DEC-METRICS-TRAILING-WINDOW-001
+    Stage-C2) — the exact :func:`_resolve_folds` shape over the SAME
+    ``BRUTEX_METRICS_RUST_FOLD`` flag: OFF (the default) is the verbatim
+    :func:`fold_recency` call — byte-identical by construction (the
+    never-routes bomb-kernel spy pins it); ON routes through
+    :func:`brutex.metrics.compute_rust.recency_wire_via_kernel`
+    (burn-in self-checked on its own budget, SHARED autorevert latch) and
+    ANY kernel fault degrades fail-closed to the SAME Python arm
+    (``MemoryError`` re-raises raw). A NAIVE anchor takes the Python arm
+    unconditionally so :func:`fold_recency`'s own boundary ``ValueError``
+    law holds verbatim (the seam's epoch conversion would raise a bare
+    ``TypeError`` instead). The window bounds cross as exact epoch µs —
+    ``cutoff = anchor − TRAILING_WINDOW`` computed HERE with the verbatim
+    Python expression, then converted on the seam's one epoch basis.
+    """
+    from brutex.metrics import compute_rust
+
+    if trailing_anchor.tzinfo is None or not compute_rust.metrics_rust_fold_enabled():
+        return fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor)
+    anchor_us = compute_rust.datetime_to_epoch_us(trailing_anchor)
+    cutoff_us = compute_rust.datetime_to_epoch_us(trailing_anchor - TRAILING_WINDOW)
+    wire = compute_rust.recency_wire_via_kernel(
+        trades,
+        start_equity_paisa,
+        anchor_us=anchor_us,
+        cutoff_us=cutoff_us,
+        # The burn-in oracle, INJECTED (dependency inversion — the leaf
+        # never imports this module): the Python recency fold's wire
+        # projection for exactly these arguments.
+        oracle_wire=lambda: _recency_wire(
+            fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor)
+        ),
+    )
+    if wire is None:
+        return fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor)
+    return _recency_folds_from_wire(wire)
+
+
+def _recency_wire(folds: RecencyFolds) -> RecencyWire:
+    """Project a :class:`RecencyFolds` onto the seam's plain-data wire shape.
+
+    The pure inverse pair of :func:`_recency_folds_from_wire` (round-trip
+    pinned by the pair suite): the trailing half through :func:`_fold_wire`
+    (``None`` passes through), the decay buckets verbatim — already the
+    wire's sorted exact-int tuple form.
+    """
+    return (
+        None if folds.trailing is None else _fold_wire(folds.trailing),
+        folds.decay_buckets,
+    )
+
+
+def _recency_folds_from_wire(wire: RecencyWire) -> RecencyFolds:
+    """Build the :class:`RecencyFolds` a seam-served recency wire denotes.
+
+    THIS module owns the construction (the plain-data boundary — the seam
+    leaf speaks only tuples). Values pass through UNCHANGED — bit-identity
+    is the seam's burn-in + the differential suites' proof.
+    """
+    trailing_wire, buckets = wire
+    return RecencyFolds(
+        trailing=None if trailing_wire is None else _folds_from_wire(trailing_wire),
+        decay_buckets=buckets,
+    )
+
+
+def combine_recency_from_folds(
+    folds: RecencyFolds,
+    *,
+    decay_half_life_months: float = DECAY_HALF_LIFE_MONTHS,
+) -> RecencyMetrics:
+    """COMBINE a :class:`RecencyFolds` into the four recency row values.
+
+    The trailing trio mirrors the main combine's expressions token-for-token
+    on the WINDOWED folds (DEC-METRICS-TRAILING-WINDOW-001):
+
+    * ``trailing_net_pnl_paisa`` — the windowed ``net_pnl_paisa`` (exact int).
+    * ``trailing_profit_factor`` — ``_safe_ratio(gross_profit,
+      gross_loss_abs)``, the main ``profit_factor`` law (``None`` when the
+      windowed gross loss is zero).
+    * ``trailing_sharpe_ratio`` — the main Sharpe law on the windowed
+      moments: ``None if std_dev is None or std_dev == 0.0 else mean /
+      std_dev`` (per-trade-return ratio, zero risk-free rate, NO
+      annualisation multiplier — DEC-METRICS-001 verbatim, so no span choice
+      arises; the windowed return series shares the full history's
+      ``start_equity_paisa`` denominator by construction of the fold).
+
+    All three are ``None`` when the window held zero trades
+    (``folds.trailing is None``) — expected and honest, never fabricated.
+
+    The decay composite applies the exponential weights libm-side (here —
+    the fold stays integer-exact): ``Σ pnl · 0.5^(bucket / half_life)``
+    over the SORTED buckets, whose fixed ascending-key order makes the IEEE
+    float summation deterministic.
+
+    Raises
+    ------
+    ValueError
+        If ``decay_half_life_months`` is not a FINITE positive float
+        (NaN/±inf/zero/negative refused). ``math.inf`` — formerly accepted
+        as the weight-1.0 plain-net limit — is REFUSED since the round-1
+        refuter (DEC-METRICS-TRAILING-WINDOW-001): validation symmetry —
+        ``NaN`` was already refused via the ``> 0`` check, so a silently
+        accepted ``inf`` that degenerates decay to the plain net was the
+        asymmetric gap. A caller wanting the plain net reads
+        ``net_pnl_paisa``; a near-plain-net decay uses a large FINITE
+        half-life (the documented tolerance story).
+    """
+    if not (math.isfinite(decay_half_life_months) and decay_half_life_months > 0.0):
+        raise ValueError(
+            f"combine_recency_from_folds: decay_half_life_months must be finite and > 0, "
+            f"got {decay_half_life_months}"
+        )
+    trailing = folds.trailing
+    if trailing is None:
+        trailing_sharpe: float | None = None
+        trailing_pf: float | None = None
+        trailing_net: int | None = None
+    else:
+        trailing_net = trailing.net_pnl_paisa
+        # The main profit_factor law token-for-token on the windowed folds.
+        trailing_pf = _safe_ratio(
+            float(trailing.gross_profit_paisa), float(trailing.gross_loss_abs_paisa)
+        )
+        # The main Sharpe law token-for-token on the windowed moments.
+        std_dev = trailing.moments.std_dev
+        trailing_sharpe = (
+            None if std_dev is None or std_dev == 0.0 else trailing.moments.mean / std_dev
+        )
+    decay = 0.0
+    for bucket, pnl in folds.decay_buckets:
+        decay += pnl * 0.5 ** (bucket / decay_half_life_months)
+    return RecencyMetrics(
+        trailing_sharpe_ratio=trailing_sharpe,
+        trailing_profit_factor=trailing_pf,
+        trailing_net_pnl_paisa=trailing_net,
+        decay_weighted_net_paisa=decay,
     )
 
 
@@ -913,6 +1541,9 @@ def _compute_metrics_impl(
     start_equity_paisa: int,
     span_years: float,
     drawdown: tuple[int, float, int, float],
+    sl_exit_count: int | None = None,
+    trailing_anchor: datetime | None = None,
+    decay_half_life_months: float = DECAY_HALF_LIFE_MONTHS,
 ) -> ResultMetrics:
     """Shared metric body behind :func:`compute_metrics` / the scalar entry.
 
@@ -923,21 +1554,67 @@ def _compute_metrics_impl(
     sweep-core conversion) expressed as the pure composition
     ``combine_metrics_from_folds(_fold_trades(...))`` over the SAME
     expressions, still a pure parameterisation with no behaviour change
-    (the golden + byte-parity suites pin it). Callers validate their own
+    (the golden + byte-parity suites pin it) — the fold half served
+    through the :func:`_resolve_folds` dispatch since
+    DEC-METRICS-RUST-COMPUTE-FOLD-001 (flag OFF ⇒ the verbatim
+    ``_fold_trades`` call; flag ON ⇒ the bit-identical Rust fold with a
+    fail-closed degrade to the same arm). Callers validate their own
     boundary; this body assumes ``total_bars >= 1`` and a valid scalar
     set. The zero-trade row stays this composition root's own arm
     (:func:`_empty_metrics`), mirroring the sweep core's ``zero_trade``
     arm — :func:`combine_metrics_from_folds` requires ``n_trades >= 1``.
+    With a supplied ``trailing_anchor`` the recency pass
+    (DEC-METRICS-TRAILING-WINDOW-001) runs as a SECOND fold/combine —
+    :func:`fold_recency` → :func:`combine_recency_from_folds` — and its four
+    values replace the base row's ``None`` defaults; an absent anchor is
+    the honest legacy arm (every recency field ``None``).
     """
     if not trades:
+        if sl_exit_count not in (None, 0):
+            # The counters sum to the trade count by construction, so a
+            # positive SL counter over ZERO trades is a threading bug —
+            # refused loudly, mirroring combine_metrics_from_folds' bound.
+            raise ValueError(
+                f"sl_exit_count={sl_exit_count} supplied for a zero-trade result — "
+                f"the exit-reason counters sum to the trade count, so this is a "
+                f"threading bug"
+            )
+        if trailing_anchor is not None:
+            # The recency validators run on the zero-trade arm too (a naive
+            # anchor / non-positive half-life must fail loudly on BOTH arms,
+            # never masked by the empty return): the REAL owners are invoked
+            # over the empty series (well-defined — ``trailing=None``, no
+            # buckets; O(1), result discarded) so the boundary laws + their
+            # messages keep exactly ONE home each.
+            combine_recency_from_folds(
+                fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor),
+                decay_half_life_months=decay_half_life_months,
+            )
         return _empty_metrics(drawdown)
-    return combine_metrics_from_folds(
-        _fold_trades(trades, start_equity_paisa),
+    base = combine_metrics_from_folds(
+        _resolve_folds(trades, start_equity_paisa),
         total_bars=total_bars,
         benchmark_return_pct=benchmark_return_pct,
         start_equity_paisa=start_equity_paisa,
         span_years=span_years,
         drawdown=drawdown,
+        sl_exit_count=sl_exit_count,
+    )
+    if trailing_anchor is None:
+        # The honest legacy arm (DEC-METRICS-TRAILING-WINDOW-001): a caller
+        # without a global anchor reads every recency field as None — never
+        # a per-combo max-exit fabrication.
+        return base
+    recency = combine_recency_from_folds(
+        _resolve_recency_folds(trades, start_equity_paisa, trailing_anchor=trailing_anchor),
+        decay_half_life_months=decay_half_life_months,
+    )
+    return replace(
+        base,
+        trailing_sharpe_ratio=recency.trailing_sharpe_ratio,
+        trailing_profit_factor=recency.trailing_profit_factor,
+        trailing_net_pnl_paisa=recency.trailing_net_pnl_paisa,
+        decay_weighted_net_paisa=recency.decay_weighted_net_paisa,
     )
 
 

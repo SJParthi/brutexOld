@@ -61,6 +61,13 @@ from typing import Final
 
 import structlog
 
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade. The
+# projection decision gates on `sweep_ops_rust_enabled()` FIRST so the
+# flag-OFF default path is byte-identical; `_sla_decision_python` below is
+# the live oracle. Env parses / validation raises / message rendering / the
+# structlog event stay Python.
+from brutex.engine.sweep_ops_rust import routed_sla_decision, sweep_ops_rust_enabled
+
 logger = structlog.get_logger("brutex.engine.sweep_sla_guard")
 
 #: The CLAUDE.md §8 production-sweep SLA envelope UPPER bound: "2-4 days wall
@@ -451,20 +458,40 @@ def check_sweep_sla(
 
     dominant_tuples: tuple[str, ...] = ()
     if cells is None:
+        # Flat model — exactly the law the DEC-RUST-SWEEP-OPS-001 facade
+        # mirrors (`_sla_decision_python` is the live oracle): route through
+        # the default-OFF seam; flag-OFF is the verbatim oracle.
         weighted = False
-        projected = tuple_count * per_tuple_seconds
+        if sweep_ops_rust_enabled():
+            projected, decision_token = routed_sla_decision(
+                tuple_count,
+                per_tuple_seconds,
+                envelope_seconds,
+                acknowledge,
+                python_law=lambda: _sla_decision_python(
+                    tuple_count, per_tuple_seconds, envelope_seconds, acknowledge
+                ),
+            )
+        else:
+            projected, decision_token = _sla_decision_python(
+                tuple_count, per_tuple_seconds, envelope_seconds, acknowledge
+            )
+        decision = SlaDecision(decision_token)
     else:
+        # k-aware weighted projection (DEC-SWEEP-SCALE-GUARDS-001) — OUTSIDE
+        # the facade's flat-law domain (the routed law multiplies
+        # tuple_count x per_tuple_seconds), so the weighted arm's decision
+        # ladder deliberately stays Python.
         weighted = True
         cost = project_weighted_grid_cost(cells, per_tuple_seconds=per_tuple_seconds)
         projected = cost.projected_seconds
         dominant_tuples = cost.dominant_labels
-
-    if projected <= envelope_seconds:
-        decision = SlaDecision.ALLOWED
-    elif acknowledge:
-        decision = SlaDecision.ACKNOWLEDGED
-    else:
-        decision = SlaDecision.REFUSED
+        if projected <= envelope_seconds:
+            decision = SlaDecision.ALLOWED
+        elif acknowledge:
+            decision = SlaDecision.ACKNOWLEDGED
+        else:
+            decision = SlaDecision.REFUSED
 
     projection = SlaProjection(
         tuple_count=tuple_count,
@@ -488,6 +515,26 @@ def check_sweep_sla(
         dominant_tuples=list(dominant_tuples),
     )
     return projection
+
+
+def _sla_decision_python(
+    tuple_count: int,
+    per_tuple_seconds: float,
+    envelope_seconds: float,
+    acknowledge: bool,
+) -> tuple[float, str]:
+    """The verbatim projection-decision law — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip).
+
+    Returns ``(projected_seconds, decision_token)`` — the token is the
+    :class:`SlaDecision` wire value the caller re-wraps.
+    """
+    projected = tuple_count * per_tuple_seconds
+    if projected <= envelope_seconds:
+        return projected, SlaDecision.ALLOWED.value
+    if acknowledge:
+        return projected, SlaDecision.ACKNOWLEDGED.value
+    return projected, SlaDecision.REFUSED.value
 
 
 __all__ = [

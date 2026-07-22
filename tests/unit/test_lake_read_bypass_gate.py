@@ -166,16 +166,13 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "lake_read dedup chokepoint governs lake bar reads only "
         "(DEC-RESULTS-CASCADE-VERDICT-JOIN-001)"
     ),
-    "brutex/data/window_ledger_store.py": (
-        "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
-        "bar/options lake — dedup identity does not apply"
-    ),
-    "brutex/data/lake_rust_ledger_render.py": (
-        "burn-in ROW-EQUIVALENCE readback — pq.read_table over the IN-MEMORY "
-        "just-rendered WINDOW-LEDGER parquet bytes (the rust arm vs the pyarrow "
-        "oracle, io.BytesIO — never a lake file, never bar/options rows); the "
-        "window_ledger_store sidecar class one seam over "
-        "(DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001)"
+    "brutex/meta/annotate.py": (
+        "annotation-pass read of the results-depth AGGS sidecar "
+        "(<stem>.aggs.parquet under sweep_runs/, run_id-keyed engine "
+        "artifacts — the trade_store writer/reader pair's outputs) for the "
+        "informational vix_band_winners_p10_p90 field — not a "
+        "bar/options-lake read, so the lake_read dedup identity does not "
+        "apply (DEC-META-LABEL-ANNOTATE-001)"
     ),
     "brutex/cli.py": (
         "wired: _LakeOptionBarSource._row_at keep-first + WARN via log_read_duplicates"

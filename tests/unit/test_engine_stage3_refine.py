@@ -1,13 +1,17 @@
-"""Unit tests for the Stage-3 refinement runner (DEC-STAGE3-REFINE-001, ADR-0007 slice 4).
+"""Unit tests for the Stage-3 refinement runner (DEC-STAGE3-REFINE-001, ADR-0007
+slice 4; optimizer re-hosted by DEC-RUST-STAGE3-REFINE-001).
 
 100% line+branch with a SYNTHETIC evaluator (no engine, no bars): the A/B
 determinism oracle (same seed + config ⇒ byte-identical run, the ADR-0007
-condition-5 envelope), the ≤ fevals×restarts hard budget (condition 8), the
-quantize-before-eval guarantee (condition 3 — the evaluator only ever sees
-on-grid ints), the run-scoped value cache (re-proposed grid points never
+condition-5 envelope), the ≤ fevals×restarts hard budget (condition 8 — now
+enforced STRICTLY inside the Rust driver), the quantize-before-eval guarantee
+(condition 3 — the evaluator only ever sees on-grid ints, snapped inside the
+driver), the run-scoped value cache (re-proposed grid points never
 re-simulate), every-eval surfacing (condition 6 — the DSR-N contribution),
-the seed/identity derivations (conditions 4/5), and the three-line
-STAGE_3_REFINE audit pattern (§4).
+the seed/identity derivations (conditions 4/5 — the LOW-64-BIT seed restored,
+the v2 identity folding the wheel's version + baked source digest), the
+three-line STAGE_3_REFINE audit pattern (§4), and the loud no-fallback
+refusal when the Rust runtime is disabled.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 import pytest
+from brutex.engine.refine_rust import REFINE_RUST_ENV, RefineRustUnavailableError
 from brutex.engine.stage3_grid import MODE_A_SL_AXIS, MODE_A_TP_AXIS
 from brutex.engine.stage3_refine import (
     STAGE3_ACTION_COMPLETE,
@@ -30,7 +35,7 @@ from brutex.engine.stage3_refine import (
     seed_from_mask_run_id,
 )
 
-pytest.importorskip("cma")  # the optimize extra — installed in the CI unit job
+pytest.importorskip("brutex_refine")  # the Stage-3 Rust wheel — built in the CI unit job
 
 #: A valid 64-char BLAKE3-shaped mask run identity (deterministic test fixture).
 _MASK_RUN_ID = "ab" * 32
@@ -87,43 +92,51 @@ class TestDeterminism:
         assert report_a == report_b  # identity, evals (order included), best, counts
         assert ev_a.calls == ev_b.calls  # the literal evaluation sequence
 
-    def test_seed_derives_from_the_mask_identity_low_32_bits(self) -> None:
-        # numpy MT19937 caps seeds at 2**32-1 — the ADR's 64-bit derivation is
-        # narrowed to 32 (recorded in DEC-STAGE3-REFINE-001); still fully derived.
-        assert seed_from_mask_run_id(_MASK_RUN_ID) == int(_MASK_RUN_ID[-8:], 16)
-        assert seed_from_mask_run_id(_MASK_RUN_ID) < 2**32
+    def test_seed_derives_from_the_mask_identity_low_64_bits(self) -> None:
+        # The ADR-0007 wording RESTORED (DEC-RUST-STAGE3-REFINE-001): the
+        # in-crate xoshiro256++ takes the full u64, so the retired numpy
+        # MT19937 32-bit narrowing is gone.
+        assert seed_from_mask_run_id(_MASK_RUN_ID) == int(_MASK_RUN_ID[-16:], 16)
+        assert seed_from_mask_run_id(_MASK_RUN_ID) < 2**64
         other = "cd" * 32
         assert seed_from_mask_run_id(other) != seed_from_mask_run_id(_MASK_RUN_ID)
 
     def test_identity_changes_with_seed_budget_and_versions(self) -> None:
-        pycma_v, numpy_v = optimizer_versions()
+        optimizer_version, optimizer_build = optimizer_versions()
         base = refinement_run_id(
             mask_run_id=_MASK_RUN_ID,
             budget=RefineBudget(),
             seed=7,
-            pycma_version=pycma_v,
-            numpy_version=numpy_v,
+            optimizer_version=optimizer_version,
+            optimizer_build=optimizer_build,
         )
         assert base != refinement_run_id(
             mask_run_id=_MASK_RUN_ID,
             budget=RefineBudget(),
             seed=8,
-            pycma_version=pycma_v,
-            numpy_version=numpy_v,
+            optimizer_version=optimizer_version,
+            optimizer_build=optimizer_build,
         )
         assert base != refinement_run_id(
             mask_run_id=_MASK_RUN_ID,
             budget=RefineBudget(max_fevals=100),
             seed=7,
-            pycma_version=pycma_v,
-            numpy_version=numpy_v,
+            optimizer_version=optimizer_version,
+            optimizer_build=optimizer_build,
         )
         assert base != refinement_run_id(
             mask_run_id=_MASK_RUN_ID,
             budget=RefineBudget(),
             seed=7,
-            pycma_version="9.9.9",  # a bumped optimizer is a NEW identity
-            numpy_version=numpy_v,
+            optimizer_version="brutex-refine-9.9.9",  # a bumped optimizer = NEW identity
+            optimizer_build=optimizer_build,
+        )
+        assert base != refinement_run_id(
+            mask_run_id=_MASK_RUN_ID,
+            budget=RefineBudget(),
+            seed=7,
+            optimizer_version=optimizer_version,
+            optimizer_build="e" * 64,  # a rebuilt-from-changed-source wheel = NEW identity
         )
 
 
@@ -152,7 +165,7 @@ class TestBudgetAndCache:
         _, report = _run()
         # The bowl peaks exactly at the on-grid (100, 250); the deterministic
         # 600-eval run must land within a few ticks (no exact-coordinate pin —
-        # that would couple the test to pycma internals, not our contract).
+        # that lives in the frozen golden, which a re-lock consciously moves).
         assert abs(report.best_sl_paisa - 100) <= 3 * MODE_A_SL_AXIS.tick_paisa  # type: ignore[attr-defined]
         assert abs(report.best_tp_paisa - 250) <= 3 * MODE_A_TP_AXIS.tick_paisa  # type: ignore[attr-defined]
         assert report.best_sharpe <= 0.0  # type: ignore[attr-defined]
@@ -191,6 +204,10 @@ class TestAuditPattern:
         start, flush, complete = lines
         assert start[2]["mask_run_id"] == _MASK_RUN_ID
         assert start[2]["refinement_run_id"] == report.refinement_run_id  # type: ignore[attr-defined]
+        # The v2 identity tokens ride the START payload (sweep-verify reads
+        # them back as the condition-B3 drift evidence).
+        assert start[2]["optimizer_version"] == optimizer_versions()[0]
+        assert start[2]["optimizer_build"] == optimizer_versions()[1]
         assert flush[2]["evals_total"] == report.evals_total  # type: ignore[attr-defined]
         assert complete[2]["best_sl_paisa"] == report.best_sl_paisa  # type: ignore[attr-defined]
         assert start[1] == flush[1] == complete[1]  # one subject per refinement run
@@ -215,30 +232,30 @@ class TestGuards:
                 mask_run_id="ab" * 15 + "\x1f" + "ab" * 16,
                 budget=RefineBudget(),
                 seed=7,
-                pycma_version="4.0.0",
-                numpy_version="2.1.0",
+                optimizer_version="brutex-refine-0.1.0",
+                optimizer_build="a" * 64,
             )
 
-    def test_refinement_run_id_rejects_unit_separator_in_pycma_version(self) -> None:
-        """The injectable pycma_version token rides the same reject-only guard."""
-        with pytest.raises(Stage3RefineError, match="pycma_version"):
+    def test_refinement_run_id_rejects_unit_separator_in_optimizer_version(self) -> None:
+        """The injectable optimizer_version token rides the same reject-only guard."""
+        with pytest.raises(Stage3RefineError, match="optimizer_version"):
             refinement_run_id(
                 mask_run_id=_MASK_RUN_ID,
                 budget=RefineBudget(),
                 seed=7,
-                pycma_version="4.0.0\x1fX",
-                numpy_version="2.1.0",
+                optimizer_version="brutex-refine-0.1.0\x1fX",
+                optimizer_build="a" * 64,
             )
 
-    def test_refinement_run_id_rejects_unit_separator_in_numpy_version(self) -> None:
-        """The injectable numpy_version token rides the same reject-only guard."""
-        with pytest.raises(Stage3RefineError, match="numpy_version"):
+    def test_refinement_run_id_rejects_unit_separator_in_optimizer_build(self) -> None:
+        """The injectable optimizer_build token rides the same reject-only guard."""
+        with pytest.raises(Stage3RefineError, match="optimizer_build"):
             refinement_run_id(
                 mask_run_id=_MASK_RUN_ID,
                 budget=RefineBudget(),
                 seed=7,
-                pycma_version="4.0.0",
-                numpy_version="2.1.0\x1fX",
+                optimizer_version="brutex-refine-0.1.0",
+                optimizer_build="a" * 63 + "\x1f",
             )
 
     def test_budget_guards(self) -> None:
@@ -263,3 +280,20 @@ class TestGuards:
     def test_budget_canonical_is_deterministic(self) -> None:
         assert RefineBudget().canonical() == RefineBudget().canonical()
         assert RefineBudget(max_fevals=10).canonical() != RefineBudget().canonical()
+
+    def test_disabled_rust_runtime_refuses_loudly_no_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-RUST-STAGE3-REFINE-001: the pycma oracle is DELETED — a falsy
+        # flag is a loud typed refusal at the FIRST wheel touch, never a
+        # silent degrade (there is nothing to degrade to).
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        ev = _BowlEvaluator()
+        with pytest.raises(RefineRustUnavailableError, match="NO fallback"):
+            refine_mask(
+                mask_run_id=_MASK_RUN_ID,
+                start_sl_paisa=50,
+                start_tp_paisa=100,
+                evaluate=cast(Evaluator, ev),
+            )
+        assert ev.calls == []  # nothing evaluated before the refusal

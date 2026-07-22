@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Final
 
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
+from brutex.engine.exec_grid import exec_window_slice
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA, metrics_for_mask
 from brutex.metrics.compute import ResultMetrics
@@ -167,6 +168,7 @@ def validate_out_of_sample(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -234,23 +236,33 @@ def validate_out_of_sample(
         roll_schedule=roll_schedule,
         apply_1day_mask=apply_1day_mask,
     )
+    # Dual-stream split (DEC-FILL-EXEC-GRID-1M-001, design §7.2/Q3): ONE day
+    # boundary applied to BOTH streams — each half's exec sub-window runs
+    # from its first decision label through the end of its last decision
+    # bar's IST session (loss-free: the slide law is session-bounded).
+    train_bars = bars[:split_index]
+    test_bars = bars[split_index:]
+    train_lo, train_hi = exec_window_slice(train_bars, exec_bars_1m)
+    test_lo, test_hi = exec_window_slice(test_bars, exec_bars_1m)
     train_metrics = metrics_for_mask(
-        bars[:split_index],
+        train_bars,
         bar_bits[:split_index],
         required_mask,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m[train_lo:train_hi],
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
         reference_stamper=reference_stamper,
     )
     test_metrics = metrics_for_mask(
-        bars[split_index:],
+        test_bars,
         bar_bits[split_index:],
         required_mask,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m[test_lo:test_hi],
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,

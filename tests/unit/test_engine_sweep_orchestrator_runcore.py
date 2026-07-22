@@ -189,15 +189,31 @@ def test_r45_diffcheck_invoked_post_persist_with_kernel_bits(tmp_path: Path) -> 
     out = tmp_path / "out"
     seen: list[dict[str, Any]] = []
 
+    # DEC-FILL-EXEC-GRID-1M-001 + apriori: the hook receives the 1m execution
+    # stream too (at tf==1minute the SAME bars_for feed, 40 bars); the legacy
+    # (no-apriori) arm passes no mask_population.
     def _diffcheck(
-        *, bars: Any, bar_bits: Any, tuple_: Any, grid: Any, mask_population: Any = None
+        *,
+        bars: Any,
+        bar_bits: Any,
+        exec_bars: Any,
+        tuple_: Any,
+        grid: Any,
+        mask_population: Any = None,
     ) -> None:
         assert mask_population is None  # legacy arm — the kwarg is never passed
-        seen.append({"n_bars": len(bars), "n_bits": len(bar_bits), "tuple": tuple_.instrument})
+        seen.append(
+            {
+                "n_bars": len(bars),
+                "n_bits": len(bar_bits),
+                "n_exec": len(exec_bars),
+                "tuple": tuple_.instrument,
+            }
+        )
 
     summary = _run(out, tmp_path / "a.jsonl", diffcheck=_diffcheck)
     assert summary is not None
-    assert seen == [{"n_bars": 40, "n_bits": 40, "tuple": "NIFTY"}]
+    assert seen == [{"n_bars": 40, "n_bits": 40, "n_exec": 40, "tuple": "NIFTY"}]
 
 
 # ── R45 executed-population threading (round 3, MIGRATION.md #1752) ──
@@ -214,7 +230,13 @@ def test_r45_apriori_arm_threads_the_executed_population(
     seen: list[Any] = []
 
     def _diffcheck(
-        *, bars: Any, bar_bits: Any, tuple_: Any, grid: Any, mask_population: Any = None
+        *,
+        bars: Any,
+        bar_bits: Any,
+        exec_bars: Any,
+        tuple_: Any,
+        grid: Any,
+        mask_population: Any = None,
     ) -> None:
         seen.append(mask_population)
 
@@ -248,7 +270,13 @@ def test_r45_apriori_extinct_tuple_threads_an_empty_population(
     seen: list[Any] = []
 
     def _diffcheck(
-        *, bars: Any, bar_bits: Any, tuple_: Any, grid: Any, mask_population: Any = None
+        *,
+        bars: Any,
+        bar_bits: Any,
+        exec_bars: Any,
+        tuple_: Any,
+        grid: Any,
+        mask_population: Any = None,
     ) -> None:
         seen.append(mask_population)
 
@@ -261,8 +289,10 @@ def test_r45_apriori_extinct_tuple_threads_an_empty_population(
 def test_r45_legacy_arm_call_shape_carries_no_population_kwarg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Legacy mode keeps the pre-round-3 call shape VERBATIM — the kwarg is
-    never passed (every legacy TupleDiffCheck implementation stays valid)."""
+    """Legacy mode carries no ``mask_population`` kwarg — the round-3 apriori
+    addition never reaches a legacy sweep. The dual-feed ``exec_bars`` kwarg
+    (DEC-FILL-EXEC-GRID-1M-001) is always threaded, in BOTH arms, orthogonal
+    to the apriori/legacy distinction this pin is about."""
     monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
     shapes: list[list[str]] = []
     summary = _run(
@@ -271,4 +301,4 @@ def test_r45_legacy_arm_call_shape_carries_no_population_kwarg(
         diffcheck=lambda **kw: shapes.append(sorted(kw)),
     )
     assert summary is not None
-    assert shapes == [["bar_bits", "bars", "grid", "tuple_"]]
+    assert shapes == [["bar_bits", "bars", "exec_bars", "grid", "tuple_"]]

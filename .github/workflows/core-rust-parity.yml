@@ -43,6 +43,15 @@
 #      _BACKUPENV=1 — independent flags, one combined leg; the
 #      crate-genuinely-engaged teeth live in each facade suite's
 #      engagement-spy + steady-state parity + hypothesis differentials).
+#   6. The T35 PR-2 models legs: the `normalise_tick_size` seam
+#      (BRUTEX_CORE_RUST_MODELS) — facade suite + type-contract battery
+#      flag-OFF at 100% coverage, then the models family re-run VERBATIM
+#      with the seam ENGAGED (TestRealCrateParity: engagement spy + edge
+#      corpus + 300-example hypothesis differential + the refuse-prefix
+#      mirror pin) + the frozen tick-size literal golden's crate arm
+#      (tests/golden/test_models_tick_size_golden.py — the live-Python-
+#      oracle ARBITER arm never skips; the crate arm asserts the SAME
+#      captured literals here).
 #
 # NOT a required gate (the lake-rust-parity precedent / coordinator
 # ruling): it gates the FUTURE default-ON flip, not every PR — a red run
@@ -69,6 +78,8 @@ on:
       - "rust/brutex-core/**"
       - "brutex/money.py"
       - "brutex/money_rust.py"
+      - "brutex/models.py"
+      - "brutex/models_rust.py"
       - "brutex/config/hardware_envelope.py"
       - "brutex/config/hardware_envelope_rust.py"
       - "brutex/config/seam_core.py"
@@ -80,6 +91,10 @@ on:
       - "brutex/config/backup_env_rust.py"
       - "tests/unit/test_money.py"
       - "tests/unit/test_money_rust.py"
+      - "tests/unit/test_models.py"
+      - "tests/unit/test_models_rust.py"
+      - "tests/unit/test_models_type_contract.py"
+      - "tests/golden/test_models_tick_size_golden.py"
       - "tests/unit/test_hardware_envelope.py"
       - "tests/unit/test_config_hardware_envelope.py"
       - "tests/unit/test_hardware_envelope_fingerprint.py"
@@ -98,6 +113,8 @@ on:
       - "rust/brutex-core/**"
       - "brutex/money.py"
       - "brutex/money_rust.py"
+      - "brutex/models.py"
+      - "brutex/models_rust.py"
       - "brutex/config/hardware_envelope.py"
       - "brutex/config/hardware_envelope_rust.py"
       - "brutex/config/seam_core.py"
@@ -109,6 +126,10 @@ on:
       - "brutex/config/backup_env_rust.py"
       - "tests/unit/test_money.py"
       - "tests/unit/test_money_rust.py"
+      - "tests/unit/test_models.py"
+      - "tests/unit/test_models_rust.py"
+      - "tests/unit/test_models_type_contract.py"
+      - "tests/golden/test_models_tick_size_golden.py"
       - "tests/unit/test_hardware_envelope.py"
       - "tests/unit/test_config_hardware_envelope.py"
       - "tests/unit/test_hardware_envelope_fingerprint.py"
@@ -232,7 +253,15 @@ jobs:
           subset_probe = brutex_core.backupenv_verify_subset_valid("2%")
           assert subset_probe is True, f"backupenv probe: {subset_probe!r}"
           assert brutex_core.backupenv_verify_subset_valid("8388608t") is False
-          print(f"brutex_core {brutex_core.__version__} probe OK (money + hwenv + m3 config)")
+          tick_probe = brutex_core.models_normalise_tick_size_str("int", "5")
+          assert tick_probe == "0.05", f"models probe: {tick_probe!r}"
+          try:
+              brutex_core.models_normalise_tick_size_str("decimal", "0.07")
+          except ValueError as exc:
+              assert str(exc).startswith("tick_refuse:"), f"models refuse probe: {exc!r}"
+          else:
+              raise AssertionError("models refuse probe: 0.07 must refuse")
+          print(f"brutex_core {brutex_core.__version__} probe OK (money + hwenv + m3 config + models)")
           PY
 
       # LANE-SCOPED COVERAGE NARROWING (honest, DEC-CONFIG-RUST-LEAVES-001):
@@ -265,8 +294,12 @@ jobs:
             tests/unit/test_config_dotenv_rust.py \
             tests/unit/test_backup_env.py \
             tests/unit/test_backup_env_rust.py \
+            tests/unit/test_models.py \
+            tests/unit/test_models_rust.py \
+            tests/unit/test_models_type_contract.py \
             --deselect tests/unit/test_hardware_envelope.py::TestFortyEightGibRegressionPin \
             --cov=brutex.money --cov=brutex.money_rust \
+            --cov=brutex.models --cov=brutex.models_rust \
             --cov=brutex.config.hardware_envelope \
             --cov=brutex.config.hardware_envelope_rust \
             --cov=brutex.config.seam_core \
@@ -319,3 +352,20 @@ jobs:
             tests/unit/test_config_dotenv_rust.py \
             tests/unit/test_backup_env.py \
             tests/unit/test_backup_env_rust.py
+
+      # The T35 PR-2 models leg: the models family re-run VERBATIM with
+      # the tick-size seam ENGAGED (the facade suite's TestRealCrateParity
+      # carries the engagement spy + the 300-example hypothesis
+      # differential + the edge corpus, so a silent degrade cannot go
+      # green; the type-contract battery is flag-independent and pins the
+      # frozen enum/dataclass/exception semantics the pyclass-hoist NO-GO
+      # verdict rests on).
+      - name: models family re-run VERBATIM with the seam ENGAGED (flag-ON twin)
+        env:
+          BRUTEX_CORE_RUST_MODELS: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_models.py \
+            tests/unit/test_models_rust.py \
+            tests/unit/test_models_type_contract.py \
+            tests/golden/test_models_tick_size_golden.py

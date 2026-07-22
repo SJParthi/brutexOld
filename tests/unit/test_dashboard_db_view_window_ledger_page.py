@@ -32,6 +32,7 @@ import pytest
 pytest.importorskip("pyarrow")
 pytest.importorskip("duckdb")
 
+import brutex_identity
 import duckdb
 from brutex.dashboard import db_view
 from brutex.dashboard.db_view import (
@@ -45,6 +46,11 @@ from brutex.data import window_ledger_store as wls
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger
 from structlog.testing import capture_logs
+
+#: The store schema — the kernel's ``LEDGER_COLUMNS`` as a tuple (the ONE
+#: schema authority; the store's former ``_COLUMNS`` re-wrap is gone —
+#: DEC-RUST-RUNID-STORES-001).
+_STORE_COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
 
 _NOW = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
 _ISO = "2026-07-01T12:00:00+00:00"
@@ -176,9 +182,9 @@ class _NoneCountConn(_SpyConn):
 
 
 def test_ledger_row_columns_pinned_to_the_store_schema() -> None:
-    """The 17-column projection MUST equal the store's ``_COLUMNS`` exactly
-    (the ``_WINDOW_KEY_COLUMNS`` precedent — pinned, never imported)."""
-    assert wls._COLUMNS == _LEDGER_ROW_COLUMNS
+    """The 16-column projection MUST equal the kernel's ``LEDGER_COLUMNS``
+    exactly (the ``_WINDOW_KEY_COLUMNS`` precedent — pinned, never imported)."""
+    assert _STORE_COLUMNS == _LEDGER_ROW_COLUMNS
 
 
 def test_ledger_table_path_constants_pinned_to_the_store() -> None:
@@ -300,7 +306,6 @@ class TestDegradeLaw:
         """A NULL ``empty_streak`` cell (all 17 columns PRESENT) trips the row
         projection's ValueError → the whole request defers to the legacy parse,
         which derives the cell from ``(status, attempts)`` — output identical."""
-        import pyarrow.parquet as pq
 
         _fresh_caches(monkeypatch)
         # Widened (Any) — this deliberately-junk row carries a NULL in an
@@ -326,7 +331,28 @@ class TestDegradeLaw:
         )
         path = wls.ledger_path(tmp_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(wls._rows_to_table([row]), path)  # type: ignore[no-untyped-call, unused-ignore]
+        # Planted RAW via pyarrow: the canonical kernel encoder REFUSES a NULL
+        # in an int-typed core slot (DEC-RUST-RUNID-STORES-001 — a production
+        # writer can no longer mint this shape), so the legacy-era junk file
+        # under test is fabricated out-of-band, exactly like a legacy lake.
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        table = pa.table(
+            {name: [row[i]] for i, name in enumerate(_STORE_COLUMNS)},
+            schema=pa.schema(
+                [
+                    (
+                        name,
+                        pa.string()
+                        if isinstance(row[i], str) or (row[i] is None and i in (8, 10))
+                        else pa.int64(),
+                    )
+                    for i, name in enumerate(_STORE_COLUMNS)
+                ]
+            ),
+        )
+        pq.write_table(table, path)
         legacy = window_ledger_rows_cached(tmp_path)
         assert legacy[0][11] == 2  # derived: EMPTY → attempts
         with duckdb.connect() as conn, capture_logs() as logs:

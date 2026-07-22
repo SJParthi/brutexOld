@@ -161,8 +161,15 @@ def _run_sweep(out_root: Path, grid: SweepGridConfig, bars: Sequence[CandleBar])
         for tuple_ in iter_sweep_tuples(grid):
             store = load_or_create_store(tuple_store_path(out_root, tuple_, grid))
             dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+            # tf==1minute fixed point (DEC-FILL-EXEC-GRID-1M-001): the SAME
+            # list serves as decision AND 1m execution stream.
             run_persisted_sweep(
-                bars, tuple_.to_run_config(grid), store=store, dedup=dedup, audit=audit
+                bars,
+                tuple_.to_run_config(grid),
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                exec_bars_1m=bars,
             )
 
 
@@ -299,19 +306,32 @@ class TestFreshPass:
         assert all(row["mae_granularity"] == "1m" for row in page.rows)
         assert all(row["path_1m_status"] == "ok" for row in page.rows)
 
-    def test_no_minute_data_degrades_honestly(self, out_root: Path) -> None:
+    def test_no_minute_data_refuses_the_tuple_loudly(self, out_root: Path) -> None:
+        """No 1m stream ⇒ the 1m-grid re-sim is IMPOSSIBLE — refuse, never fake.
+
+        REWRITTEN for DEC-FILL-EXEC-GRID-1M-001: the old law (degrade the
+        capture to ``no_1m_data`` and still build sidecars off a decision-TF
+        re-sim) is RETIRED — every fill now resolves on the 1-minute execution
+        stream, so an instrument with no 1m bars cannot be re-simulated at
+        all. The pass records the tuple errored (the per-tuple fence catches
+        the loud ``ResultsDepthError``) and writes NO sidecars — the
+        correct-or-absent posture.
+        """
         grid = _grid()
         with capture_logs() as logs:
             report = _run_pass(out_root, grid, minute=False)
-        assert report.top100_written is True
+        assert report.tuples_errored == 1
+        assert report.tuples_processed == 0
+        assert report.pool == 0
+        assert report.top100_written is True  # the empty artifact still ships
         assert any(log["event"] == "results_depth.no_minute_data" for log in logs)
+        errors = [log for log in logs if log["event"] == "results_depth.tuple_error"]
+        assert len(errors) == 1
+        assert errors[0]["error_type"] == "ResultsDepthError"
+        # No sidecar trio was written for the refused tuple.
         paths = _tuple_paths(out_root, grid)
-        stamp = load_stamp(paths)
-        assert stamp is not None
-        run_id = next(iter(stamp.trade_spans))
-        page = read_trade_page(paths, run_id=run_id, offset=0, limit=5)
-        assert all(row["path_1m_status"] == "no_1m_data" for row in page.rows)
-        assert all(row["mae_granularity"] == "tf" for row in page.rows)
+        assert load_stamp(paths) is None
+        assert not paths.trades.exists()
 
     def test_vix_feed_stamps_every_trade(self, out_root: Path) -> None:
         with capture_logs() as logs:
@@ -659,7 +679,11 @@ class TestOldSchemaAggsBackCompat:
         the pool. Now the column defaults to the HONEST 0 (the pre-guard walker
         never emitted the ``session_gap`` label, so 0 IS that old artifact's
         true label count) per the WindowLedgerRecord / Ruling-5 optional-column
-        template, and the tuple pools normally.
+        template, and the tuple pools normally. EXTENDED for
+        DEC-FILL-EXEC-GRID-1M-001: the five 1m-grid counter columns
+        (``exits_deferred`` … ``forced_fill_slid_minutes``) get the SAME
+        presence-tolerant honest-0 default — dropping all six new-era columns
+        yields the genuine 49-column pre-#1743 artifact shape (55 − 6 = 49).
         """
         import polars as pl
 
@@ -668,14 +692,33 @@ class TestOldSchemaAggsBackCompat:
         assert fresh.tuples_processed == 1
         paths = _tuple_paths(out_root, grid)
 
-        # Rewrite the aggs sidecar WITHOUT the new column — the exact 49-column
-        # shape a pre-guard writer produced — and re-stamp its per-file hash the
-        # way the OLD code's own write_tuple_sidecars would have (the stamp's
-        # store_content_hash is untouched, so the tuple reads stamped-current —
-        # the #1743 honest clause (ii) shape).
+        # Rewrite the aggs sidecar WITHOUT the new columns — the exact
+        # 49-column shape a pre-#1743 writer produced — and re-stamp its
+        # per-file hash the way the OLD code's own write_tuple_sidecars would
+        # have (the stamp's store_content_hash is untouched, so the tuple
+        # reads stamped-current — the #1743 honest clause (ii) shape).
+        new_era_columns = [
+            "exits_session_gap",
+            "exits_deferred",
+            "signals_dropped_collision",
+            "fill_slid_minutes",
+            "exit_fill_slid_minutes",
+            "forced_fill_slid_minutes",
+        ]
         df = pl.read_parquet(paths.aggs)
-        assert "exits_session_gap" in df.columns
-        df.drop("exits_session_gap").write_parquet(paths.aggs)
+        assert all(col in df.columns for col in new_era_columns)
+        assert len(df.columns) - len(new_era_columns) == 49
+        # A REAL pre-#1743 artifact's FIVE tallies sum to n_trades (its
+        # walker never emitted the session_gap label — those trades closed
+        # under another label). The 1m-grid fixture legitimately produces
+        # session_gap exits, so fold that count into exits_end_of_data before
+        # dropping — emulating a self-consistent old record, never an
+        # invariant-violating one (the honest-0 default must re-satisfy the
+        # __post_init__ sum law on read-back).
+        df = df.with_columns(
+            (pl.col("exits_end_of_data") + pl.col("exits_session_gap")).alias("exits_end_of_data")
+        )
+        df.drop(new_era_columns).write_parquet(paths.aggs)
         import hashlib
         import json
 
@@ -691,6 +734,11 @@ class TestOldSchemaAggsBackCompat:
         aggs = _load_agg_records(paths)
         assert len(aggs) == 5
         assert all(agg.exits_session_gap == 0 for agg in aggs)
+        assert all(agg.exits_deferred == 0 for agg in aggs)
+        assert all(agg.signals_dropped_collision == 0 for agg in aggs)
+        assert all(agg.fill_slid_minutes == 0 for agg in aggs)
+        assert all(agg.exit_fill_slid_minutes == 0 for agg in aggs)
+        assert all(agg.forced_fill_slid_minutes == 0 for agg in aggs)
 
         # End-to-end: the stamped-current tuple is SKIPPED (not rebuilt) and
         # still POOLS — never the pre-fix errored/dropped double-count.
@@ -708,9 +756,11 @@ class TestOldSchemaAggsBackCompat:
         _run_pass(out_root, grid)
         paths = _tuple_paths(out_root, grid)
         records = pl.read_parquet(paths.aggs).to_dicts()
-        # Hand-shape the first row to carry a non-zero session_gap count,
+        # Hand-shape the first row to carry a DISTINCTIVE session_gap count,
         # keeping the exit-tally sum invariant (move ONE exit out of whichever
-        # real bucket holds it — the fixture's finalists all trade).
+        # real bucket holds it into session_gap — the fixture's finalists all
+        # trade, and under the 1m exec grid they already carry real
+        # session_gap counts, so the pin is the INCREMENTED value surviving).
         first = records[0]
         donor = next(
             name
@@ -723,15 +773,20 @@ class TestOldSchemaAggsBackCompat:
             )
             if int(first[name]) > 0
         )
+        prior_first = int(first["exits_session_gap"])
+        prior_total = sum(int(rec["exits_session_gap"]) for rec in records)
         first[donor] = int(first[donor]) - 1
-        first["exits_session_gap"] = 1
+        first["exits_session_gap"] = prior_first + 1
         pl.DataFrame(records).write_parquet(paths.aggs)
         from brutex.engine.results_depth_pass import _load_agg_records
 
         aggs = _load_agg_records(paths)
         by_id = {agg.run_id: agg for agg in aggs}
-        assert by_id[str(first["run_id"])].exits_session_gap == 1  # the real count survived
-        assert sum(agg.exits_session_gap for agg in aggs) == 1  # every other row stayed 0
+        # The real (incremented) count survived — a setdefault-clobber mutant
+        # would read the honest-0 default here instead.
+        assert by_id[str(first["run_id"])].exits_session_gap == prior_first + 1
+        # Every other row kept its own stored count (total moved by exactly 1).
+        assert sum(agg.exits_session_gap for agg in aggs) == prior_total + 1
 
 
 class TestCompositesFor:
@@ -763,6 +818,8 @@ class TestCompositesFor:
         from tests.fakes.wp5_depth_fixtures import make_agg
 
         row = make_result_row(run_id_of(1))
+        # The shared fake defaults the five 1m-grid counter fields to 0
+        # (DEC-FILL-EXEC-GRID-1M-001) — no per-call overrides needed.
         agg = make_agg(run_id_of(1), fingerprint=fingerprint_seed(1))
         relaxed = replace(
             agg, mae_avg_paisa=None, mfe_avg_paisa=None, recovery_factor=None, win_loss_ratio=None
@@ -1417,6 +1474,7 @@ class TestWorstCaseCaptureChain:
             tf_minutes=1,
             sl_paisa=200,
             tp_paisa=100,
+            exec_bars_1m=bars,  # tf==1m fixed point — same list, both streams
             minute_index=None,
             stamper=None,
         )
@@ -1428,6 +1486,7 @@ class TestWorstCaseCaptureChain:
             mask_to_entry_signals(bar_bits, row.mask_bits),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point — same list, both streams
             stop_loss_paisa=200,
             take_profit_paisa=100,
             detail_sink=detail_sink,  # type: ignore[arg-type]
@@ -1439,3 +1498,353 @@ class TestWorstCaseCaptureChain:
         entry_ts = capture.trades[0].entry_ts
         (entry_bar,) = [b for b in bars if b.timestamp == entry_ts]
         assert capture.trades[0].entry_px == entry_bar.high
+
+
+# ---------------------------------------------------------------------------
+# DEC-ALPHA-BUYHOLD-METRIC-001 — alpha threading through the pass.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+
+
+class TestAlphaThreading:
+    def test_alpha_metrics_land_on_every_top100_entry(self, out_root: Path) -> None:
+        """The pass threads the R27 baseline's paisa pair + the grid equity
+        into the writer: every entry carries the alpha triple, and the triple
+        satisfies the exact formula over the WRITTEN baseline artifact."""
+        grid = _grid()
+        _run_pass(out_root, grid)
+        run_id = grid_identity(grid)
+        run_dir = sweep_run_dir(out_root, run_id)
+        artifact = load_top100(run_dir.parent, run_id)
+        assert artifact is not None
+        assert artifact.entries, "fixture pool must produce entries"
+        baseline = json.loads((run_dir / "baseline-NIFTY.json").read_text(encoding="utf-8"))
+        anchor_paisa = round(Decimal(baseline["anchor_open"]) * 100)
+        close_paisa = round(Decimal(baseline["sessions"][-1][1]) * 100)
+        equity = _grid().start_equity_paisa
+        for entry in artifact.entries:
+            metrics = entry["metrics"]
+            assert isinstance(metrics, dict)
+            strat = float(int(metrics["net_pnl_paisa"])) / float(equity) * 100.0
+            bh = float(close_paisa - anchor_paisa) / float(anchor_paisa) * 100.0
+            assert metrics["strategy_return_pct"] == strat
+            assert metrics["bh_return_pct"] == bh
+            assert metrics["alpha_pct"] == strat - bh
+
+    def test_errored_baseline_leaves_alpha_honestly_absent(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed baseline carries NO alpha keys (the honest '—'), while
+        the pass + artifact still complete (the R27 fence law)."""
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            raise ValueError("baseline exploded")
+
+        monkeypatch.setattr(results_depth_pass, "compute_baseline", _boom)
+        grid = _grid()
+        report = _run_pass(out_root, grid)
+        assert report.baselines_written == 0
+        assert report.top100_written is True
+        run_id = grid_identity(grid)
+        artifact = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert artifact is not None
+        for entry in artifact.entries:
+            assert "alpha_pct" not in entry["metrics"]  # type: ignore[operator]
+
+    def test_alpha_derivation_raise_never_skips_the_baseline_write(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review r1 latent-defect pin: the ADDITIVE alpha derivation is
+        fail-soft in its OWN narrow guard — a raise there can never skip the
+        pre-existing R27 baseline WRITE (still written + referenced +
+        tallied, pass completes, alpha honestly absent)."""
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            raise ValueError("alpha derivation exploded")
+
+        monkeypatch.setattr(results_depth_pass, "alpha_baseline_from_series", _boom)
+        grid = _grid()
+        report = _run_pass(out_root, grid)
+        # The R27 baseline artifact is untouched by the alpha raise.
+        run_id = grid_identity(grid)
+        run_dir = sweep_run_dir(out_root, run_id)
+        assert (run_dir / "baseline-NIFTY.json").is_file()
+        assert report.baselines_written == 1
+        # The pass completes; the artifact still REFERENCES the baseline and
+        # its entries carry NO alpha keys (the honest "—").
+        assert report.top100_written is True
+        artifact = load_top100(run_dir.parent, run_id)
+        assert artifact is not None
+        assert artifact.baselines == {"NIFTY": "baseline-NIFTY.json"}
+        assert artifact.entries
+        for entry in artifact.entries:
+            assert "alpha_pct" not in entry["metrics"]  # type: ignore[operator]
+
+    def test_alpha_derivation_memory_error_re_raises_raw(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The alpha guard's escape trio propagates raw (never fail-soft)."""
+
+        def _oom(*_args: object, **_kwargs: object) -> object:
+            raise MemoryError
+
+        monkeypatch.setattr(results_depth_pass, "alpha_baseline_from_series", _oom)
+        with pytest.raises(MemoryError):
+            _run_pass(out_root)
+
+    def test_junk_alpha_gate_env_fails_the_pass_before_any_tuple_work(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_ALPHA_GATE", "junk")
+        with pytest.raises(ValueError, match="BRUTEX_ALPHA_GATE"):
+            _run_pass(out_root, _grid())
+        # Nothing was built — the resolve runs FIRST (eager fail-loud law).
+        assert not sweep_run_dir(out_root, grid_identity(_grid())).exists()
+
+    def test_alpha_gate_param_overrides_the_env(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit alpha_gate bool never consults the env (junk inert)."""
+        monkeypatch.setenv("BRUTEX_ALPHA_GATE", "junk")
+        report = _run_pass(out_root, _grid(), alpha_gate=False)
+        assert report.top100_written is True
+
+    def test_alpha_gate_env_on_threads_to_the_writer(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_ALPHA_GATE", "1")
+        grid = _grid()
+        report = _run_pass(out_root, grid)
+        assert report.top100_written is True
+        run_id = grid_identity(grid)
+        artifact = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert artifact is not None
+        assert artifact.source["alpha_gate"] is True
+        excluded = artifact.source["alpha_gate_excluded"]
+        assert isinstance(excluded, int) and excluded >= 0
+        # Accounting: the pass's gate_passers (pre-alpha-gate hard-gate
+        # passers) == the shipped entries + the alpha-gate exclusions (the
+        # fixture pool collapses no twin families).
+        assert len(artifact.entries) + excluded == report.gate_passers
+        # Review r1 FIX 1: the artifact-side ``source["gate_passers"]`` AGREES
+        # with the report-side count under gate-ON — both mean the HARD-gate
+        # passer count, never the post-alpha-exclusion count.
+        assert artifact.source["gate_passers"] == report.gate_passers
+
+
+# ── Exec-provider + fill-sensitivity threading (DEC-OPTIONS-EXEC-FEEDBACK-001 /
+#    DEC-FILL-EXEC-GRID-1M-001, R13) ─────────────────────────────────────────────
+
+
+class TestExecProviderAndFillSensitivityThreading:
+    """The provider kwargs thread VERBATIM; ``fill_sensitivity=True`` builds the
+    resolver over the pass's own caches — the default arm stays byte-identical
+    (no additive keys, ``None`` providers into :func:`build_top100`)."""
+
+    @staticmethod
+    def _spy_build(monkeypatch: pytest.MonkeyPatch, seen: dict[str, object]) -> None:
+        real_build = results_depth_pass.build_top100
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            for key in (
+                "options_exec_provider",
+                "futures_exec_provider",
+                "fill_sensitivity_provider",
+            ):
+                seen[key] = kwargs.get(key)
+            return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(results_depth_pass, "build_top100", _spy)
+
+    def test_default_threads_none_and_keeps_the_prechange_artifact_shape(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+        self._spy_build(monkeypatch, seen)
+        _run_pass(out_root)
+        assert seen["options_exec_provider"] is None
+        assert seen["futures_exec_provider"] is None
+        assert seen["fill_sensitivity_provider"] is None
+        run_id = grid_identity(_grid())
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert loaded is not None
+        assert loaded.entries
+        # The pre-change artifact SHAPE: the emit-on-wired keys are ABSENT on
+        # every entry AND on the source header (absence == not wired — the
+        # additive-key law that keeps provider-None artifact bytes identical).
+        for entry in loaded.entries:
+            assert "options_exec" not in entry
+            assert "futures_exec" not in entry
+            assert "fill_sensitivity" not in entry
+        for flag in ("options_exec_wired", "futures_exec_wired", "fill_sensitivity_wired"):
+            assert flag not in loaded.source
+
+    def test_wired_providers_thread_verbatim_and_annotate_every_ranked_entry(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.results_depth_pass import _FillSensitivityResolver
+        from brutex.engine.top100_artifact import Top100Candidate
+
+        def _options(_candidate: Top100Candidate) -> dict[str, object]:
+            return {"status": "not_priced", "reason": "sentinel_options"}
+
+        def _futures(_candidate: Top100Candidate) -> dict[str, object]:
+            return {"status": "not_priced", "reason": "sentinel_futures"}
+
+        seen: dict[str, object] = {}
+        self._spy_build(monkeypatch, seen)
+        _run_pass(
+            out_root,
+            options_exec_provider=_options,
+            futures_exec_provider=_futures,
+            fill_sensitivity=True,
+        )
+        # Threaded VERBATIM — the exact callables, identity not copies.
+        assert seen["options_exec_provider"] is _options
+        assert seen["futures_exec_provider"] is _futures
+        resolver = seen["fill_sensitivity_provider"]
+        assert isinstance(resolver, _FillSensitivityResolver)
+        run_id = grid_identity(_grid())
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert loaded is not None
+        assert loaded.entries
+        for entry in loaded.entries:
+            assert entry["options_exec"] == {"status": "not_priced", "reason": "sentinel_options"}
+            assert entry["futures_exec"] == {"status": "not_priced", "reason": "sentinel_futures"}
+            # The REAL resolver re-simulated the fixture finalist (parity-OK on
+            # this fixture) and PRICED the fold — the haircut arithmetic law.
+            verdict = entry["fill_sensitivity"]
+            assert isinstance(verdict, dict)
+            assert verdict["status"] == "priced"
+            assert verdict["reference_basis"] == "open_anchored"
+            assert verdict["n_trades"] > 0
+            assert (
+                verdict["haircut_paisa"]
+                == verdict["reference_net_pnl_paisa"] - verdict["worst_case_net_pnl_paisa"]
+            )
+            # Dominance on REAL walker output (round-1 review fold): the
+            # worst-case law never overstates the open-anchored reference,
+            # so the shipped haircut is >= 0 here — the fold never guards.
+            haircut = verdict["haircut_paisa"]
+            assert isinstance(haircut, int)
+            assert haircut >= 0
+        assert loaded.source["fill_sensitivity_wired"] is True
+        # The captured resolver degrades HONESTLY on an out-of-band candidate
+        # (a run_id no pooled tuple recorded) — the named reason, never a crash.
+        from tests.fakes.wp5_depth_fixtures import make_candidate
+
+        stray = make_candidate(999, fingerprint="f" * 16)
+        assert resolver(stray) == {"status": "not_priced", "reason": "no_replay_context"}
+
+
+class TestFillSensitivityResolver:
+    """`_FillSensitivityResolver` direct unit arms (DEC-FILL-EXEC-GRID-1M-001):
+    every NAMED degrade, the global-stop re-raise law, and the per-tuple memos."""
+
+    @staticmethod
+    def _context(minute_bars: Sequence[CandleBar]) -> object:
+        from brutex.engine.results_depth_pass import _InstrumentContext
+        from brutex.engine.session_lens import build_session_lens
+
+        return _InstrumentContext(
+            minute_index=None,
+            minute_bars=tuple(minute_bars),
+            lens=build_session_lens((), instrument="NIFTY"),
+        )
+
+    def _resolver(
+        self,
+        *,
+        mapped_run_id: str | None,
+        minute_bars: Sequence[CandleBar],
+        bars_of: object,
+    ) -> object:
+        from brutex.engine.results_depth_pass import _FillSensitivityResolver
+
+        grid = _grid()
+        (tuple_,) = iter_sweep_tuples(grid)
+        tuple_of = {} if mapped_run_id is None else {mapped_run_id: tuple_}
+        context = self._context(minute_bars)
+        return _FillSensitivityResolver(
+            bars_of=bars_of,  # type: ignore[arg-type]
+            context_of=lambda _instrument: context,  # type: ignore[arg-type, return-value]
+            tuple_of=tuple_of,
+            grid=grid,
+        )
+
+    @staticmethod
+    def _candidate(n: int) -> object:
+        from tests.fakes.wp5_depth_fixtures import make_candidate
+
+        return make_candidate(n, fingerprint="ab" * 8)
+
+    def test_unmapped_run_id_degrades_no_replay_context(self) -> None:
+        def _never(*_args: object) -> object:
+            raise AssertionError("must not touch bars for an unmapped candidate")
+
+        resolver = self._resolver(mapped_run_id=None, minute_bars=_BARS, bars_of=_never)
+        assert resolver(self._candidate(7)) == {  # type: ignore[operator]
+            "status": "not_priced",
+            "reason": "no_replay_context",
+        }
+
+    def test_empty_minute_stream_degrades_no_1m_data(self) -> None:
+        from tests.fakes.wp5_depth_fixtures import run_id_of as _rid
+
+        def _never(*_args: object) -> object:
+            raise AssertionError("must not load bars without a 1m stream")
+
+        resolver = self._resolver(mapped_run_id=_rid(7), minute_bars=(), bars_of=_never)
+        assert resolver(self._candidate(7)) == {  # type: ignore[operator]
+            "status": "not_priced",
+            "reason": "no_1m_data",
+        }
+
+    def test_memory_error_re_raises_raw(self) -> None:
+        from tests.fakes.wp5_depth_fixtures import run_id_of as _rid
+
+        def _oom(*_args: object) -> object:
+            raise MemoryError
+
+        resolver = self._resolver(mapped_run_id=_rid(7), minute_bars=_BARS, bars_of=_oom)
+        with pytest.raises(MemoryError):
+            resolver(self._candidate(7))  # type: ignore[operator]
+
+    def test_resim_failure_degrades_named_and_logged(self) -> None:
+        from tests.fakes.wp5_depth_fixtures import run_id_of as _rid
+
+        def _boom(*_args: object) -> object:
+            raise ValueError("planted re-sim fault")
+
+        resolver = self._resolver(mapped_run_id=_rid(7), minute_bars=_BARS, bars_of=_boom)
+        with capture_logs() as logs:
+            verdict = resolver(self._candidate(7))  # type: ignore[operator]
+        assert verdict == {"status": "not_priced", "reason": "resim_failed"}
+        assert any(log["event"] == "results_depth.fill_sensitivity_resim_failed" for log in logs)
+
+    def test_parity_mismatch_degrades_and_memos_are_per_tuple(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        from tests.fakes.wp5_depth_fixtures import run_id_of as _rid
+
+        calls = {"capture": 0, "bars": 0}
+
+        def _bars_of(_instrument: str, _tf_label: str) -> Sequence[CandleBar]:
+            calls["bars"] += 1
+            return _BARS
+
+        def _fake_capture(*_args: object, **_kwargs: object) -> object:
+            calls["capture"] += 1
+            return SimpleNamespace(parity_ok=False)
+
+        monkeypatch.setattr(results_depth_pass, "capture_combo", _fake_capture)
+        resolver = self._resolver(mapped_run_id=_rid(7), minute_bars=_BARS, bars_of=_bars_of)
+        expected = {"status": "not_priced", "reason": "resim_parity_mismatch"}
+        assert resolver(self._candidate(7)) == expected  # type: ignore[operator]
+        # A second resolve for the SAME tuple hits BOTH memos (bar_bits + the
+        # exec map are mask-independent) — no rebuild, identical verdict.
+        assert resolver(self._candidate(7)) == expected  # type: ignore[operator]
+        assert calls["capture"] == 2
+        assert calls["bars"] == 2

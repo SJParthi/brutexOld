@@ -192,7 +192,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Sequence
-from typing import Final
+from typing import Final, NoReturn
 
 import numpy as np
 import numpy.typing as npt
@@ -200,7 +200,11 @@ import structlog
 
 from brutex.engine.combo_mask import count_combos, count_supermasks
 from brutex.engine.sweep_lookahead import env_flag_tristate
-from brutex.vocabulary.conflicts import has_conflict
+from brutex.engine.sweep_ops_rust import (
+    routed_apriori_join_prune,
+    sweep_ops_rust_enabled,
+)
+from brutex.vocabulary.conflicts import CONFLICT_PAIRS, has_conflict
 
 __all__ = [
     "DEFAULT_MAX_MASK_BARS",
@@ -537,7 +541,115 @@ def _join_and_prune(
     return candidates
 
 
-def _raise_budget(cell_label: str, k: int, count: int, n_bars: int, max_mask_bars: int) -> None:
+#: The conflict pairs pre-packed as `(1 << a) | (1 << b)` masks — the crate's
+#: `has_conflict` mirror data (sorted for determinism). Derived ONCE from the
+#: canonical :data:`~brutex.vocabulary.conflicts.CONFLICT_PAIRS` (never a
+#: second literal); the oracle keeps calling `has_conflict` itself.
+_CONFLICT_PAIR_MASKS: Final[tuple[int, ...]] = tuple(
+    sorted((1 << a) | (1 << b) for a, b in CONFLICT_PAIRS)
+)
+
+
+class _BudgetTrip(Exception):
+    """Internal signal: the strided budget probe tripped at ``count`` appends.
+
+    Raised ONLY by :func:`_join_result_python`'s probe closure to stop the
+    verbatim :func:`_join_and_prune` oracle at the exact Python trip point,
+    then converted to the VALUE shape the routed law shares — never escapes
+    this module.
+    """
+
+    def __init__(self, count: int) -> None:
+        super().__init__(count)
+        self.count = count
+
+
+def _join_result_python(
+    frontier_tuples: list[tuple[int, ...]],
+    frontier_masks: npt.NDArray[np.uint64],
+    *,
+    drop_conflicts: bool,
+    n_bars: int,
+    limit: int,
+) -> tuple[list[tuple[int, ...]], int | None]:
+    """The value-shaped join fold — the retained Python oracle.
+
+    Runs the verbatim :func:`_join_and_prune` with the standard strided
+    budget probe (STRICT ``count * n_bars > limit`` at every
+    :data:`_BUDGET_CHECK_STRIDE` multiple — exactly ``_budget_check``'s
+    trip law) and folds the outcome to the routed law's VALUE shape
+    (DEC-RUST-SWEEP-OPS-001 slice 5): ``(candidates, None)`` on a full
+    join, ``([], tripped_count)`` on a budget trip. The caller raises the
+    ``SweepAprioriBudgetError`` bytes from the count.
+    """
+
+    def _probe(count: int) -> None:
+        if count * n_bars > limit:
+            raise _BudgetTrip(count)
+
+    try:
+        candidates = _join_and_prune(
+            frontier_tuples, frontier_masks, drop_conflicts=drop_conflicts, on_count=_probe
+        )
+    except _BudgetTrip as trip:
+        return ([], trip.count)
+    return (candidates, None)
+
+
+def _join_and_prune_checked(
+    frontier_tuples: list[tuple[int, ...]],
+    frontier_masks: npt.NDArray[np.uint64],
+    *,
+    drop_conflicts: bool,
+    n_bars: int,
+    limit: int,
+    cell_label: str,
+    k: int,
+) -> list[tuple[int, ...]]:
+    """Join + prune one level with the strided budget trip — routed or oracle.
+
+    The ONE seam the generate loop calls per level: flag ON routes the pure
+    fold through the sweep-ops crate (the frontier crosses as position
+    tuples; the frequent-membership set is rebuilt crate-side; conflict
+    pairs cross via :data:`_CONFLICT_PAIR_MASKS`), flag OFF runs the
+    verbatim oracle. A budget trip — identical count either arm — raises
+    :func:`_raise_budget`'s exact message bytes HERE, so
+    ``SweepAprioriBudgetError`` semantics are byte-identical both arms.
+    """
+    if sweep_ops_rust_enabled():
+
+        def _oracle() -> tuple[list[tuple[int, ...]], int | None]:
+            return _join_result_python(
+                frontier_tuples,
+                frontier_masks,
+                drop_conflicts=drop_conflicts,
+                n_bars=n_bars,
+                limit=limit,
+            )
+
+        candidates, tripped = routed_apriori_join_prune(
+            frontier_tuples,
+            drop_conflicts,
+            _CONFLICT_PAIR_MASKS,
+            n_bars,
+            limit,
+            _BUDGET_CHECK_STRIDE,
+            python_law=_oracle,
+        )
+    else:
+        candidates, tripped = _join_result_python(
+            frontier_tuples,
+            frontier_masks,
+            drop_conflicts=drop_conflicts,
+            n_bars=n_bars,
+            limit=limit,
+        )
+    if tripped is not None:
+        _raise_budget(cell_label, k, tripped, n_bars, limit)
+    return candidates
+
+
+def _raise_budget(cell_label: str, k: int, count: int, n_bars: int, max_mask_bars: int) -> NoReturn:
     """Raise the deterministic mask·bar breaker as a ``SweepComboError`` subclass (LOUD).
 
     Imports :class:`brutex.engine.sweep_run.SweepAprioriBudgetError` LAZILY at the
@@ -786,11 +898,14 @@ def generate_apriori_candidates(
 
     # Build the intermediate frequent frontiers F_2 … F_{k-1} (each hit-filtered).
     for j in range(2, k):
-        candidates = _join_and_prune(
+        candidates = _join_and_prune_checked(
             frontier_tuples,
             frontier_masks,
             drop_conflicts=(j == _PAIR_LEVEL),
-            on_count=_budget_check,
+            n_bars=resolved_n_bars,
+            limit=limit,
+            cell_label=cell_label,
+            k=k,
         )
         # AUTHORITATIVE breaker check on the SETTLED RAW |C_j| — the SAME quantity
         # the strided ``on_count`` check accumulates, BEFORE hit-filtering. The
@@ -826,8 +941,14 @@ def generate_apriori_candidates(
     # filtering (so the trip is shard-INVARIANT + whole-cell: every root_mod shard
     # trips identically on the whole-cell budget), then emit the shard-owned masks
     # in lex-by-position order.
-    final_candidates = _join_and_prune(
-        frontier_tuples, frontier_masks, drop_conflicts=(k == _PAIR_LEVEL), on_count=_budget_check
+    final_candidates = _join_and_prune_checked(
+        frontier_tuples,
+        frontier_masks,
+        drop_conflicts=(k == _PAIR_LEVEL),
+        n_bars=resolved_n_bars,
+        limit=limit,
+        cell_label=cell_label,
+        k=k,
     )
     _budget_check(len(final_candidates))
     # Target-level census: raw |C_k| (pre-shard); frequent OMITTED (Stage-1B decides).

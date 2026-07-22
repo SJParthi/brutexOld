@@ -443,6 +443,23 @@ class TestSweepGridConfig:
         with pytest.raises(ValueError, match="take_profits value\\s+on the Mode-A grid"):
             _grid(stage3_enable=True, stop_losses=[80], take_profits=[505])
 
+    def test_stage3_enable_wheelless_runtime_is_a_clean_config_valueerror(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-RUST-STAGE3-REFINE-001 (#1960): GridAxis.normalize rides the
+        # brutex_refine wheel — an enabled grid on a wheel-less/flag-off box
+        # must fail fast at __post_init__ as the SAME clean config ValueError
+        # the CLI surfaces, never a raw RefineRustUnavailableError leak.
+        from brutex.engine.refine_rust import RefineRustUnavailableError
+        from brutex.engine.stage3_grid import GridAxis
+
+        def _boom(self: GridAxis, paisa: int) -> float:
+            raise RefineRustUnavailableError("the brutex_refine wheel is not importable")
+
+        monkeypatch.setattr(GridAxis, "normalize", _boom)
+        with pytest.raises(ValueError, match="requires the Stage-3\\s+Rust runtime"):
+            _grid(stage3_enable=True, stop_losses=[80])
+
     def test_stage3_enable_accepts_on_grid_axes(self) -> None:
         grid = _grid(stage3_enable=True, stop_losses=[80, 100], take_profits=[50, 120])
         assert grid.stage3_enable is True
@@ -632,15 +649,24 @@ class TestTupleDigestGateSelectionIdentity:
     default-selection) sweep stays BYTE-STABLE — no existing on-disk store
     re-keys WITHIN the one-law era. The default digest is the
     empirically-captured constant, DELIBERATELY re-locked once by
-    DEC-FILL-WORST-CASE-ONLY-001: the descriptor now folds the permanent
-    ``fill_mode: worst_case`` token unconditionally, so every post-DEC store
-    address is distinct from every precise-era address by construction (the
-    anti-aliasing pin below keeps the retired digest dead).
+    DEC-FILL-WORST-CASE-ONLY-001 (the permanent ``fill_mode: worst_case``
+    token) and once more by DEC-FILL-EXEC-GRID-1M-001: the descriptor now
+    ALSO folds ``execution_grid: 1m_next_bar`` unconditionally (emitted
+    right after fill_mode), so every 1m-grid store address is distinct from
+    every pre-grid address by construction (the anti-aliasing pin below
+    keeps both retired digests dead).
     """
 
-    # The one-law default digest (16-char _PATH_DIGEST_LEN) captured after
-    # DEC-FILL-WORST-CASE-ONLY-001 folded the unconditional fill_mode token.
-    _DEFAULT_DIGEST = "7a0120c1123b44c6"
+    # The 1m-grid default digest (16-char _PATH_DIGEST_LEN): blake3 over the
+    # sort_keys canonical-JSON params dict now carrying BOTH permanent tokens
+    # {"fill_mode": "worst_case", "execution_grid": "1m_next_bar"} —
+    # re-locked by DEC-FILL-EXEC-GRID-1M-001 (the digest over the params dict
+    # now carrying execution_grid).
+    _DEFAULT_DIGEST = "3e0dd7d080da66b7"
+    #: The FROZEN worst-case-era pre-grid default digest (captured on the
+    #: DEC-FILL-WORST-CASE-ONLY-001 tree, before execution_grid folded in) —
+    #: a retired address no 1m-grid sweep may ever mint again.
+    _WORST_CASE_PRE_GRID_DIGEST = "7a0120c1123b44c6"
     #: The FROZEN precise-era default digest (captured on 0f411437) — a
     #: retired address no one-law sweep may ever mint again.
     _PRECISE_ERA_DIGEST = "5b020e892247deac"
@@ -674,16 +700,37 @@ class TestTupleDigestGateSelectionIdentity:
         assert d90 != d0
         assert d90 != d80  # a distinct KNOB value re-keys again, not just presence
 
+    def test_cvar_gate_rekeys_and_is_value_sensitive(self) -> None:
+        # DEC-RANK-CVAR-TAIL-GATE-001: an ACTIVE CVaR tail gate re-keys the
+        # store address exactly like the overfit gate; the explicit None
+        # default elides (byte-stable — the killing test for the
+        # elision-condition flip mutant).
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+        from brutex.ranking import CvarGateConfig
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        assert _tuple_digest(_tuple(), _grid(cvar_gate=None)) == d0
+        d50 = _tuple_digest(_tuple(), _grid(cvar_gate=CvarGateConfig(threshold_paisa=50_000)))
+        d60 = _tuple_digest(_tuple(), _grid(cvar_gate=CvarGateConfig(threshold_paisa=60_000)))
+        da = _tuple_digest(
+            _tuple(), _grid(cvar_gate=CvarGateConfig(threshold_paisa=50_000, alpha_bps=100))
+        )
+        assert d50 != d0
+        assert d50 != d60  # threshold value re-keys
+        assert d50 != da  # alpha value re-keys
+
     def test_one_law_digest_never_aliases_the_precise_era(self) -> None:
-        # DEC-FILL-WORST-CASE-ONLY-001 anti-aliasing pin: the unconditional
-        # fill_mode token moves the default store address off the frozen
-        # precise-era digest, so a one-law sweep can never adopt (or
-        # overwrite) a precise-era Parquet at the same path.
+        # DEC-FILL-WORST-CASE-ONLY-001 + DEC-FILL-EXEC-GRID-1M-001
+        # anti-aliasing pin: the unconditional fill_mode + execution_grid
+        # tokens move the default store address off BOTH frozen prior-era
+        # digests, so a 1m-grid sweep can never adopt (or overwrite) a
+        # precise-era or pre-grid worst-case Parquet at the same path.
         from brutex.engine.sweep_orchestrator import _tuple_digest
 
         d0 = _tuple_digest(_tuple(), _grid())
         assert d0 == self._DEFAULT_DIGEST
         assert d0 != self._PRECISE_ERA_DIGEST
+        assert d0 != self._WORST_CASE_PRE_GRID_DIGEST
 
     def test_stage3_rekeys_but_disabled_knobs_inert(self) -> None:
         from brutex.engine.sweep_orchestrator import _tuple_digest
@@ -739,6 +786,93 @@ class TestTupleDigestGateSelectionIdentity:
         p_topk = tuple_store_path(tmp_path, t, _grid(top_k=50))
         p_mh = tuple_store_path(tmp_path, t, _grid(min_hits=5))
         assert len({p_base, p_topk, p_mh}) == 3
+
+
+# ── max_sl_hit_rate — the Door-6 gate knob (DEC-METRICS-LOSSRATE-FIRSTCLASS-001) ──
+
+
+class TestMaxSlHitRateKnob:
+    """The opt-in SL-hit-rate gate knob: identity elision + Stage-B enforcement.
+
+    Stage A shipped the config plumbing with a construction refusal; Stage B
+    (the exit-reason wire) DELETED the refusal — a SET value is now accepted,
+    range-validated, folded into the store-address identity
+    (``_gate_config_fragment``) and threaded to ranking Door 6 via
+    ``to_run_config``.
+    """
+
+    def test_default_none_keeps_the_frozen_digest(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        digest = TestTupleDigestGateSelectionIdentity._DEFAULT_DIGEST
+        assert _tuple_digest(_tuple(), _grid()) == digest
+        # An EXPLICIT None is the default — byte-identical, never a re-key.
+        assert _tuple_digest(_tuple(), _grid(max_sl_hit_rate=None)) == digest
+
+    def test_set_value_is_accepted_and_rekeys_the_digest(self) -> None:
+        """Stage B: an in-range ceiling constructs (the Stage-A refusal is
+        GONE) and moves the tuple digest off the frozen default — a gated vs
+        an ungated tree can never share a store address."""
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        default = TestTupleDigestGateSelectionIdentity._DEFAULT_DIGEST
+        gated = _tuple_digest(_tuple(), _grid(max_sl_hit_rate=0.5))
+        assert gated != default
+        # Distinct ceilings are distinct addresses too.
+        assert gated != _tuple_digest(_tuple(), _grid(max_sl_hit_rate=0.25))
+
+    def test_boundary_one_is_accepted(self) -> None:
+        assert _grid(max_sl_hit_rate=1.0).max_sl_hit_rate == 1.0
+
+    def test_gated_redo_targets_a_distinct_store_and_sentinel(self, tmp_path: Path) -> None:
+        """The C1/C2 law for Door 6: a gated grid maps to fresh store paths."""
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        t = _tuple()
+        p_base = tuple_store_path(tmp_path, t, _grid())
+        p_gated = tuple_store_path(tmp_path, t, _grid(max_sl_hit_rate=0.5))
+        assert p_base != p_gated
+        assert completion_sentinel_path(p_base) != completion_sentinel_path(p_gated)
+
+    def test_to_run_config_threads_the_ceiling(self) -> None:
+        """The grid knob reaches every tuple's SweepRunConfig (the Door-6
+        enforcement input) — and the default stays None."""
+        grid = _grid(max_sl_hit_rate=0.5)
+        run_cfg = next(iter_sweep_tuples(grid)).to_run_config(grid)
+        assert run_cfg.max_sl_hit_rate == 0.5
+        default_grid = _grid()
+        assert next(iter_sweep_tuples(default_grid)).to_run_config(
+            default_grid
+        ).max_sl_hit_rate is (None)
+
+    @pytest.mark.parametrize("bad", [0.0, -0.1, 1.0000001, float("nan"), float("inf")])
+    def test_out_of_range_value_is_a_range_refusal(self, bad: float) -> None:
+        with pytest.raises(ValueError, match="finite fraction"):
+            _grid(max_sl_hit_rate=bad)
+
+    def test_fragment_folds_the_active_knob_via_a_protocol_fake(self) -> None:
+        """The active-only identity fold, exercised through the structural
+        ``_GateConfigInput`` seam (kept beside the real-grid digest tests —
+        the fold contract is independent of the concrete config class)."""
+        from brutex.engine.sweep_identity import (
+            _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        class _FakeGrid:
+            overfit = None
+            max_sl_hit_rate: float | None = 0.5
+            cvar_gate = None
+            stage3_enable = False
+            stage3_top_k = 10_000
+            stage3_max_fevals = 200
+            stage3_max_restarts = 3
+
+        assert _gate_config_fragment(_FakeGrid()) == {"max_sl_hit_rate": 0.5}
+
+        class _FakeGridOff(_FakeGrid):
+            max_sl_hit_rate = None
+
+        assert _gate_config_fragment(_FakeGridOff()) is None
 
 
 # ────── run_sweep_grid ──────
@@ -1692,3 +1826,63 @@ class TestRunSweepGridAprioriWiring:
             tuples_failed=0,
         )
         assert summary.tuples_failed_apriori_budget == 0
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the grid tuple-count fold
+    (DEC-RUST-SWEEP-OPS-001 slice 6).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Only the pre-extracted
+    axis-cardinality product routes — the ``SweepGridConfig`` object
+    marshaling, ``iter_sweep_tuples``, and the #1715 gate-identity digest
+    (``_tuple_digest`` / ``_selection_identity_fragment`` — run-identity
+    class) stay Python on both arms.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        grids = [
+            _grid(),
+            _grid(
+                instruments=["NIFTY", "BANKNIFTY"],
+                timeframes=[Timeframe("1minute", 1), Timeframe("5minute", 5)],
+                directions=[Side.BUY, Side.SELL],
+                k_values=[1, 2],
+                stop_losses=[80, None],
+                take_profits=[50],
+                proximities=[None],
+            ),
+        ]
+        off = [count_sweep_tuples(grid) for grid in grids]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = [count_sweep_tuples(grid) for grid in grids]
+            # The enumeration invariant holds with the routed count.
+            assert len(list(iter_sweep_tuples(grids[0]))) == on[0]
+        finally:
+            self._reset_facade()
+        assert on == off
+        assert off[1] == 32

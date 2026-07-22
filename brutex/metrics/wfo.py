@@ -65,6 +65,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Final
 
+# The slice-6 Rust-statistics seam (DEC-METRICS-RUST-STATS-002). Imports only
+# stdlib + structlog at module scope (its engine-flag import is lazy — no
+# import-time cycle; the cpcv.py precedent).
+from brutex.metrics import rust_stats
 from brutex.metrics.cpcv import sharpe_of_returns
 
 if TYPE_CHECKING:
@@ -286,12 +290,48 @@ def wfo_pass_rate(
             f"({arr.size} bars) is too short for train_size={train_size}, "
             f"test_size={test_size}, embargo={embargo} under {scheme.value}"
         )
+    n_pass: int | None = None
+    if rust_stats.stats_rust_enabled():
+        # The flag-gated Rust WFO kernel (DEC-METRICS-RUST-STATS-002 —
+        # REPLICATED claim: the numpy pairwise reduction mirrored, burn-in
+        # fenced). ``None`` — latched / wheel-absent / kernel error / refused
+        # result / the min_sharpe exact-type domain refusal — falls through
+        # to the retained-forever Python loop, so wheel state can never
+        # change results or error behaviour (the rust_stats envelope).
+        n_pass = rust_stats.wfo_pass_count_via_kernel(
+            arr,
+            [walk.test_start for walk in walks],
+            [walk.test_stop for walk in walks],
+            min_sharpe,
+            n_walks=len(walks),
+            oracle=lambda: _walk_pass_count(arr, walks, min_sharpe),
+        )
+    if n_pass is None:
+        n_pass = _walk_pass_count(arr, walks, min_sharpe)
+    return n_pass / len(walks)
+
+
+def _walk_pass_count(
+    arr: npt.NDArray[np.float64],
+    walks: list[WFOWalk],
+    min_sharpe: float,
+) -> int:
+    """The pure-Python per-walk pass count — the retained-forever oracle.
+
+    Moved VERBATIM from :func:`wfo_pass_rate`
+    (DEC-METRICS-RUST-STATS-002; zero arithmetic change): one
+    :func:`brutex.metrics.cpcv.sharpe_of_returns` per test window, a pass
+    iff the Sharpe is defined and STRICTLY greater than ``min_sharpe``.
+    Serves every call when the ``BRUTEX_STATS_RUST`` flag is OFF (the
+    default), every fallback when it is ON, and the burn-in self-check
+    compares — never deleted.
+    """
     n_pass = 0
     for walk in walks:
         sharpe = sharpe_of_returns(arr[walk.test_start : walk.test_stop])
         if sharpe is not None and sharpe > min_sharpe:
             n_pass += 1
-    return n_pass / len(walks)
+    return n_pass
 
 
 def wfo_pass_rates(

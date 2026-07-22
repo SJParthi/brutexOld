@@ -1,5 +1,5 @@
 """The worst-case-only fill law — the RESIDENT-KERNEL seam
-(DEC-FILL-WORST-CASE-ONLY-001).
+(DEC-FILL-WORST-CASE-ONLY-001, on the DEC-FILL-EXEC-GRID-1M-001 dual feed).
 
 The ``ResidentTradeSim`` half of the fill-law suite, split out of
 ``test_engine_trade_sim_fill_mode.py`` so the DEC-CICD-GATE-HONESTY-001
@@ -10,9 +10,12 @@ Covers the ``_kernel_fill_law_current`` signature probe matrix, the
 STALE-WHEEL construction demotion (``fill_law_kernel_stale`` — a wheel that
 still exposes the retired mode flags would silently price the retired
 PRECISE defaults through its flagless call, so the WHOLE object serves the
-worst-case Python oracle instead), the flagless four-argument kernel call,
-and the real-kernel bit-parity vs the oracle. The shared bar fixture is
-imported from the sibling module (Golden Rule #11 COMMON — never a copy).
+worst-case Python oracle instead; the stale fake carries the CURRENT
+exec-grid 8-arg constructor so the fill-law probe — not the exec-grid one —
+is the arm under test), the flagless four-argument kernel call, and the
+real-kernel bit-parity vs the dual-feed oracle. The shared bar fixture is
+imported from the sibling module (Golden Rule #11 COMMON — never a copy);
+at ``tf_minutes == 1`` the same sequence serves both streams (design §6).
 """
 
 from __future__ import annotations
@@ -43,12 +46,17 @@ def _window() -> tuple[list[Any], list[int]]:
     return bars, [1, 0, 1, 0]
 
 
+def _resident(bars: list[Any], bits: list[int]) -> ResidentTradeSim:
+    """The tf=1 degenerate dual-feed build (both streams = the same sequence)."""
+    return ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars)
+
+
 class TestKernelServesTheOneLaw:
-    """A current wheel serves worst-case bit-identical to the oracle."""
+    """A current wheel serves worst-case bit-identical to the dual-feed oracle."""
 
     def test_real_kernel_bit_identical_to_oracle(self) -> None:
         bars, bits = _window()
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _resident(bars, bits)
         if not sim.rust_active:  # pragma: no cover — wheel-less environment
             pytest.skip("fno_math wheel not installed")
         kernel = sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=1000)[0]
@@ -57,6 +65,7 @@ class TestKernelServesTheOneLaw:
             mask_to_entry_signals(bits, 1),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=1000,
         )
         assert [(t.pnl_paisa, t.mfe_paisa, t.mae_paisa, t.holding_bars) for t in kernel] == [
@@ -89,11 +98,24 @@ class TestStaleWheelDemotion:
         # Construction-time demotion: a stale wheel's kernel is DISCARDED
         # (self._rust = None, reason fill_law_kernel_stale) so every batch
         # rides the bit-exact worst-case oracle — never a silent precise
-        # answer through the retired flags' defaults.
+        # answer through the retired flags' defaults. The fake carries the
+        # CURRENT exec-grid constructor (named ``arm_source`` parameter) so
+        # the pre-construction ``_kernel_exec_grid_current`` probe passes and
+        # the FILL-LAW probe is provably the demoting arm.
         import fno_math
 
         class _StaleKernel:
-            def __init__(self, *args: Any) -> None:
+            def __init__(
+                self,
+                exec_open: list[int],
+                exec_high: list[int],
+                exec_low: list[int],
+                exec_close: list[int],
+                exec_is_forced: list[bool],
+                exec_session_idx: list[int],
+                arm_source: list[int],
+                bar_bits: list[int],
+            ) -> None:
                 pass
 
             def simulate_masks(
@@ -111,7 +133,7 @@ class TestStaleWheelDemotion:
         monkeypatch.setattr(fno_math, "ResidentSweepSim", _StaleKernel)
         bars, bits = _window()
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+            sim = _resident(bars, bits)
         assert sim.rust_active is False
         stale_warns = [
             log
@@ -126,6 +148,7 @@ class TestStaleWheelDemotion:
             mask_to_entry_signals(bits, 1),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=1000,
         )
         assert [(t.pnl_paisa, t.mae_paisa) for t in served] == [
@@ -168,7 +191,7 @@ class TestStaleWheelDemotion:
         # The wheel built from THIS tree's flagless kernel reads CURRENT.
         pytest.importorskip("fno_math")
         bars, bits = _window()
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _resident(bars, bits)
         if sim._rust is None:  # pragma: no cover — wheel-less environment
             pytest.skip("fno_math wheel not installed")
         assert _kernel_fill_law_current(sim._rust) is True

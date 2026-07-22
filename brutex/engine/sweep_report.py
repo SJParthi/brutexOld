@@ -38,6 +38,7 @@ from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    from brutex.engine.exec_grid import ExecGridMap
     from brutex.engine.reference_series import TradeReferenceStamper
 
 #: The leaderboard sort keys ``brutex sweep --sort-by`` accepts. ``composite`` is the
@@ -107,6 +108,7 @@ def oos_section(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     start_equity_paisa: int,
@@ -136,6 +138,7 @@ def oos_section(
                 rc.mask,
                 direction=direction,
                 tf_minutes=tf_minutes,
+                exec_bars_1m=exec_bars_1m,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
                 start_equity_paisa=start_equity_paisa,
@@ -160,6 +163,7 @@ def filter_oos_held(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     start_equity_paisa: int,
@@ -186,6 +190,7 @@ def filter_oos_held(
             rc.mask,
             direction=direction,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
             stop_loss_paisa=stop_loss_paisa,
             take_profit_paisa=take_profit_paisa,
             start_equity_paisa=start_equity_paisa,
@@ -208,6 +213,8 @@ def sweep_report(
     direction: Side,
     condition_bits: Sequence[int],
     k: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     top_n: int | None = 20,
@@ -240,6 +247,12 @@ def sweep_report(
         The condition bit positions to brute-force over and how many each combo
         requires — passed straight to
         :func:`~brutex.engine.sweep_driver.rank_sweep_over_bits`.
+    exec_bars_1m, exec_map
+        The 1-minute EXECUTION stream (+ optional precomputed
+        :class:`~brutex.engine.exec_grid.ExecGridMap`) every fill resolves on
+        (DEC-FILL-EXEC-GRID-1M-001; REQUIRED — no silent single-feed shape,
+        design §3.3). At ``tf_minutes == 1`` pass the same sequence as
+        *bars*; a ``None`` map is derived once per sweep/OOS run.
     stop_loss_paisa, take_profit_paisa, top_n, min_hits, start_equity_paisa, proximity, prior_n, max_combos
         Sweep / render parameters; see
         :func:`~brutex.engine.sweep_driver.rank_sweep_over_bits` and
@@ -294,6 +307,8 @@ def sweep_report(
         k,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
@@ -314,6 +329,7 @@ def sweep_report(
             ranked,
             direction=direction,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
             stop_loss_paisa=stop_loss_paisa,
             take_profit_paisa=take_profit_paisa,
             start_equity_paisa=start_equity_paisa,
@@ -340,6 +356,7 @@ def sweep_report(
             oos_ranked,
             direction=direction,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
             stop_loss_paisa=stop_loss_paisa,
             take_profit_paisa=take_profit_paisa,
             start_equity_paisa=start_equity_paisa,

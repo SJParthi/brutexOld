@@ -988,8 +988,8 @@ class TestOldEmptySingleConfirm:
         # UNCHANGED (#1172 pin kept verbatim): old_window=False → the settle arm
         # never fires; two empties stay EMPTY 2/3 — the 3-streak law byte-identical.
         ledger = WindowLedger()
-        for now in (_NOW, _LATER):
-            status = ledger.record(
+        statuses = [
+            ledger.record(
                 _key(),
                 raw_bars=0,
                 error_type=None,
@@ -998,7 +998,9 @@ class TestOldEmptySingleConfirm:
                 in_pull_fetches=1,
                 old_window=False,
             )
-        assert status == EMPTY
+            for now in (_NOW, _LATER)
+        ]
+        assert statuses[-1] == EMPTY
         record = ledger.records()[0]
         assert record.empty_streak == 2
         assert record.last_error is None  # no expired-window stamp on a recent empty

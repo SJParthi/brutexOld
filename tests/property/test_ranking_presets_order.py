@@ -15,7 +15,15 @@ the input, and re-sorting is idempotent.
 # this file only; `reportCallIssue` stays a hard error everywhere else.
 from __future__ import annotations
 
-from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord
+from itertools import pairwise
+
+from brutex.ranking.presets import (
+    PRESET_NAMES,
+    PRESETS,
+    RankRecord,
+    dd_band_index,
+    min_dd_first_key,
+)
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -36,6 +44,16 @@ def _records(draw: st.DrawFn) -> list[RankRecord]:
             profit_factor=draw(st.floats(0.0, 20.0, allow_nan=False)),
             win_rate=draw(st.floats(0.0, 1.0, allow_nan=False)),
             calmar_ratio=draw(_metric),
+            # The nullable Stage-B axes: both None arms drawn so the growth +
+            # win_rate_safe presets' presence-flag laws ride every property.
+            log_growth_at_half_kelly=draw(_composite),
+            sl_hit_rate=draw(st.one_of(st.none(), st.floats(0.0, 1.0, allow_nan=False))),
+            # The nullable Stage-C recency axes (DEC-METRICS-TRAILING-WINDOW-001)
+            # — the recent / recent_decay presence-flag laws ride every property.
+            trailing_sharpe_ratio=draw(_composite),
+            decay_weighted_net_paisa=draw(
+                st.one_of(st.none(), st.floats(-1e9, 1e9, allow_nan=False))
+            ),
         )
         for run_id in ids
     ]
@@ -66,7 +84,65 @@ def test_output_is_a_permutation_and_resort_is_idempotent(records: list[RankReco
 
 @given(records=_records())
 @settings(max_examples=60, deadline=None)
-def test_min_dd_first_orders_drawdown_monotonically(records: list[RankRecord]) -> None:
+def test_min_dd_first_orders_drawdown_band_monotonically(records: list[RankRecord]) -> None:
+    """The DD ε-BAND law (DEC-RANK-DD-BAND-ORDER-001, MIGRATION.md LANE W1 item 5).
+
+    The OLD strict raw-DD monotonicity invariant was deliberately RETIRED by
+    the ε-band ruling: within one :data:`DD_BAND_PCT`-wide band the composite
+    (DESC, ``None`` after every scored value) then the retained tiebreaks
+    decide, so raw DD is only BAND-monotonic over the output — a 2bp-DD edge
+    no longer outranks a 58x-P&L edge inside the same band.
+    """
     ordered = PRESETS["min_dd_first"].sort_records(records)
-    drawdowns = [record.max_drawdown_pct for record in ordered]
-    assert drawdowns == sorted(drawdowns)
+    # (a) Band indices (floor(dd / DD_BAND_PCT) via the REAL quantizer —
+    # imported from brutex.ranking.presets, never re-minted) are
+    # non-decreasing over the whole output.
+    bands = [dd_band_index(record.max_drawdown_pct) for record in ordered]
+    assert bands == sorted(bands)
+    # (b) The within-band key law holds — asserted via the module's own
+    # exported key function: the full 4-part key (band, composite-presence,
+    # -composite, max_consecutive_losses) is non-decreasing, which subsumes
+    # "composite DESC with the None-after-scored arm, then the retained
+    # tiebreaks" inside every band.
+    keys = [min_dd_first_key(record) for record in ordered]
+    assert keys == sorted(keys)
+
+
+@given(records=_records())
+@settings(max_examples=60, deadline=None)
+def test_win_rate_safe_orders_win_rate_monotonically(records: list[RankRecord]) -> None:
+    # DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: win rate dominates the
+    # key — descending across the whole order; and within any equal win
+    # rate, concrete SL-hit rates precede None (presence-flag law) and rank
+    # ascending among themselves.
+    ordered = PRESETS["win_rate_safe"].sort_records(records)
+    win_rates = [record.win_rate for record in ordered]
+    assert win_rates == sorted(win_rates, reverse=True)
+    for earlier, later in pairwise(ordered):
+        if earlier.win_rate != later.win_rate:
+            continue
+        if earlier.sl_hit_rate is None:
+            assert later.sl_hit_rate is None
+        elif later.sl_hit_rate is not None:
+            assert earlier.sl_hit_rate <= later.sl_hit_rate
+
+
+@given(records=_records())
+@settings(max_examples=60, deadline=None)
+def test_recency_presets_order_scored_descending_nulls_last(
+    records: list[RankRecord],
+) -> None:
+    # DEC-METRICS-TRAILING-WINDOW-001: each recency preset orders its own
+    # metric descending over the SCORED records, with every None strictly
+    # after every scored one (the presence-flag law).
+    for token, field in (
+        ("recent", "trailing_sharpe_ratio"),
+        ("recent_decay", "decay_weighted_net_paisa"),
+    ):
+        ordered = PRESETS[token].sort_records(records)
+        values = [getattr(record, field) for record in ordered]
+        scored = [value for value in values if value is not None]
+        assert scored == sorted(scored, reverse=True), token
+        # Nulls form a contiguous TAIL — no scored record after a None.
+        if None in values:
+            assert all(value is None for value in values[values.index(None) :]), token

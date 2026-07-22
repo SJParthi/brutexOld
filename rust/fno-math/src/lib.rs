@@ -79,11 +79,30 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+/// DEC-METRICS-RUST-COMPUTE-FOLD-001: the metrics-FOLD kernel — the Rust
+/// mirror of `brutex.metrics.compute._fold_trades` (the Slice-0 fold layer;
+/// the libm-carrying combine tail deliberately stays in Python).
+pub mod metrics_fold;
+
 /// DEC-METRICS-RUST-STATS-001 (slice 6): Stage-3/4 statistics kernels — the
 /// sequential/integer heavy loops of the Stage-3/4 statistical filters
 /// (CPCV fold pass-count in PR-1; later PRs append inside the same module).
 /// Python keeps every numpy pairwise reduction, libm call and raise.
 pub mod stats;
+
+/// DEC-OPTCOST-TAILS-RUST-001: options-cost TAIL kernels — the pure decision
+/// math of the regime-rate lookup (`brutex/costs/constants.py`), moneyness
+/// classification (`brutex/data/moneyness.py`) and strike/lot/expiry rules
+/// (`brutex/options/`). Ints-only FFI; every refusal stays a code Python
+/// materializes with today's exact exception bytes (VERIFIED-RATES-ONLY,
+/// DEC-ETC-REGIME-HISTORY-001).
+pub mod optcost;
+
+/// LANE W1 (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001 /
+/// DEC-RANK-DD-BAND-ORDER-001): born-Rust multi-key selection kernels —
+/// ε-Pareto skyline, per-axis bounded top-M heaps, DD-band quantize. The
+/// Python twin (`brutex.ranking.multi_select`) is the parity ORACLE.
+pub mod rank_select;
 
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -162,11 +181,73 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(metrics_fold::metrics_fold_recency, m)?)?;
+    m.add_function(wrap_pyfunction!(metrics_fold::metrics_fold_trades, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     // ---- stats module (slice 6, DEC-METRICS-RUST-STATS-001): Stage-3/4
     // statistics kernels. Additive registration only; existing registrations
     // above are untouched. Later slice-6 PRs append inside this fence.
     m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
+    // ── DEC-METRICS-RUST-STATS-002 (slice 6, PR-2 — the stats tails):
+    // DSR (PSR + SR_0), PBO/CSCV and WFO kernels. Additive appends only,
+    // inside the same slice-6 fence; existing registrations untouched.
+    m.add_function(wrap_pyfunction!(stats::deflated_sharpe::stats_psr, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        stats::deflated_sharpe::stats_expected_max_sharpe,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(stats::pbo::stats_pbo_cscv, m)?)?;
+    m.add_function(wrap_pyfunction!(stats::wfo::stats_wfo_pass_count, m)?)?;
+    // DEC-RANK-CVAR-TAIL-GATE-001: the integer-exact CVaR worst-k tail fold
+    // behind the default-OFF `BRUTEX_RANK_CVAR_RUST` seam
+    // (`brutex.ranking.cvar_gate`).
+    m.add_function(wrap_pyfunction!(stats::cvar::stats_cvar_tail_fold, m)?)?;
+    // DEC-ALPHA-BUYHOLD-METRIC-001 — the ALPHA-vs-BUY&HOLD benchmark scalar
+    // (fenced additive registration; NO crate version bump — the #1942
+    // precedent, run identity / `_indicator_version` untouched).
+    m.add_function(wrap_pyfunction!(stats::alpha::alpha_vs_buyhold_pct, m)?)?;
     // ---- end stats module ----
+    // ---- optcost module (DEC-OPTCOST-TAILS-RUST-001): options-cost tail
+    // kernels (regime rates / moneyness / strike-lot-expiry rules).
+    // Additive registration only; existing registrations above are
+    // untouched. Consumed by the default-OFF BRUTEX_OPTCOST_TAILS_RUST seam.
+    m.add_function(wrap_pyfunction!(optcost::regime::optcost_regime_rate, m)?)?;
+    m.add_function(wrap_pyfunction!(optcost::lots::optcost_history_lookup, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::expiry::optcost_next_weekly_expiry,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::expiry::optcost_next_monthly_expiry,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::moneyness::optcost_moneyness_classify,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(optcost::moneyness::optcost_atm_offset, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::moneyness::optcost_strike_step,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(optcost::strike::optcost_offset_strike, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::strike::optcost_strike_offset_from_atm,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::strike::optcost_grid_around_atm,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(optcost::strike::optcost_round_to_atm, m)?)?;
+    // ---- end optcost module ----
+    // ── LANE W1 (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001 /
+    // DEC-RANK-DD-BAND-ORDER-001): the multi-key selection kernels (fenced
+    // additive registration block — keep-both union seam with sibling
+    // fno-math lanes). ──
+    m.add_function(wrap_pyfunction!(rank_select::rank_pareto_frontier, m)?)?;
+    m.add_function(wrap_pyfunction!(rank_select::rank_axis_topm, m)?)?;
+    m.add_function(wrap_pyfunction!(rank_select::rank_dd_band_indices, m)?)?;
+    // ── end LANE W1 registration block ──
     Ok(())
 }

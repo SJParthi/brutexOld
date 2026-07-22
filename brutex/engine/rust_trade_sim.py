@@ -1,87 +1,103 @@
-"""Resident Rust trade-sim seam — the hot trade-walk reused across masks.
+"""Resident Rust trade-sim seam — the hot dual-feed trade-walk reused across masks.
 
-DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). The Python side of the Rust
-Stage-2 trade-simulation kernel (``fno_math.ResidentSweepSim``). It is the
-trade-sim analogue of :class:`brutex.engine.combo_mask.ResidentBarBuffer`: the
-expensive per-(instrument, tf) inputs — the OHLC→paisa conversion
-(:func:`brutex.engine.stage1a._price_to_paisa`), the SESSION-AWARE forced-exit
-flags (:func:`brutex.calendars.nse.is_forced_exit_bar` against each bar session's
-close − 10min; DEC-SESSION-FORCED-EXIT-001), the per-bar IST session identity
-(each bar's IST calendar-date ordinal — the gate that DROPS a pending entry whose
-fill bar falls on a later session, R2-OC-2), and the Stage-1A ``bar_bits``
-truth-vectors — are computed ONCE in Python (the single source of truth,
-CLAUDE.md §11 COMMON) and handed to a resident Rust buffer. Thereafter a whole
-batch of strategy masks is simulated into round-trip
-:class:`~brutex.metrics.types.ClosedTrade` objects WITHOUT re-marshalling the bar
-window per combo.
+DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563), rebuilt on the 1-minute
+EXECUTION grid by DEC-FILL-EXEC-GRID-1M-001 (the PR-B design,
+``docs/design/fills/PRB_1M_EXECUTION_GRID_DESIGN.md``). The Python side of the
+Rust Stage-2 trade-simulation kernel (``fno_math.ResidentSweepSim``). It is
+the trade-sim analogue of :class:`brutex.engine.combo_mask.ResidentBarBuffer`:
+the expensive per-(instrument, tf) inputs — the 1-minute EXECUTION stream's
+OHLC→paisa conversion (:func:`brutex.engine.stage1a._price_to_paisa`), its
+SESSION-AWARE forced-exit flags (:func:`brutex.calendars.nse.is_forced_exit_bar`
+at 1-minute granularity against each bar session's close − 10min;
+DEC-SESSION-FORCED-EXIT-001), its per-bar IST session identity (each 1m bar's
+IST calendar-date ordinal — the open-position ``session_gap`` guard's key), the
+:class:`~brutex.engine.exec_grid.ExecGridMap`'s ``arm_source`` projection
+column (which 1m bar fills which DECISION bar's signal — the mapping law
+``exec_idx(N) = first ts_1m >= ts_tf[N] + tf_minutes`` with the
+same-session/B6/B4 gates already applied at build time), and the Stage-1A
+DECISION-length ``bar_bits`` truth-vectors — are computed ONCE in Python (the
+single source of truth, CLAUDE.md §11 COMMON) and handed to a resident Rust
+buffer. Thereafter a whole batch of strategy masks is simulated into
+round-trip :class:`~brutex.metrics.types.ClosedTrade` objects WITHOUT
+re-marshalling the windows per combo.
+
+## The dual-feed shape (design §3.4)
+
+Signals live on the DECISION timeframe (``bar_bits`` — Stage-1A untouched);
+fills + management live on the 1-minute EXECUTION stream. The kernel walks the
+1m stream; on a 1m bar ``j`` with ``arm_source[j] = N >= 0`` it evaluates
+``bar_bits[N] & mask == mask`` and fills a due entry at THAT bar's worst-case
+adverse extreme. Every ``TradeRecord`` index/holding is therefore a 1-MINUTE
+quantity (design §2.6); NO timestamp ever crosses the FFI.
 
 ## Why this is bit-identical to the Python walker (Golden Rule #4)
 
-Because the price→paisa conversion and the forced-exit detection — the two seams
-a naive port would most easily get wrong — are done in Python by the SAME
-functions :func:`brutex.engine.trade_sim.simulate_trades` uses, the Rust kernel
-receives identical int64 inputs and only reproduces the per-bar SL/TP/forced
-state-machine branch order. The result is byte-identical trades; a golden
-cross-check (``tests/golden``) asserts it field-by-field, and the
+Because the price→paisa conversion, the forced-exit detection and the
+``arm_source`` mapping — the seams a naive port would most easily get wrong —
+are done in Python by the SAME functions
+:func:`brutex.engine.trade_sim.simulate_trades` uses, the Rust kernel receives
+identical int64 inputs and only reproduces the per-bar SL/TP/forced
+state-machine branch order. The result is byte-identical trades; the
 :meth:`ResidentTradeSim.simulate_masks` fallback below IS
-:func:`~brutex.engine.trade_sim.simulate_trades` (so an environment without the
-compiled wheel produces the exact same trades, never a silent divergence).
+:func:`~brutex.engine.trade_sim.simulate_trades` (so an environment without
+the compiled wheel produces the exact same trades, never a silent divergence).
 
 ## Honest envelope (Golden Rule #10) — NOT O(1) total
 
-* Construction is ``O(N_bars)`` — the one-time paisa/forced/bar_bits derivation +
-  the resident copy across the FFI boundary, paid ONCE.
-* :meth:`ResidentTradeSim.simulate_masks` is ``O(N_masks · N_bars)`` compute (each
-  mask walks the whole window once) + ``O(Σ trades)`` output. The per-bar work is
-  O(1); the whole sweep is inherently O(N_masks · N_bars). Claiming O(1) total is
-  a physical impossibility and is FORBIDDEN.
+* Construction is ``O(N_1m + N_tf)`` — the one-time paisa/forced/exec-map
+  derivation + the resident copy across the FFI boundary, paid ONCE.
+* :meth:`ResidentTradeSim.simulate_masks` is ``O(N_masks · N_1m)`` compute in
+  the worst case (each mask walks the whole 1m window; the kernel's flat-skip
+  ``next_arm`` jump table makes a FLAT stretch O(armed bars), design §1.5) +
+  ``O(Σ trades)`` output. Claiming O(1) total is a physical impossibility and
+  is FORBIDDEN.
 
 ## Kernel-envelope guards (DEC-SWEEP-RUST-TRADESIM-WIRE-001 + DEC-TRADE-SIM-U128-KERNEL-001)
 
 TWO compiled kernels share one width-generic Rust core
-(``rust/fno-math/src/trade_sim.rs`` ``MaskWord``): the u64-native
-``ResidentSweepSim`` (today's 60-bit production vocabulary) and the u128
-``ResidentSweepSimU128`` (the ``MAX_VOCAB_BITS = 128`` headroom — >64-bit
-masks/bar_bits are now Rust-served instead of oracle-served). Both validate
-every paisa input against the overflow-safe ceiling ``MAX_PRICE_PAISA =
-i64::MAX / 8`` (#1090). An input outside the WIDEST kernel's envelope must
-still NEVER surface as a PyO3 ``OverflowError`` / kernel ``ValueError`` where
-the pure-Python oracle would simply simulate (a wheel-present vs wheel-absent
-behaviour asymmetry), so every such input routes to the bit-exact Python
-oracle instead, LOUDLY (one structlog WARNING, never silent):
+(``rust/fno-math/src/trade_sim.rs`` over ``rust/fno-math/src/mask_word.rs``
+``MaskWord``): the u64-native ``ResidentSweepSim`` (today's 60-bit production
+vocabulary) and the u128 ``ResidentSweepSimU128`` (the ``MAX_VOCAB_BITS =
+128`` headroom). Both validate every paisa input against the overflow-safe
+ceiling ``MAX_PRICE_PAISA = i64::MAX / 8`` (#1090). An input outside the
+WIDEST kernel's envelope must still NEVER surface as a PyO3 ``OverflowError``
+/ kernel ``ValueError`` where the pure-Python oracle would simply simulate (a
+wheel-present vs wheel-absent behaviour asymmetry), so every such input routes
+to the bit-exact Python oracle instead, LOUDLY (one structlog WARNING, never
+silent):
 
 * at CONSTRUCTION: ``bar_bits`` all inside ``[0, U64_MASK]``
-  (:data:`~brutex.engine.combo_mask.U64_MASK`) build the u64 kernel —
-  byte-identical to the pre-u128 seam; any value in ``(U64_MASK,
-  _U128_MASK]`` builds the u128 kernel instead (``rust_active`` True either
-  way, one ``except (ImportError, AttributeError)`` → ``wheel_missing``
-  covers both); a value outside ``[0, _U128_MASK]`` (above = beyond even the
-  u128 headroom; below zero = API misuse only, the production emitter
-  :func:`~brutex.engine.stage1a.build_bar_bits` is non-negative by
-  construction, but a negative int would raise the SAME PyO3
-  ``OverflowError`` at either ``Vec`` edge) routes the WHOLE object to the
-  oracle with reason ``bar_bits_beyond_u128``, as does any price column
-  value outside ``[-MAX_PRICE_PAISA, MAX_PRICE_PAISA]`` paisa
-  (``price_out_of_envelope``);
+  (:data:`~brutex.engine.combo_mask.U64_MASK`) build the u64 kernel; any value
+  in ``(U64_MASK, _U128_MASK]`` builds the u128 kernel instead (``rust_active``
+  True either way, one ``except (ImportError, AttributeError)`` →
+  ``wheel_missing`` covers both); a value outside ``[0, _U128_MASK]`` routes
+  the WHOLE object to the oracle with reason ``bar_bits_beyond_u128``, as does
+  any EXECUTION price column value outside ``[-MAX_PRICE_PAISA,
+  MAX_PRICE_PAISA]`` paisa (``price_out_of_envelope``). A wheel whose kernel
+  class PREDATES the exec-grid constructor (DEC-FILL-EXEC-GRID-1M-001 — no
+  ``arm_source`` parameter; its single-feed walk prices the RETIRED
+  decision-TF law) demotes the WHOLE object to the dual-feed oracle with
+  warn-once ``exec_grid_kernel_stale`` (signature-inspected BEFORE
+  construction — never a constructor ``TypeError``, never a wrong-law kernel
+  answer; see :func:`_kernel_exec_grid_current`);
 * per :meth:`ResidentTradeSim.simulate_masks` CALL (that call only): a mask
-  outside ``[0, _U128_MASK]`` → ``mask_beyond_u128`` → oracle (same
-  both-directions rationale), an SL/TP distance above ``MAX_PRICE_PAISA`` →
-  oracle. A mask in ``(U64_MASK, _U128_MASK]`` over a u64-resident window is
-  NOT a fallback: the u128 sibling kernel is built LAZILY (at most once per
-  instance, one ``rust_trade_sim.wide_kernel_promoted`` INFO) and the WHOLE
-  batch is routed wide — u64-fit batches keep the u64 kernel byte-identical.
-  Only when the installed wheel PREDATES the u128 class does the wide batch
-  fall back to the oracle, warn-once ``wheel_missing_u128`` (reachable only
-  from a monkeypatched/hand-imported stale module: the shim's import-time
-  handshake makes a genuinely stale ``.so`` fail at ``import fno_math``).
-  Likewise a batch over a wheel PREDATING the worst-case-only kernel
-  (DEC-FILL-WORST-CASE-ONLY-001 — a stale kernel whose ``simulate_masks``
-  still carries the retired ``worst_case`` / ``sl_next_open`` /
-  ``tp_next_open`` / ``tp_first`` mode flags, whose DEFAULTS priced the
-  retired PRECISE law) demotes to the bit-exact worst-case oracle with
-  warn-once ``fill_law_kernel_stale`` (signature-inspected, never a
-  TypeError probe — see :func:`_kernel_fill_law_current`); wheel state can
-  therefore never change results, only the serving engine.
+  outside ``[0, _U128_MASK]`` → ``mask_beyond_u128`` → oracle, an SL/TP
+  distance above ``MAX_PRICE_PAISA`` → oracle. A mask in ``(U64_MASK,
+  _U128_MASK]`` over a u64-resident window is NOT a fallback: the u128
+  sibling kernel is built LAZILY (at most once per instance, one
+  ``rust_trade_sim.wide_kernel_promoted`` INFO) and the WHOLE batch is routed
+  wide — u64-fit batches keep the u64 kernel byte-identical. Only when the
+  installed wheel PREDATES the u128 class (or its u128 class predates the
+  exec-grid constructor) does the wide batch fall back to the oracle,
+  warn-once ``wheel_missing_u128`` (reachable only from a monkeypatched /
+  hand-imported stale module: the shim's import-time handshake makes a
+  genuinely stale ``.so`` fail at ``import fno_math``). Likewise a batch over
+  a wheel PREDATING the worst-case-only kernel (DEC-FILL-WORST-CASE-ONLY-001
+  — the retired ``worst_case`` / ``sl_next_open`` / ``tp_next_open`` /
+  ``tp_first`` mode flags on ``simulate_masks``) demotes to the bit-exact
+  worst-case oracle with warn-once ``fill_law_kernel_stale``
+  (signature-inspected — see :func:`_kernel_fill_law_current`); wheel state
+  can therefore never change results, only the serving engine.
   Every per-call WARNING is emitted ONCE per ``(instance, reason)`` — the
   production sweep calls ``simulate_masks`` once per bounded chunk (up to
   thousands of chunks per tuple), so a sticky-reason warning on EVERY chunk
@@ -89,20 +105,23 @@ oracle instead, LOUDLY (one structlog WARNING, never silent):
   already-warned reason fall back silently (the path is still observable per
   tuple via ``sweep_run.trade_sim_path``).
 
-A non-positive SL/TP distance is rejected with ``ValueError`` IDENTICALLY on both
-arms (the kernel would silently accept ``0`` where the Python walker raises — the
-wrapper normalises the domain so wheel state can never change the error
-behaviour).
+A non-positive SL/TP distance is rejected with ``ValueError`` IDENTICALLY on
+both arms (the kernel would silently accept ``0`` where the Python walker
+raises — the wrapper normalises the domain so wheel state can never change the
+error behaviour).
 
 ## Observability delta vs the Python walker (STATED per Golden Rule #10)
 
 The Python walker (:func:`brutex.engine.trade_sim.simulate_trades`) emits
-per-trade ``trade_sim.entry`` / ``trade_sim.exit`` DEBUG structlog events; the
-compiled kernel emits NONE — deliberately (that per-trade logging is part of the
-interpreter tax the wiring removes; filtering it alone moved a measured run
-92.8 → 122.3 combos/s). So under DEBUG-level structlog, per-trade telemetry
-appears ONLY on tuples served by the Python fallback arm. The per-TUPLE signals
-(``sweep_run.trade_sim_path``, the fallback WARNINGs) are engine-independent.
+per-trade ``trade_sim.entry`` / ``trade_sim.exit`` DEBUG structlog events plus
+the walker-level deferral/collision/slide counters
+(DEC-FILL-EXEC-GRID-1M-001 §L); the compiled kernel emits NONE — deliberately
+(that per-trade logging is part of the interpreter tax the wiring removes).
+So under DEBUG-level structlog, per-trade telemetry appears ONLY on tuples
+served by the Python fallback arm. The per-TUPLE signals
+(``sweep_run.trade_sim_path``, the fallback WARNINGs, the
+:class:`~brutex.engine.exec_grid.ExecGridMap` build events) are
+engine-independent.
 """
 
 from __future__ import annotations
@@ -122,6 +141,7 @@ from brutex.calendars.nse import (
     is_forced_exit_bar,
 )
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, U64_MASK, mask_to_entry_signals
+from brutex.engine.exec_grid import ExecGridMap, build_exec_grid_map
 from brutex.engine.exit_index import bars_strictly_increasing
 
 # Intentional friend access (DEC-P0-017 per-site convention): ``_price_to_paisa``
@@ -164,30 +184,31 @@ _U128_MASK: Final[int] = (1 << MAX_VOCAB_BITS) - 1
 #: (DEC-TRADESIM-OPEN-SESSION-GUARD-001) — everything past the cap rolls into
 #: ONE ``trade_sim.session_tail_hole_suppressed`` summary (the house
 #: preopen.prev_close_noncontiguous capped-warn precedent). Mask-independent
-#: by construction: the detection runs ONCE per tuple at derivation, never
-#: per mask and never inside the walker's ``_close`` (the
-#: DEC-SWEEP-LOG-VOLUME-GUARD-001 #1630 posture).
+#: by construction: the detection runs ONCE per tuple at derivation over the
+#: 1-minute EXECUTION stream, never per mask and never inside the walker's
+#: ``_close`` (the DEC-SWEEP-LOG-VOLUME-GUARD-001 #1630 posture).
 _TAIL_HOLE_WARN_CAP: Final[int] = 20
 
 
 def _warn_session_tail_holes(forced: Sequence[bool], session_days: Sequence[int]) -> None:
     """WARN once per session-tail data hole in the window (capped, mask-independent).
 
-    A *session-tail hole* is a maximal run of consecutive bars sharing one
-    session ordinal that (i) is NOT the window's final session and (ii)
-    contains NO bar with ``forced=True`` — exactly the shape on which the
-    walker's (A2) open-position session guard fires a ``session_gap`` close
-    (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the session's stored bars ended
-    before any forced-exit-window bar, so a position opened in it can only
-    close retroactively at its last stored bar. The FINAL session is exempt —
-    an incomplete final session is the ordinary end-of-window shape the
-    ``end_of_data`` close already names honestly.
+    A *session-tail hole* is a maximal run of consecutive 1-minute EXECUTION
+    bars sharing one session ordinal that (i) is NOT the window's final
+    session and (ii) contains NO bar with ``forced=True`` — exactly the shape
+    on which the walker's (A2) open-position session guard fires a
+    ``session_gap`` close (DEC-TRADESIM-OPEN-SESSION-GUARD-001 on the 1m
+    stream): the session's stored bars ended before any forced-exit-window
+    bar, so a position opened in it can only close retroactively at its last
+    stored 1m bar. The FINAL session is exempt — an incomplete final session
+    is the ordinary end-of-window shape the ``end_of_data`` close already
+    names honestly.
 
     Emits at most :data:`_TAIL_HOLE_WARN_CAP` ``trade_sim.session_tail_hole``
     WARNs (fields: ``session`` — the ISO date from the ordinal — and ``bars``,
     the session's stored-bar count) plus ONE
     ``trade_sim.session_tail_hole_suppressed`` summary carrying the total when
-    the cap is exceeded. One O(N_bars) pass, paid at the already-O(N_bars)
+    the cap is exceeded. One O(N_1m) pass, paid at the already-O(N_1m)
     derivation. The pure-Python re-sim paths (capture / cascade / robustness /
     CLI) deliberately get no WARN — the ``exits_session_gap`` aggregate
     counter is their persistent signal; data-hole ALERTING stays owned by the
@@ -220,20 +241,23 @@ def _warn_session_tail_holes(forced: Sequence[bool], session_days: Sequence[int]
 
 @dataclass(frozen=True, slots=True)
 class PriceColumns:
-    """The tf-independent per-bar kernel input columns for ONE bar window.
+    """The tf-independent per-bar kernel input columns for ONE bar stream.
 
-    The four OHLC paisa columns (the flagged 4×-Decimal-snap-per-bar cost of
-    ``_derive_kernel_inputs``) plus the per-bar IST-date ``session_days``
+    The four OHLC paisa columns plus the per-bar IST-date ``session_days``
     ordinals — everything in the resident kernel's input set that is a pure
-    function of the BARS alone (the ``forced`` flags depend on ``tf_minutes``
-    and stay per-instance). Derived once per kernel lifetime by
-    :func:`derive_price_columns` and shareable across every
-    :class:`ResidentTradeSim` built over the same window
-    (DEC-STAGE1A-RUST-BATCH-001, the W2 rider). The columns are immutable
-    ``tuple``\\s — the SAME object is shared by the kernel and every sim built
-    from it, so a mutable list here would let one consumer corrupt every
-    sibling in place (review LOW-2 hardening; PyO3 ``Vec`` extraction accepts
-    any sequence, so the FFI edge is unchanged).
+    function of ONE bar sequence alone (the ``forced`` flags and the
+    ``arm_source`` projection stay per-instance). Under the 1-minute
+    execution grid (DEC-FILL-EXEC-GRID-1M-001) the kernel consumes columns
+    derived from the EXECUTION 1m stream — a kernel holder passing
+    ``precomputed_columns`` must derive them from the SAME ``exec_bars_1m``
+    it hands the sim (mismatched lengths refuse loudly at construction).
+    Derived once per kernel lifetime by :func:`derive_price_columns` and
+    shareable across every :class:`ResidentTradeSim` built over the same
+    stream (DEC-STAGE1A-RUST-BATCH-001, the W2 rider). The columns are
+    immutable ``tuple``\\s — the SAME object is shared by the kernel and every
+    sim built from it, so a mutable list here would let one consumer corrupt
+    every sibling in place (review LOW-2 hardening; PyO3 ``Vec`` extraction
+    accepts any sequence, so the FFI edge is unchanged).
 
     Raises
     ------
@@ -269,19 +293,22 @@ class PriceColumns:
 
 
 def derive_price_columns(bars: Sequence[CandleBar]) -> PriceColumns:
-    """Derive the tf-independent kernel input columns from *bars* (pure).
+    """Derive the per-bar kernel input columns from *bars* (pure).
 
     The four ``_price_to_paisa`` comprehensions + the per-bar IST-date
-    ordinals extracted from ``ResidentTradeSim._derive_kernel_inputs`` (the
-    SAME canonical seams, byte-identical output — golden-pinned) so a caller
-    holding a :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel` can pay
-    them ONCE per bar window instead of once per tuple. Bar ``i``'s values
-    derive from bar ``i``'s own fields (P-06: no look-ahead).
+    ordinals (the SAME canonical seams ``ResidentTradeSim`` uses internally,
+    byte-identical output — golden-pinned) so a caller holding a
+    :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel` can pay them
+    ONCE per stream instead of once per tuple. Under the 1-minute execution
+    grid the kernel-facing columns are the EXECUTION stream's — pass
+    ``exec_bars_1m`` here when precomputing for :class:`ResidentTradeSim`.
+    Bar ``i``'s values derive from bar ``i``'s own fields (P-06: no
+    look-ahead).
 
     Parameters
     ----------
     bars
-        Chronologically ordered bars for one ``(instrument, interval)``.
+        Chronologically ordered bars of ONE stream.
 
     Returns
     -------
@@ -312,12 +339,12 @@ def _construction_fallback_reason(
     >128-bit value AND a negative one — mirroring
     :func:`~brutex.engine.combo_mask.count_supermasks`'s guard stance; the
     negative direction is API misuse only, kept so wheel state can never
-    change behaviour), and a paisa price outside ``[-MAX_PRICE_PAISA,
-    MAX_PRICE_PAISA]`` would raise the #1090 boundary ``ValueError`` in either
-    kernel. Either routes the WHOLE object to the pure-Python oracle
-    (bit-identical either way). A value in ``(U64_MASK, _U128_MASK]`` is NOT a
-    fallback — the constructor builds the u128 kernel for it. One
-    ``O(N_bars)`` scan, paid once at the already-``O(N_bars)`` construction.
+    change behaviour), and an EXECUTION-stream paisa price outside
+    ``[-MAX_PRICE_PAISA, MAX_PRICE_PAISA]`` would raise the #1090 boundary
+    ``ValueError`` in either kernel. Either routes the WHOLE object to the
+    pure-Python oracle (bit-identical either way). A value in ``(U64_MASK,
+    _U128_MASK]`` is NOT a fallback — the constructor builds the u128 kernel
+    for it. One ``O(N)`` scan, paid once at the already-``O(N)`` construction.
     """
     if any(not 0 <= b <= _U128_MASK for b in bar_bits):
         return "bar_bits_beyond_u128"
@@ -343,7 +370,7 @@ def _call_fallback_reason(
     either kernel where the Python walker simulates. A mask in ``(U64_MASK,
     _U128_MASK]`` is NOT a fallback — the caller promotes the batch to the
     u128 kernel. ``O(N_masks)`` per call — negligible next to the
-    ``O(N_masks · N_bars)`` sweep.
+    ``O(N_masks · N_1m)`` sweep.
     """
     if any(not 0 <= m <= _U128_MASK for m in masks):
         return "mask_beyond_u128"
@@ -391,17 +418,44 @@ def _kernel_fill_law_current(kernel: object) -> bool:
     return not any(flag in signature.parameters for flag in _STALE_KERNEL_FLAGS)
 
 
+def _kernel_exec_grid_current(kernel_cls: object) -> bool:
+    """``True`` iff *kernel_cls*'s constructor implements the exec-grid law.
+
+    The DEC-FILL-EXEC-GRID-1M-001 twin of :func:`_kernel_fill_law_current`,
+    probed BEFORE construction: an installed wheel whose kernel class
+    PREDATES the 1-minute execution grid takes the retired single-feed
+    7-column constructor — handing it the new 8-argument call would raise
+    ``TypeError`` (or worse, a monkeypatched near-miss could silently walk
+    the RETIRED decision-TF law). So the seam inspects the class constructor
+    signature ONCE (PyO3 emits the class ``__text_signature__``, so
+    :func:`inspect.signature` resolves it) and demotes a stale wheel's WHOLE
+    window to the bit-exact dual-feed Python oracle instead (reason
+    ``exec_grid_kernel_stale`` — never a wrong kernel answer, never a
+    crash). The current constructor is recognised by its ``arm_source``
+    parameter (the exec-grid projection column — no pre-PR-B constructor
+    ever carried it). A signature that cannot be inspected at all reads as
+    STALE — the conservative arm: the oracle serves the window correctly
+    either way.
+    """
+    try:
+        signature = inspect.signature(kernel_cls)  # type: ignore[arg-type]
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return "arm_source" in signature.parameters
+
+
 def _monotonic(exit_indices: Sequence[int]) -> bool:
     """Certify one mask's exit-index stream: non-negative + strictly increasing.
 
     DEC-SWEEP-EXIT-INDEX-FASTPATH-001, the kernel-record certification: the
     single-position walker (which the kernel mirrors bit-for-bit) closes at
-    most one trade per bar and emits trades in close order, so a well-formed
-    per-mask exit-index stream is strictly increasing and starts at ``>= 0``.
-    A stream failing this certificate signals a kernel ordering/marshalling
-    regression — the caller withholds the indices (the metrics tail then
-    serves the mask through the bit-identical timestamp-dict path) rather
-    than trusting them. ``O(trades)`` per mask, zero allocation.
+    most one trade per 1m bar and emits trades in close order, so a
+    well-formed per-mask exit-index stream is strictly increasing and starts
+    at ``>= 0``. A stream failing this certificate signals a kernel
+    ordering/marshalling regression — the caller withholds the indices (the
+    metrics tail then serves the mask through the bit-identical
+    timestamp-dict path) rather than trusting them. ``O(trades)`` per mask,
+    zero allocation.
     """
     prev = -1
     for idx in exit_indices:
@@ -432,41 +486,52 @@ def _width_offender_fields(values: Sequence[int]) -> dict[str, str | int | None]
 
 
 class ResidentTradeSim:
-    """Hold one ``(instrument, tf)`` bar window resident for repeated mask sims.
+    """Hold one dual-feed ``(instrument, tf)`` window resident for repeated mask sims.
 
-    Build it once from the bars + their Stage-1A ``bar_bits``; then call
-    :meth:`simulate_masks` for each mask batch. The OHLC→paisa conversion, the
-    forced-exit flags, and the resident bar copy are paid once at construction,
-    not once per mask.
+    Build it once from the DECISION bars + their Stage-1A ``bar_bits`` + the
+    1-minute EXECUTION stream; then call :meth:`simulate_masks` for each mask
+    batch. The OHLC→paisa conversion (EXECUTION stream), the 1m forced-exit
+    flags, the :class:`~brutex.engine.exec_grid.ExecGridMap` and the resident
+    bar copy are paid once at construction, not once per mask.
 
     The compiled kernel is width-dispatched (DEC-TRADE-SIM-U128-KERNEL-001):
-    u64-fit ``bar_bits`` build ``fno_math.ResidentSweepSim`` (byte-identical
-    to the pre-u128 seam), wider (≤ u128) ``bar_bits`` build
-    ``fno_math.ResidentSweepSimU128``, and a >64-bit MASK over a u64-resident
-    window lazily promotes the batch to the u128 sibling (see
-    :meth:`_promote_wide_kernel`). When NO compiled kernel is available the
-    buffer transparently falls back to the pure-Python
-    :func:`brutex.engine.trade_sim.simulate_trades` per mask — the SAME oracle
-    both Rust kernels are verified against — so the trades are identical, and
-    the fallback is LOGGED (``rust_trade_sim.fallback`` WARNING), never a
-    silent divergence. Honest envelope: the production sweep hard-imports
-    ``fno_math`` at module scope (``sweep_driver.py`` / ``combo_mask.py``), so
-    a truly wheel-ABSENT environment fails at import long before this seam —
-    the real production fallback trigger is a STALE wheel that imports but
-    lacks a kernel class (the ``AttributeError`` arms), plus the
-    kernel-envelope guards documented on the module.
+    u64-fit ``bar_bits`` build ``fno_math.ResidentSweepSim`` , wider (≤ u128)
+    ``bar_bits`` build ``fno_math.ResidentSweepSimU128``, and a >64-bit MASK
+    over a u64-resident window lazily promotes the batch to the u128 sibling
+    (see :meth:`_promote_wide_kernel`). When NO compiled kernel is available
+    (or the installed one predates the exec-grid constructor —
+    ``exec_grid_kernel_stale``) the buffer transparently falls back to the
+    pure-Python :func:`brutex.engine.trade_sim.simulate_trades` per mask — the
+    SAME dual-feed oracle both Rust kernels are verified against — so the
+    trades are identical, and the fallback is LOGGED
+    (``rust_trade_sim.fallback`` WARNING), never a silent divergence. Honest
+    envelope: the production sweep hard-imports ``fno_math`` at module scope
+    (``sweep_driver.py`` / ``combo_mask.py``), so a truly wheel-ABSENT
+    environment fails at import long before this seam — the real production
+    fallback trigger is a STALE wheel, plus the kernel-envelope guards
+    documented on the module.
 
     Parameters
     ----------
-    bars
-        Chronologically ordered bars for one ``(instrument, interval)``
-        (non-empty; the trade-sim feed).
+    decision_bars
+        Chronologically ordered DECISION-TF bars for one ``(instrument,
+        interval)`` (non-empty; the signal domain).
     bar_bits
-        The Stage-1A per-bar u64 truth-vectors for the same window (from
-        :func:`brutex.engine.stage1a.build_bar_bits`). Must match ``bars`` length.
+        The Stage-1A per-DECISION-bar truth-vectors for the same window (from
+        :func:`brutex.engine.stage1a.build_bar_bits`). Must match
+        ``decision_bars`` length.
     tf_minutes
-        The bar timeframe in whole minutes (``>= 1``), for the timeframe-aware
-        forced-exit detection.
+        The DECISION timeframe in whole minutes (``>= 1``), for the
+        close-instant mapping law. At ``tf_minutes == 1`` pass the same
+        sequence for both streams.
+    exec_bars_1m
+        The 1-minute EXECUTION stream covering the window (non-empty; the
+        fill/walk domain). REQUIRED — no silent single-feed call shape
+        survives DEC-FILL-EXEC-GRID-1M-001 (design §3.3).
+    exec_map
+        Optional pre-built :class:`~brutex.engine.exec_grid.ExecGridMap` for
+        this exact stream pair; ``None`` derives it once at construction. A
+        supplied map must cover both streams (lengths refuse loudly).
     reference_stamper
         Optional India-VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
@@ -475,28 +540,37 @@ class ResidentTradeSim:
         ``vix_at_entry`` / ``vix_at_exit`` (REFERENCE ONLY, never a signal
         input; a missing VIX bar stamps ``None``, never fabricated). The Rust
         kernel itself is UNTOUCHED: the stamp happens Python-side in the
-        :meth:`_to_trade_and_exit` converter (an O(1) post-stamp per trade), so the
-        kernel's trade tuples stay engine-blind and both arms stamp through
-        the SAME :meth:`~brutex.engine.reference_series.TradeReferenceStamper.stamp`.
-        ``None`` (the default) leaves both VIX fields ``None`` — byte-identical
-        to the pre-wiring output.
+        :meth:`_to_trade_and_exit` converter (an O(1) post-stamp per trade),
+        so the kernel's trade tuples stay engine-blind and both arms stamp
+        through the SAME
+        :meth:`~brutex.engine.reference_series.TradeReferenceStamper.stamp`.
+        ``None`` (the default) leaves both VIX fields ``None``.
+    precomputed_columns
+        Optional :class:`PriceColumns` derived from the SAME ``exec_bars_1m``
+        (via :func:`derive_price_columns`) — the W2-rider sharing seam. A
+        mismatched column set refuses loudly.
 
     Raises
     ------
     ValueError
-        If ``bars`` is empty, ``bar_bits`` length ≠ ``bars`` length, or
-        ``tf_minutes < 1``.
+        If either stream is empty, ``bar_bits`` length ≠ ``decision_bars``
+        length, ``tf_minutes < 1``, or an injected ``exec_map`` /
+        ``precomputed_columns`` does not cover the streams.
     brutex.calendars.nse.HolidayDataUnavailableError
         If any bar is dated on a weekday OUTSIDE the published holiday span —
-        the session (and thus the forced-exit boundary) cannot be verified, so
-        construction refuses LOUDLY instead of fabricating a 15:20 boundary
-        (mirrors :meth:`brutex.engine.trade_sim.TradeSimWalker` exactly).
+        the session (and thus the forced-exit boundary / session-close
+        instant) cannot be verified, so construction refuses LOUDLY instead
+        of fabricating a boundary (mirrors
+        :class:`brutex.engine.trade_sim.TradeSimWalker` +
+        :func:`~brutex.engine.exec_grid.build_exec_grid_map` exactly).
     """
 
     __slots__ = (
         "_bar_bits",
-        "_bars",
         "_call_fallback_warned",
+        "_decision_bars",
+        "_exec_bars",
+        "_exec_map",
         "_kernel_inputs",
         "_precomputed_columns",
         "_reference_stamper",
@@ -510,38 +584,51 @@ class ResidentTradeSim:
 
     def __init__(
         self,
-        bars: Sequence[CandleBar],
+        decision_bars: Sequence[CandleBar],
         bar_bits: Sequence[int],
         *,
         tf_minutes: int,
+        exec_bars_1m: Sequence[CandleBar],
+        exec_map: ExecGridMap | None = None,
         reference_stamper: TradeReferenceStamper | None = None,
         precomputed_columns: PriceColumns | None = None,
     ) -> None:
-        if not bars:
-            raise ValueError("ResidentTradeSim: bars must be non-empty")
-        if len(bar_bits) != len(bars):
+        if not decision_bars:
+            raise ValueError("ResidentTradeSim: decision_bars must be non-empty")
+        if not exec_bars_1m:
+            raise ValueError("ResidentTradeSim: exec_bars_1m must be non-empty")
+        if len(bar_bits) != len(decision_bars):
             raise ValueError(
-                f"ResidentTradeSim: bar_bits length {len(bar_bits)} != bars length {len(bars)}"
+                f"ResidentTradeSim: bar_bits length {len(bar_bits)} != decision_bars "
+                f"length {len(decision_bars)}"
             )
         if tf_minutes < 1:
             raise ValueError(f"ResidentTradeSim: tf_minutes must be >= 1, got {tf_minutes}")
-        if precomputed_columns is not None and precomputed_columns.n_bars != len(bars):
-            # The W2 rider's injection seam (DEC-STAGE1A-RUST-BATCH-001):
-            # a mismatched column set is a caller bug — refuse it naming both
-            # lengths, never a silently misaligned kernel window.
+        if precomputed_columns is not None and precomputed_columns.n_bars != len(exec_bars_1m):
+            # The W2 rider's injection seam (DEC-STAGE1A-RUST-BATCH-001),
+            # rebased onto the EXECUTION stream: a mismatched column set is a
+            # caller bug — refuse it naming both lengths, never a silently
+            # misaligned kernel window.
             raise ValueError(
                 f"ResidentTradeSim: precomputed_columns cover {precomputed_columns.n_bars} "
-                f"bars != bars length {len(bars)}"
+                f"bars != exec_bars_1m length {len(exec_bars_1m)}"
             )
-        self._bars: tuple[CandleBar, ...] = tuple(bars)
+        if exec_map is not None and (
+            exec_map.n_decision != len(decision_bars) or exec_map.n_exec != len(exec_bars_1m)
+        ):
+            raise ValueError(
+                f"ResidentTradeSim: exec_map covers ({exec_map.n_decision}, "
+                f"{exec_map.n_exec}) bars != streams "
+                f"({len(decision_bars)}, {len(exec_bars_1m)})"
+            )
+        self._decision_bars: tuple[CandleBar, ...] = tuple(decision_bars)
+        self._exec_bars: tuple[CandleBar, ...] = tuple(exec_bars_1m)
         self._bar_bits: list[int] = list(bar_bits)
         self._tf_minutes = tf_minutes
         self._reference_stamper = reference_stamper
         # The G-4 unconditional memo: `_derive_kernel_inputs` is a pure
-        # function of the immutable `_bars` + `_tf_minutes` (its docstring
-        # law), so its 6-tuple is derived at most ONCE per instance — the
-        # duplicate O(N_bars) Decimal pass the lazy u128 promotion used to pay
-        # is gone even flag-OFF (no observable output change; spy-pinned).
+        # function of the immutable `_exec_bars` (its docstring law), so its
+        # 6-tuple is derived at most ONCE per instance.
         self._kernel_inputs: (
             tuple[
                 tuple[int, ...],
@@ -554,12 +641,21 @@ class ResidentTradeSim:
             | None
         ) = None
         self._precomputed_columns = precomputed_columns
-        # Exit-index certification (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): the
-        # window's timestamps strictly increase ⇒ index↔timestamp is a
-        # bijection ⇒ a trade's TRUE exit index provably equals the metrics
-        # tail's last-wins dict lookup, so the indices may replace it. Paid
-        # ONCE here (the construction is already O(N_bars)), never per mask.
-        self._ts_certified: bool = bars_strictly_increasing(self._bars)
+        # The ONE exec-grid mapping (design §1.2): built here when not
+        # injected — the same map the Python-oracle fallback threads into
+        # every walker run, so both arms consume the identical arm_source
+        # projection (never a per-arm re-derivation drift).
+        self._exec_map: ExecGridMap = (
+            exec_map
+            if exec_map is not None
+            else build_exec_grid_map(self._decision_bars, self._exec_bars, tf_minutes=tf_minutes)
+        )
+        # Exit-index certification (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 on the
+        # 1m grid): the EXECUTION stream's timestamps strictly increase ⇒
+        # index↔timestamp is a bijection over the walk domain ⇒ a trade's
+        # TRUE 1m exit index provably equals the metrics tail's last-wins
+        # dict lookup, so the indices may replace it. Paid ONCE here.
+        self._ts_certified: bool = bars_strictly_increasing(self._exec_bars)
         # Per-(instance, reason) warn-once memo for the per-call fallback (module
         # docstring): the sweep chunks a tuple into up to thousands of
         # `simulate_masks` calls, so a per-CALL warning on a sticky reason (e.g.
@@ -576,20 +672,20 @@ class ResidentTradeSim:
         self._rust_is_wide = False
 
         open_p, high_p, low_p, close_p, forced, session_days = self._derive_kernel_inputs()
-        # Kernel-envelope guard (module docstring): an out-of-envelope window —
-        # a beyond-u128 bar_bits value or a price beyond the kernel's #1090
-        # ceiling — never crosses the FFI boundary; the whole object serves the
+        # Kernel-envelope guard (module docstring): an out-of-envelope window
+        # never crosses the FFI boundary; the whole object serves the
         # bit-exact Python oracle instead, and says so LOUDLY (never a silent
         # divergence, never a raise the pure-Python engine would not have
         # raised). ``fno_math`` is imported ONCE, lazily, at the construction
         # just below (the wheel may be absent — the SINGLE import site apart
         # from the wide promotion's), so the resident kernel handle is typed
-        # ``object`` with a targeted ignore at its one call site — the same
-        # lazy-wheel convention :class:`~brutex.engine.combo_mask.ResidentBarBuffer`
-        # uses. A window whose bar_bits fit u64 builds the u64 kernel —
-        # byte-identical to the pre-u128 seam; a wider (≤ u128) window builds
-        # the u128 kernel; EITHER class missing on a stale wheel lands in the
-        # ONE ``wheel_missing`` arm.
+        # ``object`` with a targeted ignore at its one call site. A window
+        # whose bar_bits fit u64 builds the u64 kernel; a wider (≤ u128)
+        # window builds the u128 kernel; EITHER class missing on a stale
+        # wheel lands in the ONE ``wheel_missing`` arm, and a class carried
+        # by a wheel that PREDATES the exec-grid constructor is demoted
+        # BEFORE construction (``exec_grid_kernel_stale`` — never a
+        # constructor TypeError; :func:`_kernel_exec_grid_current`).
         self._rust: object | None = None
         reason = _construction_fallback_reason(self._bar_bits, open_p, high_p, low_p, close_p)
         if reason is None:
@@ -597,34 +693,32 @@ class ResidentTradeSim:
             try:
                 import fno_math
 
-                # Fresh list copies at the FFI edge only: the memoised columns
-                # are SHARED immutable tuples (review LOW-2), while the
-                # fno_math stub's typed contract declares list columns (PyO3
-                # itself accepts any sequence). One O(N) copy per construction
-                # — the constructor's own Vec marshal is already O(N).
-                if wide:
-                    self._rust = fno_math.ResidentSweepSimU128(
-                        list(open_p),
-                        list(high_p),
-                        list(low_p),
-                        list(close_p),
-                        list(forced),
-                        list(session_days),
-                        self._bar_bits,
-                    )
-                    self._rust_is_wide = True
-                else:
-                    self._rust = fno_math.ResidentSweepSim(
-                        list(open_p),
-                        list(high_p),
-                        list(low_p),
-                        list(close_p),
-                        list(forced),
-                        list(session_days),
-                        self._bar_bits,
-                    )
+                kernel_cls: object = (
+                    fno_math.ResidentSweepSimU128 if wide else fno_math.ResidentSweepSim
+                )
             except (ImportError, AttributeError):
                 reason = "wheel_missing"
+            else:
+                if not _kernel_exec_grid_current(kernel_cls):
+                    reason = "exec_grid_kernel_stale"
+                else:
+                    # Fresh list copies at the FFI edge only: the memoised
+                    # columns are SHARED immutable tuples (review LOW-2),
+                    # while the fno_math stub's typed contract declares list
+                    # columns (PyO3 itself accepts any sequence). One O(N)
+                    # copy per construction — the constructor's own Vec
+                    # marshal is already O(N).
+                    self._rust = kernel_cls(  # type: ignore[operator]
+                        list(open_p),
+                        list(high_p),
+                        list(low_p),
+                        list(close_p),
+                        list(forced),
+                        list(session_days),
+                        list(self._exec_map.arm_source),
+                        self._bar_bits,
+                    )
+                    self._rust_is_wide = wide
         if self._rust is not None and not _kernel_fill_law_current(self._rust):
             # Stale-wheel demotion (DEC-FILL-WORST-CASE-ONLY-001): the built
             # kernel still exposes the retired mode flags, so its flagless
@@ -642,7 +736,8 @@ class ResidentTradeSim:
             _LOG.warning(
                 "rust_trade_sim.fallback",
                 reason=reason,
-                n_bars=len(self._bars),
+                n_bars=len(self._decision_bars),
+                n_exec_bars=len(self._exec_bars),
                 tf_minutes=tf_minutes,
                 **(
                     _width_offender_fields(self._bar_bits)
@@ -661,51 +756,53 @@ class ResidentTradeSim:
         tuple[bool, ...],
         tuple[int, ...],
     ]:
-        """Derive the resident kernel's per-bar input columns from the bars.
+        """Derive the resident kernel's per-1m-bar input columns from the EXECUTION stream.
 
         Returns ``(open_p, high_p, low_p, close_p, forced, session_days)`` —
         the SAME canonical Python seams both kernel widths are fed from
         (called once at construction, and once more only if a >64-bit mask
         batch later promotes the window to the u128 sibling kernel; a pure
-        function of the immutable ``_bars`` + ``_tf_minutes``, so both
-        derivations are identical by construction).
+        function of the immutable ``_exec_bars``, so both derivations are
+        identical by construction). The seventh kernel input —
+        ``arm_source`` — lives on the instance's
+        :class:`~brutex.engine.exec_grid.ExecGridMap` (built once at
+        construction; design §1.2), so the memo stays a pure function of ONE
+        stream.
 
-        The forced-exit flags are SESSION-AWARE — byte-identical to
-        :func:`~brutex.engine.trade_sim.simulate_trades` — so the boundary is
-        the bar session's own close − 10min (15:20 IST on a regular day, the
-        early close − 10min on a half-day / Muhurat session), resolved per IST
-        date via the COMMON strict ``get_session_checked`` →
+        The forced-exit flags are SESSION-AWARE at 1-MINUTE granularity —
+        byte-identical to :meth:`brutex.engine.trade_sim.TradeSimWalker.push_1m`
+        (``is_forced_exit_bar(t, 1, boundary)``) — so the boundary is the 1m
+        bar session's own close − 10min (15:20 IST on a regular day, the
+        early close − 10min on a half-day / Muhurat session), resolved per
+        IST date via the COMMON strict ``get_session_checked`` →
         :func:`~brutex.calendars.nse.forced_exit_seconds_for_session`; an
         in-coverage date with no session falls back to 15:20
         (DEC-SESSION-FORCED-EXIT-001), while a bar dated on a weekday OUTSIDE
         the published holiday span raises ``HolidayDataUnavailableError`` —
-        LOUDLY, in lock-step with the streaming walker's
-        ``_forced_exit_seconds`` (the parity contract holds: both paths refuse
-        the same uncoverable date instead of silently fabricating a 15:20
-        boundary). The boundary is memoised by the LAST IST date only (a
-        1-slot cache, O(1) per bar) — a chronological feed re-resolves once
-        per new day, exactly as the streaming walker does, so the precomputed
-        Rust-kernel flags and the Python-fallback exits never diverge.
+        LOUDLY, in lock-step with the streaming walker (the parity contract
+        holds: both paths refuse the same uncoverable date instead of
+        silently fabricating a boundary). The boundary is memoised by the
+        LAST IST date only (a 1-slot cache, O(1) per bar) — a chronological
+        feed re-resolves once per new day, exactly as the streaming walker
+        does, so the precomputed Rust-kernel flags and the Python-fallback
+        exits never diverge.
 
-        ``session_days`` is the per-bar SESSION identity — the bar's own IST
-        calendar-date ordinal, the SAME date key the forced-exit resolution
-        uses — threaded to the kernel so a pending entry armed on a session's
-        last stored bar is DROPPED at the next session's open instead of
-        filling ~18h stale across the overnight gap (R2-OC-2; mirrors the
-        walker's ``_pending_entry_day`` gate bit-for-bit) AND so an open
-        position never survives a session-date change (the ``session_gap``
-        close, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the same ordinals feed
-        the kernel's open-position guard, zero new FFI inputs). Bar ``i``'s
-        session derives from bar ``i``'s own timestamp — knowable at bar ``i``
-        (P-06: no look-ahead).
+        ``session_days`` is the per-1m-bar SESSION identity — the bar's own
+        IST calendar-date ordinal, the SAME date key the forced-exit
+        resolution uses — threaded to the kernel so an open position never
+        survives a session-date change (the ``session_gap`` close,
+        DEC-TRADESIM-OPEN-SESSION-GUARD-001 on the 1m stream — the same
+        ordinals feed the kernel's open-position guard). Bar ``i``'s session
+        derives from bar ``i``'s own timestamp — knowable at bar ``i`` (P-06:
+        no look-ahead).
 
         Observability (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the forced/
         session loop ends with ONE mask-independent capped sweep over its
         derived columns — :func:`_warn_session_tail_holes` — naming every
-        non-final session whose stored bars never reach a forced-exit bar
+        non-final session whose stored 1m bars never reach a forced-exit bar
         (the exact shape the guard will fire on), so a session-tail data
         hole is loud once per derivation, never once per mask. Under the
-        memo (below) a memo HIT RE-EMITS the sweep from the memoised
+        memo a memo HIT RE-EMITS the sweep from the memoised
         ``forced``/``session_days`` columns — a pure function of them, so
         the warn frequency and payloads match the non-memo derivation's
         per-call emission 1:1 (main-parity: the u128 promotion's second
@@ -714,9 +811,10 @@ class ResidentTradeSim:
         Since DEC-STAGE1A-RUST-BATCH-001 (the W2 rider): the tf-independent
         columns come from the injected ``precomputed_columns`` when a kernel
         holder supplied them (byte-identical by construction — the SAME
-        :func:`derive_price_columns` produced them, golden-pinned) else from
-        one local :func:`derive_price_columns` call, and the assembled
-        6-tuple is MEMOISED on the instance (pure — the G-4 law), so the u128
+        :func:`derive_price_columns` over the SAME ``exec_bars_1m`` produced
+        them, golden-pinned) else from one local
+        :func:`derive_price_columns` call, and the assembled 6-tuple is
+        MEMOISED on the instance (pure — the G-4 law), so the u128
         promotion's second derivation is a dict-free O(1) handoff. Every
         column in the memo is an immutable ``tuple`` — the price columns are
         SHARED across every sim built from one kernel, so no consumer can
@@ -742,7 +840,7 @@ class ResidentTradeSim:
         session_days: list[int] = []
         cache_date: date | None = None
         cache_seconds: int | None = None
-        for bar in self._bars:
+        for bar in self._exec_bars:
             ts_ist = bar.timestamp.astimezone(IST)
             bar_day = ts_ist.date()
             if bar_day != cache_date:
@@ -751,12 +849,12 @@ class ResidentTradeSim:
                 cache_seconds = (
                     None if session is None else forced_exit_seconds_for_session(session)
                 )
-            forced.append(is_forced_exit_bar(ts_ist.time(), self._tf_minutes, cache_seconds))
+            forced.append(is_forced_exit_bar(ts_ist.time(), 1, cache_seconds))
             session_days.append(bar_day.toordinal())
         _warn_session_tail_holes(forced, session_days)
         columns = self._precomputed_columns
         if columns is None:
-            columns = derive_price_columns(self._bars)
+            columns = derive_price_columns(self._exec_bars)
         self._kernel_inputs = (
             columns.open_paisa,
             columns.high_paisa,
@@ -773,20 +871,24 @@ class ResidentTradeSim:
         DEC-TRADE-SIM-U128-KERNEL-001: a mask in ``(U64_MASK, _U128_MASK]``
         over a u64-resident window promotes the WHOLE batch to
         ``fno_math.ResidentSweepSimU128`` — built lazily HERE from the same
-        :meth:`_derive_kernel_inputs` columns (a memo handoff since the
-        DEC-STAGE1A-RUST-BATCH-001 G-4 memo — the historical second
-        ``O(N_bars)`` DECIMAL derivation is gone; the hit still pays the
-        ``O(N_bars)`` session-tail-hole RE-EMIT sweep for main-parity warn
+        :meth:`_derive_kernel_inputs` columns + the instance's
+        ``ExecGridMap.arm_source`` (a memo handoff since the
+        DEC-STAGE1A-RUST-BATCH-001 G-4 memo; the hit still pays the
+        ``O(N_1m)`` session-tail-hole RE-EMIT sweep for main-parity warn
         frequency, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — plus the FFI copy,
         paid once per instance, announced with ONE
         ``rust_trade_sim.wide_kernel_promoted`` INFO) and memoised, so the
-        chunked sweep's subsequent wide batches are pure kernel calls. Returns
-        ``None`` when the installed wheel predates the class (memoised via
-        ``_wide_unavailable`` — no per-chunk re-import attempts); the caller
-        then falls back to the oracle with the warn-once
+        chunked sweep's subsequent wide batches are pure kernel calls.
+        Returns ``None`` when the installed wheel predates the class OR its
+        class predates the exec-grid constructor
+        (:func:`_kernel_exec_grid_current` — an old-constructor sibling
+        cannot take ``arm_source``); either verdict is memoised via
+        ``_wide_unavailable`` (no per-chunk re-import attempts) and the
+        caller falls back to the oracle with the warn-once
         ``wheel_missing_u128`` reason. Reachable only from a monkeypatched /
-        hand-imported stale module: a genuinely stale installed ``.so`` fails
-        at ``import fno_math`` (the shim's import-time symbol handshake).
+        hand-imported stale module: a genuinely stale installed ``.so``
+        fails at ``import fno_math`` (the shim's import-time symbol
+        handshake).
         """
         if self._rust_wide is not None:
             return self._rust_wide
@@ -799,6 +901,9 @@ class ResidentTradeSim:
         except (ImportError, AttributeError):
             self._wide_unavailable = True
             return None
+        if not _kernel_exec_grid_current(kernel_cls):
+            self._wide_unavailable = True
+            return None
         open_p, high_p, low_p, close_p, forced, session_days = self._derive_kernel_inputs()
         # Fresh list copies at the FFI edge — the memo stays immutable tuples
         # (review LOW-2; the construction-site comment has the full rationale).
@@ -809,19 +914,48 @@ class ResidentTradeSim:
             list(close_p),
             list(forced),
             list(session_days),
+            list(self._exec_map.arm_source),
             self._bar_bits,
         )
         _LOG.info(
             "rust_trade_sim.wide_kernel_promoted",
-            n_bars=len(self._bars),
+            n_bars=len(self._decision_bars),
+            n_exec_bars=len(self._exec_bars),
             tf_minutes=self._tf_minutes,
         )
         return self._rust_wide
 
     @property
     def n_bars(self) -> int:
-        """Number of bars in the resident window."""
-        return len(self._bars)
+        """Number of DECISION bars in the resident window (the signal domain)."""
+        return len(self._decision_bars)
+
+    @property
+    def n_exec_bars(self) -> int:
+        """Number of 1-minute EXECUTION bars in the resident window (the walk domain)."""
+        return len(self._exec_bars)
+
+    @property
+    def exec_bars(self) -> tuple[CandleBar, ...]:
+        """The resident 1-minute EXECUTION stream (the fill/walk domain).
+
+        PUBLIC so the sweep spine's metrics tail validates each mask's exit
+        1m indices against the SAME stream the kernel walked
+        (DEC-FILL-EXEC-GRID-1M-001 §3.8) — never a second copy that could
+        drift from the resident window.
+        """
+        return self._exec_bars
+
+    @property
+    def exec_map(self) -> ExecGridMap:
+        """The window's :class:`~brutex.engine.exec_grid.ExecGridMap`.
+
+        PUBLIC so downstream consumers (the metrics tail's 1m→decision index
+        translation via ``decision_of``, design §3.8, and the chunk-failure
+        re-attribution's oracle replay) read the SAME mapping this window
+        simulates with — never a second derivation that could drift.
+        """
+        return self._exec_map
 
     @property
     def reference_stamper(self) -> TradeReferenceStamper | None:
@@ -856,10 +990,12 @@ class ResidentTradeSim:
     ) -> list[list[ClosedTrade]]:
         """Simulate a BATCH of masks over the resident window → per-mask trades.
 
-        Thin delegate over :meth:`simulate_masks_with_exit_indices` (ONE
-        batch spine, DEC-SWEEP-EXIT-INDEX-FASTPATH-001) that drops the
+        Thin delegate over :meth:`simulate_masks_with_exit_indices` (itself
+        a thin delegate over :meth:`simulate_masks_with_exit_counts` — the
+        ONE batch spine, DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B over
+        the DEC-SWEEP-EXIT-INDEX-FASTPATH-001 shape) that drops the
         exit-index halves — byte-identical trades, same error contract,
-        same fallback/warn behaviour. See that method for the full contract.
+        same fallback/warn behaviour. See the spine for the full contract.
         """
         return [
             trades
@@ -881,20 +1017,66 @@ class ResidentTradeSim:
     ) -> list[tuple[list[ClosedTrade], list[int] | None]]:
         """Simulate a BATCH of masks → per-mask ``(trades, exit_indices)`` pairs.
 
-        ``out[j]`` is ``(trades, exit_indices)`` for ``masks[j]`` (signal-only
-        spot; the worst-case adverse-max fill law — the ONLY law,
-        DEC-FILL-WORST-CASE-ONLY-001 — next-bar entry at the adverse extreme,
-        level-clamped SL/TP, 15:20 forced exit at the adverse extreme). The
-        trades are bit-identical to ``[simulate_trades(bars,
-        mask_to_entry_signals(bar_bits, m), ...) for m in masks]`` — the Rust
-        path and the fallback walk the same hardcoded law and direction.
-        Empty ``masks`` → ``[]``.
+        Thin delegate over :meth:`simulate_masks_with_exit_counts` (ONE batch
+        spine — DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B, mirroring how
+        :meth:`simulate_masks` already delegated here) that drops the
+        exit-reason counters — byte-identical trades + indices, same error
+        contract, same fallback/warn behaviour. See that method for the full
+        contract.
+        """
+        return [
+            (trades, exit_indices)
+            for trades, exit_indices, _counts in self.simulate_masks_with_exit_counts(
+                masks,
+                direction=direction,
+                stop_loss_paisa=stop_loss_paisa,
+                take_profit_paisa=take_profit_paisa,
+            )
+        ]
+
+    def simulate_masks_with_exit_counts(
+        self,
+        masks: Sequence[int],
+        *,
+        direction: Side,
+        stop_loss_paisa: int | None = None,
+        take_profit_paisa: int | None = None,
+    ) -> list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]]:
+        """Simulate a BATCH of masks → ``(trades, exit_indices, exit_counts)`` triples.
+
+        ``out[j]`` is the triple for ``masks[j]`` (signal-only spot; the
+        worst-case adverse-max fill law on the 1-MINUTE execution grid — the
+        ONLY law, DEC-FILL-WORST-CASE-ONLY-001 + DEC-FILL-EXEC-GRID-1M-001 —
+        next-1m-bar entry at the adverse extreme, level-clamped SL/TP per 1m
+        bar, forced session-close exit at the adverse extreme). The trades are
+        bit-identical to ``[simulate_trades(decision_bars,
+        mask_to_entry_signals(bar_bits, m), exec_bars_1m=..., ...) for m in
+        masks]`` — the Rust path and the fallback walk the same hardcoded law
+        and direction. Empty ``masks`` → ``[]``.
+
+        ``exit_counts`` (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is the
+        mask's per-reason closed-trade counters in
+        :data:`~brutex.engine.trade_sim.EXIT_REASONS` order — on the Rust arm
+        the kernel's own accumulation, on the fallback arm the walker's
+        :attr:`~brutex.engine.trade_sim.TradeSimWalker.exit_reason_counts`;
+        both are parity-pinned bit-equal, and ``sum(exit_counts) ==
+        len(trades)`` is VALIDATED per mask on the kernel arm (a mismatch is
+        a kernel/marshalling bug and raises ``ValueError`` — inside the
+        sweep's chunk try, so it rides the existing re-attribution →
+        tuple-skip ladder, never a silently wrong ``sl_hit_rate``). A STALE
+        wheel predating the kernel's counted twin serves the WHOLE call
+        through the bit-exact Python oracle instead (warn-once reason
+        ``wheel_missing_exit_counts`` — trades/counts identical, only the
+        engine path changes; reachable only from a monkeypatched /
+        hand-imported stale module, the ``wheel_missing_u128`` envelope).
 
         ``exit_indices`` (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) is each trade's
-        exit BAR INDEX in the resident window, emitted only under a DOUBLE
-        certificate — the window's timestamps strictly increase (checked once
-        at construction) AND the mask's stream passes :func:`_monotonic` —
-        else ``None``, and the metrics tail serves that mask through the
+        exit bar index in the resident 1-MINUTE EXECUTION window (design
+        §2.6 — a 1m index, translatable to its owning decision bar via
+        ``exec_map.decision_of``), emitted only under a DOUBLE certificate —
+        the EXECUTION stream's timestamps strictly increase (checked once at
+        construction) AND the mask's stream passes :func:`_monotonic` — else
+        ``None``, and the metrics tail serves that mask through the
         bit-identical timestamp-dict path. A monotonicity failure on a
         CERTIFIED window is a kernel ordering regression and is WARNed once
         per instance (``rust_trade_sim.exit_indices_uncertified``); an
@@ -919,9 +1101,9 @@ class ResidentTradeSim:
 
         Returns
         -------
-        list[tuple[list[ClosedTrade], list[int] | None]]
-            One ``(trades, exit_indices)`` pair per mask, positionally
-            aligned with ``masks``.
+        list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]]
+            One ``(trades, exit_indices, exit_counts)`` triple per mask,
+            positionally aligned with ``masks``.
 
         Raises
         ------
@@ -962,6 +1144,17 @@ class ResidentTradeSim:
                 rust = self._promote_wide_kernel()
                 if rust is None:
                     call_reason = "wheel_missing_u128"
+            # Stale-wheel probe (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B):
+            # a hand-imported wheel predating the counted twin lacks the
+            # method — serve the WHOLE call through the bit-exact Python
+            # oracle (trades + counts identical, only the engine path
+            # changes), warn-once like every other sticky per-call reason.
+            if (
+                call_reason is None
+                and rust is not None
+                and getattr(rust, "simulate_masks_with_exit_counts", None) is None
+            ):
+                call_reason = "wheel_missing_exit_counts"
             if call_reason is not None:
                 if call_reason not in self._call_fallback_warned:
                     self._call_fallback_warned.add(call_reason)
@@ -979,14 +1172,19 @@ class ResidentTradeSim:
                     )
                 rust = None
         if rust is None:
-            # Pure-Python fallback: the exact oracle (the SAME walker
-            # simulate_trades wraps), one mask at a time. The walker's exit
-            # indices are TRUE indices and monotonic by construction; they
-            # are emitted under the same window certificate as the kernel's.
-            # The window's OWN stamper rides into every walker, so a
-            # fallback-served window stamps identically to the kernel-served
-            # one (never a wheel-state divergence — DEC-VIX-STAMP-WIRE-001).
-            out: list[tuple[list[ClosedTrade], list[int] | None]] = []
+            # Pure-Python fallback: the exact dual-feed oracle (the SAME
+            # walker simulate_trades wraps), one mask at a time, threading
+            # the instance's OWN ExecGridMap (never a per-mask re-derivation).
+            # The walker's exit indices are TRUE 1m indices and monotonic by
+            # construction; they are emitted under the same window
+            # certificate as the kernel's. The window's OWN stamper rides
+            # into every walker, so a fallback-served window stamps
+            # identically to the kernel-served one (never a wheel-state
+            # divergence — DEC-VIX-STAMP-WIRE-001). The exit-reason counters
+            # come from the walker's OWN accumulation
+            # (:attr:`~brutex.engine.trade_sim.TradeSimWalker.exit_reason_counts`
+            # — the same source the parity gates pin the kernel against).
+            out: list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]] = []
             for mask in masks:
                 walker = TradeSimWalker(
                     direction=direction,
@@ -996,16 +1194,25 @@ class ResidentTradeSim:
                     reference_stamper=self._reference_stamper,
                 )
                 trades, exit_indices = walker.run_with_exit_indices(
-                    self._bars, mask_to_entry_signals(self._bar_bits, mask)
+                    self._decision_bars,
+                    self._exec_bars,
+                    mask_to_entry_signals(self._bar_bits, mask),
+                    exec_map=self._exec_map,
                 )
-                out.append((trades, exit_indices if self._ts_certified else None))
+                out.append(
+                    (
+                        trades,
+                        exit_indices if self._ts_certified else None,
+                        walker.exit_reason_counts,
+                    )
+                )
             return out
 
-        # Rust path — the flagless worst-case-only kernel call
+        # Rust path — the flagless worst-case-only COUNTED kernel call
         # (DEC-FILL-WORST-CASE-ONLY-001: the retired mode flags are DELETED
         # from the FFI; a stale flag-carrying wheel was demoted to the oracle
         # at construction, so this call is provably the current kernel).
-        raw = rust.simulate_masks(  # type: ignore[attr-defined]
+        raw = rust.simulate_masks_with_exit_counts(  # type: ignore[attr-defined]
             list(masks),
             direction is Side.BUY,
             stop_loss_paisa,
@@ -1015,18 +1222,28 @@ class ResidentTradeSim:
         # ONCE per batch call — not once per trade — and threaded into the
         # per-record converter, which post-stamps each Rust trade Python-side.
         stamper = self._reference_stamper
-        pairs: list[tuple[list[ClosedTrade], list[int] | None]] = []
-        for mask_records in raw:
+        triples: list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]] = []
+        for mask_records, exit_counts in raw:
             mask_trades: list[ClosedTrade] = []
             mask_exit_indices: list[int] = []
             for record in mask_records:
                 trade, exit_idx = self._to_trade_and_exit(record, direction, stamper)
                 mask_trades.append(trade)
                 mask_exit_indices.append(exit_idx)
+            counts = tuple(exit_counts)
+            if sum(counts) != len(mask_trades):
+                # A counter/trade mismatch is a kernel or marshalling bug —
+                # refuse it (docstring: inside the sweep's chunk try, so it
+                # rides the re-attribution → tuple-skip ladder), never a
+                # silently wrong sl_hit_rate downstream.
+                raise ValueError(
+                    "ResidentTradeSim.simulate_masks_with_exit_counts: kernel "
+                    f"exit_counts sum {sum(counts)} != trade count {len(mask_trades)}"
+                )
             if not self._ts_certified:
                 # Malformed (duplicate/reordered timestamp) window: withhold
                 # the indices — the dict path is the historical behaviour.
-                pairs.append((mask_trades, None))
+                triples.append((mask_trades, None, counts))
             elif not _monotonic(mask_exit_indices):
                 # A non-monotonic stream on a CERTIFIED window is a kernel
                 # ordering regression — refuse the indices LOUDLY (once per
@@ -1038,10 +1255,10 @@ class ResidentTradeSim:
                         reason="exit_indices_not_monotonic",
                         n_trades=len(mask_trades),
                     )
-                pairs.append((mask_trades, None))
+                triples.append((mask_trades, None, counts))
             else:
-                pairs.append((mask_trades, mask_exit_indices))
-        return pairs
+                triples.append((mask_trades, mask_exit_indices, counts))
+        return triples
 
     def _to_trade_and_exit(
         self,
@@ -1049,11 +1266,13 @@ class ResidentTradeSim:
         direction: Side,
         stamper: TradeReferenceStamper | None,
     ) -> tuple[ClosedTrade, int]:
-        """Map one Rust trade tuple → ``(ClosedTrade, exit_idx)`` (idx→bar timestamps).
+        """Map one Rust trade tuple → ``(ClosedTrade, exit_idx)`` (1m idx→bar timestamps).
 
-        The exit bar index — which the kernel record already carries and the
-        pre-#1186 mapping discarded — is returned alongside the trade so the
-        metrics tail can skip its per-mask ``exit_ts``→index dict build
+        The kernel record's ``entry_idx`` / ``exit_idx`` / ``holding_bars``
+        are 1-MINUTE EXECUTION-stream quantities (design §2.6) — the
+        timestamps resolve against ``exec_bars_1m``, and the exit index is
+        returned alongside the trade so the metrics tail can skip its
+        per-mask ``exit_ts``→index dict build
         (DEC-SWEEP-EXIT-INDEX-FASTPATH-001).
 
         ALSO the POST-STAMP seam (DEC-VIX-STAMP-WIRE-001): when a *stamper* is
@@ -1068,8 +1287,8 @@ class ResidentTradeSim:
         from brutex.metrics.types import ClosedTrade
 
         pnl, mfe, mae, holding, entry_idx, exit_idx = record
-        entry_ts = self._bars[entry_idx].timestamp
-        exit_ts = self._bars[exit_idx].timestamp
+        entry_ts = self._exec_bars[entry_idx].timestamp
+        exit_ts = self._exec_bars[exit_idx].timestamp
         if stamper is not None:
             vix_at_entry, vix_at_exit = stamper.stamp(entry_ts, exit_ts)
         else:

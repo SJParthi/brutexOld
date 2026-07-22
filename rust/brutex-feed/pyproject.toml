@@ -14,7 +14,7 @@ build-backend = "maturin"
 
 [project]
 name = "brutex-feed"
-version = "0.1.0"
+version = "0.2.0"
 description = "Engine read-boundary decision kernel (positivity + bad-tick scan) for BruteX."
 readme = "README.md"
 license = { text = "Proprietary" }

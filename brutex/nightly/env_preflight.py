@@ -83,6 +83,20 @@ REMOVED_ENV_FLAGS: Final[tuple[RemovedEnvFlag, ...]] = (
         tier="removed",
     ),
     RemovedEnvFlag(
+        name="BRUTEX_LAKE_RUST_LEDGER_RENDER",
+        removed_by=(
+            "DEC-RUST-RUNID-STORES-001 (MIGRATION.md #1962 — supersedes-in-part "
+            "DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 #1918 on the render plane)"
+        ),
+        remediation=(
+            "unset BRUTEX_LAKE_RUST_LEDGER_RENDER / remove the line from ~/.brutex/.env "
+            "— the window-ledger render is no longer flag-selectable (the "
+            "brutex_identity kernel render is canonical); every ledger load/save/append "
+            "refuses while it is set (any value, its old truthy and falsy forms alike)"
+        ),
+        tier="removed",
+    ),
+    RemovedEnvFlag(
         name="BRUTEX_SKIP_WHEEL_FRESHNESS",
         removed_by="DEC-BOX-AUTODEPLOY-LANE-001 (active doctor escape, registered §4.5)",
         remediation=(

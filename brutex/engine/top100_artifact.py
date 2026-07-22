@@ -90,15 +90,22 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.guarded_read import read_regular_bytes_deadline
+from brutex.engine.alpha_metric import AlphaBaseline, AlphaValues, compute_alpha_values
 from brutex.engine.resilience_streaks import project_resilience_annotation
 from brutex.models import BruteXError
-from brutex.ranking import MIN_TRADES
+from brutex.ranking import MIN_TRADES, STREAK_DOOR_WLR_EXEMPT, streak_door_threshold
 from brutex.ranking.presets import (
     DEFAULT_PRESET,
     PRESET_NAMES,
     PRESETS,
     RankRecord,
     sort_by_preset,
+)
+from brutex.ranking.tiers import (
+    DEFAULT_TIER_CONFIG,
+    TierInputs,
+    classify_tier,
+    tier_config_payload,
 )
 from brutex.vocabulary.describe import matched_condition_names
 
@@ -132,7 +139,10 @@ __all__ = [
     "TOP100_SCHEMA_VERSION",
     "TOP100_STAGE",
     "TOP100_STAMP_FILENAME",
+    "FillSensitivityProvider",
+    "FuturesExecProvider",
     "MarginRoiProvider",
+    "OptionsExecProvider",
     "PoolCounts",
     "ReasonProvider",
     "Top100Artifact",
@@ -195,7 +205,11 @@ GATE_MAX_DRAWDOWN_PCT: Final[float] = 30.0
 GATE_MIN_WIN_RATE: Final[float] = 0.25
 GATE_MIN_WIN_LOSS_RATIO: Final[float] = 2.0
 
-#: Gate 5 — a longer losing streak is an account-blower.
+#: Gate 5's legacy fixed streak bound — since DEC-METRICS-KELLY-GROWTH-001
+#: the FLOOR inside the shared :func:`brutex.ranking.streak_door_threshold`
+#: (which :func:`passes_hard_gates` composes directly — the statistics is
+#: IMPORTED, never re-derived here); this re-pin survives for the
+#: drift-test against ``brutex.ranking``'s private twin + back-compat.
 GATE_MAX_CONSECUTIVE_LOSSES: Final[int] = 10
 
 #: Required keys of every artifact entry — the binding P3→P4 contract keys
@@ -278,6 +292,36 @@ MarginRoiProvider: TypeAlias = Callable[  # noqa: UP040
     ["Top100Candidate"], Mapping[str, object] | None
 ]
 
+#: `DEC-OPTIONS-EXEC-FEEDBACK-001` — the post-sweep options-sim verdict
+#: provider: candidate → the per-entry ``options_exec`` object (priced or the
+#: NAMED ``not_priced`` — TOTAL when wired, never ``None`` per entry). The
+#: whole provider being ``None`` (``--no-options-sim`` / no option lake) means
+#: the key is ABSENT from every entry — pre-change artifacts + the fixture
+#: corpus stay BYTE-IDENTICAL (unlike the cascade's always-emit: a sim that
+#: never ran has nothing to say per entry, and emitting a key would force the
+#: frozen byte golden to regenerate for zero information).
+OptionsExecProvider: TypeAlias = Callable[  # noqa: UP040
+    ["Top100Candidate"], Mapping[str, object]
+]
+
+#: The futures-executor verdict provider — the ``options_exec`` law's futures
+#: twin (`DEC-OPTIONS-EXEC-FEEDBACK-001`; the object REUSES the shipped
+#: ``futures/leaderboard.py`` annotation shape under the reserved
+#: ``futures_exec`` key).
+FuturesExecProvider: TypeAlias = Callable[  # noqa: UP040
+    ["Top100Candidate"], Mapping[str, object]
+]
+
+#: The fill-sensitivity annotation provider (DEC-FILL-EXEC-GRID-1M-001, R13 —
+#: annotation NEVER re-ranks or hides): candidate → the per-entry
+#: ``fill_sensitivity`` object (:mod:`brutex.engine.fill_sensitivity` — priced
+#: or the NAMED ``not_priced``; TOTAL when wired). Resolved ONLY for the
+#: RANKED entries (each call is one O(bars) reference re-sim — the disclosed
+#: O(|top100|·bars) run-end envelope), never for the whole pool.
+FillSensitivityProvider: TypeAlias = Callable[  # noqa: UP040
+    ["Top100Candidate"], Mapping[str, object]
+]
+
 
 @dataclass(frozen=True, slots=True)
 class Top100Candidate:
@@ -355,6 +399,11 @@ class Top100Artifact:
     baselines: Mapping[str, str]
     entries: tuple[Mapping[str, object], ...]
     cascade_join: Mapping[str, object] | None = None
+    #: ADDITIVE root meta (DEC-RANKING-SPLUS-TIER-001): the tier-threshold
+    #: values the writer classified with (``tier_config_payload`` — the
+    #: artifact is self-describing); ``None`` on a pre-change artifact read
+    #: back by :func:`load_top100` (the key is then simply not re-emitted).
+    tier_config: Mapping[str, object] | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Render the artifact's deterministic JSON payload (B5 shape)."""
@@ -368,6 +417,8 @@ class Top100Artifact:
         }
         if self.cascade_join is not None:
             payload["cascade_join"] = dict(self.cascade_join)
+        if self.tier_config is not None:
+            payload["tier_config"] = dict(self.tier_config)
         return payload
 
     def rendered_bytes(self) -> bytes:
@@ -396,6 +447,23 @@ def passes_hard_gates(row: ResultRow, agg: ComboAggregate) -> bool:
     upstream non-finite fail-closed guard has no reachable input here. A
     ``None`` ``win_loss_ratio`` contributes ``0.0`` to the combined gate —
     the upstream ``passes_gates`` substitution, verbatim.
+
+    Door 5 is the derived binomial-null streak door
+    (DEC-METRICS-KELLY-GROWTH-001): the SHARED
+    :func:`brutex.ranking.streak_door_threshold` (imported — the statistics
+    has ONE home) at ``loss_rate = losing_trades / total_trades`` (safe:
+    Door 1 already refused ``total_trades < 30``, and the mirror
+    short-circuits), with the high-payoff exemption ``win_loss_ratio >=
+    STREAK_DOOR_WLR_EXEMPT`` (a ``None`` ratio never exempts).
+
+    HONEST SCOPE: the opt-in gates (the overfit / Deflated-Sharpe gate and
+    the Door-6 ``max_sl_hit_rate`` ceiling —
+    DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) are deliberately NOT
+    mirrored here: both are per-grid config, already enforced at sweep rank
+    time on the persisted survivors (the gate config is folded into the
+    store ADDRESS by ``_gate_config_fragment``, so a gated tree's rows are
+    gate-passing by construction), and the display-zone artifact has no
+    authoritative gate config to re-judge them under.
     """
     if row.total_trades < GATE_MIN_TRADES:
         return False
@@ -406,7 +474,11 @@ def passes_hard_gates(row: ResultRow, agg: ComboAggregate) -> bool:
     wlr = agg.win_loss_ratio if agg.win_loss_ratio is not None else 0.0
     if row.win_rate < GATE_MIN_WIN_RATE and wlr < GATE_MIN_WIN_LOSS_RATIO:
         return False
-    return agg.max_consecutive_losses <= GATE_MAX_CONSECUTIVE_LOSSES
+    if agg.win_loss_ratio is not None and agg.win_loss_ratio >= STREAK_DOOR_WLR_EXEMPT:
+        return True
+    return agg.max_consecutive_losses <= streak_door_threshold(
+        row.total_trades, row.losing_trades / row.total_trades
+    )
 
 
 def resolve_preset(name: str) -> str:
@@ -426,8 +498,26 @@ def resolve_preset(name: str) -> str:
     return DEFAULT_TOP100_PRESET
 
 
-def _rank_record(candidate: Top100Candidate) -> RankRecord:
-    """Project one pooled candidate onto the COMMON flat rank-record shape."""
+def _rank_record(
+    candidate: Top100Candidate,
+    *,
+    alpha_pct: float | None = None,
+    net_after_cost_of: Mapping[str, int] | None = None,
+) -> RankRecord:
+    """Project one pooled candidate onto the COMMON flat rank-record shape.
+
+    ``alpha_pct`` (DEC-ALPHA-BUYHOLD-METRIC-001) is the candidate's computed
+    alpha-vs-buy-&-hold percent, or the honest ``None`` when no baseline
+    covers its instrument's window — the ``alpha`` preset ranks such rows
+    LAST (the None-after-scored law), every other preset ignores the axis.
+
+    ``net_after_cost_of`` (`DEC-OPTIONS-EXEC-FEEDBACK-001`) maps ``run_id`` →
+    the PRICED options-exec headline net (int paisa); an unmapped candidate —
+    or ``None``, every pre-change caller — keeps the honest ``None``
+    "unpriced" state (ranks last under the ``net_after_cost`` preset, inert
+    under every other; never a fabricated 0).
+    """
+    mapped = None if net_after_cost_of is None else net_after_cost_of.get(candidate.row.run_id)
     return RankRecord(
         run_id=candidate.row.run_id,
         max_drawdown_pct=candidate.row.max_drawdown_pct,
@@ -436,11 +526,34 @@ def _rank_record(candidate: Top100Candidate) -> RankRecord:
         profit_factor=candidate.row.profit_factor,
         win_rate=candidate.row.win_rate,
         calmar_ratio=candidate.row.calmar_ratio,
+        # The growth-preset input (DEC-METRICS-KELLY-GROWTH-001): the row's
+        # persisted half-Kelly log growth — None on a pre-extension store
+        # (honestly unscored, ranks last under the preset's presence flag).
+        log_growth_at_half_kelly=candidate.row.log_growth_at_half_kelly,
+        # The win_rate_safe-preset input (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        # Stage B): the row's persisted SL-hit rate — None on a pre-extension
+        # store (honestly unknown, ranks after every concrete rate within an
+        # equal win rate under the preset's presence flag).
+        sl_hit_rate=candidate.row.sl_hit_rate,
+        # The recency-preset inputs (DEC-METRICS-TRAILING-WINDOW-001): the
+        # row's persisted trailing Sharpe + decay composite — None on a
+        # pre-extension store / anchor-less run (honestly unscored, rank
+        # last under each preset's presence flag).
+        trailing_sharpe_ratio=candidate.row.trailing_sharpe_ratio,
+        decay_weighted_net_paisa=candidate.row.decay_weighted_net_paisa,
+        alpha_pct=alpha_pct,
+        # DEC-OPTIONS-EXEC-FEEDBACK-001: the joined priced options-exec net
+        # (None = unpriced, ranks last under net_after_cost, inert elsewhere).
+        net_after_cost_paisa=mapped,
     )
 
 
 def rank_candidates(
-    candidates: Sequence[Top100Candidate], *, preset: str
+    candidates: Sequence[Top100Candidate],
+    *,
+    preset: str,
+    alpha_by_run_id: Mapping[str, float] | None = None,
+    net_after_cost_of: Mapping[str, int] | None = None,
 ) -> tuple[Top100Candidate, ...]:
     """Order *candidates* under *preset* — a strict, discovery-order-free total order.
 
@@ -448,9 +561,23 @@ def rank_candidates(
     (:func:`brutex.ranking.presets.sort_by_preset` — the ``ResultsStore.top_k``
     law: stable ``run_id``-ASC pre-sort, then ONE stable sort on the preset
     key) — identical output for any input permutation (property-pinned).
+    ``alpha_by_run_id`` feeds the ``alpha`` preset's axis (an absent id ==
+    honestly uncomputable → ``None``); the default ``None`` map is
+    byte-identical to the pre-alpha ordering under every preset.
+    ``net_after_cost_of`` threads the joined options-exec nets into the rank
+    record (see :func:`_rank_record`; ``None`` is byte-identical pre-change).
     """
     resolved = resolve_preset(preset)
-    return sort_by_preset(candidates, preset=PRESETS[resolved], record_of=_rank_record)
+    alpha_map: Mapping[str, float] = {} if alpha_by_run_id is None else alpha_by_run_id
+    return sort_by_preset(
+        candidates,
+        preset=PRESETS[resolved],
+        record_of=lambda candidate: _rank_record(
+            candidate,
+            alpha_pct=alpha_map.get(candidate.row.run_id),
+            net_after_cost_of=net_after_cost_of,
+        ),
+    )
 
 
 # ── Entry payload projection ─────────────────────────────────────────────────
@@ -465,7 +592,11 @@ def _loads_object(rendered: str) -> dict[str, object]:
 
 
 def _metrics_payload(
-    row: ResultRow, agg: ComboAggregate, *, cpcv_pass_rate: float | None = None
+    row: ResultRow,
+    agg: ComboAggregate,
+    *,
+    cpcv_pass_rate: float | None = None,
+    alpha: AlphaValues | None = None,
 ) -> dict[str, object]:
     """Every ResultRow metric + the agg's depth stats — full precision, ints exact.
 
@@ -475,6 +606,11 @@ def _metrics_payload(
     unit projection, never a rounding (CLAUDE.md §4). Emitted ONLY when the
     rate is known: an absent key renders the honest "—" on every display
     site, NEVER a fabricated 0 (the oneclick_artifacts absent-key law).
+
+    ``alpha`` (DEC-ALPHA-BUYHOLD-METRIC-001) follows the SAME emit-on-known
+    law: a non-``None`` triple adds ``alpha_pct`` / ``strategy_return_pct``
+    / ``bh_return_pct`` at full float precision; an instrument with no
+    baseline for the window adds NOTHING — the honest "—", never 0.
     """
     payload: dict[str, object] = {
         # ── the persisted ResultRow, field-for-field (R27 traceability) ──
@@ -530,6 +666,10 @@ def _metrics_payload(
     }
     if cpcv_pass_rate is not None:
         payload["cpcv_pass_pct"] = cpcv_pass_rate * 100.0
+    if alpha is not None:
+        payload["alpha_pct"] = alpha.alpha_pct
+        payload["strategy_return_pct"] = alpha.strategy_return_pct
+        payload["bh_return_pct"] = alpha.bh_return_pct
     return payload
 
 
@@ -611,6 +751,56 @@ def _cascade_payload(
     }, verdict.cpcv_pass_rate
 
 
+def _tier_payload(candidate: Top100Candidate, *, cascade_status: str) -> dict[str, object]:
+    """One entry's ADDITIVE ``tier`` object (DEC-RANKING-SPLUS-TIER-001).
+
+    ANNOTATION-ONLY — classified strictly AFTER ranking, over the SAME joined
+    cascade status the entry's ``cascade`` object carries (threaded, never a
+    report re-read). Every input is an EXISTING persisted value
+    (``ResultRow`` ⋈ ``ComboAggregate`` + the owning tuple's arm);
+    ``avg_entry_price`` is Decimal RUPEES on the 2dp tick grid
+    (``results_store._PRICE_FIELDS``), so ``× 100`` is an EXACT int-paisa
+    projection (a non-positive price degrades to ``None`` — the classifier's
+    honest ``missing_input:avg_entry_price``).
+    """
+    row = candidate.row
+    agg = candidate.agg
+    entry_paisa = int(row.avg_entry_price * 100)
+    verdict = classify_tier(
+        TierInputs(
+            total_trades=row.total_trades,
+            win_rate=row.win_rate,
+            win_loss_ratio=agg.win_loss_ratio,
+            losing_trades=row.losing_trades,
+            profit_factor=row.profit_factor,
+            gross_loss_paisa=row.gross_loss_paisa,
+            expectancy_paisa=row.expectancy_paisa,
+            sl_paisa=candidate.sl_paisa,
+            entry_price_paisa=entry_paisa if entry_paisa > 0 else None,
+            mae_1m_worst_paisa=agg.mae_1m_worst_paisa,
+            trades_with_1m=agg.trades_with_1m,
+            equity_status=agg.equity_status,
+            max_drawdown_pct=row.max_drawdown_pct,
+            # SCALE LAW (hostile-review round-1 MAJOR-1): the agg's
+            # ``max_dd_minute_path_pct`` is a 0-1 FRACTION
+            # (``minute_path.py`` ``drop / peak`` — the bx-oneclick.js
+            # bxMinutePathDdText ×100 display law), while the classifier's
+            # ``max_minute_dd_pct`` ceilings (7.5 / 15.0) are PERCENTAGE
+            # POINTS like the sibling ``max_drawdown_pct`` (which compute.py
+            # already ×100s). Fed verbatim, a 40% intraday dip read 0.40 ≤
+            # 7.5 and the axis could NEVER fire — scale ×100 HERE (an exact
+            # unit projection, never a rounding).
+            max_dd_minute_path_pct=(
+                None if agg.max_dd_minute_path_pct is None else agg.max_dd_minute_path_pct * 100.0
+            ),
+            max_consecutive_losses=agg.max_consecutive_losses,
+            cascade_status=cascade_status,
+        ),
+        config=DEFAULT_TIER_CONFIG,
+    )
+    return {"label": verdict.tier, "blocked_next": list(verdict.blocked_next)}
+
+
 def _entry_payload(
     rank: int,
     candidate: Top100Candidate,
@@ -621,8 +811,19 @@ def _entry_payload(
     margin_roi: Mapping[str, object] | None,
     join: CascadeJoin | None = None,
     join_state: str = CASCADE_STATE_NO_REPORT,
+    alpha: AlphaValues | None = None,
+    options_exec: Mapping[str, object] | None = None,
+    futures_exec: Mapping[str, object] | None = None,
+    fill_sensitivity: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Project one ranked candidate onto the binding entry shape (B5).
+
+    ``options_exec`` / ``futures_exec`` (`DEC-OPTIONS-EXEC-FEEDBACK-001`) and
+    ``fill_sensitivity`` (DEC-FILL-EXEC-GRID-1M-001) are ADDITIVE
+    emit-on-wired keys: ``None`` (an unwired provider) leaves the key ABSENT —
+    pre-change artifact bytes are IDENTICAL (:data:`ENTRY_REQUIRED_KEYS`
+    deliberately untouched, the cascade-comment law); a wired provider keys
+    EVERY entry (priced or the named ``not_priced``).
 
     The resilience annotation lands as ONE additive top-level ``resilience``
     key via :func:`brutex.engine.resilience_streaks.project_resilience_annotation`
@@ -631,7 +832,7 @@ def _entry_payload(
     """
     row = candidate.row
     cascade, cpcv_rate = _cascade_payload(row.run_id, join=join, state=join_state)
-    entry = {
+    entry: dict[str, object] = {
         "rank": rank,
         "run_id": row.run_id,
         "mask_hex": f"{row.mask_bits:0{_MASK_HEX_WIDTH}x}",
@@ -640,7 +841,7 @@ def _entry_payload(
         "tf": row.tf,
         "direction": row.direction,
         "arm": {"sl_paisa": candidate.sl_paisa, "tp_paisa": candidate.tp_paisa},
-        "metrics": _metrics_payload(row, candidate.agg, cpcv_pass_rate=cpcv_rate),
+        "metrics": _metrics_payload(row, candidate.agg, cpcv_pass_rate=cpcv_rate, alpha=alpha),
         "regime": _regime_payload(candidate.agg),
         "vix_band": _vix_band_payload(candidate.agg),
         "family_id": family_id,
@@ -649,7 +850,17 @@ def _entry_payload(
         "margin_roi": None if margin_roi is None else dict(margin_roi),
         "equity_ref": {"tuple": candidate.tuple_ref, "sidecar": "equity"},
         "cascade": cascade,
+        # DEC-RANKING-SPLUS-TIER-001: writer-ALWAYS-emitted, reader-OPTIONAL
+        # (deliberately NOT in ENTRY_REQUIRED_KEYS — old artifacts stay
+        # loadable). Classified over the SAME joined cascade status above.
+        "tier": _tier_payload(candidate, cascade_status=str(cascade["status"])),
     }
+    if options_exec is not None:
+        entry["options_exec"] = dict(options_exec)
+    if futures_exec is not None:
+        entry["futures_exec"] = dict(futures_exec)
+    if fill_sensitivity is not None:
+        entry["fill_sensitivity"] = dict(fill_sensitivity)
     return project_resilience_annotation(entry, candidate.resilience)
 
 
@@ -668,6 +879,12 @@ def build_top100(
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
     cascade_join: CascadeJoin | None = None,
+    alpha_baselines: Mapping[str, AlphaBaseline] | None = None,
+    start_equity_paisa: int | None = None,
+    alpha_gate: bool = False,
+    options_exec_provider: OptionsExecProvider | None = None,
+    futures_exec_provider: FuturesExecProvider | None = None,
+    fill_sensitivity_provider: FillSensitivityProvider | None = None,
 ) -> Top100Artifact:
     """Build the global artifact from the pooled winners — one O(pool) pass.
 
@@ -709,6 +926,41 @@ def build_top100(
         stay ``not_validated``. The join is ANNOTATION-ONLY: ranking /
         preset order / family collapse are byte-untouched (R13 — a
         cascade-FAILED rank-1 stays rank-1, flagged never hidden).
+    options_exec_provider, futures_exec_provider
+        The `DEC-OPTIONS-EXEC-FEEDBACK-001` post-sweep exec-sim verdict seams
+        (TOTAL providers — see the aliases). ``None`` leaves the key ABSENT
+        from every entry AND the ``*_wired`` source flag UNEMITTED —
+        pre-change artifact bytes IDENTICAL (the emit-on-wired law); wired,
+        each is resolved ONCE per gate-passing representative BEFORE ranking
+        and the PRICED options nets feed the ``net_after_cost`` preset's rank
+        record (``net_after_cost_of``) — the SAME resolved verdicts land on
+        the entries (never a double resolve).
+    fill_sensitivity_provider
+        The DEC-FILL-EXEC-GRID-1M-001 annotation seam — resolved ONLY for the
+        RANKED entries (each call is one O(bars) reference re-sim; the
+        disclosed O(|top100|·bars) run-end envelope). It never feeds ranking
+        (R13 — annotation only).
+
+    alpha_baselines, start_equity_paisa
+        DEC-ALPHA-BUYHOLD-METRIC-001: instrument → the R27 baseline's
+        paisa pair, plus the grid's start equity (the strategy notional).
+        When BOTH are supplied every candidate whose instrument has a
+        baseline gains the O(1)/candidate kernel-routed alpha triple on its
+        ``metrics`` (``alpha_pct`` / ``strategy_return_pct`` /
+        ``bh_return_pct`` — emit-on-known; an uncovered instrument adds
+        NOTHING → the honest "—"). Defaults (``None``) are BYTE-IDENTICAL
+        to the pre-alpha artifact (pinned).
+    alpha_gate
+        The DEFAULT-OFF rejection gate (``BRUTEX_ALPHA_GATE``, resolved by
+        the CALLER — fail-loud at launch): when ``True``, gate-passing
+        candidates whose COMPUTABLE alpha is <= 0 are EXCLUDED before the
+        family collapse — counted (``source["alpha_gate_excluded"]``) +
+        named (ONE ``top100.alpha_gate_excluded`` WARN with a capped id
+        sample), never silent truncation. An UNCOMPUTABLE alpha never
+        excludes (Golden Rule #1 — you cannot judge what you cannot
+        measure). ARTIFACT-LEVEL scope only: persisted stores + the
+        ``sweep_identity`` tuple digest are byte-untouched (post-hoc
+        display selection, NOT a store-address fold — the honest scope).
 
     Raises
     ------
@@ -721,6 +973,20 @@ def build_top100(
             raise Top100Error(f"build_top100: duplicate candidate run_id {candidate.row.run_id!r}")
         seen.add(candidate.row.run_id)
     resolved = resolve_preset(preset)
+
+    # ── Alpha vs buy-&-hold (DEC-ALPHA-BUYHOLD-METRIC-001) ──
+    # One O(1) kernel-routed triple per candidate whose instrument carries a
+    # baseline; an uncovered instrument stays honestly ABSENT from the map
+    # (its entries emit no alpha keys → the display "—", never a 0).
+    alpha_values: dict[str, AlphaValues] = {}
+    if alpha_baselines and start_equity_paisa is not None:
+        for candidate in candidates:
+            baseline = alpha_baselines.get(candidate.row.instrument)
+            if baseline is None:
+                continue
+            alpha_values[candidate.row.run_id] = compute_alpha_values(
+                candidate.row.net_pnl_paisa, start_equity_paisa, baseline
+            )
 
     # ── Cascade sweep_id gate (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) ──
     # The cascade dir is ONE-per-results-root and overwritten per sweep, so a
@@ -743,6 +1009,40 @@ def build_top100(
         join_for_entries = cascade_join
 
     passers = [c for c in candidates if passes_hard_gates(c.row, c.agg)]
+    # Snapshot the HARD-gate passer count BEFORE the alpha gate can narrow
+    # ``passers``: ``source["gate_passers"]`` + the ``top100.built`` log field
+    # keep their historical meaning ("hard-gate passers") and stay equal to
+    # the report-side ``ResultsDepthReport.gate_passers`` accounting under
+    # gate-ON; ``alpha_gate_excluded`` is the SOLE accounting of alpha
+    # rejections (review r1, DEC-ALPHA-BUYHOLD-METRIC-001).
+    hard_passers = len(passers)
+
+    # ── The DEFAULT-OFF alpha rejection gate (DEC-ALPHA-BUYHOLD-METRIC-001) ──
+    # Runs BEFORE the family collapse so an excluded candidate can never be a
+    # representative. Only a COMPUTABLE alpha <= 0 excludes; an uncomputable
+    # one (no baseline) is kept — never judged on a number that does not
+    # exist. COUNTED + NAMED, never silent truncation.
+    alpha_gate_excluded = 0
+    if alpha_gate:
+        kept: list[Top100Candidate] = []
+        excluded_ids: list[str] = []
+        for candidate in passers:
+            values = alpha_values.get(candidate.row.run_id)
+            if values is not None and values.alpha_pct <= 0.0:
+                excluded_ids.append(candidate.row.run_id)
+                continue
+            kept.append(candidate)
+        alpha_gate_excluded = len(excluded_ids)
+        if excluded_ids:
+            _LOG.warning(
+                "top100.alpha_gate_excluded",
+                run_id=run_id,
+                excluded=alpha_gate_excluded,
+                sample=excluded_ids[:10],
+                note="alpha <= 0 vs buy-&-hold — excluded from the top100 BUILD only "
+                "(stores + run identity untouched; BRUTEX_ALPHA_GATE is operator-gated)",
+            )
+        passers = kept
 
     # Family collapse (R34): one representative per family among the PASSERS.
     # The partition's representative (fewest mask bits, run_id ASC) is used
@@ -771,7 +1071,32 @@ def build_top100(
         members_of[chosen.row.run_id] = listed
     families_collapsed = len(passers) - len(representatives)
 
-    ranked = rank_candidates(representatives, preset=resolved)[:TOP100_LIMIT]
+    # ── Exec-sim verdict resolution (`DEC-OPTIONS-EXEC-FEEDBACK-001`) ──
+    # Resolve each wired provider ONCE per gate-passing representative BEFORE
+    # ranking (the providers are O(1) map lookups over the hook's in-memory
+    # verdict maps): the PRICED options nets feed the ``net_after_cost``
+    # preset's rank record, and the SAME resolved verdicts land on the ranked
+    # entries below — provider consulted exactly once per entry.
+    options_exec_by_id: dict[str, Mapping[str, object]] | None = None
+    if options_exec_provider is not None:
+        options_exec_by_id = {c.row.run_id: options_exec_provider(c) for c in representatives}
+    futures_exec_by_id: dict[str, Mapping[str, object]] | None = None
+    if futures_exec_provider is not None:
+        futures_exec_by_id = {c.row.run_id: futures_exec_provider(c) for c in representatives}
+    net_after_cost_of: dict[str, int] | None = None
+    if options_exec_by_id is not None:
+        net_after_cost_of = {}
+        for rid, verdict in options_exec_by_id.items():
+            net = verdict.get("net_after_cost_paisa")
+            if verdict.get("status") == "priced" and isinstance(net, int):
+                net_after_cost_of[rid] = net
+
+    ranked = rank_candidates(
+        representatives,
+        preset=resolved,
+        alpha_by_run_id={run_id_: values.alpha_pct for run_id_, values in alpha_values.items()},
+        net_after_cost_of=net_after_cost_of,
+    )[:TOP100_LIMIT]
     entries: list[Mapping[str, object]] = []
     for position, candidate in enumerate(ranked, start=1):
         run = candidate.row.run_id
@@ -789,6 +1114,17 @@ def build_top100(
                 ),
                 join=join_for_entries,
                 join_state=join_state,
+                alpha=alpha_values.get(run),
+                options_exec=(None if options_exec_by_id is None else options_exec_by_id[run]),
+                futures_exec=(None if futures_exec_by_id is None else futures_exec_by_id[run]),
+                # Resolved ONLY for the ranked entries — one O(bars)
+                # reference re-sim per call (DEC-FILL-EXEC-GRID-1M-001; the
+                # disclosed O(|top100|·bars) run-end envelope).
+                fill_sensitivity=(
+                    None
+                    if fill_sensitivity_provider is None
+                    else fill_sensitivity_provider(candidate)
+                ),
             )
         )
 
@@ -796,7 +1132,7 @@ def build_top100(
         "data_snapshot_hashes": sorted(set(data_snapshot_hashes)),
         "stores": counts.stores,
         "pool": len(candidates),
-        "gate_passers": len(passers),
+        "gate_passers": hard_passers,
         "excluded_no_aggs": counts.excluded_no_aggs,
         "zero_trade_excluded": counts.zero_trade_excluded,
         "parity_excluded": counts.parity_excluded,
@@ -804,6 +1140,24 @@ def build_top100(
         "reasons_wired": reason_provider is not None,
         "margin_roi_wired": margin_roi_provider is not None,
     }
+    # DEC-ALPHA-BUYHOLD-METRIC-001 — EMIT-ON-NON-DEFAULT: the two gate keys
+    # appear ONLY when the operator-gated switch is ON, so a default build's
+    # bytes are IDENTICAL to the pre-alpha artifact (golden-pinned).
+    if alpha_gate:
+        source["alpha_gate"] = True
+        source["alpha_gate_excluded"] = alpha_gate_excluded
+    # EMIT-ON-WIRED `*_wired` flags (`DEC-OPTIONS-EXEC-FEEDBACK-001` /
+    # DEC-FILL-EXEC-GRID-1M-001): deliberately NOT unconditional like
+    # `reasons_wired` — an always-emitted False would change every
+    # provider-None artifact's bytes and force the frozen byte golden + the
+    # whole fixture corpus to regenerate for zero information (the
+    # emit-on-present idiom). Absence == not wired, disclosed here.
+    if options_exec_provider is not None:
+        source["options_exec_wired"] = True
+    if futures_exec_provider is not None:
+        source["futures_exec_wired"] = True
+    if fill_sensitivity_provider is not None:
+        source["fill_sensitivity_wired"] = True
     # Root cascade-join meta — writer-ALWAYS-emitted, reader-OPTIONAL. Under
     # a mismatch the report's sweep_id is NAMED (the diagnosable half) while
     # the counts stay honest null (a stale report's totals must never read
@@ -830,13 +1184,16 @@ def build_top100(
         baselines=dict(baselines),
         entries=tuple(entries),
         cascade_join=cascade_meta,
+        # DEC-RANKING-SPLUS-TIER-001: the self-describing threshold echo —
+        # writer-ALWAYS-emitted, reader-OPTIONAL (the cascade_join law).
+        tier_config=tier_config_payload(DEFAULT_TIER_CONFIG),
     )
     _LOG.info(
         "top100.built",
         run_id=run_id,
         preset=resolved,
         pool=len(candidates),
-        gate_passers=len(passers),
+        gate_passers=hard_passers,
         families_collapsed=families_collapsed,
         entries=len(entries),
         cascade_join_state=join_state,
@@ -997,6 +1354,7 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
     # re-emitted on a round-trip); a non-object value is dropped, never a
     # reject (the entries + stamp already proved integrity above).
     cascade_join_raw = payload.get("cascade_join")
+    tier_config_raw = payload.get("tier_config")
     return Top100Artifact(
         schema_version=TOP100_SCHEMA_VERSION,
         run_id=run_id,
@@ -1005,4 +1363,5 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
         baselines={str(key): str(value) for key, value in baselines.items()},
         entries=tuple(entries),
         cascade_join=cascade_join_raw if isinstance(cascade_join_raw, dict) else None,
+        tier_config=tier_config_raw if isinstance(tier_config_raw, dict) else None,
     )

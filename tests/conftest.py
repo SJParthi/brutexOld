@@ -148,6 +148,25 @@ STRATEGIES_RUST_COMBO_ENV = (
 )
 os.environ.setdefault(STRATEGIES_RUST_COMBO_ENV, "0")
 
+# DEC-ALPHA-BUYHOLD-METRIC-001 test hermeticity (the market-hours-guard
+# philosophy — hermetic against the AMBIENT ENVIRONMENT): the alpha
+# rejection gate (`BRUTEX_ALPHA_GATE`, default OFF) is resolved from the
+# REAL ``os.environ`` at cmd_sweep_all launch + the results-depth pass
+# entry. When the flag is UNSET this belt pins it explicitly OFF
+# (``setdefault``), so the default-build byte-identity pins (no gate keys on
+# the top100 ``source``) never depend on the runner's shell; an explicit
+# outer export — truthy or junk alike — WINS over the setdefault, and such a
+# run will honestly flip those pins / red the fail-loud launches (the
+# sibling-belt contract; not something a setdefault can prevent). The gate's
+# OWN tests stay fully armed — they inject env mappings or
+# ``monkeypatch.setenv`` explicitly (which overrides this setdefault) — so
+# this default disables ONLY the ambient env read, never the tested law.
+# Pinned literal (the wheel-free discipline above — the constant home
+# ``brutex.engine.alpha_metric`` transitively imports the engine package,
+# which hard-imports the wheels); drift-pinned equal to
+# ``alpha_metric.ALPHA_GATE_ENV`` by tests/unit/test_engine_alpha_metric.py.
+os.environ.setdefault("BRUTEX_ALPHA_GATE", "0")
+
 # DEC-BOX-AUTODEPLOY-LANE-001 hermeticity belt: the nightly's pre-chain
 # box-update leg runs REAL git (incl. a network `git fetch origin main`) at
 # `cmd_nightly_run` time — the whole suite runs with the lane's kill switch
@@ -168,6 +187,35 @@ os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
 # `env=` or `monkeypatch.setenv` explicitly).
 os.environ.pop("BRUTEX_SKIP_WHEEL_FRESHNESS", None)
 os.environ.pop("BRUTEX_FILL_MODE", None)
+
+# DEC-ABSTAIN-GATE-STREAM-001 + DEC-META-LABEL-ANNOTATE-001 hermeticity: a
+# host env carrying the DORMANT `BRUTEX_ABSTAIN_GATE_INSIM` knob would trip
+# the sweep-launch refusal across every sweep-all suite, and an ambient
+# `BRUTEX_META_GATE` would flip the default-OFF Rust meta facade ON for
+# unrelated tests. POP both (the fill-mode discipline above — the meta
+# suites inject env explicitly on both arms).
+os.environ.pop("BRUTEX_ABSTAIN_GATE_INSIM", None)
+os.environ.pop("BRUTEX_META_GATE", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_meta_rust_latch() -> Iterator[None]:
+    """Belt-and-braces: never let a meta-facade latch leak across suites.
+
+    DEC-META-LABEL-ANNOTATE-001 (round-1 N-2): `brutex.meta.meta_rust`
+    keeps a per-process burn-in counter + autorevert LATCH plus a warn-once
+    registry. The meta suites reset it locally, but any OTHER test that
+    drives the facade (an integration chain with `BRUTEX_META_GATE` set)
+    could latch it and silently change a later suite's arm. Reset AFTER
+    every test — but only when the module was actually imported (the lazy
+    `sys.modules` probe keeps this a no-op for the rest of the battery and
+    never imports the facade into tests that pin import-freeness).
+    """
+    yield
+    meta_rust = sys.modules.get("brutex.meta.meta_rust")
+    if meta_rust is not None:
+        meta_rust.reset_meta_rust_for_tests()
+
 
 # DEC-TEST-AWS-HERMETICITY-001 — the suite-wide AWS hermeticity belt. The
 # loud, named error every blocked live-AWS attempt raises. Message names the

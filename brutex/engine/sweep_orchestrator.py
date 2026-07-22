@@ -75,7 +75,7 @@ import itertools
 import json
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
-from math import prod
+from math import isfinite, prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -83,6 +83,11 @@ import blake3
 import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
+from brutex.engine.exec_grid import (
+    EXEC_INTERVAL_LABEL,
+    EXECUTION_GRID_1M_NEXT_BAR,
+    ExecGridMap,
+)
 from brutex.engine.results_store import (
     ResultsStore,
     ResultsStoreError,
@@ -94,8 +99,13 @@ from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_identity import (
     _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
+    gate_provenance_token,
 )
 from brutex.engine.sweep_kernel import ResidentKernelCache
+from brutex.engine.sweep_ops_rust import (
+    routed_grid_tuple_count,
+    sweep_ops_rust_enabled,
+)
 from brutex.engine.sweep_run import (
     SweepComboError,
     SweepRunConfig,
@@ -103,7 +113,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.execution.fill_mode import FillMode
-from brutex.ranking import MIN_TRADES, OverfitGateConfig
+from brutex.ranking import MIN_TRADES, CvarGateConfig, OverfitGateConfig
 from brutex.ranking.temporal import TemporalRobustnessConfig
 from brutex.strategies.types import (
     DEFAULT_PRICE_SOURCE_CELL,
@@ -303,6 +313,16 @@ class SweepGridConfig:
         NOT redo completed tuples — a resumed grid can mix gate regimes per
         tuple (visible in the per-tuple SWEEP_START audit payloads;
         remediation = a fresh results root).
+    max_sl_hit_rate
+        Opt-in SL-hit-rate gate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        Stage B). ``None`` (the default) is fully inert — identity digests
+        AND gate verdicts byte-identical. A SET value is range-validated (a
+        finite fraction in ``(0, 1]``) and ENFORCED as ranking Door 6
+        (:func:`brutex.ranking.passes_gates` — fail-closed on an absent
+        ``sl_hit_rate``), forwarded to every tuple's
+        :class:`~brutex.engine.sweep_run.SweepRunConfig`; the knob joins the
+        gate-config identity fragment so a gated vs an ungated tree can never
+        share a store address (see the field comment).
     unsafe_allow_out_of_scope_instruments
         Layer-1 engine-scope escape hatch (DEC-ENGINE-SCOPE-GUARD-001; default
         ``False``): when False, every instrument must satisfy
@@ -350,6 +370,17 @@ class SweepGridConfig:
     min_hits: int = MIN_TRADES
     overfit: OverfitGateConfig | None = None
     temporal: TemporalRobustnessConfig | None = None
+    #: Opt-in SL-hit-rate gate CEILING (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    #: Stage B — enforcement live): when set, combos whose stop-loss-exit
+    #: fraction (``ResultMetrics.sl_hit_rate``, the Stage-B exit-reason wire)
+    #: exceeds it are rejected at ranking Door 6 (fail-closed: a row with no
+    #: measured ``sl_hit_rate`` fails an active gate) — and the knob joins the
+    #: gate-config identity fragment (``_gate_config_fragment``) so gated and
+    #: ungated trees can never share a store address (the exact "ungated rows
+    #: served as institutional winners" trap the fragment exists to prevent).
+    #: ``None`` (the default) is fully inert: every existing digest AND every
+    #: gate verdict byte-identical.
+    max_sl_hit_rate: float | None = None
     #: Stage-3 refinement pass (DEC-STAGE3-WIRE-001, ADR-0007 §5 slice 5) —
     #: DEFAULT-OFF. When enabled, after every grid tuple persists, the launcher
     #: runs the BIPOP-CMA-ES refinement over each (instrument, tf, mode)
@@ -374,6 +405,17 @@ class SweepGridConfig:
     #: enumerations) — digests, checkpoints, cache keys and store paths stay
     #: byte-identical for in-scope grids (regression-pinned).
     unsafe_allow_out_of_scope_instruments: bool = False
+    #: Opt-in CVaR tail-risk rejection gate (DEC-RANK-CVAR-TAIL-GATE-001) —
+    #: DEFAULT-OFF (``None`` = byte-identical to the pre-gate sweep). When set,
+    #: every kept mask's per-trade P&L list is judged at the eval spine
+    #: (:func:`brutex.engine.sweep_run._iter_mask_metrics`) and a fat-tail
+    #: candidate is rejected BEFORE ranking (counted, ``sweep.cvar_gate``
+    #: INFO). The ACTIVE config folds into ``grid_identity`` /
+    #: ``tuple_cache_key`` / ``_tuple_digest`` via the shared
+    #: :func:`~brutex.engine.sweep_identity._gate_config_fragment`
+    #: (default-elided — the DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 law).
+    #: Appended LAST so every positional construction stays valid.
+    cvar_gate: CvarGateConfig | None = None
 
     def __post_init__(self) -> None:
         # Order-preserving de-dup of every axis (set semantics, deterministic
@@ -492,6 +534,17 @@ class SweepGridConfig:
             raise ValueError(f"SweepGridConfig.top_k must be >= 1 or None, got {self.top_k}")
         if self.min_hits < 0:
             raise ValueError(f"SweepGridConfig.min_hits must be >= 0, got {self.min_hits}")
+        if self.max_sl_hit_rate is not None and (
+            not isfinite(self.max_sl_hit_rate) or not 0.0 < self.max_sl_hit_rate <= 1.0
+        ):
+            # Range law only — the Stage-A "not yet enforced" refusal is GONE:
+            # the Stage-B exit-reason wire made ``sl_hit_rate`` concrete on
+            # every sweep row, and ``to_run_config`` threads the ceiling into
+            # ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
+            raise ValueError(
+                f"SweepGridConfig.max_sl_hit_rate must be a finite fraction in "
+                f"(0.0, 1.0] or None, got {self.max_sl_hit_rate}"
+            )
 
         # Per-tuple guard: reject up front any k whose mask count exceeds the cap,
         # so a tuple can never raise mid-grid AFTER earlier tuples persisted.
@@ -524,6 +577,7 @@ class SweepGridConfig:
                 f"got {self.stage3_max_fevals}/{self.stage3_max_restarts}"
             )
         if self.stage3_enable:
+            from brutex.engine.refine_rust import RefineRustUnavailableError
             from brutex.engine.stage3_grid import (
                 MODE_A_SL_AXIS,
                 MODE_A_TP_AXIS,
@@ -545,6 +599,15 @@ class SweepGridConfig:
                         raise ValueError(
                             f"SweepGridConfig.stage3_enable requires every {label} value "
                             f"on the Mode-A grid: {exc}"
+                        ) from exc
+                    except RefineRustUnavailableError as exc:
+                        # DEC-RUST-STAGE3-REFINE-001: normalize rides the
+                        # brutex_refine wheel — an enabled grid on a
+                        # wheel-less/flag-off box fails fast HERE as the same
+                        # clean config ValueError the CLI already surfaces.
+                        raise ValueError(
+                            f"SweepGridConfig.stage3_enable requires the Stage-3 "
+                            f"Rust runtime to validate {label}: {exc}"
                         ) from exc
 
             _require_on_grid("stop_losses", MODE_A_SL_AXIS, self.stop_losses)
@@ -601,8 +664,8 @@ class SweepTuple:
         Threads the grid's shared context (mode + the three reproducibility
         hashes), shared knobs (``condition_bits``, ``prior_n``,
         ``start_equity_paisa``), the honest guards (``max_combos``, ``top_k``,
-        ``min_hits``) and the opt-in ``overfit`` gate config together with this
-        tuple's swept axes.
+        ``min_hits``) and the opt-in gate configs (``overfit``,
+        ``max_sl_hit_rate``) together with this tuple's swept axes.
 
         Parameters
         ----------
@@ -648,6 +711,12 @@ class SweepTuple:
             overfit=grid.overfit,
             roll_schedule=roll_schedule,
             temporal=grid.temporal,
+            max_sl_hit_rate=grid.max_sl_hit_rate,
+            cvar_gate=grid.cvar_gate,
+            # The row-side gate-provenance carrier (DEC-SWEEP-SERVING-GATE-
+            # PROVENANCE-001): the SAME grid the store-address digest folds,
+            # so the persisted rows' token and the address can never disagree.
+            gate_provenance=grid_gate_provenance(grid),
         )
 
 
@@ -729,19 +798,24 @@ def count_sweep_tuples(grid: SweepGridConfig) -> int:
         ``|instruments| · |timeframes| · |directions| · |k_values| ·
         |stop_losses| · |take_profits| · |proximities| · |fib_anchors|``.
     """
-    return prod(
-        (
-            len(grid.instruments),
-            len(grid.timeframes),
-            len(grid.directions),
-            len(grid.k_values),
-            len(grid.stop_losses),
-            len(grid.take_profits),
-            len(grid.proximities),
-            len(grid.fib_anchors),
-            len(grid.price_source_cells),
-        )
+    axes = (
+        len(grid.instruments),
+        len(grid.timeframes),
+        len(grid.directions),
+        len(grid.k_values),
+        len(grid.stop_losses),
+        len(grid.take_profits),
+        len(grid.proximities),
+        len(grid.fib_anchors),
+        len(grid.price_source_cells),
     )
+    if sweep_ops_rust_enabled():
+
+        def _oracle(values: tuple[int, ...] = axes) -> int:
+            return prod(values)
+
+        return routed_grid_tuple_count(axes, python_law=_oracle)
+    return prod(axes)
 
 
 def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
@@ -868,6 +942,35 @@ def _selection_identity_fragment(grid: SweepGridConfig) -> dict[str, int] | None
     return fragment or None
 
 
+def grid_gate_provenance(grid: SweepGridConfig) -> str | None:
+    """Return *grid*'s canonical GATE-CONFIG serving-provenance token, or ``None`` at defaults.
+
+    The ONE write-side seam of DEC-SWEEP-SERVING-GATE-PROVENANCE-001. This is the
+    SERVING carrier — the token persisted on the rows / the store schema and
+    hashed by :func:`brutex.dashboard.sweep_results_view.gate_coordinate_of` into
+    the leaderboard serving COORDINATE. It is scoped to the GATE CONFIG ONLY
+    (:func:`~brutex.engine.sweep_identity._gate_config_fragment` — overfit /
+    Stage-3, the knobs that change what the rows MEAN); the SELECTION knobs
+    (``top_k`` / ``min_hits`` / ``max_combos``) are DELIBERATELY excluded
+    (``selection=None``) because they are a display / which-finalists concern,
+    not a what-rows-mean concern — a ``--top``-only light run therefore carries
+    NO gate coordinate (is "ungated"), so a zero-survivor gated re-run's 0-row
+    sentinel serves the honest empty set instead of mis-folding the stale
+    baseline rows (the CLI-default 0-row-misfold, closed here).
+
+    SEPARABLE from the store ADDRESS: :func:`_tuple_digest` STILL folds
+    :func:`_selection_identity_fragment` directly into the Parquet /
+    completion-sentinel filename (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001,
+    #1336), so a changed ``top_k`` still re-keys the on-disk store — only the
+    serving carrier drops the selection leg. ``None`` — an ungated grid — keeps
+    every row + store byte-identical to the pre-column format.
+    """
+    return gate_provenance_token(
+        gate_config=_gate_config_fragment(grid),
+        selection=None,
+    )
+
+
 def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     """Return the BLAKE3 hex digest of *tuple_*'s full canonical identity under *grid*.
 
@@ -952,6 +1055,10 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     # worst-case store addresses with the frozen precise-era addresses, so a
     # resume could silently adopt precise-priced tuple stores.
     descriptor["fill_mode"] = FillMode.WORST_CASE.value
+    # DEC-FILL-EXEC-GRID-1M-001: the execution-grid twin — eliding it would
+    # alias 1m-grid store addresses with the frozen decision-TF-era
+    # addresses, so a resume could silently adopt pre-grid tuple stores.
+    descriptor["execution_grid"] = EXECUTION_GRID_1M_NEXT_BAR
     # allow_nan=False is byte-neutral for finite inputs (json emits identical
     # bytes for finite numbers) and converts a hypothetical non-finite gate
     # float from a silent invalid-JSON filename into a loud raise (F5).
@@ -1039,7 +1146,7 @@ def tuple_store_path(root: Path, tuple_: SweepTuple, grid: SweepGridConfig) -> P
     return root / tuple_.instrument / tuple_.tf.label / filename
 
 
-def load_or_create_store(path: Path) -> ResultsStore:
+def load_or_create_store(path: Path, *, gate_provenance: str | None = None) -> ResultsStore:
     """Return a :class:`ResultsStore` for *path*, pre-loaded if the file exists.
 
     The idempotence keystone (Golden Rule #4 / #7): by loading an existing
@@ -1051,6 +1158,14 @@ def load_or_create_store(path: Path) -> ResultsStore:
     ----------
     path
         The destination Parquet file.
+    gate_provenance
+        Optional store-level gate+selection token
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) stamped on a FRESHLY-created
+        store so a gated tuple that persists ZERO survivors still flushes a
+        schema-discoverable gated Parquet (the arm-2 carrier). A LOADED store
+        keeps its own on-disk schema presence instead (the load flag inside
+        :meth:`~brutex.engine.results_store.ResultsStore.load`). ``None``
+        (every ungated/legacy caller) is byte-identical to before.
 
     Returns
     -------
@@ -1060,7 +1175,7 @@ def load_or_create_store(path: Path) -> ResultsStore:
     """
     if path.exists():
         return ResultsStore.load(path)
-    return ResultsStore(path=path)
+    return ResultsStore(path=path, gate_provenance=gate_provenance)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1087,8 +1202,16 @@ class TupleStoreProvider:
         return tuple_store_path(self.root, tuple_, self.grid)
 
     def __call__(self, tuple_: SweepTuple) -> ResultsStore:
-        """Load-or-create the tuple's store (the original lambda body, verbatim)."""
-        return load_or_create_store(self.store_path(tuple_))
+        """Load-or-create the tuple's store, stamped with the grid's gate provenance.
+
+        A FRESH store carries :func:`grid_gate_provenance` so even a
+        zero-survivor gated tuple flushes a schema-discoverable gated Parquet
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001); an ungated grid passes
+        ``None`` — byte-identical to the pre-provenance lambda body.
+        """
+        return load_or_create_store(
+            self.store_path(tuple_), gate_provenance=grid_gate_provenance(self.grid)
+        )
 
 
 def make_store_for(root: Path, grid: SweepGridConfig) -> Callable[[SweepTuple], ResultsStore]:
@@ -1133,6 +1256,7 @@ class TupleDiffCheck(Protocol):
         *,
         bars: Sequence[CandleBar],
         bar_bits: Sequence[int],
+        exec_bars: Sequence[CandleBar],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
         mask_population: Sequence[int] | None = None,
@@ -1179,6 +1303,7 @@ def run_one_tuple(
     store_quarantine: StoreQuarantine | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    exec_map_for: Callable[[str, str], ExecGridMap] | None = None,
     hit_count_memo: MutableMapping[int, int] | None = None,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
@@ -1291,6 +1416,14 @@ def run_one_tuple(
                 f"(skip_empty=False)"
             )
         return None
+    # DEC-FILL-EXEC-GRID-1M-001 (design §1.2 D1): the 1-minute EXECUTION
+    # stream rides the SAME bars_for contract under the "1minute" label — at
+    # tf=1minute the two calls are the same key, so the memoised loader
+    # serves ONE object for both streams (no double load, no double fold).
+    exec_bars = bars_for(tuple_.instrument, EXEC_INTERVAL_LABEL)
+    exec_map = (
+        exec_map_for(tuple_.instrument, tuple_.tf.label) if exec_map_for is not None else None
+    )
     roll_schedule = (
         roll_schedule_by_instrument.get(tuple_.instrument)
         if roll_schedule_by_instrument is not None
@@ -1308,6 +1441,7 @@ def run_one_tuple(
             ema_source=tuple_.price_source.ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
+            exec_bars_1m=exec_bars,
         )
         if kernel_cache is not None
         else None
@@ -1331,6 +1465,8 @@ def run_one_tuple(
             store=store_for(tuple_),
             dedup=dedup,
             audit=audit,
+            exec_bars_1m=exec_bars,
+            exec_map=exec_map,
             kernel=kernel,
             # Enables the per-tuple trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001):
             # the digest is the same collision guard the store filename carries.
@@ -1374,13 +1510,20 @@ def run_one_tuple(
             diffcheck(
                 bars=bars,
                 bar_bits=kernel.bar_bits,
+                exec_bars=exec_bars,
                 tuple_=tuple_,
                 grid=grid,
                 mask_population=population_capture[-1],
             )
         else:
-            # LEGACY arm — the pre-round-3 call shape, byte-identical.
-            diffcheck(bars=bars, bar_bits=kernel.bar_bits, tuple_=tuple_, grid=grid)
+            # LEGACY arm — the pre-round-3 call shape (no apriori population).
+            diffcheck(
+                bars=bars,
+                bar_bits=kernel.bar_bits,
+                exec_bars=exec_bars,
+                tuple_=tuple_,
+                grid=grid,
+            )
     return summary
 
 
@@ -1395,9 +1538,11 @@ def run_sweep_grid(
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     reuse_bar_bits: bool = True,
     diffcheck: TupleDiffCheck | None = None,
+    exec_map_for: Callable[[str, str], ExecGridMap] | None = None,
     store_quarantine: StoreQuarantine | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    rollup_hook: Callable[[SweepTuple], None] | None = None,
 ) -> SweepGridSummary:
     """Run the full grid sweep: enumerate the outer product + persist every tuple.
 
@@ -1489,6 +1634,14 @@ def run_sweep_grid(
     reference_stamper
         Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001), forwarded to
         every tuple's :func:`run_one_tuple` — ONE stamper per grid run.
+    rollup_hook
+        Optional per-tuple ``/results`` rollup merge seam
+        (DEC-RESULTS-TOPK-ROLLUP-001 Hook A —
+        ``RollupMergeHook.merge_tuple``), fired after each SUCCESSFUL tuple
+        (after *on_tuple*). The hook is FENCED INTERNALLY at BLOCKER-1
+        strength — it never raises into the grid (a display optimization
+        must never abort a 2-4 day grid; regression-pinned). ``None`` (the
+        default) is byte-identical to the pre-rollup driver.
 
     Returns
     -------
@@ -1630,6 +1783,7 @@ def run_sweep_grid(
                 store_quarantine=store_quarantine,
                 roll_schedule_by_instrument=roll_schedule_by_instrument,
                 reference_stamper=reference_stamper,
+                exec_map_for=exec_map_for,
                 hit_count_memo=hit_count_memo,
             )
         except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
@@ -1685,6 +1839,11 @@ def run_sweep_grid(
         persisted += summary.persisted
         if on_tuple is not None:
             on_tuple(tuple_, summary)
+        if rollup_hook is not None:
+            # Hook A (DEC-RESULTS-TOPK-ROLLUP-001): merge THIS tuple's freshly
+            # flushed store into the /results rollup. Internally fenced —
+            # never raises into the grid.
+            rollup_hook(tuple_)
 
     grid_summary = SweepGridSummary(
         tuples_total=total,
@@ -1731,6 +1890,7 @@ __all__ = [
     "TupleStoreProvider",
     "bloom_capacity_hint",
     "count_sweep_tuples",
+    "grid_gate_provenance",
     "hit_memo_cell_key",
     "iter_sweep_tuples",
     "load_or_create_store",

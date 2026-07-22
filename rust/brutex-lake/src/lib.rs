@@ -133,10 +133,6 @@ pub mod window_ledger;
 // `brutex/data/lake_rust_waved.py`): the heal/scan/read surface, one module
 // file per conversion step under src/waved/. ADDITIVE (§4.1 merge law).
 pub mod waved;
-// ADR-0020 G10 CONVERT — the window-ledger parquet RENDER
-// (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918; row-equivalence
-// standard, never bytes — the #1917 spike record). ADDITIVE registration.
-pub mod window_ledger_render;
 // SLICE T24 PR-1 — the cold data-integrity detector pure laws
 // (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948): the
 // raw-integrity blake2b digest + the interior bar-less run walker + the
@@ -633,17 +629,6 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // cores are deleted; per-finding/per-file isolation is crate-owned).
     // Appended AFTER every earlier waved registration (§4.1 additive law).
     m.add_function(wrap_pyfunction!(waved::heal::waved_endgame_witness, m)?)?;
-    // ADR-0020 G10 CONVERT (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001) — the
-    // window-ledger parquet render; the facade
-    // `brutex/data/lake_rust_ledger_render.py` engages it behind the
-    // default-OFF BRUTEX_LAKE_RUST_LEDGER_RENDER with a SYMBOL handshake on
-    // this name (a pre-G10 wheel latches `crate_stale`) PLUS the polars
-    // version guard (the render IS polars — unlike the G8 pure laws).
-    // Appended additively, never reordering the siblings (§4.1).
-    m.add_function(wrap_pyfunction!(
-        window_ledger_render::render_ledger_parquet_from_ipc,
-        m
-    )?)?;
     // SLICE T24 PR-1 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001) — the detector
     // pure laws; the facade `brutex/data/detectors_rust.py` engages them
     // behind three default-OFF flags via the all-or-nothing SYMBOL

@@ -53,6 +53,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
+from brutex import optcost_rust
+
 
 class TradeDirection(Enum):
     """Bull (buy CE) or bear (buy PE)."""
@@ -176,10 +178,35 @@ def resolve_offset_strike(
 
     The OTM/ITM mapping is symmetric across direction: "plus" always
     means "further OTM in the trade direction."
+
+    DEC-OPTCOST-TAILS-RUST-001: with ``BRUTEX_OPTCOST_TAILS_RUST`` truthy the
+    arithmetic runs on the ``fno_math`` ``optcost_offset_strike`` kernel (the
+    non-OFFSET-rule ``ValueError`` stays decided HERE, pre-FFI, byte-identical);
+    flag OFF — the default — is byte-identical.
     """
     if rule.kind != StrikeRuleKind.OFFSET:
         raise ValueError(f"resolve_offset_strike called on non-OFFSET rule {rule.name!r}")
     step_count = int(rule.param)
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.offset_strike(
+            atm_strike,
+            step_count,
+            strike_step,
+            is_bull=direction == TradeDirection.BULL,
+            python=lambda: _resolve_offset_strike_python(
+                step_count, direction, atm_strike, strike_step
+            ),
+        )
+    return _resolve_offset_strike_python(step_count, direction, atm_strike, strike_step)
+
+
+def _resolve_offset_strike_python(
+    step_count: int,
+    direction: TradeDirection,
+    atm_strike: int,
+    strike_step: int,
+) -> int:
+    """The verbatim arithmetic arm of :func:`resolve_offset_strike` — the live oracle."""
     if direction == TradeDirection.BULL:
         # CE: OTM means higher strike
         return atm_strike + step_count * strike_step

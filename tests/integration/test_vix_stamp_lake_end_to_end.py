@@ -210,6 +210,7 @@ class TestVixStampLakeEndToEnd:
                 store=store,
                 dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
                 audit=audit,
+                exec_bars_1m=_INDEX_BARS,
                 reference_stamper=stamper,
             )
         assert summary.persisted > 0

@@ -9,7 +9,7 @@ chain (``mask_run_id`` / ``tuple_cache_key`` / ``_tuple_digest`` /
 cache then served STALE results as fresh (Golden Rules #4/#7). v2 streams ALL
 SEVEN CandleBar fields per bar under the ``bxsnap2|`` domain tag.
 
-Deliberately in its own module WITHOUT the ``pytest.importorskip("cma")`` that
+Deliberately in its own module WITHOUT the ``pytest.importorskip("brutex_refine")`` that
 gates ``test_engine_stage3_wire.py`` — the hash needs no optimizer, so these
 teeth bite even where the ``optimize`` extra is absent.
 """

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import pytest
 from brutex.engine.stage3_grid import MODE_A_SL_AXIS, MODE_A_TP_AXIS, GridAxis
+
+pytest.importorskip("brutex_refine")  # the wheel hosts the bijection math
 from hypothesis import given
 from hypothesis import strategies as st
 

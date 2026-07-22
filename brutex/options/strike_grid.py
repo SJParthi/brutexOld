@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from brutex import optcost_rust
 from brutex.options.lot_size_history import OptionsUnderlying
 
 # Strike step in price units (rupees). All instruments use integer
@@ -52,8 +53,23 @@ def round_to_atm(spot_price: float, instrument: OptionsUnderlying) -> int:
         round_to_atm(24_012.0, NIFTY) -> 24_000  (step=50, closer to 24_000 than 24_050)
         round_to_atm(24_025.0, NIFTY) -> 24_050  (half-step ties up)
         round_to_atm(50_075.0, BANKNIFTY) -> 50_100  (closer to 50_100 than 50_000)
+
+    DEC-OPTCOST-TAILS-RUST-001: with ``BRUTEX_OPTCOST_TAILS_RUST`` truthy the
+    rounding runs on the ``fno_math`` ``optcost_round_to_atm`` kernel (the
+    CPython float floor-division law transcribed with proof — outside its
+    provable envelope the kernel abstains and this Python arm serves); flag
+    OFF — the default — is byte-identical.
     """
     step = STRIKE_STEP[instrument]
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.round_atm(
+            spot_price, step, python=lambda: _round_to_atm_python(spot_price, step)
+        )
+    return _round_to_atm_python(spot_price, step)
+
+
+def _round_to_atm_python(spot_price: float, step: int) -> int:
+    """The verbatim Python arm of :func:`round_to_atm` — the live oracle."""
     # Add half-step then floor-divide for deterministic half-up rounding
     # (banker's rounding doesn't apply because we're rounding to a grid step,
     # not to a fixed precision)
@@ -79,8 +95,19 @@ def strike_offset_from_atm(
     Example:
         strike_offset_from_atm(24_000, 3, NIFTY) -> 24_150
         strike_offset_from_atm(50_000, -2, BANKNIFTY) -> 49_800
+
+    DEC-OPTCOST-TAILS-RUST-001: flag-gated onto the ``fno_math``
+    ``optcost_strike_offset_from_atm`` kernel; flag OFF is byte-identical.
     """
-    return atm_strike + offset_steps * STRIKE_STEP[instrument]
+    step = STRIKE_STEP[instrument]
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.strike_offset(
+            atm_strike,
+            offset_steps,
+            step,
+            python=lambda: atm_strike + offset_steps * step,
+        )
+    return atm_strike + offset_steps * step
 
 
 def grid_around_atm(
@@ -97,6 +124,16 @@ def grid_around_atm(
 
     Returns:
         Sorted list of strikes from ATM - half_width × step to ATM + half_width × step.
+
+    DEC-OPTCOST-TAILS-RUST-001: flag-gated onto the ``fno_math``
+    ``optcost_grid_around_atm`` kernel; flag OFF is byte-identical.
     """
     step = STRIKE_STEP[instrument]
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.grid_around(
+            atm_strike,
+            step,
+            half_width,
+            python=lambda: [atm_strike + i * step for i in range(-half_width, half_width + 1)],
+        )
     return [atm_strike + i * step for i in range(-half_width, half_width + 1)]

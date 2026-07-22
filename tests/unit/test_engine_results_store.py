@@ -30,6 +30,7 @@ suites; here we assert behaviour + cover every branch.
 
 from __future__ import annotations
 
+import math
 import sys
 from collections.abc import Callable
 from decimal import Decimal
@@ -42,6 +43,7 @@ if TYPE_CHECKING:  # typing-only — the tests import polars lazily at run time
 import pytest
 from brutex.engine.results_store import (
     CONDITION_NAME_SEP,
+    EXIT_QUALITY_FIELDS,
     MASK_BITS_MAX,
     FlushResult,
     ResultRow,
@@ -49,6 +51,7 @@ from brutex.engine.results_store import (
     ResultsStoreError,
     ResultsStoreGateConflictError,
     ResultsStoreSchemaError,
+    VixTrioConflictError,
 )
 from brutex.strategies.combo import combo_hash
 from brutex.vocabulary.describe import matched_condition_names
@@ -407,9 +410,10 @@ class TestTopK:
             store.top_k(1, by="avg_entry_price")  # price columns are not rankable
 
     def test_ranks_money_above_2_53_exactly(self) -> None:
-        # int64 paisa above 2**53 must rank EXACTLY — `_field_getter` returns the
-        # raw int (no float() coercion that would tie 2**53 and 2**53 + 1). This
-        # guards a reproducibility-critical property (and kills the float mutant).
+        # int64 paisa above 2**53 must rank EXACTLY — the kernel's rank_top_k
+        # receives the raw int (the retired `_field_getter` helper's law: no
+        # float() coercion that would tie 2**53 and 2**53 + 1). This guards a
+        # reproducibility-critical property (and kills the float mutant).
         big = 2**53
         store = ResultsStore(path=Path("unused.parquet"))
         store.extend(
@@ -831,3 +835,240 @@ class TestTopThousandStorage:
         after = [r.run_id for r in reloaded.top_k(1000, by="net_pnl_paisa")]
         assert after == before
         assert len(after) == 1000
+
+
+# ── sl_hit_rate exit-quality column (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 B) ──
+
+
+class TestSlHitRateColumn:
+    """The Stage-B exit-quality column: Ruling-5 optionality, backfill,
+    conflict, rank law, and the public field constant."""
+
+    def test_public_constant_and_default_none(self) -> None:
+        assert EXIT_QUALITY_FIELDS == ("sl_hit_rate",)
+        assert _row().sl_hit_rate is None
+
+    def test_concrete_value_round_trips_through_parquet(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        store = ResultsStore(path=tmp_path / "s.parquet")
+        store.append(_row(sl_hit_rate=0.375))
+        store.flush()
+        loaded = ResultsStore.load(tmp_path / "s.parquet")
+        assert loaded.rows()[0].sl_hit_rate == 0.375
+
+    def test_none_round_trips_as_parquet_null(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        store = ResultsStore(path=tmp_path / "s.parquet")
+        store.append(_row())
+        store.flush()
+        assert ResultsStore.load(tmp_path / "s.parquet").rows()[0].sl_hit_rate is None
+
+    def test_non_finite_value_rejected(self) -> None:
+        for bad in (math.nan, math.inf, -math.inf):
+            with pytest.raises(ResultsStoreError, match="sl_hit_rate"):
+                _row(sl_hit_rate=bad)
+
+    def test_directional_backfill_none_to_value(self) -> None:
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row())
+        upgraded = store.append(_row(sl_hit_rate=0.25))
+        assert upgraded is True
+        assert store.get(_rid(1)) is not None
+        assert store.get(_rid(1)).sl_hit_rate == 0.25  # type: ignore[union-attr]
+
+    def test_less_informed_redo_never_erases(self) -> None:
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(sl_hit_rate=0.25))
+        redo_appended = store.append(_row())
+        assert redo_appended is False  # directional no-op
+        assert store.get(_rid(1)).sl_hit_rate == 0.25  # type: ignore[union-attr]
+
+    def test_value_vs_value_conflict_raises_plain_error(self) -> None:
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(sl_hit_rate=0.25))
+        with pytest.raises(ResultsStoreError, match="exit-quality conflict") as exc_info:
+            store.append(_row(sl_hit_rate=0.5))
+        # The reproducibility-breach family — NOT the VIX lake-moved type.
+        assert not isinstance(exc_info.value, VixTrioConflictError)
+
+    def test_top_k_ranks_nulls_last_both_directions(self) -> None:
+        store = ResultsStore(path=Path("unused.parquet"))
+        store.append(_row(run_id=_rid(1), sl_hit_rate=0.9))
+        store.append(_row(run_id=_rid(2), sl_hit_rate=0.1))
+        store.append(_row(run_id=_rid(3)))  # None — pre-extension unknown
+        asc = store.top_k(3, by="sl_hit_rate", descending=False)
+        assert [r.sl_hit_rate for r in asc] == [0.1, 0.9, None]
+        desc = store.top_k(3, by="sl_hit_rate", descending=True)
+        assert [r.sl_hit_rate for r in desc] == [0.9, 0.1, None]
+
+
+class TestSelectionFields:
+    """LANE W1 (DEC-RANK-PARETO-PERSIST-001): the selection-provenance pair."""
+
+    def test_defaults_are_honest_none(self) -> None:
+        row = _row()
+        assert row.pareto_member is None
+        assert row.selection_basis is None
+
+    def test_valid_canonical_tag_accepted(self) -> None:
+        row = _row(pareto_member=True, selection_basis="composite,dd,frontier")
+        assert row.pareto_member is True
+        assert row.selection_basis == "composite,dd,frontier"
+
+    def test_empty_tag_refused(self) -> None:
+        with pytest.raises(ResultsStoreError, match="non-empty token string"):
+            _row(selection_basis="")
+
+    def test_unknown_token_refused(self) -> None:
+        with pytest.raises(ResultsStoreError, match="selection_basis invalid"):
+            _row(selection_basis="composite,sharpe")
+
+    def test_misordered_tag_refused(self) -> None:
+        # Tokens valid but NOT in the canonical BASIS_ORDER join.
+        with pytest.raises(ResultsStoreError, match="canonical BASIS_ORDER"):
+            _row(selection_basis="dd,composite")
+
+    def test_pareto_member_without_frontier_token_refused(self) -> None:
+        # The review-round-1 coherence cross-check, direction 1: a claimed
+        # frontier member MUST carry the "frontier" basis token (the persist
+        # composer stamps both from the ONE frontier set).
+        with pytest.raises(ResultsStoreError, match="incoherent"):
+            _row(pareto_member=True, selection_basis=None)
+        with pytest.raises(ResultsStoreError, match="incoherent"):
+            _row(pareto_member=True, selection_basis="composite")
+
+    def test_frontier_token_without_pareto_member_refused(self) -> None:
+        # Direction 2: a "frontier"-tagged row MUST claim membership — both
+        # the honest-unknown None and an explicit False are incoherent.
+        with pytest.raises(ResultsStoreError, match="incoherent"):
+            _row(pareto_member=None, selection_basis="frontier")
+        with pytest.raises(ResultsStoreError, match="incoherent"):
+            _row(pareto_member=False, selection_basis="composite,frontier")
+
+    def test_coherent_tag_combinations_accepted(self) -> None:
+        # Every coherent shape constructs: member+token, tagged non-member
+        # without the token, and the legacy None/None row.
+        assert _row(pareto_member=True, selection_basis="frontier").pareto_member is True
+        assert _row(pareto_member=False, selection_basis="composite").selection_basis == "composite"
+        legacy = _row(pareto_member=None, selection_basis=None)
+        assert (legacy.pareto_member, legacy.selection_basis) == (None, None)
+
+    def test_selection_fields_round_trip_flush_load(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        path = tmp_path / "sel.parquet"
+        store = ResultsStore(path=path)
+        store.append(
+            _row(run_id="1" * 64, pareto_member=True, selection_basis="composite,frontier")
+        )
+        store.append(_row(run_id="2" * 64, mask_bits=0b11))
+        store.flush()
+        loaded = ResultsStore.load(path)
+        rows = loaded.rows()
+        assert (rows[0].pareto_member, rows[0].selection_basis) == (True, "composite,frontier")
+        assert (rows[1].pareto_member, rows[1].selection_basis) == (None, None)
+
+    def test_differing_selection_tags_are_a_strict_conflict(self) -> None:
+        # The append-conflict law: tags are computed BEFORE the single append
+        # per run_id; a second append with a different tag is a run-identity
+        # conflict (never a silent merge — the VIX backfill is the ONE
+        # sanctioned directional exception, and selection is not in it).
+        store = ResultsStore(path=Path("/tmp/unused.parquet"))
+        store.append(_row(selection_basis="composite"))
+        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
+            store.append(_row(selection_basis="composite,dd"))
+
+    def test_not_rankable(self) -> None:
+        store = ResultsStore(path=Path("/tmp/unused.parquet"))
+        store.append(_row())
+        for name in ("pareto_member", "selection_basis"):
+            with pytest.raises(ResultsStoreError, match="unknown ranking field"):
+                store.top_k(1, by=name)
+
+
+class TestSignedZeroPriceNoop:
+    """The kernel's TEXT price compare must keep the retired NUMERIC law on zeros.
+
+    ``Decimal("-0.00")`` passes the ``price >= 0`` validation and equals
+    ``Decimal("0.00")`` NUMERICALLY, so the retired dataclass ``__eq__`` read an
+    identical re-append as a silent no-op. ``_price_ffi_text`` normalises the
+    sign wrapper-side (the hostile-review MINOR of DEC-RUST-RUNID-STORES-001) —
+    without it the text compare would flip this into a false run-identity
+    conflict.
+    """
+
+    def test_signed_zero_price_reappend_is_noop_not_conflict(self) -> None:
+        from dataclasses import replace
+        from decimal import Decimal
+
+        store = ResultsStore(path=Path("unused.parquet"))
+        stored = _row(avg_entry_price=Decimal("0.00"))
+        incoming = replace(stored, avg_entry_price=Decimal("-0.00"))
+        assert stored == incoming  # the retired NUMERIC law: equal rows
+        appended = store.append(stored)
+        assert appended is True
+        reappended = store.append(incoming)
+        assert reappended is False  # noop — never a conflict
+        assert len(store) == 1
+
+    def test_price_ffi_text_normalises_only_zero(self) -> None:
+        from decimal import Decimal
+
+        from brutex.engine.results_store import _price_ffi_text
+
+        assert _price_ffi_text(Decimal("-0.00")) == "0.00"
+        assert _price_ffi_text(Decimal("0.00")) == "0.00"
+        assert _price_ffi_text(Decimal("123.45")) == "123.45"
+        # Scale text preserved on the zero class (only the SIGN is dropped).
+        assert _price_ffi_text(Decimal("-0")) == "0"
+
+    def test_row_to_ffi_marshals_row_positions(self) -> None:
+        # DEC-RUST-RUNID-STORES-002 scaffolding (zero-caller today): _row_to_ffi
+        # marshals one row into the positional FFI tuple the kernel append
+        # decision will consume. Pin EVERY position against its source field so
+        # a field re-order or a dropped/added column fails loudly — the two
+        # price positions carry the _price_ffi_text signed-zero normalisation,
+        # every other position is the raw field.
+        from brutex.engine.results_store import _price_ffi_text, _row_to_ffi
+
+        row = _row(
+            deflated_sharpe=0.9,
+            vix_mean=14.2,
+            vix_min=11.0,
+            vix_max=19.5,
+        )
+        ffi = _row_to_ffi(row)
+        assert ffi == (
+            row.run_id,
+            row.instrument,
+            row.tf,
+            row.direction,
+            row.mode,
+            row.mask_bits,
+            row.net_pnl_paisa,
+            row.gross_profit_paisa,
+            row.gross_loss_paisa,
+            row.max_drawdown_paisa,
+            row.expectancy_paisa,
+            row.total_trades,
+            row.winning_trades,
+            row.losing_trades,
+            row.sharpe_ratio,
+            row.sortino_ratio,
+            row.calmar_ratio,
+            row.profit_factor,
+            row.win_rate,
+            row.max_drawdown_pct,
+            _price_ffi_text(row.avg_entry_price),
+            _price_ffi_text(row.avg_exit_price),
+            row.deflated_sharpe,
+            row.vix_mean,
+            row.vix_min,
+            row.vix_max,
+            row.condition_names,
+        )
+        # The two price positions are TEXT (the signed-zero-normalising
+        # marshal), never the raw Decimal — spot-pin the transform.
+        assert ffi[20] == _price_ffi_text(row.avg_entry_price)
+        assert ffi[21] == _price_ffi_text(row.avg_exit_price)
+        assert ffi[0] == row.run_id
+        assert ffi[26] == row.condition_names

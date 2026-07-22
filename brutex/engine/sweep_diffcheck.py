@@ -12,7 +12,10 @@ combiner + golden trade sim) so construction never becomes faith.
 This module imports NONE of the production simulation / metrics modules:
 ``brutex.engine.trade_sim``, ``brutex.engine.rust_trade_sim``,
 ``brutex.engine.sweep_driver``, ``brutex.engine.rust_metrics``,
-``brutex.metrics.compute``, ``brutex.engine.exit_index`` — pinned by an AST
+``brutex.metrics.compute``, ``brutex.engine.exit_index``,
+``brutex.engine.exec_grid`` (the production signal→1m mapping —
+DEC-FILL-EXEC-GRID-1M-001 design §3.11: importing it would kill the
+mapping's independence) — pinned by an AST
 test over the whole file (the DEC-SUSPICION-SWEEP-FIXES-001 #1492 idiom).
 The production leg is INJECTED into :class:`DiffCheckHook` by the run core
 (``simulate_trades`` + the equity/drawdown fold), so even the hook side of
@@ -26,35 +29,50 @@ fold, drawdown scan and the float bit-compare key are all RE-DERIVED here
 in a flat forward loop (the ``tests/unit/test_surface_trial_results.py``
 independent-recomputation bar).
 
-## Rules re-derived (the spec — ``trade_sim`` module docstring / sim-map c.1)
+## Rules re-derived (the spec — ``trade_sim`` module docstring / sim-map c.1,
+## on the DEC-FILL-EXEC-GRID-1M-001 1-minute execution grid, design §3.11)
 
-Signal on bar N (``(bar_bits[N] & mask) == mask``) ⇒ fill on bar N+1,
-only within the SAME IST session date (an overnight-gap fill is DROPPED —
-R2-OC-2) and never on a forced-exit bar. Every fill PRICE follows the
-independently RE-STATED worst-case adverse-max law — the ONLY law
-(DEC-FILL-WORST-CASE-ONLY-001): entry fills at the entry bar's adverse
-extreme (BUY at HIGH / SELL at LOW — SL/TP levels then anchor on that
-actual entry fill); SL/TP touch on the bar's ``[low, high]`` in int paisa
-with the pessimistic same-bar SL-first tie-break, and the triggered SL
-**or TP** fills at ``min(level, bar low)`` for a BUY / ``max(level, bar
-high)`` for a SELL (a gap-through bar fills at the extreme; a bar gapping
-PAST the level in the trade's favour stays clamped AT the level — never
-an overstated favourable gap); the forced session-close exit — the first
-bar whose ``[open, open+tf)`` window passes the session's close − 10 min
-boundary, overriding everything — fills at the forced bar's adverse
-extreme (its ``(open, open)`` excursion fold unchanged); MFE/MAE fold per
-in-position bar; an open position never survives an IST session-date
-change (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743) — on the
-FIRST bar whose IST session date differs (pure ``!=``, either direction)
-from the position's entry-session date it closes retroactively at the
-PRIOR session's last managed bar's adverse extreme (that bar's timestamp
-/ index; NO excursion fold from the boundary bar) under ``session_gap``,
-and the boundary bar never arms an entry (earliest re-arm ``i+1``,
-earliest fill ``i+2``); a position still open at end of data closes at
-the LAST managed bar's adverse extreme — for the same prefix,
-bit-identical to the ``session_gap`` record modulo the reason label (the
-truncation equivalence). P&L is the per-unit directional move in int64
-paisa — NO costs of any kind (Track-1 spot is signal-only; CLAUDE.md §7).
+Signal on DECISION bar N (``(bar_bits[N] & mask) == mask``) ⇒ fill on the
+first stored 1-MINUTE bar at-or-after N's close instant ``ts_tf[N] +
+tf_minutes`` — the reference re-derives that mapping with its OWN flat
+forward two-pointer (deliberately NOT importing
+:mod:`brutex.engine.exec_grid`, which joins the banned list): a fill
+candidate on a DIFFERENT IST session date DROPS (the session-bounded slide
+law — cross-session attempts never fill), a same-date candidate at/after
+the arming session's close instant is REFUSED (the B6 bounded-distance
+assertion), and when a ≥tf hole maps two decision bars onto ONE 1m bar the
+EARLIEST-armed wins (B4 — the loser's signal drops). The walk itself runs
+per 1-MINUTE bar. Every fill PRICE follows the independently RE-STATED
+worst-case adverse-max law — the ONLY law (DEC-FILL-WORST-CASE-ONLY-001):
+entry fills at the entry 1m bar's adverse extreme (BUY at HIGH / SELL at
+LOW — SL/TP levels then anchor on that actual entry fill), never on a
+forced-exit 1m bar; the entry 1m bar folds its FULL range into MFE/MAE but
+runs NO exit detection (the same-bar deferral law §2.4 — management begins
+on its successor); SL/TP touch on each LATER 1m bar's ``[low, high]`` in
+int paisa with the pessimistic same-bar SL-first tie-break, and the
+triggered SL **or TP** fills at ``min(level, bar low)`` for a BUY /
+``max(level, bar high)`` for a SELL (a gap-through bar fills at the
+extreme; a bar gapping PAST the level in the trade's favour stays clamped
+AT the level — never an overstated favourable gap); the forced
+session-close exit — the first 1m bar whose ``[open, open+1min)`` window
+passes the session's close − 10 min boundary, overriding SL/TP — fills at
+the forced bar's adverse extreme (its ``(open, open)`` excursion fold
+unchanged); MFE/MAE fold per in-position 1m bar; an open position never
+survives an IST session-date change (DEC-TRADESIM-OPEN-SESSION-GUARD-001,
+MIGRATION.md #1743, on the 1m stream) — on the FIRST 1m bar whose IST
+session date differs (pure ``!=``, either direction) from the position's
+entry-session date it closes retroactively at the PRIOR session's last
+managed 1m bar (that bar's timestamp / index; NO excursion fold from the
+boundary bar) under ``session_gap``, and the boundary bar never fills an
+entry; a position still open at end of data closes at the LAST managed 1m
+bar under ``end_of_data`` — both retroactive closes price at that bar's
+adverse extreme UNLESS it is the trade's own entry bar, where the fill is
+the bar's CLOSE (the B3 terminal carve-out — pricing the terminal same-bar
+close at the extreme would BE the full-range phantom loss the deferral
+kills); ``holding_bars`` counts 1-MINUTE bars (``exit_idx − entry_idx +
+1`` over the execution stream). P&L is the per-unit directional move in
+int64 paisa — NO costs of any kind (Track-1 spot is signal-only;
+CLAUDE.md §7).
 
 ## Determinism (design D-11)
 
@@ -101,9 +119,10 @@ import math
 import os
 import random
 import struct
+from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -141,6 +160,20 @@ MASKS_MISMATCHED_CAP: Final[int] = 8
 #: in-coverage date has no trading session (the production walker's own
 #: fallback for a crafted feed dated on a holiday/weekend).
 _DEFAULT_FORCED_EXIT_SECONDS: Final[int] = 15 * 3600 + 20 * 60
+
+#: Reference-side re-derivation of the regular session CLOSE (15:30 IST as
+#: seconds-since-midnight) — the B6 bounded-distance ceiling for an
+#: in-coverage date with no trading session (mirrors the production
+#: mapping's deterministic non-session fallback without importing it).
+_DEFAULT_SESSION_CLOSE_SECONDS: Final[int] = 15 * 3600 + 30 * 60
+
+#: The reference's OWN §6b restatement constants (never imported from
+#: exec_grid — the §3.11 AST ban): the timeframe vocabulary carries TRADING
+#: minutes and 1day is the 375-minute session (DEC-TF-VOCAB-21-001), but the
+#: close-instant law is WALL-CLOCK — a midnight-IST 1day label closes at the
+#: NEXT midnight, so every 1day arm point cross-session drops.
+_SESSION_TRADING_MINUTES: Final[int] = 375
+_DAY_WALL_MINUTES: Final[int] = 1440
 
 #: 2-decimal tick-grid quantum for the re-derived rupee→paisa snap.
 _PAISA_QUANTUM: Final[Decimal] = Decimal("0.01")
@@ -202,13 +235,15 @@ class RefTrade:
 
 @dataclass(slots=True)
 class _RefPosition:
-    """Mutable open-position state for the naive forward loop (int paisa).
+    """Mutable open-position state for the naive dual-stream loop (int paisa).
 
     ``last_exit_basis`` is the price a retroactive ``session_gap`` /
-    ``end_of_data`` close prices against — the last managed bar's CLOSE
-    under PRECISE, its direction-resolved ADVERSE extreme (LOW for a BUY,
-    HIGH for a SELL) under WORST_CASE (DEC-FILL-WORST-CASE-ONLY-001) — resolved
-    per managed bar so the close site never re-reads a bar.
+    ``end_of_data`` close prices against — the last managed 1m bar's
+    direction-resolved ADVERSE extreme (LOW for a BUY, HIGH for a SELL)
+    under the worst-case law (DEC-FILL-WORST-CASE-ONLY-001), or the entry
+    bar's CLOSE while no successor was ever managed (the B3 terminal
+    carve-out, DEC-FILL-EXEC-GRID-1M-001 §3.12) — resolved per bar so the
+    close site never re-reads a bar.
     """
 
     entry_idx: int
@@ -284,6 +319,64 @@ def _close_position(
     )
 
 
+def _reference_arm_map(
+    bars: Sequence[CandleBar],
+    exec_bars: Sequence[CandleBar],
+    *,
+    tf_minutes: int,
+) -> list[int]:
+    """The reference's OWN signal→1m-fill mapping (a flat forward two-pointer).
+
+    Independently re-states the DEC-FILL-EXEC-GRID-1M-001 mapping law
+    (design §3.11 — :mod:`brutex.engine.exec_grid` is a banned import):
+    decision bar ``N``'s fill candidate is the first stored 1m bar whose
+    timestamp is at-or-after ``ts_tf[N] + tf_minutes``; a candidate on a
+    DIFFERENT IST session date DROPS (the session-bounded slide law), a
+    same-date candidate at/after the arming session's close instant is
+    REFUSED (the B6 bounded-distance assertion — session close from the
+    canonical calendar, data not simulator logic; an in-coverage
+    non-session date falls back to the regular 15:30 close), and when two
+    decision bars map onto ONE 1m bar the EARLIEST-armed wins (B4).
+
+    Returns one entry per 1m bar: the winning decision index, else ``-1``.
+    """
+    n_exec = len(exec_bars)
+    armed = [-1] * n_exec
+    close_cache: dict[date, int] = {}
+    # Independent §6b restatement (see the module constants — NOT imported
+    # from exec_grid, the AST ban): 1day's 375 TRADING minutes convert to the
+    # 1440-minute wall-clock day for the close-instant law, so every 1day arm
+    # point cross-session drops (structurally empty).
+    step_minutes = _DAY_WALL_MINUTES if tf_minutes == _SESSION_TRADING_MINUTES else tf_minutes
+    j = 0
+    for n, dbar in enumerate(bars):
+        close_instant = dbar.timestamp + timedelta(minutes=step_minutes)
+        while j < n_exec and exec_bars[j].timestamp < close_instant:
+            j += 1
+        if j >= n_exec:
+            # The stored 1m tail ended — this and every later decision bar
+            # simply never fills (the design §5.2 cause-4 shape).
+            break
+        fill_ist = exec_bars[j].timestamp.astimezone(IST)
+        arming_day = dbar.timestamp.astimezone(IST).date()
+        if fill_ist.date() != arming_day:
+            continue  # cross-session slide attempts DROP.
+        if arming_day not in close_cache:
+            session = get_session_checked(arming_day)
+            close_cache[arming_day] = (
+                _DEFAULT_SESSION_CLOSE_SECONDS
+                if session is None
+                else session.close_time_ist.hour * 3600 + session.close_time_ist.minute * 60
+            )
+        fill_seconds = fill_ist.hour * 3600 + fill_ist.minute * 60 + fill_ist.second
+        if fill_seconds >= close_cache[arming_day]:
+            continue  # B6: at/after the arming session's close — refused.
+        if armed[j] >= 0:
+            continue  # B4: an earlier decision bar already claimed j.
+        armed[j] = n
+    return armed
+
+
 def reference_simulate(
     bars: Sequence[CandleBar],
     entry_fires: Sequence[bool],
@@ -292,34 +385,42 @@ def reference_simulate(
     tf_minutes: int,
     sl_paisa: int | None,
     tp_paisa: int | None,
+    exec_bars: Sequence[CandleBar],
 ) -> list[RefTrade]:
-    """Naive forward-loop re-simulation of the locked Track-1 fill rules.
+    """Naive dual-stream re-simulation of the locked Track-1 fill rules.
 
-    Implements the ONE hardcoded worst-case fill law exactly (adverse-max
-    fills, pessimistic same-bar SL-first tie, no Mode-B exit signals —
-    DEC-FILL-WORST-CASE-ONLY-001) — see the module docstring for the full
+    Implements the ONE hardcoded worst-case fill law on the 1-minute
+    execution grid exactly (adverse-max fills, pessimistic same-bar
+    SL-first tie, the same-bar deferral, the B3 terminal CLOSE carve-out,
+    no Mode-B exit signals — DEC-FILL-WORST-CASE-ONLY-001 +
+    DEC-FILL-EXEC-GRID-1M-001) — see the module docstring for the full
     independently re-derived rule list.
 
     Parameters
     ----------
     bars
-        Chronologically ordered bars for one instrument (UTC timestamps,
-        Decimal-rupee prices).
+        Chronologically ordered DECISION-TF bars for one instrument (UTC
+        timestamps, Decimal-rupee prices) — the signal domain.
     entry_fires
-        One ``bool`` per bar — ``True`` arms an entry at the NEXT bar's
-        open (same length as *bars*).
+        One ``bool`` per DECISION bar — ``True`` arms an entry at that
+        bar's next-1m fill (same length as *bars*).
     direction
         ``"BUY"`` or ``"SELL"`` (the ``Side`` value strings).
     tf_minutes
-        Bar timeframe in whole minutes (``>= 1``).
+        DECISION bar timeframe in whole minutes (``>= 1``); the walk is
+        always on the 1-minute grid.
     sl_paisa, tp_paisa
         Stop / target distances from entry in paisa (``> 0``) or ``None``
         to disable that leg.
+    exec_bars
+        Chronologically ordered 1-MINUTE execution bars — the fill/walk
+        domain (at ``tf_minutes == 1`` pass the same sequence as *bars*).
 
     Returns
     -------
     list[RefTrade]
-        Closed round-trips in the order they closed.
+        Closed round-trips in the order they closed (indices are 1-MINUTE
+        indices into *exec_bars*).
 
     Raises
     ------
@@ -339,83 +440,41 @@ def reference_simulate(
         raise ValueError(f"entry_fires length {len(entry_fires)} != bars length {len(bars)}")
 
     buy = direction == "BUY"
+    armed = _reference_arm_map(bars, exec_bars, tf_minutes=tf_minutes)
     trades: list[RefTrade] = []
     fe_cache: dict[date, int | None] = {}
     pos: _RefPosition | None = None
-    pending = False
-    pending_day: date | None = None
 
-    for i, bar in enumerate(bars):
-        # Session/forced resolution only when a position or pending entry
-        # needs it (the pre-existing calendar-idle law: the idle path never
-        # touches the calendar, so an out-of-coverage date on a flat stretch
-        # cannot raise). The whole (A)/(A2)/(B) ladder lives inside this arm
-        # — each guard requires a position or a pending entry — so the arm's
-        # non-Optional ``day`` local is the (A)/(A2) session key; the
-        # Optional ``bar_day`` mirror survives solely for step (C)'s
-        # reuse-or-resolve fallback expression.
-        bar_day: date | None = None
+    for j, bar in enumerate(exec_bars):
+        src = armed[j]
+        due = src >= 0 and bool(entry_fires[src])
         closed: RefTrade | None = None
-        if pos is not None or pending:
+        # Session/forced resolution only when a position or a due fill needs
+        # it (the calendar-idle law: the idle path never touches the
+        # calendar, so an out-of-coverage date on a flat stretch cannot
+        # raise).
+        if pos is not None or due:
             ts_ist = bar.timestamp.astimezone(IST)
             day = ts_ist.date()
-            bar_day = day
             open_seconds = ts_ist.hour * 3600 + ts_ist.minute * 60 + ts_ist.second
-            forced = open_seconds + tf_minutes * 60 > _forced_boundary(day, fe_cache)
-
-            # (A) Fill a pending entry at THIS bar's open — same IST session
-            # date only (overnight-gap fills DROP, R2-OC-2 — unchanged) and
-            # never on a forced bar. (A) clears the pending flag before
-            # opening and step (C) arms only while flat, so (A) and (A2) can
-            # never both run on one bar (oracle-law §3(c) state invariant).
-            if pos is None and pending:
-                pending = False
-                same_session = day == pending_day
-                pending_day = None
-                if not forced and same_session:
-                    # The re-stated adverse-max law: the entry fills at the
-                    # entry bar's ADVERSE extreme — BUY at HIGH, SELL at LOW
-                    # (DEC-FILL-WORST-CASE-ONLY-001). The SL/TP levels anchor
-                    # on the ACTUAL worst entry fill.
-                    entry_paisa = _to_paisa(bar.high if buy else bar.low)
-                    if buy:
-                        sl_level = None if sl_paisa is None else entry_paisa - sl_paisa
-                        tp_level = None if tp_paisa is None else entry_paisa + tp_paisa
-                    else:
-                        sl_level = None if sl_paisa is None else entry_paisa + sl_paisa
-                        tp_level = None if tp_paisa is None else entry_paisa - tp_paisa
-                    pos = _RefPosition(
-                        entry_idx=i,
-                        entry_paisa=entry_paisa,
-                        entry_ts=bar.timestamp,
-                        # The IST SESSION date the fill resolved (never the
-                        # UTC date) — the (A2) session key, oracle-law §3(a).
-                        entry_day=day,
-                        sl_level=sl_level,
-                        tp_level=tp_level,
-                        mfe=0,
-                        mae=0,
-                        last_idx=i,
-                        last_exit_basis=bar.low if buy else bar.high,
-                        last_ts=bar.timestamp,
-                    )
+            # A 1-MINUTE bar is forced iff its [open, open+1min) window
+            # passes the session's close − 10 min boundary (the walk grid is
+            # the 1m stream — tf is 1 here regardless of the decision TF).
+            forced = open_seconds + 60 > _forced_boundary(day, fe_cache)
 
             if pos is not None and day != pos.entry_day:
                 # (A2) Session-boundary close (DEC-TRADESIM-OPEN-SESSION-
-                # GUARD-001, MIGRATION.md #1743 — re-derived from the ledger
-                # + design spec, oracle-law derivation §1/§2): an open
-                # position never survives an IST session-date change. On the
-                # FIRST bar whose session date differs (pure ``!=``, either
-                # direction — fires at most once even across a multi-session
-                # hole) close retroactively at the PRIOR session's last
-                # MANAGED bar — its CLOSE / timestamp / index, read BEFORE
-                # this bar touches ``last_*`` — with NO excursion fold from
-                # this boundary bar, whose forced flag is then irrelevant
-                # (the oracle is flat for the rest of this iteration). The
-                # DEFAULT policy carries no pending next-open exit slot, so
-                # there is nothing further to subsume; ``closed`` non-None
-                # makes step (C) skip arming on the boundary bar (earliest
-                # re-arm ``i+1``, earliest new fill ``i+2``).
+                # GUARD-001 on the 1m stream): an open position never
+                # survives an IST session-date change. On the FIRST 1m bar
+                # whose session date differs (pure ``!=``, either direction
+                # — fires at most once even across a multi-session hole)
+                # close retroactively at the PRIOR session's last MANAGED 1m
+                # bar — its resolved exit basis / timestamp / index, read
+                # BEFORE this bar touches ``last_*`` — with NO excursion
+                # fold from this boundary bar, whose forced flag is then
+                # irrelevant (the reference is flat for the rest of this
+                # iteration). ``closed`` non-None blocks the (A) fill below,
+                # so the boundary bar never opens a new position.
                 closed = _close_position(
                     pos,
                     exit_paisa=_to_paisa(pos.last_exit_basis),
@@ -426,9 +485,15 @@ def reference_simulate(
                 )
                 pos = None
 
-            # (B) Manage the open position on this bar (entry bar included).
+            # (B) Manage the open position on this 1m bar — bars strictly
+            # AFTER the entry bar only (the entry bar is fully handled at
+            # the (A) fill below: full-range excursion fold, NO exit
+            # detection — the same-bar deferral law §2.4).
             elif pos is not None:
-                pos.last_idx = i
+                pos.last_idx = j
+                # The retroactive-close basis: this bar's adverse extreme
+                # (a managed bar is never the entry bar, so the B3 terminal
+                # CLOSE carve-out no longer applies once any bar is managed).
                 pos.last_exit_basis = bar.low if buy else bar.high
                 pos.last_ts = bar.timestamp
                 if forced:
@@ -442,7 +507,7 @@ def reference_simulate(
                         pos,
                         exit_paisa=forced_paisa,
                         exit_ts=bar.timestamp,
-                        exit_idx=i,
+                        exit_idx=j,
                         reason="forced_1520",
                         buy=buy,
                     )
@@ -469,7 +534,7 @@ def reference_simulate(
                             pos,
                             exit_paisa=min(level, low_paisa) if buy else max(level, high_paisa),
                             exit_ts=bar.timestamp,
-                            exit_idx=i,
+                            exit_idx=j,
                             reason="stop_loss",
                             buy=buy,
                         )
@@ -480,22 +545,58 @@ def reference_simulate(
                             pos,
                             exit_paisa=min(level, low_paisa) if buy else max(level, high_paisa),
                             exit_ts=bar.timestamp,
-                            exit_idx=i,
+                            exit_idx=j,
                             reason="take_profit",
                             buy=buy,
                         )
                         pos = None
+
+            # (A) Fill a due entry on THIS 1m bar — the mapping already
+            # timed + session-gated it; the walk-side gates: never while a
+            # position is open, never on a bar a trade just closed (the
+            # exit/boundary bar is consumed), and never on a forced-exit 1m
+            # bar (cannot open at/after the session's forced instant).
+            if pos is None and closed is None and due and not forced:
+                # The re-stated adverse-max law: the entry fills at the
+                # entry 1m bar's ADVERSE extreme — BUY at HIGH, SELL at LOW
+                # (DEC-FILL-WORST-CASE-ONLY-001). The SL/TP levels anchor
+                # on the ACTUAL worst entry fill.
+                entry_paisa = _to_paisa(bar.high if buy else bar.low)
+                if buy:
+                    sl_level = None if sl_paisa is None else entry_paisa - sl_paisa
+                    tp_level = None if tp_paisa is None else entry_paisa + tp_paisa
+                else:
+                    sl_level = None if sl_paisa is None else entry_paisa + sl_paisa
+                    tp_level = None if tp_paisa is None else entry_paisa - tp_paisa
+                pos = _RefPosition(
+                    entry_idx=j,
+                    entry_paisa=entry_paisa,
+                    entry_ts=bar.timestamp,
+                    # The IST SESSION date the fill resolved (never the
+                    # UTC date) — the (A2) session key.
+                    entry_day=day,
+                    sl_level=sl_level,
+                    tp_level=tp_level,
+                    mfe=0,
+                    mae=0,
+                    last_idx=j,
+                    # The B3 terminal carve-out basis: while the LAST bar is
+                    # the trade's OWN entry bar, a retroactive close prices
+                    # at its CLOSE (never the adverse extreme — that would
+                    # be the full-range phantom loss the same-bar deferral
+                    # exists to kill). Every managed successor overwrites
+                    # this with its adverse extreme.
+                    last_exit_basis=bar.close,
+                    last_ts=bar.timestamp,
+                )
+                # §2.4: the entry bar folds its FULL range but NEVER exits.
+                _fold_excursion(pos, _to_paisa(bar.high), _to_paisa(bar.low), buy=buy)
         if closed is not None:
             trades.append(closed)
 
-        # (C) While flat — and not on a bar a trade just closed — arm the
-        # next entry, recording THIS bar's IST session date (the (A) gate).
-        if pos is None and closed is None and entry_fires[i]:
-            pending = True
-            pending_day = bar_day if bar_day is not None else bar.timestamp.astimezone(IST).date()
-
-    # End of data: a still-open position closes at the LAST managed bar's
-    # adverse extreme — the resolved exit basis.
+    # End of data: a still-open position closes at the LAST managed 1m
+    # bar's resolved exit basis (adverse extreme, or the entry bar's CLOSE
+    # under the B3 terminal carve-out).
     if pos is not None:
         trades.append(
             _close_position(
@@ -511,13 +612,22 @@ def reference_simulate(
 
 
 def reference_drawdown(
-    ref_trades: Sequence[RefTrade], *, n_bars: int, start_equity_paisa: int
+    ref_trades: Sequence[RefTrade],
+    *,
+    bars: Sequence[CandleBar],
+    start_equity_paisa: int,
 ) -> tuple[int, float, int, float]:
     """Re-derived equity fold + drawdown scan over the reference trades.
 
-    Each trade's P&L lands on its exit BAR INDEX; equity is the running sum
-    from *start_equity_paisa*, one sample per bar. The scan re-derives the
-    documented drawdown definitions (largest peak-to-trough drop in paisa,
+    Each trade's P&L lands on its OWNING DECISION bar — the LAST decision
+    bar whose label is at-or-before the trade's ``exit_ts``, re-derived
+    here with a flat backward-compatible ``bisect`` over the decision
+    labels (DEC-FILL-EXEC-GRID-1M-001 §3.8: exits resolve on the 1-minute
+    grid, so a coarse-TF ``exit_ts`` is an INTERIOR instant of its owning
+    bucket; the label-aligned exit is the ``exit_ts == label`` special case
+    of the same fold). Equity is the running sum from *start_equity_paisa*,
+    one sample per DECISION bar. The scan re-derives the documented
+    drawdown definitions (largest peak-to-trough drop in paisa,
     fraction-of-peak percentage ×100 — unclamped, zero-or-negative peak
     contributes no percentage — longest below-peak bar run, and the Ulcer
     Index = RMS of the percentage-drawdown series ×100) with the SAME
@@ -529,8 +639,8 @@ def reference_drawdown(
     ----------
     ref_trades
         The :func:`reference_simulate` output.
-    n_bars
-        Number of bars in the window (``> 0``).
+    bars
+        The DECISION-TF bars of the window (non-empty, chronological).
     start_equity_paisa
         Notional capital base in paisa.
 
@@ -542,15 +652,21 @@ def reference_drawdown(
     Raises
     ------
     ValueError
-        If ``n_bars <= 0`` or a trade's ``exit_idx`` is out of range.
+        If *bars* is empty or a trade's ``exit_ts`` precedes the first
+        decision label (out of window).
     """
+    n_bars = len(bars)
     if n_bars <= 0:
-        raise ValueError(f"n_bars must be > 0, got {n_bars}")
+        raise ValueError(f"bars must be non-empty, got {n_bars}")
+    labels = [bar.timestamp for bar in bars]
     realized = [0] * n_bars
     for trade in ref_trades:
-        if not 0 <= trade.exit_idx < n_bars:
-            raise ValueError(f"exit_idx {trade.exit_idx} out of range for n_bars {n_bars}")
-        realized[trade.exit_idx] += trade.pnl_paisa
+        owner = bisect_right(labels, trade.exit_ts) - 1
+        if owner < 0:
+            raise ValueError(
+                f"exit_ts {trade.exit_ts!r} precedes the first decision label {labels[0]!r}"
+            )
+        realized[owner] += trade.pnl_paisa
     running = start_equity_paisa
     equity: list[int] = []
     for pnl in realized:
@@ -847,7 +963,11 @@ class ProductionTradeLike(Protocol):
 
 
 class ProductionSimulate(Protocol):
-    """The injected production trade-sim leg (a ``simulate_trades`` adapter)."""
+    """The injected production trade-sim leg (a ``simulate_trades`` adapter).
+
+    ``exec_bars`` is the 1-minute EXECUTION stream (DEC-FILL-EXEC-GRID-1M-001
+    — the adapter threads it as ``simulate_trades(..., exec_bars_1m=…)``).
+    """
 
     def __call__(
         self,
@@ -858,6 +978,7 @@ class ProductionSimulate(Protocol):
         tf_minutes: int,
         stop_loss_paisa: int | None,
         take_profit_paisa: int | None,
+        exec_bars: Sequence[CandleBar],
     ) -> Sequence[ProductionTradeLike]:
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
@@ -934,6 +1055,7 @@ class DiffCheckHook:
         *,
         bars: Sequence[CandleBar],
         bar_bits: Sequence[int],
+        exec_bars: Sequence[CandleBar],
         tuple_: DiffCheckTupleLike,
         grid: DiffCheckGridLike,
         budget_left: int,
@@ -958,7 +1080,11 @@ class DiffCheckHook:
         Parameters
         ----------
         bars, bar_bits
-            The tuple's certified bar window + Stage-1A condition bitsets.
+            The tuple's certified DECISION bar window + Stage-1A condition
+            bitsets.
+        exec_bars
+            The tuple's 1-minute EXECUTION stream
+            (DEC-FILL-EXEC-GRID-1M-001) — threaded verbatim to BOTH legs.
         tuple_, grid
             The sweep tuple + owning grid (structural views).
         budget_left
@@ -1014,6 +1140,7 @@ class DiffCheckHook:
                     digest=digest,
                     bars=bars,
                     bar_bits=bar_bits,
+                    exec_bars=exec_bars,
                     tuple_=tuple_,
                     grid=grid,
                 )
@@ -1041,6 +1168,7 @@ class DiffCheckHook:
         digest: str,
         bars: Sequence[CandleBar],
         bar_bits: Sequence[int],
+        exec_bars: Sequence[CandleBar],
         tuple_: DiffCheckTupleLike,
         grid: DiffCheckGridLike,
     ) -> DiffCheckMismatch | None:
@@ -1056,6 +1184,7 @@ class DiffCheckHook:
             tf_minutes=tf_minutes,
             stop_loss_paisa=tuple_.sl_paisa,
             take_profit_paisa=tuple_.tp_paisa,
+            exec_bars=exec_bars,
         )
         ref_trades = reference_simulate(
             bars,
@@ -1064,6 +1193,7 @@ class DiffCheckHook:
             tf_minutes=tf_minutes,
             sl_paisa=tuple_.sl_paisa,
             tp_paisa=tuple_.tp_paisa,
+            exec_bars=exec_bars,
         )
         diff = _first_trade_mismatch(prod_trades, ref_trades)
         if diff is None:
@@ -1074,7 +1204,7 @@ class DiffCheckHook:
                 tf_minutes=tf_minutes,
             )
             ref_dd = reference_drawdown(
-                ref_trades, n_bars=len(bars), start_equity_paisa=grid.start_equity_paisa
+                ref_trades, bars=bars, start_equity_paisa=grid.start_equity_paisa
             )
             if drawdown_bit_key(prod_dd) != drawdown_bit_key(ref_dd):
                 diff = ("drawdown", repr(prod_dd), repr(ref_dd))

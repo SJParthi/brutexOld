@@ -33,7 +33,11 @@ from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.ranking.presets import PRESET_NAMES
 from fastapi.testclient import TestClient
 
-from tests.fakes.leaderboard_preset_fixtures import make_leaderboard_row, write_tuple_store
+from tests.fakes.leaderboard_preset_fixtures import (
+    make_leaderboard_row,
+    run_id_hex,
+    write_tuple_store,
+)
 
 
 def _nifty() -> Instrument:
@@ -119,7 +123,19 @@ class TestPresetParam:
         assert resp.status_code == 200
         payload = resp.json()
         assert payload["preset"] == "min_dd_first"
-        assert payload["preset_inert_axes"] == ["composite_score", "max_consecutive_losses"]
+        # DEC-ALPHA-BUYHOLD-METRIC-001: alpha_pct joins the inert set — an
+        # ARTIFACT-level metric never persisted on ResultRow (honest
+        # disclosure, the Golden-Rule-#10 law). net_after_cost_paisa likewise
+        # joins PRESET_INERT_AXES as a DISCLOSED-INERT axis per
+        # DEC-OPTIONS-EXEC-FEEDBACK-001 (#1990) — see
+        # brutex/dashboard/sweep_results_view.py PRESET_INERT_AXES; dynamic
+        # activation deferred to DEC-NETCOST-RESULTS-JOIN-001.
+        assert payload["preset_inert_axes"] == [
+            "composite_score",
+            "max_consecutive_losses",
+            "alpha_pct",
+            "net_after_cost_paisa",
+        ]
         assert [r["max_drawdown_pct"] for r in payload["rows"]] == [2.0, 25.0]
 
     def test_invalid_preset_is_a_clean_400_naming_valid_values(self, client: TestClient) -> None:
@@ -154,6 +170,61 @@ class TestPresetParam:
         assert default_again == default_first
         assert [r["max_drawdown_pct"] for r in preset["rows"]] == [2.0, 25.0]
         assert [r["sharpe_ratio"] for r in default_again["rows"]] == [3.0, 1.0]
+
+    def test_win_rate_safe_preset_threads_sl_hit_rate(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: the view's
+        _preset_rank_record threads the persisted sl_hit_rate — tied win
+        rates rank by SL-hit rate ASC with a None rate (a pre-extension row)
+        last, then win rate DESC dominates over any SL-hit rate."""
+        write_tuple_store(
+            store.path.parent,
+            [
+                make_leaderboard_row(1, win_rate=0.5, sl_hit_rate=0.8),
+                make_leaderboard_row(2, win_rate=0.5, sl_hit_rate=0.1),
+                make_leaderboard_row(3, win_rate=0.5, sl_hit_rate=None),
+                make_leaderboard_row(4, win_rate=0.9, sl_hit_rate=1.0),
+            ],
+        )
+        payload = client.get("/api/v1/sweep/leaderboard?preset=win_rate_safe").json()
+        assert payload["preset"] == "win_rate_safe"
+        assert [r["run_id"] for r in payload["rows"]] == [
+            run_id_hex(4),  # win rate 0.9 dominates even at SL-hit 1.0
+            run_id_hex(2),  # tied 0.5: lowest SL-hit rate first
+            run_id_hex(1),
+            run_id_hex(3),  # None rate last within the tied win rate
+        ]
+
+    def test_recent_presets_thread_the_recency_columns(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """DEC-METRICS-TRAILING-WINDOW-001: the view's _preset_rank_record
+        threads the persisted trailing_sharpe_ratio / decay_weighted_net_paisa
+        — each recency preset orders its metric DESC with a None (a
+        pre-extension row / anchor-less run) last."""
+        write_tuple_store(
+            store.path.parent,
+            [
+                make_leaderboard_row(1, trailing_sharpe_ratio=0.2, decay_weighted_net_paisa=50.0),
+                make_leaderboard_row(2, trailing_sharpe_ratio=1.7, decay_weighted_net_paisa=-10.0),
+                make_leaderboard_row(3, trailing_sharpe_ratio=None, decay_weighted_net_paisa=None),
+            ],
+        )
+        recent = client.get("/api/v1/sweep/leaderboard?preset=recent").json()
+        assert recent["preset"] == "recent"
+        assert [r["run_id"] for r in recent["rows"]] == [
+            run_id_hex(2),  # highest trailing Sharpe first
+            run_id_hex(1),
+            run_id_hex(3),  # None last
+        ]
+        decay = client.get("/api/v1/sweep/leaderboard?preset=recent_decay").json()
+        assert decay["preset"] == "recent_decay"
+        assert [r["run_id"] for r in decay["rows"]] == [
+            run_id_hex(1),  # highest decay-weighted net first
+            run_id_hex(2),
+            run_id_hex(3),  # None last
+        ]
 
     def test_preset_on_empty_tree_is_honest_empty_board(self, client: TestClient) -> None:
         """A preset over an empty sweeps tree is the honest empty board, preset echoed."""

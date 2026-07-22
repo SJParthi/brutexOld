@@ -308,7 +308,7 @@ class TestTzEdges:
 def _ranked_combo() -> RankedCombo:
     """A gates-independent ranked combo over the local fixture (mask 0)."""
     metrics = driver_mod.evaluate_combo(
-        _BARS, 0, direction=Side.BUY, tf_minutes=1, take_profit_paisa=50
+        _BARS, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=_BARS, take_profit_paisa=50
     )
     return RankedCombo(mask=0, metrics=metrics, composite_score=0.0, deflated_sharpe=None)
 
@@ -327,6 +327,7 @@ class TestAllMiss:
                 bars=_BARS,
                 bar_bits=build_bar_bits(_BARS),
                 tf_minutes=1,
+                exec_bars_1m=_BARS,
                 sl_paisa=None,
                 tp_paisa=50,
                 reference_stamper=empty_stamper,

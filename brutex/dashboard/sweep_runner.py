@@ -97,6 +97,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.ranking.multi_select import DEFAULT_PERSIST_TOP_K
 from brutex.universe import ENGINE_SWEEP_SPOT_TRIPLES
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
@@ -141,8 +142,11 @@ DEFAULT_K: Final[str] = "extinction"
 #: therefore not part of this default.
 DEFAULT_SL: Final[str] = "50,100,150"
 DEFAULT_TP: Final[str] = "100,200,300"
-#: Default top-N composite-ranked combos persisted per tuple (R21).
-DEFAULT_TOP: Final[int] = 1000
+#: Default top-N composite-ranked combos persisted per tuple (R21) — the ONE
+#: common :data:`brutex.ranking.multi_select.DEFAULT_PERSIST_TOP_K` (1000;
+#: imported, never copied — CLAUDE.md §11 COMMON;
+#: DEC-RANK-QUOTA-PERSIST-1000-001).
+DEFAULT_TOP: Final[int] = DEFAULT_PERSIST_TOP_K
 #: Default run-mode identity label stamped on the run hash — distinguishes
 #: an institutional launch from the retired light "A"-moded research runs.
 DEFAULT_MODE: Final[str] = "INSTITUTIONAL"

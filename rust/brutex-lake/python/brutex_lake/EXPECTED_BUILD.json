@@ -15,7 +15,6 @@
     "merge_decision_from_ipc",
     "pinned_polars_version",
     "raw_integrity_blake2b_hex",
-    "render_ledger_parquet_from_ipc",
     "render_parquet_defaults_from_ipc",
     "render_parquet_from_ipc",
     "render_stats_shard_json",

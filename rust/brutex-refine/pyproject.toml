@@ -1,0 +1,35 @@
+# Maturin build config for brutex-refine (DEC-RUST-STAGE3-REFINE-001).
+#
+# Mixed Python + Rust layout (the brutex-feed / trading-core shape): the
+# cdylib ships as the private submodule `brutex_refine._brutex_refine`;
+# `python/brutex_refine/__init__.py` re-exports it behind the stale-wheel
+# handshake. `features = ["python"]` turns on the optional pyo3 dependency
+# (extension-module + abi3-py312) so the wheel includes the binding.
+#
+# https://www.maturin.rs/
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-refine"
+version = "0.1.0"
+description = "Stage-3 refinement optimizer core (restarted CMA-ES + Mode-A grid + top-K selection) for BruteX."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [{ name = "SJParthi" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "brutex_refine._brutex_refine"
+features = ["python"]
+strip = true

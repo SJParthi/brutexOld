@@ -358,3 +358,74 @@ def test_sweep_futures_alias_resolver_refusal_is_user_error(
     err = capsys.readouterr().err
     assert "sweep error" in err
     assert "NSE-NIFTY-FUT" in err or "FNO" in err
+
+
+# ── 1-minute EXECUTION-slice refusal (DEC-FILL-EXEC-GRID-1M-001 §3.3) ─────────
+# The dual-feed law: every fill resolves on the 1-minute execution grid, so a
+# decision-TF sweep MUST also carry the symbol's 1-minute slice. When the
+# decision-TF bars are present but the 1-minute exec slice is ABSENT, cmd_sweep
+# refuses LOUDLY — the exec slice is NON-WAIVABLE, never a decision-TF-era
+# report. These teeth pin BOTH the exit code AND the §3.3 message string, so a
+# removed or weakened refusal fails this test.
+
+
+def _persist_decision_tf_only(tmp_path: Path, *, interval: str = "5minute") -> tuple[Path, Path]:
+    """Write NIFTY bars into ONLY a decision-TF partition — no 1-minute slice.
+
+    The same in-session NIFTY window is stored under a non-1minute lake
+    interval label, so the decision-bars load passes the ``if not bars`` guard
+    while ``load_sweep_slice(interval="1minute")`` returns ``[]`` — the exact
+    condition that arms the DEC-FILL-EXEC-GRID-1M-001 §3.3 refusal.
+    """
+    lake_root = tmp_path / "lake"
+    catalog_path = tmp_path / "catalog.duckdb"
+    writer = ParquetWriter(lake_root=lake_root)
+    with Catalog.open(catalog_path) as cat:
+        sink = ParquetBarSink(writer=writer, catalog=cat)
+        sink.append(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            interval=interval,
+            bars=_bars(),
+        )
+    return lake_root, catalog_path
+
+
+def test_cmd_sweep_refuses_when_1minute_exec_slice_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DEC-FILL-EXEC-GRID-1M-001 §3.3: absent 1-minute exec slice → loud refusal.
+
+    A decision-TF (``5minute``) lake with NO ``1minute`` partition passes the
+    decision-bars guard but fails the exec-slice load, so cmd_sweep must return
+    ``EXIT_USER_ERROR`` (1) and print the non-waivable §3.3 message — never a
+    decision-TF-era report, never a traceback.
+    """
+    lake_root, catalog_path = _persist_decision_tf_only(tmp_path, interval="5minute")
+    rc = cmd_sweep(
+        lake_root=lake_root,
+        catalog_path=catalog_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        interval="5minute",  # decision TF ≠ 1minute — exec slice must be loaded separately
+        start="2024-01-02",
+        end="2024-01-03",
+        direction="BUY",
+        k=2,
+        conditions="0,1,2",
+        stop_loss_paisa=None,
+        take_profit_paisa=None,
+        top=10,
+        min_hits=None,
+        sort_by="composite",
+        validate_oos=False,
+        oos_only=False,
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    # The exact §3.3 substring — the non-waivable exec-slice refusal.
+    assert "no 1-minute EXECUTION bars" in err
+    assert "DEC-FILL-EXEC-GRID-1M-001" in err
+    assert _SYMBOL in err

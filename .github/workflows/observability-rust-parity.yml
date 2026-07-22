@@ -139,13 +139,15 @@ jobs:
         # [ui] because the loop_watchdog consumer suite drives the FastAPI
         # lifespan wiring; fno-math + trading-core because the stage_stamp
         # consumer suite imports brutex.engine.* (whose __init__ hard-imports
-        # both wheels). Belt-and-suspenders crates.io flake guard on every
-        # wheel build — the ci.yml retry idiom, POSIX sh.
+        # both wheels); brutex-identity because results_store.py hard-imports
+        # its kernel (DEC-RUST-RUNID-STORES-001). Belt-and-suspenders
+        # crates.io flake guard on every wheel build — the ci.yml retry
+        # idiom, POSIX sh.
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[data,dev,ui]"
           pip install maturin
-          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-observability; do
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity ./rust/brutex-observability; do
             n=0
             until pip install "$crate"; do
               n=$((n+1))

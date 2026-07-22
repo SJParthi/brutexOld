@@ -56,10 +56,17 @@ Optional-column back-compat (the ``WindowLedger.bars_net_new`` template)
 Columns added AFTER a store format ships are **appended LAST** in the Parquet
 column order and read back via :func:`_optional_float`: a store written before
 the column existed loads that field as ``None`` — the honest unknown, never a
-fabricated value. Two such generations exist today: ``deflated_sharpe``
-(DEC-SWEEP-WINNERS-BY-NAME-001 era) and the ``vix_mean``/``vix_min``/``vix_max``
-trio (DEC-VIX-STAMP-WIRE-001), each pinned by a committed pre-column fixture in
-``tests/golden/fixtures/``.
+fabricated value. Five such generations exist today: ``deflated_sharpe``
+(DEC-SWEEP-WINNERS-BY-NAME-001 era), the ``vix_mean``/``vix_min``/``vix_max``
+trio (DEC-VIX-STAMP-WIRE-001), the loss/growth trio
+``loss_rate``/``kelly_fraction``/``log_growth_at_half_kelly``
+(:data:`GROWTH_FIELDS` — DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+DEC-METRICS-KELLY-GROWTH-001), ``sl_hit_rate``
+(:data:`EXIT_QUALITY_FIELDS` — the Stage-B exit-reason-counter column), and
+the recency family ``trailing_sharpe_ratio``/``trailing_profit_factor``/
+``trailing_net_pnl_paisa``/``decay_weighted_net_paisa``
+(:data:`RECENCY_FIELDS` — DEC-METRICS-TRAILING-WINDOW-001 Stage C),
+pinned by the committed pre-column fixtures in ``tests/golden/fixtures/``.
 
 Idempotence + byte-determinism (Golden Rule #4 / #7, mirrors
 ``brutex/data/parquet_writer.py``)
@@ -124,8 +131,9 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, fields, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
+import brutex_identity
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
@@ -243,13 +251,156 @@ _TEMPORAL_JSON_FIELDS: Final[tuple[str, ...]] = (
     "stats_by_month_json",
     "temporal_judged_years_json",
 )
+#: Float64 **nullable** loss/growth metric columns
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001):
+#: ``loss_rate`` (the losing-side mirror of ``win_rate``) plus the Kelly
+#: pair ``kelly_fraction`` / ``log_growth_at_half_kelly``, written from
+#: :class:`~brutex.metrics.compute.ResultMetrics` by the ONE projector
+#: (``sweep_run.ranked_combo_to_result_row``) — the Kelly pair through the
+#: SAME ``_metric_or_zero`` ``None`` → ``0.0`` coercion the rankable
+#: ``profit_factor`` column already rides (the mirrored precedent,
+#: DEC-METRICS-KELLY-GROWTH-001 design-pack ruling), so a row written by
+#: CURRENT code always carries concrete floats and ``None`` appears ONLY
+#: when reading a store written BEFORE the columns existed (the Ruling-5
+#: presence-tolerant boundary — the honest unknown). Full precision, NEVER
+#: rounded. Appended LAST in the on-disk column order, AFTER the VIX trio +
+#: the emit-on-present temporal quartet (:data:`_TEMPORAL_JSON_FIELDS`) —
+#: the landed-first-wins re-integration order (the optional-column
+#: back-compat template, gap-register ruling 5). Unlike
+#: VIX these ARE rankable — under the explicit NULLS-LAST total order of
+#: :data:`_NULLABLE_RANKABLE_FIELDS` — and, unlike VIX, each is a PURE
+#: FUNCTION of other stored columns + the run's code (which is inside the
+#: BLAKE3 run identity via ``code_commit_sha``), so a value-vs-value
+#: conflict under one ``run_id`` is a genuine reproducibility breach.
+#: PUBLIC for the same reason as :data:`VIX_FIELDS` — the ONE cross-module
+#: source of truth for the column names (CLAUDE.md §2 Rule 11 COMMON).
+GROWTH_FIELDS: Final[tuple[str, ...]] = (
+    "loss_rate",
+    "kelly_fraction",
+    "log_growth_at_half_kelly",
+)
+#: Float64 **nullable** exit-quality column(s)
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): ``sl_hit_rate`` — the
+#: stop-loss-exit share of the combo's closed trades, written from
+#: :class:`~brutex.metrics.compute.ResultMetrics` by the ONE projector as a
+#: PLAIN pass-through (deliberately NO ``_metric_or_zero`` coercion — a
+#: ``None`` means the metrics were computed WITHOUT the trade-sim's
+#: exit-reason counters, and coercing it to ``0.0`` would fabricate a
+#: perfect-looking SL record). The sweep spine ALWAYS threads the counters,
+#: so a sweep-written row is concrete; ``None`` appears from a counter-less
+#: legacy caller or a store written BEFORE the column existed (the Ruling-5
+#: presence-tolerant boundary — the honest unknown). Full precision, NEVER
+#: rounded. Appended LAST in the on-disk column order, AFTER the growth trio
+#: (the optional-column back-compat template). Rankable under the same
+#: NULLS-LAST law as the growth trio (:data:`_NULLABLE_RANKABLE_FIELDS`);
+#: deterministic per run identity (a pure function of the run's own trade
+#: stream + code), so a value-vs-value conflict under one ``run_id`` is a
+#: genuine reproducibility breach. NEVER in the run identity. PUBLIC — the
+#: ONE cross-module source of truth for the column name(s) (CLAUDE.md §2
+#: Rule 11 COMMON).
+EXIT_QUALITY_FIELDS: Final[tuple[str, ...]] = ("sl_hit_rate",)
+#: Float64 **nullable** recency-metric columns
+#: (DEC-METRICS-TRAILING-WINDOW-001 Stage C): the trailing-window trio
+#: ``trailing_sharpe_ratio`` / ``trailing_profit_factor`` /
+#: ``trailing_net_pnl_paisa`` plus the whole-history decay composite
+#: ``decay_weighted_net_paisa``, written from
+#: :class:`~brutex.metrics.compute.ResultMetrics` by the ONE projector as
+#: PLAIN pass-throughs (deliberately NO ``_metric_or_zero`` coercion — a
+#: ``None`` means either the GLOBAL ``trailing_anchor`` was not threaded
+#: (a legacy caller) or, for the trailing trio, the 24-month window
+#: honestly held zero trades; coercing either to ``0.0`` would fabricate a
+#: measured recency figure, Golden Rule #1). The sweep spine always
+#: threads the anchor, so a sweep-written row's ``decay_weighted_net_paisa``
+#: is concrete while its trailing trio is concrete exactly when the window
+#: held trades. ``trailing_net_pnl_paisa`` is an exact int on
+#: ``ResultMetrics`` and stored on the shared nullable-Float64 lane (the
+#: optional-column template) — exact for every |paisa| < 2**53, far beyond
+#: any real P&L. Full precision, NEVER rounded. Appended LAST in the
+#: on-disk column order, AFTER the exit-quality column (the optional-column
+#: back-compat template). Rankable under the same NULLS-LAST law
+#: (:data:`_NULLABLE_RANKABLE_FIELDS`); deterministic per run identity
+#: (the anchor is the data-end of the snapshot inside the BLAKE3 identity
+#: via ``data_snapshot_hash``), so a value-vs-value conflict under one
+#: ``run_id`` is a genuine reproducibility breach. NEVER in the run
+#: identity. PUBLIC — the ONE cross-module source of truth for the column
+#: names (CLAUDE.md §2 Rule 11 COMMON).
+RECENCY_FIELDS: Final[tuple[str, ...]] = (
+    "trailing_sharpe_ratio",
+    "trailing_profit_factor",
+    "trailing_net_pnl_paisa",
+    "decay_weighted_net_paisa",
+)
 
-#: Numeric columns a leaderboard may rank by (metrics + money + counts).
-#: The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio are
-#: deliberately NOT rankable — VIX must never drive strategy ranking
-#: (CLAUDE.md §2 Rule 3) and a nullable column has no total order.
+#: Nullable selection-provenance columns (LANE W1, DEC-RANK-PARETO-PERSIST-001
+#: / DEC-RANK-QUOTA-PERSIST-1000-001): ``pareto_member`` (Boolean — the row is
+#: an ε-Pareto frontier member of its tuple's ranked pool) and
+#: ``selection_basis`` (Utf8 — the comma-joined, canonical-order basis tokens
+#: from :data:`brutex.ranking.multi_select.BASIS_ORDER` the row qualified
+#: under). Appended LAST in the on-disk column order (at the train-b fold:
+#: after the W2 metrics tail — loss-rate/growth/exit-quality/recency — which
+#: keeps ITS landed order; the optional-column back-compat template);
+#: ``None`` = the honest unknown (a store written before LANE W1).
+#: ANNOTATION-ONLY: deliberately excluded from :data:`_RANKABLE_FIELDS`
+#: (provenance never drives ranking) and NEVER an input to the BLAKE3 run
+#: identity. PUBLIC for the same reason as :data:`VIX_FIELDS` — one
+#: cross-module source of truth for the pair's column names.
+SELECTION_FIELDS: Final[tuple[str, ...]] = ("pareto_member", "selection_basis")
+
+#: Nullable Utf8 GATE-PROVENANCE column (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
+#: the canonical gate+selection identity token
+#: (:func:`brutex.engine.sweep_identity.gate_provenance_token`) the producing
+#: grid ran under, or ``None`` for an ungated default-selection run / a store
+#: written before the column existed. CONDITIONALLY emitted — the column is
+#: present ONLY in gated stores (see :meth:`ResultsStore._render_bytes`), so
+#: every ungated store's bytes stay byte-identical to the pre-column format
+#: (the frozen ``_GOLDEN_CONTENT_HASH`` lever). This is gate-scoped-DEDUP
+#: provenance for the ``/results`` read side — NOT part of the BLAKE3 run
+#: identity, never rankable, and NOT the statutory 5-door gate re-check.
+#: Appended LAST in the on-disk column order — AFTER the LANE-W1 selection
+#: pair (the train-b fold order; the optional-column back-compat template).
+GATE_PROVENANCE_FIELD: Final[str] = "gate_provenance"
+
+#: Nullable fields that ride the DIRECTIONAL ``None`` → value backfill lane
+#: of :meth:`ResultsStore.append` (the DEC-VIX-STAMP-WIRE-001 law, extended
+#: to the growth trio by DEC-METRICS-KELLY-GROWTH-001, to the
+#: exit-quality column by the Stage-B extension, and to the gate-provenance
+#: carrier by DEC-SWEEP-SERVING-GATE-PROVENANCE-001): a redo into a
+#: pre-extension store (``load_or_create_store`` PRE-LOADS the old file)
+#: appends rows that now CARRY values where the stored row honestly holds
+#: ``None`` — an upgrade, never a conflict. Value-vs-value disagreement
+#: still raises (typed per family — see :func:`_merge_nullable_backfill`;
+#: the gate-provenance token rides its OWN directional merge,
+#: :func:`_merge_gate_provenance_backfill`, whose two-different-known-tokens
+#: case raises the plain :class:`ResultsStoreError`).
+#: The LANE-W1 selection-provenance pair deliberately does NOT join this
+#: lane — selection is recomputed per persist pool, never backfilled.
+_BACKFILLABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS + (GATE_PROVENANCE_FIELD,)
+)
+
+#: Non-nullable numeric columns a leaderboard may rank by (metrics + money +
+#: counts). The nullable ``deflated_sharpe``, the REFERENCE-ONLY VIX trio, the
+#: LANE-W1 selection-provenance pair and the gate-provenance carrier are
+#: deliberately NOT rankable — VIX
+#: must never drive strategy ranking (CLAUDE.md §2 Rule 3), provenance is
+#: annotation not a metric, and a nullable column has no total order UNLESS an
+#: explicit null-placement law is defined for it: the growth trio ranks under
+#: the NULLS-LAST law of :data:`_NULLABLE_RANKABLE_FIELDS` below
+#: (DEC-METRICS-KELLY-GROWTH-001 — a conscious, documented extension;
+#: ``deflated_sharpe`` + VIX + selection + gate provenance keep their
+#: non-rankable status).
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
     _METRIC_FIELDS + _MONEY_PAISA_FIELDS + _COUNT_FIELDS
+)
+
+#: NULLABLE columns :meth:`ResultsStore.top_k` may rank by, under the ONE
+#: explicit null-placement law (DEC-METRICS-KELLY-GROWTH-001): a ``None``
+#: value ranks AFTER every real value in BOTH directions (nulls-LAST — an
+#: unmeasurable metric never outranks a measured one), with the same stable
+#: ``run_id``-ASC tie-break as :data:`_RANKABLE_FIELDS`. Kept a SEPARATE set
+#: so every pre-existing rankable column's behaviour stays byte-identical.
+_NULLABLE_RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS
 )
 
 
@@ -440,6 +591,39 @@ class ResultRow:
         serve-time denominator that makes a zero-trade judged year (absent
         bucket, hollow cell) distinguishable from an out-of-window year (not in
         this list). Present iff the three stats columns are.
+    loss_rate, kelly_fraction, log_growth_at_half_kelly
+        The nullable loss/growth metric trio (:data:`GROWTH_FIELDS` —
+        DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001),
+        written from the combo's :class:`~brutex.metrics.compute.ResultMetrics`
+        by the ONE projector (``loss_rate`` is total there; the Kelly pair
+        rides the projector's ``_metric_or_zero`` ``None`` → ``0.0`` coercion
+        — the mirrored ``profit_factor`` precedent). Full precision, NEVER
+        rounded; each present value must be finite. ``None`` (the default)
+        appears only when a pre-extension store loads presence-tolerantly
+        (the honest unknown — Ruling 5). Round-trips as a Parquet null.
+        Rankable under the NULLS-LAST law
+        (:data:`_NULLABLE_RANKABLE_FIELDS`); NEVER in the run identity.
+    sl_hit_rate
+        The nullable stop-loss-exit share (:data:`EXIT_QUALITY_FIELDS` —
+        DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), written from the
+        combo's :class:`~brutex.metrics.compute.ResultMetrics` by the ONE
+        projector as a PLAIN pass-through (NO ``_metric_or_zero`` coercion
+        — ``None`` means the metrics lacked exit-reason counters, the
+        honest unknown; the sweep spine always threads them so a
+        sweep-written row is concrete). Full precision; must be finite
+        when present. Round-trips as a Parquet null. Rankable under the
+        NULLS-LAST law; NEVER in the run identity.
+    trailing_sharpe_ratio, trailing_profit_factor, trailing_net_pnl_paisa, decay_weighted_net_paisa
+        The nullable recency-metric family (:data:`RECENCY_FIELDS` —
+        DEC-METRICS-TRAILING-WINDOW-001 Stage C), written from the combo's
+        :class:`~brutex.metrics.compute.ResultMetrics` by the ONE projector
+        as PLAIN pass-throughs (NO coercion — ``None`` means the GLOBAL
+        ``trailing_anchor`` was absent, or — for the trailing trio — the
+        24-month window honestly held zero trades). ``trailing_net_pnl_paisa``
+        rides the shared nullable-Float64 lane (exact for every
+        |paisa| < 2**53). Full precision; each present value must be
+        finite. Round-trips as a Parquet null. Rankable under the
+        NULLS-LAST law; NEVER in the run identity.
 
     Raises
     ------
@@ -483,6 +667,32 @@ class ResultRow:
     stats_by_quarter_json: str | None = None
     stats_by_month_json: str | None = None
     temporal_judged_years_json: str | None = None
+    loss_rate: float | None = None
+    kelly_fraction: float | None = None
+    log_growth_at_half_kelly: float | None = None
+    sl_hit_rate: float | None = None
+    trailing_sharpe_ratio: float | None = None
+    trailing_profit_factor: float | None = None
+    trailing_net_pnl_paisa: float | None = None
+    decay_weighted_net_paisa: float | None = None
+    #: LANE-W1 selection provenance (:data:`SELECTION_FIELDS`): ε-Pareto
+    #: frontier membership + the canonical-order basis tokens. ``None`` = the
+    #: honest unknown (a pre-W1 store / an un-tagged producer). Never
+    #: rankable, never in the run identity. Appended LAST — at the train-b
+    #: fold the W2 metrics tail above keeps its landed order and this pair
+    #: goes AFTER it (the optional-column back-compat template).
+    pareto_member: bool | None = None
+    selection_basis: str | None = None
+    #: Gate-scoped-dedup provenance (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
+    #: the canonical gate+selection token of the producing grid
+    #: (:func:`brutex.engine.sweep_identity.gate_provenance_token`), or
+    #: ``None`` = ungated / legacy (a store written before the column existed
+    #: loads ``None`` presence-tolerantly — the optional-column law). An
+    #: OPAQUE carrier string — deliberately unvalidated beyond ``str | None``;
+    #: never rankable, never in the BLAKE3 run identity, and NOT the statutory
+    #: 5-door gate re-check (that verdict is a P2 concern, disjoint from this
+    #: column).
+    gate_provenance: str | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -539,7 +749,13 @@ class ResultRow:
             # sign of zero is normalised (Golden Rule #4 byte-determinism).
             object.__setattr__(self, name, value + 0.0)
 
-        for name in (*_NULLABLE_METRIC_FIELDS, *VIX_FIELDS):
+        for name in (
+            *_NULLABLE_METRIC_FIELDS,
+            *VIX_FIELDS,
+            *GROWTH_FIELDS,
+            *EXIT_QUALITY_FIELDS,
+            *RECENCY_FIELDS,
+        ):
             value = getattr(self, name)
             if value is None:
                 continue
@@ -575,6 +791,59 @@ class ResultRow:
             object.__setattr__(self, name, round_money(price))
 
         self._validate_temporal_columns()
+
+        # LANE-W1 selection-basis vocabulary law: a present tag must be
+        # non-empty, canonical-order tokens from the ONE vocabulary
+        # (brutex.ranking.multi_select.join_basis_tokens — imported, never a
+        # mirrored literal). A poisoned/misordered tag is refused at
+        # construction, never persisted.
+        #
+        # The import is deliberately FUNCTION-level (a sys.modules dict hit
+        # after the first call — negligible beside this method's Decimal
+        # validation work): importing brutex.ranking.multi_select executes
+        # brutex/ranking/__init__.py, whose brutex.metrics re-export imports
+        # numpy — and `import brutex.engine` MUST stay numpy-free at import
+        # time. ci.yml's dotted per-module coverage stanzas
+        # (--cov=brutex.engine.<mod>) import the parent package at coverage
+        # start and re-import it under measurement; numpy 2.x's
+        # single-phase-init extension refuses that second load
+        # ("cannot load module more than once per process"), so a
+        # module-level edge here broke EVERY dotted engine stanza in CI
+        # (run 29651181531 — DEC-RANK-PARETO-PERSIST-001 CI seam fix).
+        from brutex.ranking.multi_select import BASIS_FRONTIER, join_basis_tokens
+
+        if self.selection_basis is not None:
+            if not self.selection_basis:
+                raise ResultsStoreError(
+                    "ResultRow.selection_basis must be a non-empty token string or None"
+                )
+            tokens = tuple(self.selection_basis.split(","))
+            try:
+                canonical = join_basis_tokens(tokens)
+            except ValueError as exc:
+                raise ResultsStoreError(f"ResultRow.selection_basis invalid: {exc}") from exc
+            if canonical != self.selection_basis:
+                raise ResultsStoreError(
+                    f"ResultRow.selection_basis {self.selection_basis!r} is not in the "
+                    f"canonical BASIS_ORDER join (expected {canonical!r})"
+                )
+
+        # LANE-W1 tag COHERENCE cross-check (review round 1): the persist
+        # composer stamps both provenance fields from the ONE frontier set,
+        # so `pareto_member is True` ⇔ the "frontier" basis token — a
+        # hand-built row breaking that biconditional is refused exactly like
+        # an empty/unknown/misordered tag (never persisted). Legacy
+        # None/None rows are vacuously coherent (not-True, no token).
+        frontier_tagged = (
+            self.selection_basis is not None and BASIS_FRONTIER in self.selection_basis.split(",")
+        )
+        if (self.pareto_member is True) != frontier_tagged:
+            raise ResultsStoreError(
+                f"ResultRow: pareto_member ({self.pareto_member!r}) and selection_basis "
+                f"({self.selection_basis!r}) are incoherent — pareto_member is True iff "
+                f"the {BASIS_FRONTIER!r} token is in selection_basis (the ONE persist "
+                f"composer stamps both from the same frontier set)"
+            )
 
     def _validate_temporal_columns(self) -> None:
         """Validate + canonicalise the four optional temporal-stats columns.
@@ -649,11 +918,46 @@ class ResultsStore:
     ----------
     path
         Destination Parquet file. Created (with parents) on :meth:`flush`.
+    gate_provenance
+        Optional store-level gate+selection token
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) the producing grid runs under
+        — the ``gate_provenance`` COLUMN is emitted whenever it is set, EVEN
+        AT ZERO ROWS, so a gated re-run that persists no survivors still
+        writes a schema-discoverable gated store (the arm-2 carrier; the
+        read side derives its coordinate set from that schema presence).
+        ``None`` (the default — every ungated/legacy caller) changes nothing:
+        the column then rides only on row values, so ungated stores stay
+        byte-identical to the pre-column format.
     """
 
-    def __init__(self, *, path: Path) -> None:
+    def __init__(self, *, path: Path, gate_provenance: str | None = None) -> None:
         self._path = path
         self._rows: dict[str, ResultRow] = {}
+        self._gate_provenance = gate_provenance
+        #: Set by :meth:`load` — whether the LOADED file carried the
+        #: ``gate_provenance`` column (schema presence, valid even at 0 rows);
+        #: ``None`` = this store was never loaded from disk.
+        self._gate_column_loaded: bool | None = None
+
+    @property
+    def gate_provenance_present(self) -> bool:
+        """Whether this store is GATED — i.e. carries the ``gate_provenance`` column.
+
+        The ONE schema-presence law (DEC-SWEEP-SERVING-GATE-PROVENANCE-001),
+        shared by the writer (:meth:`_render_bytes` emits the column iff this
+        is ``True``) and the dashboard's store-level gate-coordinate
+        derivation. ``True`` when the store was constructed with a
+        store-level token, OR was LOADED from a file whose schema carries the
+        column (preserved across a load → flush round trip, even at 0 rows),
+        OR any held row carries a non-``None`` token. ``False`` is the
+        ungated/legacy store — its flush stays byte-identical to the
+        pre-column format.
+        """
+        return (
+            self._gate_provenance is not None
+            or bool(self._gate_column_loaded)
+            or any(row.gate_provenance is not None for row in self._rows.values())
+        )
 
     @property
     def path(self) -> Path:
@@ -672,21 +976,47 @@ class ResultsStore:
         """Insert *row* keyed by its ``run_id``, idempotently (O(1)).
 
         A re-append under an already-stored ``run_id`` follows the DIRECTIONAL
-        three-branch rule (DEC-VIX-STAMP-WIRE-001) on the nullable
-        REFERENCE-ONLY VIX trio (:data:`VIX_FIELDS`), per field:
+        three-branch rule (DEC-VIX-STAMP-WIRE-001, extended to the growth trio
+        by DEC-METRICS-KELLY-GROWTH-001) on the nullable backfillable fields
+        (:data:`_BACKFILLABLE_FIELDS` — the REFERENCE-ONLY VIX trio +
+        :data:`GROWTH_FIELDS` + :data:`EXIT_QUALITY_FIELDS` +
+        :data:`RECENCY_FIELDS`), per field:
 
         1. **Identical value** (including both-``None``) → OK, a silent no-op.
         2. **Backfill ``None`` → value** → OK, the stored row is UPGRADED to
            the union (a stamped redo may fill in what an unstamped run
-           honestly didn't know; the reverse direction ``value → None`` never
-           erases — an unstamped redo is *less* informed, not conflicting).
-        3. **Two different known values** → :class:`VixTrioConflictError` —
-           NOT a run-identity breach (VIX is deliberately outside the
-           identity): the India-VIX lake moved between the two runs, so the
-           typed raise names that cause + remedy and the grid drivers demote
-           it to a #904 tuple-skip instead of a grid abort.
+           honestly didn't know — for the growth trio: a redo of a
+           PRE-EXTENSION tuple carries values the old store honestly lacked;
+           the reverse direction ``value → None`` never erases — a
+           less-informed redo is *less* informed, not conflicting).
+        3. **Two different known values** → typed per family: on a VIX field,
+           :class:`VixTrioConflictError` — NOT a run-identity breach (VIX is
+           deliberately outside the identity): the India-VIX lake moved
+           between the two runs, so the typed raise names that cause + remedy
+           and the grid drivers demote it to a #904 tuple-skip instead of a
+           grid abort. On a growth field, the PLAIN
+           :class:`ResultsStoreError` — the growth trio is a pure function of
+           the OTHER stored columns + the run's code (inside the run identity
+           via ``code_commit_sha``), so two known values under one ``run_id``
+           ARE a genuine reproducibility breach, never a lake-moved story.
+           On an exit-quality field the SAME plain error — ``sl_hit_rate``
+           is a deterministic function of the run's own trade stream + code,
+           the same reproducibility class. On a recency field
+           (DEC-METRICS-TRAILING-WINDOW-001) the SAME plain error too — the
+           family is a deterministic function of the trade stream + the
+           GLOBAL trailing anchor (the data-end of the snapshot inside the
+           identity via ``data_snapshot_hash``) + code.
 
-        Every NON-VIX field keeps the strict rule: any difference raises the
+        The nullable ``gate_provenance`` carrier follows the SAME directional
+        law (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): identical → no-op,
+        ``None`` → token backfills (a pre-provenance store's rows load
+        ``None`` and a same-config redo may stamp them), token → ``None``
+        never erases, and two DIFFERENT known tokens raise the plain
+        :class:`ResultsStoreError` (two configs at one store address is a
+        genuine anomaly — the address folds the config since
+        DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001).
+
+        Every OTHER field keeps the strict rule: any difference raises the
         plain :class:`ResultsStoreError` run-identity conflict (a genuine
         reproducibility breach — the backfill never masks it).
 
@@ -698,22 +1028,24 @@ class ResultsStore:
         Returns
         -------
         bool
-            ``True`` if the store content changed with a VIX consequence —
-            the row was newly added OR an existing row was
-            VIX-backfill-upgraded; ``False`` if the stored row already carried
-            everything *row* knows (the idempotent no-op) OR the ONLY change
-            was a temporal ENRICHMENT (below) — per the D16 contract a
-            temporal enrichment never grows the row count and reports
-            ``False`` even though the stored bytes changed.
+            ``True`` if the store content changed with a backfill consequence —
+            the row was newly added OR an existing row was backfill-upgraded
+            on a :data:`_BACKFILLABLE_FIELDS` column (VIX and/or
+            growth / exit-quality / recency fields); ``False`` if the stored
+            row already carried everything *row* knows (the idempotent no-op)
+            OR the ONLY change was a temporal ENRICHMENT (below) — per the
+            D16 contract a temporal enrichment never grows the row count and
+            reports ``False`` even though the stored bytes changed.
 
         Raises
         ------
         ResultsStoreError
             If a *different* row is already stored under the same ``run_id`` —
             a run-identity collision means upstream non-determinism and is never
-            silently overwritten (Golden Rule #4). The VIX backfill branch and
-            the temporal enrichment carve-out are the TWO sanctioned,
-            directional exceptions described below.
+            silently overwritten (Golden Rule #4). The nullable-backfill
+            branch (:data:`_BACKFILLABLE_FIELDS`) and the temporal enrichment
+            carve-out are the TWO sanctioned, directional exceptions
+            described below.
         VixTrioConflictError
             If the difference includes two different known values on a VIX
             field — the VIX lake moved between runs (see the class docstring).
@@ -739,7 +1071,8 @@ class ResultsStore:
                 if getattr(existing, f.name) != getattr(row, f.name)
             )
             if any(
-                name not in VIX_FIELDS and name not in _TEMPORAL_JSON_FIELDS for name in differing
+                name not in _BACKFILLABLE_FIELDS and name not in _TEMPORAL_JSON_FIELDS
+                for name in differing
             ):
                 _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
                 if set(differing) <= set(_NULLABLE_METRIC_FIELDS):
@@ -763,18 +1096,23 @@ class ResultsStore:
                     f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
                     f"map to one result (Golden Rule #4) — refusing to overwrite."
                 )
-            # Only the two sanctioned overlay families (the VIX trio and/or the
-            # temporal columns) differ — apply each family's directional merge.
+            # Only the sanctioned overlay families (the backfillable nullable
+            # columns, the gate-provenance carrier and/or the temporal
+            # columns) differ — apply each family's directional merge.
+            # Provenance FIRST (the DEC-SWEEP-SERVING-GATE-PROVENANCE-001
+            # order): its two-different-known-tokens RAISE fires before any
+            # other union is attempted.
             merged = existing
+            if GATE_PROVENANCE_FIELD in differing:
+                merged = _merge_gate_provenance_backfill(merged, row)
             if any(name in _TEMPORAL_JSON_FIELDS for name in differing):
-                # Align the VIX trio so the enrichment helper's non-temporal
-                # equality precondition holds; the VIX merge runs separately below.
-                aligned = replace(
-                    row,
-                    vix_mean=merged.vix_mean,
-                    vix_min=merged.vix_min,
-                    vix_max=merged.vix_max,
-                )
+                # Align every backfillable nullable field so the enrichment
+                # helper's non-temporal equality precondition holds; the
+                # nullable backfill merge runs separately below.
+                aligned_values: dict[str, object] = {
+                    name: getattr(merged, name) for name in sorted(_BACKFILLABLE_FIELDS)
+                }
+                aligned = replace(row, **aligned_values)  # type: ignore[arg-type]
                 enriched = _merge_temporal_enrichment(merged, aligned)
                 if enriched is None:
                     _LOG.error(
@@ -796,31 +1134,65 @@ class ResultsStore:
                         ),
                     )
                 merged = enriched
-            vix_backfilled: tuple[str, ...] = ()
-            if any(name in VIX_FIELDS for name in differing):
-                vix_merged = _merge_vix_backfill(merged, row)
-                vix_backfilled = tuple(
-                    name
-                    for name in VIX_FIELDS
-                    if getattr(merged, name) is None and getattr(vix_merged, name) is not None
-                )
-                merged = vix_merged
+            if any(
+                name in _BACKFILLABLE_FIELDS and name != GATE_PROVENANCE_FIELD for name in differing
+            ):
+                # The per-family directional union (typed value-vs-value
+                # conflicts raise inside) — temporal enrichment above only
+                # touched temporal fields, so merged's backfillable fields
+                # still equal existing's here (the gate-provenance carrier was
+                # already union-merged above and is untouched by this helper).
+                merged = _merge_nullable_backfill(merged, row)
             if merged == existing:
                 # Directional no-op: the incoming row is strictly LESS informed
                 # (it only turns known values into None) — the stored row
                 # already carries the union, nothing changes.
                 return False
             self._rows[row.run_id] = merged
-            if vix_backfilled:
-                _LOG.info(
-                    "results_store.vix_backfill",
-                    run_id=row.run_id,
-                    backfilled_fields=vix_backfilled,
-                )
-                return True
-            # Temporal-only enrichment: content changed but the row count did
-            # not grow — the D16 contract reports False.
-            return False
+            vix_backfilled = tuple(
+                name
+                for name in VIX_FIELDS
+                if getattr(existing, name) is None and getattr(merged, name) is not None
+            )
+            growth_backfilled = tuple(
+                name
+                for name in GROWTH_FIELDS
+                if getattr(existing, name) is None and getattr(merged, name) is not None
+            )
+            exit_quality_backfilled = tuple(
+                name
+                for name in EXIT_QUALITY_FIELDS
+                if getattr(existing, name) is None and getattr(merged, name) is not None
+            )
+            recency_backfilled = tuple(
+                name
+                for name in RECENCY_FIELDS
+                if getattr(existing, name) is None and getattr(merged, name) is not None
+            )
+            gate_backfilled = tuple(
+                name
+                for name in (GATE_PROVENANCE_FIELD,)
+                if getattr(existing, name) is None and getattr(merged, name) is not None
+            )
+            for event, names in (
+                ("results_store.vix_backfill", vix_backfilled),
+                ("results_store.growth_backfill", growth_backfilled),
+                ("results_store.exit_quality_backfill", exit_quality_backfilled),
+                ("results_store.recency_backfill", recency_backfilled),
+                ("results_store.gate_provenance_backfill", gate_backfilled),
+            ):
+                if names:
+                    _LOG.info(event, run_id=row.run_id, backfilled_fields=names)
+            # True iff some backfillable field was upgraded; a temporal-only
+            # enrichment changed the bytes but not the row count — the D16
+            # contract reports False for it.
+            return bool(
+                vix_backfilled
+                or growth_backfilled
+                or exit_quality_backfilled
+                or recency_backfilled
+                or gate_backfilled
+            )
         self._rows[row.run_id] = row
         return True
 
@@ -849,15 +1221,25 @@ class ResultsStore:
         broken by ``run_id`` ascending, so the leaderboard is identical for any
         insertion order. Returns fewer than *k* rows if the store holds fewer.
 
+        A NULLABLE rankable column (:data:`_NULLABLE_RANKABLE_FIELDS` — the
+        growth trio, DEC-METRICS-KELLY-GROWTH-001) ranks under the explicit
+        NULLS-LAST total order: a ``None`` value (a pre-extension store's
+        honest unknown) ranks AFTER every real value in BOTH directions —
+        an unmeasurable metric never outranks a measured one — with the same
+        stable ``run_id``-ASC tie-break. Every pre-existing
+        :data:`_RANKABLE_FIELDS` column's behaviour is byte-identical.
+
         Parameters
         ----------
         k
             Number of leaders to return (``>= 1``).
         by
             Column to rank by — one of the metric, money or count columns
-            (see :data:`_RANKABLE_FIELDS`).
+            (see :data:`_RANKABLE_FIELDS`) or a nullable rankable column
+            (see :data:`_NULLABLE_RANKABLE_FIELDS`).
         descending
             ``True`` (default) ranks largest-first; ``False`` smallest-first.
+            ``None`` values rank LAST either way.
 
         Raises
         ------
@@ -866,11 +1248,16 @@ class ResultsStore:
         """
         if k < 1:
             raise ResultsStoreError(f"top_k: k must be >= 1, got {k}")
-        if by not in _RANKABLE_FIELDS:
+        getter: Callable[[ResultRow], float] | Callable[[ResultRow], tuple[int, float]]
+        if by in _NULLABLE_RANKABLE_FIELDS:
+            getter = _nullable_field_getter(by, descending=descending)
+        elif by in _RANKABLE_FIELDS:
+            getter = _field_getter(by)
+        else:
             raise ResultsStoreError(
-                f"top_k: unknown ranking field {by!r}; choose one of {sorted(_RANKABLE_FIELDS)}"
+                f"top_k: unknown ranking field {by!r}; choose one of "
+                f"{sorted(_RANKABLE_FIELDS | _NULLABLE_RANKABLE_FIELDS)}"
             )
-        getter = _field_getter(by)
         # Stable two-pass sort: run_id asc first (the tie-break), then by the
         # ranking column — Python's stable sort preserves run_id order in ties.
         ordered = sorted(self._rows.values(), key=lambda r: r.run_id)
@@ -946,6 +1333,14 @@ class ResultsStore:
             df = pl.read_parquet(path)
         except (pl.exceptions.PolarsError, OSError) as exc:
             raise ResultsStoreSchemaError(f"unreadable results store at {path}: {exc}") from exc
+        # Schema-presence of the CONDITIONAL gate_provenance column — recorded
+        # from the decoded frame (valid even at ZERO rows) so (a) the dashboard
+        # can derive a 0-row gated store's coordinate without a second footer
+        # read, and (b) a load → flush round trip preserves the column (the
+        # emission predicate `gate_provenance_present` folds this flag), never
+        # silently un-gating a 0-row gated store
+        # (DEC-SWEEP-SERVING-GATE-PROVENANCE-001).
+        store._gate_column_loaded = GATE_PROVENANCE_FIELD in df.columns
         try:
             for record in df.iter_rows(named=True):
                 store.append(_row_from_record(record))
@@ -1009,17 +1404,20 @@ class ResultsStore:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
         for name in VIX_FIELDS:
-            # The nullable REFERENCE-ONLY VIX trio — appended LAST (the
-            # optional-column back-compat template); None → Parquet null.
+            # The nullable REFERENCE-ONLY VIX trio (the optional-column
+            # back-compat template); None → Parquet null.
             columns[name] = [getattr(row, name) for row in ordered]
 
         # EMIT-ON-PRESENT temporal columns (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001):
         # written iff ANY row carries a non-None value — a PURE, deterministic
         # function of the row set (same rows ⇒ same presence verdict ⇒ same
         # schema ⇒ same bytes), so re-flushing an unchanged store stays
-        # byte-identical (Golden Rule #4) AND the all-None flush is
-        # BYTE-IDENTICAL to the pre-extension writer (pinned by the frozen
-        # sweep goldens + the fixture bytes-equality test).
+        # byte-identical (Golden Rule #4) AND the all-None flush keeps its
+        # pre-extension column ABSENCE (pinned by the frozen goldens + the
+        # fixture bytes-equality test). The quartet keeps its LANDED position
+        # (strictly after the VIX trio — the landed-first-wins
+        # re-integration ruling); the growth / exit-quality / recency
+        # families append strictly AFTER it below.
         temporal_present = any(
             getattr(row, name) is not None for row in ordered for name in _TEMPORAL_JSON_FIELDS
         )
@@ -1028,27 +1426,63 @@ class ResultsStore:
                 # None keeps None (→ Parquet null) for rows without capture.
                 columns[name] = [getattr(row, name) for row in ordered]
 
+        for name in (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS, *SELECTION_FIELDS):
+            # The nullable growth trio + the nullable exit-quality column +
+            # the nullable recency family + the LANE-W1 selection-provenance
+            # pair — appended LAST, in that order, strictly AFTER the temporal
+            # quartet's landed position (the optional-column back-compat
+            # template, each generation strictly after the previous one —
+            # at the train-b fold the selection pair goes strictly AFTER the
+            # W2 recency family); None → Parquet null.
+            columns[name] = [getattr(row, name) for row in ordered]
+
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
         # fixed insertion order above (identity → mask limbs → money → counts →
         # metrics → deflated → prices → the VIX trio → [temporal,
-        # emit-on-present, LAST] — each optional family appended at its own
-        # introduction point for legacy-file back-compat) for a reproducible
-        # byte stream.
-        df = pl.DataFrame(
-            columns,
-            schema={
-                **dict.fromkeys(_STRING_FIELDS, pl.Utf8),
-                **dict.fromkeys(
-                    (*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64
+        # emit-on-present, at its LANDED position] → the growth trio → the
+        # exit-quality column → the recency family → the LANE-W1 selection
+        # pair → the CONDITIONAL gate_provenance column LAST — each optional
+        # family appended at its own introduction point, landed-first-wins,
+        # for legacy-file back-compat) for a reproducible byte stream.
+        # The SCHEMA dict governs the frame's column ORDER (probed): it must
+        # spell the ruled on-disk order exactly — … prices → VIX → [temporal,
+        # emit-on-present, at its LANDED position] → growth → exit-quality →
+        # recency → selection → the CONDITIONAL gate_provenance LAST (the
+        # landed-first-wins re-integration ruling).
+        schema: dict[str, Any] = {
+            **dict.fromkeys(_STRING_FIELDS, pl.Utf8),
+            **dict.fromkeys((*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64),
+            **dict.fromkeys(
+                (
+                    *_METRIC_FIELDS,
+                    *_NULLABLE_METRIC_FIELDS,
+                    *_PRICE_FIELDS,
+                    *VIX_FIELDS,
                 ),
-                **dict.fromkeys(
-                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *VIX_FIELDS),
-                    pl.Float64,
-                ),
-                **(dict.fromkeys(_TEMPORAL_JSON_FIELDS, pl.Utf8) if temporal_present else {}),
-            },
-        )
+                pl.Float64,
+            ),
+            **(dict.fromkeys(_TEMPORAL_JSON_FIELDS, pl.Utf8) if temporal_present else {}),
+            **dict.fromkeys(
+                (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS),
+                pl.Float64,
+            ),
+            "pareto_member": pl.Boolean,
+            "selection_basis": pl.Utf8,
+        }
+        if self.gate_provenance_present:
+            # CONDITIONAL emission (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): the
+            # gate_provenance column is written ONLY for a GATED store (a
+            # store-level token, a loaded gated schema, or any token-carrying
+            # row — the ONE `gate_provenance_present` law), appended LAST. An
+            # ungated store emits NO column, so its bytes — and every frozen
+            # store-bytes golden — stay byte-identical to the pre-column
+            # format. At zero rows the column still lands in the schema
+            # footer, which is exactly how the read side discovers a gated
+            # re-run that persisted no survivors (the arm-2 carrier).
+            columns[GATE_PROVENANCE_FIELD] = [row.gate_provenance for row in ordered]
+            schema[GATE_PROVENANCE_FIELD] = pl.Utf8
+        df = pl.DataFrame(columns, schema=schema)
         bio = io.BytesIO()
         df.write_parquet(
             bio,
@@ -1075,31 +1509,40 @@ def _validate_run_id(run_id: str) -> None:
 
     Canonical = exactly :data:`COMBO_HASH_HEX_LEN` lowercase hex chars, matching
     ``brutex.strategies.combo.combo_hash(...)``'s ``.hex()`` output so the dedup
-    key is unambiguous (no upper/lower aliasing).
+    key is unambiguous (no upper/lower aliasing). The LAW runs in the
+    ``brutex_identity`` kernel (DEC-RUST-RUNID-STORES-001); the repr-bearing
+    arms are re-rendered here with CPython ``repr`` so the message bytes match
+    the retired body exactly (the kernel renders Rust ``{:?}`` quoting).
+    Disclosed narrowing: a same-length string that only ``bytes.fromhex``'s
+    whitespace tolerance accepted (e.g. embedded spaces) is now rejected —
+    reject-only on garbage, no real BLAKE3 hex is affected.
     """
-    if len(run_id) != COMBO_HASH_HEX_LEN:
-        raise ResultsStoreError(
-            f"run_id must be {COMBO_HASH_HEX_LEN}-char BLAKE3 hex, got {len(run_id)} chars"
-        )
-    if run_id != run_id.lower():
+    message = brutex_identity.validate_run_id_error(run_id, COMBO_HASH_HEX_LEN)
+    if message is None:
+        return
+    if message.startswith("run_id must be lowercase hex"):
         raise ResultsStoreError(f"run_id must be lowercase hex, got {run_id!r}")
-    try:
-        bytes.fromhex(run_id)
-    except ValueError as exc:
-        raise ResultsStoreError(f"run_id {run_id!r} is not valid hex") from exc
+    if message.endswith("is not valid hex"):
+        raise ResultsStoreError(f"run_id {run_id!r} is not valid hex")
+    raise ResultsStoreError(message)
 
 
-def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
-    """Union-merge two same-``run_id`` rows differing ONLY in the nullable VIX trio.
+def _merge_nullable_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
+    """Union-merge two same-``run_id`` rows differing ONLY in backfillable fields.
 
     The resolution is a per-field UNION under the directional law of
-    :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001): for each of
-    :data:`VIX_FIELDS` the known (non-``None``) value wins — ``None`` means
-    *honestly unknown*, never a conflicting fact — so a stamped redo backfills
-    an unstamped row and an unstamped redo never erases a stamp. The caller
-    (:meth:`ResultsStore.append`) has ALREADY established that every non-VIX
-    field is equal — a non-VIX difference is the plain run-identity conflict
-    and never reaches this merge.
+    :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001, extended to the
+    growth trio by DEC-METRICS-KELLY-GROWTH-001): for each NUMERIC member of
+    :data:`_BACKFILLABLE_FIELDS` (the gate-provenance carrier rides its OWN
+    :func:`_merge_gate_provenance_backfill` and is untouched — this helper
+    preserves the caller's already-merged value) the known (non-``None``) value wins —
+    ``None`` means *honestly unknown*, never a conflicting fact — so a
+    more-informed redo backfills a less-informed row (a stamped redo fills
+    the VIX trio; a post-extension redo fills the growth trio of a
+    pre-extension store) and a less-informed redo never erases. The caller
+    (:meth:`ResultsStore.append`) has ALREADY established that every
+    non-backfillable field is equal — any other difference is the plain
+    run-identity conflict and never reaches this merge.
 
     Raises
     ------
@@ -1111,7 +1554,87 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
         a merged trio violating ``min <= mean <= max`` — still raises the
         plain order-law :class:`ResultsStoreError` from the merged row's own
         construction.)
+    ResultsStoreError
+        When one GROWTH field carries two DIFFERENT known values: the growth
+        trio is a pure function of the other stored columns + the run's code
+        (inside the BLAKE3 run identity via ``code_commit_sha``), so — unlike
+        VIX — two known values under one ``run_id`` with every other column
+        equal ARE a genuine reproducibility breach (a formula drift without a
+        code-identity re-key), refused loudly (Golden Rule #4).
     """
+    growth_conflicting = tuple(
+        name
+        for name in GROWTH_FIELDS
+        if getattr(existing, name) is not None
+        and getattr(incoming, name) is not None
+        and getattr(existing, name) != getattr(incoming, name)
+    )
+    if growth_conflicting:
+        _LOG.error(
+            "results_store.growth_conflict",
+            run_id=existing.run_id,
+            conflicting_fields=growth_conflicting,
+            stored={name: getattr(existing, name) for name in GROWTH_FIELDS},
+            incoming={name: getattr(incoming, name) for name in GROWTH_FIELDS},
+        )
+        raise ResultsStoreError(
+            f"growth-metric conflict for {existing.run_id}: the stored row and the "
+            f"redo carry different known values for {', '.join(growth_conflicting)} "
+            f"while every non-backfillable column is identical. The growth trio is a "
+            f"pure function of the other stored columns + the run's code (which is "
+            f"inside the BLAKE3 run identity via code_commit_sha), so this is a "
+            f"genuine reproducibility breach — a metric-formula drift without a "
+            f"code-identity re-key. Refusing to overwrite (Golden Rule #4)."
+        )
+    exit_quality_conflicting = tuple(
+        name
+        for name in EXIT_QUALITY_FIELDS
+        if getattr(existing, name) is not None
+        and getattr(incoming, name) is not None
+        and getattr(existing, name) != getattr(incoming, name)
+    )
+    if exit_quality_conflicting:
+        _LOG.error(
+            "results_store.exit_quality_conflict",
+            run_id=existing.run_id,
+            conflicting_fields=exit_quality_conflicting,
+            stored={name: getattr(existing, name) for name in EXIT_QUALITY_FIELDS},
+            incoming={name: getattr(incoming, name) for name in EXIT_QUALITY_FIELDS},
+        )
+        raise ResultsStoreError(
+            f"exit-quality conflict for {existing.run_id}: the stored row and the "
+            f"redo carry different known values for "
+            f"{', '.join(exit_quality_conflicting)} while every non-backfillable "
+            f"column is identical. sl_hit_rate is a deterministic function of the "
+            f"run's own trade stream + code (inside the BLAKE3 run identity via "
+            f"code_commit_sha), so two known values under one run_id ARE a genuine "
+            f"reproducibility breach. Refusing to overwrite (Golden Rule #4)."
+        )
+    recency_conflicting = tuple(
+        name
+        for name in RECENCY_FIELDS
+        if getattr(existing, name) is not None
+        and getattr(incoming, name) is not None
+        and getattr(existing, name) != getattr(incoming, name)
+    )
+    if recency_conflicting:
+        _LOG.error(
+            "results_store.recency_conflict",
+            run_id=existing.run_id,
+            conflicting_fields=recency_conflicting,
+            stored={name: getattr(existing, name) for name in RECENCY_FIELDS},
+            incoming={name: getattr(incoming, name) for name in RECENCY_FIELDS},
+        )
+        raise ResultsStoreError(
+            f"recency-metric conflict for {existing.run_id}: the stored row and the "
+            f"redo carry different known values for {', '.join(recency_conflicting)} "
+            f"while every non-backfillable column is identical. The recency family is "
+            f"a deterministic function of the run's own trade stream + the GLOBAL "
+            f"trailing anchor (the data-end of the snapshot inside the BLAKE3 run "
+            f"identity via data_snapshot_hash) + the run's code (code_commit_sha), so "
+            f"two known values under one run_id ARE a genuine reproducibility breach. "
+            f"Refusing to overwrite (Golden Rule #4)."
+        )
     conflicting = tuple(
         name
         for name in VIX_FIELDS
@@ -1146,7 +1669,10 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
             if getattr(existing, name) is not None
             else getattr(incoming, name)
         )
-        for name in VIX_FIELDS
+        # The NUMERIC backfillable families only — the gate-provenance
+        # carrier (also in _BACKFILLABLE_FIELDS) is union-merged by
+        # _merge_gate_provenance_backfill and preserved via replace().
+        for name in (*VIX_FIELDS, *GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS)
     }
     # Explicit keywords (not a **splat) so mypy checks each against its field type.
     return replace(
@@ -1154,7 +1680,42 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
         vix_mean=resolved["vix_mean"],
         vix_min=resolved["vix_min"],
         vix_max=resolved["vix_max"],
+        loss_rate=resolved["loss_rate"],
+        kelly_fraction=resolved["kelly_fraction"],
+        log_growth_at_half_kelly=resolved["log_growth_at_half_kelly"],
+        sl_hit_rate=resolved["sl_hit_rate"],
+        trailing_sharpe_ratio=resolved["trailing_sharpe_ratio"],
+        trailing_profit_factor=resolved["trailing_profit_factor"],
+        trailing_net_pnl_paisa=resolved["trailing_net_pnl_paisa"],
+        decay_weighted_net_paisa=resolved["decay_weighted_net_paisa"],
     )
+
+
+def _nullable_field_getter(
+    name: str, *, descending: bool
+) -> Callable[[ResultRow], tuple[int, float]]:
+    """Return a NULLS-LAST sort-key accessor for a nullable rankable column.
+
+    The ONE null-placement law (DEC-METRICS-KELLY-GROWTH-001): the key is a
+    ``(presence, value)`` pair whose presence flag is chosen so that — under
+    the caller's single ``reverse=descending`` sort — a ``None`` value lands
+    AFTER every real value in BOTH directions (an unmeasurable metric never
+    outranks a measured one). Descending (``reverse=True``): present rows key
+    ``(1, value)`` and ``None`` keys ``(0, 0.0)`` — reversed, every present
+    row precedes it. Ascending (``reverse=False``): present rows key
+    ``(0, value)`` and ``None`` keys ``(1, 0.0)`` — un-reversed, ``None``
+    sorts last. Ties (equal values, and all-``None``) fall through to the
+    caller's stable ``run_id``-ASC pre-sort.
+    """
+    present_flag = 1 if descending else 0
+
+    def _get(row: ResultRow) -> tuple[int, float]:
+        value: float | None = getattr(row, name)
+        if value is None:
+            return (1 - present_flag, 0.0)
+        return (present_flag, value)
+
+    return _get
 
 
 def _field_getter(name: str) -> Callable[[ResultRow], float]:
@@ -1169,6 +1730,89 @@ def _field_getter(name: str) -> Callable[[ResultRow], float]:
         return getattr(row, name)  # type: ignore[no-any-return]
 
     return _get
+
+
+#: The marshalled :class:`ResultRow` FFI shape — dataclass field order with the
+#: derived ``condition_names`` LAST; prices as their exact ``str(Decimal)``
+#: texts (post-snap the 2dp text is canonical, so string equality ≡ numeric
+#: equality). ONE tuple builder feeds every kernel decision.
+_ResultRowFfi = tuple[
+    str,
+    str,
+    str,
+    str,
+    str,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    str,
+    str,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    str,
+]
+
+
+def _price_ffi_text(value: Decimal) -> str:
+    """Render a price for the kernel's TEXT comparison, signed-zero normalised.
+
+    The kernel compares prices as strings, and the retired dataclass ``__eq__``
+    compared them NUMERICALLY — under which ``Decimal("-0.00")`` equals
+    ``Decimal("0.00")``. ``abs()`` on the zero class drops the sign while
+    preserving the scale text, so a signed-zero price stays the numeric-law
+    no-op instead of flipping into a false run-identity conflict (the
+    hostile-review MINOR of DEC-RUST-RUNID-STORES-001). Non-zero values pass
+    through verbatim — ``round_money`` fixes their scale at construction, so
+    text equality matches numeric equality for every producible price.
+    """
+    return str(abs(value) if value == 0 else value)
+
+
+def _row_to_ffi(row: ResultRow) -> _ResultRowFfi:
+    """Marshal one row for the kernel append decision."""
+    return (
+        row.run_id,
+        row.instrument,
+        row.tf,
+        row.direction,
+        row.mode,
+        row.mask_bits,
+        row.net_pnl_paisa,
+        row.gross_profit_paisa,
+        row.gross_loss_paisa,
+        row.max_drawdown_paisa,
+        row.expectancy_paisa,
+        row.total_trades,
+        row.winning_trades,
+        row.losing_trades,
+        row.sharpe_ratio,
+        row.sortino_ratio,
+        row.calmar_ratio,
+        row.profit_factor,
+        row.win_rate,
+        row.max_drawdown_pct,
+        _price_ffi_text(row.avg_entry_price),
+        _price_ffi_text(row.avg_exit_price),
+        row.deflated_sharpe,
+        row.vix_mean,
+        row.vix_min,
+        row.vix_max,
+        row.condition_names,
+    )
 
 
 def _encode_limb(mask: int, *, hi: bool) -> int:
@@ -1208,6 +1852,71 @@ def _optional_float(record: dict[str, object], name: str) -> float | None:
     """
     value = record.get(name)
     return None if value is None else float(value)  # type: ignore[arg-type]
+
+
+def _optional_bool(record: dict[str, object], name: str) -> bool | None:
+    """Read a nullable Boolean column with optional-column back-compat.
+
+    The :func:`_optional_float` law for the LANE-W1 ``pareto_member`` column:
+    an absent column (a pre-W1 store) reads ``None`` exactly like a stored
+    Parquet null — the honest unknown, never a fabricated ``False``.
+    """
+    value = record.get(name)
+    return None if value is None else bool(value)
+
+
+def _optional_str(record: dict[str, object], name: str) -> str | None:
+    """Read a nullable Utf8 column with optional-column back-compat.
+
+    The string twin of :func:`_optional_float` — the SAME ``record.get``
+    presence-tolerant read law (gap-register ruling 5): absent-or-null reads
+    ``None`` — the honest unknown, never a fabricated value (Golden Rule #1).
+    Consumers: the LANE-W1 ``selection_basis`` column and the
+    ``gate_provenance`` carrier (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, the
+    latter pinned by the frozen pre-extension golden fixture).
+    """
+    value = record.get(name)
+    return None if value is None else str(value)
+
+
+def _merge_gate_provenance_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
+    """Union-merge the nullable ``gate_provenance`` carrier of two same-``run_id`` rows.
+
+    The directional law of :meth:`ResultsStore.append`
+    (DEC-SWEEP-SERVING-GATE-PROVENANCE-001), mirroring
+    :func:`_merge_nullable_backfill`: the known (non-``None``) token wins —
+    ``None`` means *honestly unknown* (a pre-provenance store's rows, or an
+    un-threaded legacy caller), never a conflicting fact — so a
+    provenance-stamped redo backfills a legacy row and a legacy redo never
+    erases a stamp. The caller (:meth:`ResultsStore.append`) has ALREADY
+    established that every non-backfillable field is equal.
+
+    Raises
+    ------
+    ResultsStoreError
+        When the two rows carry DIFFERENT known tokens: two gate configs
+        can never legitimately share one store address (the address folds
+        the config, DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so this is a
+        genuine anomaly — refused loudly, never silently overwritten.
+    """
+    stored, arrived = existing.gate_provenance, incoming.gate_provenance
+    if stored == arrived or arrived is None:
+        return existing
+    if stored is not None:
+        _LOG.error(
+            "results_store.gate_provenance_conflict",
+            run_id=existing.run_id,
+            stored=stored,
+            incoming=arrived,
+        )
+        raise ResultsStoreError(
+            f"gate-provenance conflict for {existing.run_id}: the stored row and the "
+            f"redo carry DIFFERENT known gate_provenance tokens while every other "
+            f"column is compatible. Two gate configs can never share one store "
+            f"address (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) — refusing to "
+            f"overwrite (Golden Rule #4)."
+        )
+    return replace(existing, gate_provenance=arrived)
 
 
 def _row_from_record(record: dict[str, object]) -> ResultRow:
@@ -1257,6 +1966,17 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         vix_mean=_optional_float(record, "vix_mean"),
         vix_min=_optional_float(record, "vix_min"),
         vix_max=_optional_float(record, "vix_max"),
+        loss_rate=_optional_float(record, "loss_rate"),
+        kelly_fraction=_optional_float(record, "kelly_fraction"),
+        log_growth_at_half_kelly=_optional_float(record, "log_growth_at_half_kelly"),
+        sl_hit_rate=_optional_float(record, "sl_hit_rate"),
+        trailing_sharpe_ratio=_optional_float(record, "trailing_sharpe_ratio"),
+        trailing_profit_factor=_optional_float(record, "trailing_profit_factor"),
+        trailing_net_pnl_paisa=_optional_float(record, "trailing_net_pnl_paisa"),
+        decay_weighted_net_paisa=_optional_float(record, "decay_weighted_net_paisa"),
+        pareto_member=_optional_bool(record, "pareto_member"),
+        selection_basis=_optional_str(record, "selection_basis"),
+        gate_provenance=_optional_str(record, GATE_PROVENANCE_FIELD),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -1330,7 +2050,12 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 
 __all__ = [
     "CONDITION_NAME_SEP",
+    "EXIT_QUALITY_FIELDS",
+    "GATE_PROVENANCE_FIELD",
+    "GROWTH_FIELDS",
     "MASK_BITS_MAX",
+    "RECENCY_FIELDS",
+    "SELECTION_FIELDS",
     "VIX_FIELDS",
     "FlushResult",
     "ResultRow",

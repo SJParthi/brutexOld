@@ -22,9 +22,20 @@ sites pass their grid unchanged and the frozen ``grid_identity`` /
 
 from __future__ import annotations
 
+import json
 from typing import Any, Protocol
 
-from brutex.ranking import OverfitGateConfig
+# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-OFF Rust routing facade. The
+# wired fragment gates on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
+# default path is byte-identical (including attribute-access order); the
+# verbatim Python law below is the live oracle. This law feeds RUN IDENTITY
+# (`grid_identity` / `tuple_cache_key` / `_tuple_digest`) — the facade's
+# burn-in + exact-type gates are the anti-drift teeth. A SET
+# `max_sl_hit_rate` (DEC-METRICS-KELLY-GROWTH-001 — the identity axis
+# post-dates the crate's fragment law) is refused to the oracle INSIDE the
+# facade (`gate_fragment_beyond_crate`; the train-b tier-2 seam remedy).
+from brutex.engine.sweep_ops_rust import routed_gate_fragment, sweep_ops_rust_enabled
+from brutex.ranking import CvarGateConfig, OverfitGateConfig
 
 
 class _GateConfigInput(Protocol):
@@ -48,6 +59,24 @@ class _GateConfigInput(Protocol):
     @property
     def overfit(self) -> OverfitGateConfig | None:
         """The overfit gate config, or ``None`` when the gate is off."""
+        raise NotImplementedError
+
+    @property
+    def max_sl_hit_rate(self) -> float | None:
+        """The opt-in SL-hit-rate gate ceiling, or ``None`` when the gate is off.
+
+        DEC-METRICS-KELLY-GROWTH-001: an ACTIVE (set) knob re-keys the
+        per-tuple store address via the identity fragment; enforcement is
+        ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B —
+        :func:`brutex.ranking.passes_gates` / :func:`brutex.ranking.gate_reasons`).
+        The default ``None`` contributes nothing, so ungated digests are
+        byte-identical.
+        """
+        raise NotImplementedError
+
+    @property
+    def cvar_gate(self) -> CvarGateConfig | None:
+        """The CVaR tail-risk gate config, or ``None`` when the gate is off."""
         raise NotImplementedError
 
     @property
@@ -91,6 +120,39 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
     ``tuple_cache_key`` goldens are unmoved — every golden grid is at gate
     defaults). All legs flattened to JSON-native scalars.
     """
+    if not sweep_ops_rust_enabled():
+        return _gate_config_fragment_python(grid)
+    if grid.cvar_gate is not None:
+        # DEC-RANK-CVAR-TAIL-GATE-001 × DEC-RUST-SWEEP-OPS-001: the crate
+        # fragment law predates the cvar leg, so a SET gate is OUTSIDE its
+        # domain — post-burn-in the crate would serve a fragment silently
+        # DROPPING the ``cvar`` key (a run-identity-class divergence). The
+        # WHOLE computation routes to the Python oracle instead (the
+        # ``max_sl_hit_rate`` beyond-crate seam remedy, mirrored).
+        return _gate_config_fragment_python(grid)
+    overfit = grid.overfit
+    overfit_values = (
+        None
+        if overfit is None
+        else (
+            overfit.dsr_min,
+            overfit.weight,
+            overfit.default_skew,
+            overfit.default_excess_kurtosis,
+        )
+    )
+    return routed_gate_fragment(
+        overfit_values,
+        bool(grid.stage3_enable),
+        (grid.stage3_top_k, grid.stage3_max_fevals, grid.stage3_max_restarts),
+        max_sl_hit_rate=grid.max_sl_hit_rate,
+        python_law=lambda: _gate_config_fragment_python(grid),
+    )
+
+
+def _gate_config_fragment_python(grid: _GateConfigInput) -> dict[str, Any] | None:
+    """The verbatim Python fragment law — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip)."""
     fragment: dict[str, Any] = {}
     overfit = grid.overfit
     if overfit is not None:
@@ -106,6 +168,24 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
             float(overfit.default_skew),
             float(overfit.default_excess_kurtosis),
         ]
+    if grid.max_sl_hit_rate is not None:
+        # The opt-in SL-hit-rate gate (DEC-METRICS-KELLY-GROWTH-001) is an
+        # active-gate axis exactly like overfit: a SET ceiling changes what a
+        # tuple's persisted rows MEAN, so it re-keys; the default None
+        # contributes NOTHING and every existing digest is byte-identical
+        # (the frozen 7a0120c1123b44c6 default-digest pin
+        # (test_engine_sweep_orchestrator.py; 5b020e892247deac is the retired
+        # precise-era negative pin)). Enforcement is
+        # ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B); the
+        # fragment arm itself stays covered via a Protocol fake.
+        fragment["max_sl_hit_rate"] = grid.max_sl_hit_rate
+    cvar = grid.cvar_gate
+    if cvar is not None:
+        # DEC-RANK-CVAR-TAIL-GATE-001: an ACTIVE CVaR tail gate changes which
+        # masks survive to ranking/persistence, so it re-keys exactly like the
+        # overfit gate; ``None`` (the default — the gate OFF) contributes
+        # NOTHING, keeping the default digest byte-stable.
+        fragment["cvar"] = [cvar.alpha_bps, cvar.threshold_paisa]
     if grid.stage3_enable:
         # The Stage-3 knobs matter to the result ONLY when the pass runs; a
         # disabled pass leaves them inert, so they never re-key a light grid.
@@ -117,4 +197,36 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
     return fragment or None
 
 
-__all__ = ["_gate_config_fragment"]
+def gate_provenance_token(
+    *, gate_config: dict[str, Any] | None, selection: dict[str, Any] | None
+) -> str | None:
+    """Return the canonical gate+selection provenance STRING, or ``None`` at defaults.
+
+    The row/store CARRIER value of DEC-SWEEP-SERVING-GATE-PROVENANCE-001: the
+    canonical JSON of the non-``None`` ``{gate_config, selection}`` legs —
+    EXACTLY the two fragments :func:`_gate_config_fragment` (here) and
+    ``sweep_orchestrator._selection_identity_fragment`` already fold into the
+    per-tuple store-address digest (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) —
+    so the persisted ``ResultRow.gate_provenance`` token and the store address
+    can never disagree (single source of truth; the caller MUST pass those two
+    fragments' outputs, never hand-built dicts). Stored as the parseable
+    PRE-IMAGE, not a hash, so the read side can GROUP and LABEL coordinates.
+
+    ``None`` when BOTH fragments are ``None`` (an ungated default-selection
+    grid) — the golden-neutrality lever: an ungated row carries ``None``, the
+    store emits NO ``gate_provenance`` column, and every frozen store-bytes
+    golden stays byte-identical (Golden Rule #4). Serialised with the SAME
+    ``sort_keys`` / compact-separator / ``allow_nan=False`` discipline as the
+    digest descriptor, so the token itself is byte-deterministic.
+    """
+    legs: dict[str, Any] = {}
+    if gate_config is not None:
+        legs["gate_config"] = gate_config
+    if selection is not None:
+        legs["selection"] = selection
+    if not legs:
+        return None
+    return json.dumps(legs, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+__all__ = ["_gate_config_fragment", "gate_provenance_token"]

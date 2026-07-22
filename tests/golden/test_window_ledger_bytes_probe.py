@@ -1,55 +1,34 @@
-"""window_ledger_store byte-divergence PROBE pin (ADR-0020 G10 spike — branch B).
+"""window_ledger_store CANONICAL-ENCODER pin (the ADR-0020 G10 resolution).
 
-DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001 (MIGRATION.md #1917 — allocator-final).
-The G10 spike swept 14 polars-native (Rust encoder) writer arms across a
-7-case corpus built through the PRODUCTION ledger writer and found ZERO
-sha256 matches against the pyarrow-25 production bytes — confirming ADR-0020
-F3's "infeasible by construction" by measurement (the transcript + the priced
-DEC-LAKE-EXACT-PIN-001 escalation live at
-``docs/lake/g10_window_ledger_byte_parity/``). This test PINS the DOCUMENTED
-divergence class so CI carries the finding without flaking, and proves the
-ROW-LEVEL fixed point (the module's own contract,
-``brutex/data/window_ledger_store.py:16``) HOLDS across encoders:
+DEC-RUST-RUNID-STORES-001, resolving the G10 byte-parity escalation of
+DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001 (MIGRATION.md #1917) by its priced
+**option (iii)** — GOLDEN RE-BASELINE: the #1917 spike PROVED byte-identity
+with the pyarrow-25 production bytes unreachable by construction (the
+divergence is encoder identity — ``created_by``, the footer format-version
+marker, the ``ARROW:schema`` flatbuffer, page-header thrift — none an exposed
+knob; the transcript + the priced DEC-LAKE-EXACT-PIN-001 escalation live at
+``docs/lake/g10_window_ledger_byte_parity/``). The lane therefore DELETED the
+pyarrow writer, made the ``brutex_identity`` kernel's parquet-rs encoder the
+CANONICAL on-disk byte form (greenfield-sanctioned — no stored ledger
+predates it), and kept the #1917 cross-encoder ROW FIXED POINT as the
+correctness law. This test pins that resolution:
 
-* the production pyarrow write is byte-DETERMINISTIC (same ledger rendered
-  twice yields identical bytes — the measured divergence is encoder
-  identity, never write nondeterminism);
-* the best polars-native arm (``pl.from_arrow`` + ``compression="snappy"``,
-  ``use_pyarrow=False``) is NOT byte-identical, and the divergence is the
-  measured ENCODER-IDENTITY class: the ``created_by`` footer string differs,
-  both encoders embed an ``ARROW:schema`` key-value block whose serialized
-  flatbuffer BYTES differ, and the footer format-version marker
-  differs — NONE of these is an exposed polars knob
-  (``pl.DataFrame.write_parquet`` signature captured in the transcript);
-* the polars-written file read back through the PRODUCTION
-  ``_read_ledger_file_rows`` yields row tuples IDENTICAL to the pyarrow
-  file's — the cross-encoder ROW fixed point the escalation's options
-  (ii)/(iii) rely on (the reader is schema-name-based, never byte-based).
+* the CANONICAL write (through the REAL production ``save_window_ledger``)
+  is byte-DETERMINISTIC — same ledger, same bytes;
+* the canonical file reads back to IDENTICAL row tuples through the
+  production reader AND pyarrow AND DuckDB ``read_parquet`` — the
+  cross-encoder ROW fixed point (readers are schema-name-based, never
+  byte-based; the /db + /coverage DuckDB fast paths keep working);
+* a LEGACY pyarrow-written file (the retired writer's schema + its snappy
+  default) still reads through the production reader to the SAME row
+  tuples — the pre-conversion history is never orphaned;
+* the canonical bytes genuinely differ from the retired pyarrow encoder's in
+  the DOCUMENTED encoder-identity class (``created_by``) — carrying the
+  #1917 finding forward so a future "bytes became equal" flip re-opens the
+  decision loudly instead of rotting silently.
 
-If a future pyarrow/polars bump ever makes any of these assertions flip
-(e.g. the bytes become EQUAL), this test fails LOUDLY and deterministically —
-that materially re-opens the G10 decision: re-run the spike probe and update
-the escalation. That is the pin's purpose, not a flake.
-
-**RECONCILE (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918):**
-the G10 decision has since been RULED + SHIPPED as the CONVERSION — the
-default-OFF ``BRUTEX_LAKE_RUST_LEDGER_RENDER`` render seam under the
-ROW-EQUIVALENCE + reader-parity standard (the operator ruling of 2026-07-16
-as relayed via the coordinator; byte-identity stays measured-infeasible,
-golden re-baseline stays forbidden). The divergence class this file pins is
-therefore no longer an OPEN decision but the shipped conversion's DOCUMENTED
-envelope: the flag-ON writer's bytes ARE the polars-native class measured
-here, and the reader-parity + state-convergence gates
-(``tests/integration/test_window_ledger_rust_reader_parity.py`` /
-``..._state_convergence.py``) are the standard's teeth. This probe keeps
-pinning the PYARROW ORACLE arm (the flag-OFF production default) — the
-fixture below pins its own env hermetically so a runner exporting the flag
-can never flip the probed writer arm — and a future byte-EQUALITY flip
-still fails loudly (it would falsify the measured-infeasible record and
-re-open the priced `DEC-LAKE-EXACT-PIN-001` option).
-
-Whitebox: drives the private ``_rows_to_table`` / ``_read_ledger_file_rows``
-seams (the surfaces under probe — the DEC-P0-017 convention).
+Whitebox: drives the private ``_read_ledger_file_rows`` seam (the surface
+under probe — the DEC-P0-017 convention).
 """
 
 # pyright: reportPrivateUsage=none
@@ -57,40 +36,44 @@ seams (the surfaces under probe — the DEC-P0-017 convention).
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-import polars as pl
+import brutex_identity
+import duckdb
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from brutex.data import lake_rust_ledger_render
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
     _read_ledger_file_rows,
-    _rows_to_table,
     ledger_path,
+    render_ledger_parquet,
     save_window_ledger,
 )
+
+#: The canonical 17-column schema order — the kernel's ``LEDGER_COLUMNS`` as a
+#: tuple (the ONE schema authority; the store's former ``_COLUMNS`` re-wrap is
+#: gone — DEC-RUST-RUNID-STORES-001).
+_COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
 
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
-def _pyarrow_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin the probed writer to the PYARROW ORACLE arm (module docstring).
+def _retired_render_flag_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetically UNSET the retired ``$BRUTEX_LAKE_RUST_LEDGER_RENDER`` knob.
 
-    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001: the production writer is now
-    flag-gated — a runner exporting ``BRUTEX_LAKE_RUST_LEDGER_RENDER=1``
-    would make ``_production_parquet`` render POLARS bytes and invert every
-    divergence assertion below. The probe's subject is the ORACLE arm, so
-    the env is cleared + the facade latch reset hermetically here.
+    DEC-RUST-RUNID-STORES-001 (supersedes-in-part
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 #1918 on the render plane): the
+    writer is unconditionally the ``brutex_identity`` kernel render — there
+    is no flag arm to pin any more, and a runner still exporting the retired
+    variable would trip the store's LOUD ``require_ledger_render_env_unset``
+    refusal (its own suite: ``TestLedgerRenderEnvGuard``). This golden is
+    about the CANONICAL BYTES, so the stale-env refusal is kept out of frame.
     """
-    monkeypatch.delenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, raising=False)
-    lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
-    yield
-    lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
+    monkeypatch.delenv("BRUTEX_LAKE_RUST_LEDGER_RENDER", raising=False)
 
 
 def _key(security_id: str) -> WindowKey:
@@ -124,65 +107,117 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _polars_native_parquet(prod: Path, out: Path) -> Path:
-    """The spike's best arm: from_arrow + snappy through the polars Rust encoder."""
+def _retired_pyarrow_parquet(prod: Path, out: Path) -> Path:
+    """Re-render the canonical file's rows through the RETIRED pyarrow writer shape.
+
+    The exact fixed-schema ``pa.table`` + all-defaults ``pq.write_table`` the
+    pre-conversion ``save_window_ledger`` used — fabricated here (the
+    production module no longer carries it) both as the LEGACY-file fixture
+    and as the encoder-identity counterparty for the divergence pin.
+    """
     rows = _read_ledger_file_rows(prod)
-    frame = pl.from_arrow(_rows_to_table(rows))
-    assert isinstance(frame, pl.DataFrame)
-    frame.write_parquet(out, use_pyarrow=False, compression="snappy")
+    schema = pa.schema(
+        [(name, pa.string() if name in _STRING_COLUMNS else pa.int64()) for name in _COLUMNS]
+    )
+    table = pa.table(
+        {name: [row[i] for row in rows] for i, name in enumerate(_COLUMNS)},
+        schema=schema,
+    )
+    pq.write_table(table, out)
     return out
 
 
-def test_production_ledger_write_is_byte_deterministic(tmp_path: Path) -> None:
-    """Same ledger saved twice → identical bytes (divergence below is never flake)."""
+#: The retired writer's string columns (its fixed schema — every other column int64).
+_STRING_COLUMNS = frozenset(
+    {
+        "market",
+        "security_id",
+        "interval",
+        "window_start",
+        "window_end",
+        "status",
+        "last_error",
+        "first_seen_at",
+        "last_attempt_at",
+        "streak_provenance",
+    }
+)
+
+
+def test_canonical_ledger_write_is_byte_deterministic(tmp_path: Path) -> None:
+    """Same ledger saved twice → identical bytes (the canonical-encoder pin)."""
     sha_a = _sha(_production_parquet(tmp_path / "a"))
     sha_b = _sha(_production_parquet(tmp_path / "b"))
-    print(f"production sha256: {sha_a[:16]} / {sha_b[:16]}")
+    print(f"canonical sha256: {sha_a[:16]} / {sha_b[:16]}")
     assert sha_a == sha_b
-
-
-def test_polars_native_bytes_diverge_in_the_documented_class(tmp_path: Path) -> None:
-    """The measured G10 divergence class holds: not byte-identical, for pinned reasons."""
-    prod = _production_parquet(tmp_path)
-    pol = _polars_native_parquet(prod, tmp_path / "polars_native.parquet")
-    prod_sha, pol_sha = _sha(prod), _sha(pol)
-    print(f"pyarrow sha256: {prod_sha[:16]}  polars-native sha256: {pol_sha[:16]}")
-    # The finding: NOT byte-identical (equality here re-opens the G10 decision).
-    assert prod_sha != pol_sha
-    assert prod.read_bytes() != pol.read_bytes()
-    prod_md = pq.read_metadata(prod)  # type: ignore[no-untyped-call, unused-ignore]
-    pol_md = pq.read_metadata(pol)  # type: ignore[no-untyped-call, unused-ignore]
-    # Class 1: created_by is encoder identity — no polars knob exists for it.
-    assert prod_md.created_by != pol_md.created_by
-    assert prod_md.created_by.startswith("parquet-cpp-arrow")
-    # Class 2: BOTH encoders embed an ARROW:schema key-value block (pyarrow via
-    # its store_schema=True default; polars writes its own), but the serialized
-    # flatbuffer BYTES differ — and neither side exposes a byte-level knob.
-    prod_kv = prod_md.metadata
-    pol_kv = pol_md.metadata
-    assert prod_kv is not None and b"ARROW:schema" in prod_kv
-    assert pol_kv is not None and b"ARROW:schema" in pol_kv
-    assert prod_kv[b"ARROW:schema"] != pol_kv[b"ARROW:schema"]
-    # Class 3: the footer format-version marker differs (pyarrow '2.6' family
-    # vs polars '1.0' at the measured pyarrow 25.0.0 / polars 1.42.1).
-    assert prod_md.format_version != pol_md.format_version
-    # Both are still real parquet files (PAR1 magic head + tail).
-    for path in (prod, pol):
-        blob = path.read_bytes()
-        assert blob[:4] == b"PAR1" and blob[-4:] == b"PAR1"
+    # The pure render is deterministic too (the same bytes law one level down).
+    rows = _read_ledger_file_rows(ledger_path(tmp_path / "a"))
+    assert render_ledger_parquet(rows) == render_ledger_parquet(rows)
 
 
 def test_cross_encoder_row_fixed_point(tmp_path: Path) -> None:
-    """The module's REAL contract survives the encoder swap: rows are identical.
+    """The option-(iii) correctness law: one byte form, every reader agrees.
 
-    ``_read_ledger_file_rows`` (the ONE production reader, schema-name-based)
-    reads the polars-native file into row tuples IDENTICAL to the pyarrow
-    file's — the load-bearing fact for the escalation's options (ii)/(iii):
-    loaders are unaffected by the byte divergence.
+    The canonical file reads back to IDENTICAL row tuples through the
+    production reader, through pyarrow, and through DuckDB ``read_parquet``
+    (the /db + /coverage fast paths) — loaders are schema-name-based, so the
+    encoder re-baseline is invisible to every consumer.
     """
     prod = _production_parquet(tmp_path)
-    pol = _polars_native_parquet(prod, tmp_path / "polars_native.parquet")
     prod_rows = _read_ledger_file_rows(prod)
-    pol_rows = _read_ledger_file_rows(pol)
-    assert prod_rows == pol_rows
     assert len(prod_rows) == 3  # anti-vacuous: the corpus genuinely has rows
+
+    # pyarrow cross-read.
+    table = pq.read_table(prod)
+    pyarrow_rows = [
+        tuple(table.column(name)[i].as_py() for name in _COLUMNS) for i in range(table.num_rows)
+    ]
+    assert pyarrow_rows == prod_rows
+
+    # DuckDB cross-read (column order pinned by explicit projection).
+    con = duckdb.connect()
+    try:
+        duck_rows = con.execute(
+            f"SELECT {', '.join(_COLUMNS)} FROM read_parquet(?)",  # noqa: S608 — trusted module-constant column names; the path is a bound parameter
+            [str(prod)],
+        ).fetchall()
+    finally:
+        con.close()
+    assert [tuple(r) for r in duck_rows] == prod_rows
+
+
+def test_legacy_pyarrow_file_reads_to_identical_rows(tmp_path: Path) -> None:
+    """A retired-writer (pyarrow, snappy) file is NOT orphaned by the re-baseline.
+
+    The production reader yields row tuples IDENTICAL to the canonical file's —
+    the #1917 cross-encoder row fixed point, now serving as the legacy
+    back-compat law (pre-conversion ledgers keep loading bit-for-bit).
+    """
+    prod = _production_parquet(tmp_path)
+    legacy = _retired_pyarrow_parquet(prod, tmp_path / "legacy_pyarrow.parquet")
+    assert _read_ledger_file_rows(legacy) == _read_ledger_file_rows(prod)
+
+
+def test_canonical_bytes_diverge_from_retired_encoder_in_documented_class(
+    tmp_path: Path,
+) -> None:
+    """The #1917 finding carried forward: encoder identity differs, rows do not.
+
+    If a future parquet-rs/pyarrow bump ever makes the bytes EQUAL, this pin
+    fails loudly — that would materially re-open the G10 decision (re-run the
+    spike probe, update the escalation record). Never a flake: both writes are
+    deterministic.
+    """
+    prod = _production_parquet(tmp_path)
+    legacy = _retired_pyarrow_parquet(prod, tmp_path / "legacy_pyarrow.parquet")
+    assert _sha(prod) != _sha(legacy)
+    prod_md = pq.read_metadata(prod)
+    legacy_md = pq.read_metadata(legacy)
+    # created_by IS the encoder identity: parquet-rs vs parquet-cpp-arrow.
+    assert prod_md.created_by != legacy_md.created_by
+    assert legacy_md.created_by.startswith("parquet-cpp-arrow")
+    assert "parquet-rs" in prod_md.created_by
+    # Both are still real parquet files (PAR1 magic head + tail).
+    for path in (prod, legacy):
+        blob = path.read_bytes()
+        assert blob[:4] == b"PAR1" and blob[-4:] == b"PAR1"

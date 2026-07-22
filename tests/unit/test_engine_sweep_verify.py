@@ -23,8 +23,9 @@ from typing import ClassVar
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
 from brutex.engine.reference_series import TradeReferenceStamper
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import VIX_FIELDS, ResultsStore
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -35,6 +36,7 @@ from brutex.engine.sweep_orchestrator import (
 )
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
 from brutex.engine.sweep_verify import (
+    _APPENDED_NULLABLE_FIELDS,
     RecordedContext,
     SweepVerifyError,
     TreeVerifyReport,
@@ -53,6 +55,7 @@ from brutex.engine.sweep_verify import (
     recorded_overfit_from_audit,
     recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
+    recorded_temporal_from_audit,
     stale_roll_schedule_refusal,
     verify_identity,
     verify_structural,
@@ -73,6 +76,8 @@ from brutex.engine.tuple_complete import (
 )
 from brutex.orchestrator.audit import AuditWriter
 from brutex.ranking import OverfitGateConfig
+from brutex.ranking.multi_select import union_persist_bound
+from brutex.ranking.temporal import TemporalRobustnessConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import has_conflict
 
@@ -471,8 +476,18 @@ class TestWorstCaseGenerationRefusal:
     def test_worst_case_generation_reads_clean(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
-            self._append(audit, params={"fill_mode": "worst_case", "sl_paisa": 80})
-            self._append(audit, params={"fill_mode": "worst_case"})
+            self._append(
+                audit,
+                params={
+                    "fill_mode": "worst_case",
+                    "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
+                    "sl_paisa": 80,
+                },
+            )
+            self._append(
+                audit,
+                params={"fill_mode": "worst_case", "execution_grid": EXECUTION_GRID_1M_NEXT_BAR},
+            )
         context, _schedules, others = recorded_audit_facts(path)
         assert context is not None
         assert context.data_snapshot_hash == "snap0001"
@@ -486,7 +501,11 @@ class TestWorstCaseGenerationRefusal:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             self._append(audit, params={"sl_paisa": 80}, snapshot="snap0001")
-            self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0002")
+            self._append(
+                audit,
+                params={"fill_mode": "worst_case", "execution_grid": EXECUTION_GRID_1M_NEXT_BAR},
+                snapshot="snap0002",
+            )
         context, _schedules, others = recorded_audit_facts(path, snapshot="snap0002")
         assert context is not None
         assert context.data_snapshot_hash == "snap0002"
@@ -500,7 +519,10 @@ class TestWorstCaseGenerationRefusal:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             audit.append(action="OTHER", subject="s", payload={"params": {"fill_mode": "junk"}})
-            self._append(audit, params={"fill_mode": "worst_case"})
+            self._append(
+                audit,
+                params={"fill_mode": "worst_case", "execution_grid": EXECUTION_GRID_1M_NEXT_BAR},
+            )
         assert recorded_audit_facts(path)[0] is not None
 
     def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
@@ -526,6 +548,98 @@ class TestWorstCaseGenerationRefusal:
         report = verify_identity(root, grid)
         assert report.checked_stores == 1
         assert not report.corrupt, report.findings
+
+
+# ── Recorded execution grid (DEC-FILL-EXEC-GRID-1M-001) ──
+
+
+class TestExecGridGenerationRefusal:
+    """DEC-FILL-EXEC-GRID-1M-001: the fill_mode law's TWIN refusal arm in
+    `_require_worst_case_entries` — a scoped generation whose recorded params
+    pass the worst-case gate but lack ``execution_grid == "1m_next_bar"`` is a
+    DECISION-TF-era tree (fills resolved on the decision bar, pre-1m-grid);
+    verifying it would launder pre-grid prices, so fact-derivation refuses
+    LOUDLY naming the DEC. Generation-scoping is preserved exactly like the
+    fill_mode arm's.
+    """
+
+    _CTX: ClassVar[dict[str, str]] = {
+        "data_snapshot_hash": "snap0001",
+        "indicator_version": "ind-v1",
+        "code_commit_sha": "deadbeef",
+    }
+
+    _REFUSAL = r"decision-TF-era sweep tree refused \(DEC-FILL-EXEC-GRID-1M-001\)"
+
+    def _append(
+        self,
+        audit: AuditWriter,
+        *,
+        params: dict[str, object],
+        snapshot: str = "snap0001",
+    ) -> None:
+        audit.append(
+            action="SWEEP_START",
+            subject="s",
+            payload={
+                **self._CTX,
+                "data_snapshot_hash": snapshot,
+                "instrument": "NIFTY",
+                "params": params,
+            },
+        )
+
+    def test_missing_grid_key_refuses_as_decision_tf_era(self, tmp_path: Path) -> None:
+        # A worst-case-clean generation with NO execution_grid key is the
+        # exact PR-A-era shape — refused, never verified.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst_case", "sl_paisa": 80})
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_junk_grid_token_refuses_identically(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(
+                audit, params={"fill_mode": "worst_case", "execution_grid": "decision_bar"}
+            )
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_refusal_is_generation_scoped(self, tmp_path: Path) -> None:
+        # Generation A is decision-TF-era (worst-case but gridless),
+        # generation B carries the canonical token: the scoped B read
+        # succeeds, the scoped A read refuses, the unscoped read (latest=B)
+        # succeeds — the refusal never folds the whole file.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0001")
+            self._append(
+                audit,
+                params={"fill_mode": "worst_case", "execution_grid": EXECUTION_GRID_1M_NEXT_BAR},
+                snapshot="snap0002",
+            )
+        context, _schedules, others = recorded_audit_facts(path, snapshot="snap0002")
+        assert context is not None
+        assert context.data_snapshot_hash == "snap0002"
+        assert others == ("snap0001",)
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path, snapshot="snap0001")
+        assert recorded_audit_facts(path)[0] is not None  # unscoped = latest = B
+
+    def test_fill_mode_refusal_takes_precedence(self, tmp_path: Path) -> None:
+        # A generation failing BOTH laws refuses on the fill_mode arm first
+        # (the checks run in that order per entry — pinned so the wording
+        # stays deterministic for operators).
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"sl_paisa": 80})
+        with pytest.raises(
+            SweepVerifyError,
+            match=r"precise-era sweep tree refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            recorded_audit_facts(path)
 
 
 # ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──
@@ -681,6 +795,7 @@ class TestRecordedAuditFacts:
                     "instrument": "NSE-NIFTY-FUT",
                     "params": {
                         "fill_mode": "worst_case",
+                        "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
                         "roll_schedule": list(schedule if schedule is not None else self._SCHEDULE),
                     },
                 },
@@ -885,7 +1000,11 @@ class TestRecordedAuditFacts:
                     "data_snapshot_hash": "snap0001",
                     "indicator_version": "ind-v1",
                     "code_commit_sha": "deadbeef",
-                    "params": {"fill_mode": "worst_case", "roll_schedule": list(self._SCHEDULE)},
+                    "params": {
+                        "fill_mode": "worst_case",
+                        "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
+                        "roll_schedule": list(self._SCHEDULE),
+                    },
                 },
             )
         context, schedules, others = recorded_audit_facts(path)
@@ -1831,25 +1950,42 @@ class TestIdentity:
         assert "store_unreadable" in _codes(verify_identity(tree, _grid()))
 
     def test_topk_inflation_signature(self, tmp_path: Path) -> None:
-        # THE #650 regression at this tier: a top_k=1 store holding MORE than
-        # top_k rows under one digest is corrupt — detectable bars-free, even
-        # on a pre-#646 tree (delete the sidecar/sentinel to prove it).
+        # THE #650 regression at this tier: a top_k=1 store holding MORE rows
+        # than the LANE-W1 union persist bound (top_k + quota/frontier
+        # extras — a legitimate union store exceeds bare top_k by design,
+        # review round 1 gate re-run) under one digest is corrupt —
+        # detectable bars-free, even on a pre-#646 tree (delete the
+        # sidecar/sentinel to prove it).
         grid = _grid(top_k=1)
         root = tmp_path / "results"
         root.mkdir()
         _sweep(root, grid)
         store_path = _store_path(root, grid)
         store = ResultsStore.load(store_path)
-        assert len(store) == 1
-        (row,) = store.rows()
-        extra = dataclasses.replace(row, run_id="f" * 64)
-        store.append(extra)
+        assert grid.top_k is not None
+        bound = union_persist_bound(grid.top_k)
+        baseline = len(store)
+        assert 1 <= baseline <= bound  # the union legitimately persists > top_k
+        (row, *_rest) = store.rows()
+        for index in range(bound - baseline + 1):
+            store.append(dataclasses.replace(row, run_id=f"{(1 << 200) + index:064x}"))
         store.flush()
         trial_stats_sidecar_path(store_path).unlink()
         completion_sentinel_path(store_path).unlink()
         report = verify_identity(root, grid)
         assert "rows_exceed_top_k" in _codes(report)
         assert not report.clean
+
+    def test_union_extras_within_bound_are_not_inflation(self, tmp_path: Path) -> None:
+        # The W1 counter-pin: a legitimate union store (rows > top_k but
+        # within union_persist_bound) must NOT read as #650 inflation.
+        grid = _grid(top_k=1)
+        root = tmp_path / "results"
+        root.mkdir()
+        _sweep(root, grid)
+        store = ResultsStore.load(_store_path(root, grid))
+        assert grid.top_k is not None and len(store) > grid.top_k
+        assert "rows_exceed_top_k" not in _codes(verify_identity(root, grid))
 
     def test_row_label_mismatch(self, tree: Path) -> None:
         store_path = _store_path(tree, _grid())
@@ -2377,7 +2513,7 @@ class TestRecountVixDivergence:
         for finding in report.findings:
             assert finding.severity == "warn"
             assert "India-VIX lake moved" not in finding.detail
-            assert "original rows carry NO trio values" in finding.detail
+            assert "carry NO values on the diverging nullable columns" in finding.detail
             assert "None→value backfill" in finding.detail
             assert "no quarantine needed" in finding.detail
 
@@ -2401,7 +2537,10 @@ class TestRecountVixDivergence:
         """
         original, scratch, grid = self._two_trees(tmp_path, None, None)
         store_path = _store_path(original, grid)
-        _drop_store_columns(store_path, ["vix_mean", "vix_min", "vix_max"])
+        # A faithful pre-VIX-generation stand-in lacks the trio AND every
+        # strictly-later appended nullable family (growth / exit-quality /
+        # recency) — a real pre-VIX writer predates them all.
+        _drop_store_columns(store_path, sorted(_APPENDED_NULLABLE_FIELDS))
         assert store_path.read_bytes() != _store_path(scratch, grid).read_bytes()
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
@@ -2411,7 +2550,7 @@ class TestRecountVixDivergence:
         finding = report.findings[0]
         assert finding.severity == "warn"
         assert "India-VIX lake moved" not in finding.detail
-        assert "original rows carry NO trio values" in finding.detail
+        assert "carry NO values on the diverging nullable columns" in finding.detail
         assert "None→value backfill" in finding.detail
         assert "no quarantine needed" in finding.detail
 
@@ -2468,6 +2607,44 @@ class TestRecountVixDivergence:
             _stores_differ_only_in_vix(_store_path(original, grid), _store_path(scratch, grid))
             is None
         )
+
+    def test_recorded_later_family_value_divergence_abstains(self, tmp_path: Path) -> None:
+        # A recorded NON-None growth/exit-quality/recency value the recount
+        # cannot reproduce is a genuine identity-envelope divergence — the
+        # attribution must abstain (None → the corrupt ladder), never read
+        # it as a VIX backfill/moved shape.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        store_path = _store_path(original, grid)
+        rows = ResultsStore.load(store_path).rows()
+        assert rows[0].loss_rate is not None  # the current writer computes it
+        self._rewrite_store(
+            store_path,
+            (dataclasses.replace(rows[0], loss_rate=0.987654321), *rows[1:]),
+        )
+        assert _stores_differ_only_in_vix(store_path, _store_path(scratch, grid)) is None
+
+    def test_pre_extension_none_later_family_rows_are_the_backfill_shape(
+        self, tmp_path: Path
+    ) -> None:
+        # The ROW shape of a pre-extension store recounted under current
+        # code: the original rows hold None on every later-family nullable
+        # metric while the recount computes real values — the sanctioned
+        # directional None→value backfill, attributed never condemned.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        store_path = _store_path(original, grid)
+        rows = ResultsStore.load(store_path).rows()
+        later_nulled: dict[str, None] = dict.fromkeys(
+            sorted(_APPENDED_NULLABLE_FIELDS - set(VIX_FIELDS))
+        )
+        self._rewrite_store(
+            store_path,
+            tuple(dataclasses.replace(row, **later_nulled) for row in rows),  # type: ignore[arg-type]
+        )
+        assert _stores_differ_only_in_vix(store_path, _store_path(scratch, grid)) == "backfill"
 
     def test_helper_attributes_a_mixed_equal_and_vix_diff_row_set(self, tmp_path: Path) -> None:
         # One row equal + one row differing ONLY in the trio → attributed.
@@ -2811,13 +2988,60 @@ class TestPreVixSchemaMigration:
         assert _is_pre_vix_schema_migration(original, scratch) is False
 
     def test_extra_schema_drift_abstains(self, tmp_path: Path) -> None:
-        # Missing trio PLUS any other column drift — stripping the trio from
-        # the scratch schema no longer reproduces the original: abstain.
+        # Missing appended nullable columns PLUS any other column drift —
+        # stripping the appended nullable columns from the scratch schema no
+        # longer reproduces the original: abstain (the final strip-compare
+        # arm, reached with both presence gates passing).
         original = tmp_path / "original.parquet"
         scratch = tmp_path / "scratch.parquet"
         self._reflush(_PRE_VIX_FIXTURE, original)
         self._reflush(_PRE_VIX_FIXTURE, scratch)
-        _drop_store_columns(original, ["vix_mean", "vix_min", "vix_max", "deflated_sharpe"])
+        _drop_store_columns(original, [*sorted(_APPENDED_NULLABLE_FIELDS), "deflated_sharpe"])
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+        assert _stores_differ_only_in_vix(original, scratch) is None
+
+    def test_later_family_presence_abstains(self, tmp_path: Path) -> None:
+        # A store carrying a LATER appended nullable column (sl_hit_rate)
+        # while missing the trio matches NO real writer generation — the
+        # widened presence gate abstains, never a guessed attribution.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        self._reflush(_PRE_VIX_FIXTURE, original)
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        _drop_store_columns(original, sorted(_APPENDED_NULLABLE_FIELDS - {"sl_hit_rate"}))
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+
+    def test_original_with_selection_column_abstains(self, tmp_path: Path) -> None:
+        # LANE W1 (review round 1 gate re-run): a store carrying ANY
+        # selection-provenance column is not the pre-VIX generation
+        # (selection landed after VIX) — partial presence abstains.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        self._reflush(_PRE_VIX_FIXTURE, original)
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        _drop_store_columns(original, ["vix_mean", "vix_min", "vix_max", "selection_basis"])
+        # original keeps pareto_member — partial selection presence.
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+        assert _stores_differ_only_in_vix(original, scratch) is None
+
+    def test_scratch_without_selection_pair_abstains(self, tmp_path: Path) -> None:
+        # The recount side must CARRY the selection pair (the current writer
+        # always appends it) for the migration to explain the diff.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        shutil.copyfile(_PRE_VIX_FIXTURE, original)
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        _drop_store_columns(scratch, ["pareto_member", "selection_basis"])
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+
+    def test_non_generation_schema_drift_abstains(self, tmp_path: Path) -> None:
+        # Both optional generations absent from the original AND another
+        # column missing — the stripped compare still refuses.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        shutil.copyfile(_PRE_VIX_FIXTURE, original)
+        _drop_store_columns(original, ["deflated_sharpe"])
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
         assert _is_pre_vix_schema_migration(original, scratch) is False
 
     def test_unreadable_footer_abstains(self, tmp_path: Path) -> None:
@@ -2855,7 +3079,7 @@ class TestRecordedStage3FromAudit:
             audit.append(
                 action="STAGE_3_REFINE_START",
                 subject="s",
-                payload={"pycma_version": "3.4.0", "numpy_version": "2.1.0"},
+                payload={"optimizer_version": "3.4.0", "optimizer_build": "2.1.0"},
             )
         record = recorded_stage3_from_audit(path)
         assert record.knobs is not None
@@ -2929,6 +3153,193 @@ class TestRecordedStage3FromAudit:
         record = recorded_stage3_from_audit(path)
         assert record.knobs is not None
         assert record.knobs.stage3_top_k == 3
+
+
+class TestRecordedTemporalFromAudit:
+    """The Tier-3 temporal recount reader (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+
+    The condition-B1 twin of ``recorded_stage3_from_audit``: the shadow
+    re-sweep must run the tree's RECORDED temporal regime (BOTH modes capture
+    the four emit-on-present period-stats columns at the finalist re-sim), so
+    the reader derives it from the hash-chained ``SWEEP_START``
+    ``temporal_gate`` payloads — never the verify-time ``$BRUTEX_TEMPORAL``
+    environment. Fails-before: without the reader + its cli threading, every
+    tree launched under the shipped ``observe`` default recounted as a false
+    verdict-grade CORRUPT (the CI shard-3/-4 reds of 2026-07-19).
+    """
+
+    def _gate_payload(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "mode": "observe",
+            "min_profitable_years_fraction": 0.5,
+            "max_single_year_pnl_share": 0.6,
+            "min_edge_year_sessions": 120,
+            "min_judged_years": 2,
+        }
+        base.update(overrides)
+        return base
+
+    def _start_payload(self, temporal: dict[str, object] | object | None) -> dict[str, object]:
+        payload: dict[str, object] = {"instrument": "NSE-NIFTY", "k": 1}
+        if temporal is not None:
+            payload["temporal_gate"] = temporal
+        return payload
+
+    def test_absent_audit_is_no_history(self, tmp_path: Path) -> None:
+        record = recorded_temporal_from_audit(tmp_path / "nope.jsonl")
+        assert record.config is None
+        assert record.consistent is True
+
+    def test_temporal_less_sweep_starts_read_none_consistent(self, tmp_path: Path) -> None:
+        """A pre-temporal / --temporal-mode off tree recounts temporal-less."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload(None))
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload(None))
+        record = recorded_temporal_from_audit(path)
+        assert record.config is None
+        assert record.consistent is True
+
+    def test_reads_the_recorded_config(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._start_payload(
+                    self._gate_payload(mode="gate", min_profitable_years_fraction=0.25)
+                ),
+            )
+            # Non-SWEEP_START entries are ignored (never parsed for the key).
+            audit.append(action="TUPLE_DONE", subject="s", payload={"temporal_gate": "junk"})
+        record = recorded_temporal_from_audit(path)
+        assert record.consistent is True
+        assert record.config == TemporalRobustnessConfig(
+            min_profitable_years_fraction=0.25,
+            max_single_year_pnl_share=0.6,
+            min_edge_year_sessions=120,
+            min_judged_years=2,
+            mode="gate",
+        )
+
+    def test_agreeing_repeat_lines_stay_consistent(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+        record = recorded_temporal_from_audit(path)
+        assert record.consistent is True
+        assert record.config is not None and record.config.mode == "observe"
+
+    def test_mixed_configured_and_configless_lines_flag_inconsistent(self, tmp_path: Path) -> None:
+        """The ledgered resume envelope: gate regimes can mix per tuple."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload(None))
+        record = recorded_temporal_from_audit(path)
+        assert record.consistent is False
+        assert record.config is None  # one shadow config cannot reproduce the tree
+
+    def test_disagreeing_configs_flag_inconsistent(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._start_payload(self._gate_payload(mode="gate")),
+            )
+        record = recorded_temporal_from_audit(path)
+        assert record.consistent is False
+        assert record.config is None
+
+    def test_non_mapping_payload_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload("junk"))
+        with pytest.raises(SweepVerifyError, match="not a mapping"):
+            recorded_temporal_from_audit(path)
+
+    def test_missing_key_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        gate = self._gate_payload()
+        del gate["min_judged_years"]
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload(gate))
+        with pytest.raises(SweepVerifyError, match="missing"):
+            recorded_temporal_from_audit(path)
+
+    def test_invalid_config_values_raise(self, tmp_path: Path) -> None:
+        """A tampered payload never constructs a config silently (fail closed)."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._start_payload(self._gate_payload(min_profitable_years_fraction=1.5)),
+            )
+        with pytest.raises(SweepVerifyError, match="not a valid gate config"):
+            recorded_temporal_from_audit(path)
+
+    def test_uncoercible_value_raises(self, tmp_path: Path) -> None:
+        """A non-numeric fraction maps to the SAME typed refusal (TypeError arm)."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._start_payload(
+                    self._gate_payload(min_profitable_years_fraction=[0.5])
+                ),
+            )
+        with pytest.raises(SweepVerifyError, match="not a valid gate config"):
+            recorded_temporal_from_audit(path)
+
+    def test_unreadable_audit_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_temporal_from_audit(path)
+
+    def test_mid_chain_corruption_after_valid_line_still_maps(self, tmp_path: Path) -> None:
+        """The try spans the streaming iteration (DEC-AUDIT-READERS-STREAM-001)."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+        with path.open("a", encoding="utf-8") as f:
+            f.write("{not jsonl mid-chain\n")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_temporal_from_audit(path)
+
+    def test_streams_without_materialising_the_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Memory-shape pin: the reader rides ``iter_entries``, never the
+        whole-chain ``read_entries`` list (the stage3 reader's discipline)."""
+        from brutex.orchestrator import audit as audit_mod
+
+        def _boom(_path: Path) -> list[object]:
+            raise AssertionError("read_entries called — chain materialised")
+
+        monkeypatch.setattr(audit_mod, "read_entries", _boom)
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+        record = recorded_temporal_from_audit(path)
+        assert record.config is not None and record.config.mode == "observe"
 
 
 class TestCellRecountCodes:
@@ -3650,3 +4061,96 @@ class TestModeCensusFieldsSingleSource:
         # orphan the census constant (the gate would stop matching anything).
         field_names = {field.name for field in dataclasses.fields(TupleTrialStats)}
         assert set(MODE_CENSUS_FIELDS) <= field_names
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the recount post-diff verdict tail
+    (DEC-RUST-SWEEP-OPS-001 slice 5).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by patching
+    the facade's ``importlib`` binding. Flag ON must be behavior-identical to
+    the flag-OFF Python law (which every OTHER recount test in this file
+    drives) — the byte-diff, the run-identity seams
+    (``canonical_trade_params``/``mask_run_id``), the finding codes,
+    severities and detail BYTES all stay Python on both arms; only the pure
+    post-diff classification tail routes.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _findings(report: TreeVerifyReport) -> list[tuple[str, str, str]]:
+        return [(f.code, f.severity, f.detail) for f in report.findings]
+
+    def test_flag_on_matches_flag_off_over_the_whole_ladder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One tampered grid store + one tampered cell store, driven under
+        every (context_match, cell_evidence) combination — finding triples
+        (code, severity, detail bytes) identical ON vs OFF over the SAME
+        trees (``compare_recount`` is read-only)."""
+        grid = _grid()
+        original, scratch = tmp_path / "original", tmp_path / "scratch"
+        for root in (original, scratch):
+            root.mkdir()
+            _sweep(root, grid)
+        record = _stage3_record()
+        plan = plan_expected_stores(original, grid, stage3=record)  # type: ignore[arg-type]
+        (cell_rel,) = [
+            p.relative_to(original) for p, (_, _, is_grid) in plan.items() if not is_grid
+        ]
+        grid_store = _store_path(original, grid)
+        for root in (original, scratch):
+            dest = root / cell_rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(root / grid_store.relative_to(original), dest)
+        # Tamper BOTH the grid store and the cell store in the original tree.
+        grid_store.write_bytes(grid_store.read_bytes() + b"tampered")
+        cell = original / cell_rel
+        cell.write_bytes(cell.read_bytes() + b"tampered")
+
+        combos = [(True, True), (True, False), (False, True), (False, False)]
+
+        def _drive() -> list[list[tuple[str, str, str]]]:
+            return [
+                self._findings(
+                    compare_recount(original, scratch, plan, context_match=cm, cell_evidence=ce)
+                )
+                for cm, ce in combos
+            ]
+
+        off = _drive()
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = _drive()
+        finally:
+            self._reset_facade()
+        assert on == off
+        # Anti-vacuous: the ladder genuinely branched — grid corrupt +
+        # cell dependent under (True, *); inconclusive under (False, *).
+        assert {c for c, _, _ in off[0]} == {
+            "recount_divergence",
+            "cell_recount_divergence_dependent",
+        }
+        assert "recount_divergence_inconclusive" in {c for c, _, _ in off[2]}

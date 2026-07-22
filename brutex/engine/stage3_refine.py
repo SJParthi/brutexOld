@@ -1,4 +1,5 @@
-"""Stage-3 BIPOP-CMA-ES refinement runner (ADR-0007 §5 slice 4 — DEC-STAGE3-REFINE-001).
+"""Stage-3 restarted-CMA-ES refinement runner (ADR-0007 §5 slice 4 —
+DEC-STAGE3-REFINE-001, optimizer re-hosted by DEC-RUST-STAGE3-REFINE-001).
 
 The deterministic refinement pass over the Stage-2 survivor set: for each
 survivor mask (per leaderboard, in leaderboard order — ADR-0007 condition 1),
@@ -10,23 +11,34 @@ path (the *evaluate* seam — production binds a
 :func:`~brutex.engine.sweep_driver.metrics_for_mask` closure; tests bind a
 synthetic objective).
 
+The OPTIMIZER MATH lives in the ``brutex_refine`` Rust wheel
+(``rust/brutex-refine`` — DEC-RUST-STAGE3-REFINE-001, DEFAULT-ON, the pycma
+path DELETED): this module keeps ONLY the bookkeeping — run identity, seed
+derivation, the value cache, the eval records, the audit lines. The wheel's
+:class:`~brutex.engine.refine_rust.RefineSessionLike` proposes QUANTIZED
+on-grid pairs (the snap runs inside the driver), so the evaluator can only
+ever see ints, structurally.
+
 Design (the nine ADR-0007 conditions this module owns):
 
 * **Condition 4 — refinement-run identity + value cache.** The resumable /
   dedup unit is the WHOLE per-mask refinement run, identified by
   :func:`refinement_run_id` = ``blake3(mask_run_id ‖ optimizer-config ‖ seed ‖
-  budget ‖ pycma/numpy versions)``. Per-eval results live in a run-scoped
-  VALUE cache keyed by the quantized ``(sl_paisa, tp_paisa)`` — the optimizer
-  needs ``f(x)``, not membership, so a re-proposed grid point returns the
-  cached metrics without re-simulating (and without inflating the trial
-  count).
+  budget ‖ optimizer version + build digest)``. Per-eval results live in a
+  run-scoped VALUE cache keyed by the quantized ``(sl_paisa, tp_paisa)`` — the
+  optimizer needs ``f(x)``, not membership, so a re-proposed grid point
+  returns the cached metrics without re-simulating (and without inflating the
+  trial count). The build token is the wheel's baked crate-source digest, so
+  ANY optimizer source change mints NEW identities (Golden Rule #4).
 * **Condition 5 — determinism.** The seed derives from the mask's BLAKE3 run
-  identity (:func:`seed_from_mask_run_id`, the id's low 64 bits); the inner
-  optimizer runs single-threaded; restart *k* seeds ``seed + k`` so the
-  restart streams are disjoint but fully derived. Reproducibility is claimed
-  for same commit + same lockfile + same platform ONLY (CMA-ES
-  eigendecomposition is ULP-BLAS-sensitive — the A/B oracle in the tests
-  pins same-process determinism, nothing more).
+  identity (:func:`seed_from_mask_run_id`, the id's LOW 64 BITS — the
+  ADR-0007 wording restored: the retired pycma path had narrowed it to 32
+  bits under numpy's MT19937 seed cap, a constraint the in-crate PRNG does
+  not have); the inner optimizer runs single-threaded; restart *k* seeds
+  ``seed + k`` (u64 wrapping) so the restart streams are disjoint but fully
+  derived. Reproducibility is claimed for same commit + same wheel + same
+  platform ONLY (libm transcendentals are platform-rounded — the same honest
+  envelope the pycma path carried).
 * **Condition 6 — every evaluation is a Bailey-LdP trial.** EVERY cache-miss
   evaluation is returned in :attr:`RefineMaskReport.evals` so the caller
   appends each as a :class:`~brutex.engine.results_store.ResultRow` into the
@@ -40,7 +52,10 @@ Design (the nine ADR-0007 conditions this module owns):
 * **Condition 8 — honest bounded budget.** ``max_fevals`` asks per restart ×
   a HARD ``max_restarts`` cap (defaults 200 × 3 = ≤600 unique evals/mask; a
   flat-fitness early stop just moves on to the next restart, the cap bounds
-  the churn). No wall-time claim is made.
+  the churn). The Rust driver enforces the per-restart cap STRICTLY — the
+  retired pycma loop could overshoot by a partial population (measured 121
+  asks on a 60-ask budget); this port closes that to the documented bound
+  exactly. No wall-time claim is made.
 * **§4 observability.** ``STAGE_3_REFINE_START`` / ``…_FLUSH`` /
   ``…_COMPLETE`` audit lines per refinement run through the injected
   hash-chained writer, mirroring the sweep's three-line pattern.
@@ -54,13 +69,14 @@ binds the lockbox-excluded training bars exactly as Stage 2 does.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import structlog
 
-from brutex.engine.stage3_grid import denormalize_sl_tp, normalize_sl_tp
+from brutex.engine.refine_rust import optimizer_versions, require_refine_rust
+from brutex.engine.stage3_grid import MODE_A_SL_AXIS, MODE_A_TP_AXIS, normalize_sl_tp
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:
@@ -124,36 +140,28 @@ class RefineBudget:
         return f"fevals={self.max_fevals};restarts={self.max_restarts};sigma0={self.sigma0!r}"
 
 
-def optimizer_versions() -> tuple[str, str]:
-    """Return ``(pycma_version, numpy_version)`` — the identity's library fields.
-
-    Imported lazily so the engine package never hard-requires the ``optimize``
-    extra (DEC-STAGE3-OPTIMIZE-EXTRA-001): a build without pycma can still run
-    Stage 2; only an actual refinement run needs it.
-    """
-    import cma  # type: ignore[import-untyped, unused-ignore]  # no py.typed in pycma; dual-env
-    import numpy
-
-    return str(cma.__version__), str(numpy.__version__)
-
-
 def refinement_run_id(
     *,
     mask_run_id: str,
     budget: RefineBudget,
     seed: int,
-    pycma_version: str,
-    numpy_version: str,
+    optimizer_version: str,
+    optimizer_build: str,
 ) -> str:
     """The refinement run's BLAKE3 identity (ADR-0007 condition 4).
 
-    ``blake3(mask_run_id ‖ optimizer-config ‖ seed ‖ budget ‖ library
-    versions)`` — the resumable/dedup unit is the WHOLE per-mask run, so a
-    bumped optimizer version, budget, or seed yields a NEW identity (cached
-    per-eval values from another identity are never reused).
+    ``blake3(mask_run_id ‖ optimizer-config ‖ seed ‖ budget ‖ optimizer
+    version + build digest)`` — the resumable/dedup unit is the WHOLE
+    per-mask run, so a bumped optimizer version, a REBUILT-from-changed-source
+    wheel (the build digest moves), a changed budget, or a changed seed
+    yields a NEW identity (cached per-eval values from another identity are
+    never reused). The payload version token is ``stage3-refine-v2``
+    (DEC-RUST-STAGE3-REFINE-001 — the v1 formula folded the retired
+    ``(pycma, numpy)`` pair; greenfield ruling, no stored v1 identities
+    exist).
 
-    The three injectable string tokens (``mask_run_id``, ``pycma_version``,
-    ``numpy_version``) are screened for the ``\\x1f`` join delimiter through
+    The three injectable string tokens (``mask_run_id``, ``optimizer_version``,
+    ``optimizer_build``) are screened for the ``\\x1f`` join delimiter through
     the COMMON :func:`~brutex.strategies.combo.reject_unit_separator` guard
     (DEC-RUN-IDENTITY-GUARD-PARITY-001) — REJECT-ONLY, so every
     currently-legal input's digest is byte-unchanged (golden-pinned). The
@@ -166,8 +174,8 @@ def refinement_run_id(
     Raises
     ------
     Stage3RefineError
-        If ``mask_run_id``, ``pycma_version``, or ``numpy_version`` contains
-        the ``\\x1f`` unit-separator byte.
+        If ``mask_run_id``, ``optimizer_version``, or ``optimizer_build``
+        contains the ``\\x1f`` unit-separator byte.
     """
     import fno_math
 
@@ -177,20 +185,20 @@ def refinement_run_id(
         "refinement_run_id",
         (
             ("mask_run_id", mask_run_id),
-            ("pycma_version", pycma_version),
-            ("numpy_version", numpy_version),
+            ("optimizer_version", optimizer_version),
+            ("optimizer_build", optimizer_build),
         ),
         error=Stage3RefineError,
     )
 
     payload = "\x1f".join(
         (
-            "stage3-refine-v1",
+            "stage3-refine-v2",
             mask_run_id,
             budget.canonical(),
             f"seed={seed}",
-            f"cma={pycma_version}",
-            f"numpy={numpy_version}",
+            f"optimizer={optimizer_version}",
+            f"build={optimizer_build}",
         )
     )
     return str(fno_math.blake3_hash(payload.encode("utf-8")).hex())
@@ -199,18 +207,19 @@ def refinement_run_id(
 def seed_from_mask_run_id(mask_run_id: str) -> int:
     """Derive the mask's deterministic optimizer seed (ADR-0007 condition 5).
 
-    The LOW 32 bits of the mask's BLAKE3 run identity — fully derived, no RNG
-    of its own, distinct across masks with overwhelming probability. ADR-0007
-    wrote "low 64 bits"; numpy's MT19937 (pycma's RNG) hard-caps seeds at
-    ``2**32 - 1``, so the derivation narrows to 32 bits — an
-    implementation-forced narrowing recorded in DEC-STAGE3-REFINE-001, with
-    the determinism property unchanged (same identity ⇒ same seed).
+    The LOW 64 bits of the mask's BLAKE3 run identity — fully derived, no RNG
+    of its own, distinct across masks with overwhelming probability. This is
+    the ADR-0007 wording RESTORED (DEC-RUST-STAGE3-REFINE-001): the retired
+    pycma path narrowed the derivation to 32 bits because numpy's MT19937
+    caps seeds at ``2**32 − 1``; the in-crate xoshiro256++ takes the full
+    u64, so the narrowing is gone (greenfield ruling — no cached 32-bit-seed
+    identities exist to preserve).
     """
     if len(mask_run_id) != _RUN_ID_HEX_LEN:
         raise Stage3RefineError(
             f"mask_run_id must be the 64-char BLAKE3 hex identity, got {len(mask_run_id)} chars"
         )
-    return int(mask_run_id[-8:], 16)
+    return int(mask_run_id[-16:], 16)
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,14 +267,16 @@ def refine_mask(
     budget: RefineBudget | None = None,
     audit: AuditSink | None = None,
 ) -> RefineMaskReport:
-    """Run ONE mask's bounded BIPOP-style CMA-ES refinement over the (SL, TP) grid.
+    """Run ONE mask's bounded restarted-CMA-ES refinement over the (SL, TP) grid.
 
-    The inner loop (ADR-0007 §1): seed = the mask identity's low 64 bits;
-    restart *k* runs a fresh single-threaded ``cma.CMAEvolutionStrategy`` at
-    ``seed + k`` in normalized [0,1]² with ``max_fevals`` asks; every proposed
-    point is snapped to the Mode-A grid (ints) BEFORE evaluation; a re-proposed
-    grid point is answered from the run-scoped value cache. The objective is
-    the pool-independent ``sharpe_ratio`` (maximized — condition 2).
+    The inner loop (ADR-0007 §1, DEC-RUST-STAGE3-REFINE-001): seed = the mask
+    identity's low 64 bits; restart *k* runs a fresh single-threaded CMA-ES at
+    ``seed + k`` in normalized [0,1]² with at most ``max_fevals`` asks (the
+    hard per-restart cap, enforced inside the Rust driver); every proposed
+    point is snapped to the Mode-A grid (ints) INSIDE the driver before it is
+    exposed; a re-proposed grid point is answered from the run-scoped value
+    cache. The objective is the pool-independent ``sharpe_ratio`` (maximized —
+    condition 2; the driver minimizes, so this wrapper negates).
 
     Parameters
     ----------
@@ -288,18 +299,24 @@ def refine_mask(
     RefineMaskReport
         The run identity, every unique evaluation (condition 6), and the best
         quantized candidate.
+
+    Raises
+    ------
+    brutex.engine.refine_rust.RefineRustUnavailableError
+        When the Rust runtime cannot be engaged (flag off / wheel absent) —
+        loud, never a silent fallback (there is none).
     """
-    import cma  # type: ignore[import-untyped, unused-ignore]  # no py.typed in pycma; dual-env
+    runtime = require_refine_rust()
 
     budget = budget if budget is not None else RefineBudget()
     seed = seed_from_mask_run_id(mask_run_id)
-    pycma_version, numpy_version = optimizer_versions()
+    optimizer_version, optimizer_build = optimizer_versions()
     run_id = refinement_run_id(
         mask_run_id=mask_run_id,
         budget=budget,
         seed=seed,
-        pycma_version=pycma_version,
-        numpy_version=numpy_version,
+        optimizer_version=optimizer_version,
+        optimizer_build=optimizer_build,
     )
     subject = f"refine:{run_id[:16]}"
     if audit is not None:
@@ -311,49 +328,40 @@ def refine_mask(
                 "mask_run_id": mask_run_id,
                 "seed": seed,
                 "budget": budget.canonical(),
-                "pycma_version": pycma_version,
-                "numpy_version": numpy_version,
+                "optimizer_version": optimizer_version,
+                "optimizer_build": optimizer_build,
                 "x0": [start_sl_paisa, start_tp_paisa],
             },
         )
 
     x0 = normalize_sl_tp(start_sl_paisa, start_tp_paisa)
+    session = runtime.RefineSession(
+        x0,
+        budget.sigma0,
+        seed,
+        budget.max_fevals,
+        budget.max_restarts,
+        (MODE_A_SL_AXIS.lo_paisa, MODE_A_SL_AXIS.hi_paisa, MODE_A_SL_AXIS.tick_paisa),
+        (MODE_A_TP_AXIS.lo_paisa, MODE_A_TP_AXIS.hi_paisa, MODE_A_TP_AXIS.tick_paisa),
+    )
+
     cache: dict[tuple[int, int], ResultMetrics] = {}
     evals: list[RefinedEval] = []
     cache_hits = 0
-
-    def _objective(point: Iterable[float]) -> float:
-        """Quantize → cached full backtest → NEGATED Sharpe (CMA minimizes)."""
-        nonlocal cache_hits
-        u_sl, u_tp = point
-        sl, tp = denormalize_sl_tp(float(u_sl), float(u_tp))
-        hit = cache.get((sl, tp))
-        if hit is None:
-            hit = evaluate(sl, tp)
-            cache[(sl, tp)] = hit
-            evals.append(RefinedEval(sl_paisa=sl, tp_paisa=tp, metrics=hit))
-        else:
-            cache_hits += 1
-        return -_sharpe_of(hit)
-
-    restarts_run = 0
-    for restart in range(budget.max_restarts):
-        restarts_run += 1
-        es = cma.CMAEvolutionStrategy(
-            list(x0),
-            budget.sigma0,
-            {
-                # Disjoint, fully-derived restart streams — wrapped to numpy's
-                # uint32 seed domain (the same cap that narrows the base seed).
-                "seed": (seed + restart) % 2**32,
-                "verbose": -9,
-                "maxfevals": budget.max_fevals,
-                "bounds": [0.0, 1.0],
-            },
-        )
-        while not es.stop():
-            asks = es.ask()
-            es.tell(asks, [_objective(a) for a in asks])
+    while not session.done():
+        values: list[float] = []
+        for sl, tp in session.ask():
+            hit = cache.get((sl, tp))
+            if hit is None:
+                hit = evaluate(sl, tp)
+                cache[(sl, tp)] = hit
+                evals.append(RefinedEval(sl_paisa=sl, tp_paisa=tp, metrics=hit))
+            else:
+                cache_hits += 1
+            # NEGATED Sharpe — the driver minimizes (condition 2).
+            values.append(-_sharpe_of(hit))
+        session.tell(values)
+    restarts_run = session.restarts_run()
 
     best_key = max(cache, key=lambda key: (_sharpe_of(cache[key]), (-key[0], -key[1])))
     best_sharpe = _sharpe_of(cache[best_key])

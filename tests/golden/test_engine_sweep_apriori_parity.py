@@ -134,6 +134,9 @@ def _run(
             dedup=dedup,
             audit=audit,
             trial_stats_digest=digest,
+            # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point — the
+            # decision stream IS the execution stream.
+            exec_bars_1m=bars,
         )
 
 

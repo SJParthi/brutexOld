@@ -144,6 +144,10 @@ var BX_SCREENER_COLUMNS = [
      law): the stored dsr is the per-tuple figure, never shown unlabeled. */
   { key: "metrics.dsr", label: "DSR (tuple-N)", type: "num", explain: "dsr" },
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
+  /* DEC-ALPHA-BUYHOLD-METRIC-001: alpha vs buy-&-hold — additive artifact
+     metric; a pre-alpha artifact lacks the key entirely -> "—" (absent-
+     excluded-but-counted under a filter, the #1631 law — never a 0). */
+  { key: "metrics.alpha_pct", label: "Alpha %", type: "num", explain: "alpha_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
   // Losing-streak resilience columns (the sibling block; dotted keys resolve
   // row.resilience.* / row.metrics.* generically; null → "—", never a
@@ -166,6 +170,18 @@ var BX_SCREENER_COLUMNS = [
      a pre-change artifact lacks the key entirely -> "—" (absent-excluded-
      but-counted under a filter, the #1631 law — never a fabricated PASS). */
   { key: "cascade.status_text", label: "Cascade", type: "str", explain: "cascade_status" },
+  /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier — tier.status_text is
+     SERVER-built (oneclick_view.tier_status_text); a pre-tier artifact lacks
+     the key entirely -> "—" (absent-excluded-but-counted under the exact
+     tier filter, the instrument law — never a fabricated tier). */
+  { key: "tier.status_text", label: "Tier", type: "str", explain: "tier" },
+  /* `DEC-OPTIONS-EXEC-FEEDBACK-001`: the post-sweep exec-sim verdicts.
+     Dotted paths into the additive options_exec/futures_exec objects — a
+     pre-change (or provider-None) artifact lacks the key entirely -> the
+     cell renders "—" via bxFieldValue's undefined and sorting puts the row
+     LAST (zero new mechanism; the absent-key law). */
+  { key: "options_exec.net_after_cost_paisa", label: "Opt net", type: "num", money: true, explain: "options_net_after_cost" },
+  { key: "futures_exec.net_pnl_paisa", label: "Fut net", type: "num", money: true, explain: "futures_net" },
   { key: "family_id", label: "Family", type: "str", explain: "family_id" },
   { key: "mask_hex", label: "Mask", type: "str", explain: "mask_hex" }
 ];
@@ -296,10 +312,15 @@ function bxVixOverlap(band, lo, hi) {
  * filters: { tf: string[]|null, direction: string|null,
  *            instrument: string|null (exact match; an absent-instrument row
  *            never matches an active filter),
+ *            tier: string|null (exact match on tier.label; an absent-tier /
+ *            null-label row never matches an active filter),
  *            min_win_rate: number|null, min_pf: number|null,
  *            min_trades: number|null, min_dsr: number|null,
  *            max_abs_dd_paisa: number|null (magnitude cap — max_dd_paisa is
- *            stored NEGATIVE, the cap compares |dd|) }.
+ *            stored NEGATIVE, the cap compares |dd|),
+ *            executability: ""|"priced"|"positive"|undefined (the
+ *            options_exec selection — absent-key rows never match an active
+ *            filter, `DEC-OPTIONS-EXEC-FEEDBACK-001`) }.
  * A null/absent filter key never excludes. min_dsr floors the row's
  * metrics.dsr — the TUPLE-scoped Deflated Sharpe (an inflating under-count;
  * the /results DSR label law, DEC-RESULTS-TRUST-HONESTY-001) — a row without
@@ -327,6 +348,38 @@ function bxFilterRow(row, filters) {
   // an artifact the dropdown stays empty and the filter is never active.
   if (filters.instrument && row.instrument !== filters.instrument) {
     return false;
+  }
+  // Tier is exact-match on the LABEL token (DEC-RANKING-SPLUS-TIER-001 —
+  // the instrument law verbatim): a row WITHOUT the additive `tier` object
+  // (or with a null label — judged "not tiered") never matches an ACTIVE
+  // filter; options are harvested ONLY from rows carrying a non-null label
+  // (bxHarvestFilterOptions), so a pre-tier artifact's dropdown stays empty.
+  if (filters.tier) {
+    var tierLabel = row.tier && typeof row.tier === "object" ? row.tier.label : undefined;
+    if (tierLabel !== filters.tier) {
+      return false;
+    }
+  }
+  // Executability (`DEC-OPTIONS-EXEC-FEEDBACK-001`): a row WITHOUT the
+  // additive options_exec object never matches an ACTIVE filter — a
+  // pre-change artifact (or a --no-options-sim run) filters to empty under
+  // "priced", never to a fabricated verdict; a not_priced row never matches
+  // either (presence of the KEY is not a priced verdict). Deliberately NO
+  // excluded-count line (unlike the null-VIX RANGE filter, where a null band
+  // is ambiguous evidence): this is a positive SELECTION whose whole point
+  // is presence — an absent/unpriced object is a definitive non-match.
+  if (filters.executability) {
+    var oe = row.options_exec;
+    var priced = !!oe && typeof oe === "object" && oe.status === "priced";
+    if (filters.executability === "priced" && !priced) {
+      return false;
+    }
+    if (
+      filters.executability === "positive" &&
+      !(priced && typeof oe.net_after_cost_paisa === "number" && oe.net_after_cost_paisa > 0)
+    ) {
+      return false;
+    }
   }
   var m = row.metrics || {};
   if (typeof filters.min_win_rate === "number" && !(m.win_rate >= filters.min_win_rate)) {

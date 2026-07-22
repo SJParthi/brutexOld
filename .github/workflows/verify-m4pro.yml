@@ -92,11 +92,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Bootstrap (venv + deps + both Rust kernels + doctor)
+      - name: Bootstrap (venv + deps + Rust kernels + doctor)
         run: |
           # The repo's own turnkey bootstrap is the single source of truth
           # (CLAUDE.md §11 COMMON): 3.12 venv, [dev,data,ui] + optimize extras,
-          # fno_math + trading_core via maturin, then `brutex doctor`.
+          # fno_math + trading_core + brutex_identity via maturin, then
+          # `brutex doctor`.
           python -m venv .venv
           . .venv/bin/activate
           pip install --upgrade pip
@@ -120,6 +121,13 @@ jobs:
           }
           build_with_retry rust/fno-math
           build_with_retry rust/trading-core
+          # brutex_identity is a HARD import of brutex.engine /
+          # brutex.strategies.combo / brutex.data.window_ledger_store since
+          # DEC-RUST-RUNID-STORES-001 — without this build the mypy/pyright/
+          # pytest steps below die at collection with ModuleNotFoundError
+          # (caught by the lane's independent refuter round; the round-1
+          # "whole-workflow job census" had missed this self-hosted workflow).
+          build_with_retry rust/brutex-identity
 
       - name: Lint + format (ruff)
         run: |

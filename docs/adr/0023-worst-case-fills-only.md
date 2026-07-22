@@ -79,12 +79,19 @@ with mode threading.
 
 ## Honest envelope
 
-- **INTERIM (coordinator ruling 5):** until PR-B's 1-minute execution grid
-  lands (its own DEC+ADR — dual-feed, run-identity re-key, SL/TP monitored
-  on the 1m grid), the adverse extreme is the DECISION-TF bar's: a 5-minute
-  entry takes the whole 5-minute range's adverse depth — strictly MORE
-  pessimistic than the operator's next-1-minute-bar target law, never
-  optimistic.
+- **INTERIM (coordinator ruling 5) — SUPERSEDED by PR-B
+  (DEC-FILL-EXEC-GRID-1M-001, 2026-07-18):** the decision-TF interim
+  adverse-extreme law below is RETIRED — every fill now resolves on the
+  next-1-minute execution grid (dual-feed, run-identity re-key, SL/TP
+  monitored on the 1m grid), so the interim's extra pessimism is gone.
+  Historical record: until PR-B, the adverse extreme was the DECISION-TF
+  bar's — a 5-minute entry took the whole 5-minute range's adverse depth —
+  strictly MORE pessimistic than the operator's next-1-minute-bar target
+  law, never optimistic.
+- **Golden re-locks superseded (DEC-FILL-EXEC-GRID-1M-001):** this ADR's
+  hand-derived golden values were CONSCIOUSLY re-locked AGAIN under PR-B's
+  1m execution grid; the #1825-era literals survive only as frozen
+  anti-alias pins (e.g. the sweep-run `_PRE_GRID_RUN_ID`).
 - The worst-case buy on a ranged F&O bar prices one tick OUTSIDE the
   printed range (extreme + tick) — the honest adverse floor, not a
   printable price; on a FLAT bar the fills equal the retired open±tick
