@@ -710,10 +710,17 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
         "lockbox",
         "monte_carlo",
     }, _msg
-    # The pool SIZE is trajectory-count-stable (3 min-hits survivors + 3
+    # The pool SIZE is trajectory-count-stable (3 min-hits survivors + 4
     # unique Rust-refined cells — a pre-tell first-generation cell set,
     # machine-stable by construction; see the re-measure note above).
-    assert surv["hard_gates"] == 6, _msg
+    # EXEC-GRID RE-MEASURE (2026-07-22): re-measured 3x deterministic
+    # (7/7/7) on the exec-grid folded tree — DEC-FILL-EXEC-GRID-1M-001
+    # re-keys run identity, so the pinned-sha stage-3 seed draw re-shapes
+    # the candidate pool (the fevals=4 first generation now lands 4
+    # DISTINCT quantized cells, was 3; measured cells_written=4 +
+    # cascade n_input=7); conscious re-pin per
+    # DEC-R38-REHEARSAL-DETERMINISM-001 — never a blind bump.
+    assert surv["hard_gates"] == 7, _msg
     dsr = surv["deflated_sharpe"]
     assert 1 <= dsr <= surv["hard_gates"], _msg  # NOT DSR-killed — the legs run
     for leg in ("walk_forward", "cpcv", "pbo", "reality_check_spa", "romano_wolf"):
