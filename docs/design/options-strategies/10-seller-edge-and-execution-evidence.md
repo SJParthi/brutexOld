@@ -277,7 +277,7 @@ translation layer is a FUTURE operator-gated DEC/ADR: the sweep engine is SPOT-O
    drawdown — already persisted by the results-depth pass [REPO per CLAUDE.md §1 #1617]) must be
    first-class ranking inputs; (c) stress-window lockboxes should pin the known shock windows.
 2. **The existing cascade gates are the counter — name them and use them all** [REPO
-   brutex/metrics/cascade.py:12-13, stages enum :161-167]: **DSR** (#2, deflated Sharpe —
+   brutex/metrics/cascade.py:12-13, stages enum :160-167]: **DSR** (#2, deflated Sharpe —
    directly attacks the Sharpe illusion), **CPCV** (#3, combinatorially purged CV),
    **Reality-Check/SPA** (#4, pool-level "is the best candidate real or data-snooped", p<0.05
    [REPO brutex/metrics/cascade.py:41]), **PBO** (#5, pool overfit probability), **Romano-Wolf**
@@ -498,7 +498,7 @@ defense).** When a defense action on leg L decides at minute `t` and L's bar at 
      `defense_expiry_settled`, counted;
    - otherwise → carry to the NEXT session's first `volume>0` bar under a `defense_session_gap`
      reason (the seller twin of the engine's `session_gap` law + counter
-     [REPO trade_sim.py:60-67,270]), counted `defense_carried_sessions`; interim MTM uses the
+     [REPO trade_sim.py:60-67; counter trade_store.py:210]), counted `defense_carried_sessions`; interim MTM uses the
      last-known close with a `stale_mark_minutes` counter.
 4. **Never** emit a `NO_DATA`/`STALE_BAR` *rejection* for a defense action — those reasons stay
    entry-only. A rejection would silently convert "couldn't price the close" into "held the naked

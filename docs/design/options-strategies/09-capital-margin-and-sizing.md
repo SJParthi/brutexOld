@@ -394,23 +394,31 @@ method (b), "flag … in audit log with `margin_method` field"
 
 ```
 margin_proxy_per_lot(t) =
-    premium_mark(t) × lot(t)                        # net-premium component (SPAN-like)
-  + lot(t) × max over i of loss_i(t)                # scan-risk component
-      where loss_i = structure loss at spot shocks
-      S(t)·(1 ± f_i·m(t)),  f_i ∈ {1/3, 2/3, 1},    # SPAN-like scan ladder
-      m(t) = max(K·σ̂(t), m_floor)                   # σ̂ from OUR daily series;
-                                                    # m_floor covers −12.98% (2020-03-23)
-  + e_rate × S(t) × lot(t)                          # exposure/ELM floor arm
+    premium_mark(t) × lot(t)                        # net-premium base (SPAN-like)
+  + max( scan_arm(t) , e_rate × S(t) × lot(t) )     # ONE floor: SPAN scan-risk arm OR
+                                                    # exposure/ELM arm, whichever binds —
+                                                    # NOT an additive third term
+      where scan_arm(t) = lot(t) × max over i of loss_i(t)   # worst per-lot scan loss
+        loss_i = structure loss at spot shocks
+          S(t)·(1 ± f_i·m(t)),  f_i ∈ {1/3, 2/3, 1},         # SPAN-like scan ladder
+          m(t) = max(K·σ̂(t), m_floor)                        # σ̂ from OUR daily series;
+                                                             # m_floor covers −12.98% (2020-03-23)
+        e_rate × S(t) × lot(t) = exposure/ELM floor          # notional_per_lot = S(t) × lot(t)
 ```
 
-with `margin_proxy = max(scan_arm, exchange_minimum_estimate)` where
-`exchange_minimum_estimate = e_rate × notional` uses a DECLARED rate. **Honesty rules on that
-arm:** the microstructure research search-captured a candidate `e_rate` — index exposure margin
+That single definition — `margin_proxy_per_lot = premium×lot + max( scan_arm , e_rate × notional_per_lot )`
+where `scan_arm = lot × max_i(loss_i)` (the worst per-lot loss across the SPAN scan scenarios) and
+`e_rate × notional_per_lot` (`notional_per_lot = S × lot`) is the exposure/ELM floor using a DECLARED
+rate — is the ONLY reading: a single MAX between the two risk arms sitting above the premium base,
+NEVER an additive third term. **Honesty rules on the exposure/ELM arm:** the microstructure research
+search-captured a candidate `e_rate` — index exposure margin
 **3% of notional on short positions** [WEB NSE Clearing Margins page, search-captured] — but
 that capture is not full-document depth and the ELM component rate remains open
 [UNVERIFIED — CM-U13]; under the margin_history override law any adopted `e_rate` may only ship
 as an ADR-stamped ASSUMED (or full-document-cited) value — otherwise **ship V2 with the scan
-arm + premium arm alone and say so**. For defined-risk structures, additionally clamp
+arm + premium arm alone and say so**, i.e. DROP the exposure floor entirely when `e_rate` is
+unknown so that `margin_proxy_per_lot = premium×lot + scan_arm`. For defined-risk structures,
+additionally clamp
 `margin_proxy ≤ max_loss_per_lot + net_credit×lot` (no exchange charges more than max loss plus
 premium on a fully hedged vertical — [ARITH] on the defined-risk bound; the §2.2 broker
 snapshots are consistent).

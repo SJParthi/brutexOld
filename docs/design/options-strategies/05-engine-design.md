@@ -192,7 +192,7 @@ G-CAPITAL (§5), and it determines the v1 sweep set:
 | 4 | Iron butterfly | `S:CE@ATMOFF(0)+S:PE@ATMOFF(0)+B:PE@−W+B:CE@+W /W0` | **DEF** `W−C` | **YES** | exact |
 | 5 | Bull put spread | `S:PE@Δ/T + B:PE@−W/T` | **DEF** `W−C` | **YES** | exact; entry mask = bullish 60-bit point (§3) |
 | 6 | Bear call spread | `S:CE@Δ/T + B:CE@+W/T` | **DEF** `W−C` | **YES** | exact; entry mask = bearish 60-bit point |
-| 7 | Covered call (index, FUT-covered) | `B:FUT/M0 + S:CE@Δ/T` | UND (down) | **NO — REFUSE** | naked-class downside, no defined max loss |
+| 7 | Covered call (index, FUT-covered) | `B:FUT/M0 + S:CE@Δ/T` | **DEFINED-LARGE (downside)** | **NO — REFUSE** | the covered futures leg is SPAN-margined ⇒ not v1-capital-admissible without SPAN history |
 | 8 | Cash-secured put | `S:PE@Δ/T + reserve K·lot` | **FIN-large** `K−C` | **YES\*** | max_loss exact but a large multiple of real SPAN (magnitude **UNVERIFIED (G1)**, chapter [09](09-capital-margin-and-sizing.md)) — admitted under `capital_basis="max_loss"` with the understatement DISCLOSED (ruling R-1, §14) |
 | 9 | Front-ratio (credit) | `B:CE@ATMOFF + S:CE@Δ ×2` | UND (one wing) | **NO — REFUSE** | extra naked leg |
 | 10 | Jade lizard | `S:PE@Δ + S:CE@Δ + B:CE@+W_c`, `C>W_c` | UND-down | **NO — REFUSE** | naked put side |
