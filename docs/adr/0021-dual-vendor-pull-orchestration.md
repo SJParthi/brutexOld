@@ -1004,7 +1004,7 @@ earlier "no cross-vendor contention by construction" claim is CORRECTED to
 shipped truth):** the zero-cross-impact guarantee below holds only once
 WS-D PRECONDITION P1 (§15 item 4) lands — the Dhan client-id-keyed
 `account_key_resolver` on BOTH Dhan jobs, owned by the Dhan track (queued,
-their ~#1865-band ledger work landing behind the club). SHIPPED TRUTH
+their ~#1865-band, landed on main as DEC-DHAN-ACCOUNT-LOCK-ISOLATE-001 #2213, ledger work landing behind the club). SHIPPED TRUTH
 today, per the Dhan track's review of their club #1551 lineage (their
 attribution — this track cannot see their branch): the club's two Dhan
 jobs pass NO `account_key_resolver`, so they inherit the DEFAULT resolver —
@@ -1706,7 +1706,7 @@ the inspection and records the consumption/rename.
 3. The Dhan track's contract values landing via club PR #1551 + follow-ups.
 4. **WS-D PRECONDITION P1 (feed-track review fold — the zero-cross-impact
    precondition):** the Dhan client-id-keyed `account_key_resolver` on BOTH
-   Dhan jobs — owned by the Dhan track (queued, their ~#1865-band ledger
+   Dhan jobs — owned by the Dhan track (queued, their ~#1865-band, landed on main as DEC-DHAN-ACCOUNT-LOCK-ISOLATE-001 #2213, ledger
    work landing behind the club). Until it lands, a wet Dhan pull takes the
    GROWW account flock via the inherited default resolver (verified on
    this tree — `brutex/dashboard/pull_jobs.py:154-177` + :438/:468-470)
