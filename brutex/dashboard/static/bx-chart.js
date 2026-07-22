@@ -418,6 +418,209 @@ function bxMinutePathSeries(rows) {
   };
 }
 
+/* ── Batch B+C ADDITIVE pure axis/label helpers (DEC-DASHBOARD-VISUAL-
+      OVERHAUL-001). NEW functions only — every pre-existing pure function
+      above is byte-untouched (node-golden-pinned). All values derive from
+      the ALREADY-LOADED bars/trades arrays — never a new fetch, never a
+      fabricated number. ── */
+
+/**
+ * Nice tick values inside [lo, hi] on a 1/2/5 step ladder (pure).
+ *
+ * A flat domain (lo === hi) yields the single tick [lo] (the flat-scale
+ * contract's honest one-label axis). Non-finite inputs yield [] — the
+ * renderer simply draws no axis, never a NaN coordinate.
+ *
+ * @param {number} lo - domain low.
+ * @param {number} hi - domain high.
+ * @param {number} count - target tick count (~4-6; floor ≥ 1).
+ * @returns {number[]} ascending tick values within [lo, hi].
+ */
+function bxNiceTicks(lo, hi, count) {
+  if (typeof lo !== "number" || typeof hi !== "number" || !isFinite(lo) || !isFinite(hi)) {
+    return [];
+  }
+  if (lo === hi) {
+    return [lo]; // flat domain — one honest label at the midpoint line
+  }
+  if (lo > hi) {
+    var swap = lo;
+    lo = hi;
+    hi = swap;
+  }
+  var n = typeof count === "number" && isFinite(count) && count >= 1 ? Math.floor(count) : 4;
+  var raw = (hi - lo) / n;
+  var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+  var norm = raw / mag;
+  var step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+  var first = Math.ceil(lo / step);
+  var last = Math.floor(hi / step);
+  if (last - first > 1000) {
+    return [lo, hi]; // pathological step underflow — bounded, honest endpoints
+  }
+  var out = [];
+  for (var k = first; k <= last; k++) {
+    out.push(k * step); // index-multiplied, never float-accumulated
+  }
+  return out;
+}
+
+/**
+ * Evenly spaced bar INDICES for a time axis (pure; endpoints included).
+ *
+ * @param {number} n - the bar count.
+ * @param {number} count - target label count (min 2 when n > 1).
+ * @returns {number[]} ascending, deduplicated indices into [0, n-1].
+ */
+function bxTimeTickIdxs(n, count) {
+  if (typeof n !== "number" || !isFinite(n) || n <= 0) {
+    return [];
+  }
+  n = Math.floor(n);
+  if (n === 1) {
+    return [0];
+  }
+  var c = Math.max(2, Math.min(typeof count === "number" && isFinite(count) ? Math.floor(count) : 6, n));
+  var out = [];
+  for (var k = 0; k < c; k++) {
+    var idx = Math.round((k * (n - 1)) / (c - 1));
+    if (out.length === 0 || out[out.length - 1] !== idx) {
+      out.push(idx);
+    }
+  }
+  return out;
+}
+
+/**
+ * The IST clock label ("HH:MM") of an epoch-ms instant — pure epoch
+ * arithmetic (the bxIstDateOfEpoch idiom, TZ-invariant). An exact IST
+ * midnight (a 1day bar) reads the IST DATE instead, so a daily axis is
+ * never a row of meaningless "00:00" labels.
+ *
+ * @param {number} ms - epoch milliseconds.
+ * @returns {string|null} "HH:MM", "YYYY-MM-DD" at midnight, or null.
+ */
+function bxIstClockLabel(ms) {
+  if (typeof ms !== "number" || !isFinite(ms)) {
+    return null;
+  }
+  var iso = new Date(ms + 330 * 60000).toISOString();
+  var hm = iso.slice(11, 16);
+  return hm === "00:00" ? iso.slice(0, 10) : hm;
+}
+
+/**
+ * Map a price into a bxCandleGeom's vertical pixel space (pure — the SAME
+ * inverted scale the candles ride, so a gridline/last-price marker can
+ * never disagree with the candle geometry). Flat geometry maps to the
+ * vertical midpoint (the flat-scale contract).
+ *
+ * @param {object} geom - a bxCandleGeom() result.
+ * @param {number} h - drawing height (px) — as passed to bxCandleGeom.
+ * @param {number} pad - inner padding (px) — as passed to bxCandleGeom.
+ * @param {number} price - the price to map.
+ * @returns {number|null} the y coordinate, or null (empty geometry).
+ */
+function bxPriceToY(geom, h, pad, price) {
+  if (!geom || geom.empty || geom.priceLo === null || geom.priceHi === null) {
+    return null;
+  }
+  if (typeof price !== "number" || !isFinite(price)) {
+    return null;
+  }
+  return bxScaleLinear([geom.priceLo, geom.priceHi], [h - pad, pad])(price);
+}
+
+/**
+ * The equity y-domain the path node ALREADY uses (pure mirror of
+ * bxEquityPathNode's lo/hi fold — zero is always inside, so a zero
+ * baseline is always drawable).
+ *
+ * @param {object} series - a bxEquitySeries()/bxMinutePathSeries() result.
+ * @returns {object|null} {lo, hi} in paisa, or null (empty series).
+ */
+function bxEquityDomain(series) {
+  if (!series || series.empty || !series.points || series.points.length === 0) {
+    return null;
+  }
+  var lo = 0;
+  var hi = 0;
+  for (var i = 0; i < series.points.length; i++) {
+    var v = series.points[i].cum_paisa;
+    if (v < lo) {
+      lo = v;
+    }
+    if (v > hi) {
+      hi = v;
+    }
+  }
+  return { lo: lo, hi: hi };
+}
+
+/** Title/aria text length cap (hard rule: bounded tooltip payloads). */
+var BX_TITLE_TEXT_CAP = 500;
+
+/**
+ * Bound a tooltip/aria string to BX_TITLE_TEXT_CAP chars with an ellipsis
+ * (pure; the hard cap for unbounded payload-derived text).
+ *
+ * @param {string} s - the candidate text.
+ * @returns {string} s, or its capped form ending in "…".
+ */
+function bxCapTitleText(s) {
+  s = String(s);
+  return s.length > BX_TITLE_TEXT_CAP ? s.slice(0, BX_TITLE_TEXT_CAP - 1) + "…" : s;
+}
+
+/**
+ * The static hover text for ONE candle — the bar's OWN stored OHLC values
+ * at FULL precision (pure; TradingView-style inspect depth with zero
+ * per-frame work — rendered once as an SVG <title> child).
+ *
+ * @param {object} row - a mapped candle row {ts, open, high, low, close}.
+ * @returns {string} e.g. "2024-01-02 09:15 IST · O 100.5 · H 101 · L 99.25 · C 100".
+ */
+function bxCandleTitleText(row) {
+  if (!row) {
+    return "";
+  }
+  var day = bxIstDateOfEpoch(row.ts);
+  var clock = bxIstClockLabel(row.ts);
+  var when = day === null ? "?" : (clock === day ? day : day + " " + clock) + " IST";
+  return bxCapTitleText(
+    when +
+      " · O " + String(row.open) +
+      " · H " + String(row.high) +
+      " · L " + String(row.low) +
+      " · C " + String(row.close)
+  );
+}
+
+/**
+ * The hover/aria text for ONE trade arrow — endpoint kind + direction +
+ * the trade's OWN stored price/timestamp strings verbatim (pure; an exit
+ * arrow also names the stored exit reason). Capped at BX_TITLE_TEXT_CAP.
+ *
+ * @param {string} kind - "entry" | "exit".
+ * @param {object} trade - the trades-route row.
+ * @returns {string} e.g. "entry long · @ 100.5 · 2024-01-02T03:45:00+00:00".
+ */
+function bxTradeArrowTitle(kind, trade) {
+  var t = trade || {};
+  var isEntry = kind === "entry";
+  var px = isEntry ? t.entry_px : t.exit_px;
+  var ts = isEntry ? t.entry_ts : t.exit_ts;
+  var bits = [
+    String(kind) + " " + (t.direction === null || t.direction === undefined ? "?" : String(t.direction)),
+    "@ " + (px === null || px === undefined ? "—" : String(px)),
+    ts === null || ts === undefined ? "—" : String(ts)
+  ];
+  if (!isEntry && t.exit_reason !== null && t.exit_reason !== undefined) {
+    bits.push("exit reason: " + String(t.exit_reason));
+  }
+  return bxCapTitleText(bits.join(" · "));
+}
+
 /** The loud out-of-window note (ONE constant so UI + tests cannot drift). */
 var BX_ARROW_DROPPED_NOTE = "trade outside chart window — widen range";
 
@@ -578,6 +781,191 @@ function bxEquityPathNode(series, w, h, pad) {
   return bxSvgEl("path", { d: bxPathD(pts), "class": "bx-equity-line", fill: "none" });
 }
 
+/* ── Batch B+C ADDITIVE browser-only builders (createElementNS +
+      setAttribute + textContent ONLY — zero string-to-DOM sinks; label
+      strings come from the pure helpers above / an injected house
+      formatter, never raw server markup). ── */
+
+/**
+ * One namespaced SVG <title> child (the static, paint-free hover tooltip).
+ *
+ * @param {string} text - the tooltip text (set via textContent only).
+ * @returns {Element} the <title> node.
+ */
+function bxSvgTitleNode(text) {
+  var n = document.createElementNS(BX_SVG_NS, "title");
+  n.textContent = String(text);
+  return n;
+}
+
+/**
+ * One right-anchored SVG <text> label (textContent only).
+ *
+ * @param {number} x - anchor x (px).
+ * @param {number} y - baseline y (px).
+ * @param {string} label - the label text.
+ * @param {string} cls - CSS class.
+ * @param {string} anchor - text-anchor value.
+ * @returns {Element} the <text> node.
+ */
+function bxAxisTextNode(x, y, label, cls, anchor) {
+  var n = bxSvgEl("text", {
+    x: x.toFixed(2),
+    y: y.toFixed(2),
+    "text-anchor": anchor,
+    "class": cls
+  });
+  n.textContent = String(label);
+  return n;
+}
+
+/**
+ * Price gridlines + right-edge 2dp price labels for a candle chart
+ * (tick math via bxNiceTicks/bxPriceToY — the candles' own scale).
+ *
+ * @param {object} geom - a bxCandleGeom() result.
+ * @param {number} w - drawing width (px).
+ * @param {number} h - drawing height (px).
+ * @param {number} pad - inner padding (px).
+ * @param {number} count - target tick count.
+ * @returns {Element[]} gridline + label nodes (draw UNDER the candles).
+ */
+function bxPriceAxisNodes(geom, w, h, pad, count) {
+  var out = [];
+  if (!geom || geom.empty || geom.priceLo === null) {
+    return out;
+  }
+  var ticks = bxNiceTicks(geom.priceLo, geom.priceHi, count);
+  for (var i = 0; i < ticks.length; i++) {
+    var y = bxPriceToY(geom, h, pad, ticks[i]);
+    if (y === null) {
+      continue;
+    }
+    out.push(bxSvgEl("line", {
+      x1: pad.toFixed(2),
+      x2: (w - pad).toFixed(2),
+      y1: y.toFixed(2),
+      y2: y.toFixed(2),
+      "class": "bx-gridline"
+    }));
+    out.push(bxAxisTextNode(w - pad - 2, y - 3, ticks[i].toFixed(2), "bx-axis-label", "end"));
+  }
+  return out;
+}
+
+/**
+ * Time-axis labels (+ faint vertical guides) for a candle chart — IST
+ * clock labels computed from the loaded bars' own timestamps.
+ *
+ * @param {object[]} rows - the mapped candle rows (ascending ts).
+ * @param {object} geom - the matching bxCandleGeom() result.
+ * @param {number} h - drawing height (px).
+ * @param {number} pad - inner padding (px).
+ * @param {number} count - target label count.
+ * @returns {Element[]} guide + label nodes (draw UNDER the candles).
+ */
+function bxTimeAxisNodes(rows, geom, h, pad, count) {
+  var out = [];
+  if (!rows || rows.length === 0 || !geom || geom.empty) {
+    return out;
+  }
+  var idxs = bxTimeTickIdxs(rows.length, count);
+  for (var i = 0; i < idxs.length; i++) {
+    var idx = idxs[i];
+    var label = bxIstClockLabel(rows[idx].ts);
+    if (label === null) {
+      continue; // unparseable ts never yields a fabricated label
+    }
+    var x = pad + geom.xSlot * (idx + 0.5);
+    out.push(bxSvgEl("line", {
+      x1: x.toFixed(2),
+      x2: x.toFixed(2),
+      y1: pad.toFixed(2),
+      y2: (h - pad).toFixed(2),
+      "class": "bx-gridline bx-gridline-v"
+    }));
+    out.push(bxAxisTextNode(x, h - 4, label, "bx-axis-label", "middle"));
+  }
+  return out;
+}
+
+/**
+ * The last-price marker: a dashed line + label at the LAST loaded bar's
+ * close (its own stored value, full precision — never a live quote).
+ *
+ * @param {object[]} rows - the mapped candle rows (ascending ts).
+ * @param {object} geom - the matching bxCandleGeom() result.
+ * @param {number} w - drawing width (px).
+ * @param {number} h - drawing height (px).
+ * @param {number} pad - inner padding (px).
+ * @returns {Element[]} the marker nodes ([] when there is nothing).
+ */
+function bxLastPriceNodes(rows, geom, w, h, pad) {
+  if (!rows || rows.length === 0 || !geom || geom.empty) {
+    return [];
+  }
+  var close = rows[rows.length - 1].close;
+  var y = bxPriceToY(geom, h, pad, close);
+  if (y === null) {
+    return [];
+  }
+  var line = bxSvgEl("line", {
+    x1: pad.toFixed(2),
+    x2: (w - pad).toFixed(2),
+    y1: y.toFixed(2),
+    y2: y.toFixed(2),
+    "class": "bx-lastprice-line"
+  });
+  var label = bxAxisTextNode(w - pad - 2, y - 4, "last " + String(close), "bx-lastprice-label", "end");
+  return [line, label];
+}
+
+/**
+ * Equity chart chrome: zero baseline + y gridlines with labels from an
+ * INJECTED house formatter (paisa → the money() display law lives with
+ * the caller — this builder never formats money itself).
+ *
+ * @param {object} series - a bxEquitySeries()/bxMinutePathSeries() result.
+ * @param {number} w - drawing width (px).
+ * @param {number} h - drawing height (px).
+ * @param {number} pad - inner padding (px).
+ * @param {Function} labelOf - paisa -> display string.
+ * @returns {Element[]} chrome nodes (draw UNDER the equity path).
+ */
+function bxEquityAxisNodes(series, w, h, pad, labelOf) {
+  var out = [];
+  var dom = bxEquityDomain(series);
+  if (dom === null) {
+    return out;
+  }
+  var y = bxScaleLinear([dom.lo, dom.hi], [h - pad, pad]);
+  var ticks = bxNiceTicks(dom.lo, dom.hi, 4);
+  for (var i = 0; i < ticks.length; i++) {
+    if (ticks[i] === 0) {
+      continue; // the zero baseline gets its own louder line below
+    }
+    var ty = y(ticks[i]);
+    out.push(bxSvgEl("line", {
+      x1: pad.toFixed(2),
+      x2: (w - pad).toFixed(2),
+      y1: ty.toFixed(2),
+      y2: ty.toFixed(2),
+      "class": "bx-gridline"
+    }));
+    out.push(bxAxisTextNode(w - pad - 2, ty - 3, labelOf(ticks[i]), "bx-axis-label", "end"));
+  }
+  var zy = y(0);
+  out.push(bxSvgEl("line", {
+    x1: pad.toFixed(2),
+    x2: (w - pad).toFixed(2),
+    y1: zy.toFixed(2),
+    y2: zy.toFixed(2),
+    "class": "bx-zero-line"
+  }));
+  out.push(bxAxisTextNode(w - pad - 2, zy - 3, labelOf(0), "bx-axis-label", "end"));
+  return out;
+}
+
 var BXChart = {
   SVG_NS: BX_SVG_NS,
   ARROW_DROPPED_NOTE: BX_ARROW_DROPPED_NOTE,
@@ -598,7 +986,23 @@ var BXChart = {
   svgEl: bxSvgEl,
   candleNodes: bxCandleNodes,
   arrowNode: bxArrowNode,
-  equityPathNode: bxEquityPathNode
+  equityPathNode: bxEquityPathNode,
+  // Batch B+C additive axis/label surface (pure + builders):
+  TITLE_TEXT_CAP: BX_TITLE_TEXT_CAP,
+  niceTicks: bxNiceTicks,
+  timeTickIdxs: bxTimeTickIdxs,
+  istClockLabel: bxIstClockLabel,
+  priceToY: bxPriceToY,
+  equityDomain: bxEquityDomain,
+  capTitleText: bxCapTitleText,
+  candleTitleText: bxCandleTitleText,
+  tradeArrowTitle: bxTradeArrowTitle,
+  svgTitleNode: bxSvgTitleNode,
+  axisTextNode: bxAxisTextNode,
+  priceAxisNodes: bxPriceAxisNodes,
+  timeAxisNodes: bxTimeAxisNodes,
+  lastPriceNodes: bxLastPriceNodes,
+  equityAxisNodes: bxEquityAxisNodes
 };
 
 /* Browsers get the global; a non-browser harness (the node golden) gets the

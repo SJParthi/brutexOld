@@ -148,7 +148,9 @@ def test_gate_paint_once_recovery_and_timer_disarm(
     expect(nifty_row.locator("td").nth(1)).to_have_text(fixture.ground["nifty_price"])
     nifty_pct = nifty_row.locator("td").nth(3)
     expect(nifty_pct).to_have_text(fixture.ground["nifty_pct"])
-    expect(nifty_pct).to_have_class("pos")
+    # Full class-attribute match: directional money cells carry the shared
+    # .num broker-grid discipline beside the .pos/.neg tint (bx-design.css).
+    expect(nifty_pct).to_have_class("pos num")
 
     # Pill switch to Price Losers (client-side re-render from the cached
     # payload — no fetch): BANKNIFTY -10.00% on a .neg cell.
@@ -157,7 +159,7 @@ def test_gate_paint_once_recovery_and_timer_disarm(
     expect(loser_row).to_have_count(1)
     loser_pct = loser_row.locator("td").nth(3)
     expect(loser_pct).to_have_text(fixture.ground["banknifty_pct"])
-    expect(loser_pct).to_have_class("neg")
+    expect(loser_pct).to_have_class("neg num")
     assert session.request_count(_MOVERS_KEY) == 3, "pill switch must not refetch"
 
     # 4) Timer-disarm: a DEAD 6 s advance fires no movers request; the

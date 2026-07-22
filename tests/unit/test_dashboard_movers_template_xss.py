@@ -7,7 +7,8 @@ GAP A (stored XSS): the ``renderRows`` loop interpolated vendor-derived string
 cell values (symbol name + moneyness) into ``innerHTML`` WITHOUT escaping. The
 fix adds the same ``esc()`` helper ``db.html`` / ``universe.html`` /
 ``completeness.html`` ship (CLAUDE.md §11 COMMON) and wraps the cell value:
-``<td class="${cls}">${esc(v)}</td>``.
+``<td class="${cls}"${tattr}>${esc(v)}</td>`` (the ``tattr`` depth title —
+DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch B+C — is itself esc()-built or empty).
 
 GAP B (reflected XSS): the page set the note via ``innerHTML`` with server text
 that echoes the raw ``?asset=`` query param. The fix makes the bold prefix a
@@ -48,7 +49,7 @@ def test_movers_row_cells_are_escaped_before_innerhtml() -> None:
     """GAP A: every rendered cell value passes through ``esc()`` — never raw ``${v}``."""
     html = _render_movers_html()
     # The cell is interpolated as esc(v), not the bare value.
-    assert '<td class="${cls}">${esc(v)}</td>' in html
+    assert '<td class="${cls}"${tattr}>${esc(v)}</td>' in html
     # The vulnerable raw form must be gone.
     assert '<td class="${cls}">${v}</td>' not in html
 
@@ -231,7 +232,7 @@ def test_movers_prevclose_marker_is_appended_before_the_escaped_cell_write() -> 
     cell interpolation (the ' ~' moneyness-marker precedent) — the marker text
     passes through esc(v), never a second unescaped write."""
     html = _render_movers_html()
-    cell_write = '<td class="${cls}">${esc(v)}</td>'
+    cell_write = '<td class="${cls}"${tattr}>${esc(v)}</td>'
     assert html.index("row.prev_close_contiguous === false") < html.index(cell_write)
     assert html.index("row.oi_baseline_contiguous === false") < html.index(cell_write)
 
@@ -295,7 +296,7 @@ def test_movers_muhurat_marker_appends_dagger_on_strictly_true() -> None:
     ) in html
     # Pre-esc placement: both muhurat appends occur BEFORE the single escaped
     # cell interpolation (the ' *' precedent — the marker rides esc(v)).
-    cell_write = '<td class="${cls}">${esc(v)}</td>'
+    cell_write = '<td class="${cls}"${tattr}>${esc(v)}</td>'
     assert html.index("row.prev_close_muhurat === true") < html.index(cell_write)
     assert html.index("row.oi_baseline_muhurat === true") < html.index(cell_write)
 

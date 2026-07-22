@@ -5,91 +5,79 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BruteX — Movers</title>
 <style>
-  :root {
-    --bg:#0A0D11; --surface:#131722; --surface-2:#1A1F2C; --surface-3:#232938;
-    --border:#1E222D; --border-strong:#2B313F;
-    --text:#E5E8EC; --text-bright:#FFFFFF; --muted:#787B86;
-    --green:#26D9B0; --green-bright:#4FFFD0; --red:#FF5C5C;
-    --yellow:#FFB74D; --blue:#5B8DEF; --purple:#9D7BFF;
-    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
-    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
-    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
-    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
-  }
+  /* Page-specific skin ONLY (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch B+C):
+     tokens + components come from the SHARED design system — bx-theme.css
+     (header + canonical token set) and bx-design.css (.bx-chip / .bx-tab /
+     .bx-table --dense --zebra + .num / .bx-skel / honesty channel), linked
+     below AFTER this block so the shared rules win the cascade. The former
+     page-local :root token fork + the forked .pill/.tab/table/header skins
+     are DELETED — this block carries only what is genuinely movers-specific. */
   * { box-sizing:border-box; }
   html, body { margin:0; background:var(--bg); height:100%; }
   body { font-family:-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
     color:var(--text); min-height:100vh; display:flex; flex-direction:column;
     background:radial-gradient(ellipse at top, rgba(91,141,239,0.06), transparent 50%),
       radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%), var(--bg); }
-  header { display:flex; align-items:center; gap:14px; padding:16px 24px; border-bottom:1px solid var(--border);
-    position:sticky; top:0; z-index:6; background:rgba(10,13,17,.82); backdrop-filter:blur(11px); }
-  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
-    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .sub { color:var(--muted); font-size:12px; }
-  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
-  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
-  .topnav a:hover { color:var(--text-bright); }
-  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
-  nav { margin-left:18px; display:flex; gap:14px; font-size:13px; }
-  nav a { color:var(--blue); text-decoration:none; } nav a:hover { color:var(--green); }
   .wrap { flex:1; padding:20px 24px; max-width:1340px; width:100%; }
-  .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:16px 18px; }
   .card > h1 { font-size:17px; margin:0 0 14px; color:var(--text-bright);
     display:flex; align-items:center; gap:10px;
     padding-bottom:10px; border-bottom:1px solid var(--border); }
   .card > h1::before { content:""; flex:0 0 auto; width:3px; height:18px; border-radius:2px;
     background:linear-gradient(180deg,var(--blue),var(--purple)); }
-  .tabs { display:flex; gap:8px; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:12px; }
-  .tab { padding:8px 16px; border-radius:9px; font-size:14px; font-weight:600; cursor:pointer;
-    color:var(--muted); background:transparent; border:1px solid transparent; user-select:none; }
-  .tab.on { color:var(--green-bright); background:rgba(38,217,176,.10); border-color:var(--green); }
+  .tabs { margin-bottom:12px; }
   .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
-  .pill { padding:6px 12px; border-radius:999px; font-size:12.5px; cursor:pointer; user-select:none;
-    color:var(--muted); background:var(--surface-2); border:1px solid var(--border-strong); }
-  .pill.on { color:var(--yellow); border-color:var(--yellow); background:rgba(255,183,77,.10); }
+  /* Sub-filter pills re-seat on the shared .bx-chip base; the selected state
+     reads by ELEVATION + CONTRAST (the segmented-control law), never a hue. */
+  #pills { display:inline-flex; gap:var(--chip-gap); flex-wrap:wrap; }
+  .pill { cursor:pointer; user-select:none; }
+  .pill.on { color:var(--text-bright); background:var(--surface-3);
+    border-color:var(--border-strong); box-shadow:var(--elev-1); }
   .spacer { margin-left:auto; }
   select, input[type=date], input[type=number] { background:var(--surface-2); color:var(--text);
-    border:1px solid var(--border-strong); border-radius:9px; padding:7px 10px; font-size:12.5px; }
+    border:1px solid var(--border-strong); border-radius:var(--r-sm); padding:7px 10px; font-size:var(--fs-1); }
   input[type=number]{ width:64px; }
-  label.ctl { display:inline-flex; flex-direction:column; gap:3px; font-size:10px; color:var(--muted);
+  label.ctl { display:inline-flex; flex-direction:column; gap:3px; font-size:var(--fs-0); color:var(--muted);
     text-transform:uppercase; letter-spacing:.4px; }
-  button.go { background:linear-gradient(180deg, rgba(38,217,176,.12), transparent); border:1px solid var(--green);
-    color:var(--green-bright); border-radius:9px; padding:8px 14px; font-size:13px; font-weight:700; cursor:pointer; align-self:flex-end; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  /* tabular-nums: fixed-width digits so every numeric column aligns precisely
-     (the dashboard convention, e.g. /coverage + /universe) — a markets screen. */
-  th, td { text-align:right; padding:10px 12px; border-bottom:1px solid var(--border);
-    white-space:nowrap; font-variant-numeric:tabular-nums; }
-  th:first-child, td:first-child { text-align:left; }
-  thead th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
-    position:sticky; top:64px; background:var(--surface); cursor:pointer; user-select:none; }
-  thead th:hover { color:var(--text-bright); }
-  thead th.sorted { color:var(--blue); }
+  /* Dense broker grid: page-specific CELL semantics over the shared .bx-table
+     (directional money keeps td.pos/td.neg cell colour — never a chip). */
+  .bx-table th, .bx-table td { white-space:nowrap; }
   td.name { color:var(--text-bright); font-weight:600; }
   td.pos { color:var(--green); } td.neg { color:var(--red); }
   td.muted { color:var(--muted); }
-  tbody tr:hover { background:var(--surface-2); }
+  /* Honesty markers (" *" / " †" / " ~") ride the CELL TEXT verbatim (the
+     pinned marker law); the carrying cell gains a muted-gold dotted underline
+     + cursor:help so the footnote is visible on a dense grid, and its title=
+     carries the explanation (the design-system --honest disclosed-truth channel). */
+  td.hmark { text-decoration:underline dotted var(--honest); text-underline-offset:3px; cursor:help; }
   /* Row drill-down affordance (DEC-MOVERS-DRILL-DOWN-001): only rows stamped with a
      real payload symbol are links; SAMPLE/empty rows carry no data-symbol → default cursor. */
   tbody tr[data-symbol] { cursor:pointer; }
   .controls-row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
-  #asof { margin-left:auto; font-size:12px; color:var(--muted); align-self:center; }
-  .note { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; } .note b { color:var(--text); }
+  /* As-of / staleness / gated-status provenance line — textContent-only writes;
+     the #asofDot live-dot SIBLING is class-flipped from the REAL fetch outcome
+     (the pinned $("asof").textContent writes never touch the dot node). */
+  #asofDot { margin-left:auto; align-self:center; flex:0 0 auto; }
+  #asof { font-size:var(--fs-1); color:var(--muted); align-self:center; }
+  .note { font-size:var(--fs-1); color:var(--muted); margin-top:12px; line-height:1.5; } .note b { color:var(--text); }
+  /* .bx-skel loading shimmer on the note while a fetch is in flight (the
+     literal "Loading…" terminal string is banned by the design system;
+     every terminal path removes the class before its textContent write). */
+  #noteText.bx-skel { display:inline-block; min-width:220px; height:12px;
+    vertical-align:middle; border-radius:4px; }
   /* Per-underlying PCR panel (DEC-MOVERS-OPTIONS-PCR-001) — Options tab only. */
   #pcrPanel { margin-bottom:12px; }
   #pcrRows .name { color:var(--text-bright); font-weight:600; }
   #pcrRows .muted { color:var(--muted); }
-  .preview-badge { font-size:10px; font-weight:700; color:var(--yellow); border:1px solid var(--yellow);
-    border-radius:999px; padding:2px 8px; background:rgba(255,183,77,.10); }
+  /* PREVIEW · sample badge — the honesty (muted-gold) channel at the --fs-0
+     legibility floor (the old sub-legible 10px amber badge is banned).
+     Class name KEPT — the browser-truth suite locates `.preview-badge`. */
+  .preview-badge { font-size:var(--fs-0); font-weight:700; color:var(--honest); border:1px solid var(--honest-bd);
+    border-radius:var(--r-pill); padding:2px 8px; background:var(--honest-bg); }
   .empty { color:var(--muted); text-align:center; padding:24px 0; }
-  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline:2px solid var(--blue); outline-offset:2px; border-radius:8px; }
-  @media (prefers-reduced-motion: reduce){ *{ animation:none!important; transition:none!important; } }
 </style>
 <link rel="stylesheet" href="/static/bx-datepicker.css">
 <link rel="stylesheet" href="/static/bx-theme.css">
+<link rel="stylesheet" href="/static/bx-design.css">
 <script defer src="/static/bx-datepicker.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
@@ -116,12 +104,14 @@
   </header>
 
   <div class="wrap">
-    <div class="card">
+    <div class="card bx-card">
       <h1>📊 Markets Movers</h1>
-      <div class="tabs" id="tabs">
-        <div class="tab on" data-asset="spot">📈 Spot</div>
-        <div class="tab" data-asset="futures">🔮 Futures</div>
-        <div class="tab" data-asset="options">🎯 Options</div>
+      <!-- Asset tabs re-seated on the shared .bx-tabbar/.bx-tab rail (labels +
+           data-asset hooks byte-unchanged — the inline JS reads them). -->
+      <div class="tabs bx-tabbar" id="tabs">
+        <div class="tab bx-tab on" data-asset="spot">📈 Spot</div>
+        <div class="tab bx-tab" data-asset="futures">🔮 Futures</div>
+        <div class="tab bx-tab" data-asset="options">🎯 Options</div>
       </div>
 
       <div class="bar">
@@ -176,8 +166,13 @@
              (byte-identical to today); a positive value drops thin contracts from the
              Top Volume ranking. Applied server-side at rank time, so it never re-scans. -->
         <label class="ctl">Min vol<input type="number" id="minvol" min="0" step="1" value="0" title="Minimum cumulative session volume (Top Volume ranking)" /></label>
-        <button class="go" id="refresh">↻ Refresh</button>
-        <span id="asof"></span>
+        <button class="bx-btn bx-btn-primary" id="refresh">↻ Refresh</button>
+        <!-- Truthful snapshot dot (design-system .bx-live-dot): neutral grey
+             until a fetch resolves; class-flipped from the REAL outcome only
+             (ok = live payload, warn = gated, down = server error / offline).
+             A SIBLING of #asof — the pinned $("asof").textContent writes stay
+             byte-identical and can never wipe the dot node. -->
+        <span class="bx-live-dot" id="asofDot" aria-hidden="true"></span><span id="asof"></span>
       </div>
 
       <!-- Per-underlying Put-Call Ratio panel (DEC-MOVERS-OPTIONS-PCR-001):
@@ -195,10 +190,16 @@
         <div id="pcrRows"></div>
       </div>
 
-      <table>
-        <thead><tr id="head"></tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
+      <!-- Shared dense broker grid (.bx-table --dense --zebra + .num cells)
+           inside the .bx-tablewrap scroller: the thead sticks at top:0 INSIDE
+           the wrap (kills the old top:64px magic number) and wide option
+           column sets scroll on x inside the wrap — never the page body. -->
+      <div class="bx-tablewrap bx-tablewrap--vh">
+        <table class="bx-table bx-table--dense bx-table--zebra bx-thead-sticky">
+          <thead><tr id="head"></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
       <p class="note" id="note"><b>Note:</b> <span id="noteText"></span></p>
     </div>
   </div>
@@ -342,6 +343,9 @@ function fillTimes() {
    NO legend / a stale legend). textContent only — never innerHTML for server strings
    (DEC-DASHBOARD-XSS-HARDENING-001). */
 function refreshBaselineLegend(note) {
+  /* Terminal write — drop the pending .bx-skel shimmer before the note lands
+     (both real-payload load() paths + the cached pill switch route here). */
+  $("noteText").classList.remove("bx-skel");
   const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
   /* Muhurat legend (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the EMIT-ON-TRUE keys
      arrive only when the baseline is the legitimate Diwali Muhurat close — a real
@@ -362,7 +366,10 @@ function applyCategory() {
   else { load(); }
 }
 function renderPills() {
-  $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
+  /* Pills ride the shared .bx-chip base (design system); the `.on` selected
+     state reads by elevation + contrast via the page rule. Static config
+     labels only — no payload string reaches this innerHTML write. */
+  $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill bx-chip ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
   /* Pill clicks are DELEGATED — one listener on #pills, attached once at init
      (onPillsClick), surviving this innerHTML swap by construction — so this
      function only rebuilds markup on asset switches; it wires no handlers and
@@ -370,16 +377,23 @@ function renderPills() {
   /* Expiry applies to futures/options only — hidden for spot. */
   const derivAsset = (state.asset==="futures" || state.asset==="options");
   $("expiry").style.display = derivAsset ? "" : "none";
-  if (derivAsset && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option>${e}</option>`).join("");
+  /* Expiry-tier tooltips (static literals only — XSS-safe by construction):
+     each serial tier names its meaning so a dense toolbar stays inspectable. */
+  const TIER_TIP = { Near:"front (nearest unexpired) expiry", Next:"2nd serial expiry", Far:"3rd serial expiry" };
+  if (derivAsset && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option title="${TIER_TIP[e]}">${e}</option>`).join("");
   /* Options-only: the All/Monthly/Weekly cadence the Near/Next/Far tier ranks within. */
+  const TRACK_TIP = { All:"all expiries", Monthly:"monthly expiries only", Weekly:"weekly expiries only" };
   $("track").style.display = (state.asset==="options") ? "" : "none";
-  if (state.asset==="options" && !$("track").innerHTML) $("track").innerHTML = ["All","Monthly","Weekly"].map(e=>`<option>${e}</option>`).join("");
+  if (state.asset==="options" && !$("track").innerHTML) $("track").innerHTML = ["All","Monthly","Weekly"].map(e=>`<option title="${TRACK_TIP[e]}">${e}</option>`).join("");
 }
 function renderHead() {
   const cols = ASSETS[state.asset].cols;
+  /* Headers ride the shared .bx-th-sort affordance (cursor/hover/.sorted
+     accent); non-first columns take .num so header + numeric cell alignment
+     agree. Static config labels only — no payload string in this write. */
   $("head").innerHTML = cols.map(([label],i) => {
     const arrow = state.sort.idx===i ? (state.sort.dir>0?" ▲":" ▼") : "";
-    return `<th data-i="${i}" class="${state.sort.idx===i?'sorted':''}">${label}${arrow}</th>`;
+    return `<th data-i="${i}" class="bx-th-sort${i?' num':''} ${state.sort.idx===i?'sorted':''}">${label}${arrow}</th>`;
   }).join("");
   /* th sort clicks are DELEGATED — one listener on the #head row, attached once
      at init (onHeadClick), surviving this innerHTML rebuild by construction —
@@ -409,6 +423,11 @@ function fmtElapsed(s){
   if (m > 0) return `${m}m ${String(sec).padStart(2,"0")}s`;
   return `${sec}s`;
 }
+/* Truthful snapshot dot (design-system .bx-live-dot): a class flip driven ONLY
+   by the REAL fetch outcome — live-ok on a served payload, live-warn while the
+   prebuild gate holds, live-down on a server error / offline preview. Neutral
+   grey until the first outcome lands; never timer-driven, never fabricated. */
+function setAsofDot(s) { const d = $("asofDot"); if (d) d.className = "bx-live-dot" + (s ? " " + s : ""); }
 /* PCR panel (DEC-MOVERS-OPTIONS-PCR-001): per-underlying put/call ratios over
    the SAME candidate set the rankings use. Ratios arrive as full-precision
    strings or null (zero call-side denominator — never Infinity, never
@@ -501,7 +520,9 @@ function renderRows() {
       : "";
     return "<tr" + link + ">" + cols.map(([,field,type],i) => {
     let v = row[field]; if (v===undefined||v===null) v = "—";
-    let cls = i===0 ? "name" : "";
+    /* Non-first cells take the shared .bx-table .num discipline (right-aligned
+       tabular-nums monospace) — the broker numeric-grid law. */
+    let cls = i===0 ? "name" : "num";
     /* Numeric cells get display formatting: money → ₹ + Indian grouping @ 2dp,
        num → 2dp via the SHARED half-up bxFixed2 (DEC-STORED-DATA-VALIDATION-001
        — the IEEE toFixed rounder diverged from the pinned ROUND_HALF_UP display
@@ -515,7 +536,7 @@ function renderRows() {
       else if (type === "num4") v = v.toFixed(4);  /* Greeks (iv/delta) — display-only 4dp, payload stays full precision */
     }
     if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct") {
-      const n = numify(v); if (n!==null && n!==0) cls = n>0 ? "pos" : "neg";
+      const n = numify(v); if (n!==null && n!==0) cls = (n>0 ? "pos" : "neg") + " num";
       if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + bxFixed2(n) + "%";
     }
     /* Moneyness chip (DEC-FNO-MONEYNESS-001): the cell reads "ITM -1" / "OTM +10" /
@@ -526,8 +547,8 @@ function renderRows() {
        " ~" flags the possibly-overestimated ATM±N step; a registry-confident row
        shows no marker. Appended AFTER the tint check (startsWith is unaffected). */
     if (field==="moneyness" && typeof v === "string") {
-      if (v.startsWith("ITM")) cls = "pos"; else if (v.startsWith("OTM")) cls = "neg";
-      else if (v==="?"||v==="—") cls = "muted";
+      if (v.startsWith("ITM")) cls = "pos num"; else if (v.startsWith("OTM")) cls = "neg num";
+      else if (v==="?"||v==="—") cls = "muted num";
       if (row.strike_step_confidence === "observed" && v!=="?" && v!=="—") v += " ~";
     }
     /* Baseline-contiguity HONESTY MARKER (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001),
@@ -544,7 +565,36 @@ function renderRows() {
        distinctly from the " *" possible-lake-hole marker; pre-esc like " *". */
     if ((field==="change"||field==="pct_change") && row.prev_close_muhurat === true && v!=="—" && v!=="?") v += " †";
     if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_muhurat === true && v!=="—" && v!=="?") v += " †";
-    return `<td class="${cls}">${esc(v)}</td>`;
+    /* DEPTH title= (design system, TradingView-inspection law): built ONLY
+       from values ALREADY in this served row — never a new fetch, never a
+       computed fiction, never a repeat of the visible text.
+       (a) the exact full-precision payload number behind a formatted cell;
+       (b) the honesty-marker explanations (" *" / " †" / " ~" — the marker
+           TEXT itself stays byte-verbatim in the cell per the pinned law;
+           the cell also gains .hmark, the muted-gold footnote affordance);
+       (c) the price×OI four-quadrant buildup read on the OI Chg % cell
+           (derived from this row's own pct_change × oi sign — the
+           design-system buildup vocabulary, data-driven, no new backend).
+       esc()'d into a double-quoted attribute — the SAME sanctioned
+       innerHTML+esc path every cell already rides. */
+    let tip = "";
+    const raw = row[field];
+    if (typeof raw === "number" && String(raw) !== String(v)) tip = "exact: " + String(raw);
+    if (typeof v === "string") {
+      if (v.endsWith(" *")) { tip += (tip ? " · " : "") + "* baseline is not the immediately-preceding REGULAR NSE session (nearest-prior shown — possible lake hole)"; cls += " hmark"; }
+      if (v.endsWith(" †")) { tip += (tip ? " · " : "") + "† baseline is the Diwali Muhurat session close (a real NSE session the lake legitimately carries)"; cls += " hmark"; }
+      if (v.endsWith(" ~")) { tip += (tip ? " · " : "") + "~ strike grid from the sparse lake-observed ladder only (ATM±N step may be overestimated)"; cls += " hmark"; }
+    }
+    if (field === "oi_chg_pct") {
+      const p = numify(row.pct_change), o = numify(raw);
+      if (p !== null && o !== null && p !== 0 && o !== 0) {
+        const kind = p > 0 ? (o > 0 ? "long buildup (price ↑ · OI ↑)" : "short covering (price ↑ · OI ↓)")
+                           : (o > 0 ? "short buildup (price ↓ · OI ↑)" : "long unwinding (price ↓ · OI ↓)");
+        tip += (tip ? " · " : "") + kind;
+      }
+    }
+    const tattr = tip ? ' title="' + esc(tip) + '"' : "";
+    return `<td class="${cls}"${tattr}>${esc(v)}</td>`;
   }).join("") + "</tr>";
   }).join("");
 }
@@ -571,7 +621,13 @@ async function load() {
      so it is set via textContent on a dedicated span — the static "<b>Note:</b>"
      label stays in the DOM — never innerHTML (DEC-DASHBOARD-XSS-HARDENING-001).
      A reflected `?asset=<img …>` renders as inert text, not a live tag. */
-  $("noteText").textContent = "Loading…";
+  /* Pending state = the shared .bx-skel shimmer (the literal "Loading…"
+     terminal string is banned by the design system); EVERY terminal path —
+     refreshBaselineLegend (success + unchanged-skip + pill switch), the gated
+     branch, the 5xx branch and the offline catch — removes the class before
+     its own textContent write, so a skeleton always resolves to real copy. */
+  $("noteText").classList.add("bx-skel");
+  $("noteText").textContent = "";
   /* Unconditional PCR-panel invalidation (DEC-MOVERS-OPTIONS-PCR-001): the ONE
      move covering asset switches, gated payloads, preview/catch fallbacks, and
      absent-key payloads — the panel only reappears via showPcr() on a
@@ -613,7 +669,9 @@ async function load() {
         wasGated = false; lastGatedKey = null;
         rowsData = [];
         renderHead(); renderRows();
+        setAsofDot("live-down");
         $("asof").textContent = `server error · HTTP ${r.status}`;
+        $("noteText").classList.remove("bx-skel");
         $("noteText").textContent = detail || `the server answered HTTP ${r.status} — check the dashboard log (movers.pcr_corruption / the stack trace) for the fault.`;
         return;
       }
@@ -662,7 +720,9 @@ async function load() {
           ? ` — movers warm ${j.warm_segment ? j.warm_segment + " " : ""}${j.warm_done}/${j.warm_total}` : "";
         gatedStatus = `final stage: ${j.phase}${warm} — running ${fmtElapsed(j.elapsed_s)} (auto-refreshes)`;
       }
+      setAsofDot("live-warn");
       $("asof").textContent = gatedStatus;
+      $("noteText").classList.remove("bx-skel");
       $("noteText").textContent = j.note || "pull pipeline running — movers gated until the prebuild finishes.";
       clearTimeout(gateTimer);
       gateTimer = setTimeout(load, GATE_RETRY_MS);
@@ -670,16 +730,17 @@ async function load() {
     }
     clearTimeout(gateTimer);
     wasGated = false; lastGatedKey = null;
+    setAsofDot("live-ok");
     /* Skip-render-when-unchanged (skipUnchangedRender guard): byte-identical body
        for the byte-identical coordinate — the DOM (and rowsData/lastPayload)
-       already show exactly this snapshot; restore the note (set to "Loading…"
-       above) and stop. Guarded to the no-client-sort state so a manually sorted
+       already show exactly this snapshot; restore the note (put in the pending
+       .bx-skel state above) and stop. Guarded to the no-client-sort state so a manually sorted
        view never takes this path (DEC-DASHBOARD-JS-PERF-001). */
     const sig = p.toString() + "|" + bodyText;
     if (state.sort.idx === null && sig === lastRenderSig) {
       /* rowsData is unchanged (the DOM already shows this snapshot) — restore the
-         note THROUGH the legend helper so the " *" legend survives the "Loading…"
-         overwrite too (the same desync class as the pill switch). */
+         note THROUGH the legend helper so the " *" legend survives the
+         pending-skeleton overwrite too (the same desync class as the pill switch). */
       baseNote = j.note || "";
       refreshBaselineLegend(baseNote);
       showPcr(j);  /* load() hid the panel above — an identical repeat must restore it. */
@@ -727,7 +788,9 @@ async function load() {
     wasGated = false; lastGatedKey = null;
     rowsData = SAMPLE[state.asset] || SAMPLE.spot;
     renderHead(); renderRows();
+    setAsofDot("live-down");
     $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
+    $("noteText").classList.remove("bx-skel");
     $("noteText").textContent = "preview of the layout with sample rows — run the dashboard for real movers data (click any column to sort).";
   }
 }

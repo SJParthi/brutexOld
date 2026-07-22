@@ -486,3 +486,137 @@ class TestCandleRowsFromDbPayload:
             json.dumps("2024-01-02T04:46:00+00:00"),
         )
         assert out == {"entry_idx": 0, "exit_idx": 1, "dropped": False, "note": ""}
+
+
+class TestAxisTickPures:
+    """Batch B+C additive PURE axis/tick helpers (DEC-DASHBOARD-VISUAL-
+    OVERHAUL-001) — the tick/label math behind the new price/time axes,
+    last-price marker and equity zero baseline. Exact integer oracles only
+    (1/2/5 nice steps land on exact values); the createElementNS renderers
+    stay browser-only + source-string-pinned (the module's honest envelope).
+    """
+
+    def test_nice_ticks_basic_1_2_5_ladder(self) -> None:
+        assert _node_call("C.niceTicks(0, 100, 5)") == [0, 20, 40, 60, 80, 100]
+        assert _node_call("C.niceTicks(99, 201, 4)") == [100, 150, 200]
+
+    def test_nice_ticks_flat_domain_single_honest_label(self) -> None:
+        """Flat price range (the F-B3 flat-scale contract's axis twin):
+        exactly ONE tick at the collapsed value — never a NaN ladder."""
+        assert _node_call("C.niceTicks(5, 5, 5)") == [5]
+
+    def test_nice_ticks_reversed_and_junk_domains(self) -> None:
+        assert _node_call("C.niceTicks(100, 0, 5)") == [0, 20, 40, 60, 80, 100]
+        assert _node_call("C.niceTicks(NaN, 1, 5)") == []
+        assert _node_call("C.niceTicks(0, Infinity, 5)") == []
+
+    def test_time_tick_idxs_endpoints_and_dedup(self) -> None:
+        # Math.round(k·374/5) for k=0..5 — exact JS oracle, endpoints pinned.
+        assert _node_call("C.timeTickIdxs(375, 6)") == [0, 75, 150, 224, 299, 374]
+        assert _node_call("C.timeTickIdxs(1, 6)") == [0]
+        assert _node_call("C.timeTickIdxs(2, 6)") == [0, 1]
+        assert _node_call("C.timeTickIdxs(0, 6)") == []
+        assert _node_call("C.timeTickIdxs(NaN, 6)") == []
+
+    def test_ist_clock_label_and_midnight_date_form(self) -> None:
+        """Pure-epoch IST labels (the bxIstDateOfEpoch idiom): a session bar
+        reads HH:MM; an exact-midnight 1day bar reads the IST DATE."""
+        ist = timezone(timedelta(hours=5, minutes=30))
+        bar = int(datetime(2024, 1, 2, 9, 15, tzinfo=ist).timestamp() * 1000)
+        midnight = int(datetime(2024, 1, 2, 0, 0, tzinfo=ist).timestamp() * 1000)
+        assert _node_call("C.istClockLabel(ARGS[0])", json.dumps(bar)) == "09:15"
+        assert _node_call("C.istClockLabel(ARGS[0])", json.dumps(midnight)) == "2024-01-02"
+        assert _node_call("C.istClockLabel(NaN)") is None
+
+    def test_price_to_y_rides_the_candle_scale_exactly(self) -> None:
+        """bxPriceToY mirrors bxCandleGeom's inverted scale — a gridline can
+        never disagree with the candles (power-of-two box, exact oracle)."""
+        rows = [{"ts": 0, "open": 0, "high": 100, "low": 0, "close": 50}]
+        expr = (
+            "(() => {"
+            "  const g = C.candleGeom(ARGS[0], 256, 256, 0);"
+            "  return [C.priceToY(g, 256, 0, 0), C.priceToY(g, 256, 0, 50),"
+            "          C.priceToY(g, 256, 0, 100), C.priceToY(g, 256, 0, NaN)];"
+            "})()"
+        )
+        assert _node_call(expr, json.dumps(rows)) == [256, 128, 0, None]
+
+    def test_price_to_y_empty_geom_is_null(self) -> None:
+        assert _node_call("C.priceToY(C.candleGeom([], 100, 100, 0), 100, 0, 5)") is None
+
+    def test_equity_domain_always_contains_zero(self) -> None:
+        """The zero baseline is ALWAYS drawable — the domain mirrors
+        bxEquityPathNode's own lo/hi fold (0-initialised)."""
+        trades = [{"pnl_paisa": 100, "costs_paisa": 0}, {"pnl_paisa": 200, "costs_paisa": 0}]
+        out = _node_call("C.equityDomain(C.equitySeries(ARGS[0]))", json.dumps(trades))
+        assert out == {"lo": 0, "hi": 300}
+        trades2 = [{"pnl_paisa": 100, "costs_paisa": 0}, {"pnl_paisa": -300, "costs_paisa": 0}]
+        out2 = _node_call("C.equityDomain(C.equitySeries(ARGS[0]))", json.dumps(trades2))
+        assert out2 == {"lo": -200, "hi": 100}
+        assert _node_call("C.equityDomain(C.equitySeries([]))") is None
+
+
+#: The six Batch B+C createElementNS renderers + their BXChart export keys —
+#: ADDITIVE for a later wiring PR (strategy.html's marker-legend comment:
+#: bx-strategy-panel.js does not draw the axis/last-price/hover chrome yet).
+_BROWSER_ONLY_RENDERERS = (
+    ("bxSvgTitleNode", "svgTitleNode"),
+    ("bxAxisTextNode", "axisTextNode"),
+    ("bxPriceAxisNodes", "priceAxisNodes"),
+    ("bxTimeAxisNodes", "timeAxisNodes"),
+    ("bxLastPriceNodes", "lastPriceNodes"),
+    ("bxEquityAxisNodes", "equityAxisNodes"),
+)
+
+
+class TestBrowserOnlyRendererPins:
+    """The TestAxisTickPures envelope's SOURCE-STRING PIN: the six
+    document-bound (browser-only) renderers cannot be node-executed here,
+    so their definition + BXChart namespace export are asserted against the
+    shipped source — deleting or renaming one fails its matching case."""
+
+    @pytest.mark.parametrize(("fn_name", "export_key"), _BROWSER_ONLY_RENDERERS)
+    def test_renderer_defined_and_exported(self, fn_name: str, export_key: str) -> None:
+        src = _CHART_JS.read_text(encoding="utf-8")
+        assert f"function {fn_name}(" in src, f"{fn_name} definition missing"
+        assert f"{export_key}: {fn_name}" in src, f"{fn_name} BXChart export missing"
+
+
+class TestHoverTitlePures:
+    """Static-hover title builders: the bar's/trade's OWN stored values at
+    full precision — no mousemove work, capped at TITLE_TEXT_CAP (500)."""
+
+    def test_candle_title_full_precision_ist(self) -> None:
+        ist = timezone(timedelta(hours=5, minutes=30))
+        ts = int(datetime(2024, 1, 2, 9, 15, tzinfo=ist).timestamp() * 1000)
+        row = {"ts": ts, "open": 100.5, "high": 101, "low": 99.25, "close": 100}
+        out = _node_call("C.candleTitleText(ARGS[0])", json.dumps(row))
+        assert out == "2024-01-02 09:15 IST · O 100.5 · H 101 · L 99.25 · C 100"
+        assert _node_call("C.candleTitleText(null)") == ""
+
+    def test_trade_arrow_title_entry_and_exit(self) -> None:
+        trade = {
+            "direction": "long",
+            "entry_px": "100.5",
+            "entry_ts": "2024-01-02T04:45:00+00:00",
+            "exit_px": "101.25",
+            "exit_ts": "2024-01-02T04:46:00+00:00",
+            "exit_reason": "TP",
+        }
+        entry = _node_call("C.tradeArrowTitle('entry', ARGS[0])", json.dumps(trade))
+        assert entry == "entry long · @ 100.5 · 2024-01-02T04:45:00+00:00"
+        exit_t = _node_call("C.tradeArrowTitle('exit', ARGS[0])", json.dumps(trade))
+        assert exit_t == "exit long · @ 101.25 · 2024-01-02T04:46:00+00:00 · exit reason: TP"
+
+    def test_trade_arrow_title_honest_dashes_on_absent_fields(self) -> None:
+        out = _node_call("C.tradeArrowTitle('entry', ARGS[0])", json.dumps({}))
+        assert out == "entry ? · @ — · —"
+
+    def test_title_cap_bounds_hostile_payloads(self) -> None:
+        """An unbounded exit_reason is capped at exactly 500 chars with an
+        ellipsis (the hard tooltip-payload rule)."""
+        trade = {"direction": "long", "exit_px": 1, "exit_ts": "t", "exit_reason": "x" * 600}
+        out = _node_call("C.tradeArrowTitle('exit', ARGS[0])", json.dumps(trade))
+        assert len(out) == 500
+        assert out.endswith("…")
+        assert _node_call("C.TITLE_TEXT_CAP") == 500
