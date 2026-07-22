@@ -134,6 +134,13 @@ PROGRESS_VOLATILE_KEYS: Final[frozenset[str]] = frozenset(
         # siblings ``pid`` + ``running`` stay COMPARED: both are
         # deterministic in today's in-process twin (compare-by-default).
         "wall_time_utc",
+        # the dashboard file-bridge decay stamp added by main post-#1733
+        # (``sweep_supervisor.PROGRESS_WALL_TIME_KEY`` — publish_progress
+        # always folds ``wall_time = time.time()`` so a reader can decay a
+        # dead writer's frozen ``running=True`` claim) — wall-clock-derived
+        # by construction, the same #1712 ``wall_time_utc`` class, per this
+        # denylist's admission criterion.
+        "wall_time",
     }
 )
 
