@@ -139,6 +139,26 @@ class TestLoadSweepScanViaRollup:
         assert len(warns) == 1
         assert warns[0]["reason"] == "gate_coordinates_present"
 
+    def test_gated_fallback_dedupes_the_warn_on_a_repeat_serve(self, tmp_path: Path) -> None:
+        """The gated-row fallback WARN is per-(rev, reason) DEDUPED (the
+        #1711 ``OutageGate`` precedent): a poll loop hitting the SAME
+        revision must not warn once per poll — the second serve takes the
+        ``should_emit`` False arm SILENTLY while still returning the
+        identical ``gate_coordinates_present`` fallback verdict."""
+        token = '{"gate_config":{"overfit":[0.95]}}'
+        _write_store(tmp_path, [replace(_row(1), gate_provenance=token), _row(2)])
+        sweeps_root = tmp_path / SWEEPS_DIRNAME
+        assert rr.rebuild_rollup(sweeps_root) is True
+        gate = rr.LogGate()
+        rev = _rev(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            first = load_sweep_scan_via_rollup(tmp_path, rev=rev, log_gate=gate)
+            second = load_sweep_scan_via_rollup(tmp_path, rev=rev, log_gate=gate)
+        assert first.scan is None and first.fallback_reason == "gate_coordinates_present"
+        assert second.scan is None and second.fallback_reason == "gate_coordinates_present"
+        warns = [e for e in logs if e["event"] == "sweep_results.rollup_fallback"]
+        assert len(warns) == 1  # deduped — never one WARN per poll
+
     def test_fallback_names_the_reason_and_dedupes_the_warn(self, tmp_path: Path) -> None:
         _write_store(tmp_path, [_row(1)])
         gate = rr.LogGate()
