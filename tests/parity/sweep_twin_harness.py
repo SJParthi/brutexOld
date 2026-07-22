@@ -289,6 +289,7 @@ def run_persisted_arm(
     cfg: SweepRunConfig,
     trial_stats_digest: str = DEFAULT_TWIN_DIGEST,
     reference_stamper: TradeReferenceStamper | None = None,
+    exec_bars_1m: Sequence[CandleBar] | None = None,
 ) -> PersistedArmArtifacts:
     """Run ONE persisted-sweep arm into a fresh *root*; capture its artifacts.
 
@@ -296,6 +297,15 @@ def run_persisted_arm(
     a fresh store / dedup / audit writer per arm. The digest path is ON by
     default so the trial-stats sidecar + completion sentinel are genuinely
     written and compared (the frozen sweep-run golden does not exercise them).
+
+    ``exec_bars_1m`` is the 1-minute execution stream ``run_persisted_sweep``
+    requires post-#1733 (DEC-FILL-EXEC-GRID-1M-001). ``None`` (the default)
+    uses *bars* itself — the twin fixture runs at tf=1minute, where the
+    decision stream IS the execution stream (§6 fixed point: one list, one
+    key), mirroring the ``exec_bars_1m=bars`` adaptation of
+    ``tests/golden/test_engine_sweep_run_golden.py``. It stays a parameter
+    (never a hardcode) so a future belt/futures arm whose execution stream
+    differs can thread its own.
     """
     store_dir = root / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
@@ -314,6 +324,12 @@ def run_persisted_arm(
                 audit=audit,
                 trial_stats_digest=trial_stats_digest,
                 reference_stamper=reference_stamper,
+                # tf=1minute — the decision stream IS the execution stream
+                # (§6 fixed point: one list, one key) — the same
+                # ``exec_bars_1m=bars`` adaptation as
+                # tests/golden/test_engine_sweep_run_golden.py
+                # (DEC-FILL-EXEC-GRID-1M-001; required kw-only post-#1733).
+                exec_bars_1m=bars if exec_bars_1m is None else exec_bars_1m,
             )
     return PersistedArmArtifacts(
         arm=arm.name,
