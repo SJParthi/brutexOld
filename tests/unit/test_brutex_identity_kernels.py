@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, cast
 
@@ -123,7 +123,12 @@ class TestSnapshotDifferential:
         st.datetimes(
             min_value=datetime(1970, 1, 1),
             max_value=datetime(9999, 12, 30),
-            timezones=st.none() | st.timezones(),
+            # Static-only cast: the runtime signature accepts the documented
+            # naive-or-aware mix `none() | timezones()` alongside bounds
+            # (`SearchStrategy[tzinfo | None]`), but the stub's overload set
+            # has no bounds+mixed arm — cast() is identity at runtime, so
+            # generation is byte-unchanged.
+            timezones=cast("st.SearchStrategy[tzinfo]", st.none() | st.timezones()),
         )
     )
     def test_isoformat_differential_over_hostile_datetimes(self, ts: datetime) -> None:

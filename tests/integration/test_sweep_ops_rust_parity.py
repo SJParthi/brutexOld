@@ -121,7 +121,7 @@ from brutex.observability.stage_stamp import (  # noqa: E402
     validate_stage_stamp,
     write_stage_stamp,
 )
-from brutex.ranking import OverfitGateConfig  # noqa: E402
+from brutex.ranking import CvarGateConfig, OverfitGateConfig  # noqa: E402
 from hypothesis import given  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
@@ -165,7 +165,9 @@ class _FragmentGrid:
     the fake tracks the REAL `SweepGridConfig` shape after the
     DEC-METRICS-KELLY-GROWTH-001 identity-axis extension (the train-b
     tier-2 seam: a stale fake without the attribute AttributeError'd the
-    extended Python law inside the burn-in oracle callback).
+    extended Python law inside the burn-in oracle callback); `cvar_gate`
+    (default None — gate OFF) tracks the DEC-RANK-CVAR-TAIL-GATE-001
+    identity-fragment extension the same way.
     """
 
     def __init__(
@@ -173,6 +175,7 @@ class _FragmentGrid:
         *,
         overfit: OverfitGateConfig | None = None,
         max_sl_hit_rate: float | None = None,
+        cvar_gate: CvarGateConfig | None = None,
         stage3_enable: bool = False,
         stage3_top_k: int = 10,
         stage3_max_fevals: int = 200,
@@ -180,6 +183,7 @@ class _FragmentGrid:
     ) -> None:
         self._overfit = overfit
         self._max_sl_hit_rate = max_sl_hit_rate
+        self._cvar_gate = cvar_gate
         self._stage3_enable = stage3_enable
         self._stage3_top_k = stage3_top_k
         self._stage3_max_fevals = stage3_max_fevals
@@ -192,6 +196,10 @@ class _FragmentGrid:
     @property
     def max_sl_hit_rate(self) -> float | None:
         return self._max_sl_hit_rate
+
+    @property
+    def cvar_gate(self) -> CvarGateConfig | None:
+        return self._cvar_gate
 
     @property
     def stage3_enable(self) -> bool:
