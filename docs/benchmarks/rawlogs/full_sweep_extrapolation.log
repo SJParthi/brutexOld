@@ -1,0 +1,18 @@
+
+Kernel regression floor (DEC-P0-062 / DEC-SWEEP-RESIDENT-KERNEL-001):
+  per-trial proxy  = 22.87 µs/trial
+  regression floor = 10 ms/trial
+
+.
+SLA validator (DEC-P0-062 / DEC-SWEEP-RESIDENT-KERNEL-001, G-08):
+  path                  = resident + rayon-parallel batched mask-AND
+  mask·bar throughput   = 3939.9 M mask·bar/s
+  per-trial proxy       = 12.69 µs/trial
+  measured throughput   = 78,798 trials/sec
+  projected (33B)       = 4.85 days
+  M4 Pro SLA envelope   = 4.00 days
+
+s..
+=========================== short test summary info ============================
+SKIPPED [1] tests/bench/test_full_sweep_extrapolation.py:218: BRUTEX_M4PRO_ABS=1 not set — the absolute 33B-trial SLA gate runs only on the M4 Pro self-hosted runner (projection printed above). On shared GHA the O(1) RATIO gate (test_throughput_canary.py) + the regression floor are the active gates (DEC-P0-020 honest envelope).
+3 passed, 1 skipped in 0.48s

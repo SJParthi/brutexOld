@@ -1,0 +1,21 @@
+2026-07-18 14:51:13 [info     ] hardware_envelope.ram_detected detected=True total_ram_bytes=16856244224
+2026-07-18 14:51:13 [info     ] hardware_envelope.budget_derived budget=BRUTEX_MAX_BLOOM_BYTES derived_bytes=5618748074 detected_ram_bytes=16856244224 floor_bytes=17179869184 fraction=0.3333333333333333 workers=1
+2026-07-18 14:51:13 [info     ] bloom_init                     backend=fastbloom-rs bits_per_item=33.547705 capacity=200000 fpr_target=1e-07 impl_k=24 k=24 m_bits=6709541 m_bytes=838693
+.2026-07-18 14:51:14 [info     ] bloom_init                     backend=fastbloom-rs bits_per_item=33.547705 capacity=200000 fpr_target=1e-07 impl_k=24 k=24 m_bits=6709541 m_bytes=838693
+.2026-07-18 14:51:14 [info     ] bloom_init                     backend=fastbloom-rs bits_per_item=33.547705 capacity=200000 fpr_target=1e-07 impl_k=24 k=24 m_bits=6709541 m_bytes=838693
+2026-07-18 14:51:14 [info     ] bloom_init                     backend=fastbloom-rs bits_per_item=33.547705 capacity=200000 fpr_target=1e-07 impl_k=24 k=24 m_bits=6709541 m_bytes=838693
+....
+
+-------------------------------------------------------------------------------------------------- benchmark: 4 tests -------------------------------------------------------------------------------------------------
+Name (time in ns)                     Min                     Max                  Mean                StdDev                Median                 IQR            Outliers  OPS (Kops/s)            Rounds  Iterations
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+test_probe_at_large_scale        613.0001 (1.0)      253,008.0000 (3.66)       818.5285 (1.0)      1,546.0886 (1.17)       641.0000 (1.0)      311.5000 (7.08)     595;1643    1,221.7046 (1.0)       99444           1
+test_probe_at_small_scale        615.0000 (1.00)      69,075.0000 (1.0)        876.6982 (1.07)     1,563.9911 (1.18)       642.0000 (1.00)      87.7500 (1.99)      92;2426    1,140.6434 (0.93)      10365           1
+test_contains_at_small_scale     950.0000 (1.55)      69,086.0000 (1.00)     1,234.5976 (1.51)     1,521.1431 (1.15)     1,000.0000 (1.56)      44.0000 (1.0)      528;4144      809.9805 (0.66)      25364           1
+test_contains_at_large_scale     995.0000 (1.62)      77,406.0000 (1.12)     1,210.9962 (1.48)     1,325.2671 (1.0)      1,056.0000 (1.65)      44.0000 (1.0)      423;3865      825.7664 (0.68)      32205           1
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Legend:
+  Outliers: 1 Standard Deviation from Mean; 1.5 IQR (InterQuartile Range) from 1st Quartile and 3rd Quartile.
+  OPS: Operations Per Second, computed as 1 / Mean
+6 passed in 2.46s
