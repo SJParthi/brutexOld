@@ -6,9 +6,10 @@
 > **future operator-gated DEC/ADR**.
 > **Date:** 2026-07-19.
 > **Provenance:** multi-agent deep-research session, docs-only branch
-> `claude/options-strategies-design`, deliberately **NO PR** (fleet-wide
-> PR-creation freeze); every repo citation is `file:line` at the branch base
-> SHA (see `docs/design/options-strategies/README.md`).
+> `claude/options-strategies-design`; draft PR #1725
+> (DEC-OPTION-SELLING-RESEARCH-001, #2210) carries this research pair; every
+> repo citation is `file:line` at the branch base SHA (see
+> `docs/design/options-strategies/README.md`).
 
 This chapter merges the three microstructure research parts — (1) expiry
 calendars / strike grids / lot sizes, (2) settlement / STT / exercise, (3)
@@ -101,7 +102,8 @@ mid-Aug-2023 (MIDCPNIFTY→Mon) · 2023-09-04 (BANKNIFTY weekly→Wed) ·
 one-weekly-per-exchange + 2% expiry ELM) · 2025-01-01 (NSE monthlies→last
 Thu; BSE all→Tue) · 2025-04-25/Jul-2025 expiry (BANKNIFTY 35, MIDCPNIFTY
 140) · 2025-09-01 (NSE→Tue, BSE→Thu, stocks→last Tue) ·
-2025-10-28/2025-12-30/Jan-2026 cycle (lot reset NIFTY 65 etc.) ·
+2025-10-03/2025-12-30/Jan-2026 cycle (lot reset NIFTY 65 etc. — Circular
+176/2025 dated 2025-10-03, §4.5; qtr/half-yearly flipped 2025-12-30 EOD) ·
 2026-08-03 (FUTURE: NSE F&O close 15:40 — §1.9).
 
 ### 1.6 The weekly-expiry history in prose
@@ -335,7 +337,7 @@ Index lot sequences (verified anchors):
 | SENSEX | 15 → **10** (2023-05-15 relaunch) → **20** (2024-11-20) → 20 (no later change found) | [Business Today](https://www.businesstoday.in/amp/markets/top-story/story/bse-relaunches-sensex-bankex-derivative-contracts-changes-expiry-cycle-reduces-lot-size-381394-2023-05-15), [HDFC Sec](https://www.hdfcsec.com/blog/details/change-in-the-lot-size-of-index-derivative-for-weekly-monthly-quarterly-and-half-yearly-expiry-) |
 | FINNIFTY | 40 → **25** (2024-04-26) → **65** (2024-11-20) → **60** (Jan-2026 cycle) | [Motilal](https://www.motilaloswal.com/learning-centre/2024/4/revised-lot-size-for-nifty-fin-nifty-and-nifty-midcap-contracts-and-what-does-it-mean-for-you), [Zerodha/X](https://x.com/zerodhaonline/status/1974363648974881113) |
 | MIDCPNIFTY | 75 → **50** (2024-04-26) → **120** (2024-11-20) → **140** (Jul-2025) → **120** (Jan-2026 cycle) | ditto + [Business Standard 2025-03-31](https://www.business-standard.com/markets/capital-market-news/nse-revises-market-lot-sizes-for-nifty-bank-nifty-midcap-select-f-o-contracts-125033100440_1.html) |
-| NIFTYNXT50 | 10 (2024-04-24 launch) → **25** (2024-11-20) → unchanged | [FAOP64625 era reports](https://groww.in/blog/nse-increases-lot-sizes-for-index-derivatives) |
+| NIFTYNXT50 | 10 (2024-04-24 launch) → **25** (2024-11-20) → unchanged (lot size UNVERIFIED — §7 M-8, matching §4.5) | [FAOP64625 era reports](https://groww.in/blog/nse-increases-lot-sizes-for-index-derivatives) |
 | BANKEX | 20 → **15** (2023-05-15) → **30** (2024-11-20) → §7 E-5 | [Business Today](https://www.businesstoday.in/amp/markets/top-story/story/bse-relaunches-sensex-bankex-derivative-contracts-changes-expiry-cycle-reduces-lot-size-381394-2023-05-15), [Paytm Money](https://www.paytmmoney.com/blog/changes-in-lot-sizes-of-derivatives-contracts-on-nse-and-bse/) |
 
 Stock lots: revised in the same periodic reviews (the Jul-2021 circular

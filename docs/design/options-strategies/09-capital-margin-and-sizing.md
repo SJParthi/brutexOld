@@ -5,7 +5,7 @@ SPOT-ONLY (DEC-ENGINE-SPOT-ONLY-001) and options remain REFERENCE_ONLY; any acti
 future operator-gated DEC/ADR.
 **Date:** 2026-07-19
 **Provenance:** multi-agent deep-research session, docs-only branch
-`claude/options-strategies-design`, deliberately NO PR (fleet-wide PR-creation freeze).
+`claude/options-strategies-design`, draft PR #1725 (DEC-OPTION-SELLING-RESEARCH-001, #2210) carries this research pair.
 
 **Evidence legend:**
 - **[REPO path:line]** — read directly in the research session from the working tree.
@@ -24,8 +24,8 @@ maintains (CLAUDE.md §2 Rule 3).
 
 **Sibling docs:** margin/limits/bans/freeze/circuit *mechanics* in full detail live in the
 microstructure doc of this series (doc 02); the 2024-25 regulatory measures and product-landscape
-regime windows live in the regulatory-landscape doc. This doc summarizes both only as far as
-capital, margin modeling, and sizing require.
+regime windows also live in doc 02 (02-indian-fno-microstructure.md). This doc summarizes both
+only as far as capital, margin modeling, and sizing require.
 
 ---
 
@@ -130,7 +130,7 @@ current regime **NIFTY 65 / BANKNIFTY 30 / SENSEX 20** (Jan-2026 series onward)
 | 3 | **Short straddle** (ATM both legs) | Same stack; ATM legs carry the largest scan risk → ≥ strangle | ≈ ₹1.5–2 lakh | [WEB Choice India straddle article + Samco; consistent with repo ₹1.0–1.5L @ its assumed lot 75 [REPO docs/track2/TRACK2_RISK_MGMT.md:112-117]] |
 | 4 | **Iron condor** (strangle + bought wings) | Defined-risk portfolio; SPAN spread benefit | **₹44,303** in the same Varsity worked example (vs ₹1.45L unhedged = **−69.5%**); an "80% margin reduction" figure also circulates | [WEB Zerodha Varsity (via search); WEB share.market / navigationtrading for the 80% claim — two different examples, both quoted, neither generalizable (CM-U15)] |
 | 5 | **Bull put spread** (credit vertical) | Defined-risk; margin ≈ scan risk of the pair, floored near max-loss | ≈ ₹20–30k (order of magnitude) | [ARITH] one condor ≈ two verticals → ₹44,303/2 ≈ ₹22k; exact rupee figure per width [UNVERIFIED — CM-U3]; the max-loss LAW is exact: max_loss = (width − net_credit) × lot [WEB Fidelity / Zerodha Varsity bull-put-spread chapters] |
-| 6 | **Cash-secured put** (a sizing DISCIPLINE, not an exchange margin class) | Seller voluntarily reserves full assignment notional | ≈ ₹16.4 lakh notional at S=25,000×65 (illustrative) | [ARITH] S×lot; India index options are cash-settled — the CSP discipline = notional-cap sizing (§4 law N) |
+| 6 | **Cash-secured put** (a sizing DISCIPLINE, not an exchange margin class) | Seller voluntarily reserves full assignment notional | ≈ ₹16.25 lakh notional at S=25,000×65 (illustrative) | [ARITH] S×lot; India index options are cash-settled — the CSP discipline = notional-cap sizing (§4 law N) |
 | 7 | **Covered call** (index proxy: long futures + short call) | Futures margin + short call, SPAN offset between legs | futures leg alone ≈ low-₹1L class; combined [UNVERIFIED — CM-U5] | index futures margin ≈ 11-13% of notional historically [UNVERIFIED — CM-U5]; true stock covered calls need physical shares (out of engine scope — stocks REFERENCE_ONLY, CLAUDE.md §2 Rule 3) |
 | 8 | **Ratio write / naked ratio** (1×2) | Undefined risk on the extra short leg — margins like a naked short + a spread | ≥ row 1 + row 5 | [ARITH] composition; exact SPAN portfolio number [UNVERIFIED — CM-U3] |
 | 9 | **Calendarized short premium** (short near / long far) | SPAN calendar-spread benefit EXCEPT on expiry day (removed) | small until expiry week; **full de-benefit on expiry day** | [WEB ICICI Direct + Zerodha Z-Connect; REPO docs/track2/TRACK2_RISK_MGMT.md:424-425] — §5.3 |
@@ -161,7 +161,9 @@ GROSS carry if everything expires worthless. They are emphatically **not expecte
 seller's expected edge is a small fraction of gross credit; left-tail losses are multiples of it
 — §3). Declared assumptions: illustrative spot **S = 25,000** (ILLUSTRATIVE ONLY — not a market
 claim for any date); lot **65** [REPO brutex/options/lot_size_history.py:63]; margins from §2.2;
-ATM weekly straddle premium ≈ 0.8·S·σ·√T (Brenner–Subrahmanyam approximation, standard result)
+ATM weekly straddle premium ≈ 0.8·S·σ·√T (Brenner–Subrahmanyam approximation [WEB Brenner &
+Subrahmanyam 1988, "A Simple Formula to Compute the Implied Standard Deviation," Financial
+Analysts Journal — standard published result])
 with annualized σ = 12% assumed for the week ([UNVERIFIED as a current-regime figure — CM-U6];
 production reads realized/implied vol from the lake + the stamped `vix_at_entry`, which the
 engine already carries per CLAUDE.md §2 Rule 3).
@@ -301,7 +303,7 @@ Concretely:
 
 ---
 
-## 4. Position-sizing laws for the engine to sweep
+## 4. Position-sizing laws for the translation layer to sweep
 
 The house already enumerates four sizing methods (fixed-rupee / fixed-fractional /
 vol-targeting off `vix_at_entry` / fractional-Kelly-only — full Kelly REJECTED)
@@ -316,7 +318,7 @@ structure?**
 | **N** | **Notional cap** (undefined-risk fallback; also the cash-secured-put discipline) | `n_lots = floor(C_notional · equity / (S(t) × lot(t)))` | **YES — EXACT** (spot lake + lot table only) |
 | **S** | **Stress-loss cap** (the recommended undefined-risk primary) | `m(t) = max(K · σ̂(t), m_floor)`; per structure, `stress_loss_per_lot = lot(t) × structure_loss_at(S(t)·(1−m), S(t)·(1+m)) − net_credit×lot(t)`; e.g. strangle: `lot × max(K_put − S(1−m), S(1+m) − K_call, 0)`; `n_lots = floor(B_stress · equity / stress_loss_per_lot)` | **YES for the PRICE-move arm** — σ̂(t) = trailing daily vol from the 2020→today 1-minute→1-day spot series (computable in production; NOT measured here — no lake in the research environment). `m_floor` should dominate K·σ̂: the window contains −12.98% (2020-03-23) and −5.93% (2024-06-04) [WEB §3], so `m_floor ∈ {6%, 13%}` are the two honest presets ("worst post-election print" / "worst COVID print"). **Honest limit:** an AT-EXPIRY / through-strike price bound — it does NOT bound pre-expiry MTM under an IV explosion (vega loss). For intraday-only variants, substitute worst intraday adverse excursion from the 1-minute series (also computable) |
 | **H** | **Portfolio heat cap** | `Σ_open stress_or_max_loss / equity ≤ H` | YES given D/S per position — a pure fold |
-| **P** | **Per-structure concentration caps** | max lots per structure class per expiry; mirrors the repo's ≤60% single-index cap [REPO TRACK2_RISK_MGMT.md:304] | YES — bookkeeping |
+| **P** | **Per-structure concentration caps** | max lots per structure class per expiry; mirrors the repo's ≤60% single-index cap [REPO TRACK2_RISK_MGMT.md:302] | YES — bookkeeping |
 | **M** | **Margin-proxy cap** | `n_lots = floor(C_margin · equity / margin_proxy_per_lot(t))` | **ONLY under the V2 annotation model (§5.2)** — and then ONLY as an annotated feasibility screen, never a ranked/sized-by input under V1. REFUSED as an exact law today (no SPAN history) |
 | **X** | **Structural clamps** (always-on, not swept) | `qty ≤ freeze_qty` per order leg (NSE freeze denominated in UNITS, not lots — the doc-02 correction of [REPO TRACK2_RISK_MGMT.md:51-58]; freeze values are time-varying, so a HISTORICAL backtest needs a dated freeze table, not the master's current snapshot [REPO brutex/adapters/groww/instruments.py:207]; current values post-FAOP71540 [UNVERIFIED — CM-U19]); FutEq position-limit headroom [REPO TRACK2_RISK_MGMT.md:27-45] | YES — constants + delta-adjusted fold (delta available from the lake's Greeks overlay, GREEKS_FORMULA_VERSION 2, CLAUDE.md §1 — a genuine synergy: stored per-bar delta makes FutEq computation feasible without new vendor data) |
 
@@ -382,7 +384,7 @@ annotate-never-reranks law:
   store or influences ranking." [REPO brutex/futures/executor.py:14-16]; MAE/MFE likewise
   "annotation-only, never a ranking input" [REPO brutex/futures/executor.py:383]. Ledger form:
   "R13 annotation-never-reranks: ranking/preset order/family collapse byte-untouched — a
-  cascade-FAILED rank-1 STAYS rank-1 and is flagged" [REPO docs/MIGRATION.md:7167]; second
+  cascade-FAILED rank-1 STAYS rank-1 and is flagged" [REPO docs/MIGRATION.md #1749 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001)]; second
   precedent "annotation-only — it does NOT change which combos pass the in-sample gates or the
   ranking" [REPO docs/MIGRATION.md:5198].
 
@@ -481,7 +483,7 @@ DEC-ETC-REGIME-HISTORY-001-style table with its circular as the citation:
 - Regime boundaries come from DATA channels, not hardcoded dates, wherever a data channel
   exists (the registry/instrument-master backbone — lot sizes ride the master + the
   leg-economics fold, CLAUDE.md §2 DEC-GROWW-LEG-ECONOMICS-001; the hardcoded cited tables are
-  cross-checks/fallbacks, per the regulatory-landscape doc's architectural conclusion).
+  cross-checks/fallbacks, per doc 02's architectural conclusion (02-indian-fno-microstructure.md)).
 
 ---
 

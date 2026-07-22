@@ -162,7 +162,7 @@ itself, never a hardcoded NSE rule). Seed grids are the taxonomy chapter's
 | `E-DELTA(δlo,δhi)` | strike whose stored \|Δ\| ∈ [δlo,δhi] | {(.05,.10),(.10,.20),(.15,.25),(.25,.35),(.45,.55)} | **refuses when the Greeks overlay is NULL** — the 7-status ladder `STATUS_NO_RATE/AT_EXPIRY/NO_SPOT/BAD_INPUT/BELOW_INTRINSIC/NO_SOLUTION/OK` (`brutex/data/greeks_enrich.py:129-136`). The last ~600 s pre-expiry is `AT_EXPIRY`-NULL by design ⇒ a Δ-selected 0DTE strike is **unresolvable in the final ~10 minutes** (chapter [04](04-gap-analysis.md)); the production-lake coverage fraction is **UNVERIFIED (G8)** — the on-box recipe is a `brutex greeks-backfill --dry-run` census |
 | `E-EM(m)` | S ± m·EM, EM = S·IV·√(DTE/365) | m ∈ {0.5,0.75,1.0,1.25,1.5,2.0} | inherits the same overlay-NULL refusal + the enrichment's q=0 / rate-6.5%-ASSUMED / T-anchor bias (chapter [04](04-gap-analysis.md)) |
 | `E-IVW(w0,a)` | wing width = round(w0·(1+a·IVR)) | w0 ∈ {2,4,6}; a ∈ {0,0.5,1.0} | **a>0 is UNAVAILABLE in v1** — it needs an IV-rank series that does not exist (§3.3) and a VIX-derived variant would inherit the Rule-3 bar. **v1 ships fixed-width wings (a=0 only).** |
-| `E-YIELD(y)` | net credit ≥ y of denominator | y ∈ {0.5%,1%,2%} of **notional** | the margin denominator is **BLOCKED** (§5) — v1 uses notional; a margin-yield screen refuses |
+| `E-YIELD(y)` | net credit ≥ y of the structure WIDTH | y ∈ {0.20, 0.33, 0.40} of **width** (= the exact max-loss capital basis, §5.1 — no SPAN needed) | the SPAN-**margin** denominator stays BLOCKED (§5) and undefined-risk families refuse; defined-risk (v1-admissible) families use credit/width |
 | level-anchored | strike pinned to a 60-bit spot-mask level (pivot / PDH-PDL / fib) | — | overlay-free; the entry-mask bits themselves (§3) |
 
 ### §2.3 Expiry-tier addressing (`expiry_tier`) — vendor DATA, never a formula
@@ -192,7 +192,7 @@ G-CAPITAL (§5), and it determines the v1 sweep set:
 | 4 | Iron butterfly | `S:CE@ATMOFF(0)+S:PE@ATMOFF(0)+B:PE@−W+B:CE@+W /W0` | **DEF** `W−C` | **YES** | exact |
 | 5 | Bull put spread | `S:PE@Δ/T + B:PE@−W/T` | **DEF** `W−C` | **YES** | exact; entry mask = bullish 60-bit point (§3) |
 | 6 | Bear call spread | `S:CE@Δ/T + B:CE@+W/T` | **DEF** `W−C` | **YES** | exact; entry mask = bearish 60-bit point |
-| 7a | Covered call (index, FUT-covered) | `B:FUT/M0 + S:CE@Δ/T` | UND (down) | **NO — REFUSE** | naked-class downside, no defined max loss |
+| 7 | Covered call (index, FUT-covered) | `B:FUT/M0 + S:CE@Δ/T` | UND (down) | **NO — REFUSE** | naked-class downside, no defined max loss |
 | 8 | Cash-secured put | `S:PE@Δ/T + reserve K·lot` | **FIN-large** `K−C` | **YES\*** | max_loss exact but a large multiple of real SPAN (magnitude **UNVERIFIED (G1)**, chapter [09](09-capital-margin-and-sizing.md)) — admitted under `capital_basis="max_loss"` with the understatement DISCLOSED (ruling R-1, §14) |
 | 9 | Front-ratio (credit) | `B:CE@ATMOFF + S:CE@Δ ×2` | UND (one wing) | **NO — REFUSE** | extra naked leg |
 | 10 | Jade lizard | `S:PE@Δ + S:CE@Δ + B:CE@+W_c`, `C>W_c` | UND-down | **NO — REFUSE** | naked put side |
@@ -204,7 +204,7 @@ G-CAPITAL (§5), and it determines the v1 sweep set:
 repertoire on index underlyings inside the honestly-priceable cost window [2024-10-01 → today]
 (the option-ETC verified-window floor, `brutex/costs/constants.py:126-136` refusal doctrine;
 §6.2). **REFUSED in v1: 6 families** — short straddle (1), short strangle (2), index covered
-call (7a), front-ratio (9), jade lizard (10) on the capital axis; calendar (11) on the
+call (7), front-ratio (9), jade lizard (10) on the capital axis; calendar (11) on the
 cross-expiry max-loss + data-wall grounds. The refused families are **first-class in the
 grammar but refuse on their named axis** and unlock *additively* when the SPAN-margin DEC
 (§5.5) and the cross-expiry-bound DEC land — the exact `margin_history.py` posture ("annotate
@@ -332,7 +332,7 @@ without co-timed intrabar data; it is rejected as fabrication.
 
 Per open structure, per 1-minute bar, over the joined premium path (Σ signed leg closes — an
 O(legs) join, the read the movers-options screen already performs per contract via
-`lake_source.load_pair`): read leg closes → compute the structure mark → evaluate triggers in a
+`_read_future_session`): read leg closes → compute the structure mark → evaluate triggers in a
 **pinned deterministic order** → act. **v1 management law = static structures with a managed
 exit**; the leg-mutating adjustments (`D-ROLL-U` roll-the-untested-side, `D-RECENTER`
 delta-band re-center, `D-WING` add-a-wing, `D-INVERT`) are **v2 EXIT-LAW axis members on
@@ -405,6 +405,10 @@ bars:
 | **A — bounded-fill** | P1∧P2∧P3∧P4∧P5 on every leg | the per-leg price bound plausibly holds AT the simulated size for liquid ATM-band near-expiry index legs; **residuals remain** — the impact counterfactual (P3 passing does NOT bound market impact; λ is uncalibratable, §4.6) and the instant-spread corner (a bar can print H−L=₹3 while the book quotes ₹15 wide — undetectable from OHLCV) — **DISCLOSED, not zero** |
 | **B — bounded-price, unbounded-size** | P1∧P2 on every leg, but ≥1 leg fails P3/P4 | the price bound holds for a MARGINAL (small) order only; the run's SIZE claim is NOT supported for this trade |
 | **C — refused** | ≥1 leg fails P1/P2/P5 (or lot/cost-regime) | nothing — atomic reject, counted with the failing leg + reason |
+
+These per-TRIAL fill-honesty classes A/B/C are the taxonomy of record; chapter
+[10](10-seller-edge-and-execution-evidence.md) §6's F-A…F-E are a DISTINCT per-ACTION
+execution-realism scheme that FEEDS this per-trial verdict — see 10 §6.
 
 **Counters** (the `OptionsRuleResult` extension shape, `executor.py:602-712` — every counter
 typed, `__post_init__`-reconciled, no catch-all): `n_class_a`, `n_class_b` with
@@ -815,7 +819,7 @@ axes marked:
 | `E-DELTA` short band | {(.05,.10),(.10,.20),(.15,.25),(.25,.35),(.45,.55)} | 5 | swept |
 | `E-IVW` wing width (a=0 only) | {w0=2,4,6} | 3 | swept — a>0 UNAVAILABLE (no IV-rank series, §3.3) |
 | `E-YIELD` y/W | {0.20, 0.33, 0.40} | 3 | swept |
-| DTE band | {21-45, 1-7} | 2 | swept |
+| DTE band | {21-30, 1-7} | 2 | swept — >30-DTE entries refuse on D-C2 (04 §2.4; expiry−30d pull wall) and are counted, not priced |
 | IVR floor | — | 1 | **UNAVAILABLE** — the classic seller vol-regime gate is absent in v1 (§3.3) |
 | Entry mask (60-bit) | ONE curated range-regime point per family | 1 | the mask is itself a spot-engine axis; not crossed in the v1 base sweep |
 | Management doctrine block | `D-STATIC` control arm (1) + `D-SL-k{1.5,2} × D-TP{50,75} × D-DTE{7,1}` (2×2×2 = 8) + width-consumed q{50,75} (+2) + `D-STOP-TOUCH`{tested,all} (+2) + singles/dedup | ≈ 30 | curated cells; `D-STATIC` is REQUIRED — defended expectancy is meaningless without the undefended baseline on the SAME entries |
@@ -846,12 +850,14 @@ O(K · survivors), not O(K · all cells).
 
 ### §8.3 The blind full-cross is REFUSED as a sweep shape (show the number)
 
-A blind cross of all 12 families × the full defense grammar (≈ 3.4 × 10⁵ defense programs —
-the enumeration is chapter [01](01-strategy-taxonomy.md)) × entry ~10³ × K{5} × sizing{~12} ×
+A blind cross of all 12 families × the full defense grammar (defense programs = 7 triggers
+(chapter [01](01-strategy-taxonomy.md) §f.1) × 9 actions (§f.2) = 63 trigger→action bindings,
+compounded over the `max_adjustments` depth — even a shallow 3-adjustment doctrine is 63³ ≈
+2.5 × 10⁵) × entry ~10³ × K{5} × sizing{~12} ×
 fill-policy{2}:
 
 ```
-12 × 3.4×10⁵ × 10³ × 5 × 12 × 2  ≈  5 × 10¹¹ cells   — REFUSED.
+12 × 2.5×10⁵ × 10³ × 5 × 12 × 2  ≈  4.5 × 10¹¹ cells   — REFUSED.
 ```
 
 Most cells are redundant or incoherent (`D-INVERT` without `D-ROLL-U`), and the v2 leg-mutating

@@ -4,7 +4,7 @@
 
 **Date:** 2026-07-19
 
-**Provenance:** multi-agent deep-research session, docs-only branch `claude/options-strategies-design`, deliberately NO PR (fleet-wide PR-creation freeze); every repo citation is `file:line` at the branch base SHA (see [README.md](README.md)).
+**Provenance:** multi-agent deep-research session, docs-only branch `claude/options-strategies-design`, draft PR #1725 (DEC-OPTION-SELLING-RESEARCH-001, #2210) carries this research pair; every repo citation is `file:line` at the branch base SHA (see [README.md](README.md)).
 
 ---
 
@@ -1077,7 +1077,7 @@ as-of cutoffs already available (`filter_to_ist_minute` family).
 
 1. **Volume-unit semantics UNVERIFIED:** the repo labels F&O bar volume "Traded contracts in the bar"
    (`fno_candle_lake.py:138`) but the vendor doc says only "volume"
-   (`docs/groww/api-reference/03-backtesting.md:233`); whether Groww reports option volume in contracts
+   (`docs/groww/api-reference/03-backtesting.md:230`); whether Groww reports option volume in contracts
    or underlying units is unconfirmed (§11 DATA-U-D1). A lot-normalised liquidity screen is wrong by a
    factor of lot_size if the unit assumption is wrong.
 2. **A volume screen is a tradability PROXY, not a fill guarantee** — 1-minute aggregate volume says
@@ -1199,7 +1199,7 @@ adjustment adds one more per-leg cost breakdown (₹20/order brokerage multiplie
 | Settle-price proxy divergence | Disclosed error-band field per expiry-settled trade + adverse-within-band resolution (`[per micro-settle §6.5]`); one capped WARN per sim (the `options.sim.unverified_cost_window` idiom, `executor.py:892-912` `[per repo-exec §b]`) |
 | Attribution residual dominance | REFERENCE-ONLY flag column (VIX-trio discipline, `results_store.py:214-227`) |
 | Expiry/assignment terminal | Appended `EXIT_REASONS` token walking the `session_gap` chain (`[per repo-results §e.3]`) |
-| Gate/door visibility | New doors extend `GATE_REASON_ORDER` + `per_door_kills` in lockstep (`run_manifest.py:91,188-193` `[per repo-results §d]`) |
+| Gate/door visibility | New doors extend `GATE_REASON_ORDER` (`brutex/ranking/__init__.py:257`) + `per_door_kills` (`run_manifest.py:91,188-193`) in lockstep `[per repo-results §d]` |
 | Fill-honesty class + regime flags | The §2.4.3 counters + leaderboard honesty footer |
 
 ---
@@ -1295,7 +1295,7 @@ future options-strategy DEC/ADR should quote this register rather than re-derive
 | 1 | DATA-U-C1 | Whether Groww `get_expiries`/`get_contracts` + `get_historical_candles` serve long-EXPIRED contracts retroactively (historical far-leg backfill feasibility; also lost-lake re-pullability). Inherits repo-lake U1/U5 + repo-quality U5; the stock-option depth flavor is the backlog's own Phase-0 hard gate (`TRACK2_OPTION_SELLING_BACKLOG.md:38-44` `[per repo-exec UNVERIFIED #11]`) | UNVERIFIED | A live credentialed probe fetching a 2023 expired monthly's chain + candles; transcript committed per the repo probe convention |
 | 2 | DATA-U-C2 | Footprint delta of widening `DEFAULT_OPTION_LOOKBACK_DAYS` 30→60/90 (the ~2-3× options-lake figure is the operator-accepted #1145 estimate, not a measurement) | UNVERIFIED | `brutex lake` census / `du` on the operator box before/after a widened trial pull |
 | 3 | FILL-U1 | Groww 1-minute candles are OHLC **of trades** (not quote/mid-derived), and its volume-0 bars are carried prints rather than trade prints | Operating assumption; vendor doc silent (`docs/groww/api-reference/03-backtesting.md` — no construction semantics; the repo reasons on this basis at `futures/executor.py:35-36`) | Vendor documentation/confirmation of candle construction, or a credentialed probe comparing Groww 1m bars against a known trades tape for the same session |
-| 4 | DATA-U-D1 | Groww option-candle volume UNIT (contracts vs underlying units) — the repo's own column doc says "Traded contracts" (`fno_candle_lake.py:138`) but the vendor doc says only "volume" (`03-backtesting.md:233`) | UNVERIFIED | Vendor doc clarification or a live cross-check of one bar's volume vs NSE bhavcopy contract volume |
+| 4 | DATA-U-D1 | Groww option-candle volume UNIT (contracts vs underlying units) — the repo's own column doc says "Traded contracts" (`fno_candle_lake.py:138`) but the vendor doc says only "volume" (`03-backtesting.md:230`) | UNVERIFIED | Vendor doc clarification or a live cross-check of one bar's volume vs NSE bhavcopy contract volume |
 | 5 | DATA-U-D2 | Intrabar OI staleness (exchange OI dissemination cadence vs the 1-minute bar stamp) | UNVERIFIED | NSE dissemination documentation or a live capture comparison |
 | 6 | DATA-U-E3 | Existence of any earnings/event calendar surface via Groww APIs | UNVERIFIED (none documented in `docs/groww/api-reference/` per in-session reads of the backtesting + live docs; an exhaustive read of all annexures was not performed) | Full read of the vendor API reference + vendor confirmation |
 | 7 | DATA-U-G2 | The claim "no production CE/PE read path outside those enumerated" (inherited caveat on all reader statements) | Scoped-negative per repo-quality U1 | Import-graph walk / AST census of `bars/**/FNO` consumers |

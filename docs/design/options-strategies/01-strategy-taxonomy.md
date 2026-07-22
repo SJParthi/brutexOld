@@ -6,8 +6,9 @@
 > **future operator-gated DEC/ADR**.
 > **Date:** 2026-07-19.
 > **Provenance:** multi-agent deep-research session, docs-only branch
-> `claude/options-strategies-design`, deliberately **NO PR** (fleet-wide
-> PR-creation freeze); every repo citation is `file:line` at the branch base
+> `claude/options-strategies-design`, draft PR #1725
+> (DEC-OPTION-SELLING-RESEARCH-001, #2210) carries this research pair; every repo
+> citation is `file:line` at the branch base
 > SHA (see `docs/design/options-strategies/README.md`).
 
 This document merges the three taxonomy research parts into one catalogue:
@@ -218,7 +219,10 @@ rounding law.
   strike drifts away from ATM exactly on winning trades and can exit banded
   coverage mid-trade; "Any backtest MUST censor (never fabricate) trades
   whose exit bars left coverage"
-  (`docs/track2/TRACK2_OPTION_SELLING_BACKLOG.md:32-36`).
+  (`docs/track2/TRACK2_OPTION_SELLING_BACKLOG.md:32-36`). This is a
+  defense-in-depth rule; the current Groww lake fetches all listed strikes
+  (G13), so the winner-censoring hazard is a retired-Dhan-era shape, not a
+  present-tense lake property.
 - **CN-6 (session law):** Track-2 forces exit at 15:20 IST while options
   trade to 15:30 (`docs/track2/TRACK2_OPTIONS_SPEC.md:785`) — every intraday
   variant below inherits that law; positional (overnight / hold-to-expiry)
@@ -286,7 +290,7 @@ Greeks matrix (§5.7).
 | C2 | Delta-hedged short strangle | B4 legs + hedge overlay | Neutral (managed) | Short vol | + | **UNDEFINED** (gap) | SPAN+EXPOSURE | as C1 |
 | C3 | Gamma-scalping long book | B1/B3 legs + re-hedge overlay | Neutral (managed) | Long vol | −− | DEFINED (debit + hedge slippage) | PREMIUM-ONLY book + futures margin on hedge leg | Data-feasible on the lake today; IV entry gate needs a sanctioned series (ext-9) |
 | C4 | Dispersion composite | index vol book vs constituent vol books | Neutral | Short implied correlation | mixed | Complex (leg-level UNDEFINED possible) | Margin-intensive; unmodeled (G19) | Classify-only; NOT a first-generation activation target (§5.3) |
-| C5 | 0DTE short straddle/strangle | B2/B4 at DTE=0 | Neutral | Short vol | +++ (per hour) | **UNDEFINED** intraday (until square-off) | SPAN+EXPOSURE + expiry-day +2% ELM (2024-11-20) | Venue = NIFTY Tue / SENSEX Thu only post-2024-11-20; BANKNIFTY monthly (§5.4.3) |
+| C5 | 0DTE short straddle/strangle | B2/B4 at DTE=0 | Neutral | Short vol | +++ (per hour) | **UNDEFINED** intraday (until square-off) | SPAN+EXPOSURE + expiry-day +2% ELM (2024-11-20) | Venue = the surviving index weeklies, expiry weekday registry-resolved per (underlying, date) (post-2024-11-20 single-weekly regime; G6/§d.3); BANKNIFTY monthly (§5.4.3) |
 | C6 | 0DTE long gamma ("lottery") | far-OTM +C or +P, DTE=0 | Directional | Long vol | −−− | DEFINED (= debit) | PREMIUM-ONLY | Same venue map; expected-value negative most days |
 | C7 | Pre-event long vol | B1/B3 spanning the event | Neutral | Long vol | − | DEFINED (= debit) | PREMIUM-ONLY | Only 4 event classes calendar-verifiable in-repo; the rest need ext-10 |
 | C8 | Post-event IV-crush short | B2/B4/B7 at the event | Neutral | Short vol | + | **UNDEFINED** unless winged (width if winged) | SPAN+EXPOSURE | Same event-calendar constraint; gated (ext-4) |
@@ -347,8 +351,8 @@ directional instrument in Indian F&O.
 **Risk class.** DEFINED (premium).
 
 **Indian-market fit.**
-- Index (NIFTY/BANKNIFTY/SENSEX): the most liquid option market in the world
-  by contract count; weekly expiries make short-dated long calls cheap in ₹
+- Index (NIFTY/BANKNIFTY/SENSEX): commonly reported as one of the most liquid
+  option markets by contract count; weekly expiries make short-dated long calls cheap in ₹
   but brutal in theta. Cash-settled — no delivery consequence to holding ITM
   through expiry (settlement of the intrinsic in cash).
 - Single stock: liquidity is concentrated in the front month near ATM; wide
@@ -455,8 +459,7 @@ the trade) · V **−** (short vega — an IV spike loses even without spot
 movement).
 
 **Margin (India).** SPAN + Exposure, upfront — the heaviest per-unit margin
-class in this part; order of magnitude is a double-digit percent of contract
-notional, but the exact number is a per-day exchange output (the repo holds
+class in this part; the exact number is a per-day exchange output (the repo holds
 NO sourced SPAN archive — `brutex/engine/margin_history.py:12-18` — so no
 figure is quoted). Margin *expands* as the position moves against you
 (SPAN re-computes on the moved spot/IV), which is the practical ruin
@@ -1434,9 +1437,13 @@ PREMIUM-ONLY. No SPAN.
 #### Indian-market fit
 
 - Weekly index: strong fit; OTM weekly wings on NIFTY/SENSEX are dense on the 50/100-pt
-  grids (`strike_grid.py:26-30`). Note the repo lake's fetched chain is banded near ATM
-  (ATM±10 grid law, `strike_grid.py:86-102`; `RejectReason.NO_DATA` band-drift hole,
-  `executor.py:158-161`) — far-OTM strangle wings may honestly gate NO_DATA.
+  grids (`strike_grid.py:26-30`). The current Groww lake FETCHES all listed strikes
+  (G13, all-strikes pull — the winner-censoring hazard of banded sources structurally
+  avoided); the ATM±10 grid (`strike_grid.py:86-102`) is the EXECUTOR's read-time
+  SELECTION band, not a fetch limit — a far-OTM strangle wing OUTSIDE the executor's ±10
+  selection may gate `RejectReason.NO_DATA` at the selection step (`executor.py:158-161`).
+  (The banded-FETCH hazard is the RETIRED-Dhan-era shape; see CN-5, kept as
+  defense-in-depth.)
 - Stock options: as long straddle — feasible with exit-before-expiry discipline (U1/U2).
 
 ### B.4 Short strangle
@@ -1480,8 +1487,10 @@ SPAN+EXPOSURE, both legs naked, no offset benefit; expiry-day ELM add-on U7.
 - Weekly index: alongside the short straddle, the core Indian weekly income trade;
   practical only on NIFTY/SENSEX weeklies + BANKNIFTY monthlies now (spec `:108`).
 - Stock options: poor fit (monthly duration + physical settlement on breached short legs —
-  U1/U2); also the lake's ATM-banded stock-option coverage makes far-OTM short wings the
-  exact winner-censoring shape (CN-5, backlog `:28-36`).
+  U1/U2); also the executor's ATM±10 read-time SELECTION band (`strike_grid.py:86-102`)
+  makes far-OTM short wings the exact winner-censoring shape at the selection step (CN-5
+  defense-in-depth, backlog `:28-36`; the current Groww lake fetches all listed strikes per
+  G13, so any fetch-side banding is the retired-Dhan-era shape).
 
 ### B.5 Guts (long / short)
 
@@ -1582,8 +1591,9 @@ authorized (still CN-4-gated).
 
 - Weekly index: the flagship Indian weekly income structure on NIFTY (Tue) and SENSEX
   (Thu); BANKNIFTY monthly-only (spec `:108`). Dense 50/100-pt grids give fine width
-  control (`strike_grid.py:26-30`); far wings can hit the lake's banded-coverage NO_DATA
-  gate (CN-2).
+  control (`strike_grid.py:26-30`); far wings can hit the executor's ATM±10 SELECTION-band
+  NO_DATA gate (CN-2; the current Groww lake fetches all listed strikes per G13, so the
+  banding is the executor's read-time selection, not a fetch limit).
 - Stock options: workable on liquid F&O names as a monthly defined-risk trade, but both
   short legs must be closed before expiry to avoid physical-settlement obligations on a
   breach (U1/U2); wide stock spreads raise cost drag.
@@ -1972,10 +1982,13 @@ Long form **DEFINED ≈ debit** (with the §11 T1-unwind law). Short/reverse for
 - Weekly index: medium-high — weekly-front/monthly-back double calendars on NIFTY/SENSEX
   are standard pre-event trades; BANKNIFTY month-over-month only (spec `:108`).
 - Stock options: low — two expiry slots × two strikes on monthly, thinner chains,
-  physical-settlement exit law (U1/U2), and banded lake coverage across FOUR legs makes
-  CN-2 joint-data gating the binding constraint.
+  physical-settlement exit law (U1/U2), and the executor's ATM±10 SELECTION band across
+  FOUR legs makes CN-2 joint-data gating the binding constraint (the current Groww lake
+  fetches all listed strikes per G13; the banding is the executor's read-time selection,
+  not a fetch limit).
 - BruteX readiness: the most data-hungry structure so far — 4 legs × 2 expiries; the CN-2
-  all-legs conjunction over the banded chain will honestly reject many candidate cells;
+  all-legs conjunction over the executor's ATM±10 selection band will honestly reject many
+  candidate cells;
   the sweep must COUNT those rejections (the executor's counted-reject idiom,
   `executor.py:155-184`) rather than silently thin the sample.
 
@@ -2037,7 +2050,10 @@ risk-class labeling is structural (`Σ qty per side beyond hedges ≠ 0 ⇒ UNDE
 - Weekly index: used by pros for pin/target plays on NIFTY/SENSEX weeklies; gated hard by
   CN-4 + margin. BANKNIFTY monthly-only.
 - Stock options: very poor — naked stock-option shorts + physical settlement (U1/U2) +
-  monthly gap risk; also the censoring hazard (CN-5) is maximal for the naked excess leg.
+  monthly gap risk; also the executor's ATM±10 read-time SELECTION band makes the
+  censoring hazard (CN-5, defense-in-depth) maximal for the naked excess leg (the current
+  Groww lake fetches all listed strikes per G13; the fetch-side banding is the
+  retired-Dhan-era shape).
 
 ### B.15 Call backspread / put backspread
 
@@ -2408,7 +2424,7 @@ See also the empirical companion `11-expiry-day-tail-study/STUDY.md`.
 
 #### d.2 Why the last ~30 minutes are a special regime (this is load-bearing for engine design)
 
-1. **Greeks blow up, then the model refuses.** ATM Black-76 gamma scales like 1/(S·σ√T) → ∞ as T→0 at the money; delta becomes a step function across the strike. The repo kernel *already* encodes the honest boundary: below the 600 s T-floor it returns `None`, never a fabricated Greek (`brutex/options/greeks.py:66-68`), and the enrichment docs measure theta-approximation error "~−4.7% relative on the LAST tradable expiry-day minutes, ~−0.8% at 1 h" with T going non-positive at/after the expiry instant (`brutex/data/greeks_enrich.py:471-479`). **Design rule: every 0DTE family's final-minutes logic must be PRICE-based (premium vs intrinsic), not Greeks-based — the Greeks columns are legitimately NULL there.**
+1. **Greeks blow up, then the model refuses.** ATM Black-76 gamma scales like 1/(S·σ√T) → ∞ as T→0 at the money; delta becomes a step function across the strike. The repo kernel *already* encodes the honest boundary: below the 600 s T-floor it returns `None`, never a fabricated Greek (`brutex/options/greeks.py:66-68`), and the enrichment docs report the measured IV-bias envelope of the 60 s T-anchor skew "~−4.7% relative on the LAST tradable expiry-day minutes, ~−0.8% at 1 h" with T going non-positive at/after the expiry instant (`brutex/data/greeks_enrich.py:471-479`). **Design rule: every 0DTE family's final-minutes logic must be PRICE-based (premium vs intrinsic), not Greeks-based — the Greeks columns are legitimately NULL there.**
 2. **Delta-band hedging becomes ill-posed.** With gamma exploding, any finite delta band is crossed on almost every bar near the strike; re-hedge counts (and worst-case-fill costs, G15) diverge. Engines must cap re-hedges (`max_rehedges`) or switch to a terminal regime (hold/close) in the final window — an explicit `terminal_regime` token in the management dimension (§h).
 3. **Settlement + STT mechanics change behavior.** ITM options held to expiry incur exercise STT on INTRINSIC value (0.125% → 0.15% from 2026-04-01; `brutex/costs/constants.py:82-88`) vs sell-side STT on PREMIUM if squared off — a real, encoded cost discontinuity that pushes rational longs to square off, thinning the final book. Index options settle European-style (INDEX → European exact in the repo's style machinery, `brutex/data/greeks_enrich.py:31-32`); cash settlement of index options at the closing settlement price is standard practice but its exact procedure is not encoded in-repo (register item U8).
 4. **Pin risk splits by settlement type.** For cash-settled index options, "pin risk" is settlement-price uncertainty (P&L risk only). For single-stock (deliverable) options it is assignment/delivery risk — a different risk class entirely; the Track-2 spec's expiry state machine is an acknowledged fail-loud STUB today (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 records "§4.2 expiry state machine honestly labelled a fail-loud STUB in-spec" — CLAUDE.md §1 Earlier chain, MIGRATION.md #1552-#1556). An options engine that holds positions into expiry CANNOT ship before that state machine is real.
@@ -2510,7 +2526,7 @@ Conventions: signs AT INCEPTION, structure centered as normally struck (ATM unle
 | 22 | Short calendar | ~0 | + | − | − | defined-complex (margin-heavy) | ~width of vol move (bounded, model-dependent) |
 | 23 | Diagonal (e.g. poor-man's covered call) | + | mixed | + | + | defined | net debit |
 | 24 | Call ratio spread, front (buy 1, sell 2 OTM) | + then − | − | + | − | UNDEFINED (upside) | unlimited above upper break-even |
-| 25 | Put ratio spread, front | ± then + | − | + | − | UNDEFINED (downside) | large below lower break-even |
+| 25 | Put ratio spread, front | ± then + | − | + | − | large-defined / UNDEFINED-in-practice | large below lower break-even |
 | 26 | Call backspread (sell 1, buy 2 OTM) | + | + | − | + | defined-valley | max at long strike at expiry |
 | 27 | Put backspread | − | + | − | + | defined-valley | max at long strike at expiry |
 | 28 | Jade lizard (short put + short call spread, credit > call-spread width) | + | − | + | − | large-defined (downside only; no upside risk when credit > width) | strike→0 − credit |
@@ -2743,7 +2759,7 @@ primary-PDF verification tracks C-U1/C-U2.)
 | C-U12 | Discrete-hedging noise-term magnitude claims (§b.1) — direction sourced (Sepp/Gatheral), magnitudes not quantified here | Reproduce the Sepp derivation or measure on lake data once a gamma-scalping template exists |
 
 Part C register-item note: in Part C body text, `register item U5/U6/U7/U8/U9`
-map to C-U5/C-U6/C-U7/C-U8/C-U9 above, and §i.1's `register U1/U2` map to
+map to C-U5/C-U6/C-U4/C-U3/C-U8 above, and §i.1's `register U1/U2` map to
 C-U1/C-U2.
 
 Cross-part overlaps (deliberately kept as separate rows, since each part's

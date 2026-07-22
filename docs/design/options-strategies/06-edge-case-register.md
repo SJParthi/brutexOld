@@ -5,8 +5,11 @@ SPOT-ONLY (DEC-ENGINE-SPOT-ONLY-001) and options remain REFERENCE_ONLY; any acti
 options-strategy engine is a future operator-gated DEC/ADR.
 **Date:** 2026-07-19
 **Provenance:** multi-agent deep-research session, docs-only branch
-`claude/options-strategies-design`, deliberately NO PR (fleet-wide PR-creation freeze); every repo
-citation is `file:line` at the branch base SHA (see `docs/design/options-strategies/README.md`).
+`claude/options-strategies-design`, draft PR #1725 (DEC-OPTION-SELLING-RESEARCH-001, #2210) carries
+this research pair; every repo citation is `file:line` at the branch base SHA (see
+`docs/design/options-strategies/README.md`).
+NOTE: the branch head has DRIFTED from the base SHA via the origin/main main-sync merges — resolve
+every cited `path:line` with `git show 184a48a4:<path>`, NOT the head working tree.
 This register merges the two edge-case research sections (registrars 1 and 2, reads performed
 2026-07-20) plus the fill-honesty classes of the fill-realism research section. Citations marked
 "(per sibling section …)" were line-verified by that sibling research agent in the same session;
@@ -43,7 +46,7 @@ silently resolved.
 **Naming conventions (collision-free).**
 - **P1–P14** = the verified reuse palette (§2) — repo machinery the handling laws draw from.
 - **FH-1…FH-6** = the per-leg fill-honesty predicates and **Class A/B/C** = the per-structure
-  fill-honesty classes, from the fill-realism research section (§3.1/§3.2 there, where they are
+  fill-honesty classes, from `04-gap-analysis.md` §2.4.1/§2.4.2 (where they are
   named P1–P6 — renamed here to avoid collision with the palette).
 - **PR-0…PR-5** = the multi-trigger precedence rules of E-11 (named P0–P5 in the source entry).
 - Per-entry law numbering (L1…, D1…) is scoped to its entry.
@@ -54,7 +57,7 @@ same session whose content is absorbed into the sibling docs of this set — the
 material into `03-brutex-inventory-reuse-map.md`, the microstructure material into
 `02-indian-fno-microstructure.md` (see also `08-seller-blowups-and-tail-events.md`,
 `09-capital-margin-and-sizing.md`, `10-seller-edge-and-execution-evidence.md`), and the gap-fill
-(fill-realism) material into the fill-realism sibling doc of this set. The cited `path:line`
+(fill-realism) material into `04-gap-analysis.md` (§2, FILL REALISM). The cited `path:line`
 values are the evidence and stand on their own.
 
 **A residual-ledger closure carried by this register (stated up front).** The repo-exec research
@@ -257,7 +260,7 @@ repo-exec / gap-fill §2(ii)).
    1-minute bars rather than trust a frozen aggregate
    (`brutex/dashboard/movers_snapshot.py:1732-1737` per sibling section repo-quality).
 5. The liquidity-class machinery (λ volume floor, predicates FH-1…FH-6, Class A/B/C — §5 Law A) is
-   the fill-realism section's §3; this entry composes with it rather than restating it.
+   `04-gap-analysis.md` §2.4; this entry composes with it rather than restating it.
 
 **Handling law — the DEFERRED-EXIT law.**
 - **D1 (defer):** when an exit decided at instant `t` finds leg L's bar absent or `volume == 0`,
@@ -267,7 +270,7 @@ repo-exec / gap-fill §2(ii)).
   (`max(level, high) + tick` for a short cover). Adverse drift during the deferral is therefore
   CAPTURED (the fill anchors on the later bar); the decided exit REASON is preserved from `t`.
 - **D2 (count):** `n_deferred_exits`, per-trade `deferred_minutes` (and the run max) are
-  first-class counters in the `OptionsRuleResult`-extension shape (fill-realism §3.3);
+  first-class counters in the `OptionsRuleResult`-extension shape (`04-gap-analysis.md` §2.4.3);
   annotation-only, never re-ranking.
 - **D3 (session-end escalation):** if no `volume > 0` bar for L occurs before the session's last
   bar, the structure escalates deterministically, in order: (i) overnight mode ON and the leg not
@@ -276,16 +279,16 @@ repo-exec / gap-fill §2(ii)).
   machine resolves it (or, pre-machine, the structure is CENSORED); (iii) otherwise (intraday
   mode) ⇒ CENSOR the structure (Class-C, `censored_open_exit` counted, first-failing-leg identity
   stamped). Pricing the close at a volume-0 print is FORBIDDEN — it would break the
-  demonstrated-transaction anchor the whole fill law rests on (fill-realism §1.1). *(See §5 Law B
+  demonstrated-transaction anchor the whole fill law rests on (`04-gap-analysis.md` §2.2.1). *(See §5 Law B
   for the design fork between this censor arm and E-03's retro-close arm.)*
 - **D4 (make it rare, don't paper it):** the entry-side λ liquidity floor + liquid-band predicates
-  (fill-realism §3.1, FH-3/FH-4) are the mechanism that keeps D3 rare; D2/D3 counters are the
+  (`04-gap-analysis.md` §2.4.1, FH-3/FH-4) are the mechanism that keeps D3 rare; D2/D3 counters are the
   proof per run. A config whose edge concentrates in deferred or censored exits is flagged on the
   result surface.
 - **D5 (structure atomicity):** deferral is PER LEG, but closure is per STRUCTURE — a
   structure-closing event closes every leg on its own first-tradable bar; a short leg's deferral
   never leaves a naked residue booked as closed (composes with the Class-C atomic-reject stance,
-  fill-realism §3.2).
+  `04-gap-analysis.md` §2.4.2).
 
 **Honest direction-of-bias statement (must ship with the law).** The deferred fill is the first
 DEMONSTRABLE fill after `t` — it is NOT strictly pessimistic versus a hypothetical instant
@@ -339,7 +342,7 @@ engine's session-tail hole, which the repo already treats as a first-class law (
     false-positive-safe classifier (`brutex/data/interior_gap_detect.py:28-47`). It is pure and
     reusable, but NOT armed for options anywhere today (the F&O spine never calls it — per sibling
     section repo-quality; the spot demotion is `detect_completeness_gaps AND is_index`-gated,
-    `brutex/adapters/groww/ingest.py:1526` per that section).
+    `brutex/adapters/groww/ingest.py:1526` (head: a different construct occupies this range) per that section).
   - The stronger NEW cross-sectional signature for an OPEN structure: leg L prints 0 bars over
     span [t1, t2] while ≥K same-expiry sibling contracts AND the underlying each print ≥N bars in
     the same span. Relative presence separates "market closed / feed dead" (everything dark) from
@@ -504,7 +507,7 @@ abstain law that silently disables defenses is a trap.
    "rather than a fabricated bucket" (`brutex/data/moneyness.py:19,45,61,96`).
 3. **The engine has a bit-abstain precedent:** on futures `1day` grids the intraday-only bits
    (ToD 44-47 + VWAP 52-53) are "HONESTLY cleared via the vocabulary's own `APPLIES_TO_1DAY_MASK`
-   (one bit-set source of truth)" (`brutex/engine/stage1a.py:1050-1056`; the pure predicate
+   (one bit-set source of truth)" (`brutex/engine/stage1a.py:1050-1056` (head: a different construct occupies this range); the pure predicate
    `apply_1day_mask_for` `:1319-1349`); and per the DEC-ENGINE-SPOT-ONLY-001 ledger blurb the VWAP
    bits "permanently abstain on every engine instrument" for volumeless spot (CLAUDE.md §2 Rule 3
    retirement note — ledger claim).
@@ -532,12 +535,12 @@ abstain law that silently disables defenses is a trap.
   (v1-stamp / no-overlay lakes — evidence row 4).
 - **L4 (identity):** whether a family uses Greek-gated entries is already captured by its
   condition set; the abstain law itself is engine semantics (no knob). Abstain counters are
-  outputs, out of identity — mirroring the fill-realism §3.3 counter stance.
+  outputs, out of identity — mirroring `04-gap-analysis.md` §2.4.3's counter stance.
 
 **Cannot-model.** True market IV in the degenerate band (the 1e-9 band exists BECAUSE the root is
 numerically indeterminate there — any value would be arbitrary, evidence row 1); vendor-quoted IVs
 (not stored: `spot`/`iv` honestly `None` in the candle lake reader —
-`brutex/options/lake_source.py:13` per sibling section repo-exec); Greeks are v2 MODEL enrichment,
+`brutex/options/lake_source.py:29-31` per sibling section repo-exec); Greeks are v2 MODEL enrichment,
 not exchange truth (per sibling section repo-quality row 18).
 
 **Test types.** Unit: every status class ⇒ bit abstains + counter increments (parametrized over
@@ -619,7 +622,7 @@ must price, not assume away.
   absent/zero-volume minute is the E-01/E-02 signature (`STALE_BAR` at `executor.py:543-557`).
 - Regime flags with zero new data: `expiry_day` (leg's decided-bar date == contract expiry,
   parseable from the symbol — `fno_symbol.py:14-21`) and `last_30min` (decided bar ≥ 15:00 IST) —
-  proposed by the fill-realism section §2(iv), adopted here.
+  proposed by `04-gap-analysis.md` §2.3(iv), adopted here.
 
 **Handling law (correct-or-absent).**
 
@@ -1142,7 +1145,7 @@ re-evaluate levels — `brutex/options/executor.py:1-28` per that survey).
 - **PR-2 (atomic closure):** any event that closes the STRUCTURE closes ALL legs on the SAME bar,
   each at its OWN contract bar's adverse extreme ± tick (with-level clamp only for the leg whose
   level triggered). No orphan legs, ever — composing with the Class-C atomicity stance
-  (fill-realism §3.2) and E-02 D5. A leg whose bar is untradeable at that minute defers per E-02
+  (`04-gap-analysis.md` §2.4.2) and E-02 D5. A leg whose bar is untradeable at that minute defers per E-02
   while the structure is BOOKED as closing (reason recorded from PR-1), the deferred leg's fill
   landing per D1.
 - **PR-3 (no sequencing fiction):** fills are bar-anchored, not intra-bar-sequenced — processing
@@ -1639,7 +1642,7 @@ while the chain prints is E-04 rule 3, and any open structure falls to E-03's ma
 
 ## 5. Handling-law summary
 
-Every case above resolves into FIVE handling laws plus three cross-cutting disciplines. This is
+Every case above resolves into FIVE handling laws plus four cross-cutting disciplines. This is
 the section a future options-engine DEC should quote.
 
 ### Law A — Uniform volume-0 / absent-bar reject, extended by the deferred-exit law
@@ -1654,8 +1657,8 @@ stateful engine cannot un-exist an accepted entry, the extension is E-02's defer
 (D1–D5: walk forward to the first `volume > 0` bar, worst-case-anchored, counted, escalating
 deterministically at session end) with the direction-of-bias qualifier stated verbatim.
 
-The per-leg **fill-honesty predicates** and per-structure **classes** (fill-realism section
-§3.1/§3.2; named P1–P6 there, FH-1…FH-6 here):
+The per-leg **fill-honesty predicates** and per-structure **classes** (`04-gap-analysis.md`
+§2.4.1/§2.4.2; named P1–P6 there, FH-1…FH-6 here):
 
 | # | Predicate | Existing machinery |
 |---|---|---|
@@ -1678,7 +1681,7 @@ derived `n_rejected` at `:702-712`), with `n_accepted == n_class_a + n_class_b`.
 
 A structure is the trade unit; a partial structure is a DIFFERENT risk object and is never
 silently entered, held, or closed. Concretely: atomic reject-if-any-leg-rejects at entry (E-01
-handling 2; Class-C atomicity, fill-realism §3.2); atomic closure — a structure-closing event
+handling 2; Class-C atomicity, `04-gap-analysis.md` §2.4.2); atomic closure — a structure-closing event
 closes ALL legs on the same bar, no orphan legs ever (E-11 PR-2, E-02 D5); censor-and-count when a
 structure cannot be honestly priced out (E-02 D3(iii) `censored_open_exit`, E-10 L4
 `censored_on_gap` — with the mandatory disclosure that the censored set is biased toward
@@ -1750,7 +1753,7 @@ drop, never a fabricated number. Two shapes:
   extreme ± tick (`brutex/execution/fill_mode.py:10-13`, `brutex/engine/trade_sim.py:37-42`), the
   SL-first tie generalized to the PR-1 precedence ladder (E-11), the worst-of endgame law (E-06),
   and the spread-penalty axis kept an UNCALIBRATED robustness knob — never a claimed cost model
-  (fill-realism §4.1, tick-floor law `brutex/costs/calculator.py:163-174` per that section).
+  (`04-gap-analysis.md` §2.5, tick-floor law `brutex/costs/calculator.py:163-174` per that section).
 - **Typed + counted + annotation-never-reranks observability, with the identity law:** every new
   counter/flag is an OUTPUT out of run identity; every knob that GATES or is swept enters
   `canonical_trade_params` (Golden Rule #4; the default-omitted DEC-NIFTY-PRICE-SOURCE-AXIS-001
@@ -1769,7 +1772,7 @@ drop, never a fabricated number. Two shapes:
 
 Union of both registrars' registers, renumbered EU-01…EU-24 with origins preserved (edge-1 rows
 U1…U10 → EU-01…EU-14; edge-2 rows E2-U1…E2-U10 → EU-15…EU-24). The fill-realism section's own
-UNVERIFIED register is consolidated with that sibling doc, not duplicated here; its rows U5/U7 are
+UNVERIFIED register is consolidated with `04-gap-analysis.md` (§11.2), not duplicated here; its rows U5/U7 are
 referenced from E-02/E-06, and its U8 (plus the repo-exec section's #12) is CLOSED by the direct
 reads recorded in §0. Nothing in this table is encoded as fact anywhere in this register — each
 row states what would verify it.

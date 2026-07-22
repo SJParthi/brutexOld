@@ -10,7 +10,11 @@
 > File:line citations were verified against `/home/user/bruteX` @ branch
 > `claude/rust-slice-t10-lake-keys` on 2026-07-18; the harness citations
 > (§5.1, §6) were re-verified against the committed
-> `bhavcopy_tail_study.py` on 2026-07-20.
+> `bhavcopy_tail_study.py` on 2026-07-20. The §8 `cascade.py`/`ranking`
+> anchors are re-verified against the SHIPPING branch head
+> (`claude/options-strategies-design`), which carries club-S2/cascade-join
+> growth beyond the `rust-slice-t10-lake-keys` basis of the rest of this
+> chapter.
 > **Honest cost window: 2024-10-01 → today (right edge moves).** Option
 > trades dated before 2024-10-01 are counted refusals under the repo's
 > verified cost stack (§3.4).
@@ -91,7 +95,7 @@ fill law (§6, pending data), and stress scenarios the sample may not contain
 ## 3. Feasibility on BruteX
 
 All findings executed against the working tree 2026-07-18 (measured unless
-marked). Full detail in the feasibility dossier; consolidated here.
+marked); the probe commands are cited inline per row below.
 
 ### 3.1 Data present in this container: NONE (measured)
 
@@ -117,7 +121,7 @@ marked). Full detail in the feasibility dossier; consolidated here.
 | SHORT option positions | **ABSENT by decree** — "Track 2 only ever BUYS options … never writes / shorts" (DEC-EXEC-008) | `brutex/options/executor.py:38-41` |
 | Multi-leg (straddle/spread) | **ABSENT by decree** (DEC-EXEC-009) | `brutex/options/executor.py:13-14` |
 | Intraday option-leg MTM / per-minute walk | **ABSENT** — executor prices exactly TWO bars per leg (entry + forced exit) | `brutex/options/lake_source.py:141-167`; `options/executor.py:532-539` |
-| Trailing SL / trailing TP | **ABSENT anywhere** — grep over engine/options/futures/strategies → 0 hits (measured) | feasibility dossier §3(a) |
+| Trailing SL / trailing TP | **ABSENT anywhere** — `grep -rniE 'trail(ing)?[_ -]?(sl\|tp\|stop)' brutex/engine brutex/options brutex/futures brutex/strategies` → 0 hits (executed 2026-07-18) | (reproducible grep, this cell) |
 | Intraday SL/TP walker | EXISTS for SPOT only (fixed levels, forced 15:20) — engine is spot-only by decree | `brutex/engine/trade_sim.py:151-152,320-339`; `brutex/universe.py:388,427,574` (DEC-ENGINE-SPOT-ONLY-001 #1790) |
 | Margin / SPAN model | **REFUSAL-ONLY, zero verified rows** | `brutex/engine/margin_history.py:10-27`; `docs/track2/TRACK2_RISK_MGMT.md` §2.3 forbids hardcoded constants |
 | Expiry calendar (DOW rules 2020-2026) | EXISTS but does NOT resolve holiday-shifted expiries ("downstream responsibility") | `brutex/options/expiry_calendar.py` (:28-30); `registry.duckdb` absent locally |
@@ -484,9 +488,9 @@ money" claim is weighed against ~9-in-10 individuals losing.
 | **13 Mar 2020** | COVID panic | NIFTY hit the **−10% lower circuit at 09:20**; trading **HALTED 45 min** | No exit exists during a halt; SL-at-trigger backtests are structurally impossible on halt days |
 | **23 Mar 2020** | Lockdown panic | Second −10% circuit halt (NIFTY −9.4% early, closed ~−13% — close figure UNVERIFIED in captured sources); VIX peak ~86 on 24 Mar UNVERIFIED | Overnight shorts had no exit until reopen |
 | **24 Feb 2022** (**Thursday = NIFTY weekly expiry day**) | Russia invades Ukraine | NIFTY **−4.78% (−815 pts)**; gap-down ~3% open | A weekly-expiry-day gap: prior-evening few-rupee short puts went deep ITM at the open with zero time to adjust — the exact case the theta-income pitch ignores |
-| **4 Jun 2024** | Election results below exit polls | NIFTY **−5.93% close**; **India VIX +23–27%**; intraday deeper (UNVERIFIED); 50–100× put-premium anecdotes **ANECDOTAL/UNVERIFIED** | Expiry-week 2-3 DTE short books crushed |
+| **4 Jun 2024** | Election results below exit polls | NIFTY **−5.93% close**; **India VIX +27.7% to 26.74** (intraday first ~+12% to 26.37; per 08); 50–100× put-premium anecdotes **ANECDOTAL/UNVERIFIED** | Expiry-week 2-3 DTE short books crushed |
 | **5 Aug 2024** | Yen-carry unwind | Indices ~−2.7–3% (exact UNVERIFIED); VIX spike ~+40–60% intraday UNVERIFIED | Pure external shock — unforecastable by a "sell every expiry" system |
-| **7 Apr 2025** | Trump tariff shock | Sensex intraday **−5.22%**; **India VIX +56–59% intraday** | Overnight gap + vol doubling before any stop could act |
+| **7 Apr 2025** | Trump tariff shock | Sensex intraday **−5.22%**; **India VIX >56% intraday** (closing +65.7% to ~22.8, UNVERIFIED-EXACT; per 08) | Overnight gap + vol doubling before any stop could act |
 | **7–9 May 2025** | India-Pakistan escalation | VIX +~5%/day, **+10% on 9 May** | Multi-day vol regime shift repriced IV against sellers without a huge index move |
 | **20 Aug 2021** | NIFTY 16450 CE freak trade (post-TER-removal) | Option **~₹100 → ₹803.05** | THE documented SL-slippage case — §4.3 |
 | **Expiry-day "hero-zero" class** | Recurring last-hours gamma blasts | e.g. 16 May 2024: OTM PE **~₹2→₹200 (~100×)** (practitioner-documented, not exchange-verified) | A ₹2 short can become a ₹200 liability in under an hour |
@@ -498,7 +502,8 @@ money" claim is weighed against ~9-in-10 individuals losing.
 
 - **Product ages:** Bank Nifty weeklies 27 May 2016 → discontinued as a
   weekly product in Nov 2024 — two distinct, compatible dates: the **last
-  BANKNIFTY weekly expiry traded 2024-11-13** (registry evidence), and the
+  BANKNIFTY weekly expiry traded 2024-11-13** (media/broker-sourced, per
+  doc 02), and the
   **SEBI one-weekly-per-exchange rule took effect 20-Nov-2024** (the first
   Wednesday after 13-Nov had no weekly contract left to expire; the dates do
   not conflict — one is the last listed contract, the other the rule
@@ -567,16 +572,16 @@ falsify:
 How a "made massive money for a few months" result meets the repo's cascade
 (`brutex/metrics/cascade.py`, `run_stage4_cascade` at `:552`; order: hard gates
 → DSR → CPCV → Reality-Check/SPA → PBO → Romano-Wolf → WFO → Lockbox →
-Monte-Carlo, `:604-831`):
+Monte-Carlo, `:604-857`):
 
 - **DSR** deflates the observed Sharpe against the trial population
   (`cascade.py:628-643`; cut-off `dsr_min = 0.95` at `:262`; `dsr_n_source`
-  stamped `:389-399`; pool-N pass only PROVISIONAL `:852-854`). The 432-cell
+  stamped `:404-411`; pool-N pass only PROVISIONAL `:876-885`). The 432-cell
   grid IS the trial population — a lucky few-month Sharpe gets deflated
   against all 432 siblings.
 - **CPCV** pass rate over C(16,8) = 12,870 purged splits
   (`brutex/metrics/cpcv.py:94-98`; threshold 0.5 at `cascade.py:264`; recorded
-  on every verdict `:314-328,858-863` and surfaced as `cpcv_pass_pct` —
+  on every verdict `:314-328,889-895` and surfaced as `cpcv_pass_pct` —
   DEC-RESULTS-CASCADE-VERDICT-JOIN-001 #1749). A strategy profitable only in
   one contiguous stretch fails most splits that exclude it.
 - **One-regime-wonder** flag (`combo_aggregates.py:253-254,546-611`;
@@ -586,7 +591,7 @@ Monte-Carlo, `:604-831`):
   the card. Honest note: it flags, it does not reject (`:91-92`).
 - **Per-year stability** (`pnl_by_year_json` `:191-192`), WFO pass ≥ 0.75
   (`cascade.py:275`), held-out Lockbox (`:203-215,806`).
-- **Hard gates** (`brutex/ranking/__init__.py:240-264`; `gate_reasons` `:267`):
+- **Hard gates** (`brutex/ranking/__init__.py:240-264`; `gate_reasons` `:268`):
   min_trades, profit_factor < 1.2, max_drawdown > 30%, win/WLR,
   max_consecutive_losses > 10, fail-closed `non_finite_input`. An expiry
   seller sails through the win-rate doors and dies on drawdown/streaks ONLY IF
@@ -698,7 +703,7 @@ DEC territory; no ID minted.)
 
 ### Regime breaks / product history
 - Bank Nifty weeklies launch (2016): https://www.business-standard.com/article/pti-stories/nse-to-launch-weekly-options-contracts-on-bank-nifty-index-116050501487_1.html ; https://www.nseindia.com/static/products-services/equity-derivatives-bank-nifty-option-contract-specification-weekly
-- Weekly discontinuations (last BANKNIFTY weekly expiry 2024-11-13, registry evidence; SEBI one-weekly-per-exchange rule effective 20-Nov-2024): https://support.zerodha.com/category/trading-and-markets/trading-faqs/f-otrading/articles/weekly-expiries-discontinued-for-certain-index-derivatives
+- Weekly discontinuations (last BANKNIFTY weekly expiry 2024-11-13, media/broker-sourced per doc 02; SEBI one-weekly-per-exchange rule effective 20-Nov-2024): https://support.zerodha.com/category/trading-and-markets/trading-faqs/f-otrading/articles/weekly-expiries-discontinued-for-certain-index-derivatives
 - NIFTY weeklies launch (11 Feb 2019, reported-but-verify): https://www.finideas.com/introduction-of-weekly-options-in-nifty/
 - SENSEX weeklies relaunch (May 2023) + expiry-day history: https://www.businesstoday.in/markets/stocks/story/nse-bse-fo-expiry-days-what-has-changed-for-stock-investors-history-more-480781-2025-06-18 ; https://www.venturasecurities.com/blog/changes-in-expiry-nse-and-bse/
 - SEBI Oct-2024 framework summaries: https://zerodha.com/z-connect/business-updates/sebis-new-rules-for-index-derivatives-heres-whats-changing ; https://www.businesstoday.in/markets/stocks/story/sebi-floats-new-guidelines-for-high-risk-derivative-trading-check-details-fo-448379-2024-10-01 ; https://www.outlookbusiness.com/markets/sebis-new-fo-rules-kick-in-how-the-risk-tail-coverage-change-will-affect-traders ; https://www.marketfeed.com/read/en/understanding-sebis-new-rules-and-their-impact-on-indian-options-trading ; https://retailinterest.com/learn/sebi-fno-regulation
@@ -725,4 +730,4 @@ DEC territory; no ID minted.)
 - `bhavcopy_tail_study.py` — the §5.1/§6 measurement harness (stdlib-only,
   fixture-verified; run per the §6 preamble)
 - `README.md` — run commands, honest limits, output → placeholder map
-- `tests_offline.py` — 29 offline tests (no network; not wired into ci.yml)
+- `tests_offline.py` — 39 offline tests (no network; not wired into ci.yml)

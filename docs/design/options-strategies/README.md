@@ -69,9 +69,9 @@ promise — chapter `05` §0, chapter `07` §0):
 | **06** | Edge-case register | 16 definitive edge cases (E-01…E-16) — scenario · families hit · detection signature · correct-or-absent handling law · honest limits · test types — the test-plan seed. | merges edge research → feeds `05`,`07` |
 | **07** | Verification & phasing | How it is PROVEN (the module-by-module pyramid M1–M8, seven test types, 100%-line+branch + mutation gates) and how it SHIPS (the ordered operator-gated DEC ladder) + the consolidated honest-limits register (H-1…H-18). | consumes `05`+`06` → the shipping spine |
 | **08** | Seller blow-ups & tail events | What the worst days did to short premium and what an honest backtest must reproduce — the *payment schedule* of the strategy class, each with backtest-reproduction requirements. | tail evidence → feeds `05` tail battery + the edge-study DEC |
-| **09** | Capital, margin & sizing | How the `02` §4 margin facts become sizing math; the shipped `margin_history.py` REFUSAL channel; the SPAN-history gap that BLOCKS undefined-risk families. | consumes `02`§4 → feeds `05`§7 + the SPAN DEC |
-| **10** | Seller edge & execution evidence | The variance-risk-premium literature review, the Indian counterparty, and defense-time fill realism (Class A/B/C liquidity classing). | VRP + fill evidence → feeds `05` + the edge-study DEC |
-| **11** | Expiry-day tail study | A reproducible, stdlib-only bhavcopy harness measuring per-expiry-day short-premium P&L, every SL fill **bracketed** optimistic↔pessimistic (the DEC-FILL-WORST-CASE-ONLY-001 law) — the measured naive-vs-honest gap. | the measured study → feeds `05`§5.4 + the edge-study DEC |
+| **09** | Capital, margin & sizing | How the `02` §4 margin facts become sizing math; the shipped `margin_history.py` REFUSAL channel; the SPAN-history gap that BLOCKS undefined-risk families. | consumes `02`§4 → feeds `05`§5 + the SPAN DEC |
+| **10** | Seller edge & execution evidence | The variance-risk-premium literature review, the Indian counterparty, and defense-time fill realism (F-A…F-E execution-realism liquidity classing). | VRP + fill evidence → feeds `05` + the edge-study DEC |
+| **11** | Expiry-day tail study | A reproducible, stdlib-only bhavcopy harness measuring per-expiry-day short-premium P&L, every SL fill **bracketed** optimistic↔pessimistic (the DEC-FILL-WORST-CASE-ONLY-001 law) — the measured naive-vs-honest gap. | the measured study → feeds `05`§7.4 + the edge-study DEC |
 
 ---
 
@@ -80,15 +80,15 @@ promise — chapter `05` §0, chapter `07` §0):
 Read this first. "Data-ready TODAY" = whether the **shipped repo substrate + the
 REFERENCE_ONLY lake** can honestly backtest the family under the four laws — **not** that any
 engine ships (nothing does; the engine stays spot-only). Every family is **first-class in the
-grammar** but the capital/data axes decide v1 admissibility (chapter `05` §1.6; chapter `07` §2).
+grammar** but the capital/data axes decide v1 admissibility (chapter `05` §2.4; chapter `07` §2).
 
 | Strategy-family group | Data-ready TODAY? | What unlocks / widens it (DEC or DATA) | Honest limit (never claim beyond this) |
 |---|---|---|---|
 | **Index defined-risk** — iron condor, iron butterfly, bull-put & bear-call spreads (index, ≤30 DTE, same expiry) — **the v1-admissible honest set** | **partial** — priceable end-to-end on the 30-day-window premium + stored Greeks; **exact max-loss capital basis** (no SPAN needed). The best-served group. | the **#2211 capability slice** activates it DEFAULT-OFF; the **feature-lake DEC** later unlocks vol-regime (IV-rank) timing (H-8) | no IV-rank series today ⇒ "sell when IV is high" entries have **no substrate** (H-8); no chain-completeness census ⇒ missing liquid strikes are **unattested absence / survivorship bias** (H-9); **no SLA** — no options trials/s figure exists (H-11); pre-2024-10-01 option ETC = counted `COST_REGIME_UNVERIFIED` refusal (H-12) |
 | **Index undefined-risk** — naked short straddle / strangle / front-ratio / jade lizard (index) | **no — REFUSED in v1 on the capital axis** (premium path is measurable; the *sizing* is not) | **DEC-SPAN-HISTORY-INGEST-001** (dated NSE-Clearing SPAN files → converts refusal windows to admissible date-by-date) | **NO SPAN margin history exists anywhere** — `margin_history.py` is one all-refusal row from 2020-01-01 (`brutex/engine/margin_history.py:12-23,160-173`); the drawdown-to-margin **spiral can only be BOUNDED, never simulated** (H-1/H-2); archive retention depth 2020→today is **UNVERIFIED** — if shallow, permanent past-refusal + forward-only rows |
-| **0DTE selling** — same-day expiry structures, time-anchored entries | **partial** — 1-minute-native lake exists; **iron fly = admissible, straddle/strangle = refuse** (chapter `05` §1.6 row 12) | same as its base family (defined-risk fly rides #2211; naked legs wait on SPAN); an **FSP-ingest DEC** tightens settlement (H-5) | the last ~10 min before expiry is `AT_EXPIRY`-NULL by design, so a **delta-selected 0DTE strike is unresolvable** there (chapter `05` §1.3); expiry-afternoon spreads gap violently and 1-minute OHLC mis-times fills exactly when trades matter most (chapter `04` §2.3(iv)); settlement is a **PROXY with a disclosed band**, not the exact NSE FSP (H-5) |
-| **Covered call / cash-secured put** (index; the covered/collar body uses the **index FUTURES leg**, not the underlying) | **cash-secured put = YES** (admitted on `capital_basis=max_loss`); **covered call = no — REFUSED** (naked-class downside, UND) | the **SPAN-ingest DEC** moves the CSP to a `span_margin` basis and opens the covered-call downside; covered-call `B:FUT` leg is index-futures-covered by construction | cash-secured-put max-loss basis **UNDERSTATES leveraged ROI ~6–8× vs real SPAN** (magnitude itself UNVERIFIED — H-16 / ruling B-1); the covered-call downside is undefined-risk ⇒ v1 refuse (chapter `05` §1.6 rows 7a/8) |
-| **Stock-option selling** — covered-call-like / CSP-like / verticals on single stocks | **no — REFUSED in v1** | a **stock-scope data-package DEC** (corporate-action calendar + factor + symbol re-map · MWPL ban-list archive · per-underlying earnings · delivery-STT split) — multiple independent BLOCK-class gaps | **physical settlement** (delivery risk the intraday engine cannot model) + **zero corporate-action / ban-list layer**; stock options are **monthly-only** in India (no weekly-track tokens); the executor's `LakeOptionBarSource` maps only the 3 indexes today (H-6; chapter `05` §1.4) |
+| **0DTE selling** — same-day expiry structures, time-anchored entries | **partial** — 1-minute-native lake exists; **iron fly = admissible, straddle/strangle = refuse** (chapter `05` §2.4 row 12) | same as its base family (defined-risk fly rides #2211; naked legs wait on SPAN); an **FSP-ingest DEC** tightens settlement (H-5) | the last ~10 min before expiry is `AT_EXPIRY`-NULL by design, so a **delta-selected 0DTE strike is unresolvable** there (chapter `05` §2.2); expiry-afternoon spreads gap violently and 1-minute OHLC mis-times fills exactly when trades matter most (chapter `04` §2.3(iv)); settlement is a **PROXY with a disclosed band**, not the exact NSE FSP (H-5) |
+| **Covered call / cash-secured put** (index; the covered/collar body uses the **index FUTURES leg**, not the underlying) | **cash-secured put = YES** (admitted on `capital_basis=max_loss`); **covered call = no — REFUSED** (naked-class downside, UND) | the **SPAN-ingest DEC** moves the CSP to a `span_margin` basis and opens the covered-call downside; covered-call `B:FUT` leg is index-futures-covered by construction | cash-secured-put max-loss basis **UNDERSTATES leveraged ROI ~6–8× vs real SPAN** (magnitude itself UNVERIFIED — H-16 / ruling B-1); the covered-call downside is undefined-risk ⇒ v1 refuse (chapter `05` §2.4 rows 7a/8) |
+| **Stock-option selling** — covered-call-like / CSP-like / verticals on single stocks | **no — REFUSED in v1** | a **stock-scope data-package DEC** (corporate-action calendar + factor + symbol re-map · MWPL ban-list archive · per-underlying earnings · delivery-STT split) — multiple independent BLOCK-class gaps | **physical settlement** (delivery risk the intraday engine cannot model) + **zero corporate-action / ban-list layer**; stock options are **monthly-only** in India (no weekly-track tokens); the executor's `LakeOptionBarSource` maps only the 3 indexes today (H-6) |
 
 **The honest product claim, verbatim (chapter `07` §2):** *"worst-case-bounded against
 demonstrated trades, liquidity-classed, spread-stressed — not size-realistic, not
@@ -131,8 +131,16 @@ chapter `09`), so class 3 is a **PENDING-ON-BOX recipe**, never a number.
   translation/annotation layer over a spot-only engine.
 - **Joint vehicle:** draft **PR #1725** carries this research pair, with the reproducible
   bhavcopy expiry-day tail study as **chapter `11`**.
-- **Base SHA (all `path:line` citations verified against):**
+- **Base SHA — how to resolve every `path:line` citation.** Chapters `01`–`10` + this
+  README pin every `brutex/` / `rust/` / non-design `docs/` `path:line` citation to
   `184a48a4abb0ec2fd61906499a6a799a752abd7e` (= the `origin/main` tip the branch was cut
-  from). `git diff --name-only 184a48a4…HEAD` returns ONLY files under
-  `docs/design/options-strategies/` — every cited `brutex/` / `rust/` / non-design `docs/`
-  source is byte-identical at the branch head.
+  from). **Resolve each citation with `git show 184a48a4:<path>`, NOT the head working
+  tree.** The branch head has DRIFTED from the base: the two `origin/main` main-sync merges
+  (`dbf2ee6`, `ade2427`) shifted line numbers in many cited sources (e.g.
+  `sweep_run.py canonical_trade_params` :719→:782; `catalog.py get_bars` :477→:501;
+  `nse.py`, `ingest.py`, `parquet_writer.py`, `timeframe_materialize.py`,
+  `spot_daily_resample.py`, `docs/vendors/gdfl/INGEST_DESIGN.md` likewise).
+  `git diff --name-only 184a48a4…HEAD` returns **431** files (the design tree + the branch's
+  own MIGRATION.md #2210 ledger commits + the two main-sync merges' content) — **not**
+  design-only. Chapter `11` (STUDY.md) carries its OWN citation basis (declared in STUDY §0)
+  and is NOT covered by this base-SHA pin.

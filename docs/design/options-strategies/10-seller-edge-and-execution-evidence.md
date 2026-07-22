@@ -5,7 +5,15 @@
 > a future operator-gated DEC/ADR.
 > **Date:** 2026-07-19
 > **Provenance:** multi-agent deep-research session, docs-only branch
-> `claude/options-strategies-design`, deliberately NO PR (fleet-wide PR-creation freeze).
+> `claude/options-strategies-design`, draft PR #1725 (DEC-OPTION-SELLING-RESEARCH-001, #2210)
+> carries this research pair.
+>
+> **Citation base — how to resolve every `[REPO path:line]` cite.** Chapters `01`–`10` + the
+> README pin every `brutex/` / `rust/` / non-design `docs/` `path:line` citation to base SHA
+> `184a48a4abb0ec2fd61906499a6a799a752abd7e` (the `origin/main` tip the branch was cut from) —
+> resolve each with `git show 184a48a4:<path>`, NOT the head working tree, which has DRIFTED
+> (the two `origin/main` main-sync merges `dbf2ee6`/`ade2427` shifted many cited line numbers;
+> e.g. `catalog.py get_bars` :477→:501). Chapter 11 (STUDY.md) carries its own citation basis.
 >
 > **Evidence tiers used throughout:** **[REPO path:line]** (verified by reading the file in the
 > research container) · **[WEB source]** (externally verified in-session, URL given) ·
@@ -274,7 +282,9 @@ translation layer is a FUTURE operator-gated DEC/ADR: the sweep engine is SPOT-O
    **Reality-Check/SPA** (#4, pool-level "is the best candidate real or data-snooped", p<0.05
    [REPO brutex/metrics/cascade.py:41]), **PBO** (#5, pool overfit probability), **Romano-Wolf**
    (#6, FWER rejection set), **Walk-Forward** (#7, ≥0.75 of walks), **Lockbox** (#8, held-out
-   window, sharpe floor 0.05 [REPO brutex/metrics/cascade.py:152]), **Monte-Carlo permutation**
+   window, RELATIVE sharpe floor `training_sharpe × (1 − 0.30)` [REPO
+   brutex/metrics/lockbox.py:125,477-478] — no absolute floor; the `0.05` at cascade.py:152 is
+   the composite-score WEIGHT for the `lockbox_sharpe` term, not a gate), **Monte-Carlo permutation**
    (#9, p<0.01). Caveat for selling: permutation/bootstrap resampling of a negative-skew return
    series UNDER-represents the tail exactly when the sample lacks one — the gates reduce but do
    not eliminate hazard (1); a selling-specific stress leg (synthetic gap/vol-shock scenario
@@ -426,7 +436,7 @@ executor prices at the option's own bar extremes as "the worst-case adverse anch
 (lot_size → cost_regime → no_data → stale_bar → tick_floor) [REPO executor.py:507-564]. A
 `session_gap` law already exists for positions stranded by a data hole: close retroactively at
 the prior session's last stored bar's adverse extreme, counted via the `exits_session_gap`
-counter [REPO trade_sim.py:60-67,270].
+counter [REPO trade_store.py:211] under the session-gap law [REPO trade_sim.py:60-67].
 
 **What worst-case-per-leg fills DO bound:**
 
@@ -503,8 +513,10 @@ marked to market. No mid-price netting credit, ever.
 **LAW-4 — DEGRADE LADDER for unfillable defenses.** If a `D-WING` buy or `D-ROLL-U` re-open leg
 finds no `volume>0` bar within `W` minutes (sweepable), the action degrades deterministically to
 the next-most-liquid defense (`wing-add → close-tested-side → close-all`), counted
-`defense_degraded`. This mirrors the defense grammar's ban-period degradation (`ban_active` ⇒
-`D-ROLL-U` degrades to close-only) so the grammar has ONE degradation concept.
+`defense_degraded`. 06 E-15 treats ban periods as a refuse/ABSTAIN edge; LAW-4 here INTRODUCES
+the ban-period-degradation concept (a `ban_active` ⇒ `D-ROLL-U` degrades-to-close-only rule not
+yet in 05's defense grammar) — flagged as new, to be registered in 05's grammar by the executor
+DEC.
 
 ### 5.6 What data would fix it — the GDFL forward-capture path
 
@@ -538,33 +550,40 @@ the next-most-liquid defense (`wing-add → close-tested-side → close-all`), c
 
 ## 6. The seller EXECUTION-REALISM REGISTER (per action type)
 
-Honesty classes: **A** = achieved-print-bounded (adverse extreme of a `volume>0` bar — a real
-print occurred at/beyond the charged price); **B** = defense-penalized (class A + LAW-1 penalty;
-bar range may still understate the book — C-1 residue disclosed); **C** = deferred (LAW-2
-walk-forward engaged); **D** = settlement-proxy (official settlement price approximated from the
-spot 1-minute lake); **E** = unboundable residue (size/impact beyond per-lot marginal — C-2;
-disclosed, never modeled). Every class-B/C/D fill also reports its class on the trade row (the
-`exits_session_gap`/`mae_granularity` counter precedent [REPO trade_sim.py:270; CLAUDE.md §1
-#1743 blurb]).
+Honesty classes: **F-A** = achieved-print-bounded (adverse extreme of a `volume>0` bar — a real
+print occurred at/beyond the charged price); **F-B** = defense-penalized (class F-A + LAW-1 penalty;
+bar range may still understate the book — C-1 residue disclosed); **F-C** = deferred (LAW-2
+walk-forward engaged); **F-D** = settlement-proxy (official settlement price approximated from the
+spot 1-minute lake); **F-E** = unboundable residue (size/impact beyond per-lot marginal — C-2;
+disclosed, never modeled). Every class-F-B/F-C/F-D fill also reports its class on the trade row (the
+`exits_session_gap`/`mae_granularity` counter precedent [REPO trade_store.py:211 (counter);
+trade_sim.py:60-67 (law); CLAUDE.md §1 #1743 blurb]).
+
+> **Reconciliation.** These F-A…F-E are per-ACTION EXECUTION-REALISM classes; the per-TRIAL
+> FILL-HONESTY taxonomy of record is chapter [05](05-engine-design.md) §4.5's A/B/C (a
+> whole-structure verdict over all legs at entry AND exit). An F-C deferral or F-E residue on any
+> leg drives the trial's per-trial class toward 05-Class-B (bounded-price only) or 05-Class-C
+> (refused); a trial is 05-Class-A only when every leg's fill is F-A/F-B-bounded at the simulated
+> size. See 05 §4.5.
 
 | # | Action (grammar ID) | Timing nature | Fill law | Class | Counters (per structure/run) |
 |---|---|---|---|---|---|
-| 1 | **Entry** — sell-to-open all legs (E-\* laws) | chosen | signal bar N → fill bar N+1 (engine timing lock [REPO trade_sim.py:33-36]); each leg sells @ its bar's LOW; ALL legs require a `volume>0` bar at the decided minute; any leg failing ⇒ whole entry **skipped** (foregone trade — the ONE place reject stays conservative; [REPO executor.py:543-557] law retained) | A (+E residue) | `entries`, `entry_skipped_no_data`, `entry_skipped_stale_bar`, `entry_leg_minute_mismatch`, per-leg `fill_bar_range_paisa` (the in-lake spread proxy), credit received |
-| 2 | **Profit-take** (`D-TP`) — buy-to-close | chosen | trigger on bar N close → fill N+1; each leg buys @ HIGH; LAW-2 defer on absent/stale bar (profit-takes may defer — they are still closes of an open short) | A; C if deferred | `tp_fills`, `tp_deferred`, `tp_deferral_minutes` |
-| 3 | **Stop-loss** (`D-SL-k`, `D-STOP-TOUCH`) — buy-to-close tested/all | **forced** | buy @ `max(level, high) + penalty` (adverse-max WITH level [REPO fill_mode.py:10-13] + LAW-1); same-bar tie with any TP: SL first (engine tie law [REPO trade_sim.py:43-45]); LAW-2 defer; LAW-3 legging when multi-leg | **B**; C if deferred | `sl_fills`, `sl_gap_through` (fill > level), `sl_excess_over_level_paisa`, `sl_deferred`, `sl_deferral_minutes`, `penalty_paisa_total` |
-| 4 | **Roll** (`D-ROLL-U`, `D-INVERT`, `D-DTE` roll-out) — buy-to-close old leg + sell-to-open new leg | forced | old leg buy @ HIGH+penalty; new leg sell @ LOW−penalty; SAME decided bar when both printable, else LAW-2 per leg + LAW-3 legging accounting; new-leg unfillable within W minutes ⇒ LAW-4 degrade | **B**; C/legging | `rolls`, `roll_credit_recollected_paisa`, `roll_legging_bars`, `roll_deferred_legs`, `roll_degraded` (→ which rung), `invert_width_steps` |
-| 5 | **Wing-add** (`D-WING`) — buy-to-open far-OTM wing | forced | buy @ HIGH+penalty; the WORST liquidity region by revealed broker policy (§5.2) so the LAW-4 window `W` is smallest here; unfillable ⇒ degrade to close-tested-side | **B**; C; heavy E residue | `wing_adds`, `wing_deferred`, `wing_unfillable_degraded`, `wing_fill_bar_range_paisa` |
-| 6 | **Recenter** (`D-RECENTER`) | forced (close half) + chosen (reopen half) | closing half = row 3 law; reopening half = row 1 law but LAW-2-deferrable (a recenter's reopen is optional — degrade to stay-closed, counted) | B + A | `recenters`, `recenter_reopen_skipped` |
-| 7 | **Expiry settlement** (hold-to-settle) + forced 15:20 alternative | scheduled | if closed pre-expiry: row 2/3 laws with the engine's forced-exit boundary (session close −10 min [REPO trade_sim.py:46-54]); if held to settle: index CE/PE cash-settle at intrinsic vs the **settlement-price proxy** computed from the spot 1-minute lake's last-30-min closes; proxy divergence from the official settlement price is undetectable in-lake — stamped `settlement_proxy=true` | **D** | `expiry_settlements`, `settlement_proxy_count`, `expiry_itm_legs` (STT/assignment handoff to the tax sections), `forced_1520_exits` |
-| 8 | **Any defense on a no-print/stale bar** | forced | LAW-2 (walk-forward, session-gap carry, never reject) | **C** | `defense_deferred_total`, `max_single_deferral_minutes`, `defense_carried_sessions`, `stale_mark_minutes`, `defense_session_gap` |
+| 1 | **Entry** — sell-to-open all legs (E-\* laws) | chosen | signal bar N → fill bar N+1 (engine timing lock [REPO trade_sim.py:33-36]); each leg sells @ its bar's LOW; ALL legs require a `volume>0` bar at the decided minute; any leg failing ⇒ whole entry **skipped** (foregone trade — the ONE place reject stays conservative; [REPO executor.py:543-557] law retained) | F-A (+F-E residue) | `entries`, `entry_skipped_no_data`, `entry_skipped_stale_bar`, `entry_leg_minute_mismatch`, per-leg `fill_bar_range_paisa` (the in-lake spread proxy), credit received |
+| 2 | **Profit-take** (`D-TP`) — buy-to-close | chosen | trigger on bar N close → fill N+1; each leg buys @ HIGH; LAW-2 defer on absent/stale bar (profit-takes may defer — they are still closes of an open short) | F-A; F-C if deferred | `tp_fills`, `tp_deferred`, `tp_deferral_minutes` |
+| 3 | **Stop-loss** (`D-SL-k`, `D-STOP-TOUCH`) — buy-to-close tested/all | **forced** | buy @ `max(level, high) + penalty` (adverse-max WITH level [REPO fill_mode.py:10-13] + LAW-1); same-bar tie with any TP: SL first (engine tie law [REPO trade_sim.py:43-45]); LAW-2 defer; LAW-3 legging when multi-leg | **F-B**; F-C if deferred | `sl_fills`, `sl_gap_through` (fill > level), `sl_excess_over_level_paisa`, `sl_deferred`, `sl_deferral_minutes`, `penalty_paisa_total` |
+| 4 | **Roll** (`D-ROLL-U`, `D-INVERT`, `D-ROLL-T` [DTE-triggered roll-out — a distinct grammar ID to be registered in 05; 05:346's `D-DTE` is a scheduled plain close, NOT a roll]) — buy-to-close old leg + sell-to-open new leg | forced | old leg buy @ HIGH+penalty; new leg sell @ LOW−penalty; SAME decided bar when both printable, else LAW-2 per leg + LAW-3 legging accounting; new-leg unfillable within W minutes ⇒ LAW-4 degrade | **F-B**; F-C/legging | `rolls`, `roll_credit_recollected_paisa`, `roll_legging_bars`, `roll_deferred_legs`, `roll_degraded` (→ which rung), `invert_width_steps` |
+| 5 | **Wing-add** (`D-WING`) — buy-to-open far-OTM wing | forced | buy @ HIGH+penalty; the WORST liquidity region by revealed broker policy (§5.2) so the LAW-4 window `W` is smallest here; unfillable ⇒ degrade to close-tested-side | **F-B**; F-C; heavy F-E residue | `wing_adds`, `wing_deferred`, `wing_unfillable_degraded`, `wing_fill_bar_range_paisa` |
+| 6 | **Recenter** (`D-RECENTER`) | forced (close half) + chosen (reopen half) | closing half = row 3 law; reopening half = row 1 law but LAW-2-deferrable (a recenter's reopen is optional — degrade to stay-closed, counted) | F-B + F-A | `recenters`, `recenter_reopen_skipped` |
+| 7 | **Expiry settlement** (hold-to-settle) + forced 15:20 alternative | scheduled | if closed pre-expiry: row 2/3 laws with the engine's forced-exit boundary (session close −10 min [REPO trade_sim.py:46-54]); if held to settle: index CE/PE cash-settle at intrinsic vs the **settlement-price proxy** computed from the spot 1-minute lake's last-30-min closes; proxy divergence from the official settlement price is undetectable in-lake — stamped `settlement_proxy=true` | **F-D** | `expiry_settlements`, `settlement_proxy_count`, `expiry_itm_legs` (STT/assignment handoff to the tax sections), `forced_1520_exits` |
+| 8 | **Any defense on a no-print/stale bar** | forced | LAW-2 (walk-forward, session-gap carry, never reject) | **F-C** | `defense_deferred_total`, `max_single_deferral_minutes`, `defense_carried_sessions`, `stale_mark_minutes`, `defense_session_gap` |
 | 9 | **Freak-class bar disclosure** (any fill on a bar whose extreme is a stress print) | n/a (annotation) | fills stand (worst-case is honest — §5.4) but the bar is flagged: `high/prev_close` or `low/prev_close` beyond a premium-appropriate threshold (NOT the spot engine's 4× bad-tick law — option premiums legitimately move >4×; the threshold is a design parameter [UNVERIFIED calibration — §7 U-M2]) | annotation | `freak_class_fill_count`, `freak_class_worst_multiple` |
 
-**Cross-cutting emissions (run-level):** `penalty_paisa_total`, `class_b_fill_share`,
+**Cross-cutting emissions (run-level):** `penalty_paisa_total`, `f_class_b_fill_share`,
 `class_c_fill_share`, the `fill_bar_range_paisa` distribution (the ONLY in-lake spread proxy —
 reported, never presented as a quoted spread), and the standing survivorship disclosure inherited
 verbatim from the executor's honesty note (accepted-set selection bias,
 [REPO executor.py:602-618]) rewritten for sellers: *a seller backtest's UNDEFENDED residue
-(class-C carries, degrades) must be reported beside P&L, because that residue concentrates in
+(class-F-C carries, degrades) must be reported beside P&L, because that residue concentrates in
 exactly the adverse regimes.*
 
 ---
@@ -595,7 +614,7 @@ exactly the adverse regimes.*
 | U-E1 | Quantified adverse-selection / inventory contribution to INDIAN option spread widening (the §5.1 mechanisms are cross-market/theory-anchored) | An Indian-options microstructure study with quote data (none page-verifiable found), or the §5.6 corpus |
 | U-E2 | The crowded-defense-trigger correlation as a *measured* Indian effect (same-side flow bursts at SL cascade instants) | Order-flow/prints analysis on 1-second L1 capture around VIX-spike minutes |
 | U-E3 | 2024-06-04 quoted-spread behavior in NIFTY/BANKNIFTY options (only index-level −5.93% / VIX +23.65% close 25.89 sourced) | A quote archive for that day (commercial tick vendors may sell it; GDFL cannot backfill — VERDICT.md:14-17) |
-| U-E4 | Exact current NSE option settlement-price formula text (last-30-min underlying average assumed for the class-D proxy) | The current NSE/SEBI settlement circular, read directly |
+| U-E4 | Exact current NSE option settlement-price formula text (last-30-min underlying average assumed for the class-F-D proxy) | The current NSE/SEBI settlement circular, read directly |
 | U-M1 | In-lake measurables: zero-volume-minute and absent-minute frequency by moneyness/DTE/regime; `high−low` range distribution on stress vs normal days | Re-running this analysis in a lake-mounted environment (none here: `find / -name '*.parquet' -path '*bars*'` → empty [MEASURED]) |
 | U-M2 | The freak-class bar threshold for option premiums (register row 9) | Calibration on the U-M1 measurement + the Aug-2021 known freak bars as labeled positives |
 | U-S1 | Freak-trade figures page-level exactness (₹803.05; ₹35.25→₹750 +2,029%; ₹2,080 print; ₹35,000/lot SL-M loss) — all snippet-tier, pages 403'd | Fetching Paytm Money / Moneylife / Zerodha Z-Connect / 5paisa articles outside the proxy |
