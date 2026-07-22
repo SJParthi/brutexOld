@@ -78,6 +78,25 @@ Per-axis rationale (each documented on the threshold constants too):
   DEC-TIER-PESSIMISTIC-FILL-002.
 
 O(1) per call (a bounded handful of comparisons + small tuple allocations).
+
+Rust-seam verdict (DEC-RANK-TIERS-RUST-NOGO-001) — reasoned NO-GO
+-----------------------------------------------------------------
+This module deliberately carries NO Rust seam — no ``BRUTEX_RANK_TIERS_RUST``
+flag, no kernel in the math wheel.  There is no numeric core worth an FFI
+hop: the classifier is a bounded handful of threshold comparisons invoked at
+most once per emitted top-100 entry (run-end artifact build; never the mask
+hot path), and its substance is the Python-owned string/None plane — the
+``TIER_REASON_ORDER`` vocabulary plus the dynamic ``missing_input:<field>``
+tokens (reason strings are message bytes), the load-bearing Optional
+taxonomy, the cascade status token compare, and the x100 minute-DD
+projection owned by the wiring site (``top100_artifact.py``).  A seam would
+be nearly all boundary and no body.  The ADR-0020 banner holds verbatim —
+"expected payoff ≈ 0 — conversion is for uniformity, not speed" — and
+applies a fortiori: even the uniformity payoff is nominal here.  The verdict
+is MECHANIZED in ``tests/unit/test_ranking_tiers_rust_contract.py`` (the
+``brutex/models.py`` type-port precedent, DEC-CORE-RUST-MODELS-001); a
+future port must consciously supersede all three surfaces together — this
+note, the contract test and the ledger entry.
 """
 
 from __future__ import annotations
