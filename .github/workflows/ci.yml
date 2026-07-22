@@ -3255,6 +3255,28 @@ jobs:
     runs-on: ubuntu-24.04
     needs: build-wheels
     timeout-minutes: 90
+    strategy:
+      # Sharded 8 ways (deterministic round-robin over the discovered,
+      # sorted plan — `--shard K/8` in coverage_gate_discovery.py) so a
+      # WIDE-TOUCH PR fits the per-job wall clock: the single-lane job
+      # wall-killed at exactly 90 min on the train-B mega-fold (run
+      # 29894571117 — 109 touched modules re-gated sequentially; every
+      # executed module green — a CAPACITY kill, not a correctness red).
+      # Each leg re-discovers the SAME plan and runs its 1-based slice;
+      # the shards PARTITION the plan (disjoint, union == whole —
+      # test-pinned), and the NEW-module-without-test FAIL fires on EVERY
+      # leg (fail-closed, never sliced away). `fail-fast: false` so one
+      # red module never hides a second red module in another leg (one
+      # lap surfaces them all). NOT a gate weakening: the same modules
+      # run under the same 100% line+branch law, split across legs. The
+      # job name is deliberately NOT a direct branch-protection context
+      # (branch-protection-drift.yml's expected set carries only the
+      # "Unit tests + coverage (100% gate)" fan-in + ci-ok, and BOTH
+      # `needs:` this job id — a matrix aggregates its legs, so any red
+      # leg still reds both downstream gates fail-closed).
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -3330,7 +3352,8 @@ jobs:
           if [ -n "${{ github.event.merge_group.base_sha }}" ]; then
             BASE="${{ github.event.merge_group.base_sha }}"
           fi
-          python scripts/ci/coverage_gate_discovery.py --base "$BASE"
+          python scripts/ci/coverage_gate_discovery.py --base "$BASE" \
+            --shard "${{ matrix.shard }}/8"
 
   # ─────────────────────────────────────────────────────────────────
   # UNIT TESTS + COVERAGE FAN-IN (CG-01: 100% line + branch)
