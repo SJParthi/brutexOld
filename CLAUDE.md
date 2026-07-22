@@ -512,6 +512,22 @@ ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. This header carries the pointer,
 never the story — the full record lives in the §1 Active-branch blurb +
 MIGRATION.md #1971.)
+Earlier: 2026-07-18 (DEC-META-LABEL-ANNOTATE-001 +
+DEC-ABSTAIN-GATE-STREAM-001, MIGRATION.md #1984–#1985 — the meta-labeling
+P(win) ANNOTATION layer + the abstention-first gate stream, ANNOTATION-ONLY:
+the NEW `brutex/meta/` package + the manual-invoke `brutex meta-annotate`
+CLI write the `<stem>.meta.json` FOURTH sidecar (strictly out-of-fold CPCV
+P(win) via the REUSED `cpcv_splits` + the τ sweep with
+`n_thresholds_swept` recorded + the five-reason abstain replay over each
+trade's ENTRY snapshot) beside the results-depth trio — `top100.json` +
+every existing artifact BYTE-UNTOUCHED; the born-Rust `rust/brutex-meta`
+kernels (O(1)/trade scorer + O(1)/element abstain bitmasks) sit behind the
+default-OFF `BRUTEX_META_GATE` facade with the Python oracle live; the
+DORMANT in-sim knob `BRUTEX_ABSTAIN_GATE_INSIM` REFUSES loudly at the
+sweep entry (the BRUTEX_FILL_MODE precedent). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1984–#1985 — this header carries the pointer, never
+the story.)
 Earlier: 2026-07-19 (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962,
 branch `claude/rust-calendar-leaves` — PR-1 of the calendar-leaf Rust
 conversion: NEW standalone crate `rust/brutex-calendar` (pyo3 0.29
@@ -6157,6 +6173,107 @@ hostile-review pass._
   of this first cut. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes;
   ONE new env var `BRUTEX_NIGHTLY_RUST`; run identity untouched.)
+  Earlier: `claude/meta-label-abstain-gates`
+  (**DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001,
+  MIGRATION.md #1984–#1985 — queue-master band per the winning-p0 ruling;
+  live-main ceiling #1953 at assignment, gaps legal per
+  DEC-LEDGER-RENUMBER-001** — P0 items 14+15 as ONE annotation-only change
+  set. ITEM 14 (meta-labeling, AFML Ch.3/10): NEW `brutex/meta/` —
+  `features.py` (the FIXED 16-name entry-observable feature vector, TOTAL
+  extraction from the trade_store wire; since the round-1 MAJOR-1 fold the
+  regime one-hots are the PRIOR session's label — `prev_regime_*`, the
+  nearest lens date strictly before the entry's IST date, never the
+  post-entry same-day label; entry-observability property-pinned),
+  `logistic.py` (offline numpy
+  IRLS+ridge fit, NO sklearn; `score_logistic` = the pinned
+  ascending-accumulation Python inference ORACLE), `cpcv_fit.py`
+  (strictly OUT-OF-FOLD p_win via the EXISTING `metrics.cpcv.cpcv_splits`
+  — REUSED, never re-minted; label_span = embargo = the conservative
+  trade-index max-overlap approximation over entry/exit TIMESTAMPS;
+  train-rows-only + present-vix-rows-only standardization — the round-1
+  M-6 law;
+  < MIN_TRADES_FOR_FIT=30 / single-class → the honest degenerate),
+  `threshold.py` (τ 0.50→0.95 step 0.05; `N_THRESHOLDS_SWEPT`=10 recorded
+  in every sidecar — the DSR anti-double-dipping trials count), and
+  `annotate.py` — the pass writing ONE canonical-JSON `<stem>.meta.json`
+  FOURTH sidecar + the run-level `meta_annotation.json` (NO timestamps;
+  re-runs BYTE-IDENTICAL; per-stem isolation, counted named skips;
+  global-stops re-raise raw; eight verbatim honest-limits notes +
+  `revalidation_required: true` on every artifact), surfaced as the
+  manual-invoke `brutex meta-annotate` CLI (lens via the SAME
+  `_depth_reference_loader` shim, best-effort empty-lens degrade;
+  `--dry-run` zero-write tree-pinned). R13 ZERO-RISK: `top100.json` +
+  every existing artifact BYTE-UNTOUCHED; `meta_label`/`abstain_gate`
+  display keys RESERVED, never written. THE W4 FOLD-KEY LAW (binding
+  coordination, recorded): trades are keyed ONLY by `trade_seq` +
+  entry/exit TIMESTAMPS — never bar indices or holding-bars quantities;
+  W4-owned names (`execution_grid` · `exits_deferred` ·
+  `signals_dropped_collision` · `fill_slid_minutes`) are NEVER emitted.
+  ITEM 15 (abstention-first, annotation-only): `abstain.py` — the STABLE
+  `ABSTAIN_REASON_ORDER = (regime_mismatch, vix_out_of_band, vix_missing,
+  event_day, low_confidence)` + the frozen `AbstainGateConfig` + the pure
+  TOTAL `abstain_reasons()` (NaN-normalized; EXACT `>= tau` boundary;
+  fail-closed on missing confidence under a configured τ; passes ⇔
+  reasons==(), property-pinned); the DEFAULT ILLUSTRATIVE config (no
+  regime restriction · NO VIX gate — the round-1 MAJOR-2 law: the aggs
+  vix_band_lo/hi is the p10-p90 of the combo's WINNING trades' entry VIX,
+  label-conditional + in-sample, so it is recorded only as the
+  informational `vix_band_winners_p10_p90` sidecar field with its verbatim
+  disclosure, never adopted; an explicit operator config via
+  `annotate_run(abstain_config=…)` is the ONE way to gate on VIX ·
+  block_event_days=True · τ=0.7) replayed per trade into the `.meta.json`
+  abstain block (reasons keyed by trade_seq, `would_abstain_count`,
+  `kept_pct`; the regime judged is the PRIOR session's label — the MAJOR-1
+  entry-observability law); the DORMANT in-sim arm: `BRUTEX_ABSTAIN_GATE_INSIM` set to
+  ANY value raises the typed `AbstainGateInSimRefusedError` at the
+  `cmd_sweep_all` eager chokepoint BEFORE any artifact (the
+  BRUTEX_FILL_MODE precedent; refusal-leaves-zero-artifacts
+  integration-pinned) — the walker `abstain_gate=None` ctor-hook design,
+  the reserved `canonical_trade_params` key `abstain_gate` (NEVER emitted
+  today), the Rule-3 VIX precondition + MIN_TRADES/DSR interactions and
+  the W4 compose contract (`claude/fill-1m-exec-grid` @ 779fa9e2 — ctor
+  unchanged post-PR-B) live in `docs/design/meta/ABSTAIN_INSIM_DESIGN.md`;
+  building it needs its OWN DEC + ADR + operator ruling. BORN-RUST O(1)
+  (operator 2026-07-18): NEW crate `rust/brutex-meta` (pyo3 0.29
+  abi3-py312, the brutex-feed conventions — source-digest twin, symbol
+  handshake, panic belt, proptest) — batch logistic scorer + abstain
+  reason bitmasks — behind the default-OFF Pattern-A `BRUTEX_META_GATE`
+  facade `brutex/meta/meta_rust.py` (16-call burn-in bit-compare +
+  ship-the-ORACLE autorevert + process latch; refuse-poison validation;
+  MemoryError/KeyboardInterrupt/SystemExit re-raise raw; OFF = oracle
+  serves + crate NEVER imported, bomb-spy-pinned); `brutex_meta` joins
+  `OPTIONAL_KERNELS` (never a turnkey-build prerequisite; built by the
+  NON-required ci.yml `rust-brutex-meta` lane, which also EXECUTES the
+  wheel-backed Python↔Rust parity arms). GATES (executed): all 7 meta
+  modules 100.00% line+branch on the discovery gate (233 unit tests);
+  hypothesis properties (scorer parity bit-exact over hostile floats ·
+  purge invariant · τ monotonicity · passes⇔empty); the frozen
+  byte-golden (degenerate-small 12-trade run through the REAL
+  `write_tuple_sidecars` — float-free box-stable bytes; regen refused
+  without `BRUTEX_REGEN_META_GOLDEN=1`) + frozen scorer/abstain vectors
+  (IEEE-exact + libm-captured bits, the greeks_golden precedent) on BOTH
+  arms; per-element flatness benches (`cache_tier_ceiling`); the CLI e2e
+  integration incl. the REAL `cmd_sweep_all` → `meta-annotate` chain +
+  the refusal pair; cargo fmt/clippy `-D warnings`/test green; the four
+  pure modules join mutation.yml's proven-pair loop (wiring-pinned) + 6
+  hand-applied crate mutants verified KILLED. HONEST: the OOF label span
+  is a conservative approximation, not exact per-trade purging; the fit
+  is research evidence, never a validated gate or frozen deployable
+  model; the abstain replay judges the UNGATED sim's entry snapshots —
+  not a counterfactual re-simulation; p_win floats are per-box
+  BLAS-deterministic, so re-annotation is byte-identical on the SAME box
+  only (the round-1 N-7 qualifier — the byte-golden freezes only the
+  float-free arm); the lens loader's catalog-reconcile METADATA write is
+  the one disclosed write outside the pass's own sidecars (`--no-lens`
+  avoids it). HOSTILE-REVIEW ROUND 1 folded (2 MAJORs — the prev_regime_*
+  prior-session re-source + the None-default/label-conditional-band
+  disclosure — + 4 MINORs + ~12 NITs, all at root cause; goldens
+  consciously re-frozen; the per-finding record lives in MIGRATION.md
+  #1984's fold clause).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; run identity untouched; no new
+  routes; new env vars `BRUTEX_META_GATE` (default OFF) +
+  `BRUTEX_ABSTAIN_GATE_INSIM` (dormant, any set value refuses).)
   Earlier: `claude/rust-calendar-leaves`
   (**DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962** — entry number
   PROVISIONAL, renumber-at-landing per DEC-LEDGER-RENUMBER-001 — PR-1 of the
@@ -15096,6 +15213,24 @@ hostile-review pass._
   the probes floor law · run.py orchestration — stay Python); ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1971 for the full blurb)
+  Earlier: `claude/meta-label-abstain-gates`
+  (DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001, MIGRATION.md
+  #1984–#1985 — P0 items 14+15 as ONE annotation-only change set: the NEW
+  `brutex/meta/` package + `brutex meta-annotate` write the `.meta.json`
+  fourth sidecar (strictly out-of-fold CPCV P(win) via the reused
+  `cpcv_splits` + the τ sweep with `n_thresholds_swept` recorded + the
+  five-reason abstain replay keyed by `trade_seq` + entry/exit timestamps —
+  the W4 fold-key law) beside the results-depth trio with `top100.json` +
+  every existing artifact byte-untouched; the born-Rust `rust/brutex-meta`
+  kernels behind the default-OFF `BRUTEX_META_GATE` facade (burn-in +
+  ship-the-oracle autorevert; OFF = crate never imported, bomb-spy-pinned;
+  `OPTIONAL_KERNELS` row + the non-required ci.yml `rust-brutex-meta`
+  parity lane); the DORMANT in-sim knob `BRUTEX_ABSTAIN_GATE_INSIM`
+  refuses loudly at the `cmd_sweep_all` chokepoint (the BRUTEX_FILL_MODE
+  precedent) with the composition design in
+  `docs/design/meta/ABSTAIN_INSIM_DESIGN.md`; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1984–#1985 for the full blurb)
   Earlier: `claude/rust-calendar-leaves`
   (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — PR-1 of the
   calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`

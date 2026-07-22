@@ -1,0 +1,25 @@
+# DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001 — the ONE
+# cargo-mutants scope for brutex-meta, resolved by any local `cargo mutants`
+# run from this crate dir (CLAUDE.md §2 Rule 11 COMMON; the brutex-feed toml
+# precedent). The crate is NOT in the weekly sharded mutation matrix — the
+# accepted alternative is the ledgered hand-kill evidence (the #1892/#1911
+# precedent: ≥5 hand-applied mutants each verified KILLED by the in-crate
+# suite, recorded in MIGRATION.md #1984/#1985).
+#
+# Scope: the two pure decision cores — the sigmoid branch + pinned
+# accumulation order (score.rs) and the five gate doors + bit assignments +
+# the EXACT `>=` tau boundary (abstain.rs). The in-file `#[cfg(test)]` edge
+# matrices + tests/meta_proptest.rs invariants are the killing suite.
+#
+# DELIBERATELY OUT (documented, not silent — Golden Rule #10; the
+# brutex-feed toml sets the disclosure standard):
+#   src/python.rs — the thin PyO3 mapping edge under the catch_unwind panic
+#                   belt; cargo-mutants fabricates non-compiling
+#                   replacements for PyErr-constructing wrappers (the
+#                   trading-core measurement). The edge is exercised
+#                   end-to-end by the Python facade suites
+#                   (tests/unit/test_meta_meta_rust.py + the hypothesis
+#                   parity gate in tests/property/).
+#   src/lib.rs    — re-exports + the baked SOURCE_DIGEST const only; nothing
+#                   behavioural for cargo-mutants to perturb.
+examine_globs = ["src/score.rs", "src/abstain.rs"]

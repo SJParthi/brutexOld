@@ -188,6 +188,35 @@ os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
 os.environ.pop("BRUTEX_SKIP_WHEEL_FRESHNESS", None)
 os.environ.pop("BRUTEX_FILL_MODE", None)
 
+# DEC-ABSTAIN-GATE-STREAM-001 + DEC-META-LABEL-ANNOTATE-001 hermeticity: a
+# host env carrying the DORMANT `BRUTEX_ABSTAIN_GATE_INSIM` knob would trip
+# the sweep-launch refusal across every sweep-all suite, and an ambient
+# `BRUTEX_META_GATE` would flip the default-OFF Rust meta facade ON for
+# unrelated tests. POP both (the fill-mode discipline above — the meta
+# suites inject env explicitly on both arms).
+os.environ.pop("BRUTEX_ABSTAIN_GATE_INSIM", None)
+os.environ.pop("BRUTEX_META_GATE", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_meta_rust_latch() -> Iterator[None]:
+    """Belt-and-braces: never let a meta-facade latch leak across suites.
+
+    DEC-META-LABEL-ANNOTATE-001 (round-1 N-2): `brutex.meta.meta_rust`
+    keeps a per-process burn-in counter + autorevert LATCH plus a warn-once
+    registry. The meta suites reset it locally, but any OTHER test that
+    drives the facade (an integration chain with `BRUTEX_META_GATE` set)
+    could latch it and silently change a later suite's arm. Reset AFTER
+    every test — but only when the module was actually imported (the lazy
+    `sys.modules` probe keeps this a no-op for the rest of the battery and
+    never imports the facade into tests that pin import-freeness).
+    """
+    yield
+    meta_rust = sys.modules.get("brutex.meta.meta_rust")
+    if meta_rust is not None:
+        meta_rust.reset_meta_rust_for_tests()
+
+
 # DEC-TEST-AWS-HERMETICITY-001 — the suite-wide AWS hermeticity belt. The
 # loud, named error every blocked live-AWS attempt raises. Message names the
 # remediation (inject a fake), never a secret.

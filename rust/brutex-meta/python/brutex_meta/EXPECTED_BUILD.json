@@ -1,0 +1,10 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001; the brutex_feed/fno_math/trading_core R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_meta._EXPECTED_COMPILED_SYMBOLS' names by tests. Update this file in the SAME commit as any rust/brutex-meta surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is caught at runtime by the facade's 16-call burn-in bit-compare vs the retained Python oracle with ship-the-oracle autorevert (brutex/meta/meta_rust.py) plus its refuse-poison output validation — shipped from day one (the lake-facade posture).",
+  "crate_version": "0.1.0",
+  "symbols": [
+    "SOURCE_DIGEST",
+    "__version__",
+    "abstain_masks",
+    "score_logistic"
+  ]
+}

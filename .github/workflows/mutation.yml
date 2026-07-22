@@ -591,6 +591,10 @@ jobs:
             "brutex/acceptance/independent.py:tests/unit/test_acceptance_independent.py:" \
             "brutex/acceptance/report.py:tests/unit/test_acceptance_report.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
+            "brutex/meta/abstain.py:tests/unit/test_meta_abstain.py:" \
+            "brutex/meta/features.py:tests/unit/test_meta_features.py:" \
+            "brutex/meta/logistic.py:tests/unit/test_meta_logistic.py:" \
+            "brutex/meta/threshold.py:tests/unit/test_meta_threshold.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/engine/rust_rank_select.py:tests/unit/test_engine_rust_rank_select.py:" \
             "brutex/engine/pool_union.py:tests/unit/test_engine_pool_union.py:" \

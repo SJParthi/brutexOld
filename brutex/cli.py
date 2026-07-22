@@ -62,7 +62,7 @@ import tempfile
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Final, cast
 
 if TYPE_CHECKING:
@@ -1445,6 +1445,70 @@ def build_parser() -> argparse.ArgumentParser:
             "Dhan dataset (only with --feed dhan; default rolling-options): "
             "'rolling-options' = re-enrich the ROLLING-ATM option bars (ATM±N per bar, "
             "NOT per-contract) with Greeks. 'spot' has NO Greeks (index spot)"
+        ),
+    )
+
+    # ── meta-annotate (DEC-META-LABEL-ANNOTATE-001) — P(win) sidecars ──
+    meta = sub.add_parser(
+        "meta-annotate",
+        help=(
+            "Annotate a sweep run's results-depth finalists with out-of-fold "
+            "meta-label P(win) + the abstention-gate replay (.meta.json "
+            "sidecars; annotation-only — nothing gated or re-ranked)"
+        ),
+    )
+    meta.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    meta.add_argument(
+        "--run-id",
+        required=True,
+        help="The sweep run id (the sweep_runs/<run_id> directory name)",
+    )
+    meta.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        help="Sweeps results tree (default <lake-root>/sweeps)",
+    )
+    meta.add_argument(
+        "--lens-exchange",
+        default="NSE",
+        help="Exchange for the trend/event lens daily-bar reads (default NSE)",
+    )
+    meta.add_argument(
+        "--lens-segment",
+        default="INDEX",
+        help="Segment for the lens daily-bar reads (default INDEX)",
+    )
+    meta.add_argument(
+        "--lens-start",
+        default="2020-01-01",
+        help="Lens daily-bar window start YYYY-MM-DD (default 2020-01-01)",
+    )
+    meta.add_argument(
+        "--lens-end",
+        default=None,
+        help="Lens daily-bar window end YYYY-MM-DD (default: today UTC)",
+    )
+    meta.add_argument(
+        "--no-lens",
+        action="store_true",
+        help=(
+            "Skip the lake daily-bar lens reads entirely (every regime "
+            "annotates 'unknown', no event flags — honest + counted)"
+        ),
+    )
+    meta.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Enumerate stems + validate stamps only; write nothing. Invalid "
+            "stamps are named SKIPPED on stderr but the exit stays 0 by "
+            "design (a dry-run reports, it never gates)"
         ),
     )
 
@@ -6771,6 +6835,187 @@ def cmd_enrich_greeks(
     return EXIT_INTERNAL_ERROR
 
 
+#: The single-filesystem-NAME byte limit (POSIX NAME_MAX / common FS name
+#: cap) an operator ``--run-id`` must fit — an engine grid-identity digest
+#: is 16-64 chars, so no legitimate id can ever reach this bound; a longer
+#: value would otherwise surface as an uncaught ``OSError`` (ENAMETOOLONG)
+#: from the ``run_dir.is_dir()`` probe (fix-round-4 J polish).
+_RUN_ID_MAX_BYTES = 255
+
+
+def _run_id_escapes(run_id: str) -> bool:
+    """True when an operator ``--run-id`` could escape ``sweep_runs/``.
+
+    :func:`brutex.engine.trade_store.sweep_run_dir` joins *run_id* verbatim
+    with NO containment check — its other callers pass engine grid-identity
+    digests, so the shared seam deliberately stays unchanged (refuter
+    round-3 I3-1) and the ONE operator-input caller
+    (:func:`cmd_meta_annotate`) refuses any value that is not a single
+    plain directory name: an absolute path (POSIX root or Windows
+    drive/UNC — ``PureWindowsPath`` probed for completeness), any path
+    separator (``/`` or ``\\`` — covering ``os.sep``/``os.altsep`` on
+    every platform), or a ``..`` component.
+    """
+    if Path(run_id).is_absolute() or PureWindowsPath(run_id).is_absolute():
+        return True
+    if "/" in run_id or "\\" in run_id:
+        return True
+    # Separators are refused above, so the residual ``..`` component shape
+    # is the bare value — PureWindowsPath.parts covers both flavors anyway.
+    return ".." in PureWindowsPath(run_id).parts
+
+
+def cmd_meta_annotate(
+    lake_root: Path | None,
+    *,
+    run_id: str,
+    results_root: Path | None,
+    lens_exchange: str,
+    lens_segment: str,
+    lens_start: str,
+    lens_end: str | None,
+    no_lens: bool,
+    dry_run: bool,
+) -> int:
+    """Annotate one sweep run's finalists with P(win) + the abstention replay.
+
+    DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001 — the thin CLI
+    shim over the 100%-tested :func:`brutex.meta.annotate.annotate_run` (the
+    ``cmd_enrich_greeks`` template). ANNOTATION-ONLY: writes the
+    ``<stem>.meta.json`` fourth sidecar + the run-level
+    ``meta_annotation.json`` summary; ``top100.json`` and every other
+    existing artifact stay byte-untouched. ``--dry-run`` enumerates +
+    validates stamps only (zero writes, zero fits) and exits
+    :data:`EXIT_OK` BY DESIGN even when a stamp fails validation — the
+    invalid stem is still NAMED on stderr as ``SKIPPED (stamp_invalid)``,
+    but a dry-run validates and reports, it never gates (only a WET run's
+    skips flip the exit code). Exit: :data:`EXIT_OK`
+    iff every discovered stem annotated (or dry-run);
+    :data:`EXIT_INTERNAL_ERROR` when any WET-run stem was skipped (the
+    summary names each reason); :data:`EXIT_USER_ERROR` on a bad lake
+    root / an empty-or-whitespace, overlong or path-escaping ``--run-id`` /
+    unknown run id / malformed lens
+    dates. RUN-ID CONTAINMENT (refuter round-3 I3-1 + the fix-round-4 J
+    polish): the operator
+    ``--run-id`` is refused BEFORE any path join when it is
+    empty/whitespace-only (``sweep_run_dir``'s own guard would otherwise
+    raise a raw ``TradeStoreError``), longer than
+    :data:`_RUN_ID_MAX_BYTES` = 255 bytes (the filesystem NAME limit —
+    ``run_dir.is_dir()`` would otherwise raise an uncaught ENAMETOOLONG
+    ``OSError``; an engine grid-identity digest is 16-64 chars, so no
+    legitimate id can ever reach the bound), absolute,
+    carries a path separator (``/`` or ``\\``) or has a ``..`` component
+    (:func:`_run_id_escapes`) — so the run-summary write can never land
+    outside ``sweep_runs/``; the shared
+    :func:`~brutex.engine.trade_store.sweep_run_dir` seam itself is
+    deliberately UNCHANGED (its other callers pass engine grid-identity
+    digests — the operator-trust boundary lives at this ONE
+    operator-input caller).
+
+    The trend/event lens loads each instrument's derived-1day bars through
+    the SAME best-effort :func:`_depth_reference_loader` shim the run-end
+    results-depth pass binds (a failed load degrades to an empty lens —
+    every regime ``"unknown"``, counted, never a crash); ``--no-lens``
+    skips the lake reads entirely. DISCLOSED write surface (annotation
+    scope note, DEC-META-LABEL-ANNOTATE-001): that shim runs a catalog
+    RECONCILE (``reconcile_catalog_from_lake``) before each per-instrument
+    read, which may write catalog registration METADATA for
+    on-disk-but-unregistered partitions — the one write outside the pass's
+    own sidecars; ``--no-lens`` (or ``--dry-run``) avoids it entirely.
+    """
+    from brutex.engine.trade_store import sweep_run_dir
+    from brutex.meta.annotate import annotate_run
+
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="meta-annotate")
+    results = results_root if results_root is not None else resolved / "sweeps"
+    if not run_id.strip():
+        # Sibling of the containment check (fix-round-4 J polish): an empty
+        # --run-id would otherwise surface as sweep_run_dir's own raw
+        # TradeStoreError traceback instead of a clean user error.
+        print(
+            f"[brutex] meta-annotate: invalid --run-id {run_id!r} — a run id "
+            "must be a non-empty sweep_runs/<run_id> directory name",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if len(run_id.encode("utf-8")) > _RUN_ID_MAX_BYTES:
+        # An overlong name would otherwise surface as an uncaught OSError
+        # (ENAMETOOLONG) from the run_dir.is_dir() probe; a grid-identity
+        # digest is 16-64 chars, so this can never refuse a legitimate id.
+        print(
+            f"[brutex] meta-annotate: invalid --run-id — {len(run_id.encode('utf-8'))} "
+            f"bytes exceeds the {_RUN_ID_MAX_BYTES}-byte filesystem name limit "
+            "(an engine grid-identity digest is 16-64 chars)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if _run_id_escapes(run_id):
+        print(
+            f"[brutex] meta-annotate: invalid --run-id {run_id!r} — a run id "
+            "is a single sweep_runs/<run_id> directory name (never absolute, "
+            "no path separators, no '..' components)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    run_dir = sweep_run_dir(results, run_id)
+    if not run_dir.is_dir():
+        print(
+            f"[brutex] meta-annotate: no run directory at {run_dir} — "
+            "pass the sweep's run id (the sweep_runs/<run_id> dir name)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    lens_end_value = lens_end if lens_end is not None else datetime.now(tz=UTC).date().isoformat()
+    for flag, value in (("--lens-start", lens_start), ("--lens-end", lens_end_value)):
+        try:
+            _parse_dt(value)
+        except CliUserError as exc:
+            # _parse_dt is the SHARED date parser whose message names its
+            # dominant callers' --start/--end flags; re-label with the flag
+            # the operator actually typed (refuter round-3 I3-2) — the
+            # helper's own message stays untouched for its other callers.
+            print(
+                f"[brutex] meta-annotate: {str(exc).replace('--start/--end', flag)}",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+    daily_bars_for = None
+    if not no_lens and not dry_run:
+        daily_bars_for = _depth_reference_loader(
+            slices={},
+            lake_root=resolved,
+            catalog_path=resolved / "catalog.duckdb",
+            exchange=lens_exchange,
+            segment=lens_segment,
+            start=lens_start,
+            end=lens_end_value,
+            interval="1day",
+        )
+    report = annotate_run(
+        results,
+        run_id,
+        daily_bars_for=daily_bars_for,
+        dry_run=dry_run,
+    )
+    mode = "dry-run — " if report.dry_run else ""
+    print(
+        f"[brutex] meta-annotate {mode}run={report.run_id} "
+        f"stems={report.stems_total} annotated={report.stems_annotated} "
+        f"skipped={report.stems_skipped} combos={report.combos_annotated} "
+        f"trades={report.trades_annotated}"
+    )
+    for outcome in report.outcomes:
+        if not outcome.annotated and outcome.reason not in (None, "dry_run"):
+            print(
+                f"[brutex] meta-annotate SKIPPED {outcome.stem_rel} ({outcome.reason})",
+                file=sys.stderr,
+            )
+    if report.ok:
+        return EXIT_OK
+    return EXIT_INTERNAL_ERROR
+
+
 # ────────────────────────────────────────────────────────────────────────
 # nightly (DEC-SWEEP-NIGHTLY-AUTOMATION-001) — thin, fully-covered shims
 # over the 100%-tested brutex.nightly modules (the cmd_enrich_greeks template).
@@ -8854,6 +9099,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     try:
         require_fill_mode_env_unset()
     except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # DEC-ABSTAIN-GATE-STREAM-001: the in-sim abstention gate is DESIGNED but
+    # DORMANT (annotation-only) — a set BRUTEX_ABSTAIN_GATE_INSIM refuses
+    # loudly pre-sweep, awaiting the operator gate-flip ruling (the
+    # BRUTEX_FILL_MODE set-knob-refuses precedent above).
+    from brutex.meta.abstain import AbstainGateInSimRefusedError, require_abstain_gate_insim_unset
+
+    try:
+        require_abstain_gate_insim_unset()
+    except AbstainGateInSimRefusedError as exc:
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
@@ -13653,6 +13910,18 @@ def _dispatch(argv: list[str] | None) -> int:
             underlying=args.underlying,
             start=args.start,
             end=args.end,
+            dry_run=args.dry_run,
+        )
+    if args.command == "meta-annotate":
+        return cmd_meta_annotate(
+            args.lake_root,
+            run_id=args.run_id,
+            results_root=args.results_root,
+            lens_exchange=args.lens_exchange,
+            lens_segment=args.lens_segment,
+            lens_start=args.lens_start,
+            lens_end=args.lens_end,
+            no_lens=args.no_lens,
             dry_run=args.dry_run,
         )
     if args.command == "doctor":

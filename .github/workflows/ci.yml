@@ -4103,6 +4103,87 @@ jobs:
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python
 
+  rust-brutex-meta:
+    name: Rust (brutex-meta build + clippy + test + Python parity)
+    # DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001: the
+    # born-Rust meta gate kernels (P(win) scorer + abstain reason bitmasks).
+    # DELIBERATELY NON-REQUIRED — not in ci-ok's needs (the brutex-lake
+    # precedent: the facade ships default-OFF/annotation-only, the Python
+    # oracle is the live production arm, and the required test jobs already
+    # gate every meta module at 100% via the discovery gate with the
+    # Rust-parity arms honestly importorskip'd). This lane builds the wheel
+    # and EXECUTES those parity arms for real (unit facade + hypothesis
+    # differential + frozen vectors + per-element flatness).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: rust/brutex-meta
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-meta -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      # The kernel's own edge matrix + proptest invariants + the
+      # source-digest twin parity, with overflow-checks on (release profile).
+      - name: cargo test
+        run: cargo test --release
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python
+      - name: Set up Python (parity arms)
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build wheel + run the Python-vs-Rust parity arms
+        working-directory: .
+        # Same crates.io flake guard as the trading-core job: retry the
+        # maturin build (the cargo download point) up to 3 times.
+        run: |
+          pip install maturin
+          n=0
+          until (cd rust/brutex-meta && maturin build --release --out ../../dist); do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "maturin build failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "maturin build failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+          pip install dist/*.whl
+          pip install -e ".[dev,data]"
+          # The suites import brutex.engine/metrics chains, so the two
+          # production kernels are needed too (same retry guard).
+          for crate in ./rust/fno-math ./rust/trading-core; do
+            n=0
+            until pip install "$crate"; do
+              n=$((n + 1))
+              if [ "$n" -ge 3 ]; then
+                echo "pip install $crate failed after 3 attempts" >&2
+                exit 1
+              fi
+              echo "pip install $crate failed (attempt $n) — retrying in 10s" >&2
+              sleep 10
+            done
+          done
+          python -m pytest -q \
+            tests/unit/test_meta_meta_rust.py \
+            tests/property/test_meta_gate_properties.py \
+            tests/golden/test_meta_annotation_golden.py \
+            tests/bench/test_meta_gate_o1.py
+
   rust-brutex-strategies:
     name: Rust (brutex-strategies build + clippy + test)
     # DEC-STRATEGIES-RUST-COMBO-001: the combo byte-law decision kernel's

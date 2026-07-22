@@ -176,6 +176,21 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
         "brutex/notifications/notify_rust.py",
         ".github/workflows/notify-rust-parity.yml",
     ),
+    # DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001: brutex_meta
+    # is the born-Rust meta gate kernel (P(win) scorer + abstain reason
+    # bitmasks). Consumed ONLY through the import-guarded facade
+    # brutex/meta/meta_rust.py behind the default-OFF BRUTEX_META_GATE flag —
+    # an absent/broken install serves the Python oracle with one loud WARN
+    # (the brutex_lake posture exactly). Deliberately NOT a build
+    # prerequisite: in NO cargo workspace, built by its own NON-required
+    # ci.yml lane (the rust-brutex-meta job — build + clippy + test + the
+    # wheel-backed Python parity arms). A module-top `import brutex_meta`
+    # anywhere in brutex/ would make a clean clone crash-prone — the inverse
+    # pin below forbids exactly that.
+    "brutex_meta": (
+        "brutex/meta/meta_rust.py",
+        ".github/workflows/ci.yml",
+    ),
     # DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940 / ADR-0020 slice T10):
     # brutex_data is the default-OFF data pure-law crate (the fno_symbol
     # structural grammar). It is consumed ONLY through the import-guarded
