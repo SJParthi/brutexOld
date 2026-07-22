@@ -36,12 +36,20 @@ Flag classes (the three PASS-condition oracles):
   so PASS = engagement + ZERO ``<surface_prefix>.divergence`` occurrences
   over the whole soak (the R45 never-adopt/differential idiom).
 
-Honest envelope (Golden Rule #10): the two rows below are the two flags the
-Rust-conversion track has LANDED ON THEIR SLICE BRANCHES (PR #1479 enum ·
-PR #1464 worker-kernel-cache); NEITHER flag exists on local main at this
-branch's base, so a twin run against a main checkout refuses at the
-engagement gate — the harness serves slice branches via the workflow's
-``ref`` input. Rows for future flags are added by each slice PR. The grid
+Honest envelope (Golden Rule #10): the first two rows below are the two
+flags the Rust-conversion track has LANDED ON THEIR SLICE BRANCHES (PR #1479
+enum · PR #1464 worker-kernel-cache); NEITHER of those flags exists on local
+main at this branch's base, so a twin run against a main checkout refuses at
+the engagement gate — the harness serves slice branches via the workflow's
+``ref`` input. Rows for future flags are added by each slice PR. The third
+row (``BRUTEX_SWEEP_RUST_STAGE1A``, the stage1a batch bar-bits seam — the
+flag EXISTS on main default-OFF since DEC-STAGE1A-RUST-BATCH-001 #1730 and
+flips default-ON on ``claude/stage1a-rust-default-on``, PR #1619) is the
+FIRST DEFAULT-ON row: post-flip an UNSET env serves the RUST arm, so its
+``extra_env`` pins the explicit ``"0"`` kill switch — the OFF arm is
+genuinely the Python oracle while the arm's own ``FLAG=1`` assignment (which
+by the precedence law always comes AFTER ``extra_env``) restores the ON arm;
+without the pin the twin would compare Rust to Rust (vacuous byte identity). The grid
 scales are PROVISIONAL pending the operator wall-time probe on the real box
 (design §6 open question 1); the kernel-cache RSS ceiling converts PR
 #1464's MODELED 0.66-0.73 GB/worker retention claim into a measurable soak
@@ -272,6 +280,33 @@ REGISTRY: Final[tuple[FlagSpec, ...]] = (
             "soak converts that claim from MODELED to MEASURED. The slice PR must "
             "emit the naming-law tokens (sweep_worker_kernel_cache.engaged / "
             ".fallback / .kernel_autoreverted) per design §1(b)."
+        ),
+    ),
+    _sweep_twin_spec(
+        flag="BRUTEX_SWEEP_RUST_STAGE1A",
+        surface_prefix="rust_stage1a",
+        # The FIRST DEFAULT-ON row (DEC-STAGE1A-RUST-DEFAULT-ON-001,
+        # MIGRATION.md #1938): unset now serves the RUST arm, so the OFF arm
+        # must pin the explicit "0" kill switch or the twin degenerates to
+        # Rust-vs-Rust (vacuous byte identity). Both harness legs apply
+        # extra_env BEFORE the arm's own FLAG=1 assignment (the precedence
+        # law), so the ON arm / drift leg still genuinely engage.
+        extra_env=(
+            ("BRUTEX_RESULTS_DEPTH", "0"),
+            ("BRUTEX_SWEEP_RUST_STAGE1A", "0"),
+        ),
+        notes=(
+            "PR #1619 (claude/stage1a-rust-default-on) — the batch Rust "
+            "Stage-1A bar-bits seam (brutex/engine/rust_stage1a.py; kernel "
+            "trading_core.stage1a_bar_bits_batch; oracle = the Python "
+            "Stage1AMatrixBuilder build_bar_bits path; per-process burn-in "
+            "SELF_CHECK_BUILDS=4 with the kernel_autoreverted latch; golden "
+            "battery tests/golden/test_stage1a_rust_batch_golden.py). "
+            "DEFAULT-ON on the slice branch (DEC-STAGE1A-RUST-DEFAULT-ON-001 "
+            "#1938; default-OFF on pre-flip main per #1730) — dispatch with "
+            "ref=claude/stage1a-rust-default-on to soak the default-ON arm. "
+            "The seam already emits the naming-law tokens "
+            "(rust_stage1a.engaged / .fallback / .kernel_autoreverted)."
         ),
     ),
 )

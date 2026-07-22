@@ -2118,8 +2118,10 @@ class TestPriceColumns:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The default-None arm derives locally regardless of the Stage-1A
-        # flag (the W2 rider is flag-INDEPENDENT — pinned).
-        monkeypatch.delenv("BRUTEX_SWEEP_RUST_STAGE1A", raising=False)
+        # flag (the W2 rider is flag-INDEPENDENT — pinned). The OFF arm is
+        # the explicit "0" kill switch — since DEC-STAGE1A-RUST-DEFAULT-ON-001
+        # an unset env falls to the flipped default-ON constant.
+        monkeypatch.setenv("BRUTEX_SWEEP_RUST_STAGE1A", "0")
         bars = _feed()
         bits = build_bar_bits(bars)
         sim = _sim(bars, bits)

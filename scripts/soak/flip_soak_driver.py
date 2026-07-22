@@ -304,12 +304,16 @@ def run_drift_leg(
     fd_baseline: int | None = None
     fd_final: int | None = None
     # A real leg sets the flag env for the whole loop (an injected runner drives
-    # its own state, so it never mutates the ambient env).
+    # its own state, so it never mutates the ambient env). PRECEDENCE LAW
+    # (mirrors flip_soak.sh's run_arm, where arm_env comes AFTER extra_env):
+    # extra_env is applied FIRST so the flag-under-test's own "1" assignment
+    # always wins — a DEFAULT-ON row (e.g. BRUTEX_SWEEP_RUST_STAGE1A) pins its
+    # OFF arm via an extra_env "0" without silently killing the drift leg.
     manage_env = not dry and window_runner is None
     if manage_env:
-        os.environ[flag] = "1"
         for key, value in spec.extra_env:
             os.environ[key] = value
+        os.environ[flag] = "1"
     try:
         while True:
             # Per-window bounded retry: a transient env move is retried; the

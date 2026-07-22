@@ -1,7 +1,8 @@
 """Flag-gated batch Rust Stage-1A bar-bits seam (``DEC-STAGE1A-RUST-BATCH-001``).
 
 The G1 Rust-conversion slice: :func:`brutex.engine.stage1a.build_bar_bits`
-gains a default-OFF Rust arm that replaces the per-bar Python driver loop
+gains a Rust arm (shipped default-OFF; **ON by default since
+DEC-STAGE1A-RUST-DEFAULT-ON-001**) that replaces the per-bar Python driver loop
 (one ``evaluate_with_levels`` + ``VwapState.update`` +
 ``MarketStructureState.update`` FFI call PER BAR) with ONE batch
 ``trading_core.stage1a_bar_bits_batch`` call per ``(instrument, tf)`` build.
@@ -20,11 +21,13 @@ DEC-PREBUILD-FRAME-WRITE-001 — is consumed through the PUBLIC
 :func:`brutex.engine.sweep_lookahead.env_flag_tristate` re-export, never
 copied — CLAUDE.md §11 COMMON; per-call resolution means no module-global flag
 state and every spawn worker reads its OWN inherited environment). Resolution:
-a ``TRUTHY_LITERALS`` value forces ON, a ``FALSY_LITERALS`` value forces OFF, unset /
-whitespace-empty falls to :data:`STAGE1A_RUST_DEFAULT` (**False — the kernel
-ships INERT**; the flip to default-ON is a SEPARATE later one-constant DEC,
-the #1531/#1532 two-step), and any unrecognised value fails SAFE to OFF with
-one warn-once ``flag_unrecognised`` fallback event.
+a ``TRUTHY_LITERALS`` value forces ON, a ``FALSY_LITERALS`` value forces OFF,
+unset / whitespace-empty falls to :data:`STAGE1A_RUST_DEFAULT` (**True — ON
+since DEC-STAGE1A-RUST-DEFAULT-ON-001**, the second step of the #1531/#1532
+two-step DEC-STAGE1A-RUST-BATCH-001 deferred to; the revert is that one
+constant and ``BRUTEX_SWEEP_RUST_STAGE1A=0`` is the per-process operator
+kill switch), and any unrecognised value fails SAFE to OFF with one
+warn-once ``flag_unrecognised`` fallback event.
 
 ## Burn-in self-check + autorevert latch
 
@@ -92,12 +95,15 @@ _LOG = structlog.get_logger("brutex.engine.rust_stage1a")
 #: unrecognised fails SAFE to OFF with one warn-once ``flag_unrecognised``.
 STAGE1A_RUST_ENV: Final[str] = "BRUTEX_SWEEP_RUST_STAGE1A"
 
-#: The ONE default-arm constant — **False: the kernel ships INERT**
-#: (DEC-STAGE1A-RUST-BATCH-001). The flip to ON-by-default is a SEPARATE
-#: later DEC (the reserved ``DEC-STAGE1A-RUST-DEFAULT-ON-001`` — the
-#: #1531/#1532 two-step), licensed only by the burn-in + golden parity
-#: evidence; the revert is this one constant.
-STAGE1A_RUST_DEFAULT: Final[bool] = False
+#: The ONE default-arm constant — **True: ON by default since
+#: DEC-STAGE1A-RUST-DEFAULT-ON-001** (the second step of the #1531/#1532
+#: two-step DEC-STAGE1A-RUST-BATCH-001 deferred to, licensed by the burn-in
+#: + golden parity evidence and the default-arm golden battery). The batch
+#: kernel serves by default — bit-identical to the Python oracle, burn-in
+#: whole-series-checked with the autorevert latch, and killable per process
+#: with ``BRUTEX_SWEEP_RUST_STAGE1A=0`` (the ``FALSY_LITERALS`` operator kill
+#: switch). Revert = this ONE constant.
+STAGE1A_RUST_DEFAULT: Final[bool] = True
 
 #: Kernel-served builds whole-series-compared against the Python oracle per
 #: process (module docstring for the 4-vs-16 sizing rationale).
@@ -179,8 +185,9 @@ def stage1a_rust_enabled() -> bool:
     * a ``TRUTHY_LITERALS`` value (``1/true/yes/on``) → ``True``;
     * a ``FALSY_LITERALS`` value (``0/false/no/off``) → ``False`` — the explicit
       operator kill switch, honoured regardless of the default;
-    * unset or whitespace-empty → :data:`STAGE1A_RUST_DEFAULT` (**False** —
-      the inert-ship default; the one-constant flip lever);
+    * unset or whitespace-empty → :data:`STAGE1A_RUST_DEFAULT` (**True** —
+      ON since DEC-STAGE1A-RUST-DEFAULT-ON-001; the one-constant flip/revert
+      lever);
     * any OTHER value → ``False`` with one warn-once ``flag_unrecognised``
       fallback event (fail-safe OFF — a typo'd value must never silently arm
       an experimental kernel, and once the default flips ON a typo'd kill

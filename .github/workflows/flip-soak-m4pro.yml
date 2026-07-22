@@ -81,6 +81,7 @@ on:
         options:
           - BRUTEX_SWEEP_RUST_ENUM
           - BRUTEX_SWEEP_WORKER_KERNEL_CACHE
+          - BRUTEX_SWEEP_RUST_STAGE1A
       ref:
         description: "Git ref (slice branch / SHA) to check out and soak — the workflow stays main-resident (#1479 lesson)"
         required: true

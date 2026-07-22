@@ -1,12 +1,15 @@
-"""Flag-ON golden twins for the batch Rust Stage-1A arm.
+"""DEFAULT-arm golden twins for the batch Rust Stage-1A arm.
 
-DEC-STAGE1A-RUST-BATCH-001 §6.6 — the frozen Stage-1A / roll goldens replayed
-with ``BRUTEX_SWEEP_RUST_STAGE1A=1`` against their BYTE-UNTOUCHED fixtures
-(none regenerated, none edited), the six real Muhurat-boundary parity runs
-(the #1616 corpus), and the G-5 killer pin: the frozen sweep
-``_GOLDEN_CONTENT_HASH`` / ``_GOLDEN_RUN_ID`` suite replayed flag-ON
-reproduces the pinned bytes with EXACTLY ONE ``rust_stage1a.engaged`` event —
-the strongest end-to-end bit-identity net (the #1531/#1532 precedent).
+DEC-STAGE1A-RUST-BATCH-001 §6.6, replayed as the DEFAULT (no-env) arm since
+DEC-STAGE1A-RUST-DEFAULT-ON-001 — the frozen Stage-1A / roll goldens replayed
+with the flag UNSET (the flipped ``STAGE1A_RUST_DEFAULT = True`` arm) against
+their BYTE-UNTOUCHED fixtures (none regenerated, none edited), the six real
+Muhurat-boundary parity runs (the #1616 corpus), and the G-5 killer pin: the
+frozen sweep ``_GOLDEN_CONTENT_HASH`` / ``_GOLDEN_RUN_ID`` suite replayed
+under the default arm reproduces the pinned bytes with EXACTLY ONE
+``rust_stage1a.engaged`` event — the strongest end-to-end bit-identity net
+(the #1531/#1532 precedent; the Python reference arm is the explicit "0"
+kill switch where one is needed).
 """
 
 from __future__ import annotations
@@ -61,11 +64,16 @@ from tests.golden.test_engine_stage1a_golden import (
 
 
 @pytest.fixture(autouse=True)
-def _flag_on_fresh(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Every test runs flag-ON from a fresh-process seam view."""
+def _default_arm_fresh(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every test runs the DEFAULT (no-env) arm from a fresh-process seam view.
+
+    Since DEC-STAGE1A-RUST-DEFAULT-ON-001 the unset flag IS the Rust arm —
+    the battery below therefore pins that the DEFAULT arm genuinely engages
+    the kernel AND reproduces every frozen golden byte-for-byte.
+    """
     reset_self_check_for_tests()
     reset_observability_memo_for_tests()
-    monkeypatch.setenv(STAGE1A_RUST_ENV, "1")
+    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
     yield
     reset_self_check_for_tests()
     reset_observability_memo_for_tests()
@@ -74,32 +82,32 @@ def _flag_on_fresh(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _assert_engaged(logs: Sequence[Mapping[str, object]]) -> None:
     """The anti-vacuous-gate teeth: the Rust arm genuinely served."""
     engaged = [e for e in logs if e.get("event") == "rust_stage1a.engaged"]
-    assert len(engaged) == 1, "flag-ON replay silently fell back to Python"
+    assert len(engaged) == 1, "default-arm replay silently fell back to Python"
     assert not [e for e in logs if e.get("event") == "rust_stage1a.kernel_autoreverted"]
 
 
-def test_two_day_hand_derived_golden_flag_on() -> None:
+def test_two_day_hand_derived_golden_default_on() -> None:
     with capture_logs() as logs:
         masks = build_bar_bits([_DAY1, _DAY2])
     _assert_engaged(logs)
     assert masks == [3298534883328, 303483462918144]  # the frozen literals
 
 
-def test_nifty_day_golden_manifest_flag_on() -> None:
+def test_nifty_day_golden_manifest_default_on() -> None:
     with capture_logs() as logs:
         masks = build_bar_bits(_day_feed())
     _assert_engaged(logs)
     assert _day_manifest(masks) == _DAY_SHA
 
 
-def test_banknifty_week_golden_manifest_flag_on() -> None:
+def test_banknifty_week_golden_manifest_default_on() -> None:
     with capture_logs() as logs:
         masks = build_bar_bits(_week_feed())
     _assert_engaged(logs)
     assert _week_manifest(masks) == _WEEK_SHA
 
 
-def test_futures_roll_golden_fixture_flag_on() -> None:
+def test_futures_roll_golden_fixture_default_on() -> None:
     with capture_logs() as logs:
         masks = build_bar_bits(_stitched_bars(), roll_schedule=_ROLL_SCHEDULE)
     _assert_engaged(logs)
@@ -111,7 +119,7 @@ def test_futures_roll_golden_fixture_flag_on() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# The six real Muhurat boundaries (#1616 corpus) — flag-ON parity
+# The six real Muhurat boundaries (#1616 corpus) — default-arm parity
 # ────────────────────────────────────────────────────────────────────────
 
 _MUHURAT_BOUNDARIES: tuple[tuple[date, date, date], ...] = (
@@ -138,7 +146,7 @@ def _day_bar(d: date, o: str, h: str, low: str, c: str) -> CandleBar:
 
 
 @pytest.mark.parametrize(("prev_reg", "muhurat", "next_reg"), _MUHURAT_BOUNDARIES)
-def test_muhurat_boundary_parity_flag_on(
+def test_muhurat_boundary_parity_default_on(
     prev_reg: date, muhurat: date, next_reg: date, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bars = [
@@ -149,7 +157,9 @@ def test_muhurat_boundary_parity_flag_on(
     with capture_logs() as logs:
         on = build_bar_bits(bars)
     _assert_engaged(logs)
-    monkeypatch.delenv(STAGE1A_RUST_ENV)
+    # The Python reference arm is the explicit "0" kill switch (unset now
+    # falls to the flipped default-ON constant).
+    monkeypatch.setenv(STAGE1A_RUST_ENV, "0")
     assert on == build_bar_bits(bars)
     # The prior REGULAR session carried through the Muhurat boundary — the
     # prepass drives the REAL _roll_to_new_day, so the anchor is #1616-exact.
@@ -161,17 +171,24 @@ def test_muhurat_boundary_parity_flag_on(
 
 
 # ────────────────────────────────────────────────────────────────────────
-# G-5 — the frozen sweep golden flag-ON (the #1532 killer pin)
+# G-5 — the frozen sweep golden, DEFAULT (no-env) arm (the #1532 killer pin)
 # ────────────────────────────────────────────────────────────────────────
 
 
-def test_frozen_sweep_golden_reproduced_flag_on_with_one_engaged_event(
+def test_frozen_sweep_golden_reproduced_default_on_with_one_engaged_event(
     tmp_path: Path,
 ) -> None:
-    """Flag-ON, the persisted sweep lands on the PINNED pre-Rust store hash
-    byte-for-byte with exactly ONE ``rust_stage1a.engaged`` event — the
-    strongest end-to-end bit-identity net (masks → Stage-1B → trades →
-    metrics → persisted bytes)."""
+    """THE DEC-STAGE1A-RUST-DEFAULT-ON-001 flip gate: with NO env set, the
+    persisted sweep runs the batch Stage-1A kernel (exactly ONE
+    ``rust_stage1a.engaged`` event — the anti-vacuous-gate signal) AND lands
+    on the PINNED pre-Rust store hash byte-for-byte — the strongest
+    end-to-end bit-identity net (masks → Stage-1B → trades → metrics →
+    persisted bytes). If this ever fails on the hash side, the flip must be
+    reverted (the one STAGE1A_RUST_DEFAULT constant) — parity is the flip's
+    licence."""
+    import os
+
+    assert os.environ.get(STAGE1A_RUST_ENV) is None  # genuinely the default arm
     pytest.importorskip("polars")  # flush needs the [data] extra
     from brutex.engine.sweep_run import mask_run_id
 

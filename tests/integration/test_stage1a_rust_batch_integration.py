@@ -92,7 +92,10 @@ def test_flag_on_2worker_spawn_equals_flag_off_sequential_bytes(
         _tree,  # pyright: ignore[reportPrivateUsage]
     )
 
-    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    # The flag-OFF reference arm is the explicit "0" kill switch — since
+    # DEC-STAGE1A-RUST-DEFAULT-ON-001 an unset env falls to the flipped
+    # default-ON constant (the prior delenv arm would compare Rust to Rust).
+    monkeypatch.setenv(STAGE1A_RUST_ENV, "0")
     seq_dir = tmp_path / "seq"
     seq_dir.mkdir()
     seq_out, _, _ = _run_sequential(seq_dir, _grid())

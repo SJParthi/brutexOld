@@ -1326,14 +1326,15 @@ def build_bar_bits(
 
     Notes
     -----
-    Under the default-OFF ``BRUTEX_SWEEP_RUST_STAGE1A`` flag
-    (``DEC-STAGE1A-RUST-BATCH-001``) the build is served by ONE batch
+    Under the ``BRUTEX_SWEEP_RUST_STAGE1A`` flag — **ON by default since
+    DEC-STAGE1A-RUST-DEFAULT-ON-001** (DEC-STAGE1A-RUST-BATCH-001 shipped
+    the seam default-OFF) — the build is served by ONE batch
     ``trading_core.stage1a_bar_bits_batch`` call over a
     :meth:`Stage1AMatrixBuilder.collect_batch_inputs` prepass —
     burn-in-compared + autorevert-latched against this builder, with ANY
     fallback (wheel/envelope/latch) serving the byte-identical builder path
-    below. Flag OFF (the default): one env read, zero materialization,
-    byte-identical output.
+    below. Flag OFF (the explicit ``=0`` per-process operator kill switch):
+    one env read, zero materialization, byte-identical output.
     """
     # Function-local import (the `apply_1day_mask_for` precedent) — the leaf
     # never imports stage1a back, so no cycle; the OFF path pays one env read.
