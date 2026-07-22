@@ -632,9 +632,7 @@ class TestExecColumnsConfig:
         # (#2063) inserts tier.status_text between cascade.status_text and the two
         # exec columns (test_columns_config_carries_the_tier_column pins
         # tier.status_text == cascade.status_text + 1).
-        assert (
-            keys.index("options_exec.net_after_cost_paisa") == keys.index("tier.status_text") + 1
-        )
+        assert keys.index("options_exec.net_after_cost_paisa") == keys.index("tier.status_text") + 1
         assert keys.index("futures_exec.net_pnl_paisa") == (
             keys.index("options_exec.net_after_cost_paisa") + 1
         )

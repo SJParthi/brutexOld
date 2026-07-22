@@ -91,7 +91,6 @@ def _reseed_fresh_1day_midnight(tmp_path: Path, symbols: list[str], *, day: date
     holds only day-D, so it is never itself re-derived).
     """
     import polars as pl
-
     from brutex.dashboard.movers_snapshot import (
         _read_cut_1m_frame,
         _read_daily_partition,
@@ -208,9 +207,7 @@ def test_r6_stale_stored_1day_boot_daily_serves_fresh_and_green(
     # derivation so #1931 serves them ``stored`` (the 3 stored-TF reads); only
     # STALEDAY stays divergent (stored close 31700 ≠ the 1m-derived 33000), the
     # single derived-from-1m read.
-    _reseed_fresh_1day_midnight(
-        tmp_path, ["NIFTY", "BANKNIFTY", XSS_NAME], day=MOVERS_DAY_DATE
-    )
+    _reseed_fresh_1day_midnight(tmp_path, ["NIFTY", "BANKNIFTY", XSS_NAME], day=MOVERS_DAY_DATE)
     session = new_page(fixture)
     freeze_page_clock(session.page)
     session.goto("/movers")
