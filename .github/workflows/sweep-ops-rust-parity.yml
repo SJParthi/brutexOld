@@ -255,10 +255,15 @@ jobs:
         # exactly like ci.yml's test job does (the lake-rust-parity
         # trading_core-step precedent; wheels are compiler-version
         # independent); brutex-identity joins them because results_store.py
-        # hard-imports its kernel (DEC-RUST-RUNID-STORES-001). Same
+        # hard-imports its kernel (DEC-RUST-RUNID-STORES-001), and
+        # brutex-refine because the flag-ON stem suites construct
+        # `stage3_enable=True` grids whose SweepGridConfig.__post_init__
+        # normalizes on the Mode-A grid via require_refine_rust() — a HARD
+        # brutex_refine import (DEC-RUST-STAGE3-REFINE-001; the Python
+        # optimizer math is deleted), exactly like ci.yml's test job. Same
         # crates.io flake-retry idiom as above.
         run: |
-          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity; do
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity ./rust/brutex-refine; do
             n=0
             until pip install "$crate"; do
               n=$((n+1))
