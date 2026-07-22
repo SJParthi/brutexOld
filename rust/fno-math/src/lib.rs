@@ -84,6 +84,35 @@ pub mod metrics;
 /// the libm-carrying combine tail deliberately stays in Python).
 pub mod metrics_fold;
 
+/// Slice-4 PR-1 (`feat(ranking): Rust ranking conversion`): the Rust twins
+/// of `brutex.ranking`'s rank-time math — gates + gate reasons, z-scores,
+/// composite term inputs/fold, the DSR z-term, the rank-order index
+/// permutation, batched overfit verdicts, and the correctly-rounded
+/// i64/i64 division fast path. Pure rlib-style cores + thin `#[pyfunction]`
+/// wrappers; default-OFF behind `BRUTEX_RANKING_RUST` on the Python side.
+pub mod ranking;
+
+/// DEC-SWEEP-ENUM-RUST-001 (#1738): sweep-enumeration kernel — the RANGED
+/// `enumerate_prefilter` surface (design-of-record
+/// `docs/design/sweep_core/DESIGN_FINAL_RUST_SWEEP_CORE.md` §1.3): fused
+/// k-of-bits enumeration (`iter_masks_k_of_bits`) + conflict-pair prune
+/// (`has_conflict`) + Stage-1B min-hits count over a resident condition-major
+/// transposed-bitplane substrate, unranked via the LEX-RANK combinatorial
+/// number system, emitting kept masks in the exact `itertools.combinations`
+/// lexicographic order the sweep's durable bytes depend on. Default-OFF
+/// behind `BRUTEX_SWEEP_RUST_ENUM` (Python wrapper
+/// `brutex/engine/rust_enum.py`).
+pub mod enum_kernel;
+
+// --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2215) ---
+/// Options/futures execution integer cores: money-law primitives, the
+/// worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001), both charge stacks,
+/// and the post-I/O materialize verdict tails — exact-integer twins of the
+/// Python oracles in `brutex.costs` / the two executors; rates cross the
+/// FFI as ARGUMENTS (Python stays the sole rate/refusal authority).
+pub mod exec;
+// --- end exec (slice 7 / P8) ---
+
 /// DEC-METRICS-RUST-STATS-001 (slice 6): Stage-3/4 statistics kernels — the
 /// sequential/integer heavy loops of the Stage-3/4 statistical filters
 /// (CPCV fold pass-count in PR-1; later PRs append inside the same module).
@@ -183,7 +212,42 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
     m.add_function(wrap_pyfunction!(metrics_fold::metrics_fold_recency, m)?)?;
     m.add_function(wrap_pyfunction!(metrics_fold::metrics_fold_trades, m)?)?;
+
+    // ── DEC-SWEEP-ENUM-RUST-001 (#1738) — sweep-enum kernel surface ──
+    // (fenced additive block: unmerged sibling slices share this surface;
+    // whoever lands second reconciles trivially. The interim free function
+    // `sweep_enum_conflict_free` was REPLACED pre-merge by the ranged
+    // resident classes — the design-of-record §1.3 surface.)
+    m.add_class::<enum_kernel::ResidentSweepEnum>()?;
+    m.add_class::<enum_kernel::ResidentSweepEnumU128>()?;
+    // ── end DEC-SWEEP-ENUM-RUST-001 block ──
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
+    // ── slice-4 ranking.rs registrations (feat(ranking): Rust ranking
+    //    conversion) — a comment-fenced per-slice block per the slice-4 /
+    //    slice-6 separate-registration agreement: slice 6 adds its own
+    //    stats block AFTER this one; never interleave slices inside a
+    //    block (lib.rs is a sequenced shared file — first merger wins,
+    //    the other rebases; the fences make the rebase mechanical). ──
+    m.add_function(wrap_pyfunction!(ranking::ranking_composite_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_composite_term_inputs, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_cr_div_i64, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_dsr_z_contributions, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_gate_reasons, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_overfit_verdicts, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_passes_gates, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_rank_order, m)?)?;
+    m.add_function(wrap_pyfunction!(ranking::ranking_zscores, m)?)?;
+    // ── end slice-4 ranking.rs registrations ──
+    // --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2215) ---
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_paisa, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_rupee, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_apply_slippage, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_apply_futures_fill, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_option_charge_stack, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_futures_charge_stack, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_options_materialize, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_futures_materialize, m)?)?;
+    // --- end exec (slice 7 / P8) ---
     // ---- stats module (slice 6, DEC-METRICS-RUST-STATS-001): Stage-3/4
     // statistics kernels. Additive registration only; existing registrations
     // above are untouched. Later slice-6 PRs append inside this fence.

@@ -206,7 +206,17 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # the ranking-pass rationale comment recording brutex/ranking/streaks.py
     # + tests/unit/test_ranking_streaks.py joining the pair (the #1750
     # pledge extension) cites THAT decision's entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797, 1975}),
+    # 1963 = DEC-EXEC-RUST-CORE-001's exec mutmut-pair rationale comment
+    # (slice 7 / P8, club R1 fold; renumbered #1960 -> #1963 at the
+    # 2026-07-19 refresh reconcile, then #1963 -> #1979 at the 2026-07-20
+    # merge-forward — main took #1963 for DEC-EXTREME-EVENT-DOC-HONESTY-001).
+    # mutation.yml still cites the OLD #1963 because the 2026-07-20
+    # merge-forward prep was barred from editing anything under .github/;
+    # the citation sweep of that ONE file rides the pre-land
+    # census/renumber pass (FLAGGED in the club-R1 vehicle PR).
+    # (Wave-2 club fold: union of the two lanes' allowlists — both cites
+    # coexist in the woven mutation.yml.)
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797, 1963, 1975}),
     # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16): render_shard's
     # docstring cites THAT decision's entry for its Rust-seam routing note,
     # not this one.

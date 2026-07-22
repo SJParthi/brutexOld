@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from brutex.costs import constants as C  # noqa: N812 — C = costs constants namespace
 from brutex.costs.types import (
+    ChargeStack,
     TradeCostBreakdown,
     TradeInput,
     UnsupportedTradeOutcomeError,
@@ -34,7 +35,11 @@ from brutex.costs.types import (
 )
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 
-__all__ = ["compute_trade_cost"]
+# ChargeStack is re-exported (via __all__) for the historical consumers
+# that import it from here; its HOME is the stdlib-only leaf
+# brutex.costs.types (the CodeQL py/cyclic-import fix — see the leaf's
+# class docstring).
+__all__ = ["ChargeStack", "compute_trade_cost"]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -181,6 +186,146 @@ def _apply_slippage(
     return buy_fill, sell_fill, realized_per_share
 
 
+def _charge_stack_py(
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    *,
+    is_long: bool,
+    lot_size: int,
+    n_lots: int,
+    brokerage_round_trip_paisa: int,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> ChargeStack:
+    """CALCULATOR_SPEC §4 Steps 1, 3–13 as ONE pure integer function.
+
+    The dispatchable options charge-stack core (DEC-EXEC-RUST-CORE-001,
+    MIGRATION.md #2215): everything from the moment prices are integer paisa —
+    the worst-case bar-extreme fills (DEC-FILL-WORST-CASE-ONLY-001), notionals,
+    the full charge stack under the permanent ADVERSE (ceiling) levy rounding,
+    gross/net — with every RATE resolved by the caller and passed as an
+    argument (rate encoding ``rate_decimal × 10_000_000``;
+    ``brokerage_round_trip_paisa`` is the already-resolved flat round-trip).
+    The body is the byte-identical extraction of the inline steps of
+    :func:`compute_trade_cost` under main's #1825 fill/rounding law (the
+    original #1443 extraction was re-derived on top of that law at the club-R1
+    merge-reconcile — the coordinator's main-wins-structurally ruling); the
+    Python body stays the permanent oracle for the Rust twin
+    (``fno_math.exec_option_charge_stack`` — deletion is a distinct later
+    decision, DEC-EXEC-PY-BODY-DELETE-001).
+
+    Rounding-order laws (DEC-FILL-WORST-CASE-ONLY-001 — the permanent
+    adverse-levy rule; see the step comments): statutory STT/stamp/GST =
+    floor-divide by 10^7 THEN ceiling to the rupee; non-statutory
+    ETC/SEBI/IPFT = ceiling to the paisa PER LEG then summed; GST base = the
+    SUM of the already-rounded service components (STT + stamp excluded),
+    rounded ONCE (DEC-COST-001).
+    """
+    # ── Step 1: apply slippage (1-tick flat adverse, around the worst-case
+    #    bar-extreme anchor — DEC-FILL-WORST-CASE-ONLY-001) ───────────────
+    # The "long" literal below is deliberately UN-pragma'd — it is a
+    # KILLABLE mutant (_apply_slippage branches on startswith("long"), so
+    # mutating it routes a long trade through the SHORT fill law; killed by
+    # every long-trade golden).
+    # SIM108 suppressed: the mutation pragma must scope exactly ONE literal,
+    # so the two literals need distinct source lines (a ternary puts both on
+    # the pragma'd line — the review-round-1 over-suppression this fixes).
+    if is_long:  # noqa: SIM108
+        side = "long"
+    else:
+        # ONLY the else-literal is provably equivalent: any NON-long string
+        # takes the same startswith("long") == False branch as "short".
+        side = "short"  # pragma: no mutate
+    buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
+        side,
+        entry_high_paisa=entry_high_paisa,
+        entry_low_paisa=entry_low_paisa,
+        exit_high_paisa=exit_high_paisa,
+        exit_low_paisa=exit_low_paisa,
+    )
+
+    # ── Step 3: notionals (paise) — lot size resolved by the caller ─────
+    n_shares = n_lots * lot_size
+    buy_notional_paisa = buy_fill_paisa * n_shares
+    sell_notional_paisa = sell_fill_paisa * n_shares
+
+    # ── Step 4: brokerage (per-order flat, both legs — caller-resolved) ─
+    brokerage_paisa = brokerage_round_trip_paisa
+
+    # ── Step 5: STT (sell-side premium only) ────────────────────────────
+    stt_paisa_raw = (sell_notional_paisa * stt_rate) // 10_000_000
+    stt_paisa = _round_levy_rupee(stt_paisa_raw)
+
+    # ── Step 6: exchange transaction charge (both sides on premium) ─────
+    exch_buy_paisa = _round_levy_paisa(buy_notional_paisa * etc_rate)
+    exch_sell_paisa = _round_levy_paisa(sell_notional_paisa * etc_rate)
+    exch_paisa = exch_buy_paisa + exch_sell_paisa
+
+    # ── Step 7: SEBI turnover fee (both sides) ──────────────────────────
+    sebi_buy_paisa = _round_levy_paisa(buy_notional_paisa * sebi_rate)
+    sebi_sell_paisa = _round_levy_paisa(sell_notional_paisa * sebi_rate)
+    sebi_paisa = sebi_buy_paisa + sebi_sell_paisa
+
+    # ── Step 8: IPFT (both sides; NSE only — BSE near-zero) ─────────────
+    ipft_buy_paisa = _round_levy_paisa(buy_notional_paisa * ipft_rate)
+    ipft_sell_paisa = _round_levy_paisa(sell_notional_paisa * ipft_rate)
+    ipft_paisa = ipft_buy_paisa + ipft_sell_paisa
+
+    # ── Step 9: stamp duty (buy leg only, statutory rupee rounding) ─────
+    stamp_paisa_raw = (buy_notional_paisa * stamp_rate) // 10_000_000
+    stamp_paisa = _round_levy_rupee(stamp_paisa_raw)
+
+    # ── Step 10: GST 18% on services only (DEC-COST-001) ────────────────
+    # Round TOTAL once. Base = sum of ALREADY-ROUNDED components; STT and
+    # stamp EXCLUDED (they are transaction taxes, not services).
+    gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
+    gst_paisa_raw = (gst_base_paisa * gst_rate) // 10_000_000
+    gst_paisa = _round_levy_rupee(gst_paisa_raw)
+
+    # ── Step 11: total charges ──────────────────────────────────────────
+    total_charges_paisa = (
+        brokerage_paisa + stt_paisa + exch_paisa + sebi_paisa + ipft_paisa + stamp_paisa + gst_paisa
+    )
+
+    # ── Step 12: gross PnL (slippage already baked into fills) ──────────
+    if is_long:
+        gross_pnl_paisa = sell_notional_paisa - buy_notional_paisa
+    else:  # short — PnL inverts (sold first, buy back to close)
+        gross_pnl_paisa = buy_notional_paisa - sell_notional_paisa
+
+    # ── Step 13: net PnL ────────────────────────────────────────────────
+    net_pnl_paisa = gross_pnl_paisa - total_charges_paisa
+
+    # Slippage as informational line — realized (post-floor) fill deltas.
+    slippage_paisa = realized_slip_per_share * n_shares
+
+    return ChargeStack(
+        buy_fill_paisa=buy_fill_paisa,
+        sell_fill_paisa=sell_fill_paisa,
+        n_shares=n_shares,
+        buy_notional_paisa=buy_notional_paisa,
+        sell_notional_paisa=sell_notional_paisa,
+        brokerage_paisa=brokerage_paisa,
+        stt_paisa=stt_paisa,
+        exch_paisa=exch_paisa,
+        sebi_paisa=sebi_paisa,
+        ipft_paisa=ipft_paisa,
+        stamp_paisa=stamp_paisa,
+        gst_paisa=gst_paisa,
+        slippage_paisa=slippage_paisa,
+        total_charges_paisa=total_charges_paisa,
+        gross_pnl_paisa=gross_pnl_paisa,
+        net_pnl_paisa=net_pnl_paisa,
+        realized_slip_per_share=realized_slip_per_share,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────
 # Main entry point
 # ─────────────────────────────────────────────────────────────────
@@ -262,115 +407,105 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         exit_bar_high_paisa=trade.exit_bar_high_paisa,
         exit_bar_low_paisa=trade.exit_bar_low_paisa,
     )
-    buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
-        trade.side,
-        entry_high_paisa=entry_high_paisa,
-        entry_low_paisa=entry_low_paisa,
-        exit_high_paisa=exit_high_paisa,
-        exit_low_paisa=exit_low_paisa,
-    )
-
     # ── Step 2: lookup lot size ─────────────────────────────────────────
+    # (Step 1 — slippage — is pure and raise-free, so it runs inside the
+    # charge-stack core AFTER the lot/rate resolution below; the reorder is
+    # unobservable — DEC-EXEC-RUST-CORE-001 extraction.)
     n_shares_per_lot = _lookup_lot_size(trade.instrument, trade.entry_dt_ist.date())
-    n_shares = trade.n_lots * n_shares_per_lot
 
-    # ── Step 3: notionals (paise) ───────────────────────────────────────
-    buy_notional_paisa = buy_fill_paisa * n_shares
-    sell_notional_paisa = sell_fill_paisa * n_shares
-
-    # ── Step 4: brokerage (per-order flat, both legs) ──────────────────
+    # ── Steps 4/5/6/8 rate + brokerage RESOLUTION (Python stays the single
+    # authoritative rate source; the resolved integers feed the stack) ────
+    # Step 4: brokerage (per-order flat, both legs).
     per_leg_brokerage = C.brokerage_paisa(trade.broker)
-    brokerage_paisa = per_leg_brokerage * 2
-
-    # ── Step 5: STT (sell-side premium only) ────────────────────────────
-    # DEC-COST-002: regime selected by entry_dt_ist.date()
-    # DEC-COST-003: rates locked per Finance Act 2026
+    # Step 5 rate: STT — DEC-COST-002 regime selected by entry_dt_ist.date();
+    # DEC-COST-003 rates locked per Finance Act 2026.
     stt_rate_bps_x100 = C.stt_options_rate_bps_x100(trade.entry_dt_ist.date())
-    stt_paisa_raw = (sell_notional_paisa * stt_rate_bps_x100) // 10_000_000
-    stt_paisa = _round_levy_rupee(stt_paisa_raw)
-
-    # ── Step 6: exchange transaction charge (both sides on premium) ─────
-    # Date-regime-selected like STT (COMMON rate_for_date mechanism). Only
-    # the dated VERIFIED regimes are encoded; a date on an UNVERIFIED window
-    # lands on an explicit refusal row and RAISES UnverifiedCostRegimeError
-    # here (DEC-ETC-REGIME-HISTORY-001) — the options executor prechecks
-    # and rejects such trades before reaching this point, so this raise is
-    # the authoritative defence-in-depth choke point for direct callers.
+    # Step 6 rate: exchange transaction charge — date-regime-selected like STT
+    # (COMMON rate_for_date mechanism). Only the dated VERIFIED regimes are
+    # encoded; a date on an UNVERIFIED window lands on an explicit refusal row
+    # and RAISES UnverifiedCostRegimeError here (DEC-ETC-REGIME-HISTORY-001) —
+    # the options executor prechecks and rejects such trades before reaching
+    # this point, so this raise is the authoritative defence-in-depth choke
+    # point for direct callers.
     exch_rate_bps_x100 = C.exchange_charge_bps_x100(trade.instrument, trade.entry_dt_ist.date())
-    exch_buy_paisa = _round_levy_paisa(buy_notional_paisa * exch_rate_bps_x100)
-    exch_sell_paisa = _round_levy_paisa(sell_notional_paisa * exch_rate_bps_x100)
-    exch_paisa = exch_buy_paisa + exch_sell_paisa
-
-    # ── Step 7: SEBI turnover fee (both sides) ──────────────────────────
-    sebi_buy_paisa = _round_levy_paisa(buy_notional_paisa * C.SEBI_FEE_BPS_X100)
-    sebi_sell_paisa = _round_levy_paisa(sell_notional_paisa * C.SEBI_FEE_BPS_X100)
-    sebi_paisa = sebi_buy_paisa + sebi_sell_paisa
-
-    # ── Step 8: IPFT (both sides; NSE only — BSE near-zero) ─────────────
+    # Step 8 rate: IPFT (NSE only — BSE near-zero).
     ipft_rate_bps_x100 = C.ipft_bps_x100(trade.instrument)
-    ipft_buy_paisa = _round_levy_paisa(buy_notional_paisa * ipft_rate_bps_x100)
-    ipft_sell_paisa = _round_levy_paisa(sell_notional_paisa * ipft_rate_bps_x100)
-    ipft_paisa = ipft_buy_paisa + ipft_sell_paisa
 
-    # ── Step 9: stamp duty (buy leg only, statutory rupee rounding) ─────
-    stamp_paisa_raw = (buy_notional_paisa * C.STAMP_DUTY_OPTIONS_BPS_X100) // 10_000_000
-    stamp_paisa = _round_levy_rupee(stamp_paisa_raw)
+    # ── Steps 1, 3–13: the pure integer charge-stack core ───────────────
+    # GST note (DEC-COST-001): rounded ONCE at 18% on the services total —
+    # NOT CGST + SGST separately at 9% each (Section 170 CGST). gst_split
+    # (intra/inter state) only affects how the total is DISPLAYED, never how
+    # it is computed. UNVERIFIED boundary note (Golden Rule #1): the SEBI fee
+    # is in the GST base for ALL dates — the claimed ~2022-07-18 GST-on-SEBI
+    # introduction has NO in-repo citation, so it is deliberately NOT
+    # implemented (a pre-boundary trade is OVER-charged by 18% of the
+    # sub-rupee SEBI fee — conservative; COSTS_VERIFIED.md §20).
+    # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+    # Lazy import (the materialize_trade lazy-import precedent): the seam is
+    # a costs-free LEAF (it imports the shared ChargeStack shape from
+    # brutex.costs.types, never this module — the CodeQL py/cyclic-import
+    # fix), so this import is DEFERRAL, not cycle-avoidance: it keeps the
+    # seam's engine-package + one-time fno_math import cost off plain
+    # `import brutex.costs`, landing it on the first dispatch instead.
+    # Default-OFF (`BRUTEX_EXEC_RUST`): the seam returns None unless the
+    # kernel actually serves; the Python core below stays the permanent
+    # oracle arm (DEC-EXEC-PY-BODY-DELETE-001 owns any later deletion
+    # decision).
+    from brutex import exec_rust
 
-    # ── Step 10: GST 18% on services only (DEC-COST-001) ────────────────
-    # Round TOTAL once at 18%. NOT CGST + SGST separately at 9% each.
-    # Section 170 CGST mandates rounding the total tax, not each component.
-    # gst_split (intra/inter state) only affects how the total is DISPLAYED
-    # to the operator, NOT how it's computed.
-    #
-    # UNVERIFIED date-boundary note (Golden Rule #1): the SEBI turnover fee
-    # is included in the GST base for ALL dates. A claimed GST-on-SEBI-fee
-    # introduction boundary (~2022-07-18) has NO in-repo citation, so it is
-    # deliberately NOT implemented; if the claim holds, a pre-boundary trade
-    # is OVER-charged by 18% of the (sub-rupee) SEBI fee — conservative.
-    # See COSTS_VERIFIED.md §20 known limitations.
-    gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
-    gst_paisa_raw = (gst_base_paisa * C.GST_TOTAL_BPS_X100) // 10_000_000
-    gst_paisa = _round_levy_rupee(gst_paisa_raw)
-
-    # ── Step 11: total charges ──────────────────────────────────────────
-    total_charges_paisa = (
-        brokerage_paisa + stt_paisa + exch_paisa + sebi_paisa + ipft_paisa + stamp_paisa + gst_paisa
+    stack = exec_rust.charge_stack_option(
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
+        is_long=trade.side.startswith("long"),
+        lot_size=n_shares_per_lot,
+        n_lots=trade.n_lots,
+        brokerage_round_trip_paisa=per_leg_brokerage * 2,
+        stt_rate=stt_rate_bps_x100,
+        etc_rate=exch_rate_bps_x100,
+        sebi_rate=C.SEBI_FEE_BPS_X100,
+        ipft_rate=ipft_rate_bps_x100,
+        stamp_rate=C.STAMP_DUTY_OPTIONS_BPS_X100,
+        gst_rate=C.GST_TOTAL_BPS_X100,
     )
-
-    # ── Step 12: gross PnL (slippage already baked into fills) ──────────
-    if trade.side.startswith("long"):
-        gross_pnl_paisa = sell_notional_paisa - buy_notional_paisa
-    else:  # short — PnL inverts (sold first, buy back to close)
-        gross_pnl_paisa = buy_notional_paisa - sell_notional_paisa
-
-    # ── Step 13: net PnL ────────────────────────────────────────────────
-    net_pnl_paisa = gross_pnl_paisa - total_charges_paisa
-
-    # Slippage as informational line — derived from the REALIZED fill deltas
-    # (NIT-1) so it is always internally consistent with the notionals/PnL: on
-    # the normal path this is the nominal 2 ticks × n_shares (±1 tick per leg),
-    # but when the 1-tick floor caps a degenerate sub-2-tick sell fill the
-    # sell leg actually moved 0, so the realized slippage is 1 tick × n_shares.
-    slippage_paisa = realized_slip_per_share * n_shares
+    # --- end exec-rust dispatch ---
+    if stack is None:
+        stack = _charge_stack_py(
+            entry_high_paisa,
+            entry_low_paisa,
+            exit_high_paisa,
+            exit_low_paisa,
+            is_long=trade.side.startswith("long"),
+            lot_size=n_shares_per_lot,
+            n_lots=trade.n_lots,
+            brokerage_round_trip_paisa=per_leg_brokerage * 2,
+            stt_rate=stt_rate_bps_x100,
+            etc_rate=exch_rate_bps_x100,
+            sebi_rate=C.SEBI_FEE_BPS_X100,
+            ipft_rate=ipft_rate_bps_x100,
+            stamp_rate=C.STAMP_DUTY_OPTIONS_BPS_X100,
+            gst_rate=C.GST_TOTAL_BPS_X100,
+        )
 
     return TradeCostBreakdown(
         n_shares_per_lot=n_shares_per_lot,
-        n_shares=n_shares,
-        buy_fill_paisa=buy_fill_paisa,
-        sell_fill_paisa=sell_fill_paisa,
-        buy_notional_paisa=buy_notional_paisa,
-        sell_notional_paisa=sell_notional_paisa,
-        brokerage_paisa=brokerage_paisa,
-        stt_paisa=stt_paisa,
-        exch_paisa=exch_paisa,
-        sebi_paisa=sebi_paisa,
-        ipft_paisa=ipft_paisa,
-        stamp_paisa=stamp_paisa,
-        gst_paisa=gst_paisa,
-        slippage_paisa=slippage_paisa,
-        total_charges_paisa=total_charges_paisa,
-        gross_pnl_paisa=gross_pnl_paisa,
-        net_pnl_paisa=net_pnl_paisa,
+        n_shares=stack.n_shares,
+        buy_fill_paisa=stack.buy_fill_paisa,
+        sell_fill_paisa=stack.sell_fill_paisa,
+        buy_notional_paisa=stack.buy_notional_paisa,
+        sell_notional_paisa=stack.sell_notional_paisa,
+        brokerage_paisa=stack.brokerage_paisa,
+        stt_paisa=stack.stt_paisa,
+        exch_paisa=stack.exch_paisa,
+        sebi_paisa=stack.sebi_paisa,
+        ipft_paisa=stack.ipft_paisa,
+        stamp_paisa=stack.stamp_paisa,
+        gst_paisa=stack.gst_paisa,
+        slippage_paisa=stack.slippage_paisa,
+        total_charges_paisa=stack.total_charges_paisa,
+        gross_pnl_paisa=stack.gross_pnl_paisa,
+        net_pnl_paisa=stack.net_pnl_paisa,
         # Always False: the Step-0 guard rejects every non-NORMAL_CLOSE
         # outcome, so the exercise branch (§4.2) is never reached here.
         used_exercise_branch=False,

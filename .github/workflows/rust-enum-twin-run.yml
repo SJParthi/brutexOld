@@ -1,0 +1,113 @@
+# Real-data twin-run for the Rust sweep-enum kernel (DEC-SWEEP-ENUM-RUST-001).
+#
+# The design-of-record's Slice-1 REAL-DATA twin gate (§7.2 venue law): the
+# same pinned sub-grid runs BRUTEX_SWEEP_RUST_ENUM=0 then =1 against the REAL
+# lake on the operator's self-hosted M4 Pro; PASS requires BOTH that every
+# persisted artifact byte-matches AND that the script's ENGAGEMENT gate
+# clears (the ON arm's log must show `sweep_rust_enum.engaged` with zero
+# fallback/autorevert/refusal markers — a stale-wheel or shadow-autoreverted
+# arm is Python-served and its byte-identity proves nothing about the
+# kernel; review round 2, script header for the full law). Dispatch-only
+# (the lake exists only on the operator box); the PASS/FAIL line + both hash
+# manifests upload as an artifact for pasting into the PR body. Operator
+# terminal fallback (identical semantics):
+#
+#   git fetch origin claude/rust-sweep-enum-slice1 \
+#     && git checkout claude/rust-sweep-enum-slice1 \
+#     && bash scripts/ci/rust_enum_twin_run.sh "$BRUTEX_LAKE_ROOT"
+name: Rust enum twin-run (real lake, M4 Pro)
+
+on:
+  # PUSH trigger (integration/club-r1-fnomath ONLY): workflow_dispatch cannot
+  # reach a workflow that is not on the default branch (a 404 from the API),
+  # but a push event reads + runs the workflow file FROM the pushed ref — the
+  # same mechanism bench-m4pro.yml uses to run on claude/** pushes on this
+  # self-hosted runner. This fires the #1479 real-lake twin-run parity gate
+  # (DEC-SWEEP-ENUM-RUST-001) automatically on every push to this branch, so
+  # the operator does not run it by hand. Scoped to this ONE branch so it can
+  # never auto-fire elsewhere. Dispatch is kept for the operator terminal path.
+  push:
+    branches:
+      - integration/club-r1-fnomath
+  workflow_dispatch:
+    inputs:
+      twin_start:
+        description: "Sub-grid window start (YYYY-MM-DD)"
+        required: false
+        default: "2024-01-01"
+      twin_end:
+        description: "Sub-grid window end (YYYY-MM-DD)"
+        required: false
+        default: "2024-03-31"
+
+permissions:
+  contents: read
+
+jobs:
+  twin-run:
+    runs-on: [self-hosted, macos, m4pro]
+    timeout-minutes: 120
+    env:
+      PYTHONHASHSEED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Guard — the real lake must be reachable
+        run: |
+          if [ -z "${BRUTEX_LAKE_ROOT:-}" ] || [ ! -d "${BRUTEX_LAKE_ROOT:-/nonexistent}" ]; then
+            echo "::error::BRUTEX_LAKE_ROOT is not exposed to Actions on this runner" \
+              "(or points at a missing directory). Run the terminal command instead:" \
+              "bash scripts/ci/rust_enum_twin_run.sh <lake-root>"
+            exit 2
+          fi
+          echo "lake root: $BRUTEX_LAKE_ROOT (read-only for this job)"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install brutex + the fno-math wheel
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e ".[dev,data]"
+          pip install ./rust/fno-math
+          pip install ./rust/trading-core
+
+      - name: Twin-run (both arms, byte compare)
+        # The dispatch inputs feed the script's own TWIN_START/TWIN_END env
+        # readers (rust_enum_twin_run.sh uses ${TWIN_*:-default}, so an empty
+        # value still falls back to the same defaults the inputs declare).
+        env:
+          TWIN_START: ${{ inputs.twin_start }}
+          TWIN_END: ${{ inputs.twin_end }}
+        run: |
+          . .venv/bin/activate
+          bash scripts/ci/rust_enum_twin_run.sh "$BRUTEX_LAKE_ROOT" 2>&1 | tee twin_run_output.txt
+
+      - name: Upload twin-run output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-enum-twin-run-output
+          path: twin_run_output.txt
+          if-no-files-found: warn
+
+      - name: Publish twin-run result to job summary (PASS/FAIL line + both hash manifests)
+        if: always()
+        run: |
+          if [ -f twin_run_output.txt ]; then
+            {
+              echo '## Rust sweep-enum twin-run (real lake, M4 Pro) — #1479 parity gate'
+              echo ''
+              echo '```'
+              cat twin_run_output.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## Rust sweep-enum twin-run — no twin_run_output.txt produced' >> "$GITHUB_STEP_SUMMARY"
+          fi

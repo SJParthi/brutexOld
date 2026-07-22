@@ -39,6 +39,8 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         # DEC-ENUM-KERNEL-U128-001 — the u128 enum/count kernel twins (a
         # deliberate, reviewed surface addition; fenced additive entries).
         "ResidentBarsU128",
+        "ResidentSweepEnum",
+        "ResidentSweepEnumU128",
         "ResidentSweepSim",
         "ResidentSweepSimU128",
         "add_u64",
@@ -53,6 +55,16 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u128s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
+        # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+        "exec_apply_futures_fill",
+        "exec_apply_slippage",
+        "exec_futures_charge_stack",
+        "exec_futures_materialize",
+        "exec_option_charge_stack",
+        "exec_options_materialize",
+        "exec_round_to_paisa",
+        "exec_round_to_rupee",
+        # --- end exec (slice 7 / P8) ---
         "metrics_fold_recency",
         "metrics_fold_trades",
         # DEC-OPTCOST-TAILS-RUST-001 (MIGRATION.md #2054, renumbered from #1962) — the 11 optcost
@@ -78,6 +90,18 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "rank_axis_topm",
         "rank_dd_band_indices",
         "rank_pareto_frontier",
+        # Slice-4 PR-1 (feat(ranking): Rust ranking conversion) — the nine
+        # ranking kernels join the surface (a deliberate, reviewed ADDITION
+        # per this module's docstring contract).
+        "ranking_composite_scores",
+        "ranking_composite_term_inputs",
+        "ranking_cr_div_i64",
+        "ranking_dsr_z_contributions",
+        "ranking_gate_reasons",
+        "ranking_overfit_verdicts",
+        "ranking_passes_gates",
+        "ranking_rank_order",
+        "ranking_zscores",
         "stats_cpcv_pass_count",
         # DEC-RANK-CVAR-TAIL-GATE-001 — the integer-exact CVaR worst-k tail
         # fold (a deliberate, reviewed surface addition).

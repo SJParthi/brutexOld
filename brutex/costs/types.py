@@ -9,6 +9,10 @@ worked examples in `docs/track2/COSTS_VERIFIED.md §5`.
 Public types:
 - ``TradeInput`` — round-trip trade specification (entry + exit + meta)
 - ``TradeCostBreakdown`` — per-component charge breakdown + roll-ups
+- ``ChargeStack`` — the pinned 17-field integer charge-stack shape shared
+  by both stacks and the ``brutex.exec_rust`` seam (homed here, the
+  stdlib-only leaf, so the seam never imports ``calculator`` — the
+  CodeQL ``py/cyclic-import`` fix; ``calculator`` re-exports it)
 - ``TradeSide`` — long_call / long_put / short_call / short_put
 - ``TradeOutcome`` — NORMAL_CLOSE / EXPIRY_EXERCISE / EXPIRY_ASSIGN / EXPIRY_WORTHLESS
 - ``Broker`` — groww / zerodha
@@ -26,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Final, Literal, get_args
+from typing import Final, Literal, NamedTuple, get_args
 
 __all__ = [
     "Broker",
@@ -408,6 +412,45 @@ class TradeInput:
 # ─────────────────────────────────────────────────────────────────
 # Output
 # ─────────────────────────────────────────────────────────────────
+
+
+class ChargeStack(NamedTuple):
+    """The 17 integer outputs of one round-trip charge-stack computation.
+
+    Field ORDER is pinned — it mirrors the Rust ``exec::ChargeStack`` struct
+    (DEC-EXEC-RUST-CORE-001, MIGRATION.md #2215) field-for-field, and both
+    project 1:1 onto the numeric fields of
+    :class:`~brutex.costs.types.TradeCostBreakdown` /
+    :class:`~brutex.costs.futures_costs.FuturesCostBreakdown`. All values are
+    int64 paisa. Shared by BOTH stacks (§11 COMMON — the futures twin returns
+    the same shape).
+
+    Homed in THIS stdlib-only leaf module — not ``calculator`` where the
+    stacks live — so the ``brutex.exec_rust`` seam can import the shared
+    shape at module level WITHOUT importing ``calculator`` (whose dispatch
+    site lazily imports the seam back): the calculator ↔ exec_rust mutual
+    import pair is structurally gone (CodeQL ``py/cyclic-import``; the
+    #1533 ``movers_cache.revision_generation`` leaf-homing precedent).
+    ``calculator`` re-exports the name for its historical consumers.
+    """
+
+    buy_fill_paisa: int
+    sell_fill_paisa: int
+    n_shares: int
+    buy_notional_paisa: int
+    sell_notional_paisa: int
+    brokerage_paisa: int
+    stt_paisa: int
+    exch_paisa: int
+    sebi_paisa: int
+    ipft_paisa: int
+    stamp_paisa: int
+    gst_paisa: int
+    slippage_paisa: int
+    total_charges_paisa: int
+    gross_pnl_paisa: int
+    net_pnl_paisa: int
+    realized_slip_per_share: int
 
 
 @dataclass(frozen=True)

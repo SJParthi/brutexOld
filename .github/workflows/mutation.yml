@@ -3,8 +3,10 @@
 # Three mutation gates + one fan-in verdict (DEC-MUTATION-RUNTIME-003):
 #
 # 1. python-mutation — `mutmut` over the critical brutex/ modules (pass 1
-#    ranking/DSR math + a 10-pair per-module loop, now incl.
-#    adapters/rate_common.py). Walks the AST, perturbs one literal /
+#    ranking/DSR math + a 14-pair per-module loop, incl.
+#    adapters/rate_common.py and — per slice-4 PR-1 review round 7 — the
+#    two Rust-parity wrapper modules engine/rust_parity_core.py +
+#    ranking/rust_ranking.py). Walks the AST, perturbs one literal /
 #    comparison / conditional at a time, and runs the module's focused
 #    unit suite against each mutant. Any mutant that **survives** means
 #    the tests don't actually cover that logic branch. Runs on EVERY
@@ -128,7 +130,14 @@ jobs:
     # "remaining 8 loop modules (~384) / >= 30 min margin" decomposition
     # back-derived the loop count from the stale -001-era 890 total while
     # pairing it with TODAY'S compute count, and was ~2.4x low on the loop
-    # modules). Mutant counts measured on THIS tree via mutmut 2.5.1
+    # modules; re-derived AGAIN slice-4 PR-1 review round 8 (R8.2) — the
+    # round-2 nominal enumerated only 10 of what are now 15 pass-2 pairs
+    # (14 at R8.2; rust_stage1a joined at the 2026-07-12 merge-reconcile,
+    # DEC-STAGE1A-RUST-BATCH-001),
+    # omitting lake_stats_manifest + sweep_apriori (merged in AFTER it was
+    # written) and the two slice-4 wrapper modules, so the loop below ran
+    # ~818 mutants the nominal never counted and the earlier "14-26 min
+    # margin" figure was stale). Mutant counts measured via mutmut 2.5.1
     # list_mutations (method validated against two real run logs: audit
     # 243/243 pre-round-2, rate_common 360/360 pre-round-3): pass 1 = 284
     # (re-measured 2026-07-11 — the -003-era 258 predated the #1617
@@ -142,13 +151,19 @@ jobs:
     # DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 Slice-0 tree — the fold/combine
     # decomposition grew the -003-era 354: origin/main measures 355, +18
     # from the decomposition, +4 from the n_trades guard; +23 x ~2.3 s
-    # ~= +53 s, absorbed by the margin below); remaining 8 loop modules =
-    # 932 (state 58 + retry 77 +
-    # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
-    # parser 33 + spec 91).
+    # ~= +53 s, absorbed by the margin below); the 8 historical loop
+    # modules = 932 (state 58 + retry 77 + audit 254 post-round-3 +
+    # rate_limiter 165 + store 146 + partition 108 + parser 33 + spec 91);
+    # PLUS the four pairs the round-2 nominal predated/omitted, measured on
+    # the slice-4 tree (round 8): lake_stats_manifest ~463 + sweep_apriori
+    # ~172 + rust_parity_core 77 + rust_ranking 106 = ~818; PLUS the
+    # rust_stage1a pair (DEC-STAGE1A-RUST-BATCH-001, folded in at the
+    # 2026-07-12 merge-reconcile) whose python-side mutant count is NOT
+    # enumerated in this comment — it adds ON TOP of the nominal below,
+    # pushing further toward the already-expected >100-min split dial.
     # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
     # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
-    # Nominal: (284 + 377 + 932) x ~2.3 s ~= 61 min; + rate_common 369
+    # Nominal: (284 + 377 + 932 + ~818) x ~2.3 s ~= 92 min; + rate_common 369
     # (post-round-3: the 9 dropped slot pragmas return 9 mutants to the gate)
     # at an ASSUMED 5-7 s CI baseline (local 2.5-3.4 s x an assumed 2x
     # shared-GHA factor — the rehearsal never reached rate_common, so its CI
@@ -158,19 +173,28 @@ jobs:
     # MIN of the two preflight-measured baselines, capped 30 s -> ~1-3.5 min
     # across the admitted regime); + the TWO ~2-10 s preflight baseline runs
     # (~4-20 s total; two samples + min per fixer round 4 R4-2).
-    # Total ~= 96-108 min nominal at that band -> an HONEST 12-24 min margin
-    # under 120 (>= ~33 min if rate_common paces like its siblings — and the
-    # measured-baseline wrap sizing makes a sibling-pace baseline a
-    # first-class admitted regime, NOT a preflight red). A ~20%
-    # shared-runner bad day on the worst end CROSSES the 120-min kill —
-    # pre-decided dial (the Rust shards' "+1 shard" twin): any observed
-    # rehearsal/scheduled run > 100 min => split pass 2 across two parallel
-    # jobs (move rate_common + the slowest loop modules out), a mechanical
-    # edit that needs no new machinery. Admitted-regime honesty (R4-3): the
+    # HONEST margin (R8.2 — no rosy band is claimed; figures re-summed at
+    # the merge-reconciles for the #1750 pass-1 re-measure 258 -> 284 and
+    # the #1685 compute re-measure 354 -> 377): at the ASSUMED 5-7 s
+    # rate_common band the total is ~124-138 min, which CROSSES the 120-min
+    # kill ON PAPER with NO margin at all; at rate_common's sibling-measured
+    # ~2.3-3 s pace the total is ~107-114 min — a 6-13 min margin that
+    # ALREADY sits past the >100-min trigger of the pre-decided dial (the
+    # Rust shards' "+1 shard" twin): any observed rehearsal/scheduled run
+    # > 100 min => split pass 2 across two parallel jobs (move rate_common +
+    # the slowest loop modules out), a mechanical edit that needs no new
+    # machinery — so the dial is EXPECTED to fire on the first observed
+    # full-15-pair run (the unenumerated rust_stage1a pair only makes it
+    # MORE certain). Either way the failure mode is LOUD (budget kill ->
+    # cancelled -> cause-aware issue below), never a silent skip.
+    # Admitted-regime honesty (R4-3, threshold re-derived round 8 + the
+    # merge-reconcile re-sum): the
     # preflight's [1200, 20000] ms band is CLASSIFIER arithmetic, not a
-    # budget guarantee — a rate_common baseline >= ~9.5-10 s (369 x ~10 s
-    # ~= 61 min on top of the ~61 min loop-module nominal) already crosses
-    # the 120-min kill from INSIDE the admitted band; the failure is LOUD
+    # budget guarantee — over the ~92 min counted nominal a rate_common
+    # baseline >= ~4.5 s (369 x 4.5 s ~= 28 min = the whole remaining
+    # budget) already crosses the 120-min kill from INSIDE the admitted
+    # band (the pre-round-8 wording said ~9.5-10 s against the
+    # under-counted ~59 min nominal); the failure is LOUD
     # (budget kill -> cancelled -> cause-aware issue) and the same
     # >100-min split dial is the remedy.
     # (The OLD broad `pytest tests/unit` runner could never finish here —
@@ -515,8 +539,46 @@ jobs:
           #     sits < 1.5x a legit pass) into explicit loud refusals at the
           #     start of the pass; a mid-pass swing INSIDE the (1.2, 20) s
           #     regime remains the accepted, disclosed residual.
-          # The 10 proven pairs (incl. data/lake_stats_manifest.py, merged in
-          # from DEC-LAKE-STATS-MANIFEST-001 — see its rationale block above)
+          # engine/rust_parity_core.py + ranking/rust_ranking.py joined per
+          # DEC-RANKING-RUST-001 slice-4 PR-1 review round 7 (R7.2/R7.3): the
+          # refuter caught the two NEW correctness-critical parity wrapper
+          # modules shipping with NO --paths-to-mutate naming them — the
+          # EXACT unwired-gate class the lake_stats_manifest round-8 block
+          # above records (Golden Rule #10), while the same PR had added
+          # ranking.rs to cargo-mutants and the slice-4 design's CI-wiring
+          # clause requires "the weekly mutmut loop" for wrapper Python
+          # modules (DEC-RANKING-RUST-001).
+          # Both focused suites run in ~2 s (the loop's subset argument
+          # holds); neither module carries a spin-capable loop (bounded
+          # `for` over collections only), so both ride the historical
+          # wrap-less runner. run_with_parity was restructured off PEP-695
+          # generics (parso 0.8.x hard-fails that syntax — 14 parse errors
+          # measured pre-fix; the sweep_apriori pack documents the same
+          # constraint). Wired + EXECUTED in-session (mutmut 2.5.1,
+          # py3.12): the post-hardening enumerations measured
+          # rust_parity_core 77/77 KILLED and rust_ranking 106/106 KILLED —
+          # each ZERO survived / ZERO suspicious / ZERO timeout (the round-7
+          # pre-hardening runs measured 80 with 21 survivors and 117 with 19;
+          # survivor-kill pins live in the two suites' TestMutationHardening
+          # packs, and the structural residue — quoted casts, PEP-526/563
+          # annotations, a literal logger name, a tandem-redundant strict
+          # zip — was RESTRUCTURED killable, never pragma'd). The 183 added
+          # mutants at the siblings' ~2.3-3 s pace add ~7-9 min; the round-7
+          # "inside the budget comment's stated margin" framing is RETRACTED
+          # (review round 8, R8.2) — that margin was computed from a nominal
+          # that omitted lake_stats_manifest + sweep_apriori (and these two
+          # pairs). The budget block at the top of this job now counts ALL
+          # 15 pass-2 pairs (14 at R8.2; rust_stage1a joined at the
+          # 2026-07-12 merge-reconcile, its count honestly UNenumerated
+          # there) and states the honest totals + the expected
+          # >100-min split-dial outcome. TestMutationWorkflowWiring pins
+          # in both suites fail the unit gate if either pair is ever dropped.
+          # The 13 slice-4-proven wrap-less pairs (incl.
+          # data/lake_stats_manifest.py,
+          # merged in from DEC-LAKE-STATS-MANIFEST-001 — see its rationale
+          # block above; the "10 pairs" wording predated the
+          # sweep_apriori/spec + slice-4 additions) plus the merged-in
+          # rust_stage1a pair (DEC-STAGE1A-RUST-BATCH-001)
           # keep their exact historical runner + no
           # --test-time-base (minimal diff — their verified interplay is
           # unchanged). HONEST mechanism note (fixer round 2 — the earlier "no
@@ -533,24 +595,52 @@ jobs:
           # — post-round-3 on the F1-restructured audit.py, byte-identical to
           # this tree; MIGRATION.md #1597) but silently defeatable by future test insertion or
           # a new spin loop without a fail-fast twin. Pre-decided dial: if a
-          # rehearsal/scheduled run ever wedges on one of the 9 pairs again, give
+          # rehearsal/scheduled run ever wedges on one of the wrap-less pairs
+          # again, give
           # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
           # measured CI baseline. rate_common runs LAST so a survivor there never
-          # masks the 10 proven modules.
+          # masks the proven wrap-less modules.
           # RECORDED DECISION (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 fixer round 1):
           # the compute.py pair deliberately stays the single unit file — the
           # Slice-0 byte-parity golden (tests/golden/test_compute_fold_combine_parity.py,
           # measured ~4.7 s) and the C23 hypothesis differential gate
           # (tests/property/test_compute_fold_combine_differential.py) are NOT
           # added: 377 mutants x an extra ~4.7 s+ per mutant ~= +29 min+,
-          # which provably crosses the 13-25 min margin under the 120-min kill
-          # documented in the budget comment above (and the pair grammar +
+          # which provably crosses the margin under the 120-min kill
+          # documented in the budget comment above (that comment's re-summed
+          # slice-4 figures superseded the "13-25 min" band this decision was
+          # originally written against — the conclusion only gets STRONGER)
+          # (and the pair grammar +
           # `pytest "$tf"` preflight are single-file). Mitigation: the
           # fold/combine seam's mutants are killable by the pair suite itself —
           # 6 hand-applied seam mutants + the n_trades-guard mutants all die
           # against tests/unit/test_metrics_compute.py alone (spot-verified;
           # MIGRATION.md #1685) — and the golden/differential suites still run
           # on every push via ci.yml's normal test tiers.
+          # masks the 10 proven modules.
+          # slice-7 exec pairs (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963):
+          # exec_rust.py (final local zero-survivor runs 2026-07-11: 84/84
+          # KILLED, then 94/94 KILLED after the review-round-1 seam
+          # hardening) + costs/calculator.py (zero-survivor re-run: 123
+          # mutants — 122 KILLED + 1 SUSPICIOUS proven killed via direct
+          # `mutmut apply` -> failing suite, a classifier timing artifact;
+          # re-proven post-round-1: 125 mutants — 124 KILLED + the same
+          # total-sign-flip SUSPICIOUS again apply-proven killed; 0 survived
+          # on every run — divisor/sign/message/basis pins + 5 documented
+          # provably-equivalent pragmas). REVIEW ROUND 2 (R3-F1): the
+          # SUSPICIOUS trip itself is de-flaked — a FIRST-collected fast
+          # total-composition pin kills the sign-flip class at test #1
+          # (0.46 s, far under the 2x-baseline threshold) and the unwrapped
+          # branch below now passes --test-time-base 45; re-proven at the
+          # round-2 tree: calculator 125/125 KILLED (0 timeout / 0
+          # suspicious / 0 survived, TWO consecutive CI-mirrored runs) and
+          # exec_rust 145/145 KILLED 0/0 after the wire-shape-guard
+          # hardening.
+          # costs/futures_costs.py is DELIBERATELY NOT paired yet:
+          # its first bounded local run surfaced early survivors before the
+          # zero-survivor bar could be met inside the slice budget — wiring
+          # it rides DEC-EXEC-COSTS-MUTMUT-001 (the named follow-up), never
+          # a silently-red weekly gate (Golden Rule #10).
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
@@ -596,11 +686,16 @@ jobs:
             "brutex/meta/logistic.py:tests/unit/test_meta_logistic.py:" \
             "brutex/meta/threshold.py:tests/unit/test_meta_threshold.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
+            "brutex/engine/rust_enum.py:tests/unit/test_engine_rust_enum.py:" \
             "brutex/engine/rust_rank_select.py:tests/unit/test_engine_rust_rank_select.py:" \
             "brutex/engine/pool_union.py:tests/unit/test_engine_pool_union.py:" \
             "brutex/ranking/multi_select.py:tests/unit/test_ranking_multi_select.py:" \
             "brutex/observability/observability_rust.py:tests/unit/test_observability_rust.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
+            "brutex/engine/rust_parity_core.py:tests/unit/test_engine_rust_parity_core.py:" \
+            "brutex/ranking/rust_ranking.py:tests/unit/test_ranking_rust_ranking.py:" \
+            "brutex/exec_rust.py:tests/unit/test_exec_rust_seam.py:" \
+            "brutex/costs/calculator.py:tests/unit/test_costs_calculator.py:" \
             "brutex/strategies/combo_rust.py:tests/unit/test_strategies_combo_rust.py:" \
             "brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
@@ -698,9 +793,22 @@ jobs:
                 --simple-output
             else
               runner="sh -c 'pytest $tf -x -q --no-header || exit 1'"
+              # --test-time-base 45 on the UNWRAPPED branch too (slice-7
+              # review round 2, R3-F1 — mirrors the wrapped branch's
+              # classifier slack): mutmut 2.x classifies a KILLED-but-slow
+              # mutant OK_SUSPICIOUS when the failing run exceeds
+              # 2 x baseline + base, and the verdict grep below counts a
+              # SUSPICIOUS id line exactly like a survivor — the
+              # calculator pair's total-sign-flip mutant (killed only via
+              # a late hypothesis property whose shrinking blew the 2x
+              # window) tripped this in 2 of 3 local runs. The base ONLY
+              # widens the killed-vs-suspicious classification; survivors
+              # (tests PASS) and the baseline*10 hard timer (BAD_TIMEOUT)
+              # are untouched.
               mutmut run \
                 --paths-to-mutate "$mod" \
                 --runner "$runner" \
+                --test-time-base 45 \
                 --simple-output
             fi
             mutmut results | tee "mutmut-results-$name.txt"
@@ -805,7 +913,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   # Rust mutation — cargo-mutants over rust/fno-math/ (8-shard matrix)
   #
-  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
+  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs
+  # + ranking.rs + enum_kernel.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
@@ -870,6 +979,36 @@ jobs:
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + ranking.rs = 921
+          #   mutants measured 2026-07-12 on the merged tree (`cargo mutants
+          #   --list | wc -l`; the slice-4 ranking.rs conversion added 321 over
+          #   the 2026-07-08 post-merge 599 — history: 556 pre-merge 2026-07-07,
+          #   599 after the race-6 u128 trade_sim fold, 897 then 915 on interim
+          #   ranking.rs shapes; the round-4 review fix moved the wrapper-inline
+          #   guards into pure killable cores, 915 -> 920; the 2026-07-12
+          #   merge-reconcile of main's #1743 trade-sim session-boundary guard
+          #   grew trade_sim.rs 167 -> 168, 920 -> 921).
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + enum_kernel.rs
+          #   = 803 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`
+          #   on the DEC-SWEEP-ENUM-RUST-001 slice-1 CONFORMANCE-REWORK tree —
+          #   metrics 358 + trade_sim 167 + python 65 + lib 9 + enum_kernel 204;
+          #   the mutants.toml exclude_re drops ONLY the 578 provably-UNVIABLE
+          #   whole-fn `-> PyResult` constructor guesses on the two pyclass
+          #   shims — rationale + verification in that file's count block).
+          #   CLUB R1 weave (integration/club-r1-fnomath): the merged tree
+          #   carries ALL THREE slice scopes — ranking.rs + enum_kernel.rs +
+          #   src/exec/ — PLUS main's slice-6 stats/*.rs + the mask_word.rs
+          #   hoist (DEC-ENUM-KERNEL-U128-001), so the union scope is ~1,454
+          #   mutants BY ARITHMETIC over the member measurements (692 merged
+          #   main tree + 321 ranking + 204 enum + 237 exec; NOT a fresh
+          #   --list run).
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 599 mutants measured
+          #   2026-07-08 (`cargo mutants --list | wc -l` on the post-merge HEAD —
+          #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
+          #   trade_sim 124->167; the pre-merge 2026-07-07 measurement was 556);
+          #   + the slice-7 src/exec/ cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md
+          #   #1963) = 836 total measured 2026-07-11 (per-file split documented
+          #   in mutants.toml; the exec/ffi.rs exclusion is documented there).
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs + mask_word.rs +
           #   stats/*.rs = 692 mutants measured 2026-07-17 (`cargo mutants
           #   --list | wc -l` on the DEC-ENUM-KERNEL-U128-001 x slice-6
@@ -906,6 +1045,15 @@ jobs:
           #   pre-decided +1-shard dial is taken TWICE: 1191/8 ~= 149/shard ->
           #   ~86 min actual / ~103 min at +20%, restoring the >= 17-min margin
           #   posture.
+          #   WAVE-2 CLUB weave note (honest margin arithmetic, derived not
+          #   measured): the folded slice-4 ranking.rs + slice-7 src/exec/
+          #   scopes join main's 1191-mutant optcost census on this SAME
+          #   8-shard matrix, so the union scope projects PAST the 120-min
+          #   cap on the +20% worst end (the club-R1 members' own ~1,454
+          #   union figure read ~143 min). The #1597 pre-decided dial
+          #   (8->12 per the members' +2 pattern) is the NAMED follow-up
+          #   for the next mutation-workflow change — not re-dialed inside
+          #   this weave; flagged in the club PR body for the coordinator.
           cargo mutants \
             --in-place \
             --shard ${{ matrix.shard }}/8 \
