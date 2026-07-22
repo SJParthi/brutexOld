@@ -156,8 +156,13 @@ class TestExpiryTabs:
         # Fold note (2026-07-22 PR #1358 hand-port): the consolidated body's populate
         # carries the body's own TIER_TIP/TRACK_TIP option tooltips — the OPTION VALUE
         # tokens (what the tabs write and load() reads) are byte-identical.
-        assert '["Near","Next","Far"].map(e=>`<option title="${TIER_TIP[e]}">${e}</option>`)' in html
-        assert '["All","Monthly","Weekly"].map(e=>`<option title="${TRACK_TIP[e]}">${e}</option>`)' in html
+        assert (
+            '["Near","Next","Far"].map(e=>`<option title="${TIER_TIP[e]}">${e}</option>`)' in html
+        )
+        assert (
+            '["All","Monthly","Weekly"].map(e=>`<option title="${TRACK_TIP[e]}">${e}</option>`)'
+            in html
+        )
 
     def test_provenance_reads_of_the_selects_survive(self) -> None:
         html = _html()
