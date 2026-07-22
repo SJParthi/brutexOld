@@ -254,9 +254,11 @@ jobs:
         # stage1a.py:78/80) — HARD wheel imports, so the lane installs both
         # exactly like ci.yml's test job does (the lake-rust-parity
         # trading_core-step precedent; wheels are compiler-version
-        # independent). Same crates.io flake-retry idiom as above.
+        # independent); brutex-identity joins them because results_store.py
+        # hard-imports its kernel (DEC-RUST-RUNID-STORES-001). Same
+        # crates.io flake-retry idiom as above.
         run: |
-          for crate in ./rust/fno-math ./rust/trading-core; do
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity; do
             n=0
             until pip install "$crate"; do
               n=$((n+1))
