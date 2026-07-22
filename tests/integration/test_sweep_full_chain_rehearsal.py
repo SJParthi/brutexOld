@@ -155,7 +155,7 @@ _CI_K_SAMPLES = 8
 #: b01dface/f005ba11/0ddba11d/deadfa11/fee1dead x5 + 10 repeated-hex-word
 #: constants (transcript in the club-O PR body).
 #:
-#: RE-MEASURED at the 2026-07-19 DEC-RUST-STAGE3-REFINE-001 (#1960)
+#: RE-MEASURED at the 2026-07-19 DEC-RUST-STAGE3-REFINE-001 (#2110)
 #: merge-forward: the stage-3 optimizer itself changed (pycma DELETED — the
 #: pure-Rust brutex-refine CMA-ES, a NEW deterministic trajectory + the
 #: 32→64-bit seed widening, both greenfield-sanctioned), so the pycma-tuned
@@ -175,7 +175,7 @@ _CI_K_SAMPLES = 8
 #: machine-stable BY CONSTRUCTION: 4 asks < λ0(=6) is a truncated FIRST
 #: generation — the sampled cells depend only on the in-crate PRNG seed +
 #: x0 + sigma0 (no tell feedback), and the crate's trajectory goldens are
-#: platform-reproduced (#1960), so the pycma-era cross-runner bimodality
+#: platform-reproduced (#2110), so the pycma-era cross-runner bimodality
 #: class does not apply to the CELL SET (Sharpe VALUES still flow through
 #: Python/libm — the law pin below stays the fleet-wide assertion).
 #: Measured first pass 129.0 s uninstrumented on the 4-vCPU sandbox
@@ -307,7 +307,7 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
     yields a bounded pool while stage-3 still genuinely refines
     (cells_written > 0 — the sibling test's teeth). Under pycma that read a
     9-candidate pool (variance 0.788); under the Rust brutex-refine
-    trajectory (#1960 merge-forward re-measure, sha re-pinned to
+    trajectory (#2110 merge-forward re-measure, sha re-pinned to
     ``"deadbeef"*5``) it reads a 6-candidate pool (variance 0.842) — see
     the ``_PINNED_CODE_COMMIT_SHA`` re-measure note.
     """
@@ -594,7 +594,7 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     # fast path (the #1798 rot) still fails loud.
     #
     # RUST STAGE-3 RE-MEASURE (2026-07-19, the DEC-RUST-STAGE3-REFINE-001
-    # #1960 merge-forward — the optimizer ITSELF changed: pycma deleted, the
+    # #2110 merge-forward — the optimizer ITSELF changed: pycma deleted, the
     # pure-Rust brutex-refine CMA-ES + the 64-bit seed widening, both
     # greenfield-sanctioned): the pycma-tuned "feedface"*5 pin drew a
     # DSR-killed pool under the Rust trajectory, so the sha was re-searched

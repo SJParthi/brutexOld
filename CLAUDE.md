@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #1960,
+_Last updated: 2026-07-19 (DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #2110,
 branch `claude/rust-stage3-refine` — the Stage-3 refinement / CMA-ES
 optimizer path converted to PURE RUST and flipped DEFAULT-ON with the
 Python optimizer math DELETED in the same lane (operator-authorized via
@@ -42,7 +42,7 @@ greenfield-sanctioned deltas; frozen Rust + Python goldens + proptest
 invariants are the correctness bar. ENGINE result UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in
-the §1 Active-branch blurb + MIGRATION.md #1960.)
+the §1 Active-branch blurb + MIGRATION.md #2110.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3657,7 +3657,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-stage3-refine`
-  (**DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #1960** — the Stage-3
+  (**DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #2110** — the Stage-3
   refinement / CMA-ES optimizer path converted to PURE RUST, flipped
   DEFAULT-ON, with the Python optimizer math DELETED in the same lane.
   AUTHORITY recorded honestly: operator-authorized via the coordinator
@@ -3744,14 +3744,15 @@ hostile-review pass._
   the skipped fuzz lane (the brutex-strategies no-fuzz precedent) +
   DEC-REFINE-RUST-DOCTOR-STAGE-001 (doctor wheel-freshness stage) + the
   bugfix-reversion-check 2-wheel subset — all recorded in MIGRATION.md
-  #1960 (renumbered #1957 → #1960 at the 2026-07-19 main merge-forward
-  per DEC-LEDGER-RENUMBER-001). REVIEW ROUNDS: hostile-review round 1 SHIP (findings folded at
-  head — per-item record in MIGRATION.md #1960) + refuter round 2 CLEAN
+  #2110 (renumbered #1957 → #1960 → #2110 — the 2026-07-19 main
+  merge-forward hop, then the 2026-07-19 queue-master ledger-census
+  collision resolution — per DEC-LEDGER-RENUMBER-001). REVIEW ROUNDS: hostile-review round 1 SHIP (findings folded at
+  head — per-item record in MIGRATION.md #2110) + refuter round 2 CLEAN
   (independent wheel rebuild; all nine claim families survived executed
   refutation incl. cross-process seeded bit-identity, the 720-stream
   OLD-vs-NEW select differential and the bit-for-bit digest
   reproduction; one cosmetic NIT — the production-unreachable fail-loud
-  `_sharpe_of` NaN pass-through — named in #1960). ENGINE result
+  `_sharpe_of` NaN pass-through — named in #2110). ENGINE result
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX (stage-3 is a
   between-stage refinement layer; the mask/bar hot loop receives ZERO
   diffs; the frozen sweep-run goldens pass UNMODIFIED); F&O lake
@@ -11152,7 +11153,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-stage3-refine`
-  (DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #1960 — the Stage-3
+  (DEC-RUST-STAGE3-REFINE-001, MIGRATION.md #2110 — the Stage-3
   refinement / CMA-ES optimizer path converted to PURE RUST and flipped
   DEFAULT-ON with the Python optimizer math DELETED in the same lane
   (operator-authorized via the coordinator; the GREENFIELD ruling — no
@@ -11174,7 +11175,7 @@ hostile-review pass._
   the `rust-brutex-refine` crate job + the mutation.yml mirror + the
   turnkey build steps + nightly WHEEL_SET wired; ENGINE result
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1960 for the full blurb)
+  see §1 + MIGRATION.md #2110 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·

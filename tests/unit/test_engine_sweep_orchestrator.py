@@ -444,7 +444,7 @@ class TestSweepGridConfig:
     def test_stage3_enable_wheelless_runtime_is_a_clean_config_valueerror(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # DEC-RUST-STAGE3-REFINE-001 (#1960): GridAxis.normalize rides the
+        # DEC-RUST-STAGE3-REFINE-001 (#2110): GridAxis.normalize rides the
         # brutex_refine wheel — an enabled grid on a wheel-less/flag-off box
         # must fail fast at __post_init__ as the SAME clean config ValueError
         # the CLI surfaces, never a raw RefineRustUnavailableError leak.

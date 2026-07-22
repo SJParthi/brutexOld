@@ -105,7 +105,7 @@ mismatches.)
   pycma math is deleted), so the flag is a loud-refusal switch, not a
   rollback lever.
 - Greenfield: no deployment and no stored stage-3 backtests exist — there is
-  no data or deployment state to unwind (MIGRATION.md #1960 greenfield
+  no data or deployment state to unwind (MIGRATION.md #2110 greenfield
   ruling).
 - The deleted pycma path is restorable from git history (merge-base
   `4c11f7a`) if a future decision ever re-opens it (its own DEC required).
@@ -145,11 +145,12 @@ mismatches.)
 - Decision ID(s): DEC-RUST-STAGE3-REFINE-001 (supersedes
   DEC-STAGE3-OPTIMIZE-EXTRA-001 #626 + the pycma arm of ADR-0007
   condition 4); named follow-up `DEC-REFINE-RUST-DOCTOR-STAGE-001`.
-- MIGRATION.md row(s): #1960 (renumbered #1957 → #1960 at the
-  2026-07-19 main merge-forward — main's club-O fold took #1957; per
+- MIGRATION.md row(s): #2110 (renumbered #1957 → #1960 → #2110 — the
+  2026-07-19 main merge-forward hop (main's club-O fold took #1957), then
+  the 2026-07-19 queue-master ledger-census collision resolution; per
   DEC-LEDGER-RENUMBER-001 the DEC-ID is the stable handle).
 - Spec section(s) touched: ADR-0007 condition-4 identity formula (v2
-  successor recorded in #1960); no TRACK1 spec text change.
+  successor recorded in #2110); no TRACK1 spec text change.
 
 ## Type of change
 
@@ -189,7 +190,7 @@ mismatches.)
 - No new copy-paste: the crate follows the `rust/brutex-feed` template; the
   one duplicated `(hi-lo)//tick+1` steps formula (Python + Rust) is a
   drift-pinned ACCEPTED deviation (collapsing it would put the wheel on the
-  wheel-free import path — recorded in #1960).
+  wheel-free import path — recorded in #2110).
 
 ### Performance
 
@@ -204,7 +205,7 @@ mismatches.)
 
 ### Documentation
 
-- NumPy-style docstrings on public symbols; MIGRATION.md #1960 + the
+- NumPy-style docstrings on public symbols; MIGRATION.md #2110 + the
   CLAUDE.md header/§1/§3 blurbs updated (incl. both review-round records);
   no silent scope expansion (Golden Rule #3).
 
@@ -212,10 +213,10 @@ mismatches.)
 
 - The CMA-ES parametrization is sourced from Hansen arXiv:1604.00772 and was
   verified constant-by-constant by the round-1 review; the crates.io evidence
-  for rejecting the third-party `cmaes` crate is dated + recorded in #1960;
+  for rejecting the third-party `cmaes` crate is dated + recorded in #2110;
   no invented rate/threshold/constant. No Groww/NSE/BSE market fact is
   touched by this PR (pull scope, rate caps, calendars all byte-untouched —
-  MIGRATION.md #1960).
+  MIGRATION.md #2110).
 
 ---
 
@@ -224,7 +225,7 @@ mismatches.)
 | Demand | This PR's proof | Real-time check |
 |---|---|---|
 | 100% code coverage | 100.00% line+branch on all six touched/gated modules (refine_rust 43/6 · stage3_refine 94/18 · stage3_grid 44/8 · stage3_select 36/12 · stage3_wire 218/64 · box_update 711/274) + the whole-engine gate 100.00% (11319/3258, 0 missed, 3843 passed) — re-measured independently by the refuter round | ci.yml per-module + whole-engine gates |
-| 100% audit coverage | the stage-3 audit payload carries optimizer_version + optimizer_build; the durable decision record is MIGRATION.md #1960; no audit-JSONL schema change | audit-chain CI gate unchanged |
+| 100% audit coverage | the stage-3 audit payload carries optimizer_version + optimizer_build; the durable decision record is MIGRATION.md #2110; no audit-JSONL schema change | audit-chain CI gate unchanged |
 | 100% testing coverage | unit + integration (rehearsal + vix 23 passed) + property (5 proptest invariants) + golden (Rust trajectory + Python refine_mask + v2 identity digests) + cargo 58 `--release --locked` + the 55-file workflow-pin battery 2925 passed; bench N/A (off-hot-path, stated); mutation via the wired weekly `rust-mutation-brutex-refine` zero-survivor job | pytest + cargo + mutation.yml |
 | 100% code checks | ruff + ruff-format clean; `mypy --strict` clean (496 files); pyright 0 errors; cargo fmt/clippy `--locked -D warnings` clean; bandit rides the standing pre-push/CI gates | pre-push hooks + ci.yml |
 | 100% code performance | N/A hot-path — stage-3 is a between-stage refinement layer; the mask/bar hot loop receives ZERO diffs (frozen sweep-run goldens UNMODIFIED); the strict budget law makes eval cost ≤ documented budget (pycma overshot 121 on 60×2 — closed) | frozen sweep goldens + budget proptest |
@@ -259,7 +260,7 @@ mismatches.)
 | VERIFY | cargo 58 `--release --locked` + the golden/property/caller battery (271 passed) + the refuter's independent-rebuild reproduction (trajectories, digests, 720-stream select differential) verify end-to-end |
 | RECONCILE | greenfield — no stored stage-3 state to reconcile; the caller contract for stage3_wire/cascade consumers is byte-identical (OLD-vs-NEW differential, 0 mismatches) |
 | PREVENT | the wired weekly `rust-mutation-brutex-refine` zero-survivor job + the `rust-brutex-refine` crate job in ci-ok.needs + the per-module 100% gate + the workflow-pin battery prevent silent regression |
-| AUDIT | MIGRATION.md #1960 (incl. both review-round records) is the durable decision record; the stage-3 audit payload carries optimizer_version + optimizer_build per refinement |
+| AUDIT | MIGRATION.md #2110 (incl. both review-round records) is the durable decision record; the stage-3 audit payload carries optimizer_version + optimizer_build per refinement |
 | RECOVER | rollback = git revert (greenfield — nothing to unwind; the deleted pycma path is restorable from git history at `4c11f7a`); the flag is a loud-refusal switch, NOT a fallback (stated plainly) |
 | COOLDOWN | the standing recommendation: this PR's own real GitHub CI run before ready/merge (all gate evidence is executor-local); post-merge the weekly mutation job completes the 468-mutant scope |
 
@@ -301,9 +302,9 @@ mismatches; wheel-free boot of 101 routes + typed call-time refusal;
 incl. all 10 wheel-install sites + ci-ok.needs; the four ledger digests
 reproduced bit-for-bit on a fresh build. One cosmetic NIT (the
 production-unreachable fail-loud `_sharpe_of` NaN pass-through) recorded as
-a named residual in MIGRATION.md #1960.
+a named residual in MIGRATION.md #2110.
 
-Review evidence: MIGRATION.md #1960 (both per-round records) + the CLAUDE.md
+Review evidence: MIGRATION.md #2110 (both per-round records) + the CLAUDE.md
 §1 review-rounds clause.
 
 ---
@@ -315,7 +316,7 @@ Review evidence: MIGRATION.md #1960 (both per-round records) + the CLAUDE.md
   round; 100.00% line+branch on every touched module + the whole engine;
   the caller contract byte-identical (720-stream differential); the mask/bar
   hot loop byte-untouched.
-- ✅ REAL (disclosed deltas, greenfield-sanctioned per the #1960 ruling):
+- ✅ REAL (disclosed deltas, greenfield-sanctioned per the #2110 ruling):
   the strict budget law CHANGES eval counts vs the deleted pycma path
   (which overshot — measured 121 on a 60×2 budget); the seed widens 32→64
   bits. No pycma bit-match is owed — none is claimed.
@@ -326,7 +327,7 @@ Review evidence: MIGRATION.md #1960 (both per-round records) + the CLAUDE.md
   round-1 MINOR-1 disclosed residual). The 468-mutant cargo-mutants full
   pass is DEFERRED to the wired weekly zero-survivor job (2 in-session
   survivors found + already pinned; partial in-session evidence recorded in
-  #1960). ALL gate evidence is executor-local until this PR's own GitHub CI
+  #2110). ALL gate evidence is executor-local until this PR's own GitHub CI
   runs (the standing pre-merge recommendation).
 - 📋 ROADMAP: `DEC-REFINE-RUST-DOCTOR-STAGE-001` (doctor wheel-freshness
   stage); the fuzz lane (skipped per the brutex-strategies no-fuzz
@@ -334,7 +335,7 @@ Review evidence: MIGRATION.md #1960 (both per-round records) + the CLAUDE.md
   re-opening of a Python fallback (its own DEC).
 
 Anti-pattern check: every claim above cites the real gate evidence (Test
-plan below) or the ledger entry (MIGRATION.md #1960); no claim is based on a
+plan below) or the ledger entry (MIGRATION.md #2110); no claim is based on a
 hypothetical artifact.
 
 ## Test plan — gate evidence (all executed, executor-local; verbatim tallies)
