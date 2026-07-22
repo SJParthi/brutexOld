@@ -1020,3 +1020,55 @@ class TestSignedZeroPriceNoop:
         assert _price_ffi_text(Decimal("123.45")) == "123.45"
         # Scale text preserved on the zero class (only the SIGN is dropped).
         assert _price_ffi_text(Decimal("-0")) == "0"
+
+    def test_row_to_ffi_marshals_row_positions(self) -> None:
+        # DEC-RUST-RUNID-STORES-002 scaffolding (zero-caller today): _row_to_ffi
+        # marshals one row into the positional FFI tuple the kernel append
+        # decision will consume. Pin EVERY position against its source field so
+        # a field re-order or a dropped/added column fails loudly — the two
+        # price positions carry the _price_ffi_text signed-zero normalisation,
+        # every other position is the raw field.
+        from brutex.engine.results_store import _price_ffi_text, _row_to_ffi
+
+        row = _row(
+            deflated_sharpe=0.9,
+            vix_mean=14.2,
+            vix_min=11.0,
+            vix_max=19.5,
+        )
+        ffi = _row_to_ffi(row)
+        assert ffi == (
+            row.run_id,
+            row.instrument,
+            row.tf,
+            row.direction,
+            row.mode,
+            row.mask_bits,
+            row.net_pnl_paisa,
+            row.gross_profit_paisa,
+            row.gross_loss_paisa,
+            row.max_drawdown_paisa,
+            row.expectancy_paisa,
+            row.total_trades,
+            row.winning_trades,
+            row.losing_trades,
+            row.sharpe_ratio,
+            row.sortino_ratio,
+            row.calmar_ratio,
+            row.profit_factor,
+            row.win_rate,
+            row.max_drawdown_pct,
+            _price_ffi_text(row.avg_entry_price),
+            _price_ffi_text(row.avg_exit_price),
+            row.deflated_sharpe,
+            row.vix_mean,
+            row.vix_min,
+            row.vix_max,
+            row.condition_names,
+        )
+        # The two price positions are TEXT (the signed-zero-normalising
+        # marshal), never the raw Decimal — spot-pin the transform.
+        assert ffi[20] == _price_ffi_text(row.avg_entry_price)
+        assert ffi[21] == _price_ffi_text(row.avg_exit_price)
+        assert ffi[0] == row.run_id
+        assert ffi[26] == row.condition_names

@@ -25,7 +25,8 @@ interaction seams no per-feature refuter could see:
 from __future__ import annotations
 
 import re
-from datetime import date
+import shutil
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,7 @@ from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.prebuild_gate import PrebuildGate
 from brutex.data.parquet_writer import ParquetWriter
 
-from tests.browser._fixtures import AppFixture, _open_store, build_movers_app
+from tests.browser._fixtures import XSS_NAME, AppFixture, _open_store, build_movers_app
 from tests.browser._guards import browser_suite_enabled
 from tests.browser.conftest import NewPageFactory, freeze_page_clock
 from tests.browser.test_refuter_r3_probes import _fno_bar, _pick_time, _switch_interval
@@ -72,6 +73,57 @@ def _rebuild_app(tmp_path: Path, extra_symbols: list[str] | None = None) -> AppF
     ground = dict(fixture.ground)
     ground["gate"] = gate
     return AppFixture(app=app, ground=ground, cleanup=store.close)
+
+
+def _reseed_fresh_1day_midnight(tmp_path: Path, symbols: list[str], *, day: date) -> None:
+    """RE-SEED (not append) each FRESH symbol's stored ``1day`` partition so the
+    daily-freshness guard (DEC-MOVERS-DAILY-FRESHNESS-001, MIGRATION.md #1931)
+    serves it ``stored``.
+
+    The shared movers fixture writes its 1-day bars stamped at 09:15 IST
+    (``test_dashboard_movers._day_bar``), while #1931's verify-equality guard
+    compares each stored day-D bar against the PRODUCTION midnight-IST
+    derivation (``resample_1m_to_daily``) — so every fixture day-D bar reads
+    ``stale`` and the read-mode count degrades to ``0 stored / N derived``.
+    Re-writing day-D through the SAME production derivation (byte-equal to the
+    guard's own re-derive) flips those symbols to ``stored``; the prior-day
+    baseline row is preserved verbatim for the prev-close (the 1-minute base
+    holds only day-D, so it is never itself re-derived).
+    """
+    import polars as pl
+
+    from brutex.dashboard.movers_snapshot import (
+        _read_cut_1m_frame,
+        _read_daily_partition,
+        _row_to_bar,
+    )
+    from brutex.data.spot_daily_resample import resample_1m_to_daily
+
+    for symbol in symbols:
+        base = _read_cut_1m_frame(
+            tmp_path, exchange="NSE", segment="INDEX", symbol=symbol, day=day, cutoff_min=None
+        )
+        assert base is not None, f"no 1-minute base for {symbol!r}"
+        # The production midnight-IST derivation — byte-equal to what #1931's
+        # guard re-derives at read time, so the stored day-D bar compares equal.
+        derived = resample_1m_to_daily(base, before=day + timedelta(days=1))
+        cur = _read_daily_partition(tmp_path, exchange="NSE", segment="INDEX", symbol=symbol)
+        prior_bars = []
+        if cur is not None:
+            prior = (
+                cur.filter(
+                    pl.col("timestamp").dt.convert_time_zone("Asia/Kolkata").dt.date() != day
+                )
+                .sort("timestamp")
+                .rename({"timestamp": "ts_utc"})
+            )
+            prior_bars = [_row_to_bar(r) for r in prior.iter_rows(named=True)]
+        # Full RE-SEED (never append): a keep-first merge would keep the stale
+        # 09:15-IST day-D bar, so drop the partition and rewrite it.
+        part_dir = tmp_path / "bars" / "NSE" / "INDEX" / symbol / "1day"
+        if part_dir.exists():
+            shutil.rmtree(part_dir)
+        movers_write(tmp_path, symbol, "1day", prior_bars + derived)
 
 
 # ── R6-P1: stale stored 3minute × explicit bucket-final pick × verify ──
@@ -152,6 +204,13 @@ def test_r6_stale_stored_1day_boot_daily_serves_fresh_and_green(
 
     _seed(tmp_path)
     fixture = _rebuild_app(tmp_path, extra_symbols=["STALEDAY"])
+    # RE-SEED the FRESH symbols' 1day partitions via the production midnight-IST
+    # derivation so #1931 serves them ``stored`` (the 3 stored-TF reads); only
+    # STALEDAY stays divergent (stored close 31700 ≠ the 1m-derived 33000), the
+    # single derived-from-1m read.
+    _reseed_fresh_1day_midnight(
+        tmp_path, ["NIFTY", "BANKNIFTY", XSS_NAME], day=MOVERS_DAY_DATE
+    )
     session = new_page(fixture)
     freeze_page_clock(session.page)
     session.goto("/movers")

@@ -628,9 +628,12 @@ class TestExecColumnsConfig:
             "money": True,
             "explain": "futures_net",
         }
-        # Placed together right after the cascade verdict column.
+        # Placed together right after the tier column: DEC-RANKING-SPLUS-TIER-001
+        # (#2063) inserts tier.status_text between cascade.status_text and the two
+        # exec columns (test_columns_config_carries_the_tier_column pins
+        # tier.status_text == cascade.status_text + 1).
         assert (
-            keys.index("options_exec.net_after_cost_paisa") == keys.index("cascade.status_text") + 1
+            keys.index("options_exec.net_after_cost_paisa") == keys.index("tier.status_text") + 1
         )
         assert keys.index("futures_exec.net_pnl_paisa") == (
             keys.index("options_exec.net_after_cost_paisa") + 1

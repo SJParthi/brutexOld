@@ -260,10 +260,13 @@ jobs:
         # `stage3_enable=True` grids whose SweepGridConfig.__post_init__
         # normalizes on the Mode-A grid via require_refine_rust() — a HARD
         # brutex_refine import (DEC-RUST-STAGE3-REFINE-001; the Python
-        # optimizer math is deleted), exactly like ci.yml's test job. Same
+        # optimizer math is deleted), exactly like ci.yml's test job; and
+        # brutex-feed because feed materialization now HARD-requires the
+        # brutex_feed wheel (DEC-FEED-RUST-MATERIALIZE-002 — an absent wheel
+        # is a typed FeedError, no Python oracle to fall back to). Same
         # crates.io flake-retry idiom as above.
         run: |
-          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity ./rust/brutex-refine; do
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity ./rust/brutex-refine ./rust/brutex-feed; do
             n=0
             until pip install "$crate"; do
               n=$((n+1))

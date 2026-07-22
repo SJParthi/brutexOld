@@ -211,6 +211,30 @@ class TestSweepOpsRouting:
         finally:
             self._reset_facade()
 
+    def test_flag_on_set_cvar_gate_routes_to_oracle(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """DEC-RANK-CVAR-TAIL-GATE-001 × DEC-RUST-SWEEP-OPS-001: a SET
+        ``cvar_gate`` is OUTSIDE the crate fragment law's domain, so flag-ON the
+        WHOLE computation routes to the Python oracle VALUE — the ``cvar``
+        identity key intact, never silently dropped by the cvar-blind crate
+        fragment (the ``max_sl_hit_rate`` beyond-crate seam remedy, mirrored;
+        this drives the sweep_identity.py:132 early-return arm)."""
+        from brutex.engine.sweep_identity import _gate_config_fragment_python
+
+        self._arm_fake_crate(monkeypatch)
+        try:
+            grid = _grid(cvar_gate=CvarGateConfig(threshold_paisa=50_000, alpha_bps=250))
+            frag = _gate_config_fragment(grid)
+            assert frag == _gate_config_fragment_python(grid)
+            assert frag is not None
+            assert "cvar" in frag
+            # A clean REFUSAL, never a burn-in autorevert: a cvar-blind crate
+            # route would drop the key here and latch the process OFF.
+            from brutex.engine.sweep_ops_rust import sweep_ops_rust_disabled
+
+            assert sweep_ops_rust_disabled() is False
+        finally:
+            self._reset_facade()
+
 
 class TestGateProvenanceToken:
     """The pure token combiner in :mod:`brutex.engine.sweep_identity`."""

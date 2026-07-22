@@ -162,9 +162,10 @@ def test_fno_deep_link_materialises_the_contract_grid(
         f"1–{_FNO_BAR_COUNT} / {_FNO_BAR_COUNT}"
     )
     expect(page.locator(_FIRST_CELL)).not_to_have_text("")
-    # The documented limitation stands honestly: the 3-level F&O cascade shows
-    # its prompt state (nothing auto-picked) while the GRID is correct.
-    expect(page.locator("#cund")).to_have_value("")
+    # The folded applyDeepLink auto-selects the underlying via the
+    # server-vocabulary longest-prefix match (DEC-MOVERS-DRILL-DOWN-001 #1662
+    # + fold #2127): NSE-NIFTY-27Jun24-FUT resolves to the NIFTY underlying.
+    expect(page.locator("#cund")).to_have_value("NIFTY")
     # markCandles highlighted the F&O lake's sidebar row, not the spot one.
     expect(page.locator('#tables .tbl[data-candles="fno"]')).to_have_class("tbl sel")
     # The fno arm never loads the spot cascade; exactly one candle query.

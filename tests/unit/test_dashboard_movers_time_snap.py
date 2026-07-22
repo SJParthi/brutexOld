@@ -586,11 +586,15 @@ class TestExplicitPickEqualsDbBar:
 
     A 3-minute last bucket whose 1m closes DIVERGE: ``?time=15:29`` (the new
     sent bucket-final) must equal the /db 3minute bar labeled 15:27 (the
-    resampler oracle), while ``?time=15:27`` (the OLD wire — a bucket-START
-    cutoff) serves the DIFFERENT mid-bucket partial value. The operator's
-    confirmed confusion: movers 3min@15:27 = 24360.00 (mid-bucket cut) vs
-    /db bar 15:27 = 24355.1 (full bucket) — both correct, different
-    semantics; the dropdown now always sends the completed-bucket semantics.
+    resampler oracle), while a NON-anchor mid-bucket instant ``?time=15:28``
+    serves the DIFFERENT partial value (the 15:28 1m close). A bucket-ANCHOR
+    pick ``?time=15:27`` no longer serves the old mid-bucket partial: the
+    backend as-of seam forward-resolves an anchor pick to that bucket's final
+    minute (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 #1601), so a bucket-anchor and
+    the bucket-final both land on the completed-bucket close. The operator's
+    confirmed confusion: movers 3min mid-bucket = 24357.55 (partial cut) vs
+    /db bar 15:27 = 24355.10 (full bucket) — both correct, different
+    semantics; the dropdown always sends the completed-bucket semantics.
 
     HONEST LIMIT (the round-3 hostile-review fold): the /db-equality holds
     WHENEVER the lake holds the picked bucket in full. A pick whose
@@ -660,13 +664,17 @@ class TestExplicitPickEqualsDbBar:
         # The new wire (?time=15:29, the sent bucket-final) == the /db bar.
         assert self._ltp(tmp_path, "15:29") == db_bar_close
 
-    def test_bucket_start_cutoff_serves_the_partial_value(self, tmp_path: Path) -> None:
+    def test_mid_bucket_nonanchor_pick_serves_the_partial_value(self, tmp_path: Path) -> None:
         self._write_lake(tmp_path)
-        # The OLD wire (?time=15:27 — a bucket-START cutoff) cuts MID-bucket:
-        # the partial cut's close is the 15:27 1m close — a DIFFERENT number.
-        partial = self._ltp(tmp_path, "15:27")
+        # A NON-anchor mid-bucket instant (?time=15:28 — NOT a 3minute bucket
+        # anchor) keeps as-of-instant semantics and cuts MID-bucket: its close
+        # is the 15:28 1m close, a DIFFERENT number from the completed bucket.
+        # A bucket-ANCHOR pick (15:27) is instead forward-resolved to the
+        # completed bucket by DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 (#1601), so the
+        # partial value is reachable ONLY through a non-anchor mid-bucket instant.
+        partial = self._ltp(tmp_path, "15:28")
         completed = self._ltp(tmp_path, "15:29")
-        assert partial == Decimal("24360.00")
+        assert partial == Decimal("24357.55")
         assert partial != completed
 
     def test_pick_beyond_end_of_data_serves_the_stored_latest_envelope(
