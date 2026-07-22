@@ -111,12 +111,12 @@ class TestWrite:
     ) -> None:
         """An OSError in the atomic write maps to StageStampError."""
         artifact = _artifact(tmp_path)
-        import brutex.observability.stage_stamp as mod
 
         def _boom(dest: Path, write_to: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(mod, "atomic_write_simple", _boom)
+        # String-target monkeypatch (the #1810 CodeQL convention).
+        monkeypatch.setattr("brutex.observability.stage_stamp.atomic_write_simple", _boom)
         with pytest.raises(StageStampError, match="failed to write stamp"):
             write_stage_stamp(artifact, stage="s", run_id=_RUN_ID)
 
@@ -268,16 +268,16 @@ class TestVerdictMatrix:
         """I-5: EVERY validation recomputes the streamed hash (spy-pinned)."""
         artifact = _artifact(tmp_path)
         write_stage_stamp(artifact, stage="s", run_id=_RUN_ID)
-        import brutex.observability.stage_stamp as mod
 
         calls: list[Path] = []
-        real = mod.content_hash_of
+        real = content_hash_of  # the top-level from-import — the real function
 
         def _spy(path: Path) -> str:
             calls.append(path)
             return real(path)
 
-        monkeypatch.setattr(mod, "content_hash_of", _spy)
+        # String-target monkeypatch (the #1810 CodeQL convention).
+        monkeypatch.setattr("brutex.observability.stage_stamp.content_hash_of", _spy)
         # Even a stamp that will fail on STAGE (a swapped stamp) is re-hashed.
         assert (
             validate_stage_stamp(artifact, expected_stage="other")[0] is StampVerdict.HASH_MISMATCH
@@ -291,18 +291,23 @@ class TestVerdictMatrix:
         """An artifact that exists as a FILE but cannot be hashed raises loudly
         (an infrastructure defect, not a stamp verdict). The read failure is
         injected (chmod is invisible to a root test runner)."""
-        import builtins
+        # DEC-LAKE-READ-INODE-GUARD-001: the hash now opens the artifact via
+        # the guarded `open_regular_binary` seam (os.open based, never
+        # builtins.open) — fault it there so the loud-raise teeth stay real,
+        # via the string-target monkeypatch (the #1810 CodeQL convention).
+        # The delegate is guarded_read's identity-pinned object — the SAME
+        # function stage_stamp binds (`from brutex.data.guarded_read import`).
+        from brutex.data.guarded_read import open_regular_binary as real_open
 
         artifact = _artifact(tmp_path)
         write_stage_stamp(artifact, stage="s", run_id=_RUN_ID)
-        real_open = builtins.open
 
-        def _boom(file: object, *args: object, **kwargs: object) -> object:
-            if str(file) == str(artifact):
+        def _boom(path: object, *args: object, **kwargs: object) -> object:
+            if str(path) == str(artifact):
                 raise OSError("I/O error")
-            return real_open(file, *args, **kwargs)  # type: ignore[call-overload]
+            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(builtins, "open", _boom)
+        monkeypatch.setattr("brutex.observability.stage_stamp.open_regular_binary", _boom)
         with pytest.raises(StageStampError, match="cannot hash artifact"):
             validate_stage_stamp(artifact, expected_stage="s")
 
@@ -418,3 +423,89 @@ class TestDiscardAndFlag:
         monkeypatch.setattr(Path, "rename", _boom)
         with pytest.raises(StageStampError, match="failed to discard"):
             discard_and_flag(artifact, reason="r", recorder=None)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the ``validate_stage_stamp`` verdict law.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    verdict-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives) — the I/O-derived MISSING/MALFORMED verdicts never
+    reach the routed decision on either arm.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_verdict_matrix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ok = tmp_path / "ok.bin"
+        ok.write_bytes(b"payload")
+        write_stage_stamp(ok, stage="sweep", run_id="r1", extra={SNAPSHOT_EXTRA_KEY: "snap-a"})
+        torn = tmp_path / "torn.bin"
+        torn.write_bytes(b"payload")
+        write_stage_stamp(torn, stage="sweep", run_id="r1")
+        torn.write_bytes(b"tampered")
+        missing_stamp = tmp_path / "nostamp.bin"
+        missing_stamp.write_bytes(b"payload")
+
+        def verdicts() -> list[StampVerdict]:
+            return [
+                validate_stage_stamp(
+                    ok,
+                    expected_stage="sweep",
+                    expected_run_id="r1",
+                    expected_snapshot_hash="snap-a",
+                )[0],
+                validate_stage_stamp(ok, expected_stage="stage3_cell")[0],
+                validate_stage_stamp(ok, expected_stage="sweep", expected_run_id="r2")[0],
+                validate_stage_stamp(ok, expected_stage="sweep", expected_snapshot_hash="snap-b")[
+                    0
+                ],
+                validate_stage_stamp(torn, expected_stage="sweep")[0],
+                validate_stage_stamp(missing_stamp, expected_stage="sweep")[0],
+                validate_stage_stamp(tmp_path / "absent.bin", expected_stage="sweep")[0],
+            ]
+
+        off = verdicts()
+        assert off == [
+            StampVerdict.OK,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.MISSING_STAMP,
+            StampVerdict.MISSING_ARTIFACT,
+        ]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert verdicts() == off
+        finally:
+            self._reset_facade()

@@ -1,0 +1,70 @@
+# pull_scope note-surgery golden — the flat twin of
+# tests/golden/fixtures/pull_scope_note_surgery.json (ONE generator,
+# cross-format-pinned by tests/golden/test_pull_scope_golden.py).
+# schema_version=1
+A	SCOPE_FULL	full
+A	SCOPE_SPOT_ONLY	spot-only
+A	SCOPE_FNO_ONLY	fno-only
+A	GREEKS_NOT_RUN_NOTE	Greeks: not run — no options in this pull
+A	FNO_SKIPPED_CLAUSE	, F&O skipped by design (spot-only scope)
+A	SPOT_SKIPPED_CLAUSE	spot skipped by design (F&O-only scope)
+A	_NOOP_SPOT_CLAUSE	spot clean (0 pair(s))
+A	_NOOP_FNO_CLAUSE	, metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)
+A	_STOP_FNO_CLAUSE	metadata + historical NOT started
+A	_STOP_FNO_SPOT_ONLY_CLAUSE	F&O not applicable (spot-only scope)
+A	_FULL_PREFIX	pipeline complete — 
+A	_SPOT_ONLY_PREFIX	spot-only pipeline complete — 
+A	_FNO_ONLY_PREFIX	F&O-only pipeline complete — 
+A	_MARKET_HOURS_WINDOW_CLAUSE	inside NSE market-hours window (08:45-15:35 IST)
+A	_MARKET_HOURS_WINDOW_SPOT_ONLY_CLAUSE	market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session)
+A	_MARKET_HOURS_PHASES_CLAUSE	(spot / metadata / historical skipped to keep the shared Groww account free for the live feed)
+A	_MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE	(spot deferred to keep the shared Groww account free for the live feed; F&O not applicable — spot-only scope)
+A	_MARKET_HOURS_PHASES_FNO_ONLY_CLAUSE	(metadata / historical deferred to keep the shared Groww account free for the live feed; spot not applicable — F&O-only scope)
+A	_MARKET_HOURS_RESUME_CLAUSE	resume on the next out-of-hours run
+A	_MARKET_HOURS_RESUME_SPOT_ONLY_CLAUSE	resume once the protection window clears
+S	N	0
+S	T	0
+S	T   	0
+S	T\t	0
+S	T\n  \n	0
+S	Tfull	0
+S	Tspot-only	1
+S	Tfno-only	2
+S	T  spot-only  	1
+S	T\tfno-only\t	2
+S	T full 	0
+S	T\u{001c}full\u{001d}	0
+S	T\u{001e}spot-only\u{001f}	1
+S	T\u{0085}spot-only 	1
+S	T fno-only　	2
+S	Tspot_only	255
+S	TSPOT-ONLY	255
+S	Tspot-only extra	255
+S	Toptions	255
+S	Tspot—only	255
+S	Tspot-only\u{0000}	255
+S	TN	255
+M	deferred — inside NSE market-hours window (08:45-15:35 IST); no vendor pull issued (spot / metadata / historical skipped to keep the shared Groww account free for the live feed); resume on the next out-of-hours run	SPOT	deferred — market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session); no vendor pull issued (spot deferred to keep the shared Groww account free for the live feed; F&O not applicable — spot-only scope); resume once the protection window clears
+M	deferred — inside NSE market-hours window (08:45-15:35 IST); no vendor pull issued (spot / metadata / historical skipped to keep the shared Groww account free for the live feed); resume on the next out-of-hours run	FNO	deferred — market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session); no vendor pull issued (metadata / historical deferred to keep the shared Groww account free for the live feed; spot not applicable — F&O-only scope); resume once the protection window clears
+M	deferred — market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session); no vendor pull issued (spot deferred to keep the shared Groww account free for the live feed; F&O not applicable — spot-only scope); resume once the protection window clears	SPOT	deferred — market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session); no vendor pull issued (spot deferred to keep the shared Groww account free for the live feed; F&O not applicable — spot-only scope); resume once the protection window clears
+M	deferred — some future wording with no anchors	SPOT	deferred — some future wording with no anchors
+M	please resume on the next out-of-hours run soon	SPOT	please resume once the protection window clears soon
+M	deferred — inside NSE market-hours window (08:45-15:35 IST); no vendor pull issued (spot / metadata / historical skipped to keep the shared Groww account free for the live feed); resume on the next out-of-hours run	C:custom phases wording — with an em-dash	deferred — market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session); no vendor pull issued custom phases wording — with an em-dash; resume once the protection window clears
+M		SPOT	
+P	pipeline complete — spot clean (1 pair(s)), metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)	spot-only pipeline complete — spot clean (1 pair(s)), F&O skipped by design (spot-only scope)	1	1
+P	window ledger reload FAILED — running full re-verify pull (no skip); pipeline complete — spot clean (1 pair(s)), metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)	window ledger reload FAILED — running full re-verify pull (no skip); spot-only pipeline complete — spot clean (1 pair(s)), F&O skipped by design (spot-only scope)	1	1
+P	pipeline complete — 1 symbol(s) quarantined: BADSYM — spot quarantined_symbols (1 pair(s)), metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)	spot-only pipeline complete — 1 symbol(s) quarantined: BADSYM — spot quarantined_symbols (1 pair(s)), F&O skipped by design (spot-only scope)	1	1
+P	pipeline complete — 12 symbol(s) quarantined: STOCK00, STOCK01, STOCK02, STOCK03, STOCK04, STOCK05, STOCK06, STOCK07, STOCK08, STOCK09 (+2 more) — spot quarantined_symbols (1 pair(s)), metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)	spot-only pipeline complete — 12 symbol(s) quarantined: STOCK00, STOCK01, STOCK02, STOCK03, STOCK04, STOCK05, STOCK06, STOCK07, STOCK08, STOCK09 (+2 more) — spot quarantined_symbols (1 pair(s)), F&O skipped by design (spot-only scope)	1	1
+P	deferred — inside NSE market-hours window (08:45-15:35 IST); no vendor pull issued (spot / metadata / historical skipped to keep the shared Groww account free for the live feed); resume on the next out-of-hours run	deferred — market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session); no vendor pull issued (spot deferred to keep the shared Groww account free for the live feed; F&O not applicable — spot-only scope); resume once the protection window clears	0	0
+P	stopped after spot — transient_residual (3 window(s) still failing); metadata + historical NOT started	stopped after spot — transient_residual (3 window(s) still failing); F&O not applicable (spot-only scope)	0	0
+P	pipeline complete — spot clean (1 pair(s)), metadata went sideways	spot-only pipeline complete — spot clean (1 pair(s)), metadata went sideways	1	0
+P	totally new prefix , metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)	totally new prefix , F&O skipped by design (spot-only scope)	0	1
+P	stopped after metadata — 1 expiry + 0 contract failure(s); historical NOT started	stopped after metadata — 1 expiry + 0 contract failure(s); historical NOT started	0	0
+P			0	0
+F	pipeline complete — spot clean (0 pair(s)), metadata 4 expiries + 40 contracts, historical 0 bars over 0 contract(s)	F&O-only pipeline complete — spot skipped by design (F&O-only scope), metadata 4 expiries + 40 contracts, historical 0 bars over 0 contract(s)	1	1
+F	window ledger reload FAILED — running full re-verify pull (no skip); pipeline complete — spot clean (0 pair(s)), metadata 4 expiries + 40 contracts, historical 0 bars over 0 contract(s)	window ledger reload FAILED — running full re-verify pull (no skip); F&O-only pipeline complete — spot skipped by design (F&O-only scope), metadata 4 expiries + 40 contracts, historical 0 bars over 0 contract(s)	1	1
+F	deferred — inside NSE market-hours window (08:45-15:35 IST); no vendor pull issued (spot / metadata / historical skipped to keep the shared Groww account free for the live feed); resume on the next out-of-hours run	deferred — market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session); no vendor pull issued (metadata / historical deferred to keep the shared Groww account free for the live feed; spot not applicable — F&O-only scope); resume once the protection window clears	0	0
+F	pipeline complete — spot wording moved, metadata 4 expiries + 40 contracts	F&O-only pipeline complete — spot wording moved, metadata 4 expiries + 40 contracts	1	0
+F	totally new prefix spot clean (0 pair(s))	totally new prefix spot skipped by design (F&O-only scope)	0	1
+F	stopped after metadata — 0 expiry + 1 contract failure(s); historical NOT started	stopped after metadata — 0 expiry + 1 contract failure(s); historical NOT started	0	0
+F			0	0

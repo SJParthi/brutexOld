@@ -58,6 +58,7 @@ def _row(
     tf: str = "5m",
     direction: str = "bull",
     sharpe: float = 1.0,
+    total_trades: int = 10,
 ) -> ResultRow:
     return ResultRow(
         run_id=f"{seed:064x}",
@@ -71,7 +72,7 @@ def _row(
         gross_loss_paisa=100_00,
         max_drawdown_paisa=50_00,
         expectancy_paisa=10_00,
-        total_trades=10,
+        total_trades=total_trades,
         winning_trades=6,
         losing_trades=4,
         sharpe_ratio=sharpe,
@@ -249,6 +250,12 @@ def test_completed_sweep_refreshes_leaderboard_cache(
         # Keep the account-wide single-flight lock inside the tmp lake (not the real
         # ~/.brutex/lake) — DEC-ACCOUNT-PULL-SINGLEFLIGHT-001.
         lake_root_resolver=lambda: lake_root,
+        # Hermeticity (DEC-TEST-AWS-HERMETICITY-001): a real lake root would
+        # otherwise invoke the DEFAULT account-key resolver, whose production
+        # binding reads the Groww api_key from LIVE AWS SSM. This sweep makes
+        # zero vendor calls, so the account lock is skipped explicitly (the
+        # established `lambda: None` idiom — test_pull_jobs_singleflight.py).
+        account_key_resolver=lambda: None,
     )
     assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True
 
@@ -286,6 +293,9 @@ def test_failed_sweep_written_store_still_visible(
         spawn=lambda fn: fn(),
         summary_cache=summary_cache,
         lake_root_resolver=lambda: lake_root,  # DEC-ACCOUNT-PULL-SINGLEFLIGHT-001
+        # Hermeticity (DEC-TEST-AWS-HERMETICITY-001): skip the account lock —
+        # the default resolver would read the api_key from live AWS SSM.
+        account_key_resolver=lambda: None,
     )
     generation_before = summary_cache.generation
     assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True
@@ -435,7 +445,11 @@ class TestLeaderboardCascadeJoin:
         assert payload["rows"][0]["composite_score"] == 1.75
         # The ?preset=composite axis is now honestly ACTIVE.
         preset = client.get("/api/v1/sweep/leaderboard?preset=composite").json()
-        assert preset["preset_inert_axes"] == ["max_consecutive_losses"]
+        assert preset["preset_inert_axes"] == [
+            "max_consecutive_losses",
+            "alpha_pct",
+            "net_after_cost_paisa",
+        ]
 
     def test_aggs_landing_after_a_poll_surfaces_without_a_sweeps_write(
         self, client: TestClient, store: InstrumentStore
@@ -476,7 +490,11 @@ class TestLeaderboardCascadeJoin:
         assert second["rows"][0]["composite_score"] == 1.75
         # The activation reaches the preset axis too — still no sweeps write.
         preset = client.get("/api/v1/sweep/leaderboard?preset=composite").json()
-        assert preset["preset_inert_axes"] == ["max_consecutive_losses"]
+        assert preset["preset_inert_axes"] == [
+            "max_consecutive_losses",
+            "alpha_pct",
+            "net_after_cost_paisa",
+        ]
 
     def test_composite_index_reads_once_per_token(
         self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
@@ -516,3 +534,131 @@ class TestLeaderboardCascadeJoin:
         ).write_parquet(sibling / "bull_k1_bbbbbbbbbbbbbbbb.aggs.parquet")
         assert client.get("/api/v1/sweep/leaderboard").json()["composite_join"]["scored_rows"] == 2
         assert calls["n"] == 2
+
+
+class TestServeFilterParams:
+    """DEC-RESULTS-TRUST-HONESTY-001 · B2a — the serving-side floor params."""
+
+    def test_min_trades_floor_reaches_the_reader(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1, total_trades=10), _row(2, total_trades=60)])
+        payload = client.get("/api/v1/sweep/leaderboard?min_trades=30").json()
+        assert [r["total_trades"] for r in payload["rows"]] == [60]
+        assert payload["total_rows"] == 1
+
+    def test_blank_filters_are_byte_identical_to_absent(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """Blank params = inactive = the EXACT legacy payload (the pinned arm)."""
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1), _row(2)])
+        legacy = client.get("/api/v1/sweep/leaderboard").json()
+        blank = client.get(
+            "/api/v1/sweep/leaderboard?min_trades=&min_pf=&min_dsr=&max_abs_dd_pct="
+        ).json()
+        assert blank == legacy
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "min_trades=abc",
+            "min_trades=-1",
+            "min_trades=30.5",
+            "min_pf=junk",
+            "min_pf=-0.1",
+            "min_dsr=nan",
+            "max_abs_dd_pct=inf",
+        ],
+    )
+    def test_junk_filter_values_are_a_clean_400(self, client: TestClient, query: str) -> None:
+        resp = client.get(f"/api/v1/sweep/leaderboard?{query}")
+        assert resp.status_code == 400
+        # The refusal names the offending parameter (the preset refusal law).
+        assert query.split("=", maxsplit=1)[0] in resp.json()["detail"]
+
+    def test_min_dsr_excludes_undemonstrable_rows(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """The fixture rows persist NO deflated_sharpe — an active min_dsr
+        floor excludes them (fail-closed on the operator's explicit request);
+        the unfiltered view still serves every row."""
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        assert client.get("/api/v1/sweep/leaderboard").json()["total_rows"] == 1
+        assert client.get("/api/v1/sweep/leaderboard?min_dsr=0").json()["total_rows"] == 0
+
+    def test_hard_gates_recheck_marks_never_drops(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1, total_trades=10), _row(2, total_trades=60)])
+        payload = client.get("/api/v1/sweep/leaderboard").json()
+        by_trades = {r["total_trades"]: r["hard_gates_recheck"] for r in payload["rows"]}
+        assert by_trades == {10: "marked", 60: "ok"}
+        assert payload["total_rows"] == 2
+
+
+class TestLeaderboardTierJoin:
+    """DEC-RANKING-SPLUS-TIER-001: the tier keys on the /results wire."""
+
+    def test_tier_keys_from_the_newest_runs_top100(
+        self, client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
+    ) -> None:
+        import json as _json
+
+        import polars as pl
+
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        run_dir = lake_root / "sweep_runs" / ("grid" + "0" * 60)
+        depth = run_dir / "results-depth" / "NIFTY" / "5m"
+        depth.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "run_id": [f"{1:064x}"],
+                "composite_score": pl.Series([1.75], dtype=pl.Float64),
+            }
+        ).write_parquet(depth / "bull_k1_aaaaaaaaaaaaaaaa.aggs.parquet")
+        doc = {
+            # Fold re-derivation (train-b 2026-07-21, PR #1578 reconcile — the
+            # L1 class): the woven #1959 reader hard-gates schema_version == 2;
+            # the member's v1 pin would read NAMED corrupt → an empty tier map.
+            "schema_version": 2,
+            "run_id": "grid" + "0" * 60,
+            "preset": "min_dd_first",
+            "source": {"pool": 1},
+            "baselines": {},
+            "entries": [
+                {
+                    "rank": 1,
+                    "run_id": f"{1:064x}",
+                    "mask_hex": "0x05",
+                    "conditions": ["PDH_CROSS_UP"],
+                    "tf": "5m",
+                    "direction": "long",
+                    "arm": "SL1.0_TP2.0",
+                    "metrics": {"sharpe": 1.0},
+                    "regime": {},
+                    "vix_band": None,
+                    "family_id": "fam-0001",
+                    "tier": {"label": "S", "blocked_next": ["win_rate"]},
+                }
+            ],
+        }
+        (run_dir / "top100.json").write_text(_json.dumps(doc), encoding="utf-8")
+        summary_cache.mark_dirty()
+        payload = client.get("/api/v1/sweep/leaderboard").json()
+        (row,) = payload["rows"]
+        assert row["tier"] == "S"
+        assert row["tier_blocked_next"] == ["win_rate"]
+        assert row["tier_status_text"] == "S — blocked from S+: win_rate"
+
+    def test_no_artifact_wire_payload_carries_no_tier_keys(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        payload = client.get("/api/v1/sweep/leaderboard").json()
+        assert all(not any(k.startswith("tier") for k in row) for row in payload["rows"])

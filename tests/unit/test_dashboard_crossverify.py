@@ -360,6 +360,64 @@ class TestLastRunSurface:
         assert snap["last_run"] is None
 
 
+class TestOwedSurface:
+    """The EMIT-ON-PRESENT ``owed_days`` progress field + the owed-store scan
+    (DEC-CROSSVERIFY-OWED-SENTINEL-001): a day whose pull committed to a
+    cross-verify that never reached a completed verdict reads LOUD on the
+    panel; the no-owed wire stays byte-identical (additive-only)."""
+
+    def test_no_owed_days_wire_is_byte_identical(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from brutex.crossverify.owed import clear_owed, mark_owed
+
+        client = _client(store, monkeypatch, tmp_path, lambda config: _report())
+        before = client.get("/api/v1/crossverify/progress")
+        assert before.status_code == 200
+        assert "owed_days" not in before.json()  # EMIT-ON-PRESENT
+        # Additive-only: an owed day adds EXACTLY the one key…
+        mark_owed(tmp_path, date(2026, 7, 9), source="test")
+        with_owed = client.get("/api/v1/crossverify/progress").json()
+        assert set(with_owed) == set(before.json()) | {"owed_days"}
+        # …and clearing it restores the exact pre-change wire BYTES.
+        clear_owed(tmp_path, date(2026, 7, 9))
+        after = client.get("/api/v1/crossverify/progress")
+        assert after.content == before.content
+
+    def test_owed_days_served_sorted_from_the_store(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from brutex.crossverify.owed import mark_owed
+
+        mark_owed(tmp_path, date(2026, 7, 9), source="test")
+        mark_owed(tmp_path, date(2026, 7, 7), source="test")
+        client = _client(store, monkeypatch, tmp_path, lambda config: _report())
+        snap = client.get("/api/v1/crossverify/progress").json()
+        assert snap["owed_days"] == ["2026-07-07", "2026-07-09"]
+
+    def test_planted_fifo_and_junk_never_500_never_hang(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import os
+
+        from brutex.crossverify.owed import owed_dir, owed_marker_path
+
+        owed_dir(tmp_path).mkdir(parents=True)
+        os.mkfifo(owed_marker_path(tmp_path, date(2026, 7, 9)))  # names-only law
+        (owed_dir(tmp_path) / "junk.txt").write_text("junk")
+        client = _client(store, monkeypatch, tmp_path, lambda config: _report())
+        response = client.get("/api/v1/crossverify/progress")
+        assert response.status_code == 200
+        assert response.json()["owed_days"] == ["2026-07-09"]
+
+    def test_no_store_app_serves_no_owed_days(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
+        client = TestClient(build_app(DashboardState(), instrument_store=None))
+        assert "owed_days" not in client.get("/api/v1/crossverify/progress").json()
+
+
 class TestUniversePanel:
     def test_panel_button_checkbox_and_status_span_exist(self) -> None:
         text = _tpl()
@@ -403,6 +461,20 @@ class TestUniversePanel:
         renderer = html.split("function cvRenderLastRun(lr)")[1].split("async function")[0]
         assert "innerHTML" not in renderer
         assert "cvStatus(line)" in renderer
+
+    def test_owed_render_is_wired_and_textcontent_only(self) -> None:
+        # The owed-day surface (DEC-CROSSVERIFY-OWED-SENTINEL-001): the panel
+        # carries the #cvowed host, the renderer is textContent-only, and
+        # BOTH payload consumers (the live poll + the on-load attach) feed it
+        # so an owed day reads loud on a fresh page open.
+        html = _tpl()
+        assert 'id="cvowed"' in html
+        assert "function cvRenderOwed(days)" in html
+        assert html.count("cvRenderOwed(s.owed_days)") == 2
+        assert "will complete on the next run" in html
+        renderer = html.split("function cvRenderOwed(days)")[1].split("/* Render the DURABLE")[0]
+        assert "textContent" in renderer
+        assert "innerHTML" not in renderer
 
     def test_greeks_na_disclosure_present(self) -> None:
         """Tonight-scope addendum item 3: the options-only Greeks stage has

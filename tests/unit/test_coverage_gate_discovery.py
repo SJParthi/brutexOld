@@ -229,6 +229,35 @@ class TestDiscoverTouchedModules:
         #     stem match, 100.00% with the pair; the static whole-engine gate runs
         #     tests/unit/test_engine_*.py together at 100%
         #     (DEC-SWEEP-RUST-TRADESIM-WIRE-001).
+        #   * brutex/engine/resilience_streaks.py — the losing-streak resilience
+        #     module (fold + sidecar + annotation), covered by the CURATED
+        #     three-file suite test_resilience_streaks.py +
+        #     test_resilience_sidecar.py + tests/integration/
+        #     test_resilience_end_to_end.py; the stem file alone tops out at
+        #     ~62.94% (the fold/annotation/backfill branches live in the
+        #     differently-stemmed sidecar + integration files), so the
+        #     discovery gate's one-stem mapping is a structural mismatch. Its
+        #     real 100% gate is the dedicated static per-module gate in ci.yml
+        #     (that exact three-file suite at --cov-fail-under=100) + the
+        #     whole-package floor (DEC-RESILIENCE-STREAKS-001).
+        #   * brutex/engine/results_depth_pass.py — gains the adoption-backfill
+        #     + resilience-fence path whose branches are exercised by the
+        #     differently-stemmed test_resilience_sidecar.py + the integration
+        #     test_resilience_end_to_end.py; test_engine_results_depth_pass.py
+        #     alone tops out at ~94.88% — the sweep_driver.py shape. Its real
+        #     100% gate is the dedicated static per-module gate in ci.yml (the
+        #     three-file suite at --cov-fail-under=100) + the whole-package
+        #     floor (DEC-RESILIENCE-STREAKS-001).
+        #   * brutex/pull_state_rust.py — the pull-state Rust facade
+        #     (DEC-RUST-PULL-STATE-001): each wave's kernel-accessor section
+        #     is exercised by that wave's OWN seam suite, stem-named for the
+        #     CONSUMER module it gates
+        #     (test_pull_outcome_rust_seam.py / test_pull_scope_rust_seam.py …),
+        #     so the stem-matched test_pull_state_rust*.py pair measures ~62%
+        #     standalone; the dedicated static ci.yml gate runs the curated
+        #     static suite (every per-wave seam file it enumerates) at
+        #     100.00% + the whole-package floor (the pull_controller.py
+        #     precedent).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -240,6 +269,9 @@ class TestDiscoverTouchedModules:
                     "brutex/dashboard/movers_snapshot.py",
                     "brutex/config/credentials.py",
                     "brutex/engine/sweep_driver.py",
+                    "brutex/engine/resilience_streaks.py",
+                    "brutex/engine/results_depth_pass.py",
+                    "brutex/pull_state_rust.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE
@@ -994,6 +1026,120 @@ class TestMainCli:
         monkeypatch.setattr(gate, "build_plan", fake_build_plan)
         assert gate.main(["--base", "upstream/dev"]) == 0
         assert seen == ["upstream/dev"]
+
+
+class TestParseShard:
+    """The ``K/N`` shard-spec parser: valid specs + every refusal arm."""
+
+    def test_valid_specs(self, gate: ModuleType) -> None:
+        assert gate.parse_shard("1/1") == (1, 1)
+        assert gate.parse_shard("3/8") == (3, 8)
+        assert gate.parse_shard("8/8") == (8, 8)
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "junk",  # no slash at all
+            "3",  # bare integer
+            "a/b",  # non-integer halves
+            "1/",  # missing N
+            "/4",  # missing K
+            "1/2/3",  # extra component (tail "2/3" is non-integer)
+            "0/4",  # K below 1
+            "5/4",  # K above N
+            "-1/4",  # negative K
+            "1/0",  # N below 1
+        ],
+    )
+    def test_bad_specs_raise_discovery_error(self, gate: ModuleType, spec: str) -> None:
+        with pytest.raises(gate.DiscoveryError):
+            gate.parse_shard(spec)
+
+
+class TestMainShard:
+    """The ``--shard`` CLI seam: slicing law + fail-closed arms."""
+
+    @staticmethod
+    def _five_entry_plan(gate: ModuleType) -> Any:
+        return gate.Plan(
+            [
+                ("brutex/a.py", ["tests/unit/test_a.py"]),
+                ("brutex/b.py", ["tests/unit/test_b.py"]),
+                ("brutex/c.py", ["tests/unit/test_c.py"]),
+                ("brutex/d.py", ["tests/unit/test_d.py"]),
+                ("brutex/e.py", ["tests/unit/test_e.py"]),
+            ],
+            [],
+            [],
+        )
+
+    def test_shards_partition_the_plan_round_robin(
+        self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The N shards are DISJOINT and their union is the WHOLE plan."""
+        plan = self._five_entry_plan(gate)
+        monkeypatch.setattr(gate, "build_plan", lambda _b: plan)
+        per_shard: list[list[str]] = []
+        for k in (1, 2):
+            ran: list[str] = []
+            monkeypatch.setattr(
+                gate, "_run_coverage", lambda m, _t, _ran=ran: (_ran.append(m), True)[1]
+            )
+            assert gate.main(["--shard", f"{k}/2"]) == 0
+            per_shard.append(ran)
+        assert per_shard[0] == ["brutex/a.py", "brutex/c.py", "brutex/e.py"]
+        assert per_shard[1] == ["brutex/b.py", "brutex/d.py"]
+        # Partition law: disjoint + union == the full sorted plan.
+        assert not (set(per_shard[0]) & set(per_shard[1]))
+        assert sorted(per_shard[0] + per_shard[1]) == [m for m, _ in plan.entries]
+
+    def test_bad_shard_exits_two_before_discovery(
+        self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A junk spec exits 2 WITHOUT running the git discovery pass."""
+        monkeypatch.setattr(
+            gate,
+            "build_plan",
+            lambda _b: pytest.fail("build_plan must not run under a junk --shard"),
+        )
+        assert gate.main(["--shard", "junk"]) == 2
+        assert "ERROR: --shard must be 'K/N'" in capsys.readouterr().out
+
+    def test_missing_added_fails_on_every_shard(
+        self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The NEW-module-without-test FAIL is never sliced away."""
+        plan = gate.Plan([], ["brutex/no_test.py"], [])
+        monkeypatch.setattr(gate, "build_plan", lambda _b: plan)
+        for k in (1, 2):
+            assert gate.main(["--shard", f"{k}/2"]) == 1
+            assert "a NEW module must ship a dedicated test" in capsys.readouterr().out
+
+    def test_empty_slice_passes_and_names_the_shard(
+        self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A shard whose slice is empty passes (its work lives on other legs)."""
+        plan = gate.Plan([("brutex/a.py", ["tests/unit/test_a.py"])], [], [])
+        monkeypatch.setattr(gate, "build_plan", lambda _b: plan)
+        monkeypatch.setattr(
+            gate,
+            "_run_coverage",
+            lambda _m, _t: pytest.fail("coverage must not run for an empty slice"),
+        )
+        assert gate.main(["--shard", "2/2"]) == 0
+        out = capsys.readouterr().out
+        assert "shard 2/2 — 0 of 1 discovered module(s) in this slice" in out
+
+    def test_shard_with_list_mode_prints_slice_and_exits_zero(
+        self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        plan = self._five_entry_plan(gate)
+        monkeypatch.setattr(gate, "build_plan", lambda _b: plan)
+        assert gate.main(["--shard", "2/2", "--list"]) == 0
+        out = capsys.readouterr().out
+        assert "shard 2/2 — 2 of 5 discovered module(s) in this slice" in out
+        assert "brutex/b.py -> tests/unit/test_b.py" in out
+        assert "brutex/a.py -> " not in out
 
 
 def test_script_is_executable_module_main(

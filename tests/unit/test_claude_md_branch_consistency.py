@@ -198,11 +198,27 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # 1774 = DEC-PULL-TODAY-COMPLETENESS-GATE-001 (2026-07-12): the
     # data/today_completeness.py pair's rationale comment cites THAT
     # decision's entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774}),
-    "brutex/data/lake_stats_manifest.py": frozenset({867}),
+    # 1797 = DEC-FEED-RUST-CORE-001 (2026-07-12, refuter round 6): the
+    # feed/replay.py pair's rationale comment (the R6a warn-drain mutant +
+    # the 3-file discovery-set field) cites THAT decision's entry, not this
+    # one.
+    # 1975 = DEC-METRICS-KELLY-GROWTH-001 (2026-07-18, W2 refuter round 1):
+    # the ranking-pass rationale comment recording brutex/ranking/streaks.py
+    # + tests/unit/test_ranking_streaks.py joining the pair (the #1750
+    # pledge extension) cites THAT decision's entry, not this one.
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797, 1975}),
+    # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16): render_shard's
+    # docstring cites THAT decision's entry for its Rust-seam routing note,
+    # not this one.
+    "brutex/data/lake_stats_manifest.py": frozenset({867, 1914}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),
-    "tests/unit/test_lake_stats_manifest.py": frozenset({1597}),
+    # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16, club RL-B fold
+    # lap): the TestRenderShardRustSeamRouting class docstring cites THAT
+    # decision's entry for the render_shard Rust-seam routing pins, not this
+    # one (the member branch extended the SOURCE module's allowlist but
+    # missed this TEST file's — caught by this pin on the folded tree).
+    "tests/unit/test_lake_stats_manifest.py": frozenset({1597, 1914}),
 }
 
 

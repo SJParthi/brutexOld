@@ -39,6 +39,43 @@ _RUN = "a1" * 32
 
 #: Locked digest (sha256 hex of the rendered top100.json bytes).
 #: Regeneration is a deliberate, ledgered act — see the module docstring.
+#: RE-LOCKED at the 2026-07-21 train-b #1578 fold for
+#: DEC-RANKING-SPLUS-TIER-001 (the S+/S/A tier classifier): the writer now
+#: ALWAYS emits the additive root ``tier_config`` threshold echo + the
+#: per-entry ``tier`` object ``{"label", "blocked_next"}``.
+#: On this fixture every kept entry classifies ``label="A"`` (the wp5
+#: defaults pass every A axis) with ``blocked_next`` naming its S blockers
+#: (``min_trades`` 40 < 200 · ``profit_factor`` 1.5 < 1.6 ·
+#: ``expectancy_headroom`` 250 < H=1000 · ``stop_too_wide`` 80 paisa on a
+#: ₹100 entry = 80 bps > 20 · ``missing_input:mae_1m`` — the fixture aggs
+#: carry no 1-minute path · ``cascade`` not_validated; the deep singleton
+#: adds ``max_drawdown`` 22.5 > 10). The diff vs the pre-change bytes is
+#: pinned ADDITIVE-ONLY in ``test_engine_top100_artifact.py::``
+#: ``test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture``
+#: (strip ``tier_config`` + per-entry ``tier`` → the frozen fixture bytes).
+#: Readers stay presence-tolerant; committed pre-change artifact fixtures
+#: load byte-untouched.
+#: FOLD RE-DERIVE (2026-07-21 train-b #1578 — REDERIVE-ON-FOLD): re-derived
+#: on the train-b woven tree to
+#: fcd0ebc0a3cda664d88f781680bf5dd72db47dbf4149eb23a4d1c76da460cac8. The
+#: member's expected 6f83b322 was derived off the pre-refresh base c890213a
+#: and is byte-INVALID on the fold, so it was NEVER adopted. Three-way hash
+#: fork: base c890213a → woven before-state 9fa6a166 (Train-A resilience
+#: re-lock + the #1959 schema_version 1→2 bump) → fold fcd0ebc0 (the tier
+#: delta ON TOP). ADDITIVE-ONLY at digest level: stripping the root
+#: ``tier_config`` + per-entry ``tier`` from ``to_payload()`` and
+#: re-rendering reproduces the woven before-state 9fa6a166 EXACTLY (the
+#: strip-pin teeth,
+#: ``test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture``).
+#: Prior lock history:
+#: RE-LOCKED at the 2026-07-15 club-O integration merge of
+#: DEC-RESILIENCE-STREAKS-001 (#1395) with main: the merged writer emits the
+#: additive per-entry ``resilience`` block ON TOP of the two deltas the
+#: 2026-07-12 re-lock below records (root ``cascade_join`` meta + per-entry
+#: ``cascade`` object + ``metrics.exits."session_gap"``); that digest
+#: (9fa6a166f3370f6d3099bd86022e1d8282a2e9bef18a4efc1f735655d71ebed2) was
+#: re-derived from the merged writer's rendered bytes (additive-only — every
+#: committed pre-change artifact fixture still loads byte-untouched).
 #: RE-LOCKED at the 2026-07-12 merge of DEC-RESULTS-CASCADE-VERDICT-JOIN-001
 #: (MIGRATION.md #1749) with main's DEC-TRADESIM-OPEN-SESSION-GUARD-001
 #: (MIGRATION.md #1743): the merged writer emits BOTH additive deltas — the
@@ -50,7 +87,7 @@ _RUN = "a1" * 32
 #: (zero-count on this fixture — the wp5 fixture aggs carry no session-gap
 #: closes). Readers stay presence-tolerant, so every committed pre-change
 #: artifact fixture still loads byte-untouched.
-_GOLDEN_TOP100_SHA256 = "c890213a1c1b19cb892fd2a45d7bcd2cb8a3fb8ed8037c7a1d03c429052d138d"
+_GOLDEN_TOP100_SHA256 = "fcd0ebc0a3cda664d88f781680bf5dd72db47dbf4149eb23a4d1c76da460cac8"
 
 
 def _fixture_artifact() -> Top100Artifact:
@@ -171,3 +208,116 @@ def test_golden_corrupt_artifact_is_detected_and_rebuilds_to_locked_bytes(
     reloaded = load_top100(tmp_path, _RUN)
     assert reloaded is not None
     assert reloaded.rendered_bytes() == pristine
+
+
+def test_wired_exec_provider_arm_is_additive_only_vs_the_unwired_golden() -> None:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001` / DEC-FILL-EXEC-GRID-1M-001: the wired
+    arm over the SAME frozen fixture differs from the unwired golden ONLY
+    additively (the #1749 additive-only-diff pattern — the cascade strip pin
+    in test_engine_top100_artifact.py).
+
+    Mechanism: ``_fixture_artifact`` is driven through a capturing wrapper so
+    the EXACT candidates + kwargs the golden was built from are re-invoked
+    with deterministic providers added — no fixture duplication, no fixture
+    file touched, and the captured unwired build is asserted to be the LOCKED
+    golden bytes (anti-vacuous). Then: stripping EXACTLY the new keys
+    (per-entry ``options_exec`` / ``futures_exec`` / ``fill_sensitivity`` +
+    the ``*_wired`` source flags) reproduces the unwired payload byte-for-byte
+    under the deterministic JSON law, and every new key is enumerated.
+    """
+    import json
+    from typing import Any
+    from unittest import mock
+
+    from brutex.engine.top100_artifact import Top100Candidate
+    from brutex.engine.top100_artifact import build_top100 as _real_build
+
+    captured: dict[str, Any] = {}
+
+    def _capture(candidates: Any, **kwargs: Any) -> Top100Artifact:
+        captured["candidates"] = list(candidates)
+        captured["kwargs"] = dict(kwargs)
+        return _real_build(candidates, **kwargs)
+
+    with mock.patch(f"{__name__}.build_top100", _capture):
+        unwired = _fixture_artifact()
+    # Anti-vacuous: the captured rebuild IS the locked golden bytes.
+    assert hashlib.sha256(unwired.rendered_bytes()).hexdigest() == _GOLDEN_TOP100_SHA256
+
+    # Deterministic providers — pure functions of the candidate's run_id.
+    def _options(c: Top100Candidate) -> dict[str, object]:
+        return {
+            "status": "priced",
+            "net_after_cost_paisa": 10_000 + int(c.row.run_id, 16),
+            "window": "2024-10-01..",
+        }
+
+    def _futures(c: Top100Candidate) -> dict[str, object]:
+        return {"status": "not_priced", "reason": f"deferred:{c.row.run_id[-2:]}"}
+
+    def _fill(c: Top100Candidate) -> dict[str, object]:
+        return {"status": "priced", "net_delta_paisa": -int(c.row.run_id, 16)}
+
+    wired = _real_build(
+        captured["candidates"],
+        **captured["kwargs"],
+        options_exec_provider=_options,
+        futures_exec_provider=_futures,
+        fill_sensitivity_provider=_fill,
+    )
+    unwired_payload = unwired.to_payload()
+    wired_payload = wired.to_payload()
+
+    # The additive delta, ENUMERATED exactly — root level: no new root keys.
+    assert set(wired_payload) == set(unwired_payload)
+    # Source: exactly the three emit-on-wired flags, all True.
+    new_source_flags = {"options_exec_wired", "futures_exec_wired", "fill_sensitivity_wired"}
+    wired_source = wired_payload["source"]
+    unwired_source = unwired_payload["source"]
+    assert isinstance(wired_source, dict)
+    assert isinstance(unwired_source, dict)
+    assert set(wired_source) - set(unwired_source) == new_source_flags
+    assert all(wired_source[flag] is True for flag in new_source_flags)
+    # Entries: same count + order; each entry gains EXACTLY the three keys,
+    # carrying the deterministic providers' objects verbatim.
+    new_entry_keys = {"options_exec", "futures_exec", "fill_sensitivity"}
+    wired_entries = wired_payload["entries"]
+    unwired_entries = unwired_payload["entries"]
+    assert isinstance(wired_entries, list)
+    assert isinstance(unwired_entries, list)
+    assert len(wired_entries) == len(unwired_entries) == 3
+    ranked_ids = [f"{3:064x}", f"{1:064x}", f"{4:064x}"]  # the locked golden order
+    assert [entry["run_id"] for entry in wired_entries] == ranked_ids
+    for entry, unwired_entry in zip(wired_entries, unwired_entries, strict=True):
+        run_id = entry["run_id"]
+        assert isinstance(run_id, str)
+        assert set(entry) - set(unwired_entry) == new_entry_keys
+        assert entry["options_exec"] == {
+            "status": "priced",
+            "net_after_cost_paisa": 10_000 + int(run_id, 16),
+            "window": "2024-10-01..",
+        }
+        assert entry["futures_exec"] == {
+            "status": "not_priced",
+            "reason": f"deferred:{run_id[-2:]}",
+        }
+        assert entry["fill_sensitivity"] == {
+            "status": "priced",
+            "net_delta_paisa": -int(run_id, 16),
+        }
+
+    # Every PRE-EXISTING key/value byte-identical: stripping EXACTLY the new
+    # keys reproduces the unwired golden payload under the deterministic JSON
+    # rendering law (sorted, compact — the artifact's own byte law).
+    stripped = dict(wired_payload)
+    stripped["source"] = {k: v for k, v in wired_source.items() if k not in new_source_flags}
+    stripped["entries"] = [
+        {k: v for k, v in entry.items() if k not in new_entry_keys} for entry in wired_entries
+    ]
+
+    def _dumps_law(payload: object) -> str:
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+
+    assert _dumps_law(stripped) == _dumps_law(unwired_payload)

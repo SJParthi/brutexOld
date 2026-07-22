@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import array
+import json
 import math
 from decimal import Decimal
 from typing import Any, ClassVar
@@ -15,6 +16,8 @@ import pytest
 from brutex.strategies.combo import (
     _MAX_CANONICALISE_DEPTH,
     UNIT_SEPARATOR,
+    _first_offending_field,
+    _stdlib_canonical_json,
     canonicalise_params,
     combo_hash,
     reject_unit_separator,
@@ -729,3 +732,85 @@ class TestRejectUnitSeparatorHelper:
             "combo_hash: tf must not contain the \\x1f "
             "unit-separator byte (it is the field join delimiter)"
         )
+
+
+class TestRustSeamOracles:
+    """DEC-STRATEGIES-RUST-COMBO-001 — the verbatim-extracted seam oracles.
+
+    The two ``python_law`` callables the ``combo_rust`` facade injects are
+    the historical inline expressions extracted token-for-token; these pins
+    prove them against independently-recomputed stdlib renders + the
+    OFF-arm (the suite-wide default — the conftest belt pins the flag "0")
+    byte-identity of the public functions vs their recorded pre-seam
+    outputs.
+    """
+
+    def test_stdlib_canonical_json_is_the_verbatim_dumps_law(self) -> None:
+        lowered = {"b": 1, "a": [True, None, "é"], "c": "0.5"}
+        assert _stdlib_canonical_json(lowered) == json.dumps(
+            lowered, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+
+    def test_stdlib_canonical_json_empty_dict(self) -> None:
+        assert _stdlib_canonical_json({}) == "{}"
+
+    def test_first_offending_field_returns_first_name(self) -> None:
+        fields = (("a", "clean"), ("b", "x\x1fy"), ("c", "\x1f"))
+        assert _first_offending_field(fields) == "b"
+
+    def test_first_offending_field_none_on_clean(self) -> None:
+        assert _first_offending_field((("a", "clean"), ("b", ""))) is None
+        assert _first_offending_field(()) is None
+
+    def test_first_offending_field_is_lazy_single_pass(self) -> None:
+        def _gen() -> Any:
+            yield ("a", "x\x1fy")
+            raise AssertionError("oracle consumed past the first offender")
+
+        assert _first_offending_field(_gen()) == "a"
+
+    def test_off_arm_canonicalise_params_byte_identity(self) -> None:
+        # The recorded PRE-seam output (the literal json.dumps render of the
+        # canonical_trade_params shape — the frozen cross-language golden).
+        params = {
+            "sl_paisa": 2000,
+            "tp_paisa": None,
+            "prior_n": 20,
+            "proximity_bps": [10, 15, 25],
+            "fib_anchor": "prev_day",
+            "start_equity_paisa": 10000000,
+            "fill_mode": "worst_case",
+        }
+        assert canonicalise_params(params) == (
+            '{"fib_anchor":"prev_day","fill_mode":"worst_case","prior_n":20,'
+            '"proximity_bps":[10,15,25],"sl_paisa":2000,'
+            '"start_equity_paisa":10000000,"tp_paisa":null}'
+        )
+
+    def test_off_arm_reject_unit_separator_byte_identity(self) -> None:
+        # The recorded PRE-seam message bytes (literal backslash-x-1-f text).
+        with pytest.raises(StrategyError) as exc_info:
+            reject_unit_separator(
+                "combo_hash",
+                (("strategy_id", "ok"), ("mode", "A\x1fB")),
+                error=StrategyError,
+            )
+        assert str(exc_info.value) == (
+            "combo_hash: mode must not contain the \\x1f "
+            "unit-separator byte (it is the field join delimiter)"
+        )
+
+    def test_off_arm_never_imports_the_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The bomb-crate spy at the combo.py level (the #1913/#1915 idiom):
+        # with the flag OFF (the suite default) neither public function may
+        # touch the wheel.
+        import brutex.strategies.combo_rust as _cr
+
+        monkeypatch.delenv(_cr.STRATEGIES_RUST_COMBO_ENV, raising=False)
+
+        def _bomb(name: str) -> Any:
+            raise AssertionError(f"flag-OFF combo.py path imported {name!r}")
+
+        monkeypatch.setattr(_cr.importlib, "import_module", _bomb)
+        assert canonicalise_params({"a": 1}) == '{"a":1}'
+        reject_unit_separator("ctx", (("a", "clean"),), error=StrategyError)

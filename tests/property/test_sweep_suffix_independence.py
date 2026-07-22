@@ -426,10 +426,15 @@ def test_full_spine_trades_closed_before_mutation_point_are_unchanged(
 ) -> None:
     """A trade closed at bar K survives ANY mutation of bars strictly after K.
 
-    The full-spine extension of the walker-local property: the suffix
-    mutation here flows through the RECOMPUTED ``bar_bits`` and entry
-    signals (mask 0 fires on every bar), so future information would have
-    every derived channel available to leak through — and still may not
+    The full-spine extension of the walker-local property, in the DUAL-FEED
+    form (DEC-FILL-EXEC-GRID-1M-001 — the walker takes a decision stream AND
+    a 1-minute execution stream; at ``tf_minutes == 1`` the same list is the
+    §6 fixed point): a suffix mutation beyond bar ``K`` on EITHER stream —
+    (a) both streams (the fixed-point law shape, the mutation flowing
+    through the RECOMPUTED ``bar_bits`` and entry signals; mask 0 fires on
+    every bar, so future information would have every derived channel
+    available to leak through), (b) the EXECUTION stream only (fills/walk
+    domain), and (c) the DECISION stream only (signal domain) — may not
     change a trade already closed at bar ``K``.
     """
     base_bits = build_bar_bits(bars)
@@ -439,6 +444,7 @@ def test_full_spine_trades_closed_before_mutation_point_are_unchanged(
         base_signals,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         stop_loss_paisa=80,
         take_profit_paisa=50,
     )
@@ -454,15 +460,43 @@ def test_full_spine_trades_closed_before_mutation_point_are_unchanged(
     mutated = _mutate_suffix(bars, exit_index + 1, data)
     mutated_bits = build_bar_bits(mutated)
     mutated_signals = mask_to_entry_signals(mutated_bits, 0)
-    mutated_trades = simulate_trades(
+    # (a) BOTH streams mutated — the fixed-point law shape.
+    both_mutated = simulate_trades(
         mutated,
         mutated_signals,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=mutated,
         stop_loss_paisa=80,
         take_profit_paisa=50,
     )
-    assert mutated_trades[: j + 1] == base_trades[: j + 1]
+    assert both_mutated[: j + 1] == base_trades[: j + 1]
+    # (b) EXECUTION stream only mutated (decision signals stay the base
+    # stream's): a fill/walk-domain leak past bar K would flip a closed
+    # prefix trade. Timestamps are preserved by _mutate_suffix, so the
+    # exec-grid mapping is structurally identical — only prices differ.
+    exec_mutated = simulate_trades(
+        bars,
+        base_signals,
+        direction=Side.BUY,
+        tf_minutes=1,
+        exec_bars_1m=mutated,
+        stop_loss_paisa=80,
+        take_profit_paisa=50,
+    )
+    assert exec_mutated[: j + 1] == base_trades[: j + 1]
+    # (c) DECISION stream only mutated (fills stay on the base exec stream):
+    # a signal-domain leak past bar K would flip a closed prefix trade.
+    decision_mutated = simulate_trades(
+        mutated,
+        mutated_signals,
+        direction=Side.BUY,
+        tf_minutes=1,
+        exec_bars_1m=bars,
+        stop_loss_paisa=80,
+        take_profit_paisa=50,
+    )
+    assert decision_mutated[: j + 1] == base_trades[: j + 1]
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -526,7 +560,11 @@ def test_prefix_sweep_is_bit_identical_before_and_after_a_full_series_run(
         store = ResultsStore(path=store_path)
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
         with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=dedup, audit=audit)
+            # tf==1 fixed point (DEC-FILL-EXEC-GRID-1M-001): the same list
+            # is the decision AND the execution stream.
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+            )
         return summary.store_content_hash, store_path.read_bytes()
 
     # Prefix metrics BEFORE any full-series evaluation …
@@ -537,6 +575,7 @@ def test_prefix_sweep_is_bit_identical_before_and_after_a_full_series_run(
         0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=prefix,
         stop_loss_paisa=80,
         take_profit_paisa=50,
         start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
@@ -554,6 +593,7 @@ def test_prefix_sweep_is_bit_identical_before_and_after_a_full_series_run(
         0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=prefix,
         stop_loss_paisa=80,
         take_profit_paisa=50,
         start_equity_paisa=DEFAULT_START_EQUITY_PAISA,

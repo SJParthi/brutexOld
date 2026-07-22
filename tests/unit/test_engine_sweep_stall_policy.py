@@ -179,3 +179,50 @@ def test_g2_env_mapping_injected_not_process_env(monkeypatch: pytest.MonkeyPatch
     assert policy == StallPolicy(timeout_seconds=300.0, source="default")
     from_process = resolve_stall_policy(per_tuple_estimate_s=None, workers=1)
     assert from_process == StallPolicy(timeout_seconds=7.0, source="env")
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1 routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the scaled stall-timeout tail.
+
+    Wheel-free: a behavior-correct FAKE crate is injected by patching the
+    facade's ``importlib`` binding. Flag ON must be value-identical to the
+    flag-OFF Python law (which every OTHER test in this file drives).
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_both_arms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm_fake_crate(monkeypatch)
+        try:
+            scaled = resolve_stall_policy(per_tuple_estimate_s=60.0, workers=1, env={})
+            assert scaled == StallPolicy(timeout_seconds=600.0, source="scaled")
+            unscaled = resolve_stall_policy(per_tuple_estimate_s=1.0, workers=1, env={})
+            assert unscaled == StallPolicy(timeout_seconds=300.0, source="default")
+        finally:
+            self._reset_facade()

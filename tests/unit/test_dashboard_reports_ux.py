@@ -28,13 +28,30 @@ from brutex.dashboard.app import _render_reports_html
 
 
 def test_header_is_sticky_and_frosted() -> None:
-    """The header is ``position:sticky`` with a blur backdrop (matches /db D2)."""
+    """The header is ``position:sticky`` with a blur backdrop (matches /db D2).
+
+    PIN MOVED (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch B+C): the page-local
+    ``header {}`` fork was DELETED in favour of the canonical bx-theme.css rule
+    (linked in <head>, cascade-last), so the sticky+blur invariant is asserted
+    against the SHARED sheet + the link — and the fork must stay deleted.
+    """
+    from pathlib import Path
+
+    import brutex.dashboard as _dash
+
     html = _render_reports_html()
-    rule = re.search(r"\bheader \{[^}]*\}", html, re.DOTALL)
-    assert rule is not None, "the header CSS rule is missing"
+    assert '<link rel="stylesheet" href="/static/bx-theme.css">' in html, (
+        "the shared bx-theme.css link is missing"
+    )
+    assert re.search(r"\bheader \{[^}]*position:\s*sticky", html, re.DOTALL) is None, (
+        "the page-local sticky-header fork must stay deleted (bx-theme.css is canonical)"
+    )
+    theme = (Path(_dash.__file__).parent / "static" / "bx-theme.css").read_text(encoding="utf-8")
+    rule = re.search(r"(?<![.\w])header \{[^}]*\}", theme, re.DOTALL)
+    assert rule is not None, "the shared header CSS rule is missing from bx-theme.css"
     block = rule.group(0)
-    assert "position:sticky" in block, "the header must be sticky"
-    assert "backdrop-filter:blur" in block, "the header must have a frosted blur backdrop"
+    assert "position: sticky" in block, "the shared header must be sticky"
+    assert "backdrop-filter: blur" in block, "the shared header must have a frosted blur backdrop"
 
 
 def test_skeleton_chips_on_load() -> None:

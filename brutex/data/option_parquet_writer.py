@@ -66,6 +66,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import parquet_read_skip_errors
+from brutex.data.guarded_read import read_parquet_regular, read_regular_bytes
 from brutex.data.lake_stats_manifest import (
     KIND_OPTIONS,
     partition_stats_tracked,
@@ -477,8 +478,22 @@ class OptionParquetWriter:
                     # reproduced through the default AUTO-ON healer's
                     # copy-forward leg AND the production ``write()`` path —
                     # no symlink/TOCTOU needed, so the containment rail
-                    # cannot see it). The literal read closes both.
-                    existing = pl.read_parquet(dest, glob=False)
+                    # cannot see it). The literal read closes both. Since the
+                    # DEC-LAKE-READ-INODE-GUARD-001 fix round the read rides
+                    # the GUARDED read_parquet_regular seam — polars receives
+                    # the fd-validated OPEN handle, so glob interpretation
+                    # stays structurally impossible (subsuming glob=False)
+                    # AND a FIFO swapped in as the copy-forward DESTINATION
+                    # month file (the heal reads the SOURCE through the
+                    # guarded scan seam, then re-opens the canonical dest
+                    # HERE) refuses with NotRegularFileError — an OSError
+                    # member of parquet_read_skip_errors(), folding into the
+                    # isolated OptionWriterError refusal below — instead of
+                    # wedging the default AUTO-ON heal batch forever in
+                    # C-level fifo_open. A symlink to a REGULAR file still
+                    # passes (open follows links; fstat sees S_ISREG), so the
+                    # R7-2 symlinked-options-root working-pull pin holds.
+                    existing = read_parquet_regular(dest)
                 except parquet_read_skip_errors() as exc:
                     raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
                 # `added` is baselined on the UNIQUE stored key count, NEVER the raw
@@ -581,7 +596,7 @@ class OptionParquetWriter:
         ):
             self._assert_options_containment(dest)
             try:
-                return pl.read_parquet(io.BytesIO(dest.read_bytes()))
+                return pl.read_parquet(io.BytesIO(read_regular_bytes(dest)))
             except parquet_read_skip_errors() as exc:
                 raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
 
@@ -678,7 +693,14 @@ class OptionParquetWriter:
         ):
             self._assert_options_containment(dest)
             try:
-                existing_bytes = dest.read_bytes()
+                # GUARDED byte read (DEC-LAKE-READ-INODE-GUARD-001 fix round —
+                # the diagnostic/re-open class sweep): heal_partition RE-reads
+                # the flagged source under its OWN locks AFTER the healer's
+                # guarded consistent read (the round-13 wide swap window), so
+                # a bare dest.read_bytes() here wedged forever on a FIFO
+                # swapped in post-scan. NotRegularFileError is an OSError →
+                # the isolated OptionWriterError refusal below absorbs it.
+                existing_bytes = read_regular_bytes(dest)
                 existing = pl.read_parquet(io.BytesIO(existing_bytes))
             except parquet_read_skip_errors() as exc:
                 raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
@@ -932,6 +954,29 @@ def _remove_option_stats(lake_root: Path, *, dest: Path) -> None:
     )
 
 
+def _defaults_python_render(df: pl.DataFrame) -> bytes:
+    """The defaults-profile LIVE PARITY ORACLE: ``df.write_parquet`` all-defaults → bytes.
+
+    DEC-RUST-DATALAKE-IO-ROADMAP-001 PR-2 — this writer's analogue of
+    :meth:`~brutex.data.parquet_writer.ParquetWriter._render_bytes`'s
+    ``_python_render`` closure: the verbatim zero-kwarg ``write_parquet``
+    render (statistics ON, Zstd(None), ``row_group_size=None`` → the
+    streaming sink's 122,880-row default split) into an in-memory buffer.
+    Byte-representative of what the flag-OFF path streams to a tmp PATH —
+    the wheel routes a ``BytesIO`` target and a path target into the SAME
+    streaming sink (the P1 standing pin in
+    ``tests/unit/test_option_parquet_writer_rust_render.py`` holds that
+    equivalence so it can never silently drift). Called only from the
+    flag-ON arm of :func:`_atomic_write_parquet`, inside the callers'
+    ``lake_write_guard`` — an OOM here maps to ``LakeWriteHalt``.
+    """
+    import io
+
+    bio = io.BytesIO()
+    df.write_parquet(bio)
+    return bio.getvalue()
+
+
 def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
     """Write *df* to *dest* atomically via the shared atomic_io helper.
 
@@ -943,8 +988,45 @@ def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
     at a truncated parquet). The helper additionally maps a full disk (``ENOSPC``) or
     an OOM (``MemoryError`` from ``df.write_parquet``) to a
     :class:`~brutex.data.errors.LakeWriteHalt` pull-wide stop (DEC-LAKE-WRITE-HALT-001).
+
+    THE PR-2 RENDER SEAM (DEC-RUST-DATALAKE-IO-ROADMAP-001; the datalake
+    conversion roadmap ADR, ``docs/adr/0020-datalake-rust-conversion-roadmap.md``):
+    when — and ONLY when — ``BRUTEX_LAKE_RUST_RENDER`` is truthy, the render
+    routes through the COMMON :mod:`brutex.data.lake_rust_render` facade
+    under the :data:`~brutex.data.lake_rust_render.PROFILE_OPTIONS_DEFAULTS`
+    profile (import/version guards, per-profile 16-render burn-in with
+    ship-the-oracle autorevert, shared latch). Flag OFF — the production
+    default — executes the LITERAL legacy call below (mechanism-verbatim,
+    not merely byte-verbatim: ``df.write_parquet`` streams straight to the
+    tmp path with zero new byte surface; never-routes spy-pinned). Honest
+    ON-arm mechanism difference, disclosed: an engaged/degraded/latched
+    render returns facade BYTES written via ``write_bytes``, while OFF
+    path-streams — byte-equal per the P1 standing pin (``BytesIO`` ≡ path
+    target at the pinned wheel). Both callers hold the full lock stack +
+    ``lake_write_guard`` around this call, so a ``MemoryError`` anywhere in
+    the ON arm (IPC handoff, crate call, oracle render) maps to
+    ``LakeWriteHalt`` with no new wrapping, and the burn-in's doubled
+    render runs INSIDE the held flock (deliberate — releasing to compare
+    would open a TOCTOU; bounded to ≤16+novel-shape renders per process,
+    ~ms at the ~16.5k-row production month shape). The facade call passes
+    NO path context (the series dir name is vendor-influenceable — the
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 log-injection discipline).
     """
-    atomic_write_via(dest, df.write_parquet)
+    from brutex.data import lake_rust_render
+
+    if not lake_rust_render.lake_rust_render_enabled():
+        atomic_write_via(dest, df.write_parquet)  # flag-OFF: the verbatim legacy call
+        return
+    import polars as pl
+
+    content = lake_rust_render.render_parquet_bytes(
+        ipc_bytes_factory=lambda: lake_rust_render.ipc_handoff_bytes(df),
+        python_render=lambda: _defaults_python_render(df),
+        polars_version=pl.__version__,
+        schema_token=str(df.schema),
+        profile=lake_rust_render.PROFILE_OPTIONS_DEFAULTS,
+    )
+    atomic_write_via(dest, lambda tmp: tmp.write_bytes(content))
 
 
 __all__ = [

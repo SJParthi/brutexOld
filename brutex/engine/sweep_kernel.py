@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING, Final
 from brutex.engine.combo_mask import ResidentBarBuffer
 from brutex.engine.rust_trade_sim import PriceColumns, derive_price_columns
 from brutex.engine.stage1a import build_bar_bits
-from brutex.strategies.types import FibAnchorKind
+from brutex.strategies.types import FibAnchorKind, PriceSource
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     # Annotation-only — keep CandleBar / ProximityParams out of this module's
@@ -99,6 +99,12 @@ class ResidentSweepKernel:
         built against (DEC-NIFTY-FIB-AXIS-001). Recorded so the sweep can fail-fast
         when a kernel is reused under a DIFFERENT anchor (the ``bar_bits`` matrix is
         anchor-specific — R-1). Defaults to :attr:`FibAnchorKind.PREV_DAY`.
+    vwap_source, ema_source
+        The swept VWAP / EMA price-source axis
+        (:class:`~brutex.strategies.types.PriceSource`) the ``bar_bits`` were built
+        against (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Recorded so the sweep can
+        fail-fast when a kernel is reused under a DIFFERENT source (bits 52-53 /
+        0-5 are source-specific). Default ``(HLC3, CLOSE)``.
     roll_schedule
         ADR-0012 futures roll schedule (DEC-STAGE1A-ROLL-RESET-001) the
         ``bar_bits`` were built against — recorded for the schedule-mismatch
@@ -120,10 +126,13 @@ class ResidentSweepKernel:
         "_apply_1day_mask",
         "_bar_bits",
         "_bars",
+        "_ema_source",
+        "_exec_bars_1m",
+        "_exec_columns",
         "_fib_anchor",
-        "_kernel_columns",
         "_resident",
         "_roll_schedule",
+        "_vwap_source",
     )
 
     def __init__(
@@ -133,13 +142,21 @@ class ResidentSweepKernel:
         proximity: ProximityParams | None = None,
         prior_n: int = 3,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        vwap_source: PriceSource = PriceSource.HLC3,
+        ema_source: PriceSource = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
+        exec_bars_1m: Sequence[CandleBar] | None = None,
     ) -> None:
         if not bars:
             raise ValueError("ResidentSweepKernel: bars must be non-empty")
         self._bars: tuple[CandleBar, ...] = tuple(bars)
+        self._exec_bars_1m: tuple[CandleBar, ...] | None = (
+            None if exec_bars_1m is None else tuple(exec_bars_1m)
+        )
         self._fib_anchor: FibAnchorKind = fib_anchor
+        self._vwap_source: PriceSource = vwap_source
+        self._ema_source: PriceSource = ema_source
         self._roll_schedule: tuple[int, ...] | None = roll_schedule
         self._apply_1day_mask: bool = apply_1day_mask
         self._bar_bits: list[int] = build_bar_bits(
@@ -147,13 +164,16 @@ class ResidentSweepKernel:
             proximity,
             prior_n,
             fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
         )
         self._resident: ResidentBarBuffer = ResidentBarBuffer(self._bar_bits)
-        # Lazily-derived tf-independent trade-sim columns (the W2 rider of
-        # DEC-STAGE1A-RUST-BATCH-001) — see :attr:`kernel_columns`.
-        self._kernel_columns: PriceColumns | None = None
+        # Lazily-derived trade-sim EXECUTION columns (the W2 rider of
+        # DEC-STAGE1A-RUST-BATCH-001, rebased onto the 1m execution stream by
+        # DEC-FILL-EXEC-GRID-1M-001) — see :attr:`exec_columns`.
+        self._exec_columns: PriceColumns | None = None
 
     @property
     def bars(self) -> tuple[CandleBar, ...]:
@@ -164,6 +184,16 @@ class ResidentSweepKernel:
     def fib_anchor(self) -> FibAnchorKind:
         """The Fib anchor this kernel's ``bar_bits`` were built against (R-1 guard)."""
         return self._fib_anchor
+
+    @property
+    def vwap_source(self) -> PriceSource:
+        """The VWAP price-source this kernel's ``bar_bits`` (bits 52-53) were built for."""
+        return self._vwap_source
+
+    @property
+    def ema_source(self) -> PriceSource:
+        """The EMA price-source this kernel's ``bar_bits`` (bits 0-5) were built for."""
+        return self._ema_source
 
     @property
     def roll_schedule(self) -> tuple[int, ...] | None:
@@ -181,20 +211,36 @@ class ResidentSweepKernel:
         return self._bar_bits
 
     @property
-    def kernel_columns(self) -> PriceColumns:
-        """The tf-independent trade-sim input columns for this bar window.
+    def exec_bars_1m(self) -> tuple[CandleBar, ...] | None:
+        """The 1-minute EXECUTION stream this kernel was built with (or ``None``).
+
+        DEC-FILL-EXEC-GRID-1M-001: carried so the sweep spine reuses ONE
+        stream + column set per ``(instrument, tf, proximity, prior_n)``
+        coordinate; ``None`` (a legacy caller that supplied no exec stream)
+        simply means the trade sim derives its own columns locally.
+        """
+        return self._exec_bars_1m
+
+    @property
+    def exec_columns(self) -> PriceColumns | None:
+        """The trade-sim EXECUTION-stream input columns for this window.
 
         Derived LAZILY via ONE
         :func:`~brutex.engine.rust_trade_sim.derive_price_columns` call per
-        kernel lifetime (the W2 rider of DEC-STAGE1A-RUST-BATCH-001) and
-        memoised, so every ``(direction, K, sl, tp)`` tuple reusing this
-        kernel hands its :class:`~brutex.engine.rust_trade_sim.ResidentTradeSim`
-        pre-derived columns instead of re-paying the 4×-Decimal-snap pass —
+        kernel lifetime over ``exec_bars_1m`` (the W2 rider of
+        DEC-STAGE1A-RUST-BATCH-001, rebased onto the EXECUTION stream by
+        DEC-FILL-EXEC-GRID-1M-001) and memoised, so every ``(direction, K,
+        sl, tp)`` tuple reusing this kernel hands its
+        :class:`~brutex.engine.rust_trade_sim.ResidentTradeSim` pre-derived
+        1m columns instead of re-paying the 4×-Decimal-snap pass —
         byte-identical by construction (the SAME seam derives both).
+        ``None`` iff the kernel was built without an execution stream.
         """
-        if self._kernel_columns is None:
-            self._kernel_columns = derive_price_columns(self._bars)
-        return self._kernel_columns
+        if self._exec_bars_1m is None:
+            return None
+        if self._exec_columns is None:
+            self._exec_columns = derive_price_columns(self._exec_bars_1m)
+        return self._exec_columns
 
     @property
     def n_bars(self) -> int:
@@ -303,6 +349,8 @@ class ResidentKernelCache:
                 ProximityParams | None,
                 int,
                 FibAnchorKind,
+                PriceSource,
+                PriceSource,
                 tuple[int, ...] | None,
             ],
             ResidentSweepKernel,
@@ -333,10 +381,13 @@ class ResidentKernelCache:
         proximity: ProximityParams | None,
         prior_n: int,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        vwap_source: PriceSource = PriceSource.HLC3,
+        ema_source: PriceSource = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
+        exec_bars_1m: Sequence[CandleBar] | None = None,
     ) -> ResidentSweepKernel:
-        """Return the kernel for ``(instrument, tf_label, proximity, prior_n, fib_anchor, roll_schedule)``, building on miss.
+        """Return the kernel for ``(instrument, tf_label, proximity, prior_n, fib_anchor, sources, roll_schedule)``, building on miss.
 
         On a hit the resident kernel is returned (and marked most-recently-used)
         WITHOUT rebuilding ``bar_bits`` or re-marshalling the bar window. On a miss
@@ -361,6 +412,13 @@ class ResidentKernelCache:
             anchor sharing one ``(instrument, tf, proximity, prior_n)`` must get its
             OWN kernel, never a stale prev-day one. Defaults to
             :attr:`FibAnchorKind.PREV_DAY`.
+        vwap_source, ema_source
+            The swept VWAP / EMA price-source
+            (:class:`~brutex.strategies.types.PriceSource`) — part of the key,
+            since ``bar_bits`` bits 52-53 / 0-5 depend on it
+            (DEC-NIFTY-PRICE-SOURCE-AXIS-001): a non-default source sharing one
+            ``(instrument, tf, proximity, prior_n, fib_anchor)`` must get its OWN
+            kernel, never a stale ``(HLC3, CLOSE)`` one. Default ``(HLC3, CLOSE)``.
         roll_schedule
             ADR-0012 futures roll schedule — part of the key
             (belt-and-braces: within one launch the schedule is constant per
@@ -370,13 +428,27 @@ class ResidentKernelCache:
         apply_1day_mask
             D12 honesty flag — a pure function of ``(instrument, tf_label)``,
             both already in the key, so it needs no key slot of its own.
+        exec_bars_1m
+            The instrument's 1-minute EXECUTION stream
+            (DEC-FILL-EXEC-GRID-1M-001; used only on a miss) — like ``bars``
+            it is a pure function of the key's ``instrument`` under the
+            deterministic ``bars_for`` contract, so it needs no key slot.
 
         Returns
         -------
         ResidentSweepKernel
             The (cached or freshly built) kernel for this bar window.
         """
-        key = (instrument, tf_label, proximity, prior_n, fib_anchor, roll_schedule)
+        key = (
+            instrument,
+            tf_label,
+            proximity,
+            prior_n,
+            fib_anchor,
+            vwap_source,
+            ema_source,
+            roll_schedule,
+        )
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
@@ -387,8 +459,11 @@ class ResidentKernelCache:
             proximity=proximity,
             prior_n=prior_n,
             fib_anchor=fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
+            exec_bars_1m=exec_bars_1m,
         )
         self._builds += 1
         self._cache[key] = kernel

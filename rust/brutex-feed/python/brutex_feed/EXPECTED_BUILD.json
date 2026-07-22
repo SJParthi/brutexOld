@@ -1,0 +1,14 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-FEED-RUST-CORE-001; the fno_math/trading_core R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_feed._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-feed surface or version change. The `brutex doctor` stage that reads it is the named follow-up `DEC-FEED-RUST-DOCTOR-STAGE-001` \u2014 this slice ships the stamp surfaces only. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is NOT caught at runtime in this slice (brutex/feed_rust.py's validate_scan is STRUCTURAL-only \u2014 a shape-valid drifted wheel serves silently). The catches for that class are the named follow-ups: the doctor stage comparing the baked `__source_digest__` (FRAMING v1, DEC-RUST-SOURCE-DIGEST-TWIN-001) against the source tree (DEC-FEED-RUST-DOCTOR-STAGE-001) and the flip-time burn-in (DEC-FEED-RUST-FLIP-001). DEC-FEED-RUST-MATERIALIZE-002: the wheel-REQUIRED extension surface (BarrierCore + scan_bars_strict + the series decision arithmetic) joins the handshake; crate 0.1.0 -> 0.2.0.",
+  "crate_version": "0.2.0",
+  "symbols": [
+    "BarrierCore",
+    "SOURCE_DIGEST",
+    "__version__",
+    "boundary_monotonic_break",
+    "expected_bar_instant",
+    "ownership_cut",
+    "scan_bars",
+    "scan_bars_strict"
+  ]
+}

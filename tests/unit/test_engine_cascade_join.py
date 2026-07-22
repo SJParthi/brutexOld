@@ -344,6 +344,42 @@ class TestVerdictTolerance:
         assert view.cpcv_pass_rate is None
         assert join.nulled_values == 1
 
+    # ── ADDITIVE regime statuses (`DEC-REGIME-REJECT-TIER-001` proposal) ──
+
+    def test_regime_statuses_absent_read_none_uncounted(self) -> None:
+        join = self._one([_verdict(_CID_A)], survivor_ids=[_CID_A])
+        view = join.by_candidate[_CID_A]
+        assert view.extreme_vol_status is None
+        assert view.regime_fragility_status is None
+        assert join.nulled_values == 0
+
+    def test_regime_statuses_verbatim_strings_kept(self) -> None:
+        join = self._one(
+            [
+                _verdict(
+                    _CID_A,
+                    extreme_vol_status="unproven_current_regime",
+                    regime_fragility_status="insufficient_strata",
+                )
+            ],
+            survivor_ids=[_CID_A],
+        )
+        view = join.by_candidate[_CID_A]
+        assert view.extreme_vol_status == "unproven_current_regime"
+        assert view.regime_fragility_status == "insufficient_strata"
+        assert join.nulled_values == 0
+
+    @pytest.mark.parametrize("junk", [7, True, ["fail"], {"s": "fail"}])
+    def test_junk_regime_statuses_nulled_counted_verdict_kept(self, junk: Any) -> None:
+        join = self._one(
+            [_verdict(_CID_A, extreme_vol_status=junk, regime_fragility_status=junk)],
+            survivor_ids=[_CID_A],
+        )
+        view = join.by_candidate[_CID_A]
+        assert view.extreme_vol_status is None
+        assert view.regime_fragility_status is None
+        assert join.nulled_values == 2
+
     def test_boundary_rates_kept_exact(self) -> None:
         join = build_cascade_join(
             _payload(
@@ -497,3 +533,60 @@ class TestRoundTrip:
         assert join.nulled_values == 0
         assert join.n_input == 4
         assert join.n_survived == 2
+
+
+class TestNewStatKeysTolerated:
+    """DEC-CASCADE-STAT-TIER-WIRE-001: the additive-at-REPORT_VERSION-1 report
+    keys (``pool_rc_pvalue`` / ``pool_spa_pvalue`` per group,
+    ``candidate_pbo`` per verdict) are UNKNOWN to the joiner — the additive
+    convention demands it processes such a report with zero skips/nulls."""
+
+    def test_report_with_the_new_keys_joins_cleanly(self) -> None:
+        row = _verdict(_CID_A, candidate_pbo=0.125)
+        payload = _payload(
+            [
+                _group(
+                    [row],
+                    pool_rc_pvalue=0.01,
+                    pool_spa_pvalue=0.02,
+                )
+            ]
+        )
+        join = build_cascade_join(payload)
+        assert join.skipped_groups == 0
+        assert join.skipped_verdicts == 0
+        assert join.nulled_values == 0
+        assert join.by_candidate[_CID_A].passed is True
+        assert join.by_candidate[_CID_A].cpcv_pass_rate == 0.75
+
+    def test_live_writer_report_with_new_keys_round_trips(self) -> None:
+        # Drive the joiner over the REAL writer's serialisation of a report
+        # carrying measured values in every new field.
+        from brutex.metrics.cascade import CandidateVerdict, CascadeReport
+
+        report = CascadeReport(
+            verdicts=(
+                CandidateVerdict(
+                    candidate_id=_CID_A,
+                    passed=True,
+                    rejected_at=None,
+                    detail="survived all Stage-4 filters",
+                    composite_score=0.5,
+                    cpcv_pass_rate=0.875,
+                    candidate_pbo=0.0625,
+                ),
+            ),
+            survivor_ids=(_CID_A,),
+            n_input=1,
+            n_survived=1,
+            stage_survivors={"hard_gates": 1},
+            pool_pbo=0.25,
+            pool_rc_pvalue=0.005,
+            pool_spa_pvalue=0.015,
+        )
+        wire = CascadeWireReport(sweep_id="ab" * 32, groups=(("NIFTY", "1minute", report),))
+        join = build_cascade_join(json.loads(serialize_wire_report(wire)))
+        assert join.skipped_groups == 0
+        assert join.skipped_verdicts == 0
+        assert join.nulled_values == 0
+        assert join.by_candidate[_CID_A].survivor_rank == 1

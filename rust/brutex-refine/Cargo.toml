@@ -1,0 +1,77 @@
+# brutex-refine — the Stage-3 refinement optimizer core (Rust).
+#
+# DEC-RUST-STAGE3-REFINE-001: a pure, dependency-free, deterministic
+# BIPOP-style restarted CMA-ES over the normalized [0,1]² (SL, TP) plane +
+# the Mode-A grid bijection + the bounded per-leaderboard top-K survivor
+# selection — the whole Stage-3 optimizer math, moved out of Python (the
+# pycma path is DELETED in the same lane; greenfield ruling — no pycma
+# bit-match is claimed, correctness is pinned by this crate's own frozen
+# goldens + algebraic/property invariants).
+#
+# ZERO runtime dependencies by design (the crate-decision record in
+# MIGRATION.md): the crates.io `cmaes` crate (0.2.2, released 2024-12-12,
+# stale >18 months) pulls nalgebra + rayon + statrs + rand_chacha — a heavy,
+# thread-bearing tree that risks nondeterminism and lockstep burden for a
+# 2-dimensional search. Determinism NEVER depends on an external crate: the
+# PRNG is an in-crate xoshiro256++ (splitmix64-seeded) + Box-Muller normals,
+# and the eigendecomposition is an in-crate cyclic Jacobi sweep.
+#
+# Pure-Rust-first (rlib, dependency-free core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature (turned
+# on by maturin for the wheel build) — the brutex-feed shape.
+
+[package]
+name = "brutex-refine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Stage-3 refinement optimizer core (restarted CMA-ES + Mode-A grid + top-K selection) for BruteX"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it
+# from the SPDX license check (mirrors brutex-feed / trading-core).
+publish = false
+
+[lib]
+name = "brutex_refine"
+path = "src/lib.rs"
+# cdylib so `import brutex_refine` finds the maturin-built extension; rlib so
+# `cargo test` links the pure-Rust core.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust core needs NO Python. The PyO3 module is opt-in: `cargo test`
+# (default features) builds + links zero Python symbols. maturin turns
+# `python` on for the wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into the
+# artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` / `__source_digest__`.
+# Build-script-only: it does NOT enter the shipped rlib's dependency tree.
+blake3 = "1.5"
+
+[dev-dependencies]
+# Property-based testing — invariants + determinism over the pure core.
+# Test-only; same major as the sibling crates so the toolchains agree.
+proptest = "1.6.0"
+# DEC-RUST-SOURCE-DIGEST-TWIN-001: tests/source_digest_parity.rs re-includes
+# the shared framing core to pin the golden parity vector. Test-only.
+blake3 = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true # Finance code — an overflow must never be silent.

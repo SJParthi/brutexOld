@@ -1384,7 +1384,9 @@ def compute_options_candidates(
         # variables (never the display-renamed mover), off the SAME single
         # session read — zero new I/O. The two skip paths above append nothing:
         # those legs live only in the pre-read ``pcr_legs_total`` denominator.
-        pcr_legs.append(PcrLeg(underlying=underlying, opt_type=opt_type, oi=oi, volume=volume))
+        pcr_legs.append(
+            PcrLeg(underlying=underlying, opt_type=opt_type, oi=oi, volume=volume, symbol=symbol)
+        )
         mover = compute_option_mover(
             underlying=resolved_names.get(underlying, underlying),
             expiry=expiry,

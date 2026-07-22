@@ -1,5 +1,8 @@
 """Tests for `brutex.options.strike_grid`."""
 
+# Whitebox pins on the private Python oracles (DEC-OPTCOST-TAILS-RUST-001):
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import pytest
@@ -105,3 +108,64 @@ class TestConstants:
         for inst in OptionsUnderlying:
             assert inst in STRIKE_STEP
             assert STRIKE_STEP[inst] > 0
+
+
+# ── DEC-OPTCOST-TAILS-RUST-001: the flag-ON seam (ON == OFF, float law) ──
+
+
+class TestOptcostRustSeamOn:
+    """The grid functions under `BRUTEX_OPTCOST_TAILS_RUST=1` match the
+    Python oracle — `round_to_atm`'s CPython float law included (half-step
+    ties, adverse float representations, NaN/inf raise parity)."""
+
+    @pytest.fixture(autouse=True)
+    def _seam_on(self, monkeypatch: pytest.MonkeyPatch):
+        import brutex.optcost_rust as ocr
+
+        pytest.importorskip("fno_math")
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "1")
+        ocr.reset_optcost_rust_for_tests()  # burn-in armed — oracle runs beside
+        yield
+        ocr.reset_optcost_rust_for_tests()
+
+    def test_round_to_atm_matches_the_oracle_on_hostile_floats(self) -> None:
+        import brutex.optcost_rust as ocr
+        from brutex.options.strike_grid import STRIKE_STEP, _round_to_atm_python
+
+        for spot in (
+            24_012.0,
+            24_025.0,  # half-step tie
+            50_075.0,
+            24_024.999999999996,
+            81_249.99999999999,
+            1e15 + 25,
+            5e-324,  # subnormal
+            0.0,
+            -0.0,
+            -24_025.0,
+        ):
+            for instrument in OptionsUnderlying:
+                assert round_to_atm(spot, instrument) == _round_to_atm_python(
+                    spot, STRIKE_STEP[instrument]
+                )
+        assert not ocr.optcost_rust_disabled()
+
+    def test_round_to_atm_nan_and_inf_raise_exactly_as_off(self) -> None:
+        # VERIFIED CPython behaviour (never assumed): `inf // step` is NaN in
+        # float floor division, so BOTH non-finite spots raise the NaN
+        # ValueError — the seam must propagate the oracle's exact bytes.
+        for spot in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError, match="cannot convert float NaN to integer"):
+                round_to_atm(spot, OptionsUnderlying.NIFTY)
+
+    def test_offset_and_grid_match_the_oracle(self) -> None:
+        assert strike_offset_from_atm(24_000, 3, OptionsUnderlying.NIFTY) == 24_150
+        assert strike_offset_from_atm(50_000, -2, OptionsUnderlying.BANKNIFTY) == 49_800
+        assert grid_around_atm(24_000, OptionsUnderlying.NIFTY, 2) == [
+            23_900,
+            23_950,
+            24_000,
+            24_050,
+            24_100,
+        ]
+        assert grid_around_atm(24_000, OptionsUnderlying.NIFTY, -1) == []

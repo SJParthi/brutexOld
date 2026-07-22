@@ -21,13 +21,24 @@ pinned reject order, hash-chained audit) without touching the options path (R12)
   resolves by earliest-expiry-≥-entry-date — deterministic, never
   liquidity-picked. A missing futures bar at the exact entry/exit minute is an
   honest counted ``NO_DATA`` reject — never a nearest-bar substitute.
-* **R15 — OPTIMISTIC = PRECISE fill only:** entry/exit fill at the minute bar's
-  OPEN ± one tick, adverse per side (never the favorable bar extreme). A
-  gap-open beyond an SL/TP fills at the REAL open (the spot sweep already fixed
-  the exit timestamp; this module never re-evaluates levels). A volume-0
-  PRINTED futures bar is REAL and TRADABLE (the ``STALE_BAR`` reject is OPT-IN
-  via ``reject_stale_bars=True``, default OFF). The pessimistic/worst leg is
-  DEFERRED — structurally absent, not faked.
+* **The worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001 — the ONLY
+  law; the retired R15 OPEN-anchored PRECISE law and the two-member mode of
+  the absorbed #1522 mode design are DELETED):** entry/exit fill at
+  the minute bar's ADVERSE EXTREME ± one adverse tick (long: entry HIGH +
+  tick / exit LOW − tick; short mirrored — adverse both legs), so a fill
+  can never flatter even on a flat bar. A gap-open beyond an SL/TP fills on
+  the REAL exit bar — its adverse extreme; the spot sweep already fixed the
+  exit timestamp and this module never re-evaluates levels. A volume-0
+  entry/exit bar is REJECTED UNCONDITIONALLY as ``STALE_BAR``
+  (DEC-FILL-WORST-CASE-ONLY-001 — CONSCIOUSLY SUPERSEDING the R15 "a
+  volume-0 printed futures bar is REAL and TRADABLE" clause and the
+  ``reject_stale_bars`` opt-in knob): a zero-volume minute's OHLC is a
+  stale/carried print no real order demonstrably filled at, so pricing it
+  fabricates an execution. HONEST COST (recorded in the DEC): the uniform
+  reject introduces a survivorship tilt — genuinely tradable-but-untraded
+  minutes (expiry-afternoon volume collapse) are now dropped instead of
+  filled, so the futures translation UNDERCOUNTS trades rather than
+  over-pricing them; the conservative side, per the operator directive.
 
 ## Routing lives ABOVE the executor
 
@@ -58,6 +69,7 @@ per-trade work, honestly stated, never an O(1)-total claim.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -143,10 +155,10 @@ class FuturesRejectReason(Enum):
     #: The resolved contract has no bar at the EXACT entry or exit UTC minute —
     #: honest reject, never a nearest-bar substitution (R15).
     NO_DATA = "no_data"
-    #: OPT-IN ONLY (``reject_stale_bars=True``): the entry or exit bar printed
-    #: with ``volume == 0``. The R14/R15 DEFAULT treats a volume-0 printed
-    #: futures bar as REAL and TRADABLE, so this never fires unless explicitly
-    #: requested.
+    #: The entry or exit bar printed with ``volume == 0`` — REJECTED
+    #: UNCONDITIONALLY (DEC-FILL-WORST-CASE-ONLY-001, superseding the R15
+    #: fill-by-default clause + the ``reject_stale_bars`` opt-in): nothing
+    #: traded in the minute, so a fill at its print is unachievable.
     STALE_BAR = "stale_bar"
 
 
@@ -621,7 +633,6 @@ def materialize_futures_trade(
     broker: Broker = "groww",
     gst_split: GstSplit = "intra_state",
     n_lots: int = 1,
-    reject_stale_bars: bool = False,
 ) -> MaterializedFuturesTrade | RejectedFuturesTrade:
     """Materialize + price one futures trade for *signal*.
 
@@ -640,11 +651,6 @@ def materialize_futures_trade(
         The futures bar source seam.
     broker, gst_split, n_lots
         Cost-model parameters (Groww, intra-state GST, 1 lot).
-    reject_stale_bars
-        OPT-IN (default ``False``): reject a volume-0 entry/exit bar as
-        ``STALE_BAR``. The default FILLS it — R14/R15 lock "a volume-0 printed
-        futures bar is real + tradable" (expiry-afternoon volume collapse is
-        counted as-is).
 
     Returns
     -------
@@ -699,8 +705,10 @@ def materialize_futures_trade(
     if window is None:
         return RejectedFuturesTrade(leg=leg, reason=FuturesRejectReason.NO_DATA)
 
-    # Gate 5 — STALE_BAR (OPT-IN only; the default fills volume-0 bars, R14/R15).
-    if reject_stale_bars and (window.entry_bar.volume == 0 or window.exit_bar.volume == 0):
+    # Gate 5 — STALE_BAR, UNCONDITIONAL (DEC-FILL-WORST-CASE-ONLY-001,
+    # superseding the R14/R15 fill-by-default + the opt-in knob): a zero-volume
+    # print is a stale/carried price no real order filled at.
+    if window.entry_bar.volume == 0 or window.exit_bar.volume == 0:
         _LOG.warning(
             "futures.reject.stale_bar",
             instrument=signal.instrument,
@@ -726,6 +734,14 @@ def materialize_futures_trade(
             n_lots=n_lots,
             broker=broker,
             gst_split=gst_split,
+            # The fill-bar extremes — the worst-case adverse anchors, REQUIRED
+            # (DEC-FILL-WORST-CASE-ONLY-001). CandleBar guarantees
+            # low ≤ open ≤ high, so the ordering validation cannot fire on a
+            # real lake bar.
+            entry_bar_high_paisa=rupees_to_paisa(window.entry_bar.high),
+            entry_bar_low_paisa=rupees_to_paisa(window.entry_bar.low),
+            exit_bar_high_paisa=rupees_to_paisa(window.exit_bar.high),
+            exit_bar_low_paisa=rupees_to_paisa(window.exit_bar.low),
         )
     )
     entry_fill = breakdown.buy_fill_paisa if leg.side == "long" else breakdown.sell_fill_paisa
@@ -785,6 +801,18 @@ class FuturesRuleResult:
     n_winners: int
     n_losers: int
     n_vix_missing: int = 0
+    #: The R45 differential verdict, PERSISTED on the result row
+    #: (`DEC-OPTIONS-EXEC-FEEDBACK-001` — pre-change these were LOCAL
+    #: variables inside :func:`execute_futures_sim`, logged + audited but
+    #: never returned, so no downstream consumer could surface them).
+    #: Defaulted trailing fields (the optional-column back-compat template) —
+    #: every existing constructor call is unchanged;
+    #: :func:`execute_futures_sim` stamps them via ``dataclasses.replace``.
+    #: A ``suspect=True`` result still persists, FLAGGED (the R13
+    #: annotation-never-hides analog) — the flag ships on the wire for a
+    #: downstream consumer to render (no display reads it today).
+    suspect: bool = False
+    differential_checked: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -798,6 +826,7 @@ class FuturesRuleResult:
             "n_winners",
             "n_losers",
             "n_vix_missing",
+            "differential_checked",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"FuturesRuleResult.{name} must be >= 0")
@@ -852,7 +881,6 @@ def run_futures_over_signals(
     broker: Broker = "groww",
     gst_split: GstSplit = "intra_state",
     n_lots: int = 1,
-    reject_stale_bars: bool = False,
 ) -> FuturesRuleResult:
     """Price every *signal* and aggregate into a :class:`FuturesRuleResult`.
 
@@ -867,7 +895,7 @@ def run_futures_over_signals(
     instrument, direction
         The run's row identity — every signal must match (fail-loud on a mixed
         batch; the result row aggregates ONE combo's trades).
-    resolver, source, broker, gst_split, n_lots, reject_stale_bars
+    resolver, source, broker, gst_split, n_lots
         Threaded to :func:`materialize_futures_trade`.
 
     Returns
@@ -905,7 +933,6 @@ def run_futures_over_signals(
             broker=broker,
             gst_split=gst_split,
             n_lots=n_lots,
-            reject_stale_bars=reject_stale_bars,
         )
         if isinstance(outcome, RejectedFuturesTrade):
             counts[outcome.reason] += 1
@@ -957,7 +984,6 @@ def execute_futures_sim(
     source: FuturesBarSource,
     n_lots: int = 1,
     audit: AuditAppend | None = None,
-    reject_stale_bars: bool = False,
     spot_check_k: int = 8,
 ) -> FuturesRuleResult:
     """Run the futures translation sim for one winning run.
@@ -977,7 +1003,7 @@ def execute_futures_sim(
         The run's replayed spot signals.
     instrument, direction, run_id
         The run's row identity + the ONE run id threading every artifact.
-    resolver, source, n_lots, reject_stale_bars
+    resolver, source, n_lots
         Threaded to the materializer.
     audit
         Optional hash-chained audit sink; one row when supplied.
@@ -1000,7 +1026,6 @@ def execute_futures_sim(
         resolver=resolver,
         source=source,
         n_lots=n_lots,
-        reject_stale_bars=reject_stale_bars,
     )
 
     if result.n_rejected_cost_regime_unverified:
@@ -1031,14 +1056,15 @@ def execute_futures_sim(
                 resolver=resolver,
                 source=source,
                 n_lots=n_lots,
-                reject_stale_bars=reject_stale_bars,
             )
             if (
                 isinstance(outcome, RejectedFuturesTrade)
                 and outcome.reason == FuturesRejectReason.STALE_BAR
             ):
-                # A POLICY reject (opt-in staleness), not a data/math outcome —
-                # excluded from the arithmetic differential, counted openly.
+                # A LAW reject (unconditional staleness,
+                # DEC-FILL-WORST-CASE-ONLY-001) — there is no fill price to
+                # arithmetic-compare, so the differential skips it OPENLY
+                # (counted via policy_skipped, never silently dropped).
                 production.append(None)
                 policy_skipped.append(True)
             else:
@@ -1078,7 +1104,12 @@ def execute_futures_sim(
                 "suspect": suspect,
             },
         )
-    return result
+    # Stamp the R45 differential verdict ONTO the returned row
+    # (`DEC-OPTIONS-EXEC-FEEDBACK-001` — the persistence fix: pre-change the
+    # verdict lived only in the log + audit payload, so a caller persisting
+    # the result silently dropped it). ``replace`` keeps the frozen row's
+    # every other field byte-identical.
+    return dataclasses.replace(result, suspect=suspect, differential_checked=n_checked)
 
 
 def _deterministic_sample(

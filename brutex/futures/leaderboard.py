@@ -42,7 +42,14 @@ if TYPE_CHECKING:  # pragma: no cover — annotation-only imports
 
 __all__ = [
     "ANNOTATION_KEY",
+    "FUTURES_EXEC_ETC_NOTE",
+    "FUTURES_EXEC_NOT_PRICED_REASONS",
+    "FUTURES_EXEC_STATUS_EXECUTED",
+    "FUTURES_EXEC_STATUS_NOT_PRICED",
     "SIDECAR_VERSION",
+    "futures_annotation",
+    "futures_exec_not_priced",
+    "futures_exec_verdict",
     "project_futures_annotation",
     "read_translation_sidecar",
     "render_futures_leaderboard",
@@ -54,6 +61,37 @@ ANNOTATION_KEY: Final[str] = "futures_exec"
 
 #: Sidecar payload schema version (bump on any shape change).
 SIDECAR_VERSION: Final[int] = 1
+
+#: The executed-arm status token (= the :data:`ExecutionKind.INDEX_FUTURES`
+#: annotation's ``status``; the deferred/unsupported arms carry
+#: ``ExecutionKind.value`` verbatim).
+FUTURES_EXEC_STATUS_EXECUTED: Final[str] = "executed"
+
+#: The wired-but-unpriced status token (`DEC-OPTIONS-EXEC-FEEDBACK-001` —
+#: the ``options_exec`` two-state law's futures twin).
+FUTURES_EXEC_STATUS_NOT_PRICED: Final[str] = "not_priced"
+
+#: The NAMED not-priced reasons a wired provider may emit (the
+#: ``options_exec`` vocabulary, shared law): the entry was outside the
+#: replayed top-K winner set, its replay raised, or it produced no signals.
+FUTURES_EXEC_NOT_PRICED_REASONS: Final[tuple[str, ...]] = (
+    "not_in_replay_set",
+    "replay_failed",
+    "no_signals",
+)
+
+#: The ETC-honesty disclosure carried on every executed verdict's ``window``:
+#: index futures are COST-FREE (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001 —
+#: ``net == gross`` and ``total_charges_paisa == 0`` on the live path), and
+#: EVERY futures-ETC window is an UNVERIFIED refusal window
+#: (:func:`~brutex.costs.futures_costs.futures_etc_unverified_windows`) — a
+#: cost-bearing trade rejects ``cost_regime_unverified``, never a fabricated
+#: rate (Golden Rule #1).
+FUTURES_EXEC_ETC_NOTE: Final[str] = (
+    "index futures are COST-FREE (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001); every "
+    "futures-ETC window is an UNVERIFIED refusal window — cost-bearing trades "
+    "reject cost_regime_unverified, never a fabricated rate"
+)
 
 
 def render_futures_leaderboard(row: Any, result: FuturesRuleResult) -> str:
@@ -150,13 +188,35 @@ def project_futures_annotation(
     if ANNOTATION_KEY in row_dict:
         msg = f"row already carries a {ANNOTATION_KEY!r} annotation — refusing to overwrite"
         raise ValueError(msg)
-    annotation: dict[str, object]
+    return {**row_dict, ANNOTATION_KEY: futures_annotation(result, kind=kind)}
+
+
+def futures_annotation(
+    result: FuturesRuleResult | None,
+    *,
+    kind: ExecutionKind = ExecutionKind.INDEX_FUTURES,
+) -> dict[str, object]:
+    """The ONE execution-leg annotation dict (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+
+    The EXTRACTED body of :func:`project_futures_annotation` (byte-identical —
+    its existing pins pass unmodified), made public so the top100
+    ``futures_exec`` verdict builder (:func:`futures_exec_verdict`) reuses the
+    SAME shape (§11 COMMON — the key + shape were reserved for exactly this by
+    DEC-FUTURES-EXEC-TRANSLATION-001's :data:`ANNOTATION_KEY`).
+
+    Raises
+    ------
+    ValueError
+        On a *result*/*kind* mismatch (an executed kind without a result; a
+        deferred/unsupported kind carrying one — a fabricated leg is
+        unrepresentable).
+    """
     if kind is ExecutionKind.INDEX_FUTURES:
         if result is None:
             msg = "INDEX_FUTURES annotation requires the executed FuturesRuleResult"
             raise ValueError(msg)
-        annotation = {
-            "status": "executed",
+        return {
+            "status": FUTURES_EXEC_STATUS_EXECUTED,
             "n_signals": result.n_signals,
             "n_accepted": result.n_accepted,
             "n_rejected": result.n_rejected,
@@ -173,17 +233,75 @@ def project_futures_annotation(
             "n_vix_missing": result.n_vix_missing,
             "win_rate": result.win_rate,
         }
-    else:
-        if result is not None:
-            msg = f"{kind.value} annotation must not carry a result (nothing was executed)"
-            raise ValueError(msg)
-        note = (
-            STOCK_SPOT_DEFERRAL_NOTE
-            if kind is ExecutionKind.STOCK_SPOT_DEFERRED
-            else "unsupported — not a tradable underlying (blank / reference-only)"
+    if result is not None:
+        msg = f"{kind.value} annotation must not carry a result (nothing was executed)"
+        raise ValueError(msg)
+    note = (
+        STOCK_SPOT_DEFERRAL_NOTE
+        if kind is ExecutionKind.STOCK_SPOT_DEFERRED
+        else "unsupported — not a tradable underlying (blank / reference-only)"
+    )
+    return {"status": kind.value, "note": note}
+
+
+def futures_exec_not_priced(reason: str) -> dict[str, object]:
+    """The NAMED degrade object of a wired-but-unpriced entry.
+
+    Raises
+    ------
+    ValueError
+        On a reason outside :data:`FUTURES_EXEC_NOT_PRICED_REASONS` — the
+        vocabulary is the wire contract; a typo'd reason fails loud at the
+        writer, never ships an unknown token.
+    """
+    if reason not in FUTURES_EXEC_NOT_PRICED_REASONS:
+        raise ValueError(
+            f"futures_exec_not_priced: unknown reason {reason!r}; expected one of "
+            f"{FUTURES_EXEC_NOT_PRICED_REASONS}"
         )
-        annotation = {"status": kind.value, "note": note}
-    return {**row_dict, ANNOTATION_KEY: annotation}
+    return {"status": FUTURES_EXEC_STATUS_NOT_PRICED, "reason": reason}
+
+
+def futures_exec_verdict(
+    result: FuturesRuleResult,
+    *,
+    replay_start: str,
+    replay_end: str,
+) -> dict[str, object]:
+    """The per-entry ``futures_exec`` object of one EXECUTED winner.
+
+    The shipped annotation shape (:func:`futures_annotation`, verbatim) plus
+    the `DEC-OPTIONS-EXEC-FEEDBACK-001` additive keys:
+
+    * ``suspect`` / ``differential_checked`` — the R45 differential verdict
+      now PERSISTED on the row (flagged, never hidden — a suspect result
+      still ships with the flag on the wire; a downstream consumer MAY
+      render it red, but today's one display surface, the /screener
+      "Fut net" column, reads only ``net_pnl_paisa`` — honestly stated);
+    * ``priced_trade_pct`` — the exact float unit projection
+      ``n_accepted / n_signals * 100.0`` (the ``options_exec`` law; ``null``
+      when ``n_signals == 0``);
+    * ``window`` — the replay envelope + the :data:`FUTURES_EXEC_ETC_NOTE`
+      cost-honesty disclosure (``net_pnl_paisa`` keeps the annotation's
+      existing name — shape reuse beats symmetry with the options object's
+      ``net_after_cost_paisa``; on the cost-free index path ``net == gross``,
+      true and disclosed by the note).
+    """
+    verdict = futures_annotation(result, kind=ExecutionKind.INDEX_FUTURES)
+    priced_trade_pct: float | None
+    if result.n_signals == 0:
+        priced_trade_pct = None
+    else:
+        priced_trade_pct = result.n_accepted / result.n_signals * 100.0
+    verdict["suspect"] = result.suspect
+    verdict["differential_checked"] = result.differential_checked
+    verdict["priced_trade_pct"] = priced_trade_pct
+    verdict["window"] = {
+        "replay_start": replay_start,
+        "replay_end": replay_end,
+        "etc_note": FUTURES_EXEC_ETC_NOTE,
+    }
+    return verdict
 
 
 def _sidecar_record(result: FuturesRuleResult, *, run_id: str) -> dict[str, object]:

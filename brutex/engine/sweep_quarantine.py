@@ -49,10 +49,15 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.sweep_checkpoint import (
     SweepCheckpoint,
     SweepCheckpointError,
     SweepCheckpointStore,
+)
+from brutex.engine.sweep_ops_rust import (
+    routed_quarantine_next_ordinal,
+    sweep_ops_rust_enabled,
 )
 from brutex.engine.trial_stats import TRIAL_STATS_SUFFIX
 from brutex.engine.tuple_complete import COMPLETION_SUFFIX
@@ -182,7 +187,7 @@ class CheckpointCorruptionTracker:
         state_path = run_dir / CHECKPOINT_CORRUPTION_STATE_FILENAME
         consecutive = 0
         try:
-            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            raw = json.loads(read_regular_text(state_path))
         except (OSError, ValueError, TypeError):
             raw = None
         if isinstance(raw, dict):
@@ -246,6 +251,25 @@ def reset_checkpoint_corruption(run_dir: Path) -> None:
         state_path.unlink(missing_ok=True)
 
 
+def _next_ordinal_python(names: list[str], prefix: str, suffix: str) -> int:
+    """The verbatim monotonic-ordinal fold over already-listed entry *names*.
+
+    The LIVE parity oracle for the DEC-RUST-SWEEP-OPS-001 routed law
+    (``routed_quarantine_next_ordinal``): :func:`_next_ordinal`'s per-name
+    body, extracted with the ``iterdir`` I/O hoisted to the caller — the
+    listing (and the quarantine MOVE the ordinal feeds) stays Python.
+    """
+    highest = 0
+    for name in names:
+        if not (name.startswith(prefix) and name.endswith(suffix)):
+            continue
+        core = name[len(prefix) : len(name) - len(suffix)] if suffix else name[len(prefix) :]
+        match = _ORDINAL_RE.match(core)
+        if match is not None:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
 def _next_ordinal(parent: Path, *, prefix: str = "", suffix: str = "") -> int:
     """Return the next monotonic ordinal for ``<prefix><n><suffix>`` entries under *parent*.
 
@@ -253,18 +277,17 @@ def _next_ordinal(parent: Path, *, prefix: str = "", suffix: str = "") -> int:
     and returns ``max(n) + 1`` (``1`` when none). Foreign names — a different
     prefix/suffix, a non-digit core — are ignored, so an operator-dropped file
     can never break the scan. O(existing entries); never a wall-clock name (I-2).
+
+    The listing runs here (I/O stays Python); the FOLD routes through the
+    default-OFF DEC-RUST-SWEEP-OPS-001 seam with :func:`_next_ordinal_python`
+    as the LIVE oracle (flag OFF = the verbatim Python fold).
     """
-    highest = 0
-    if parent.is_dir():
-        for entry in parent.iterdir():
-            name = entry.name
-            if not (name.startswith(prefix) and name.endswith(suffix)):
-                continue
-            core = name[len(prefix) : len(name) - len(suffix)] if suffix else name[len(prefix) :]
-            match = _ORDINAL_RE.match(core)
-            if match is not None:
-                highest = max(highest, int(match.group(1)))
-    return highest + 1
+    names = [entry.name for entry in parent.iterdir()] if parent.is_dir() else []
+    if sweep_ops_rust_enabled():
+        return routed_quarantine_next_ordinal(
+            names, prefix, suffix, python_law=lambda: _next_ordinal_python(names, prefix, suffix)
+        )
+    return _next_ordinal_python(names, prefix, suffix)
 
 
 def quarantine_tuple_trio(

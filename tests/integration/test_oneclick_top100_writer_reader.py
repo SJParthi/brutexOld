@@ -322,17 +322,29 @@ class TestEngineWriterThroughRoutes:
             assert row["arm"] == "SL ₹0.80 · TP ₹0.50"
             assert row["arm_raw"] == {"sl_paisa": 80, "tp_paisa": 50}
         # /strategy consumes exactly this payload: stArm is fed from row.arm
-        # of the top100 fetch — no second, unbridged arm source exists.
-        template = (
+        # of the top100 fetch — no second, unbridged arm source exists. The
+        # wiring lives in the ONE shared strategy panel module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — moved verbatim).
+        panel = (
             Path(__file__).resolve().parents[2]
             / "brutex"
             / "dashboard"
-            / "templates"
-            / "strategy.html"
+            / "static"
+            / "bx-strategy-panel.js"
         ).read_text(encoding="utf-8")
-        assert "byId('stArm').textContent = String(row.arm);" in template
-        assert "/api/v1/oneclick/top100?run_id=" in template
-        assert template.count("arm") >= 1
+        assert "byId('stArm').textContent = String(row.arm);" in panel
+        # The row source is the memo'd getTop100 promise — which fetches the
+        # ONE /api/v1/oneclick/top100 route (pinned in bx-oneclick.js).
+        assert "getTop100(state.runId)" in panel
+        oneclick_js = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "static"
+            / "bx-oneclick.js"
+        ).read_text(encoding="utf-8")
+        assert '"/api/v1/oneclick/top100"' in oneclick_js
+        assert panel.count("arm") >= 1
         assert client.get("/strategy").status_code == 200
 
     def test_instrument_is_on_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
@@ -351,9 +363,12 @@ class TestEngineWriterThroughRoutes:
         root = Path(__file__).resolve().parents[2] / "brutex" / "dashboard"
         strategy = (root / "templates" / "strategy.html").read_text(encoding="utf-8")
         assert 'id="stInstr"' in strategy
+        # The fill line lives VERBATIM in the shared strategy panel module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — moved out of the template).
+        strategy_panel = (root / "static" / "bx-strategy-panel.js").read_text(encoding="utf-8")
         assert (
             "byId('stInstr').textContent = window.BXOneclick.instrumentText(row.instrument);"
-            in strategy
+            in strategy_panel
         )
         oneclick_js = (root / "static" / "bx-oneclick.js").read_text(encoding="utf-8")
         assert 'setOc("r1_instrument", bxInstrumentText(row.instrument));' in oneclick_js
@@ -412,18 +427,20 @@ class TestEngineWriterThroughRoutes:
         assert payload["total"] == 2
         assert [row["equity_close_paisa"] for row in payload["rows"]] == [1_000, 1_500]
         assert payload["rows"][1]["equity_intraday_low_paisa"] is None  # honest None low
-        # The strategy page consumes exactly this route + the shared series
-        # builder (minute-path label; per-trade cumsum stays the fallback).
-        template = (
+        # The strategy panel module consumes exactly this route + the shared
+        # series builder (minute-path label; per-trade cumsum stays the
+        # fallback) — the page wiring moved verbatim into the module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
+        panel = (
             Path(__file__).resolve().parents[2]
             / "brutex"
             / "dashboard"
-            / "templates"
-            / "strategy.html"
+            / "static"
+            / "bx-strategy-panel.js"
         ).read_text(encoding="utf-8")
-        assert "/api/v1/oneclick/equity" in template
-        assert "window.BXChart.minutePathSeries(state.equity)" in template
-        assert "per-trade close equity (minute-path unavailable for this run)" in template
+        assert "/api/v1/oneclick/equity" in panel
+        assert "window.BXChart.minutePathSeries(state.equity)" in panel
+        assert "per-trade close equity (minute-path unavailable for this run)" in panel
 
     def test_strategy_link_contract_run_id_rank_params(self, tmp_path: Path) -> None:
         """Item 5 (BLOCKER-3, our half): the STABLE deep-link contract
@@ -441,6 +458,22 @@ class TestEngineWriterThroughRoutes:
         payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
         ranks = [row["rank"] for row in payload["rows"]]
         assert 3 in ranks  # the addressed rank exists on the wire
+        static = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static"
+        codec = (static / "bx-portal-state.js").read_text(encoding="utf-8")
+        panel = (static / "bx-strategy-panel.js").read_text(encoding="utf-8")
+        # The client-side contract, pinned (no browser harness — honest
+        # envelope). The R2 documented split (DEC-OPERATOR-PAGE-CONSOLIDATE-
+        # 001): the two PARSE expressions live in the pure BXPortalState
+        # codec (executed for real by node goldens); the row-match loop, the
+        # honest rank-miss message and the latest-run fallback live in the
+        # strategy panel module — each string asserted verbatim in exactly
+        # one file, never weakened.
+        assert "state.runId = params.get('run_id');" in codec
+        assert "state.rank = Math.max(1, parseInt(params.get('rank') || '1', 10) || 1);" in codec
+        assert "if (Number(rows[i].rank) === state.rank) { row = rows[i]; break; }" in panel
+        assert "is not in the stored top-100 (" in panel  # honest rank-miss
+        assert "runs.latest_run_id" in panel  # no-run_id fallback
+        # The strategy page loads both modules + self-mounts the panel.
         template = (
             Path(__file__).resolve().parents[2]
             / "brutex"
@@ -448,12 +481,18 @@ class TestEngineWriterThroughRoutes:
             / "templates"
             / "strategy.html"
         ).read_text(encoding="utf-8")
-        # The client-side contract, pinned (no browser harness — honest envelope):
-        assert "state.runId = params.get('run_id');" in template
-        assert "state.rank = Math.max(1, parseInt(params.get('rank') || '1', 10) || 1);" in template
-        assert "if (Number(rows[i].rank) === state.rank) { row = rows[i]; break; }" in template
-        assert "is not in the stored top-100 (" in template  # honest rank-miss
-        assert "runs.latest_run_id" in template  # no-run_id fallback
+        assert "/static/bx-portal-state.js" in template
+        assert "/static/bx-strategy-panel.js" in template
+        assert 'data-bx-autopanel="strategy"' in template
+        # Contract consumer #3: the v29 drawer's open-full link is built by
+        # the SAME BXPortalState.strategyHref (DEC-OPERATOR-PAGE-
+        # CONSOLIDATE-001 — one href law, three consumers).
+        v29 = (
+            Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates" / "v29.html"
+        ).read_text(encoding="utf-8")
+        assert 'id="ocDrawerOpenFull"' in v29
+        portal = (static / "bx-operator-portal.js").read_text(encoding="utf-8")
+        assert "window.BXPortalState.strategyHref(state.runId, rank)" in portal
 
     def test_route_names_a_future_schema_version_corruptly_never_500(self, tmp_path: Path) -> None:
         """A NEWER writer's artifact degrades to a NAMED corrupt through the
@@ -602,9 +641,20 @@ class TestCascadeJoinWriterToWire:
 
     _client = staticmethod(TestEngineWriterThroughRoutes._client)
 
-    def test_frozen_pre_change_fixture_serves_dashes_on_the_wire(self, tmp_path: Path) -> None:
-        """The back-compat oracle end-to-end: a PRE-change artifact serves with
-        NO cascade keys (the clients render '—'), never corrupt."""
+    def test_frozen_pre_change_fixture_reads_corrupt_on_the_wire(self, tmp_path: Path) -> None:
+        """The back-compat oracle end-to-end UNDER the merged #1959 schema-v2 law.
+
+        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959) bumped
+        ``TOP100_SCHEMA_VERSION`` 1→2 (per-entry ``resilience`` block —
+        bump-on-any-shape-change) with the documented reader law: an artifact
+        at an UNKNOWN version degrades to a NAMED ``corrupt`` through the route
+        (never a 500, never fabricated rows). So the frozen v1 pre-change
+        fixture now serves ``status="corrupt"``/``row_count=0`` naming the
+        ``schema_version`` mismatch — the wire twin of the unit reconcile's
+        ``test_frozen_pre_change_artifact_reads_absent_never_crashes``. The
+        pre-club version of this test asserted a successful ``ok``-with-dashes
+        serve; superseded by the #1959 bump.
+        """
         import shutil
 
         fixtures = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
@@ -613,8 +663,146 @@ class TestCascadeJoinWriterToWire:
         (lake / "sweep_runs").mkdir(parents=True)
         shutil.copytree(fixtures / "top100_pre_cascade_v1" / run_id, lake / "sweep_runs" / run_id)
         client = self._client(lake)
+        response = client.get(f"/api/v1/oneclick/top100?run_id={run_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "corrupt", payload["detail"]
+        assert payload["row_count"] == 0
+        assert "schema_version" in payload["detail"]
+
+
+# ---------------------------------------------------------------------------
+# DEC-ALPHA-BUYHOLD-METRIC-001 — the alpha triple writer → reader → route.
+# ---------------------------------------------------------------------------
+from brutex.engine.alpha_metric import AlphaBaseline  # noqa: E402
+
+
+def _alpha_engine_artifact() -> engine_top100.Top100Artifact:
+    """A REAL alpha-carrying artifact from the engine's own builder.
+
+    Hand-derivable: net +₹100 on ₹10,000 equity = +1%; B&H ₹20,000.00 →
+    ₹20,400.00 = +2% → alpha −1.0 for every fixture candidate.
+    """
+    candidates = [make_candidate(n, fingerprint=f"fp{n:02d}" + "0" * 62) for n in (1, 2)]
+    families = TwinFamilies(
+        family_by_run_id={run_id_of(n): run_id_of(n) for n in (1, 2)},
+        members_by_family={run_id_of(n): (run_id_of(n),) for n in (1, 2)},
+    )
+    return build_top100(
+        candidates,
+        run_id=_GRID_RUN_ID,
+        preset="min_dd_first",
+        families=families,
+        counts=PoolCounts(stores=1, excluded_no_aggs=0, zero_trade_excluded=0, parity_excluded=0),
+        data_snapshot_hashes=["a" * 64],
+        baselines={"NIFTY": "baseline-NIFTY.json"},
+        alpha_baselines={"NIFTY": AlphaBaseline(2_000_000, 2_040_000)},
+        start_equity_paisa=1_000_000,
+    )
+
+
+class TestAlphaWriterReaderRouteChain:
+    """Writer bytes → load_top100 → /api/v1/oneclick/top100 wire, alpha intact."""
+
+    def test_alpha_triple_survives_the_reader_boundary(self, tmp_path: Path) -> None:
+        artifact = _alpha_engine_artifact()
+        _write_engine_artifact(tmp_path / "lake", artifact)
+        run_dir = (tmp_path / "lake" / "sweep_runs") / _GRID_RUN_ID
+        result = oc.load_top100(run_dir)
+        assert result.status == "ok", result.detail
+        for row in result.rows:
+            metrics = row["metrics"]
+            assert metrics["alpha_pct"] == -1.0
+            assert metrics["strategy_return_pct"] == 1.0
+            assert metrics["bh_return_pct"] == 2.0
+
+    def test_alpha_reaches_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from brutex.dashboard.app import DashboardState, build_app
+        from fastapi.testclient import TestClient
+
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _alpha_engine_artifact())
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        for row in payload["rows"]:
+            assert row["metrics"]["alpha_pct"] == -1.0
+
+    def test_pre_alpha_artifact_serves_no_alpha_keys_on_the_wire(self, tmp_path: Path) -> None:
+        """A default (no alpha inputs) artifact carries NO alpha keys — the
+        client renders the honest '—', never a fabricated 0 (the #1631 law)."""
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from brutex.dashboard.app import DashboardState, build_app
+        from fastapi.testclient import TestClient
+
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _engine_artifact())
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok"
+        for row in payload["rows"]:
+            assert "alpha_pct" not in row["metrics"]
+
+
+class TestTierWriterToWire:
+    """DEC-RANKING-SPLUS-TIER-001: the tier object writer → reader → wire chain."""
+
+    _client = staticmethod(TestEngineWriterThroughRoutes._client)
+
+    def test_tier_flows_writer_to_reader_stamped_with_server_text(self, tmp_path: Path) -> None:
+        artifact = _engine_artifact()
+        run_dir = tmp_path / "sweep_runs"
+        write_top100(run_dir, artifact)
+        result = oc.load_top100(run_dir / _GRID_RUN_ID)
+        assert result.status == "ok", result.detail
+        for row in result.rows:
+            tier = row["tier"]
+            # The wp5 fixture rows classify at "A" (the golden's audit);
+            # the bridge stamped the ONE server-built display text.
+            assert tier["label"] == "A"
+            assert isinstance(tier["blocked_next"], list) and tier["blocked_next"]
+            assert tier["status_text"].startswith("A — blocked from S: ")
+
+    def test_tier_reaches_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _engine_artifact())
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        for row in payload["rows"]:
+            assert row["tier"]["label"] == "A"
+            assert isinstance(row["tier"]["status_text"], str)
+
+    def test_pre_tier_artifact_serves_no_tier_keys(self, tmp_path: Path) -> None:
+        """Back-compat end-to-end: a PRE-tier artifact serves with NO tier
+        keys (the clients render '—'), never corrupt.
+
+        Fold re-derivation (train-b 2026-07-21, PR #1578 reconcile): the
+        woven #1959 reader law hard-gates ``schema_version == 2``, so the
+        frozen v1 fixture as-is now reads a NAMED ``corrupt`` on the wire
+        (pinned by ``TestCascadeJoinWriterToWire``'s ``reads_corrupt`` twin).
+        The member claim under test is TIER-key absence tolerance, not the
+        version gate — the COPY is re-stamped to v2 (the L1
+        ``schema_version`` re-derivation class), everything else verbatim.
+        """
+        import shutil
+
+        fixtures = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
+        run_id = "grid" + "0" * 60
+        lake = tmp_path / "lake"
+        (lake / "sweep_runs").mkdir(parents=True)
+        run_dir = lake / "sweep_runs" / run_id
+        shutil.copytree(fixtures / "top100_pre_cascade_v1" / run_id, run_dir)
+        artifact_path = run_dir / "top100.json"
+        payload_doc = json.loads(artifact_path.read_text(encoding="utf-8"))
+        payload_doc["schema_version"] = 2
+        artifact_path.write_text(json.dumps(payload_doc), encoding="utf-8")
+        client = self._client(lake)
         payload = client.get(f"/api/v1/oneclick/top100?run_id={run_id}").json()
         assert payload["status"] == "ok", payload["detail"]
-        assert payload["cascade_join"] is None
-        assert all("cascade" not in row for row in payload["rows"])
-        assert all("cpcv_pass_pct" not in row["metrics"] for row in payload["rows"])
+        assert all("tier" not in row for row in payload["rows"])

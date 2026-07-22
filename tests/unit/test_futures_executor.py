@@ -274,56 +274,63 @@ class TestSelectFuturesLeg:
 
 class TestMaterializeAcceptPath:
     def test_golden_long_accept(self) -> None:
-        # Golden, recomputed by hand: NIFTY long 22,000.00 → 22,100.00, lot 75.
-        # buy = 2,200,005 · sell = 2,209,995 · gross = 9,990 × 75 = 749,250,
-        # cost-free → net == gross. MAE/MFE vs entry fill 2,200,005 over the
-        # 3-bar path: mfe/unit = 2,211,000−2,200,005 = 10,995 → ×75 = 824,625;
-        # mae/unit = 2,200,005−2,199,000 = 1,005 → ×75 = 75,375.
+        # Hand-recomputed WORST-CASE golden (DEC-FILL-WORST-CASE-ONLY-001 —
+        # the ONE fill law): NIFTY long over the default _window — entry
+        # HIGH 22,010.00, exit LOW 22,095.00, lot 75.
+        #   buy = 2,201,000 + 5 = 2,201,005
+        #   sell = 2,209,500 − 5 = 2,209,495
+        #   gross = (2,209,495 − 2,201,005) × 75 = 8,490 × 75 = 636,750
+        #   MAE/MFE vs the WORST entry fill 2,201,005 over the 3-bar path:
+        #   mfe/unit = 2,211,000 − 2,201,005 = 9,995 → ×75 = 749,625
+        #   mae/unit = 2,201,005 − 2,199,000 = 2,005 → ×75 = 150,375
         source = _Source(window=_window())
         out = materialize_futures_trade(_signal(), resolver=_Resolver(), source=source)
         assert isinstance(out, MaterializedFuturesTrade)
         assert (out.entry_open_paisa, out.exit_open_paisa) == (2_200_000, 2_210_000)
-        assert (out.buy_fill_paisa, out.sell_fill_paisa) == (2_200_005, 2_209_995)
+        assert (out.buy_fill_paisa, out.sell_fill_paisa) == (2_201_005, 2_209_495)
         assert out.lot_size == 75
-        assert out.gross_pnl_paisa == 749_250
+        assert out.gross_pnl_paisa == 636_750
         assert out.total_charges_paisa == 0
-        assert out.net_pnl_paisa == 749_250
-        assert out.mfe_paisa == 824_625
-        assert out.mae_paisa == 75_375
+        assert out.net_pnl_paisa == 636_750
+        assert out.mfe_paisa == 749_625
+        assert out.mae_paisa == 150_375
         assert out.cost_free is True
         assert out.exit_reason == "signal"
         assert out.entry_ts == _ENTRY
         assert out.exit_ts == _EXIT
 
     def test_golden_short_accept(self) -> None:
-        # Short: sell = 2,199,995 · buy(cover) = 2,210,005 · gross = −750,750.
-        # Entry fill = the SELL fill; mfe/unit = 2,199,995−2,199,000 = 995
-        # (best drop below entry); mae/unit = 2,211,000−2,199,995 = 11,005.
+        # Worst-case short: opening sell = entry LOW − tick = 2,198,995;
+        # cover buy = exit HIGH + tick = 2,211,005; gross = (sell − buy) ×
+        # 75 = −12,010 × 75 = −900,750. Entry fill = the SELL fill 2,198,995
+        # — BELOW the path's min low 2,199,000, so no bar ever shows a
+        # favourable excursion (mfe = 0); mae/unit = 2,211,000 − 2,198,995 =
+        # 12,005.
         out = materialize_futures_trade(
             _signal(direction=TradeDirection.BEAR),
             resolver=_Resolver(),
             source=_Source(window=_window()),
         )
         assert isinstance(out, MaterializedFuturesTrade)
-        assert (out.buy_fill_paisa, out.sell_fill_paisa) == (2_210_005, 2_199_995)
-        assert out.gross_pnl_paisa == -750_750
-        assert out.mfe_paisa == 995 * 75
-        assert out.mae_paisa == 11_005 * 75
+        assert (out.buy_fill_paisa, out.sell_fill_paisa) == (2_211_005, 2_198_995)
+        assert out.gross_pnl_paisa == -900_750
+        assert out.mfe_paisa == 0
+        assert out.mae_paisa == 12_005 * 75
         assert out.leg.side == "short"
 
-    def test_r15_gap_open_fills_at_real_open_not_sl_tp(self) -> None:
-        # [R15] the spot sweep fixed exit_ts at an SL trigger, but the futures
-        # bar GAPPED far beyond the level: the fill is the REAL open − tick,
-        # never the SL fantasy price. Hypothetical SL level: 21,950.00; the
-        # exit bar opens at 21,700.00 (gapped through it).
+    def test_gap_open_worst_case_fills_on_the_real_bar_extreme(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001: a gap-open beyond the SL still uses
+        # the REAL exit bar — its adverse extreme (LOW − tick for the long
+        # sell), never the SL fantasy level and never a fabricated bar.
+        # Exit bar opens 21,700.00, band low 21,695.00 (the _window
+        # derivation) → sell = 2,169,500 − 5.
         window = _window(exit_open="21700.00")
         out = materialize_futures_trade(
             _signal(exit_reason="sl"), resolver=_Resolver(), source=_Source(window=window)
         )
         assert isinstance(out, MaterializedFuturesTrade)
-        assert out.sell_fill_paisa == 2_170_000 - TICK_PAISA  # the REAL open − tick
+        assert out.sell_fill_paisa == 2_169_500 - TICK_PAISA  # REAL bar LOW − tick
         assert out.sell_fill_paisa != 2_195_000  # NOT the SL fantasy level
-        assert out.exit_reason == "sl"
 
     def test_r15_1520_forced_exit_fills_at_inherited_minute_open(self) -> None:
         # [R15/R18] the 15:20 forced exit fills at THAT minute's real open.
@@ -373,28 +380,32 @@ class TestMaterializeAcceptPath:
         assert (out.buy_fill_paisa, out.sell_fill_paisa) == (2_200_005, 2_199_995)
         assert out.gross_pnl_paisa == -10 * 75  # exactly the 2-tick haircut
 
-    def test_roll8_r15_zero_volume_expiry_bar_is_tradable_not_rejected(self) -> None:
-        # [ROLL-8 / R14/R15] a volume-0 PRINTED bar is REAL + TRADABLE under
-        # the default reject_stale_bars=False.
+    def test_zero_volume_expiry_bar_rejects_unconditionally(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 (scope G) — CONSCIOUSLY SUPERSEDING
+        # the R15 "a volume-0 printed futures bar is REAL and TRADABLE"
+        # clause: a zero-volume print is a stale/carried price no real order
+        # demonstrably filled at, so it ALWAYS rejects (the survivorship-tilt
+        # cost is recorded in the DEC — dropped, never over-priced).
         window = _window(entry_volume=0, exit_volume=0)
         out = materialize_futures_trade(
             _signal(), resolver=_Resolver(), source=_Source(window=window)
         )
-        assert isinstance(out, MaterializedFuturesTrade)
+        assert isinstance(out, RejectedFuturesTrade)
+        assert out.reason is FuturesRejectReason.STALE_BAR
 
-    def test_r15_pessimistic_leg_absent(self) -> None:
-        # [R15] the pessimistic/worst leg (buy=HIGH, sell=LOW) is DEFERRED —
-        # structurally ABSENT: no worst/pessimistic field exists on the trade
-        # record and no such knob exists on the fill/materialize surfaces.
+    def test_worst_case_is_the_only_law_no_mode_or_stale_knobs(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 killed-token pins: no fill_mode and no
+        # reject_stale_bars parameter survives on any executor surface (the
+        # worst leg IS the law; the stale-bar reject is unconditional).
         import inspect
 
         from brutex.costs.futures_costs import apply_futures_fill
 
-        field_names = set(MaterializedFuturesTrade.__dataclass_fields__)
-        assert not {f for f in field_names if "worst" in f or "pessimistic" in f}
-        for fn in (materialize_futures_trade, apply_futures_fill):
-            params = set(inspect.signature(fn).parameters)
-            assert not {p for p in params if "worst" in p or "pessimistic" in p}
+        for fn in (materialize_futures_trade, run_futures_over_signals, execute_futures_sim):
+            params = inspect.signature(fn).parameters
+            assert "fill_mode" not in params, fn.__name__
+            assert "reject_stale_bars" not in params, fn.__name__
+        assert "fill_mode" not in inspect.signature(apply_futures_fill).parameters
 
     def test_r31_vix_stamped_on_trade(self) -> None:
         # [R31] VIX passes through verbatim; missing stays an honest None.
@@ -529,7 +540,7 @@ class TestRunFuturesOverSignals:
         assert res.n_rejected_no_data == 1
         assert res.n_rejected == 1
         assert res.n_winners == 1
-        assert res.net_pnl_paisa == 749_250
+        assert res.net_pnl_paisa == 636_750  # the worst-case golden long
         assert res.n_vix_missing == 1  # the accepted trade carried no VIX
 
     def test_mixed_instrument_batch_fails_loud(self) -> None:
@@ -734,9 +745,10 @@ class TestExecuteFuturesSim:
         assert len(s1) == 3
         assert executor_module._deterministic_sample(signals, k=100, run_id="x") == signals
 
-    def test_stale_policy_reject_excluded_from_differential(self) -> None:
-        # A stale-rejected sample (opt-in policy) is excluded from the
-        # arithmetic differential — no false SUSPECT.
+    def test_stale_law_reject_excluded_from_differential(self) -> None:
+        # A stale-rejected sample (the UNCONDITIONAL zero-volume law,
+        # DEC-FILL-WORST-CASE-ONLY-001) is excluded from the arithmetic
+        # differential OPENLY — no false SUSPECT, no silent drop.
         window = _window(entry_volume=0)
         audit = _Audit()
         with capture_logs() as logs:
@@ -748,7 +760,6 @@ class TestExecuteFuturesSim:
                 resolver=_Resolver(),
                 source=_Source(window=window),
                 audit=audit,
-                reject_stale_bars=True,
             )
         assert result.n_rejected_stale_bar == 1
         assert audit.rows[0][2]["suspect"] is False
@@ -774,3 +785,207 @@ class TestExecuteFuturesSim:
         warn = [x for x in logs if x["event"] == "futures.sim.unverified_cost_window"]
         assert len(warn) == 1
         assert "NSE" in warn[0]["windows"]
+
+
+class TestWorstCaseFloorLaw:
+    """DEC-FILL-WORST-CASE-ONLY-001 — the one-law floor + differential teeth."""
+
+    def test_range_bar_fills_dominated_by_open_anchors(self) -> None:
+        # The floor half of the worst-case law on a RANGE bar: the buy fill
+        # sits at/above the retired open-anchored fill (open + tick) and the
+        # sell fill at/below (open − tick) — worst can never be BETTER than
+        # the retired precise pricing, on any bar.
+        out = materialize_futures_trade(
+            _signal(), resolver=_Resolver(), source=_Source(window=_window())
+        )
+        assert isinstance(out, MaterializedFuturesTrade)
+        assert out.buy_fill_paisa >= out.entry_open_paisa + TICK_PAISA
+        assert out.sell_fill_paisa <= out.exit_open_paisa - TICK_PAISA
+        # And STRICT dominance here — the default _window bars carry range.
+        assert out.buy_fill_paisa > out.entry_open_paisa + TICK_PAISA
+        assert out.sell_fill_paisa < out.exit_open_paisa - TICK_PAISA
+
+    def test_no_data_reject_unchanged_by_the_law(self) -> None:
+        # The fill law moves PRICES only — an absent window is still the
+        # counted NO_DATA reject, never a fabricated bar to price worst-case.
+        out = materialize_futures_trade(
+            _signal(), resolver=_Resolver(), source=_Source(window=None)
+        )
+        assert isinstance(out, RejectedFuturesTrade)
+        assert out.reason is FuturesRejectReason.NO_DATA
+
+    def test_r45_differential_green_under_the_one_law(self) -> None:
+        # The R45 differential: the naive reference RE-STATES the worst-case
+        # law independently, so a clean production run is never SUSPECT.
+        audit = _Audit()
+        with capture_logs() as logs:
+            execute_futures_sim(
+                [_signal()],
+                instrument="NIFTY",
+                direction=TradeDirection.BULL,
+                run_id="run-one-law",
+                resolver=_Resolver(),
+                source=_Source(window=_window()),
+                audit=audit,
+            )
+        assert audit.rows[0][2]["suspect"] is False
+        assert audit.rows[0][2]["differential_checked"] == 1
+        assert "futures.sim.differential_mismatch" not in [x["event"] for x in logs]
+
+    def test_differential_teeth_wrong_net_trips_suspect(self) -> None:
+        # Anti-vacuity teeth: a production net that DIVERGES from the naive
+        # worst-case restatement (here off by one paisa) trips SUSPECT — the
+        # differential is not trivially green.
+        prod = materialize_futures_trade(
+            _signal(), resolver=_Resolver(), source=_Source(window=_window())
+        )
+        assert isinstance(prod, MaterializedFuturesTrade)
+        report = reference_sim.differential_spot_check(
+            [_signal()],
+            [prod.net_pnl_paisa + 1],
+            resolver=_Resolver(),
+            source=_Source(window=_window()),
+        )
+        assert report.suspect
+        clean = reference_sim.differential_spot_check(
+            [_signal()],
+            [prod.net_pnl_paisa],
+            resolver=_Resolver(),
+            source=_Source(window=_window()),
+        )
+        assert not clean.suspect
+
+
+class TestR45ResultPersistence:
+    """The R45 differential verdict PERSISTED on the RETURNED result.
+
+    DEC-OPTIONS-EXEC-FEEDBACK-001: pre-change ``suspect`` /
+    ``differential_checked`` were LOCAL variables inside
+    ``execute_futures_sim`` — logged + audited but dropped from the return —
+    and ``FuturesRuleResult`` had no such fields. The defaults test below
+    therefore FAILS on the pre-change dataclass (unexpected-attribute
+    TypeError at construction / AttributeError on read) — the fails-before
+    evidence for this class.
+    """
+
+    def _result(self, **overrides: Any) -> FuturesRuleResult:
+        kwargs: dict[str, Any] = {
+            "instrument": "NIFTY",
+            "direction": "bull",
+            "n_signals": 1,
+            "n_accepted": 1,
+            "n_rejected_lot_size_unknown": 0,
+            "n_rejected_cost_regime_unverified": 0,
+            "n_rejected_no_contract": 0,
+            "n_rejected_no_data": 0,
+            "n_rejected_stale_bar": 0,
+            "gross_pnl_paisa": 100,
+            "total_charges_paisa": 0,
+            "net_pnl_paisa": 100,
+            "n_winners": 1,
+            "n_losers": 0,
+        }
+        kwargs.update(overrides)
+        return FuturesRuleResult(**kwargs)
+
+    def test_defaulted_fields_back_compat(self) -> None:
+        # The optional-column back-compat template: every pre-existing
+        # constructor call (no suspect/differential_checked kwargs) yields
+        # the honest defaults.
+        result = self._result()
+        assert result.suspect is False
+        assert result.differential_checked == 0
+
+    def test_explicit_fields_carried(self) -> None:
+        result = self._result(suspect=True, differential_checked=3)
+        assert result.suspect is True
+        assert result.differential_checked == 3
+
+    def test_negative_differential_checked_refused(self) -> None:
+        # differential_checked joined the __post_init__ negative-count loop.
+        with pytest.raises(ValueError, match="differential_checked must be >= 0"):
+            self._result(differential_checked=-1)
+
+    def test_clean_run_returns_persisted_differential(self) -> None:
+        # The RETURNED result (not just the audit payload) carries the R45
+        # outcome: one signal differentially checked, not suspect.
+        audit = _Audit()
+        result = execute_futures_sim(
+            [_signal()],
+            instrument="NIFTY",
+            direction=TradeDirection.BULL,
+            run_id="persist-clean",
+            resolver=_Resolver(),
+            source=_Source(window=_window()),
+            audit=audit,
+        )
+        assert result.suspect is False
+        assert result.differential_checked == 1
+        assert result.differential_checked > 0
+        # The audit payload and the returned result agree (one truth).
+        assert audit.rows[0][2]["suspect"] is result.suspect
+        assert audit.rows[0][2]["differential_checked"] == result.differential_checked
+
+    def test_mismatch_run_returns_suspect_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The divergent naive stub trips SUSPECT — and the flag now rides
+        # the RETURNED result row (flagged, never hidden).
+        monkeypatch.setattr(reference_sim, "naive_reference_futures_pnl", lambda *a, **k: 42)
+        result = execute_futures_sim(
+            [_signal()],
+            instrument="NIFTY",
+            direction=TradeDirection.BULL,
+            run_id="persist-suspect",
+            resolver=_Resolver(),
+            source=_Source(window=_window()),
+        )
+        assert result.suspect is True
+        assert result.differential_checked == 1
+
+    def test_disabled_differential_returns_zero_checked(self) -> None:
+        # spot_check_k=0 disables the sample — the returned result reads the
+        # honest 0-checked / not-suspect, never a fabricated verdict.
+        result = execute_futures_sim(
+            [_signal()],
+            instrument="NIFTY",
+            direction=TradeDirection.BULL,
+            run_id="persist-disabled",
+            resolver=_Resolver(),
+            source=_Source(window=_window()),
+            spot_check_k=0,
+        )
+        assert result.suspect is False
+        assert result.differential_checked == 0
+
+
+class TestMaterializeGateArms:
+    """The two materialize-time gate arms this file previously exercised only
+    at the primitive level (``futures_lot_size`` / ``select_futures_leg``) —
+    driven here through ``materialize_futures_trade`` itself so the single-file
+    executor gate stays 100% line+branch."""
+
+    def test_gate1_lot_size_unknown_rejects_before_any_io(self) -> None:
+        # A 2020-dated signal precedes the recorded lot history (floor
+        # 2021-01-01) → the NARROW Gate-1 except arm returns the counted
+        # LOT_SIZE_UNKNOWN reject BEFORE any resolver/source I/O.
+        resolver = _Resolver()
+        source = _Source(window=_window())
+        entry = datetime(2020, 6, 1, 9, 16, tzinfo=_IST)
+        out = materialize_futures_trade(
+            _signal(entry_ts=entry, exit_ts=entry + timedelta(hours=6)),
+            resolver=resolver,
+            source=source,
+        )
+        assert isinstance(out, RejectedFuturesTrade)
+        assert out.reason is FuturesRejectReason.LOT_SIZE_UNKNOWN
+        assert out.leg is None
+        assert resolver.calls == []
+        assert source.calls == []
+
+    def test_gate3_no_contract_reject_passes_through(self) -> None:
+        # Gate 3: an empty-calendar resolver's NO_CONTRACT reject is returned
+        # verbatim by materialize_futures_trade — the source is never read.
+        source = _Source(window=_window())
+        out = materialize_futures_trade(_signal(), resolver=_Resolver(symbol=None), source=source)
+        assert isinstance(out, RejectedFuturesTrade)
+        assert out.reason is FuturesRejectReason.NO_CONTRACT
+        assert source.calls == []

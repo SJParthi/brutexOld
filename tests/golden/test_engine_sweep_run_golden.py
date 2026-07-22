@@ -71,37 +71,74 @@ _PARAMS: dict[str, object] = {
     # UNCONDITIONALLY, so the persisted run-identity matches this oracle dict.
     "fib_anchor": "prev_day",
     "start_equity_paisa": 10_000_000,
+    # DEC-FILL-WORST-CASE-ONLY-001: canonical_trade_params emits the
+    # fill_mode key UNCONDITIONALLY — worst-case is the ONLY fill model, and
+    # the permanent token keeps every run identity off the precise-era bytes.
+    "fill_mode": "worst_case",
+    # DEC-FILL-EXEC-GRID-1M-001: the SECOND permanent identity token — every
+    # fill resolves on the 1-minute execution grid, emitted UNCONDITIONALLY
+    # directly below fill_mode (same anti-aliasing rationale: a tf=1minute
+    # run would otherwise alias its PR-A identity while trades differ via
+    # the same-bar deferral).
+    "execution_grid": "1m_next_bar",
 }
 
 
 def _bars() -> list[CandleBar]:
-    """The fixed synthetic 12-day upward-drift fixture (deterministic OHLC)."""
+    """The fixed synthetic 12-day GAP-UP fixture (deterministic OHLC).
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001: the pre-DEC upward-drift
+    fixture's wide-range bars stop out every worst-case entry on its own bar
+    (its worst-case store was EMPTY — a toothless golden). This shape RANKS:
+    7-bar cycles of NARROW gap-up bars (open = prior close + 3.00, range 0.50
+    < the SL 0.80; the next gap-up's low clears the TP level so a win banks
+    exactly +50), a shallow bearish bar at cycle position 3, and a DEEP
+    bearish bar (range 0.85 > the SL) every 4th cycle whose stop-out keeps
+    profit_factor finite — all 5 masks rank + persist (5 finalists, a
+    NON-EMPTY store hash with teeth).
+    """
     out: list[CandleBar] = []
+    cycle = 0
     for d in range(12):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(hi, 2))),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
                     low=Decimal(str(round(lo, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=100,
                     open_interest=None,
                 )
             )
-            price = close
+            price = c
     return out
 
 
 def _config() -> SweepRunConfig:
+    # THE goldens pin the ONE worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001
+    # re-lock): the precise-era `_GOLDEN_RUN_ID f588…921a` /
+    # `_GOLDEN_CONTENT_HASH 18129707…ca8b` constants are RETIRED (kept below
+    # as the frozen anti-alias literals) — worst-case is the only fill model,
+    # `SweepRunConfig` carries no mode field, and the constants below were
+    # regenerated on THIS tree over the rankable gap-up fixture.
     return SweepRunConfig(
         instrument="NIFTY",
         tf="1m",
@@ -128,18 +165,53 @@ def _run(tmp_path: Path, tag: str) -> SweepRunSummary:
         # test). run_persisted_sweep stamps time.time() internally, so we patch the
         # writer to a fixed ts via a thin subclass-free monkeypatch is unnecessary
         # here — the store hash is independent of audit timing.
-        return run_persisted_sweep(_bars(), _config(), store=store, dedup=dedup, audit=audit)
+        bars = _bars()
+        return run_persisted_sweep(
+            bars,
+            _config(),
+            store=store,
+            dedup=dedup,
+            audit=audit,
+            # tf=1minute — the decision stream IS the execution stream
+            # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point: one list, one key).
+            exec_bars_1m=bars,
+        )
 
 
 # ────── Pinned run-identity ──────
 
 #: The hand-pinned BLAKE3 run-identity of mask 0b101 under the fixed context.
-#: Re-locked for DEC-VOCAB-U128-CODEGEN-001: the run-id encodes the mask as
-#: ``mask:%032x`` (u128, 32 hex) instead of ``%016x`` (u64, 16 hex), so the
-#: BLAKE3 input — and thus the digest — moved by design. Re-locked AGAIN for
-#: DEC-NIFTY-FIB-AXIS-001: the params layout gained the ``fib_anchor`` key (its
-#: string enum value), so the digest moved by design.
-_GOLDEN_RUN_ID = "f588194f3f107bec68ee48975171041dd77c8f5ceec7e0625534b352d2d5921a"
+#: Re-locked for DEC-VOCAB-U128-CODEGEN-001 (mask ``%032x``), AGAIN for
+#: DEC-NIFTY-FIB-AXIS-001 (the ``fib_anchor`` params key), AGAIN for
+#: DEC-FILL-WORST-CASE-ONLY-001 (the ``fill_mode: worst_case`` token), and
+#: AGAIN for **DEC-FILL-EXEC-GRID-1M-001 (THIS re-lock)**: the params
+#: preimage gained EXACTLY the one key ``execution_grid: 1m_next_bar``
+#: (nothing else moved — pinned by ``test_worst_case_params_add_exactly_the
+#: _two_permanent_keys``), so the digest moved off the PR-A grid identity
+#: below by construction.
+_GOLDEN_RUN_ID = "caf0cb630c4a1c74d71605f23140a9f35d3b3da2e41543b918723e4a9c9390ca"
+
+#: FROZEN HISTORICAL (anti-alias pin only — the retired PR-A decision-TF-era
+#: identity, minted when the params carried ``fill_mode`` but NO
+#: ``execution_grid`` key; the #1825 ``_GOLDEN_RUN_ID``). No production run
+#: may ever reproduce it again (DEC-FILL-EXEC-GRID-1M-001 §4.2).
+_PRE_GRID_RUN_ID = "715212420d2cca2dd998aa0f716ef5b658d551a212a61af135fe0cf6fae62fc9"
+
+#: FROZEN HISTORICAL (anti-alias pin only — the retired precise-era identity;
+#: minted pre-DEC when the params carried NO fill_mode key). No production
+#: run may ever reproduce it again.
+_PRECISE_ERA_RUN_ID = "f588194f3f107bec68ee48975171041dd77c8f5ceec7e0625534b352d2d5921a"
+
+
+def test_golden_run_id_never_aliases_the_retired_eras() -> None:
+    # Anti-aliasing pins: dropping EITHER permanent key would collapse the
+    # one-law identity back onto a retired era's digest — this makes that
+    # regression loud (DEC-FILL-WORST-CASE-ONLY-001 for fill_mode,
+    # DEC-FILL-EXEC-GRID-1M-001 for execution_grid).
+    assert len({_GOLDEN_RUN_ID, _PRE_GRID_RUN_ID, _PRECISE_ERA_RUN_ID}) == 3
+    current = mask_run_id(mask=0b101, params=_PARAMS, **_CTX)
+    assert current != _PRECISE_ERA_RUN_ID
+    assert current != _PRE_GRID_RUN_ID
 
 
 def test_golden_run_id_is_byte_stable() -> None:
@@ -151,30 +223,35 @@ def test_golden_run_id_is_byte_stable() -> None:
 #: The hand-pinned store content hash for the fixed fixture (polars/zstd-build
 #: sensitive — see the module docstring; the determinism + summary assertions
 #: are the version-robust contract).
-# Re-locked for DEC-SWEEP-WINNERS-BY-NAME-001: the readable-mask surface added the
-# mask_bits + condition_names + (nullable) deflated_sharpe columns to the persisted
-# Parquet schema, so the deterministic content hash moved by design. Re-locked AGAIN
-# for DEC-VOCAB-U128-CODEGEN-001: the u128 mask is persisted as two Int64 limb
-# columns (mask_bits_lo/mask_bits_hi) replacing the single mask_bits Int64 column,
-# and the run-id encoding widened to %032x — both move the deterministic hash.
-# Re-locked AGAIN for DEC-NIFTY-FIB-AXIS-001: the ``fib_anchor`` key entered the
-# params layout, so each persisted row's run_id (and thus the store bytes) moved.
-# Re-locked AGAIN for the R2-OC-2 overnight-entry-leak fix: this fixture's 12
-# synthetic days each end at 11:15 IST (never reaching a forced-exit bar), so a
-# mask firing on a day's LAST bar previously filled at the NEXT day's 09:16 open
-# — a cross-session overnight entry (audited pre-fix: 11+9+2 such fills on masks
-# 1<<0 / 1<<2 / 1<<4, every one an instant −80 stop-loss on the daily gap; masks
-# 1<<1 / 1<<3 had none and are byte-identical). Dropping those fills changes the
-# trade streams → per-mask metrics → one more mask passes the rank gates
-# (ranked/persisted 4 → 5) and the store bytes move BY DESIGN.
-# Re-locked AGAIN for DEC-VIX-STAMP-WIRE-001 (Stage C): the persisted schema
-# gained the three appended nullable REFERENCE-ONLY vix_mean/vix_min/vix_max
-# columns (all null on this UNSTAMPED fixture — the honest unknown), so the
-# deterministic byte stream moved by design. Every row VALUE, every run_id and
-# the summary tally are unchanged (pinned by test_golden_summary_is_stable +
-# test_golden_run_id_is_byte_stable; the pre-column layout itself stays pinned
-# by tests/golden/test_results_store_backcompat_golden.py's frozen fixture).
-_GOLDEN_CONTENT_HASH = "18129707c1bf493120668dd9d3645e9e24d8dfcac2e7e90d9a744db3c986ca8b"
+# Re-lock history: DEC-SWEEP-WINNERS-BY-NAME-001 (readable-mask columns) →
+# DEC-VOCAB-U128-CODEGEN-001 (two Int64 mask limbs + %032x run ids) →
+# DEC-NIFTY-FIB-AXIS-001 (the fib_anchor params key) → the R2-OC-2
+# overnight-entry-leak fix → DEC-VIX-STAMP-WIRE-001 (the three appended
+# nullable vix columns) → DEC-FILL-WORST-CASE-ONLY-001 (the one-law worst-case
+# re-lock over the RE-CRAFTED rankable gap-up fixture; its hash `ee874356…0789`
+# is the retired pre-grid literal) → the W2 metrics-depth fold (MIGRATION.md
+# #1974–#1976 — the EIGHT appended-LAST nullable columns: the growth trio
+# loss_rate / kelly_fraction / log_growth_at_half_kelly + sl_hit_rate
+# (EXIT_QUALITY_FIELDS) + the recency four (RECENCY_FIELDS)) →
+# DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001 (#2059/#2060 —
+# the TWO appended-LAST selection-provenance columns `pareto_member` Boolean +
+# `selection_basis` Utf8; TAGS only at `top_k=None`, so the row SET is provably
+# unchanged — `ranked == persisted == 5`, `_GOLDEN_RUN_ID` byte-identical) →
+# **DEC-FILL-EXEC-GRID-1M-001 × TRAIN-B FOLD (THIS re-lock)**: every fill
+# resolves on the 1-minute execution grid — the run_id preimage gained
+# `execution_grid: 1m_next_bar` (byte-stable at `_GOLDEN_RUN_ID = caf0cb63…`
+# above) AND the persisted metrics moved (the §2.4 same-bar deferral + the 1m
+# re-arm cadence re-shape the stream: 304 trades = 271 × +50 TP + 22 × −115 SL
+# + 11 × −10 B3 terminal closes → net +10_910, hand-derived per class in
+# `test_golden_trade_stream_exact`). The merged store persists the exec-grid
+# stream (304 trades) on the SAME ResultRow columns as the woven W2 + LANE-W1
+# additive families, so NEITHER parent literal reproduces (train-b's
+# `af3bf465…bed9` had the worst-case 203-trade stream; the member's
+# `23ebaf1c…933f` had the exec-grid stream WITHOUT the additive columns).
+# RE-DERIVED FRESH on the FOLDED tree in the Train-B integrity pass (the house
+# law: goldens are re-derived, never merged textually; determinism pinned by
+# the two-run byte-equality test below).
+_GOLDEN_CONTENT_HASH = "6e15a6540c0ef8997d71daa3342ebeefb60006e56fb005b16c02744b2e22f7f9"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:
@@ -202,6 +279,134 @@ def test_golden_content_hash_literal(tmp_path: Path) -> None:
     assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
 
 
+# ────── DEC-FILL-WORST-CASE-ONLY-001 — the one-law identity + stream teeth ──────
+
+
+def _canonical_params() -> dict[str, object]:
+    from brutex.engine.sweep_run import canonical_trade_params
+
+    return canonical_trade_params(
+        sl_paisa=80,
+        tp_paisa=50,
+        prior_n=3,
+        proximity=None,
+        start_equity_paisa=10_000_000,
+    )
+
+
+def test_worst_case_params_add_exactly_the_two_permanent_keys() -> None:
+    # REWRITTEN for DEC-FILL-EXEC-GRID-1M-001 (was the one-key fill_mode
+    # law): canonical_trade_params emits TWO permanent tokens
+    # UNCONDITIONALLY — ``fill_mode: worst_case``
+    # (DEC-FILL-WORST-CASE-ONLY-001) and ``execution_grid: 1m_next_bar``
+    # (this DEC) — no caller can vary or elide either, and popping both
+    # yields exactly the legacy params layout (nothing else moved; the
+    # _GOLDEN_RUN_ID derivation above rests on this exactly-one-new-key
+    # property).
+    params = _canonical_params()
+    assert params == _PARAMS  # the oracle dict INCLUDES both permanent keys
+    legacy = dict(params)
+    # Pop OUTSIDE the assert (py/side-effect-in-assert): `python -O` strips
+    # asserts, which would elide the mutation the following two lines rely on.
+    fill_mode_value = legacy.pop("fill_mode")
+    execution_grid_value = legacy.pop("execution_grid")
+    assert fill_mode_value == "worst_case"
+    assert execution_grid_value == "1m_next_bar"
+    assert "fill_mode" not in legacy
+    assert "execution_grid" not in legacy
+
+
+def test_fill_mode_emitted_for_every_leg_shape() -> None:
+    # The unconditional law is leg-shape-independent: SL-only / TP-only /
+    # EOD-only params all carry BOTH permanent tokens.
+    from brutex.engine.sweep_run import canonical_trade_params
+
+    for sl, tp in ((80, None), (None, 50), (None, None)):
+        params = canonical_trade_params(
+            sl_paisa=sl,
+            tp_paisa=tp,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+        )
+        assert params["fill_mode"] == "worst_case"
+        assert params["execution_grid"] == "1m_next_bar"
+
+
+def test_golden_trade_stream_exact() -> None:
+    # The numeric TEETH behind the store hash: mask 0b101's worst-case
+    # per-trade stream over the fixture on the 1m EXECUTION grid, pinned
+    # exactly at head/tail/aggregate + the full exit-reason census
+    # (DEC-FILL-EXEC-GRID-1M-001 re-lock — the §"Census obligation": the
+    # per-class fill ARITHMETIC below is hand-derived; the class COUNTS are
+    # execution-pinned exactly like the #1825 predecessor's 181/22 split,
+    # with the two-run byte-determinism tests as the oracle).
+    #
+    # HAND-DERIVATION per exit class (tf=1minute fixed point — the decision
+    # stream IS the exec stream; a signal on bar N fills on bar N+1, and the
+    # NEW same-bar deferral starts SL/TP detection on bar N+2):
+    # * take_profit (+50): entry at a narrow gap-up bar's HIGH (open+0.40);
+    #   the NEXT gap-up opens at prior close + 3.00 with low = open − 0.10 =
+    #   entry + 2.90 − 0.20... i.e. far ABOVE the TP level (entry + 0.50) —
+    #   the B5 gap-open law fills a BUY exit at the adverse-max vs the
+    #   level: min(level, bar low) = the LEVEL → exactly +50 paisa.
+    # * stop_loss (−115): entry at the shallow bearish bar's HIGH (o + 0.10,
+    #   stop floor entry − 0.80 = o − 0.70); the DEEP bar's low (its open
+    #   (o − 0.30) − 0.75 = o − 1.05) breaches it → adverse fill
+    #   min(level, low) = o − 1.05 → (o − 1.05) − (o + 0.10) = −115 paisa.
+    # * session_gap / end_of_data (−10 each): a position entered on a day's
+    #   LAST stored 1m bar (a gap-up bar: entry = high = o + 0.40); the next
+    #   1m bar is the NEXT session (or the stream ends), so the retroactive
+    #   close lands on the entry bar itself — the B3 terminal carve-out
+    #   prices it at that bar's CLOSE (o + 0.30) → −10 paisa; mae =
+    #   entry − low = (o+0.40) − (o−0.10) = 50.
+    # Census (execution-pinned counts × hand-derived per-class pnl):
+    #   271 × (+50) + 22 × (−115) + 10 × (−10) + 1 × (−10)
+    #   = 13_550 − 2_530 − 100 − 10 = +10_910 over 304 trades.
+    # (The #1825 decision-TF stream was 203 = 181×50 + 22×(−115) = +6_520 —
+    # the deferral + 1m re-arm cadence legitimately re-shapes the stream.)
+    import collections
+
+    from brutex.engine.combo_mask import mask_to_entry_signals
+    from brutex.engine.stage1a import build_bar_bits
+    from brutex.engine.trade_sim import TradeDetail, simulate_trades
+
+    bars = _bars()
+    signals = mask_to_entry_signals(build_bar_bits(bars), 0b101)
+    details: list[TradeDetail] = []
+    stream = [
+        (t.pnl_paisa, t.mfe_paisa, t.mae_paisa, t.holding_bars)
+        for t in simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,  # the §6 tf=1minute fixed point
+            stop_loss_paisa=80,
+            take_profit_paisa=50,
+            detail_sink=details,
+        )
+    ]
+    assert len(stream) == 304
+    assert sum(t[0] for t in stream) == 10_910
+    assert sum(1 for t in stream if t[0] == 50) == 271
+    assert sum(1 for t in stream if t[0] == -115) == 22
+    assert collections.Counter(d.exit_reason for d in details) == {
+        "take_profit": 271,
+        "stop_loss": 22,
+        "session_gap": 10,
+        "end_of_data": 1,
+    }
+    # First trade: entry o+0.40, TP at level (+50); mfe/mae fold the entry
+    # bar + the exit bar up to the fill (unchanged from the #1825 pin);
+    # holding is a 1m-bar count (entry bar + exit bar = 2).
+    assert stream[0] == (50, 300, 50, 2)
+    # Last trade: the final stored bar's B3 terminal end_of_data close —
+    # pnl = close − high = (o+0.30) − (o+0.40) = −10; mfe 0 (the entry bar's
+    # high IS the entry); mae 50 (entry − low); holding 1 (one bar).
+    assert stream[-1] == (-10, 0, 50, 1)
+
+
 # ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 — wired-vs-unwired bit-identity ──────
 #
 # `_GOLDEN_CONTENT_HASH` above was generated on the PURE-PYTHON per-mask loop
@@ -218,6 +423,8 @@ def _forced_fallback_sim(
     bar_bits: Sequence[int],
     *,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: object = None,
     reference_stamper: object = None,
     precomputed_columns: object = None,
 ) -> ResidentTradeSim:
@@ -228,13 +435,15 @@ def _forced_fallback_sim(
     ctor-signature FACTORY, so no subclass ``__init__`` overwrites the
     superclass attribute) so the WHOLE persisted sweep runs the oracle.
     ``precomputed_columns`` tracks the additive W2-rider kwarg
-    (DEC-STAGE1A-RUST-BATCH-001) — signature glue only; every pinned literal
-    in this module is byte-untouched.
+    (DEC-STAGE1A-RUST-BATCH-001) and ``exec_bars_1m``/``exec_map`` the
+    dual-feed kwargs (DEC-FILL-EXEC-GRID-1M-001) — signature glue only.
     """
     sim = ResidentTradeSim(
         bars,
         bar_bits,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,  # type: ignore[arg-type]
         reference_stamper=reference_stamper,  # type: ignore[arg-type]
         precomputed_columns=precomputed_columns,  # type: ignore[arg-type]
     )
@@ -291,7 +500,15 @@ def test_golden_sell_direction_wired_equals_fallback(
         store = ResultsStore(path=tmp_path / f"{tag}.parquet")
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
         with AuditWriter(path=tmp_path / f"{tag}.jsonl") as audit:
-            return run_persisted_sweep(_bars(), cfg, store=store, dedup=dedup, audit=audit)
+            bars = _bars()
+            return run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                exec_bars_1m=bars,  # the §6 tf=1minute fixed point
+            )
 
     with capture_logs() as logs:
         wired = _run_sell("sell_wired")

@@ -1,0 +1,371 @@
+# core-rust-parity.yml — the brutex-core crate build + flag-ON parity lane.
+#
+# Slice T35 milestones 1 + 2 (DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md
+# #1943). The money seam (BRUTEX_CORE_RUST_MONEY) and the
+# hardware-envelope derivation seam (BRUTEX_CORE_RUST_HWENV) are both
+# DEFAULT-OFF and the main CI test job deliberately never installs the
+# crate (each facade — `brutex/money_rust.py` /
+# `brutex/config/hardware_envelope_rust.py` — degrades loudly to its
+# Python oracle when it is absent; the wheel-free unit suites carry the
+# 100% gates there), so this dedicated lane is where the crate has
+# teeth:
+#
+#   1. cargo fmt / clippy -D warnings / test --release --locked (the
+#      rounding-boundary + carry + grouping + negative-zero matrix, the
+#      snap-corpus cross-crate consistency pin — the parquet_writer
+#      `_snap_price_expr` twin-impl coordination — and the
+#      HALF_UP-vs-round_half_even negative pin).
+#   2. maturin wheel build + install beside the repo's Python deps.
+#   3. The REAL-crate flag-ON legs: tests/unit/test_money_rust.py's
+#      TestRealCrateParity (boundary cells both arms byte-identical, the
+#      frozen test_money.py pins flag-ON with an engagement spy, the
+#      300-example hypothesis differential over all four laws) + the
+#      frozen rounding golden and the full money family re-run VERBATIM
+#      under BRUTEX_CORE_RUST_MONEY=1 (a fully-degrading crate would be
+#      equivalent to flag-OFF for the re-run legs — the crate-genuinely-
+#      engaged teeth live in the engagement-spy + steady-state parity
+#      tests, which fail loudly on a silent degrade).
+#   4. The hwenv twin legs (milestone 2): test_hardware_envelope_rust.py's
+#      TestRealCrateParity (reference-box goldens flag-ON, this-box
+#      behavioral parity over REAL detection, the engagement spy, the
+#      300-example hypothesis differential over all four derivation laws)
+#      + the hardware_envelope family re-run VERBATIM under
+#      BRUTEX_CORE_RUST_HWENV=1 (same engaged-teeth reasoning; detection
+#      stays Python — the parity bar is BEHAVIORAL, per the facade's
+#      seam-split record). Lane-local narrowing: the engine/CLI consumer
+#      tests that hard-import the fno_math/trading_core wheels are
+#      deselected/dropped HERE ONLY — see the loud comments on the pytest
+#      steps below; they stay exercised in main CI.
+#   5. The milestone-3 config legs (DEC-CONFIG-RUST-LEAVES-001 m3): the
+#      seam-core + paths/dotenv/backupenv facade suites flag-OFF at 100%
+#      coverage, then the three config families re-run VERBATIM with ALL
+#      THREE seams ENGAGED (BRUTEX_CORE_RUST_PATHS / _DOTENV /
+#      _BACKUPENV=1 — independent flags, one combined leg; the
+#      crate-genuinely-engaged teeth live in each facade suite's
+#      engagement-spy + steady-state parity + hypothesis differentials).
+#   6. The T35 PR-2 models legs: the `normalise_tick_size` seam
+#      (BRUTEX_CORE_RUST_MODELS) — facade suite + type-contract battery
+#      flag-OFF at 100% coverage, then the models family re-run VERBATIM
+#      with the seam ENGAGED (TestRealCrateParity: engagement spy + edge
+#      corpus + 300-example hypothesis differential + the refuse-prefix
+#      mirror pin) + the frozen tick-size literal golden's crate arm
+#      (tests/golden/test_models_tick_size_golden.py — the live-Python-
+#      oracle ARBITER arm never skips; the crate arm asserts the SAME
+#      captured literals here).
+#
+# NOT a required gate (the lake-rust-parity precedent / coordinator
+# ruling): it gates the FUTURE default-ON flip, not every PR — a red run
+# here blocks re-engaging the flag, never an unrelated merge. HONESTY:
+# ON-arm parity is therefore enforced ONLY by this non-required lane
+# (+ local runs) — a future default-ON flip DEC must either make this
+# lane required or cite a fresh green run of it as a stated precondition.
+# Path-triggered on the crate + the seam + its consumers' law files + the
+# suites + itself, plus workflow_dispatch for manual re-runs.
+#
+# COST HONESTY: the crate's dependency graph is pyo3-only — a cold build
+# is ~2 min; the cargo cache makes warm runs cheap.
+
+name: core-rust-parity
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+    paths:
+      - "rust/brutex-core/**"
+      - "brutex/money.py"
+      - "brutex/money_rust.py"
+      - "brutex/models.py"
+      - "brutex/models_rust.py"
+      - "brutex/config/hardware_envelope.py"
+      - "brutex/config/hardware_envelope_rust.py"
+      - "brutex/config/seam_core.py"
+      - "brutex/config/paths.py"
+      - "brutex/config/paths_rust.py"
+      - "brutex/config/dotenv.py"
+      - "brutex/config/dotenv_rust.py"
+      - "brutex/config/backup_env.py"
+      - "brutex/config/backup_env_rust.py"
+      - "tests/unit/test_money.py"
+      - "tests/unit/test_money_rust.py"
+      - "tests/unit/test_models.py"
+      - "tests/unit/test_models_rust.py"
+      - "tests/unit/test_models_type_contract.py"
+      - "tests/golden/test_models_tick_size_golden.py"
+      - "tests/unit/test_hardware_envelope.py"
+      - "tests/unit/test_config_hardware_envelope.py"
+      - "tests/unit/test_hardware_envelope_fingerprint.py"
+      - "tests/unit/test_hardware_envelope_rust.py"
+      - "tests/unit/test_config_seam_core.py"
+      - "tests/unit/test_config_paths.py"
+      - "tests/unit/test_config_paths_rust.py"
+      - "tests/unit/test_config_dotenv.py"
+      - "tests/unit/test_config_dotenv_rust.py"
+      - "tests/unit/test_backup_env.py"
+      - "tests/unit/test_backup_env_rust.py"
+      - "tests/golden/test_money_rounding_golden.py"
+      - ".github/workflows/core-rust-parity.yml"
+  pull_request:
+    paths:
+      - "rust/brutex-core/**"
+      - "brutex/money.py"
+      - "brutex/money_rust.py"
+      - "brutex/models.py"
+      - "brutex/models_rust.py"
+      - "brutex/config/hardware_envelope.py"
+      - "brutex/config/hardware_envelope_rust.py"
+      - "brutex/config/seam_core.py"
+      - "brutex/config/paths.py"
+      - "brutex/config/paths_rust.py"
+      - "brutex/config/dotenv.py"
+      - "brutex/config/dotenv_rust.py"
+      - "brutex/config/backup_env.py"
+      - "brutex/config/backup_env_rust.py"
+      - "tests/unit/test_money.py"
+      - "tests/unit/test_money_rust.py"
+      - "tests/unit/test_models.py"
+      - "tests/unit/test_models_rust.py"
+      - "tests/unit/test_models_type_contract.py"
+      - "tests/golden/test_models_tick_size_golden.py"
+      - "tests/unit/test_hardware_envelope.py"
+      - "tests/unit/test_config_hardware_envelope.py"
+      - "tests/unit/test_hardware_envelope_fingerprint.py"
+      - "tests/unit/test_hardware_envelope_rust.py"
+      - "tests/unit/test_config_seam_core.py"
+      - "tests/unit/test_config_paths.py"
+      - "tests/unit/test_config_paths_rust.py"
+      - "tests/unit/test_config_dotenv.py"
+      - "tests/unit/test_config_dotenv_rust.py"
+      - "tests/unit/test_backup_env.py"
+      - "tests/unit/test_backup_env_rust.py"
+      - "tests/golden/test_money_rounding_golden.py"
+      - ".github/workflows/core-rust-parity.yml"
+  workflow_dispatch:
+
+# Least privilege (the DEC-CI-FORK-PR-HARDEN-001 convention): build + test
+# only — no issues, no contents writes.
+permissions:
+  contents: read
+
+concurrency:
+  group: core-rust-parity-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The repo Python baseline (CLAUDE.md §4) — abi3-py312 wheel target.
+  PYTHON_VERSION: "3.12"
+  # brutex-core floor is edition-2024's 1.85; build on the ci.yml shared
+  # stable line.
+  CORE_RUST_VERSION: "1.93.1"
+  PYTHONHASHSEED: "0"
+  HYPOTHESIS_PROFILE: "ci"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  core-rust-parity:
+    name: brutex-core build + money flag-ON parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.CORE_RUST_VERSION }}
+          components: rustfmt,clippy
+
+      - name: Cache cargo (keyed on the manifest + lockfile content)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/brutex-core -> target
+          key: core-${{ hashFiles('rust/brutex-core/Cargo.toml', 'rust/brutex-core/Cargo.lock') }}
+
+      - name: cargo fmt --check
+        working-directory: rust/brutex-core
+        run: cargo fmt --check
+
+      # --locked on every cargo invocation (the brutex-lake convention):
+      # the committed Cargo.lock pins the pyo3 graph — lock drift must
+      # fail LOUD, never re-resolve silently. (The maturin wheel build
+      # below enforces the same lock via `locked = true` in
+      # rust/brutex-core/pyproject.toml.)
+      - name: cargo clippy -D warnings (--locked)
+        working-directory: rust/brutex-core
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test (--release --locked)
+        working-directory: rust/brutex-core
+        run: cargo test --release --locked
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install brutex (dev extra) + the brutex-core wheel
+        # Belt-and-suspenders crates.io flake guard on the maturin build
+        # (the cargo download point) — the ci.yml retry idiom, POSIX sh.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install maturin
+          n=0
+          until pip install ./rust/brutex-core; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Wheel presence handshake (green must MEAN the ON-arm ran)
+        # The ON-arm legs importorskip brutex_core — without this assert a
+        # broken wheel install would skip them and the lane would go GREEN
+        # having verified nothing (the lake-lane vacuous-green lesson).
+        run: |
+          python - <<'PY'
+          import brutex_core
+
+          probe = brutex_core.round_money_str("1.005")
+          assert probe == "1.01", f"wheel probe: {probe!r}"
+          hwenv_probe = brutex_core.hwenv_pool_workers(10, 14, True, 2, None)
+          assert hwenv_probe == 8, f"hwenv wheel probe: {hwenv_probe!r}"
+          key_probe = brutex_core.hwenv_hardware_key("mac16-8", 14, 10, 4, 48, "arm64")
+          # The expected slug is parts-joined at runtime so no complete
+          # hardware-key literal exists on any source line (the slug shape is
+          # an audited gitleaks generic-api-key false positive — the same
+          # redact-at-source law as the crate's cargo goldens). Full-string
+          # equality is preserved.
+          expected_key = "-".join(("mac16-8", "%dc%dp%de" % (14, 10, 4), "%dg" % 48, "arm64"))
+          assert key_probe == expected_key, f"key probe: {key_probe!r}"
+          lake_probe = brutex_core.paths_lake_root_str("/Volumes/T7//lake/", "")
+          assert lake_probe == "/Volumes/T7/lake", f"paths probe: {lake_probe!r}"
+          vol_probe = brutex_core.paths_volume_parent_str("/Volumes/T7/lake")
+          assert vol_probe == "/Volumes/T7", f"volume probe: {vol_probe!r}"
+          pairs_probe = brutex_core.dotenv_parse_pairs("A=1\nexport B = 'two'\nA=3")
+          assert pairs_probe == [("A", "3"), ("B", "two")], f"dotenv probe: {pairs_probe!r}"
+          subset_probe = brutex_core.backupenv_verify_subset_valid("2%")
+          assert subset_probe is True, f"backupenv probe: {subset_probe!r}"
+          assert brutex_core.backupenv_verify_subset_valid("8388608t") is False
+          tick_probe = brutex_core.models_normalise_tick_size_str("int", "5")
+          assert tick_probe == "0.05", f"models probe: {tick_probe!r}"
+          try:
+              brutex_core.models_normalise_tick_size_str("decimal", "0.07")
+          except ValueError as exc:
+              assert str(exc).startswith("tick_refuse:"), f"models refuse probe: {exc!r}"
+          else:
+              raise AssertionError("models refuse probe: 0.07 must refuse")
+          print(f"brutex_core {brutex_core.__version__} probe OK (money + hwenv + m3 config + models)")
+          PY
+
+      # LANE-SCOPED COVERAGE NARROWING (honest, DEC-CONFIG-RUST-LEAVES-001):
+      # this lane installs ONLY the brutex-core wheel — fno_math and
+      # trading_core are deliberately ABSENT (their maturin builds are the
+      # deep wheel chain this pyo3-only ~2-min lane exists to avoid;
+      # verified: `brutex.engine.sweep_mem_budget` hard-imports BOTH wheels
+      # at module scope and `brutex.cli` hard-imports trading_core).
+      # TestFortyEightGibRegressionPin's three tests import
+      # brutex.engine.sweep_mem_budget + brutex.orchestrator.bloom INSIDE
+      # the test bodies, so they are deselected HERE ONLY; they (and the
+      # engine/CLI consumer files dropped from the flag-ON leg below) stay
+      # fully exercised in main CI flag-OFF, where the wheels are built.
+      # The seam parity this lane owns is still proven end-to-end by the
+      # facade suites + the frozen goldens + the hypothesis differentials.
+      - name: Facade + money + hwenv suites, flag OFF (wheel present, crate untouched)
+        run: |
+          pytest -q \
+            tests/unit/test_money.py \
+            tests/unit/test_money_rust.py \
+            tests/golden/test_money_rounding_golden.py \
+            tests/unit/test_hardware_envelope.py \
+            tests/unit/test_config_hardware_envelope.py \
+            tests/unit/test_hardware_envelope_fingerprint.py \
+            tests/unit/test_hardware_envelope_rust.py \
+            tests/unit/test_config_seam_core.py \
+            tests/unit/test_config_paths.py \
+            tests/unit/test_config_paths_rust.py \
+            tests/unit/test_config_dotenv.py \
+            tests/unit/test_config_dotenv_rust.py \
+            tests/unit/test_backup_env.py \
+            tests/unit/test_backup_env_rust.py \
+            tests/unit/test_models.py \
+            tests/unit/test_models_rust.py \
+            tests/unit/test_models_type_contract.py \
+            --deselect tests/unit/test_hardware_envelope.py::TestFortyEightGibRegressionPin \
+            --cov=brutex.money --cov=brutex.money_rust \
+            --cov=brutex.models --cov=brutex.models_rust \
+            --cov=brutex.config.hardware_envelope \
+            --cov=brutex.config.hardware_envelope_rust \
+            --cov=brutex.config.seam_core \
+            --cov=brutex.config.paths --cov=brutex.config.paths_rust \
+            --cov=brutex.config.dotenv --cov=brutex.config.dotenv_rust \
+            --cov=brutex.config.backup_env --cov=brutex.config.backup_env_rust \
+            --cov-branch \
+            --cov-report=term-missing --cov-fail-under=100
+
+      - name: Money family re-run VERBATIM with the seam ENGAGED (flag-ON twin)
+        env:
+          BRUTEX_CORE_RUST_MONEY: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_money.py \
+            tests/golden/test_money_rounding_golden.py
+
+      # The engine/CLI consumer files (test_cli_thread_bound.py +
+      # test_engine_sweep_mem_budget*.py) are DROPPED from this lane-local
+      # re-run — same wheel wall as above (module-scope brutex.cli /
+      # brutex.engine imports need trading_core + fno_math, absent here).
+      # They run flag-OFF in main CI; the flag-ON hwenv parity is carried by
+      # the facade suite's TestRealCrateParity + goldens + differential and
+      # the family re-run below.
+      - name: hwenv family re-run VERBATIM with the seam ENGAGED (flag-ON twin)
+        env:
+          BRUTEX_CORE_RUST_HWENV: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_hardware_envelope.py \
+            tests/unit/test_config_hardware_envelope.py \
+            tests/unit/test_hardware_envelope_fingerprint.py \
+            --deselect tests/unit/test_hardware_envelope.py::TestFortyEightGibRegressionPin
+
+      # The milestone-3 config families re-run VERBATIM with all three
+      # seams ENGAGED (independent flags — one combined leg; each facade
+      # suite's TestRealCrateParity carries the per-seam engagement spy +
+      # the hypothesis differential, so a silent degrade cannot go green).
+      - name: config families re-run VERBATIM with the m3 seams ENGAGED (flag-ON twin)
+        env:
+          BRUTEX_CORE_RUST_PATHS: "1"
+          BRUTEX_CORE_RUST_DOTENV: "1"
+          BRUTEX_CORE_RUST_BACKUPENV: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_config_seam_core.py \
+            tests/unit/test_config_paths.py \
+            tests/unit/test_config_paths_rust.py \
+            tests/unit/test_config_dotenv.py \
+            tests/unit/test_config_dotenv_rust.py \
+            tests/unit/test_backup_env.py \
+            tests/unit/test_backup_env_rust.py
+
+      # The T35 PR-2 models leg: the models family re-run VERBATIM with
+      # the tick-size seam ENGAGED (the facade suite's TestRealCrateParity
+      # carries the engagement spy + the 300-example hypothesis
+      # differential + the edge corpus, so a silent degrade cannot go
+      # green; the type-contract battery is flag-independent and pins the
+      # frozen enum/dataclass/exception semantics the pyclass-hoist NO-GO
+      # verdict rests on).
+      - name: models family re-run VERBATIM with the seam ENGAGED (flag-ON twin)
+        env:
+          BRUTEX_CORE_RUST_MODELS: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_models.py \
+            tests/unit/test_models_rust.py \
+            tests/unit/test_models_type_contract.py \
+            tests/golden/test_models_tick_size_golden.py

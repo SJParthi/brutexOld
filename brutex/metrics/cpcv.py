@@ -67,6 +67,11 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import TYPE_CHECKING, Final
 
+# The slice-6 Rust-statistics seam (DEC-METRICS-RUST-STATS-001). Imports only
+# stdlib + structlog at module scope (numpy stays lazy here), and its own
+# engine-flag import is lazy — no import-time cycle.
+from brutex.metrics import rust_stats
+
 if TYPE_CHECKING:
     # Imported lazily inside the functions that need it at runtime; kept out
     # of the module top level so the strict per-module coverage gate
@@ -351,12 +356,40 @@ def cpcv_splits(
     return splits
 
 
+def _fold_pass_count(
+    count: npt.NDArray[np.intp],
+    mean: npt.NDArray[np.float64],
+    m2: npt.NDArray[np.float64],
+    n_groups: int,
+    n_test_groups: int,
+    min_sharpe: float,
+) -> int:
+    """The pure-Python fold loop — the retained-forever parity oracle.
+
+    Moved VERBATIM from :func:`cpcv_pass_rate` (DEC-METRICS-RUST-STATS-001;
+    zero arithmetic change): one Chan/Pébay merge per
+    ``itertools.combinations`` fold, a pass iff the merged Sharpe is defined
+    and STRICTLY greater than ``min_sharpe``. Serves every call when the
+    ``BRUTEX_STATS_RUST`` flag is OFF (the default), every fallback when it
+    is ON, and the burn-in self-check compares — the operator-excepted
+    Python oracle is NEVER deleted.
+    """
+    n_pass = 0
+    for test_groups in combinations(range(n_groups), n_test_groups):
+        sharpe = _combine_moments(count, mean, m2, test_groups)
+        if sharpe is not None and sharpe > min_sharpe:
+            n_pass += 1
+    return n_pass
+
+
 def cpcv_pass_rate(
     returns: Sequence[float] | npt.NDArray[np.float64],
     *,
     n_groups: int = DEFAULT_N_GROUPS,
     n_test_groups: int = DEFAULT_N_TEST_GROUPS,
     min_sharpe: float = 0.0,
+    label_span: int = 0,
+    embargo: int = 0,
 ) -> float:
     """Fraction of CPCV test folds whose held-out Sharpe beats ``min_sharpe``.
 
@@ -371,8 +404,17 @@ def cpcv_pass_rate(
 
     The metric is evaluated on the **test** folds only; purging/embargo
     govern the *training* set (see :func:`cpcv_splits`) and so do not
-    change a test fold's return — they are exposed there for downstream
-    model-based callers.
+    change a test fold's return — the ``label_span``/``embargo`` kwargs
+    (DEC-CASCADE-STAT-TIER-WIRE-001) are therefore VALIDATED and
+    semantically declared, but **provably cannot change the returned
+    rate**: this model-free metric never constructs a training set, so
+    ``rate(embargo=0) == rate(embargo=k)`` for every valid ``k`` (the
+    invariance is pinned in ``tests/unit/test_cpcv.py`` — no illusion of
+    tightening from CPCV; the Stage-4 embargo genuinely bites at the
+    walk-forward filter instead). They exist here so the Stage-4 driver
+    threads ONE resolved embargo (the DEC-STAT-001 law, ``docs/MIGRATION.md``
+    entry #123) into both engines and a future model-based caller inherits
+    the declared, validated parameters.
 
     Returns a value in ``[0, 1]``: ``passing_folds / C(n_groups,
     n_test_groups)``. Computed in ``O(n)`` (one moments pass) plus
@@ -381,17 +423,38 @@ def cpcv_pass_rate(
     Raises
     ------
     ValueError
-        On an invalid returns series or invalid structural parameters.
+        On an invalid returns series or invalid structural parameters
+        (including a negative ``label_span``/``embargo`` —
+        :func:`_validate_params` bounds them at ``>= 0`` only, so a LARGE
+        embargo can never make a previously-valid call raise).
     """
     arr = _validate_returns(returns)
     n_samples = int(arr.size)
-    _validate_params(n_samples, n_groups, n_test_groups, label_span=0, embargo=0)
+    _validate_params(n_samples, n_groups, n_test_groups, label_span=label_span, embargo=embargo)
     bounds = _group_bounds(n_samples, n_groups)
     count, mean, m2 = _group_moments(arr, bounds)
-    n_pass = 0
     n_total = math.comb(n_groups, n_test_groups)
-    for test_groups in combinations(range(n_groups), n_test_groups):
-        sharpe = _combine_moments(count, mean, m2, test_groups)
-        if sharpe is not None and sharpe > min_sharpe:
-            n_pass += 1
+    n_pass: int | None = None
+    if rust_stats.stats_rust_enabled():
+        # The flag-gated Rust fold kernel (DEC-METRICS-RUST-STATS-001).
+        # ``None`` — latched / wheel-absent / kernel error / refused result /
+        # the min_sharpe exact-type+exactness domain refusal (foreign types,
+        # inexact or float-unconvertible ints, NaN) — falls through to the
+        # retained-forever Python oracle, and the flag resolution above
+        # degrades to the default (warn-once) when the engine package itself
+        # cannot import — so wheel state (fno_math OR trading_core) can never
+        # change results or error behaviour (within the documented exception
+        # envelope — the rust_stats module docstring).
+        n_pass = rust_stats.cpcv_pass_count_via_kernel(
+            count,
+            mean,
+            m2,
+            n_test_groups,
+            min_sharpe,
+            n_total=n_total,
+            oracle=lambda: _fold_pass_count(count, mean, m2, n_groups, n_test_groups, min_sharpe),
+        )
+    if n_pass is None:
+        n_pass = _fold_pass_count(count, mean, m2, n_groups, n_test_groups, min_sharpe)
+    # The one exact division — produced by the same expression on both arms.
     return n_pass / n_total

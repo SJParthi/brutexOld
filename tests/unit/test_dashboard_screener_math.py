@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess  # nosec B404 — fixed-argv node invocation, test-only
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -51,18 +52,32 @@ pytestmark = pytest.mark.skipif(_NODE is None, reason="node not installed")
 
 
 def _node_call(expr: str, *argv: str) -> Any:
-    """Run the REAL shipped bx-screener.js under node and return the JSON result."""
-    script = (
-        f"const S = require({json.dumps(str(_SCREENER_JS))});"
-        "const ARGS = process.argv.slice(1).map((a) => JSON.parse(a));"
-        f"console.log(JSON.stringify({expr}));"
-    )
-    proc = subprocess.run(  # nosec B603 — fixed argv, test-only
-        ["node", "-e", script, *argv],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    """Run the REAL shipped bx-screener.js under node and return the JSON result.
+
+    The JSON arguments are handed to node via TEMP FILES (node reads + parses
+    each), not the process argv — the full 100-row fixture payload now exceeds
+    the kernel's per-arg ``MAX_ARG_STRLEN`` (128 KiB) once every row carries its
+    resilience block, so a bare argv would raise ``Argument list too long``.
+    ``ARGS[i]`` stays the parsed value, so every call site is byte-unchanged.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        paths: list[str] = []
+        for i, arg in enumerate(argv):
+            path = Path(tmp) / f"arg{i}.json"
+            path.write_text(arg, encoding="utf-8")
+            paths.append(str(path))
+        script = (
+            f"const S = require({json.dumps(str(_SCREENER_JS))});"
+            "const fs = require('fs');"
+            "const ARGS = process.argv.slice(1).map((p) => JSON.parse(fs.readFileSync(p, 'utf8')));"
+            f"console.log(JSON.stringify({expr}));"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script, *paths],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
     return json.loads(proc.stdout)
 
 
@@ -493,3 +508,317 @@ class TestRenderCaps:
             " return [a.rows.length, a.null_vix_excluded]; })()"
         )
         assert out == [5000, 0]
+
+
+#: The executability fixture rows (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+_EXEC_ROWS: list[dict[str, Any]] = [
+    {
+        "rank": 1,
+        "metrics": {},
+        "options_exec": {"status": "priced", "net_after_cost_paisa": 64_206},
+    },
+    {
+        "rank": 2,
+        "metrics": {},
+        "options_exec": {"status": "priced", "net_after_cost_paisa": -4_000},
+    },
+    {
+        "rank": 3,
+        "metrics": {},
+        "options_exec": {"status": "not_priced", "reason": "not_in_replay_set"},
+    },
+    {"rank": 4, "metrics": {}},  # absent options_exec — the pre-change row
+    {
+        "rank": 5,
+        "metrics": {},
+        "options_exec": {"status": "priced", "net_after_cost_paisa": 0},
+    },  # zero net is NOT > 0
+]
+
+
+class TestExecutabilityFilter:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001` — the options_exec executability filter.
+
+    "priced" matches only rows whose additive options_exec object carries a
+    priced status; "positive" additionally requires net_after_cost_paisa > 0;
+    a row WITHOUT the options_exec key NEVER matches an active filter (the
+    absent-key law — a pre-change artifact filters to empty, never to a
+    fabricated verdict); "" (All) matches everything.
+    """
+
+    def _kept_ranks(self, executability: str) -> list[int]:
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1]).rows.map((r) => r.rank)",
+            json.dumps(_EXEC_ROWS),
+            json.dumps({"executability": executability}),
+        )
+        assert isinstance(out, list)
+        return out
+
+    def test_blank_filter_matches_everything(self) -> None:
+        assert self._kept_ranks("") == [1, 2, 3, 4, 5]
+
+    def test_priced_matches_only_priced_status_rows(self) -> None:
+        # not_priced (3) and absent-key (4) both drop — key presence alone is
+        # NOT a priced verdict.
+        assert self._kept_ranks("priced") == [1, 2, 5]
+
+    def test_positive_requires_priced_and_strictly_positive_net(self) -> None:
+        # Negative (2), unpriced (3), absent (4) and ZERO net (5) all drop.
+        assert self._kept_ranks("positive") == [1]
+
+    def test_absent_key_never_matches_either_active_filter(self) -> None:
+        for mode in ("priced", "positive"):
+            assert 4 not in self._kept_ranks(mode), mode
+        assert 4 in self._kept_ranks("")
+
+    def test_non_numeric_net_never_matches_positive(self) -> None:
+        """A string net (out-of-contract) is a definitive non-match — the
+        filter demands typeof number, never a coerced comparison."""
+        rows = [
+            {
+                "rank": 1,
+                "metrics": {},
+                "options_exec": {"status": "priced", "net_after_cost_paisa": "500"},
+            }
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1]).rows.map((r) => r.rank)",
+            json.dumps(rows),
+            json.dumps({"executability": "positive"}),
+        )
+        assert out == []
+
+    def test_filter_row_predicate_direct(self) -> None:
+        """The exported bxFilterRow itself pins the three-value contract."""
+        out = _node_call(
+            "ARGS[0].map((c) => S.filterRow(c.row, c.filters))",
+            json.dumps(
+                [
+                    {"row": _EXEC_ROWS[0], "filters": {"executability": "positive"}},
+                    {"row": _EXEC_ROWS[3], "filters": {"executability": "priced"}},
+                    {"row": _EXEC_ROWS[3], "filters": {}},
+                ]
+            ),
+        )
+        assert out == [True, False, True]
+
+
+class TestExecColumnsConfig:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001` — the two exec-verdict columns are
+    config-driven off BXScreener.COLUMNS (dotted paths into the additive
+    objects; a pre-change artifact renders "—" via the absent-key law)."""
+
+    def test_columns_config_carries_the_two_exec_columns(self) -> None:
+        cols = _node_call("S.COLUMNS")
+        keys = [c["key"] for c in cols]
+        opt = cols[keys.index("options_exec.net_after_cost_paisa")]
+        assert opt == {
+            "key": "options_exec.net_after_cost_paisa",
+            "label": "Opt net",
+            "type": "num",
+            "money": True,
+            "explain": "options_net_after_cost",
+        }
+        fut = cols[keys.index("futures_exec.net_pnl_paisa")]
+        assert fut == {
+            "key": "futures_exec.net_pnl_paisa",
+            "label": "Fut net",
+            "type": "num",
+            "money": True,
+            "explain": "futures_net",
+        }
+        # Placed together right after the tier column: DEC-RANKING-SPLUS-TIER-001
+        # (#2063) inserts tier.status_text between cascade.status_text and the two
+        # exec columns (test_columns_config_carries_the_tier_column pins
+        # tier.status_text == cascade.status_text + 1).
+        assert keys.index("options_exec.net_after_cost_paisa") == keys.index("tier.status_text") + 1
+        assert keys.index("futures_exec.net_pnl_paisa") == (
+            keys.index("options_exec.net_after_cost_paisa") + 1
+        )
+
+    def test_absent_key_cell_reads_undefined_for_the_dash_render(self) -> None:
+        """The dotted path over a pre-change row yields undefined (JSON null
+        through the harness) — the str-cell fallback renders "—"."""
+        out = _node_call(
+            '["options_exec.net_after_cost_paisa", "futures_exec.net_pnl_paisa"]'
+            ".map((k) => S.fieldValue(ARGS[0], k) === undefined)",
+            json.dumps({"rank": 1, "metrics": {}}),
+        )
+        assert out == [True, True]
+
+
+class TestTrustFilterFloors:
+    """DEC-RESULTS-TRUST-HONESTY-001 · B2a — the min_trades / min_dsr floors."""
+
+    def test_min_trades_floor(self) -> None:
+        rows = [
+            {"rank": 1, "metrics": {"trades": 10}},
+            {"rank": 2, "metrics": {"trades": 60}},
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"min_trades": 30}),
+        )
+        assert [r["rank"] for r in out["rows"]] == [2]
+
+    def test_min_dsr_floor_and_missing_value_excluded(self) -> None:
+        """A row without metrics.dsr cannot demonstrate an ACTIVE floor —
+        excluded from that filtered view only (the tuple-N label law: the
+        floored figure is the stored per-tuple DSR)."""
+        rows = [
+            {"rank": 1, "metrics": {"dsr": 0.97}},
+            {"rank": 2, "metrics": {"dsr": 0.10}},
+            {"rank": 3, "metrics": {}},
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"min_dsr": 0.5}),
+        )
+        assert [r["rank"] for r in out["rows"]] == [1]
+        # No active floor keeps every row (a null/absent filter never excludes).
+        out_all = _node_call("S.applyFilters(ARGS[0], ARGS[1])", json.dumps(rows), json.dumps({}))
+        assert [r["rank"] for r in out_all["rows"]] == [1, 2, 3]
+
+    def test_boundary_at_floor_is_kept(self) -> None:
+        rows = [{"rank": 1, "metrics": {"trades": 30, "dsr": 0.5}}]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"min_trades": 30, "min_dsr": 0.5}),
+        )
+        assert [r["rank"] for r in out["rows"]] == [1]
+
+    def test_dsr_column_is_tuple_n_labeled(self) -> None:
+        """The screener DSR column header carries the tuple-N honesty label."""
+        cols = _node_call("S.COLUMNS")
+        by_key = {c["key"]: c["label"] for c in cols}
+        assert by_key["metrics.dsr"] == "DSR (tuple-N)"
+
+
+class TestResilienceColumnConflationDead:
+    """FIX 1 (R4): the longest-by-COUNT vs worst-by-₹ conflation is dead on the
+    /screener COLUMNS config too — node-executed over the REAL shipped
+    ``BXScreener.COLUMNS`` (not a source-string read), so a relabel regression
+    that reintroduces the ambiguous bare "Worst streak" by-count label, or drops
+    the worst-by-₹ run's OWN length column, FAILS here.
+
+    The canonical distinction (must hold on EVERY surface): "longest/max cold
+    streak" is measured BY COUNT (``metrics.max_consecutive_losses``); the
+    "worst streak (by ₹)" is a DIFFERENT, commonly SHORTER run whose own length
+    is ``resilience.worst_streak_len``. A trader must never read "the longest
+    streak (N losses) cost ₹X".
+    """
+
+    def _labels_by_key(self) -> dict[str, str]:
+        cols = _node_call("S.COLUMNS")
+        return {c["key"]: c["label"] for c in cols}
+
+    def test_by_count_column_reads_by_count_never_bare_worst_streak(self) -> None:
+        labels = self._labels_by_key()
+        by_count = labels["metrics.max_consecutive_losses"]
+        # Reads clearly BY COUNT (fails-before: the bare "Worst streak" label).
+        assert by_count == "Longest streak (count)"
+        assert "count" in by_count.lower()
+        # No column may carry the bare, ambiguous "Worst streak" label (the ₹
+        # column is the distinct "Worst streak ₹") — that bare label is exactly
+        # what let a trader read the by-count run as the run that cost the ₹.
+        assert "Worst streak" not in list(labels.values())
+
+    def test_worst_by_rupee_run_shows_its_own_length_beside_the_cost(self) -> None:
+        cols = _node_call("S.COLUMNS.map((c) => c.key)")
+        # The ₹ column and its OWN-length column both exist...
+        assert "resilience.worst_streak_len" in cols
+        assert "resilience.worst_streak_pnl_paisa" in cols
+        len_i = cols.index("resilience.worst_streak_len")
+        pnl_i = cols.index("resilience.worst_streak_pnl_paisa")
+        # ...and the length sits IMMEDIATELY beside the ₹ (adjacent columns), so
+        # the ₹ is self-attributing to its own (shorter) run.
+        assert abs(len_i - pnl_i) == 1
+        labels = self._labels_by_key()
+        assert labels["resilience.worst_streak_len"] == "Worst streak len"
+        assert labels["resilience.worst_streak_pnl_paisa"] == "Worst streak ₹"
+
+    def test_every_resilience_column_has_a_distinct_unambiguous_label(self) -> None:
+        labels = list(self._labels_by_key().values())
+        # No two columns share a label (the by-count / by-₹ pair are distinct).
+        assert len(labels) == len(set(labels))
+
+
+class TestTierFilter:
+    """DEC-RANKING-SPLUS-TIER-001 — the tier column + exact-match filter.
+
+    The instrument law verbatim: the column is config-driven off
+    BXScreener.COLUMNS (tier.status_text — SERVER-built prose, never
+    composed in JS); the filter exact-matches the LABEL token; a row
+    WITHOUT the additive tier object (or with a null label — judged "not
+    tiered") never matches an ACTIVE filter, and the page only offers
+    options harvested from rows carrying a non-null label.
+    """
+
+    def test_columns_config_carries_the_tier_column(self) -> None:
+        cols = _node_call("S.COLUMNS")
+        keys = [c["key"] for c in cols]
+        assert "tier.status_text" in keys
+        col = cols[keys.index("tier.status_text")]
+        assert col == {
+            "key": "tier.status_text",
+            "label": "Tier",
+            "type": "str",
+            "explain": "tier",
+        }
+        # Beside the cascade verdict (the statistical-quality block).
+        assert keys.index("tier.status_text") == keys.index("cascade.status_text") + 1
+
+    def test_matching_tier_filter_keeps_only_labelled_rows(self) -> None:
+        rows = [
+            {"rank": 1, "tier": {"label": "S+", "blocked_next": []}, "metrics": {}},
+            {"rank": 2, "tier": {"label": "A", "blocked_next": ["min_trades"]}, "metrics": {}},
+            {"rank": 3, "tier": {"label": None, "blocked_next": ["win_rate"]}, "metrics": {}},
+            {"rank": 4, "metrics": {}},  # a pre-tier artifact row
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"tier": "S+"}),
+        )
+        assert [r["rank"] for r in out["rows"]] == [1]
+
+    def test_absent_or_null_label_row_never_matches_an_active_filter(self) -> None:
+        rows = [
+            {"rank": 1, "tier": {"label": None, "blocked_next": []}, "metrics": {}},
+            {"rank": 2, "metrics": {}},
+            {"rank": 3, "tier": "junk-shape", "metrics": {}},
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(rows),
+            json.dumps({"tier": "A"}),
+        )
+        assert out["rows"] == []
+
+    def test_inactive_tier_filter_keeps_every_row(self) -> None:
+        rows = [
+            {"rank": 1, "tier": {"label": "S", "blocked_next": []}, "metrics": {}},
+            {"rank": 2, "metrics": {}},
+        ]
+        out = _node_call("S.applyFilters(ARGS[0], ARGS[1])", json.dumps(rows), json.dumps({}))
+        assert [r["rank"] for r in out["rows"]] == [1, 2]
+
+    def test_tier_status_text_sorts_with_nulls_last(self) -> None:
+        rows = [
+            {"rank": 1, "metrics": {}},  # absent → sorts LAST
+            {
+                "rank": 2,
+                "tier": {"status_text": "S+ — exceptional (all axes passed)"},
+                "metrics": {},
+            },
+            {"rank": 3, "tier": {"status_text": "A — blocked from S: min_trades"}, "metrics": {}},
+        ]
+        out = _node_call(
+            'S.sortRows(ARGS[0], "tier.status_text", "str", "asc")',
+            json.dumps(rows),
+        )
+        assert [r["rank"] for r in out] == [3, 2, 1]

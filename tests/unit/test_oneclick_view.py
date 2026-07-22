@@ -179,6 +179,23 @@ class TestBuildTop100Payload:
         assert payload["empty_note"] is None
         assert payload["rows"][0]["metrics"]["sharpe"] == 1.0000000000000002  # untouched
 
+    def test_resilience_block_passes_through_untouched(self) -> None:
+        """The sibling resilience block is a top-level entry key the reader
+        boundary never maps — it reaches the wire byte-for-byte (full
+        precision), so the /strategy panel + /screener read row.resilience.*."""
+        resilience = {
+            "stats_live": True,
+            "losing_streak_p95": 4,
+            "worst_streak_pnl_pct": -12.5,
+            "longest_underwater_days": 30,
+            "win_rate_by_year": {"2024": [30, 50]},
+        }
+        rows = ({"rank": 1, "metrics": {"max_consecutive_losses": 5}, "resilience": resilience},)
+        payload = ov.build_top100_payload(
+            "r-x", Top100Result("ok", rows, "", "1:1"), fixture_root_active=False
+        )
+        assert payload["rows"][0]["resilience"] == resilience  # untouched, full precision
+
     def test_valid_empty_gets_the_honest_note(self) -> None:
         payload = ov.build_top100_payload(
             "r-x", Top100Result("ok", (), "", "1:1"), fixture_root_active=False
@@ -666,3 +683,111 @@ class TestTop100PayloadCascadeJoin:
         result = Top100Result("ok", (), "", "1:2", "min_dd_first")
         payload = ov.build_top100_payload("r1", result, fixture_root_active=False)
         assert payload["cascade_join"] is None
+
+
+class TestBuildBaselinePayload:
+    """B1 (DEC-RESULTS-TRUST-HONESTY-001): the stored series served VERBATIM."""
+
+    @staticmethod
+    def _ok_result() -> Any:
+        from datetime import date
+        from decimal import Decimal
+
+        from brutex.dashboard.oneclick_artifacts import BaselineResult
+        from brutex.engine.baseline import BaselineSeries
+
+        series = BaselineSeries(
+            instrument="NSE-NIFTY",
+            start=date(2024, 1, 5),
+            end=date(2024, 1, 8),
+            anchor_open=Decimal("100.00"),
+            sessions=(
+                (date(2024, 1, 5), Decimal("101.00")),
+                (date(2024, 1, 8), Decimal("103.00")),
+            ),
+            total_return_pct=3.0031218374618234,
+            source_note="computed from the sweep's own bars",
+        )
+        return BaselineResult(
+            "ok",
+            "NSE-NIFTY",
+            "baseline-NSE-NIFTY.json",
+            series,
+            ("NSE-NIFTY",),
+            "",
+            "1:2",
+        )
+
+    def test_ok_arm_serves_exact_stored_values(self) -> None:
+        payload = ov.build_baseline_payload("r-x", self._ok_result(), fixture_root_active=False)
+        assert payload["status"] == "ok"
+        assert payload["run_id"] == "r-x"
+        assert payload["instrument"] == "NSE-NIFTY"
+        assert payload["filename"] == "baseline-NSE-NIFTY.json"
+        assert payload["instruments"] == ["NSE-NIFTY"]
+        assert payload["anchor_open"] == "100.00"  # the exact 2-dp price STRING
+        assert payload["start"] == "2024-01-05"
+        assert payload["end"] == "2024-01-08"
+        assert payload["sessions"] == [["2024-01-05", "101.00"], ["2024-01-08", "103.00"]]
+        # Full precision, never rounded (CLAUDE.md §4 — a statistical figure).
+        assert payload["total_return_pct"] == 3.0031218374618234
+        assert payload["source_note"] == "computed from the sweep's own bars"
+        assert payload["detail"] == ""
+        assert payload["revision"] == "1:2"
+        assert payload["fixture_root_active"] is False
+
+    def test_non_ok_arm_keeps_series_keys_null(self) -> None:
+        from brutex.dashboard.oneclick_artifacts import BaselineResult
+
+        result = BaselineResult(
+            "awaiting", None, None, None, ("NSE-NIFTY", "BSE-SENSEX"), "instrument required", None
+        )
+        payload = ov.build_baseline_payload("r-x", result, fixture_root_active=True)
+        assert payload["status"] == "awaiting"
+        assert payload["instrument"] is None
+        assert payload["instruments"] == ["NSE-NIFTY", "BSE-SENSEX"]
+        for key in ("anchor_open", "start", "end", "sessions", "total_return_pct", "source_note"):
+            assert payload[key] is None, key
+        assert payload["detail"] == "instrument required"
+        assert payload["fixture_root_active"] is True
+
+
+class TestTierStatusText:
+    """DEC-RANKING-SPLUS-TIER-001: the ONE server-built tier display string."""
+
+    def test_splus_reads_exceptional(self) -> None:
+        assert ov.tier_status_text("S+") == "S+ — exceptional (all axes passed)"
+        # An S+ verdict carries no blockers by construction; a defensive
+        # blocked list on the wire never changes the S+ copy.
+        assert ov.tier_status_text("S+", blocked_next=("junk",)) == (
+            "S+ — exceptional (all axes passed)"
+        )
+
+    def test_s_names_the_splus_blockers(self) -> None:
+        assert ov.tier_status_text("S", blocked_next=("win_rate", "stop_too_wide")) == (
+            "S — blocked from S+: win_rate, stop_too_wide"
+        )
+
+    def test_a_names_the_s_blockers(self) -> None:
+        assert ov.tier_status_text("A", blocked_next=("min_trades",)) == (
+            "A — blocked from S: min_trades"
+        )
+
+    def test_bare_labels_without_blockers(self) -> None:
+        assert ov.tier_status_text("S") == "S"
+        assert ov.tier_status_text("A") == "A"
+
+    def test_null_label_reads_not_tiered(self) -> None:
+        assert ov.tier_status_text(None) == "not tiered"
+        assert ov.tier_status_text(None, blocked_next=("expectancy_headroom",)) == (
+            "not tiered — blocked from A: expectancy_headroom"
+        )
+
+    def test_unknown_label_reads_the_honest_dash(self) -> None:
+        assert ov.tier_status_text("B") == "—"
+        assert ov.tier_status_text("splus") == "—"
+
+    def test_gross_note_is_the_one_pinned_constant(self) -> None:
+        # The persistent honesty chip: templates render THIS constant
+        # verbatim (as its &amp; entity form) beside the tier.
+        assert ov.TIER_GROSS_NOTE == ("tier on gross signal P&L; worst-case-fill re-sim deferred")

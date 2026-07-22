@@ -51,36 +51,15 @@
   .topnav a:hover { color:var(--text-bright); }
   .ticker { padding:8px 24px; border-bottom:1px solid var(--border); font-size:12px;
     color:var(--muted); font-variant-numeric:tabular-nums; }
-  .strip { display:flex; align-items:center; gap:12px; padding:10px 24px; flex-wrap:wrap;
-    border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); }
   .oc-fixture-badge { padding:4px 10px; border:1.5px solid var(--purple); border-radius:6px;
     color:var(--purple); font-size:10.5px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
   .mode-btn { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
     padding:6px 12px; font:inherit; font-size:12px; font-weight:700; color:var(--text);
     background:var(--surface-2); }
-  .controls { display:flex; gap:12px; padding:14px 24px; border-bottom:1px solid var(--border);
-    flex-wrap:wrap; align-items:flex-end; }
-  .ctl { display:flex; flex-direction:column; gap:4px; }
-  .ctl label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
-  .ctl select, .ctl input {
-    background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
-    border-radius:var(--r-md); min-height:var(--ctl-h); padding:0 12px; font:inherit; font-size:13px;
-    color-scheme:dark; min-width:110px;
-  }
-  .count { padding:10px 24px; font-size:12px; color:var(--muted); }
-  .tablewrap { margin:0 24px 24px; background:var(--surface); border:1px solid var(--border);
-    border-radius:12px; overflow-x:auto; }
-  table { width:100%; border-collapse:collapse; font-size:12.5px; }
-  th, td { padding:9px 12px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
-  th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
-    cursor:pointer; user-select:none; position:sticky; top:0; background:var(--surface); }
-  tbody tr { cursor:pointer; }
-  tbody tr:hover { background:var(--surface-2); }
-  td.pos { color:var(--green-bright); }
-  td.neg { color:var(--red); }
-  .showall { margin:0 24px 24px; }
-  .showall button { cursor:pointer; border:1px dashed var(--border-strong); border-radius:var(--r-md);
-    padding:9px 16px; font:inherit; font-size:12px; color:var(--muted); background:transparent; }
+  /* The panel-component rules (.controls/.ctl/.count/.tablewrap/table/
+     .showall/.strip) moved to the SHARED /static/bx-oneclick-panels.css
+     under the .bx-scpanel scope (DEC-OPERATOR-PAGE-CONSOLIDATE-001) —
+     page chrome stays inline. */
   #bxTip { position:absolute; z-index:1200; max-width:340px; background:var(--surface-3);
     border:1px solid var(--border-strong); border-radius:8px; padding:8px 10px; font-size:12px;
     color:var(--text); box-shadow:var(--elev-2); pointer-events:none; }
@@ -91,11 +70,15 @@
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
 <link rel="stylesheet" href="/static/bx-design.css">
+<link rel="stylesheet" href="/static/bx-oneclick-panels.css">
 <script defer src="/static/bx-ui.js"></script>
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
+<script defer src="/static/bx-format.js"></script>
 <script defer src="/static/bx-screener.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
+<script defer src="/static/bx-portal-state.js"></script>
+<script defer src="/static/bx-screener-panel.js"></script>
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 </head>
@@ -121,6 +104,11 @@
   <!-- R36 "always visible" ticker strip (shared component — bx-oneclick.js) -->
   <div class="ticker"><span id="bxTickerStrip">sweep: — · no runs yet — awaiting real run artifact</span></div>
 
+  <!-- The winners PANEL block (DEC-OPERATOR-PAGE-CONSOLIDATE-001): markup
+       mirrored verbatim into v29's #ocWinnersSection — the hook-parity
+       fence asserts BOTH copies; wiring lives in the ONE shared
+       /static/bx-screener-panel.js (self-mounts on data-bx-autopanel). -->
+  <div class="bx-scpanel" data-bx-autopanel="screener">
   <div class="strip">
     <span>run <code id="scRunId">—</code></span>
     <span class="oc-fixture-badge" id="ocFixtureBadge" hidden>FIXTURE DATA — BRUTEX_ONECLICK_FIXTURE_ROOT active</span>
@@ -134,10 +122,23 @@
       <select id="scDir"><option value="">All</option></select></div>
     <div class="ctl"><label for="scInstrument">Instrument</label>
       <select id="scInstrument"><option value="">All</option></select></div>
+    <div class="ctl"><label for="scTierSel">Tier</label>
+      <select id="scTierSel"><option value="">All</option></select></div>
+    <!-- `DEC-OPTIONS-EXEC-FEEDBACK-001` executability selection: rows
+         without the additive options_exec object never match an active
+         filter (absent-key law — bx-screener.js bxFilterRow). -->
+    <div class="ctl"><label for="scExec">Executability</label>
+      <select id="scExec"><option value="">All</option>
+        <option value="priced">Options-priced</option>
+        <option value="positive">Net &gt; 0 after costs</option></select></div>
     <div class="ctl"><label for="scMinWin">Min win %</label>
       <input id="scMinWin" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scMinPf">Min PF</label>
       <input id="scMinPf" type="number" step="any" placeholder="any"></div>
+    <div class="ctl"><label for="scMinTrades">Min trades</label>
+      <input id="scMinTrades" type="number" step="1" placeholder="any"></div>
+    <div class="ctl"><label for="scMinDsr" title="floors the stored per-tuple DSR (tuple-N — an inflating under-count; DEC-RESULTS-TRUST-HONESTY-001)">Min DSR (tuple-N)</label>
+      <input id="scMinDsr" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scMaxDd">Max |DD| (paisa)</label>
       <input id="scMaxDd" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scVixLo">VIX band ≥</label>
@@ -152,10 +153,13 @@
        deliberately DIFFERS from /results (Rank-by metric, descending);
        loadRows fills the live preset via textContent — no sort is changed. -->
   <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
+  <!-- Legend (design-system depth law): every marker/suffix THIS page renders,
+       explained in one static muted line — honesty surfaces stay verbatim. -->
+  <div class="count" id="scLegend">legend: "—" = value absent from the run artifact (never fabricated) · "not stamped" = the run carries no VIX band (honest NULL, R31) · "×" joins a strategy's conditions · "▲/▼" = the active sort</div>
 
   <div id="scPanel"></div>
-  <div class="tablewrap">
-    <table id="scTable">
+  <div class="tablewrap bx-tablewrap">
+    <table id="scTable" class="bx-table">
       <thead><tr id="scHead"></tr></thead>
       <tbody id="scRows"></tbody>
     </table>
@@ -163,285 +167,15 @@
   <div class="showall" id="scShowAllWrap" hidden>
     <button id="scShowAll" type="button">show all rows (itself render-capped at 1000 — an oversized/corrupt artifact never freezes the tab)</button>
   </div>
+  </div>
 
   <div id="bxTip" hidden></div>
 
-<script>
-/* Strategy screener (DEC-OPERATOR-PAGE-REAL-001).
-   DOM LAW: rows/cells are built with document.createElement + textContent
-   ONLY — zero string-to-DOM sinks in this script (the movers COLS-array
-   STRUCTURE is adopted WITHOUT its innerHTML row builder, F-M1).
-   Sorting: BXScreener.compare (full-precision relational compare; every tie
-   breaks rank-ascending — a TOTAL order). Filtering: BXScreener.applyFilters
-   (a null-VIX-band row under an active band filter is EXCLUDED-but-COUNTED,
-   F-m3). Money cells render via BXExplain.paisaToRupees (exact integer
-   paisa→2dp rupees); metrics render full precision, NEVER re-rounded. */
-(function () {
-  'use strict';
-  /* A-r4 (DEC-ONECLICK-PERF-CLUB-001): every cap lives in BXScreener (ONE
-     source of truth, node-goldened) — 100 contract rows render directly;
-     the default view caps at RENDER_CAP, "Show all" itself is BOUNDED at
-     SHOW_ALL_CAP, and the loaded rows are input-capped at INPUT_CAP, so an
-     oversized/corrupt artifact (or a future path bypassing load_top100)
-     can never freeze the tab. Every truncation is NAMED on the count line. */
-  var state = {
-    runId: null,
-    rows: [],
-    rowCount: null,
-    inputDropped: 0,
-    sort: { field: 'rank', type: 'num', dir: 'asc' },
-    showAll: false
-  };
-
-  function byId(id) { return document.getElementById(id); }
-
-  function money(paisa) {
-    if (!window.BXExplain) { return '—'; }
-    var r = window.BXExplain.paisaToRupees(paisa);
-    if (r === null) { return '—'; }
-    return (Number(paisa) >= 0 ? '+₹' : '−₹') + r.replace(/^-/, '');
-  }
-
-  function cellText(row, col) {
-    var v = window.BXScreener.fieldValue(row, col.key);
-    if (col.key === 'conditions') {
-      return Array.isArray(v) ? v.join(' × ') : '—';
-    }
-    if (col.type === 'vix') {
-      /* [W3-R4]: the ONE shared compact band cell — a null-lo/hi writer band
-         reads "not stamped" (R31 honest NULL), never "null–null". */
-      return window.BXOneclick.vixBandCellText(v);
-    }
-    if (v === null || v === undefined) { return '—'; }
-    if (col.money) { return money(v); }
-    return String(v); // full precision — metrics are NEVER re-rounded (R27)
-  }
-
-  function buildHead() {
-    var head = byId('scHead');
-    while (head.firstChild) { head.removeChild(head.firstChild); }
-    var cols = window.BXScreener.COLUMNS;
-    for (var i = 0; i < cols.length; i++) {
-      var th = document.createElement('th');
-      th.setAttribute('data-field', cols[i].key);
-      th.setAttribute('data-type', cols[i].type);
-      th.setAttribute('data-explain', cols[i].explain);
-      var arrow = state.sort.field === cols[i].key ? (state.sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
-      th.textContent = cols[i].label + arrow;
-      head.appendChild(th);
-    }
-  }
-
-  function currentFilters() {
-    var num = function (id) {
-      var raw = (byId(id).value || '').trim();
-      return raw === '' ? null : Number(raw);
-    };
-    var filters = {};
-    var tf = byId('scTf').value;
-    if (tf) { filters.tf = [tf]; }
-    var dir = byId('scDir').value;
-    if (dir) { filters.direction = dir; }
-    var inst = byId('scInstrument').value;
-    if (inst) { filters.instrument = inst; }
-    var minWin = num('scMinWin');
-    if (minWin !== null) { filters.min_win_rate = minWin; }
-    var minPf = num('scMinPf');
-    if (minPf !== null) { filters.min_pf = minPf; }
-    var maxDd = num('scMaxDd');
-    if (maxDd !== null) { filters.max_abs_dd_paisa = maxDd; }
-    var lo = num('scVixLo');
-    if (lo !== null) { filters.vix_lo = lo; }
-    var hi = num('scVixHi');
-    if (hi !== null) { filters.vix_hi = hi; }
-    return filters;
-  }
-
-  function render() {
-    buildHead();
-    var applied = window.BXScreener.applyFilters(state.rows, currentFilters());
-    var sorted = window.BXScreener.sortRows(
-      applied.rows, state.sort.field, state.sort.type, state.sort.dir
-    );
-    var tbody = byId('scRows');
-    while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
-    var cap = window.BXScreener.renderCount(sorted.length, state.showAll);
-    var cols = window.BXScreener.COLUMNS;
-    for (var i = 0; i < cap; i++) {
-      var row = sorted[i];
-      var tr = document.createElement('tr');
-      tr.setAttribute('data-rank', String(row.rank));
-      for (var c = 0; c < cols.length; c++) {
-        var tdEl = document.createElement('td');
-        var text = cellText(row, cols[c]);
-        if (cols[c].money) {
-          var raw = window.BXScreener.fieldValue(row, cols[c].key);
-          if (typeof raw === 'number') { tdEl.className = raw < 0 ? 'neg' : 'pos'; }
-        }
-        tdEl.setAttribute('data-explain', cols[c].explain);
-        tdEl.textContent = text;
-        tr.appendChild(tdEl);
-      }
-      tbody.appendChild(tr);
-    }
-    var wrap = byId('scShowAllWrap');
-    wrap.hidden = state.showAll || sorted.length <= window.BXScreener.RENDER_CAP;
-    // Count line: the DENOMINATOR is the payload's row_count — never an
-    // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3);
-    // the NUMERATOR is the count actually RENDERED — when the render cap
-    // (default OR the bounded Show-all cap, A-r4) truncated the table the
-    // node-goldened bxCapNote says so ([W2-5] DEC-ONECLICK-TOP100-OBJECT-
-    // ROOT-001: "500 of 500 shown" over a 200-row table was a lie), and an
-    // input-capped out-of-contract payload is named by bxInputCapNote.
-    var total = state.rowCount === null ? '?' : String(state.rowCount);
-    var line = String(cap) + ' of ' + total + ' shown';
-    line += window.BXScreener.capNote(cap, sorted.length, state.showAll);
-    line += window.BXScreener.inputCapNote(
-      state.inputDropped, state.rows.length + state.inputDropped
-    );
-    if (applied.null_vix_excluded > 0) {
-      line += ' ' + window.BXScreener.nullVixNote(applied.null_vix_excluded);
-    }
-    byId('scCount').textContent = line;
-  }
-
-  function fillFilterOptions() {
-    var tfSeen = {};
-    var dirSeen = {};
-    var instSeen = {};
-    var tfSel = byId('scTf');
-    var dirSel = byId('scDir');
-    var instSel = byId('scInstrument');
-    for (var i = 0; i < state.rows.length; i++) {
-      tfSeen[String(state.rows[i].tf)] = true;
-      dirSeen[String(state.rows[i].direction)] = true;
-      /* Instrument options come ONLY from rows that CARRY the additive key —
-         a pre-instrument artifact offers no option, so the exact-match
-         filter can never go active against rows that cannot say. */
-      var inst = state.rows[i].instrument;
-      if (typeof inst === 'string' && inst !== '') { instSeen[inst] = true; }
-    }
-    function fill(sel, seen) {
-      while (sel.childNodes.length > 1) { sel.removeChild(sel.lastChild); }
-      var keys = Object.keys(seen).sort();
-      for (var k = 0; k < keys.length; k++) {
-        var opt = document.createElement('option');
-        opt.value = keys[k];
-        opt.textContent = keys[k];
-        sel.appendChild(opt);
-      }
-    }
-    fill(tfSel, tfSeen);
-    fill(dirSel, dirSeen);
-    fill(instSel, instSeen);
-  }
-
-  function loadRows(runId) {
-    state.runId = runId;
-    byId('scRunId').textContent = runId;
-    window.BXOneclick.oneshotFetch(
-      '/api/v1/oneclick/top100?run_id=' + encodeURIComponent(runId),
-      byId('scPanel'),
-      function (payload) {
-        var fx = byId('ocFixtureBadge');
-        if (fx) { fx.hidden = !payload.fixture_root_active; }
-        if (payload.status === 'ok' || payload.status === 'partial') {
-          // A-r4 input bound: rows past INPUT_CAP of an out-of-contract
-          // payload are cut HERE (named on the count line) so filter/sort/
-          // render work is bounded independent of payload trust.
-          var capped = window.BXScreener.inputCapRows(payload.rows || []);
-          state.rows = capped.rows;
-          state.inputDropped = capped.dropped;
-          state.rowCount = payload.row_count === undefined ? null : payload.row_count;
-          // [11] sort-basis label: name the ACTUAL artifact preset (fallback
-          // to the default name when the payload carries none) — label only.
-          byId('scSortBasis').textContent =
-            'sort basis: artifact preset '
-            + (typeof payload.preset === 'string' && payload.preset
-              ? payload.preset : 'min_dd_first (default)')
-            + ' — differs from /results (Rank-by metric, descending);'
-            + ' column clicks re-sort this page only';
-          byId('scDetail').textContent =
-            payload.status === 'partial'
-              ? 'PARTIAL artifact: ' + String(payload.detail)
-              : (payload.empty_note ? String(payload.empty_note) : 'top-100 artifact loaded');
-          fillFilterOptions();
-          render();
-        } else {
-          state.rows = [];
-          state.inputDropped = 0;
-          state.rowCount = null;
-          byId('scDetail').textContent = String(payload.detail || 'awaiting real run artifact');
-          render();
-        }
-      }
-    );
-  }
-
-  function init() {
-    buildHead();
-    // Delegated th-click sort (ONE listener — survives head rebuilds).
-    byId('scHead').addEventListener('click', function (ev) {
-      var th = ev.target.closest('th');
-      if (!th) { return; }
-      var field = th.getAttribute('data-field');
-      if (state.sort.field === field) {
-        state.sort.dir = state.sort.dir === 'asc' ? 'desc' : 'asc';
-      } else {
-        state.sort = { field: field, type: th.getAttribute('data-type'), dir: 'desc' };
-      }
-      render();
-    });
-    // Row click → the strategy page (≤2 clicks law, R36).
-    byId('scRows').addEventListener('click', function (ev) {
-      var tr = ev.target.closest('tr');
-      if (!tr || !state.runId) { return; }
-      window.location.href =
-        '/strategy?run_id=' + encodeURIComponent(state.runId) +
-        '&rank=' + encodeURIComponent(tr.getAttribute('data-rank') || '1');
-    });
-    // ~200 ms trailing-edge debounce on the eight filter inputs
-    // (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the
-    // v29.html/movers.html debounce precedent): a typing burst coalesces
-    // into ONE render instead of a full filter+sort+render per keystroke.
-    var renderDebounceTimer = null;
-    function renderDebounced() {
-      clearTimeout(renderDebounceTimer);
-      renderDebounceTimer = setTimeout(render, 200);
-    }
-    ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
-      byId(id).addEventListener('input', renderDebounced);
-    });
-    byId('scShowAll').addEventListener('click', function () {
-      state.showAll = true;
-      render();
-    });
-    var tip = byId('bxTip');
-    if (tip && window.BXExplain) {
-      window.BXExplain.bindExplainHover(document.body, tip);
-    }
-    // run_id from the query string wins; else the latest discovered run.
-    var params = new URLSearchParams(window.location.search);
-    var rid = params.get('run_id');
-    if (rid) {
-      loadRows(rid);
-    } else {
-      window.BXOneclick.oneshotFetch('/api/v1/oneclick/runs', byId('scPanel'), function (runs) {
-        if (runs.latest_run_id) {
-          loadRows(runs.latest_run_id);
-        } else {
-          byId('scDetail').textContent = String(runs.detail || 'awaiting real run artifact');
-        }
-      });
-    }
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-})();
-</script>
+<!-- The page wiring was ported into the shared
+     /static/bx-screener-panel.js (DEC-OPERATOR-PAGE-CONSOLIDATE-001):
+     the top100 load now rides the getTop100 promise memo (+ BXUI
+     skeleton/errorCard and a loadGen stale-response guard); it
+     self-mounts on the data-bx-autopanel="screener" attribute above
+     (?run_id= wins, else the latest discovered run). -->
 </body>
 </html>

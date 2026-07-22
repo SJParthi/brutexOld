@@ -22,11 +22,15 @@ import pytest
 from brutex.metrics.compute import ResultMetrics
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
 from brutex.ranking import (
+    GATE_CONSECUTIVE_LOSSES,
+    STREAK_DOOR_WLR_EXEMPT,
     OverfitGateConfig,
     RankedCombo,
     _zscores,
+    gate_reasons,
     passes_gates,
     rank_combos,
+    streak_door_threshold,
 )
 from brutex.ranking.overfit import (
     PoolDispersion,
@@ -76,6 +80,13 @@ def _m(**overrides: Any) -> ResultMetrics:
         "skewness": 0.0,
         "kurtosis": 0.0,
         "returns_std_dev": 0.0,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate consistent with the
+        # counts above (losing 20 / total 50); the Kelly pair defaults
+        # None (undefined) — override per test where the value matters.
+        "loss_rate": 0.4,
+        "kelly_fraction": None,
+        "log_growth_at_half_kelly": None,
     }
     base.update(overrides)
     return ResultMetrics(**base)
@@ -140,8 +151,129 @@ class TestPassesGates:
 
     def test_accept_exactly_max_consecutive_losses(self) -> None:
         # Boundary: max_consecutive_losses == 10 is the worst acceptable
-        # streak and must PASS — pins the `<=` against a `<` flip.
+        # streak and must PASS — pins the `<=` against a `<` flip. (Under the
+        # derived door the fixture's threshold is still 10: k99(50, 0.4) = 9
+        # floors at the legacy 10 — test_ranking_streaks pins the math.)
         assert passes_gates(_m(max_consecutive_losses=10)) is True
+
+
+# ────── Door 5 — the derived binomial-null streak door (DEC-METRICS-KELLY-GROWTH-001) ──────
+
+
+class TestStreakDoorDerived:
+    """The Door-5 re-derivation: ``max(10, k99)`` + the WLR >= 3.0 exemption.
+
+    The statistics itself (closed form vs the exact DP oracle) is pinned in
+    ``tests/unit/test_ranking_streaks.py``; here the DOOR composition —
+    threshold arms, the exemption union (a recorded lane choice), the
+    degenerate all-loss arm, the fail-closed loss_rate guard, and the
+    ONLY-LOOSENS law vs the legacy fixed-10 door.
+    """
+
+    def test_threshold_floors_at_legacy_ten(self) -> None:
+        # q = 0 → k99 = 0; q small → k99 < 10: both floor at the legacy 10 —
+        # the map's Interactions-cell justification (an unfloored door would
+        # TIGHTEN for high-win-rate combos, flipping the safe direction).
+        assert streak_door_threshold(50, 0.0) == 10
+        assert streak_door_threshold(50, 0.05) == 10
+        assert streak_door_threshold(50, 0.4) == 10  # k99 = 9, floored
+
+    def test_threshold_derives_above_floor(self) -> None:
+        # Hand-derived k99(30, 0.5) = 11 (audited in test_ranking_streaks).
+        assert streak_door_threshold(30, 0.5) == 11
+
+    def test_threshold_all_loss_degenerate_keeps_fixed_ten(self) -> None:
+        # loss_rate >= 1.0 is the quantile's refusal domain — the door keeps
+        # the FIXED legacy bound (a 100%-loss strategy must never ride its
+        # "expected" n-run through the door).
+        assert streak_door_threshold(200, 1.0) == 10
+        assert streak_door_threshold(200, 1.5) == 10
+
+    def test_loosened_streak_now_passes(self) -> None:
+        # FAILS-BEFORE evidence for the sanctioned re-derivation: an 11-loss
+        # streak over 30 trades at a 50% loss rate was REJECTED by the fixed
+        # 10 and is CONSISTENT with the strategy's own null (threshold 11).
+        m = _m(
+            total_trades=30,
+            winning_trades=15,
+            losing_trades=15,
+            loss_rate=0.5,
+            max_consecutive_losses=11,
+        )
+        assert passes_gates(m) is True
+        assert GATE_CONSECUTIVE_LOSSES not in gate_reasons(m)
+
+    def test_beyond_derived_threshold_rejects(self) -> None:
+        m = _m(
+            total_trades=30,
+            winning_trades=15,
+            losing_trades=15,
+            loss_rate=0.5,
+            max_consecutive_losses=12,
+        )
+        assert passes_gates(m) is False
+        assert GATE_CONSECUTIVE_LOSSES in gate_reasons(m)
+
+    def test_high_payoff_exemption_at_exactly_three(self) -> None:
+        # WLR == 3.0 exactly EXEMPTS (>= — the map-pinned bound), even a
+        # 20-loss streak; 3.0 − ulp does not.
+        assert passes_gates(_m(max_consecutive_losses=20, win_loss_ratio=3.0)) is True
+        below = math.nextafter(STREAK_DOOR_WLR_EXEMPT, 0.0)
+        assert passes_gates(_m(max_consecutive_losses=20, win_loss_ratio=below)) is False
+
+    def test_none_wlr_never_exempts(self) -> None:
+        # A None ratio never exempts (consistent with Door 4's None → 0.0
+        # projection); win_rate 0.6 keeps Door 4 itself green, so the reject
+        # is Door 5's alone.
+        m = _m(max_consecutive_losses=20, win_loss_ratio=None)
+        assert passes_gates(m) is False
+        assert gate_reasons(m) == (GATE_CONSECUTIVE_LOSSES,)
+
+    def test_all_loss_metrics_reject_past_fixed_ten(self) -> None:
+        m = _m(loss_rate=1.0, max_consecutive_losses=11)
+        assert passes_gates(m) is False
+        m10 = _m(loss_rate=1.0, max_consecutive_losses=10)
+        assert GATE_CONSECUTIVE_LOSSES not in gate_reasons(m10)
+
+    def test_nan_loss_rate_fails_closed(self) -> None:
+        # loss_rate rides the widened _junk_loss_rate guard arm: a NaN would
+        # silently corrupt the derived threshold, so the guard rejects up
+        # front.
+        m = _m(loss_rate=math.nan)
+        assert passes_gates(m) is False
+        assert gate_reasons(m) == ("non_finite_input",)
+
+    def test_inf_loss_rate_fails_closed(self) -> None:
+        m = _m(loss_rate=math.inf)
+        assert passes_gates(m) is False
+        assert gate_reasons(m) == ("non_finite_input",)
+
+    def test_type_illegal_none_loss_rate_fails_closed(self) -> None:
+        # Refuter round 1 (totality): loss_rate is NON-nullable, so None is
+        # junk — pre-fix both twins crashed with TypeError inside the derived
+        # Door-5 threshold; now the SAME fail-closed guard exit as NaN/inf.
+        m = _m(loss_rate=None)
+        assert passes_gates(m) is False
+        assert gate_reasons(m) == ("non_finite_input",)
+
+    def test_only_loosens_vs_the_legacy_fixed_door(self) -> None:
+        """The ONLY-LOOSENS law: every metrics row that passed the legacy
+        fixed-10 Door 5 passes the derived door — swept over streaks 0..10 ×
+        a loss-rate grid incl. both degenerate ends × None/low/high WLR
+        (gate_reasons isolates Door 5 from the other doors)."""
+        for streak in range(11):
+            for loss_rate in (0.0, 0.1, 0.5, 0.9, 1.0):
+                for wlr in (None, 0.5, 1.5, 3.5):
+                    m = _m(
+                        max_consecutive_losses=streak,
+                        loss_rate=loss_rate,
+                        win_loss_ratio=wlr,
+                    )
+                    assert GATE_CONSECUTIVE_LOSSES not in gate_reasons(m), (
+                        streak,
+                        loss_rate,
+                        wlr,
+                    )
 
 
 # ────── passes_gates — fail-closed on non-finite inputs (DEC-RANKING-TIEBREAK-001) ──────
@@ -255,6 +387,18 @@ class TestRankCombos:
         ]
         ranked = rank_combos(cand)
         assert len(ranked) == 2
+
+    def test_max_sl_hit_rate_knob_gates_the_survivor_pool(self) -> None:
+        """Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): an active
+        ceiling drops the over-ceiling AND the unmeasured (``None``) rows;
+        the default knob keeps every row (byte-identical pre-door)."""
+        cand = [
+            (1, _m(sl_hit_rate=0.2)),
+            (2, _m(sl_hit_rate=0.8)),
+            (3, _m(sl_hit_rate=None)),
+        ]
+        assert {rc.mask for rc in rank_combos(cand)} == {1, 2, 3}
+        assert {rc.mask for rc in rank_combos(cand, max_sl_hit_rate=0.5)} == {1}
 
 
 # ────── tie-break determinism (DEC-RANKING-TIEBREAK-001) ──────

@@ -14,14 +14,18 @@ envelope. These pins keep its safety properties from silently rotting:
   SUCCESS, hollowing the cron with no red anywhere (empirically verified
   to survive every other pin).
 * **Envelope honesty** — the workflow ASSERTS the 5 operator-envelope
-  checks stay SKIP-with-reason and all FOUR wheel handshakes stay PASS
-  (the two freshness checks + the two source-digest checks of
+  checks stay SKIP-with-reason, all FOUR required-wheel handshakes stay
+  PASS (the two freshness checks + the two source-digest checks of
   DEC-RUST-SOURCE-DIGEST-TWIN-001, classified into this contract by
   DEC-DOCTOR-DAILY-CHECKSET-9-001 after the live-proof run 28834010234
   red-flagged them exactly as designed — never fake-green, never quietly
-  hollow); the check-set contract
+  hollow), and the two OPTIONAL brutex_lake wheel stages stay
+  deterministic WARN (DEC-BRUTEX-LAKE-BOX-WHEEL-001, superseding-in-part
+  the 9-check set: the lake wheel is deliberately never installed
+  in-cron, so WARN is the asserted absent-wheel behavior — a PASS or
+  SKIP there reds); the check-set contract
   is TWO-sided: a MISSING/renamed name reds via the per-name asserts and
-  an ADDED check reds via the exact-9 row-count pin (a future check that
+  an ADDED check reds via the exact-11 row-count pin (a future check that
   fabricates PASS against the hermetic envelope can never sail through
   unclassified); ``--live`` (the sandbox-blind Mac kit) never runs;
   ``BRUTEX_SKIP_WHEEL_FRESHNESS`` is never set (the wheel handshakes are
@@ -143,6 +147,16 @@ EXPECTED_STATUSES = {
     # DEC-DOCTOR-DAILY-CHECKSET-9-001 after live-proof run 28834010234.
     "wheel_source_digest": "PASS",
     "wheel_source_digest_fno_math": "PASS",
+    # The two OPTIONAL brutex_lake wheel stages (DEC-BRUTEX-LAKE-BOX-WHEEL-001,
+    # superseding-in-part DEC-DOCTOR-DAILY-CHECKSET-9-001's 9-check set →
+    # 11): the lake wheel is deliberately NEVER installed in-cron (building
+    # it would risk the 30-min job timeout on a cold ~24-min-CPU polars
+    # source build), so the deterministic absent-wheel WARN is itself the
+    # asserted, proved behavior — a PASS would mean an in-cron install
+    # landed without reclassifying these rows, a SKIP would mean the
+    # BRUTEX_SKIP_WHEEL_FRESHNESS escape leaked; both red.
+    "wheel_freshness_brutex_lake": "WARN",
+    "wheel_source_digest_brutex_lake": "WARN",
 }
 
 
@@ -360,10 +374,10 @@ def test_both_wheels_installed() -> None:
 
 
 def test_envelope_honesty_contract_asserted() -> None:
-    """All 9 check verdicts are pinned: 5 SKIP-with-reason + 4 PASS.
+    """All 11 check verdicts are pinned: 5 SKIP-with-reason + 4 PASS + 2 WARN.
 
     Plus the TWO-sided check-set pin: the per-name asserts red a
-    REMOVED/RENAMED check, and the exact-9 row-count pin reds an ADDED
+    REMOVED/RENAMED check, and the exact-11 row-count pin reds an ADDED
     one (functionally proven by
     ``test_assert_step_reds_an_added_unclassified_check``).
     """
@@ -372,7 +386,7 @@ def test_envelope_honesty_contract_asserted() -> None:
         assert f"assert_status {name} {want}" in run, (
             f"envelope contract line for {name} -> {want} is missing"
         )
-    assert '"$n" -ne 9' in run, "the exact-9 check-row count pin is missing"
+    assert '"$n" -ne 11' in run, "the exact-11 check-row count pin is missing"
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +469,7 @@ def test_assert_step_reds_an_added_unclassified_check(tmp_path: Path) -> None:
     quietly SKIPs, hiding hollowed teeth) against the hermetic hosted
     envelope is the exact class the assert step exists to catch; without
     the row-count pin it would sail through green because the per-name
-    asserts only query the 9 listed names. Live-proven: run 28834010234
+    asserts only query the 11 listed names. Live-proven: run 28834010234
     red-flagged the two DEC-RUST-SOURCE-DIGEST-TWIN-001 checks that landed
     on main mid-flight, forcing DEC-DOCTOR-DAILY-CHECKSET-9-001's conscious
     reclassification — the exact designed behaviour.

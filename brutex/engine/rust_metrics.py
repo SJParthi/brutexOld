@@ -17,15 +17,17 @@ semantics lives next to that function in :mod:`brutex.engine.sweep_driver`
 
 :func:`sweep_rust_metrics_enabled` reads the env per call, exactly like the
 sibling :func:`brutex.engine.sweep_lookahead.sweep_lookahead_guard_enabled`
-(whose ``_TRUTHY`` / ``_FALSY`` literal sets are consumed through the
-PUBLIC :func:`~brutex.engine.sweep_lookahead.env_flag_tristate`
-classifier, not copied — CLAUDE.md §11 COMMON). Per-call resolution (one ``os.environ`` dict probe,
+(whose ``TRUTHY_LITERALS`` / ``FALSY_LITERALS`` literal sets — PROMOTED to
+the wheel-free :mod:`brutex.config.env_flags` leaf by
+DEC-PREBUILD-FRAME-WRITE-001 — are consumed through the PUBLIC
+:func:`~brutex.engine.sweep_lookahead.env_flag_tristate` re-export,
+not copied — CLAUDE.md §11 COMMON). Per-call resolution (one ``os.environ`` dict probe,
 ~0.1 µs against a multi-ms per-mask tail; pinned by the OFF-cost A/B bench)
 was chosen over a once-per-process memo so that (a) there is no
 module-global FLAG state, and (b) every ``sweep_parallel`` worker process
 reads its OWN inherited environment at call time — workers can never arm
-inconsistently from a parent-only resolution. Resolution: a ``_TRUTHY``
-value forces ON, a ``_FALSY`` value forces OFF (the explicit operator kill
+inconsistently from a parent-only resolution. Resolution: a ``TRUTHY_LITERALS``
+value forces ON, a ``FALSY_LITERALS`` value forces OFF (the explicit operator kill
 switch), unset/whitespace-empty falls to
 :data:`SWEEP_RUST_METRICS_DEFAULT`, and any OTHER (unrecognised) value
 fails SAFE to OFF with one warn-once ``flag_unrecognised`` event — under a
@@ -121,11 +123,12 @@ from typing import TYPE_CHECKING, Final, TypeGuard
 
 import structlog
 
-# The truthy + falsy literal sets are defined ONCE on the sibling sweep-flag
-# module (their vocabulary home) and consumed through its PUBLIC
-# ``env_flag_tristate`` classifier — the sweep env flags accept the identical
-# vocabulary with zero copied strip/lower/membership logic (CLAUDE.md §11
-# COMMON; reviewer-directed "import it, don't copy").
+# The truthy + falsy literal sets are defined ONCE in the wheel-free
+# ``brutex.config.env_flags`` leaf (their vocabulary home since
+# DEC-PREBUILD-FRAME-WRITE-001) and consumed through the sibling sweep-flag
+# module's PUBLIC ``env_flag_tristate`` re-export — the sweep env flags accept
+# the identical vocabulary with zero copied strip/lower/membership logic
+# (CLAUDE.md §11 COMMON; reviewer-directed "import it, don't copy").
 from brutex.engine.sweep_lookahead import env_flag_tristate
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -135,8 +138,8 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.engine.rust_metrics")
 
-#: The env flag. A ``_TRUTHY`` value forces the Rust metrics tail ON, a
-#: ``_FALSY`` value forces it OFF (the operator kill switch), unset/empty
+#: The env flag. A ``TRUTHY_LITERALS`` value forces the Rust metrics tail ON, a
+#: ``FALSY_LITERALS`` value forces it OFF (the operator kill switch), unset/empty
 #: falls to :data:`SWEEP_RUST_METRICS_DEFAULT`, and anything unrecognised
 #: fails SAFE to OFF with one warn-once ``flag_unrecognised`` event (a
 #: typo'd kill switch still kills under the default-ON kernel).
@@ -149,7 +152,7 @@ SWEEP_RUST_METRICS_ENV: Final[str] = "BRUTEX_SWEEP_RUST_METRICS"
 #: or whitespace-empty. ``True`` = the fused Rust drawdown
 #: kernel serves by default — bit-identical to the Python oracle inside the
 #: 2⁵² envelope, burn-in self-checked with the autorevert latch, and
-#: killable per process with ``BRUTEX_SWEEP_RUST_METRICS=0`` (the ``_FALSY``
+#: killable per process with ``BRUTEX_SWEEP_RUST_METRICS=0`` (the ``FALSY_LITERALS``
 #: operator kill switch). Revert = this ONE constant.
 SWEEP_RUST_METRICS_DEFAULT: Final[bool] = True
 
@@ -202,9 +205,9 @@ _KERNEL_DISABLED_REASON: Final[list[str | None]] = [None]
 def sweep_rust_metrics_enabled() -> bool:
     """Resolve the Rust-metrics flag over :data:`SWEEP_RUST_METRICS_DEFAULT`.
 
-    * a ``_TRUTHY`` value (``1`` / ``true`` / ``yes`` / ``on``,
+    * a ``TRUTHY_LITERALS`` value (``1`` / ``true`` / ``yes`` / ``on``,
       case-insensitive, surrounding whitespace ignored) → ``True``;
-    * a ``_FALSY`` value (``0`` / ``false`` / ``no`` / ``off``) → ``False``
+    * a ``FALSY_LITERALS`` value (``0`` / ``false`` / ``no`` / ``off``) → ``False``
       — the explicit operator kill switch, honoured regardless of the
       default;
     * unset or whitespace-empty → :data:`SWEEP_RUST_METRICS_DEFAULT` (the
@@ -212,13 +215,15 @@ def sweep_rust_metrics_enabled() -> bool:
     * any OTHER value → ``False`` with one warn-once ``flag_unrecognised``
       fallback event: the fail-safe is OFF — under a default-ON kernel a
       typo'd kill switch (``flase``, ``0ff``) must still KILL, never be
-      silently ignored. The ``_FALSY`` vocabulary is the RECOGNISED
+      silently ignored. The ``FALSY_LITERALS`` vocabulary is the RECOGNISED
       (silent) OFF; a garbage value's OFF is WARNED.
 
-    The vocabulary is the SAME ``_TRUTHY`` / ``_FALSY`` pair as the sweep
-    look-ahead guard flag, classified through the COMMON
-    :func:`brutex.engine.sweep_lookahead.env_flag_tristate` (this function
-    owns only the default + warn policy for the ``None`` verdict). Read per
+    The vocabulary is the SAME ``TRUTHY_LITERALS`` / ``FALSY_LITERALS``
+    pair as the sweep look-ahead guard flag (home:
+    :mod:`brutex.config.env_flags` since DEC-PREBUILD-FRAME-WRITE-001),
+    classified through the COMMON
+    :func:`brutex.engine.sweep_lookahead.env_flag_tristate` re-export (this
+    function owns only the default + warn policy for the ``None`` verdict). Read per
     call — see the module docstring for why (no global flag state; parallel
     workers read their own env).
     """

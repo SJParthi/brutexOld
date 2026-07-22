@@ -1,0 +1,193 @@
+{
+ "abstain": [
+  {
+   "allowed_mask": 5,
+   "block_event_days": true,
+   "confidence": [
+    "cdccccccccccec3f",
+    "000000000000e03f",
+    "000000000000f87f",
+    "666666666666e63f"
+   ],
+   "event_flags": [
+    0,
+    1,
+    0,
+    1
+   ],
+   "expected_masks": [
+    0,
+    29,
+    18,
+    9
+   ],
+   "hi": "0000000000003e40",
+   "lo": "0000000000002440",
+   "regimes": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "tau": "666666666666e63f",
+   "vix": [
+    "0000000000002840",
+    "000000000000f87f",
+    "0000000000004440",
+    "0000000000003440"
+   ]
+  },
+  {
+   "allowed_mask": 0,
+   "block_event_days": false,
+   "confidence": [
+    "000000000000f87f"
+   ],
+   "event_flags": [
+    0
+   ],
+   "expected_masks": [
+    1
+   ],
+   "hi": "000000000000f87f",
+   "lo": "000000000000f87f",
+   "regimes": [
+    0
+   ],
+   "tau": "000000000000f87f",
+   "vix": [
+    "000000000000f87f"
+   ]
+  },
+  {
+   "allowed_mask": 18446744073709551615,
+   "block_event_days": false,
+   "confidence": [
+    "666666666666e63f"
+   ],
+   "event_flags": [
+    1
+   ],
+   "expected_masks": [
+    1
+   ],
+   "hi": "0000000000002e40",
+   "lo": "0000000000002e40",
+   "regimes": [
+    70
+   ],
+   "tau": "666666666666e63f",
+   "vix": [
+    "0000000000002e40"
+   ]
+  }
+ ],
+ "note": "libm-bits residual: non-IEEE-exact scorer cases freeze the generating box's libm exp() bit patterns (glibc correctly-rounded exp assumption \u2014 the greeks_golden precedent); a libm change fails this golden loudly and any re-freeze is a conscious, ledgered act.",
+ "schema_version": 1,
+ "scorer": [
+  {
+   "bias": "0000000000000000",
+   "expected": [
+    "000000000000e03f"
+   ],
+   "features": [
+    "0000000000000000"
+   ],
+   "n_features": 1,
+   "weights": [
+    "000000000000f03f"
+   ]
+  },
+  {
+   "bias": "0000000000000000",
+   "expected": [
+    "000000000000f03f",
+    "0000000000000000"
+   ],
+   "features": [
+    "000000000000f03f",
+    "000000000000f0bf"
+   ],
+   "n_features": 1,
+   "weights": [
+    "0000000000408f40"
+   ]
+  },
+  {
+   "bias": "0000000000000000",
+   "expected": [
+    "000000000000f87f"
+   ],
+   "features": [
+    "000000000000f87f"
+   ],
+   "n_features": 1,
+   "weights": [
+    "000000000000f03f"
+   ]
+  },
+  {
+   "bias": "0000000000000000",
+   "expected": [
+    "000000000000e03f"
+   ],
+   "features": [
+    "0000000000000080"
+   ],
+   "n_features": 1,
+   "weights": [
+    "0000000000001440"
+   ]
+  },
+  {
+   "bias": "0000000000000000",
+   "expected": [
+    "000000000000e03f"
+   ],
+   "features": [
+    "000000000000f03f",
+    "000000000000f03f",
+    "000000000000f03f"
+   ],
+   "n_features": 3,
+   "weights": [
+    "0080e03779c34143",
+    "000000000000f03f",
+    "0080e03779c341c3"
+   ]
+  },
+  {
+   "bias": "9a9999999999b93f",
+   "expected": [
+    "96de1e4675d7d33f",
+    "bc4cef939a97d53f"
+   ],
+   "features": [
+    "000000000000e03f",
+    "000000000000f83f",
+    "00000000000000c0",
+    "000000000000d03f"
+   ],
+   "n_features": 2,
+   "weights": [
+    "333333333333d33f",
+    "666666666666e6bf"
+   ]
+  },
+  {
+   "bias": "9a9999999999c93f",
+   "expected": [
+    "05b56cbece8cdf3f"
+   ],
+   "features": [
+    "0000000000802b40",
+    "000000000000f03f"
+   ],
+   "n_features": 2,
+   "weights": [
+    "9a9999999999893f",
+    "9a9999999999d9bf"
+   ]
+  }
+ ]
+}

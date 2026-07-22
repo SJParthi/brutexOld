@@ -52,6 +52,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.engine.run_layout import run_dir
+from brutex.engine.sweep_ops_rust import routed_chain_link_state, sweep_ops_rust_enabled
 from brutex.observability.stage_stamp import StampVerdict
 
 _LOG = structlog.get_logger(__name__)
@@ -118,6 +119,59 @@ def _str_or_none(source: Mapping[str, object] | None, key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _link_state_python(
+    *,
+    link: str,
+    idx: int,
+    verdict_token: str | None,
+    running: bool,
+    last_stage: str | None,
+    terminal: str | None,
+    refusal_text: str | None,
+    error_type: str | None,
+) -> tuple[str, str]:
+    """The verbatim per-link priority ladder over PRIMITIVES — the LIVE oracle.
+
+    The DEC-RUST-SWEEP-OPS-001 oracle for ``routed_chain_link_state``:
+    :func:`_link_state`'s rules 1-5 with the mapping reads hoisted to the
+    wrapper (the T10-PR-2 sanctioned signature surgery — ``stamps.get`` +
+    the two ``_str_or_none`` reads are pure lookups, so hoisting them is
+    behavior-neutral and lets the burn-in compare LAWS, never mapping
+    access). Returns ``(state_token, detail)`` in the ``LinkState`` value
+    vocabulary; the ``or ""`` / ``or "unknown error"`` falsy laws are
+    verbatim (an EMPTY string falls back exactly like ``None``).
+    """
+    if verdict_token in ("hash_mismatch", "malformed"):
+        return (LinkState.RED.value, f"stamp {verdict_token}")
+    if running and link == last_stage:
+        return (LinkState.RUNNING.value, "in progress")
+    if verdict_token == "ok":  # noqa: S105 # nosec B105 — stamp verdict, not a secret
+        return (LinkState.GREEN.value, "stamp valid")
+    if running:
+        if last_stage is None:
+            return (LinkState.AMBER.value, "running; stage unknown")
+        if idx < LINKS.index(last_stage):
+            return (LinkState.GREEN.value, "completed (inferred)")
+        return (LinkState.PENDING.value, "not started")
+    if terminal in _COMPLETE_STATES:
+        return (LinkState.GREEN.value, "run complete")
+    if terminal == "refused":
+        if link == "preflight":
+            refusal = refusal_text or ""
+            return (LinkState.RED.value, f"refused: {refusal}")
+        return (LinkState.PENDING.value, "not started")
+    if terminal in _DEAD_STATES:
+        if last_stage is None:
+            return (LinkState.AMBER.value, f"run {terminal}; stage unknown")
+        if idx < LINKS.index(last_stage):
+            return (LinkState.GREEN.value, "completed (inferred)")
+        if link == last_stage:
+            error = error_type or "unknown error"
+            return (LinkState.RED.value, f"run {terminal} at this stage ({error})")
+        return (LinkState.PENDING.value, "not started")
+    return (LinkState.PENDING.value, "no evidence")
+
+
 def _link_state(
     *,
     link: str,
@@ -128,37 +182,47 @@ def _link_state(
     terminal: str | None,
     exit_status: Mapping[str, object] | None,
 ) -> tuple[LinkState, str]:
-    """Derive ONE link's state per the module's priority rules."""
+    """Derive ONE link's state per the module's priority rules.
+
+    Extracts the primitives ONCE (verdict token — a non-``StampVerdict``
+    mapping value reads as absent, exactly like the pre-extraction identity
+    compares — plus the refusal/error strings), then runs the ladder LAW:
+    the default-OFF DEC-RUST-SWEEP-OPS-001 routed seam with
+    :func:`_link_state_python` as the LIVE oracle (flag OFF = the verbatim
+    Python ladder).
+    """
     verdict = stamps.get(link)
-    if verdict is StampVerdict.HASH_MISMATCH or verdict is StampVerdict.MALFORMED:
-        return (LinkState.RED, f"stamp {verdict.value}")
-    if running and link == last_stage:
-        return (LinkState.RUNNING, "in progress")
-    if verdict is StampVerdict.OK:
-        return (LinkState.GREEN, "stamp valid")
-    if running:
-        if last_stage is None:
-            return (LinkState.AMBER, "running; stage unknown")
-        if idx < LINKS.index(last_stage):
-            return (LinkState.GREEN, "completed (inferred)")
-        return (LinkState.PENDING, "not started")
-    if terminal in _COMPLETE_STATES:
-        return (LinkState.GREEN, "run complete")
-    if terminal == "refused":
-        if link == "preflight":
-            refusal = _str_or_none(exit_status, "refusal_text") or ""
-            return (LinkState.RED, f"refused: {refusal}")
-        return (LinkState.PENDING, "not started")
-    if terminal in _DEAD_STATES:
-        if last_stage is None:
-            return (LinkState.AMBER, f"run {terminal}; stage unknown")
-        if idx < LINKS.index(last_stage):
-            return (LinkState.GREEN, "completed (inferred)")
-        if link == last_stage:
-            error_type = _str_or_none(exit_status, "error_type") or "unknown error"
-            return (LinkState.RED, f"run {terminal} at this stage ({error_type})")
-        return (LinkState.PENDING, "not started")
-    return (LinkState.PENDING, "no evidence")
+    verdict_token = verdict.value if isinstance(verdict, StampVerdict) else None
+    refusal_text = _str_or_none(exit_status, "refusal_text")
+    error_type = _str_or_none(exit_status, "error_type")
+
+    def _oracle() -> tuple[str, str]:
+        return _link_state_python(
+            link=link,
+            idx=idx,
+            verdict_token=verdict_token,
+            running=running,
+            last_stage=last_stage,
+            terminal=terminal,
+            refusal_text=refusal_text,
+            error_type=error_type,
+        )
+
+    if sweep_ops_rust_enabled():
+        state_token, detail = routed_chain_link_state(
+            link,
+            idx,
+            verdict_token,
+            running,
+            last_stage,
+            terminal,
+            refusal_text,
+            error_type,
+            python_law=_oracle,
+        )
+    else:
+        state_token, detail = _oracle()
+    return (LinkState(state_token), detail)
 
 
 def build_chain_map(

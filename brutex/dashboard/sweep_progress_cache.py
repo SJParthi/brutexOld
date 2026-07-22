@@ -15,8 +15,12 @@ moved a concurrent ``/api/v1/state`` poll from 9.1 ms to 1305.4 ms.
 
 This module is the sweep-progress twin of
 :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache` (the #1522
-precedent — TTL memo + deadline-guarded refresh + NON-BLOCKING single-flight),
-adapted to the progress file's own contract:
+precedent — TTL memo + deadline-guarded refresh + NON-BLOCKING single-flight);
+since fix 6b of DEC-MEMORY-FOOTPRINT-HARDENING-001 both twins DELEGATE the
+whole state machine to the ONE shared
+:class:`~brutex.dashboard.rate_bridge_cache.NonBlockingFileMemoBase`
+(byte-identical behaviour — this suite passed unmodified), adapted here to
+the progress file's own contract:
 
 * **TTL memo** — a repeat poll within :data:`SWEEP_PROGRESS_CACHE_TTL_S`
   (1 s, deliberately below the page's 2 s poll cadence) is a zero-syscall
@@ -71,19 +75,23 @@ Honest envelope (Golden Rule #10)
 
 from __future__ import annotations
 
-import functools
 import math
 import os
-import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
 import structlog
 
-from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
+from brutex.adapters.groww.deadline import run_with_deadline
+from brutex.dashboard.rate_bridge_cache import (
+    MEMO_SOURCE_CACHED,
+    MEMO_SOURCE_LIVE,
+    MEMO_SOURCE_UNVERIFIED,
+    NonBlockingFileMemoBase,
+)
 from brutex.engine import sweep_supervisor
 
 _LOG = structlog.get_logger("brutex.dashboard.sweep_progress_cache")
@@ -119,13 +127,15 @@ SWEEP_PROGRESS_TTL_ENV: Final[str] = "BRUTEX_SWEEP_PROGRESS_TTL_S"
 #: Env override for :data:`SWEEP_PROGRESS_READ_DEADLINE_S` (float > 0).
 SWEEP_PROGRESS_READ_DEADLINE_ENV: Final[str] = "BRUTEX_SWEEP_PROGRESS_READ_DEADLINE_S"
 
-#: This request's refresh COMPLETED within the deadline.
-PROGRESS_SOURCE_LIVE: Final[str] = "live"
+#: This request's refresh COMPLETED within the deadline. (Byte-identical
+#: aliases of the COMMON ``MEMO_SOURCE_*`` vocabulary the shared
+#: ``NonBlockingFileMemoBase`` serves — fix 6b.)
+PROGRESS_SOURCE_LIVE: Final[str] = MEMO_SOURCE_LIVE
 #: Served from the memo inside the TTL window — verification lag ≤ the TTL.
-PROGRESS_SOURCE_CACHED: Final[str] = "cached"
+PROGRESS_SOURCE_CACHED: Final[str] = MEMO_SOURCE_CACHED
 #: A refresh is in flight / wedged, or this owner's deadline expired — the
 #: served value is last-known and may lag arbitrarily (LABELLED, never silent).
-PROGRESS_SOURCE_UNVERIFIED: Final[str] = "unverified"
+PROGRESS_SOURCE_UNVERIFIED: Final[str] = MEMO_SOURCE_UNVERIFIED
 
 
 def resolve_sweep_progress_ttl_s(env: Mapping[str, str] | None = None) -> float:
@@ -249,12 +259,16 @@ def _stamp_progress_freshness(payload: dict[str, Any], result: ProgressReadResul
     )
 
 
-class SweepProgressCache:
+class SweepProgressCache(NonBlockingFileMemoBase[dict[str, Any]]):
     """TTL + deadline memo over the progress-file read, never blocking its caller.
 
     One instance per app (injected by ``build_app`` — no module-global mutable
     state, CLAUDE.md §4). Thread-safe: all state lives under ONE
     :class:`threading.Lock` held only for O(1) field ops, never across I/O.
+    The TTL / follower / owner state machine lives ONCE in the shared
+    :class:`~brutex.dashboard.rate_bridge_cache.NonBlockingFileMemoBase`
+    (fix 6b, DEC-MEMORY-FOOTPRINT-HARDENING-001 — the hand-copied twin is
+    gone; event names / payload keys / TTL + deadline envs byte-identical).
     See the module docstring for the full mechanism + honest envelope.
 
     Parameters
@@ -279,6 +293,10 @@ class SweepProgressCache:
         inject ``lambda fn, s: fn()`` for thread-free inline refreshes.
     """
 
+    _EVENT_PREFIX: ClassVar[str] = "sweep_progress_cache"
+    _TARGET_FIELD: ClassVar[str] = "path"
+    _FILE_NOUN: ClassVar[str] = "progress-file"
+
     def __init__(
         self,
         *,
@@ -288,27 +306,22 @@ class SweepProgressCache:
         reader: Callable[[Path], dict[str, Any]] | None = None,
         guard: Callable[[Callable[[], None], float], object] = run_with_deadline,
     ) -> None:
-        self._ttl_s = resolve_sweep_progress_ttl_s() if ttl_s is None else ttl_s
-        self._read_deadline_s = (
-            resolve_sweep_progress_read_deadline_s() if read_deadline_s is None else read_deadline_s
+        super().__init__(
+            ttl_s=resolve_sweep_progress_ttl_s() if ttl_s is None else ttl_s,
+            read_deadline_s=(
+                resolve_sweep_progress_read_deadline_s()
+                if read_deadline_s is None
+                else read_deadline_s
+            ),
+            clock=clock,
+            guard=guard,
+            log=_LOG,
         )
-        self._clock = clock
         self._reader = reader
-        self._guard = guard
-        self._lock = threading.Lock()
         self._payload: dict[str, Any] | None = None
-        #: Monotonic instant of the last COMPLETED refresh attempt (None = never).
-        self._probed_at: float | None = None
-        #: True while a refresh is running; cleared by the daemon's finally on
-        #: every path where the daemon RAN — or by the OWNER when the guard
-        #: raised BEFORE the daemon could run (thread exhaustion), so a spawn
-        #: failure can never wedge the cache (the #1522 MAJOR fold).
-        self._inflight = False
-        #: Once-per-outage log latch (WARN on the flip in, INFO on the flip out).
-        self._degraded = False
 
     def read(self, path: Path) -> dict[str, Any] | None:
-        """Return the stamped file-bridge payload for *path*, bounded, never raising.
+        """Return the stamped file-bridge payload for *path*, bounded.
 
         The ``file_read`` seam :meth:`DashboardState.sweep_progress_view
         <brutex.dashboard.app.DashboardState.sweep_progress_view>` accepts:
@@ -317,8 +330,14 @@ class SweepProgressCache:
         through to the in-process / idle arms" (missing file, or a cold-start
         wedge with nothing memoised). Bounded on every path — TTL hit and
         follower serves are O(1) in-memory, an owner refresh is capped by the
-        deadline guard. Only ``KeyboardInterrupt`` / ``SystemExit`` propagate
-        (with the single-flight flag released first).
+        deadline guard. Never raises EXCEPT ``KeyboardInterrupt`` /
+        ``SystemExit`` (with the single-flight flag released first) and the
+        fail-closed pull-state kernel errors below: the three-arm serve
+        DECISION now routes through :func:`brutex.pull_state_rust.
+        rust_memo_serve_arm` (via the shared
+        :meth:`~brutex.dashboard.rate_bridge_cache.NonBlockingFileMemoBase.
+        _serve_bounded`), so a wheel-absent/stale/poisoned kernel propagates
+        its typed error out of this read (DEC-RUST-PULL-STATE-001 flip phase).
 
         Parameters
         ----------
@@ -329,6 +348,15 @@ class SweepProgressCache:
         -------
         dict[str, Any] | None
             A stamped COPY of the file payload, or ``None``.
+
+        Raises
+        ------
+        brutex.pull_state_rust.PullStateKernelError
+            Wheel absent/stale, kernel raise, or a poisoned serve arm —
+            fail-closed; raised BEFORE the single-flight ``_inflight`` is
+            taken, so the single-flight state never leaks.
+        brutex.pull_state_rust.PullStateFlagRemovedError
+            The removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
         """
         result = self._read_result(path)
         if result.payload is None:
@@ -338,92 +366,15 @@ class SweepProgressCache:
         return out
 
     def _read_result(self, path: Path) -> ProgressReadResult:
-        """The three-arm cache core (TTL hit / non-blocking follower / owner refresh)."""
-        with self._lock:
-            now = self._clock()
-            age = None if self._probed_at is None else max(0.0, now - self._probed_at)
-            if age is not None and self._ttl_s > 0 and age < self._ttl_s:
-                # The zero-syscall O(1) hot path between refreshes.
-                return ProgressReadResult(self._payload, PROGRESS_SOURCE_CACHED, age)
-            if self._inflight:
-                # Non-blocking single-flight: NEVER wait on the in-flight
-                # refresh — serve last-known, honestly labelled.
-                return ProgressReadResult(self._payload, PROGRESS_SOURCE_UNVERIFIED, age)
-            self._inflight = True
-        try:
-            self._guard(functools.partial(self._refresh, path), self._read_deadline_s)
-        except DeadlineExceeded:
-            # The refresh daemon is wedged on the lake volume. Leave _inflight
-            # to the daemon's own finally (bounds abandoned daemons to ONE per
-            # outage; its eventual late return self-heals the memo) and serve
-            # the last-known value, labelled.
-            with self._lock:
-                first_flip = not self._degraded
-                self._degraded = True
-                payload = self._payload
-                probed_at = self._probed_at
-                now = self._clock()
-            if first_flip:
-                _LOG.warning(
-                    "sweep_progress_cache.read_degraded",
-                    path=str(path),
-                    deadline_s=self._read_deadline_s,
-                    detail=(
-                        "progress-file refresh blew its wall-clock deadline (a slow/"
-                        "stalled lake volume) — serving the last-known snapshot as "
-                        "'unverified' until the volume recovers"
-                    ),
-                )
-            probe_age = None if probed_at is None else max(0.0, now - probed_at)
-            return ProgressReadResult(payload, PROGRESS_SOURCE_UNVERIFIED, probe_age)
-        except Exception as exc:  # pylint: disable=broad-except — the poll route must never 500
-            # The guard failed BEFORE its refresh daemon could run (with the
-            # production run_with_deadline the only non-DeadlineExceeded raise
-            # is Thread.start() under thread/memory exhaustion — _refresh
-            # itself swallows every Exception), so NO daemon exists to clear
-            # _inflight: release it HERE, or the cache would latch
-            # 'unverified' forever with zero retries (the #1522
-            # hostile-review MAJOR, mirrored). With an INJECTED guard whose
-            # daemon DID run this re-clear is at worst an early release (one
-            # duplicate refresh, last-write-wins) — never a wedge.
-            with self._lock:
-                self._inflight = False
-                first_flip = not self._degraded
-                self._degraded = True
-                payload = self._payload
-                probed_at = self._probed_at
-                now = self._clock()
-            if first_flip:
-                _LOG.warning(
-                    "sweep_progress_cache.refresh_spawn_failed",
-                    path=str(path),
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                    detail=(
-                        "the deadline guard failed before the refresh daemon "
-                        "could run (thread/memory exhaustion) — serving the "
-                        "last-known snapshot as 'unverified'; the next poll "
-                        "retries the refresh"
-                    ),
-                )
-            probe_age = None if probed_at is None else max(0.0, now - probed_at)
-            return ProgressReadResult(payload, PROGRESS_SOURCE_UNVERIFIED, probe_age)
-        except BaseException:
-            # KeyboardInterrupt / SystemExit: NEVER swallowed — but the
-            # single-flight flag must not leak with them either (no daemon ran
-            # to clear it; see the Exception arm above).
-            with self._lock:
-                self._inflight = False
-            raise
-        with self._lock:
-            recovered = self._degraded
-            self._degraded = False
-            payload = self._payload
-        if recovered:
-            _LOG.info("sweep_progress_cache.read_recovered", path=str(path))
-        return ProgressReadResult(payload, PROGRESS_SOURCE_LIVE, 0.0)
+        """The three-arm cache core — delegates to the shared base (fix 6b)."""
+        payload, source, probe_age = self._serve_bounded(path)
+        return ProgressReadResult(payload, source, probe_age)
 
-    def _refresh(self, path: Path) -> None:
+    def _memo_value(self) -> dict[str, Any] | None:
+        """The memoised payload (called under the base's lock — plain read)."""
+        return self._payload
+
+    def _refresh_body(self, target: Path) -> None:
         """Run ONE exists+read refresh and commit it (runs on the guard's daemon).
 
         Preserves the direct view's file-arm contract byte-for-byte: a MISSING
@@ -432,35 +383,21 @@ class SweepProgressCache:
         read_progress`'s answer, whose OWN corrupt-file fallback is the idle
         dict. The commit is by side effect under the lock (last-write-wins —
         a LATE-returning wedged refresh still repairs the cache when the
-        volume recovers). A raising INJECTED reader (the production one never
-        raises by contract) is caught + WARNed, the memo kept, and
-        ``_probed_at`` STILL advanced so a persistent fast failure retries at
-        TTL cadence, never per poll. The ``finally`` clears ``_inflight`` on
-        EVERY path where this daemon ran.
+        volume recovers). The catch/finally discipline (raising injected
+        reader WARNed + memo kept + ``_probed_at`` advanced; ``_inflight``
+        cleared) lives ONCE in the shared base
+        (:meth:`~brutex.dashboard.rate_bridge_cache.NonBlockingFileMemoBase._refresh`).
         """
-        try:
-            if not path.exists():
-                payload: dict[str, Any] | None = None
-            else:
-                reader = self._reader
-                if reader is None:
-                    # LATE-BOUND module attribute — preserves the existing
-                    # monkeypatch.setattr("brutex.engine.sweep_supervisor.
-                    # read_progress", ...) seam (the #1522 precedent).
-                    reader = sweep_supervisor.read_progress
-                payload = reader(path)
-            with self._lock:
-                self._payload = payload
-                self._probed_at = self._clock()
-        except Exception as exc:  # pylint: disable=broad-except — an injected seam must never wedge the cache
-            _LOG.warning(
-                "sweep_progress_cache.refresh_failed",
-                path=str(path),
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            with self._lock:
-                self._probed_at = self._clock()
-        finally:
-            with self._lock:
-                self._inflight = False
+        if not target.exists():
+            payload: dict[str, Any] | None = None
+        else:
+            reader = self._reader
+            if reader is None:
+                # LATE-BOUND module attribute — preserves the existing
+                # monkeypatch.setattr("brutex.engine.sweep_supervisor.
+                # read_progress", ...) seam (the #1522 precedent).
+                reader = sweep_supervisor.read_progress
+            payload = reader(target)
+        with self._lock:
+            self._payload = payload
+            self._probed_at = self._clock()

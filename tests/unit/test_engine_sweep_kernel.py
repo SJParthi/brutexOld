@@ -47,7 +47,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.orchestrator.audit import AuditWriter
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import FibAnchorKind, PriceSource, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -215,15 +215,23 @@ class _FakeKernel:
         proximity: object,
         prior_n: int,
         fib_anchor: object,
+        vwap_source: object = PriceSource.HLC3,
+        ema_source: object = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
+        exec_bars_1m: object | None = None,
     ) -> None:
         self.bars = bars
         self.proximity = proximity
         self.prior_n = prior_n
         self.fib_anchor = fib_anchor
+        self.vwap_source = vwap_source
+        self.ema_source = ema_source
         self.roll_schedule = roll_schedule
         self.apply_1day_mask = apply_1day_mask
+        # DEC-FILL-EXEC-GRID-1M-001: the cache now threads the 1m execution
+        # stream to the builder on a miss — the fake mirrors the real ctor.
+        self.exec_bars_1m = exec_bars_1m
 
 
 def _fake_builder() -> tuple[list[int], object]:
@@ -236,8 +244,11 @@ def _fake_builder() -> tuple[list[int], object]:
         proximity: object,
         prior_n: int,
         fib_anchor: object,
+        vwap_source: object = PriceSource.HLC3,
+        ema_source: object = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
+        exec_bars_1m: object | None = None,
     ) -> _FakeKernel:
         calls.append(1)
         return _FakeKernel(
@@ -245,8 +256,11 @@ def _fake_builder() -> tuple[list[int], object]:
             proximity=proximity,
             prior_n=prior_n,
             fib_anchor=fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
+            exec_bars_1m=exec_bars_1m,
         )
 
     return calls, build
@@ -283,8 +297,13 @@ class TestResidentKernelCache:
             # bar_bits matrix is anchor-specific, so a different anchor must build
             # its own kernel, never reuse a stale one (R-1).
             {"fib_anchor": FibAnchorKind.ROLLING_WEEKLY},
-            # DEC-STAGE1A-ROLL-RESET-001: the ADR-0012 roll schedule is the 6th
-            # key slot — a long-lived daemon re-launching over a changed lake
+            # DEC-NIFTY-PRICE-SOURCE-AXIS-001: the VWAP / EMA price source is part
+            # of the key — bar_bits bits 52-53 / 0-5 are source-specific, so a
+            # different source must build its own kernel, never reuse a stale one.
+            {"vwap_source": PriceSource.OPEN},
+            {"ema_source": PriceSource.HLC3},
+            # DEC-STAGE1A-ROLL-RESET-001: the ADR-0012 roll schedule is a key
+            # slot — a long-lived daemon re-launching over a changed lake
             # must never serve a stale-schedule kernel (roll twin of R-1).
             {"roll_schedule": (739428, 739463)},
         ],
@@ -344,16 +363,28 @@ class TestRunPersistedSweepWithKernel:
     def test_kernel_path_matches_no_kernel_byte_for_byte(self, tmp_path: Path) -> None:
         bars = _trending_bars()
         cfg = _make_config()  # default min_hits = MIN_TRADES > 0 → prefilter runs
-        kernel = ResidentSweepKernel(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+        # DEC-FILL-EXEC-GRID-1M-001 tf==1minute fixed point: the SAME list is
+        # both the decision and the 1m execution stream.
+        kernel = ResidentSweepKernel(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, exec_bars_1m=bars
+        )
 
         store_a = ResultsStore(path=tmp_path / "a.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary_a = run_persisted_sweep(bars, cfg, store=store_a, dedup=_dedup(), audit=audit)
+            summary_a = run_persisted_sweep(
+                bars, cfg, store=store_a, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
 
         store_b = ResultsStore(path=tmp_path / "b.parquet")
         with AuditWriter.open(tmp_path / "b.jsonl") as audit:
             summary_b = run_persisted_sweep(
-                bars, cfg, store=store_b, dedup=_dedup(), audit=audit, kernel=kernel
+                bars,
+                cfg,
+                store=store_b,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+                kernel=kernel,
             )
 
         assert isinstance(summary_b, SweepRunSummary)
@@ -366,11 +397,20 @@ class TestRunPersistedSweepWithKernel:
         # min_hits=0 exercises the kernel branch that skips the Stage-1B count.
         bars = _trending_bars()
         cfg = _make_config(min_hits=0)
-        kernel = ResidentSweepKernel(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+        # tf==1minute fixed point (DEC-FILL-EXEC-GRID-1M-001): exec == decision.
+        kernel = ResidentSweepKernel(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, exec_bars_1m=bars
+        )
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             summary = run_persisted_sweep(
-                bars, cfg, store=store, dedup=_dedup(), audit=audit, kernel=kernel
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+                kernel=kernel,
             )
         assert isinstance(summary, SweepRunSummary)
         assert summary.evaluated == summary.enumerated  # nothing dedup/conflict pruned here
@@ -385,7 +425,13 @@ class TestRunPersistedSweepWithKernel:
             pytest.raises(ValueError, match="kernel has .* bars but .* bars were supplied"),
         ):
             run_persisted_sweep(
-                bars, _make_config(), store=store, dedup=_dedup(), audit=audit, kernel=kernel
+                bars,
+                _make_config(),
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+                kernel=kernel,
             )
 
 
@@ -431,15 +477,112 @@ class TestGridReuseBarBits:
         assert len(seen) == 8
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# kernel_columns — the W2 rider of DEC-STAGE1A-RUST-BATCH-001
-# ════════════════════════════════════════════════════════════════════════════
+class TestKernelPathMuhuratWeeklyAnchor:
+    """DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — resident-KERNEL-path coverage.
 
+    The crash-hardening completeness requirement: the Muhurat weekly-anchor
+    abstain guard must be proven on BOTH bar_bits build paths — the non-kernel
+    path (``build_bar_bits`` from ``sweep_run.py``, pinned in
+    ``tests/unit/test_engine_stage1a.py``) AND the resident-kernel path.
+    Structurally the kernel reaches anchors through the SAME seam
+    (``ResidentSweepKernel.__init__`` → :func:`build_bar_bits` →
+    ``Stage1AMatrixBuilder._compute_anchors`` — ``sweep_kernel.py``), so no
+    guard mirror is needed; these tests EXECUTE that path over a real Muhurat
+    window for both weekly anchors so the claim is proven, never inferred.
+    """
 
-class TestKernelColumns:
-    def test_kernel_columns_derived_once_and_memoised(
-        self, monkeypatch: pytest.MonkeyPatch
+    @staticmethod
+    def _muhurat_window() -> list[CandleBar]:
+        # The real 2024 boundary: a regular session (2024-10-31), the Muhurat
+        # evening session (2024-11-01, ~18:00 IST), the next regular session.
+        def day_bars(y: int, mo: int, d: int, hh: int, mm: int, base: float) -> list[CandleBar]:
+            return [
+                CandleBar(
+                    timestamp=datetime(y, mo, d, hh, mm + i, tzinfo=UTC),
+                    open=Decimal(str(base + i)),
+                    high=Decimal(str(base + i + 0.5)),
+                    low=Decimal(str(base + i - 0.5)),
+                    close=Decimal(str(base + i + 0.25)),
+                    volume=10,
+                    open_interest=None,
+                )
+                for i in range(4)
+            ]
+
+        return (
+            day_bars(2024, 10, 31, 3, 45, 100.0)  # 09:15 IST regular
+            + day_bars(2024, 11, 1, 12, 30, 104.0)  # ~18:00 IST Muhurat
+            + day_bars(2024, 11, 4, 3, 45, 105.0)  # next regular
+        )
+
+    @pytest.mark.parametrize("anchor", [FibAnchorKind.ROLLING_WEEKLY, FibAnchorKind.WEEKLY_STATIC])
+    def test_resident_kernel_builds_across_muhurat_with_weekly_anchor(
+        self, anchor: FibAnchorKind
     ) -> None:
+        # Pre-fix this CONSTRUCTION raised the weekly resolvers' ValueError
+        # ("not a trading day") out of build_bar_bits — the kernel path was
+        # exactly as exposed as the non-kernel path. Post-fix it completes,
+        # emits the one abstain WARN, and its bar_bits are bit-identical to
+        # the non-kernel build (the kernel is a cache, never a second math).
+        from brutex.engine.stage1a import _MUHURAT_WEEKLY_ANCHOR_EVENT, build_bar_bits
+        from structlog.testing import capture_logs
+
+        bars = self._muhurat_window()
+        with capture_logs() as logs:
+            kernel = ResidentSweepKernel(bars, fib_anchor=anchor)
+        warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["day"] == "2024-11-01"
+        assert kernel.bar_bits == build_bar_bits(bars, fib_anchor=anchor)
+
+    def test_resident_kernel_cache_get_across_muhurat_weekly_anchor(self) -> None:
+        # The production seam (`run_sweep_grid` threads ResidentKernelCache.get
+        # per tuple): a miss BUILDS across the Muhurat window without raising,
+        # and the subsequent hit reuses the kernel (no second Stage-1A build,
+        # no second WARN).
+        from brutex.engine.stage1a import _MUHURAT_WEEKLY_ANCHOR_EVENT
+        from structlog.testing import capture_logs
+
+        bars = self._muhurat_window()
+        cache = ResidentKernelCache(capacity=2)
+        with capture_logs() as logs:
+            first = cache.get(
+                bars,
+                instrument="NIFTY",
+                tf_label="1minute",
+                proximity=None,
+                prior_n=3,
+                fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+            )
+            again = cache.get(
+                bars,
+                instrument="NIFTY",
+                tf_label="1minute",
+                proximity=None,
+                prior_n=3,
+                fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+            )
+        assert again is first  # hit — built exactly once
+        assert cache.builds == 1 and cache.hits == 1
+        warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+        assert len(warns) == 1  # one WARN per Muhurat session, not per lookup
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# exec_columns — the W2 rider of DEC-STAGE1A-RUST-BATCH-001, rebased onto the
+# 1m EXECUTION stream by DEC-FILL-EXEC-GRID-1M-001 (was ``kernel_columns``)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestExecColumns:
+    def test_exec_columns_none_without_exec_stream(self) -> None:
+        # A legacy kernel built with no execution stream exposes None — the
+        # trade sim then derives its own columns locally.
+        kernel = ResidentSweepKernel(_trending_bars(n_days=1, per_day=10))
+        assert kernel.exec_bars_1m is None
+        assert kernel.exec_columns is None
+
+    def test_exec_columns_derived_once_and_memoised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # ONE derive_price_columns call per kernel lifetime (spy) — repeat
         # property reads are the memo handoff.
         from brutex.engine import sweep_kernel as sk_module
@@ -454,24 +597,30 @@ class TestKernelColumns:
 
         monkeypatch.setattr(sk_module, "derive_price_columns", _counting)
         bars = _trending_bars(n_days=2, per_day=10)
-        kernel = ResidentSweepKernel(bars)
+        # tf==1minute fixed point: exec stream == decision stream.
+        kernel = ResidentSweepKernel(bars, exec_bars_1m=bars)
         assert calls[0] == 0  # lazy: construction derives nothing
-        first = kernel.kernel_columns
-        second = kernel.kernel_columns
+        first = kernel.exec_columns
+        second = kernel.exec_columns
         assert calls[0] == 1
         assert first is second
-        # The columns equal a fresh module-level derivation (same seam).
+        # The columns equal a fresh module-level derivation (same seam), over
+        # the EXECUTION stream (here identical to the decision stream).
         assert first == real(bars)
 
-    def test_kernel_columns_feed_the_trade_sim_byte_identically(self) -> None:
+    def test_exec_columns_feed_the_trade_sim_byte_identically(self) -> None:
         from brutex.engine.rust_trade_sim import ResidentTradeSim
 
         bars = _trending_bars(n_days=2, per_day=10)
-        kernel = ResidentSweepKernel(bars)
+        kernel = ResidentSweepKernel(bars, exec_bars_1m=bars)
         injected = ResidentTradeSim(
-            bars, kernel.bar_bits, tf_minutes=1, precomputed_columns=kernel.kernel_columns
+            bars,
+            kernel.bar_bits,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            precomputed_columns=kernel.exec_columns,
         )
-        derived = ResidentTradeSim(bars, kernel.bar_bits, tf_minutes=1)
+        derived = ResidentTradeSim(bars, kernel.bar_bits, tf_minutes=1, exec_bars_1m=bars)
         assert (
             injected._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
             == derived._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]

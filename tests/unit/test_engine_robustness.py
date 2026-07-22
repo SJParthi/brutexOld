@@ -34,13 +34,20 @@ def _bar(minute: int, o: str, h: str, lo: str, c: str) -> CandleBar:
 
 
 def _session_bars() -> list[CandleBar]:
-    """A rising-then-falling 5-bar session (entry bar1 open 100.50 → exit 99.20)."""
+    """A rising-then-CRASHING 5-bar session under the one worst-case law.
+
+    Entries fill on bar1 at its adverse extreme (BUY @HIGH 102.00 / SELL
+    @LOW 100.00); end-of-data prices the last bar's adverse extreme (BUY
+    @LOW 95.00 / SELL @HIGH 96.30) — the tail crash is deep enough that the
+    short profits DESPITE the adverse entry+exit (+370p) while the long
+    loses (−700p).
+    """
     return [
         _bar(16, "100.00", "101.00", "99.50", "100.50"),
         _bar(17, "100.50", "102.00", "100.00", "101.50"),
         _bar(18, "101.50", "101.80", "100.20", "100.40"),
         _bar(19, "100.40", "100.90", "99.80", "100.10"),
-        _bar(20, "100.10", "100.30", "99.00", "99.20"),
+        _bar(20, "96.00", "96.30", "95.00", "95.20"),
     ]
 
 
@@ -70,23 +77,29 @@ class TestCpcvRobustness:
 
 
 class TestComboReturns:
+    # tf == 1minute FIXED POINT (DEC-FILL-EXEC-GRID-1M-001 design §6): the
+    # decision stream IS the execution stream — exec_bars_1m=bars everywhere
+    # (fills/timing PR-A-identical; no SL/TP here, so no same-bar deferral
+    # re-derivation is needed — end-of-data exits are unchanged).
     def test_empty_bars_raises(self) -> None:
         with pytest.raises(ValueError, match="bars must be non-empty"):
-            combo_returns([], 0, direction=Side.BUY, tf_minutes=1)
+            combo_returns([], 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])
 
     def test_buy_on_falling_tail_loses(self) -> None:
-        # mask=0 → one long held to end-of-data; the falling tail (entry 100.50 →
-        # exit 99.20) yields a single NEGATIVE per-trade return.
+        # mask=0 → one long held to end-of-data; the crashing tail (worst-case
+        # entry @HIGH 102.00 → exit @LOW 95.00) yields a single NEGATIVE return.
+        bars = _session_bars()
         rets = combo_returns(
-            _session_bars(), 0, direction=Side.BUY, tf_minutes=1, start_equity_paisa=1_000
+            bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, start_equity_paisa=1_000
         )
         assert len(rets) == 1
         assert rets[0] < 0.0
 
     def test_sell_on_falling_tail_profits(self) -> None:
         # The mirror short profits as price falls → a single POSITIVE return.
+        bars = _session_bars()
         rets = combo_returns(
-            _session_bars(), 0, direction=Side.SELL, tf_minutes=1, start_equity_paisa=1_000
+            bars, 0, direction=Side.SELL, tf_minutes=1, exec_bars_1m=bars, start_equity_paisa=1_000
         )
         assert len(rets) == 1
         assert rets[0] > 0.0
@@ -99,16 +112,26 @@ class TestComboReturns:
         bars = _session_bars()
         stale = (bars[0].timestamp.astimezone(_IST).date().toordinal() - 1,)
         with pytest.raises(ValueError, match="beyond the last roll_schedule expiry"):
-            combo_returns(bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=stale)
+            combo_returns(
+                bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, roll_schedule=stale
+            )
 
     def test_covering_schedule_and_defaults_stay_the_spot_path(self) -> None:
         bars = _session_bars()
         covering = (bars[-1].timestamp.astimezone(_IST).date().toordinal(),)
-        base = combo_returns(bars, 0, direction=Side.BUY, tf_minutes=1)
+        base = combo_returns(bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         explicit = combo_returns(
-            bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=None, apply_1day_mask=False
+            bars,
+            0,
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            roll_schedule=None,
+            apply_1day_mask=False,
         )
-        scheduled = combo_returns(bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=covering)
+        scheduled = combo_returns(
+            bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, roll_schedule=covering
+        )
         assert explicit == base  # the defaults ARE the spot path
         # A single covering contract has no roll boundary → same trades.
         assert scheduled == base

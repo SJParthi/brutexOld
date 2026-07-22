@@ -17,6 +17,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Final
 
+from brutex.models_rust import models_rust_enabled, route_normalise_tick_size
+
 # ────────────────────────────────────────────────────────────────────────
 # Enums — frozen taxonomy, every layer imports from here
 # ────────────────────────────────────────────────────────────────────────
@@ -297,11 +299,27 @@ def normalise_tick_size(raw: float | int | Decimal | str) -> Decimal:
     * ``int`` (or integer-valued float) in ``[1, 1000)`` → interpret as paise
     * After conversion, must be in :data:`VALID_TICK_SIZES_RUPEES`
 
+    When ``BRUTEX_CORE_RUST_MODELS`` is ON (default OFF — slice T35 PR-2)
+    the decision law routes through the ``rust/brutex-core`` crate via
+    :mod:`brutex.models_rust` (eligibility-gated, burn-in-checked,
+    fail-closed to this oracle); the flag-OFF default is the verbatim
+    Python law below, byte-identical and crate-untouched.
+
     Raises
     ------
     TickSizeFormatError
         If the input cannot be interpreted or the normalised value is not
         in the set of known-valid NSE/BSE tick sizes.
+    """
+    if not models_rust_enabled():
+        return _normalise_tick_size_python(raw)
+    return route_normalise_tick_size(raw, _normalise_tick_size_python, TickSizeFormatError)
+
+
+def _normalise_tick_size_python(raw: float | int | Decimal | str) -> Decimal:
+    """The verbatim CPython ``normalise_tick_size`` law — the seam's live
+    parity oracle (the Slice-0 extraction idiom; body byte-identical to the
+    pre-seam public function).
     """
     if isinstance(raw, Decimal):
         candidate = raw

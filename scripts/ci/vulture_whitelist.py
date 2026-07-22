@@ -39,3 +39,19 @@ _.__post_init__
 # test_audit_chain_properties.py (not yet by a CLI). Function exists at
 # brutex/orchestrator/audit.py:466.
 _.verify_chain
+
+# Protocol stub parameter (DEC-FEED-RUST-CORE-001): brutex/feed_rust.py's
+# _ScanKernel.__call__ mirrors the brutex_feed.scan_bars FFI signature; the
+# stub body never executes, so vulture reads the keyword-capable parameter
+# as an unused variable. The name is load-bearing documentation of the FFI
+# contract (and the real kernel is called with it positionally).
+_.screen_enabled
+
+# Protocol stub parameters (DEC-RUST-STAGE3-REFINE-001):
+# brutex/engine/refine_rust.py's RefineRuntime.RefineSession mirrors the
+# brutex_refine.RefineSession pyclass constructor signature; the stub body
+# never executes, so vulture reads the axis parameters as unused variables.
+# The names are load-bearing documentation of the FFI contract (the real
+# constructor is called with them by stage3_refine.refine_mask).
+_.sl_axis
+_.tp_axis

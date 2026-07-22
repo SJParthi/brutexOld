@@ -24,6 +24,7 @@ from brutex.ranking import (
     GATE_NON_FINITE_INPUT,
     GATE_PROFIT_FACTOR,
     GATE_REASON_ORDER,
+    GATE_SL_HIT_RATE,
     GATE_WIN_RATE_WLR,
     gate_reasons,
     passes_gates,
@@ -50,6 +51,7 @@ class TestVocabulary:
             "max_drawdown",
             "win_rate_wlr",
             "consecutive_losses",
+            "sl_hit_rate",
         )
 
     def test_tokens_match_their_constants(self) -> None:
@@ -59,6 +61,12 @@ class TestVocabulary:
         assert GATE_MAX_DRAWDOWN == "max_drawdown"
         assert GATE_WIN_RATE_WLR == "win_rate_wlr"
         assert GATE_CONSECUTIVE_LOSSES == "consecutive_losses"
+        assert GATE_SL_HIT_RATE == "sl_hit_rate"
+
+    def test_sl_hit_rate_token_is_appended_last(self) -> None:
+        """The wire vocabulary is append-only (Ruling 12): the Stage-B Door-6
+        token sits strictly LAST so pre-extension consumers' indices hold."""
+        assert GATE_REASON_ORDER[-1] == GATE_SL_HIT_RATE
 
     def test_no_duplicate_tokens(self) -> None:
         assert len(set(GATE_REASON_ORDER)) == len(GATE_REASON_ORDER)
@@ -218,6 +226,25 @@ class TestNonFiniteFailClosed:
         assert GATE_NON_FINITE_INPUT not in gate_reasons(m)
         _assert_twin_parity(m)
 
+    def test_type_illegal_none_loss_rate_fails_closed_no_crash(self) -> None:
+        """Refuter round 1 (totality): ``ResultMetrics.loss_rate`` is
+        NON-nullable, so a ``None`` there is JUNK — unlike the legitimately
+        nullable inputs above it takes the fail-closed guard exit. Pre-fix
+        both twins crashed with a ``TypeError`` inside the derived Door-5
+        threshold (``None >= 1.0``); now the gate FAILS with the guard token
+        alone (reasons non-empty, no crash) on BOTH twins."""
+        m = make_result_metrics(loss_rate=None)
+        assert gate_reasons(m) == (GATE_NON_FINITE_INPUT,)
+        assert passes_gates(m) is False
+        _assert_twin_parity(m)
+
+    def test_none_loss_rate_fails_closed_under_an_active_door6_knob_too(self) -> None:
+        """The junk-loss-rate guard is knob-independent — an active Door-6
+        ceiling changes the guard SCAN, never the loss-rate arm."""
+        m = make_result_metrics(loss_rate=None, sl_hit_rate=0.1)
+        assert gate_reasons(m, max_sl_hit_rate=0.5) == (GATE_NON_FINITE_INPUT,)
+        assert passes_gates(m, max_sl_hit_rate=0.5) is False
+
 
 class TestTwinWlrProjectionStructuralParity:
     """Structural twin-parity pins for the door-4 ``None`` → 0.0 projection.
@@ -275,6 +302,62 @@ class TestTwinWlrProjectionStructuralParity:
             assert isinstance(fallback, ast.Constant), func_name
             assert isinstance(fallback.value, float), func_name
             assert fallback.value == 0.0, func_name
+
+
+class TestDoor6SlHitRate:
+    """The opt-in Door-6 SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    Stage B) — knob semantics + twin parity + fail-closed absence."""
+
+    @staticmethod
+    def _assert_twin_parity(m: ResultMetrics, ceiling: float | None) -> None:
+        assert passes_gates(m, max_sl_hit_rate=ceiling) == (
+            gate_reasons(m, max_sl_hit_rate=ceiling) == ()
+        )
+
+    def test_none_knob_never_emits_the_token(self) -> None:
+        """The default knob is the pre-door behaviour — even a ceiling-busting
+        rate emits nothing (the door does not exist)."""
+        m = make_result_metrics(sl_hit_rate=0.99)
+        assert gate_reasons(m) == ()
+        assert passes_gates(m) is True
+
+    def test_none_knob_ignores_a_non_finite_sl_hit_rate(self) -> None:
+        """With the knob OFF, ``sl_hit_rate`` is not a gate input at all — a
+        NaN in it cannot trip the fail-closed guard (byte-identical pre-door)."""
+        m = make_result_metrics(sl_hit_rate=math.nan)
+        assert gate_reasons(m) == ()
+        assert passes_gates(m) is True
+
+    def test_above_ceiling_fails_with_the_token(self) -> None:
+        m = make_result_metrics(sl_hit_rate=0.51)
+        assert gate_reasons(m, max_sl_hit_rate=0.5) == (GATE_SL_HIT_RATE,)
+        self._assert_twin_parity(m, 0.5)
+
+    def test_at_ceiling_passes(self) -> None:
+        """The door is STRICTLY-above (``>``), so at-ceiling survives."""
+        m = make_result_metrics(sl_hit_rate=0.5)
+        assert gate_reasons(m, max_sl_hit_rate=0.5) == ()
+        assert passes_gates(m, max_sl_hit_rate=0.5) is True
+
+    def test_absent_rate_fails_closed_under_an_active_knob(self) -> None:
+        """An active gate never passes a row it cannot judge: ``sl_hit_rate``
+        ``None`` (a pre-extension row / counter-less caller) FAILS Door 6."""
+        m = make_result_metrics(sl_hit_rate=None)
+        assert gate_reasons(m, max_sl_hit_rate=0.5) == (GATE_SL_HIT_RATE,)
+        self._assert_twin_parity(m, 0.5)
+
+    def test_non_finite_rate_trips_the_guard_under_an_active_knob(self) -> None:
+        """With the knob ON, ``sl_hit_rate`` joins the fail-closed scan — a
+        NaN reports the guard token ALONE, never a fabricated door verdict."""
+        m = make_result_metrics(sl_hit_rate=math.nan)
+        assert gate_reasons(m, max_sl_hit_rate=0.5) == (GATE_NON_FINITE_INPUT,)
+        self._assert_twin_parity(m, 0.5)
+
+    def test_door_6_token_is_emitted_last_after_other_doors(self) -> None:
+        """Evaluation order: Door 6 is judged LAST, so its token trails."""
+        m = make_result_metrics(max_drawdown_pct=99.0, sl_hit_rate=0.9)
+        assert gate_reasons(m, max_sl_hit_rate=0.5) == (GATE_MAX_DRAWDOWN, GATE_SL_HIT_RATE)
+        self._assert_twin_parity(m, 0.5)
 
 
 class TestDeterminism:

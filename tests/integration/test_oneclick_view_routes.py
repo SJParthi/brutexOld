@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,6 +64,66 @@ def _template(name: str) -> str:
     text = (_TEMPLATES / name).read_text(encoding="utf-8")
     assert text, f"expected a non-empty template at {name}"
     return text
+
+
+def _static_js(name: str) -> str:
+    """Read a shared static JS module (DEC-OPERATOR-PAGE-CONSOLIDATE-001:
+    the screener/strategy page wiring moved VERBATIM out of the template
+    inline scripts into mountable modules — the pins below keep their
+    assertion text and only changed the file they grep)."""
+    text = (_STATIC / name).read_text(encoding="utf-8")
+    assert text, f"expected a non-empty static module at {name}"
+    return text
+
+
+class _MarkupHandlerScanner(HTMLParser):
+    """Collect every raw inline ``on*=`` handler attribute in real MARKUP.
+
+    CodeQL hardening (js/bad-tag-filter, code-scanning alert 1010): the
+    prior regex pair — strip ``<script…>…</script>`` blocks with
+    ``</script>`` spelled EXACTLY, then grep the remainder for handler
+    attributes — missed end-tag spelling variants (``</script >``,
+    ``</SCRIPT\\t>``, ``</script foo>``), so a variant-spelled end tag made
+    the non-greedy stripper run on to the NEXT real ``</script>`` and
+    over-strip genuine markup out of the scan. The stdlib
+    ``html.parser.HTMLParser`` does the tag grammar natively (the
+    frontend-latency suite precedent — its NIT-1 extractor carries the same
+    rationale): ``<script>`` bodies arrive via ``handle_data`` (script
+    CDATA content mode) and never surface as start tags, so JS comparisons
+    like ``a < b`` — and handler-shaped STRINGS inside a script body —
+    still cannot false-positive, while every end-tag spelling a browser
+    honours terminates the element (variant matrix pinned by
+    ``test_inline_handler_scan_catches_end_tag_spelling_variants``).
+    This is a TEST-side reader of our own trusted templates, never a
+    sanitizer. ``startswith("on")`` is deliberately BROADER than the
+    retired ``\\son[a-z]+\\s*=`` regex (valueless ``<img onerror>`` and
+    exotic handler spellings now flag too) — strictly stronger, corpus
+    re-verified zero-hit.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.handler_attrs: list[str] = []
+
+    def _scan_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, _value in attrs:
+            # HTMLParser lowercases attribute names, so ONCLICK= is covered.
+            if name.startswith("on") and len(name) > 2:
+                self.handler_attrs.append(f"<{tag} … {name}=…>")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._scan_tag(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._scan_tag(tag, attrs)
+
+
+def _inline_handler_attrs(html: str) -> list[str]:
+    """Every raw inline ``on*=`` handler attribute in ``html``'s markup."""
+    parser = _MarkupHandlerScanner()
+    parser.feed(html)
+    parser.close()
+    return parser.handler_attrs
 
 
 def _client_no_lake() -> TestClient:
@@ -127,8 +188,15 @@ class TestPagesServe:
         assert 'id="swConditions"' in html
         assert "disabled" in html.split('id="swConditions"')[1][:120]
         assert "condition-subset — not wired yet, lands at merge-integration" in html
-        # The preflight/estimator strip is HONEST about not being wired (P1).
-        assert "estimator not wired yet — lands at merge-integration (P1)" in html
+        # The preflight strip names the extinction default + the operative
+        # guard and deliberately shows NO fabricated time estimate
+        # (DEC-SWEEP-APRIORI-DEFAULT-001 — extinction depth is data-dependent;
+        # the old "estimator not wired yet" placeholder token is KILLED on
+        # this page, negative-pinned below).
+        assert "exploration: Apriori-to-extinction (default)" in html
+        assert "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS" in html
+        assert "No time estimate is shown" in html
+        assert "estimator not wired yet — lands at merge-integration (P1)" not in html
         # R3: the button never pulls — stated on the page.
         assert "this button NEVER pulls" in html or "NEVER pulls" in html
 
@@ -306,6 +374,8 @@ class TestOneclickSections:
             "r1_dsr",
             "r1_cpcv",
             "r1_vix_band",
+            "r1_worst_streak_pct",
+            "r1_uw_days",
             "actual_enumerated",
             "actual_tested",
             "actual_skipped",
@@ -332,13 +402,22 @@ class TestOneclickSections:
         assert 'href="/screener"' in html
 
     def test_v29_loads_the_oneclick_js_in_dependency_order(self) -> None:
+        """The original 5-file law + the DEC-OPERATOR-PAGE-CONSOLIDATE-001
+        extension (strictly stronger): the pure layers (bx-screener +
+        bx-portal-state) precede bx-oneclick; the panel modules and the
+        portal glue follow it."""
         html = _template("v29.html")
         order = [
             "/static/bx-ui.js",
             "/static/bx-poll.js",
             "/static/bx-explain.js",
             "/static/bx-chart.js",
+            "/static/bx-screener.js",
+            "/static/bx-portal-state.js",
             "/static/bx-oneclick.js",
+            "/static/bx-screener-panel.js",
+            "/static/bx-strategy-panel.js",
+            "/static/bx-operator-portal.js",
         ]
         positions = [html.index(src) for src in order]
         assert positions == sorted(positions), "one-click JS load order drifted"
@@ -357,38 +436,51 @@ class TestOneclickSections:
 
 class TestScreenerPage:
     def test_uses_the_one_shared_columns_config(self) -> None:
-        """§11 COMMON: the page consumes BXScreener.COLUMNS, no second list."""
+        """§11 COMMON: the panel consumes BXScreener.COLUMNS, no second list."""
+        js = _static_js("bx-screener-panel.js")
+        assert "BXScreener.COLUMNS" in js
         html = _template("screener.html")
-        assert "BXScreener.COLUMNS" in html
         assert "/static/bx-screener.js" in html
+        assert "/static/bx-screener-panel.js" in html
 
     def test_rows_are_createelement_only(self) -> None:
-        html = _template("screener.html")
-        assert "document.createElement('tr')" in html
-        assert "document.createElement('td')" in html
-        assert re.search(r"\.innerHTML\s*\+?=", html) is None
+        js = _static_js("bx-screener-panel.js")
+        assert "document.createElement('tr')" in js
+        assert "document.createElement('td')" in js
+        assert re.search(r"\.innerHTML\s*\+?=", js) is None
+        assert re.search(r"\.innerHTML\s*\+?=", _template("screener.html")) is None
 
     def test_count_line_uses_the_payload_row_count_denominator(self) -> None:
         """T-M2: never a hardcoded 100."""
-        html = _template("screener.html")
-        assert "state.rowCount" in html
-        assert "row_count" in html
-        assert "' of ' + total + ' shown'" in html
+        js = _static_js("bx-screener-panel.js")
+        assert "state.rowCount" in js
+        assert "row_count" in js
+        assert "' of ' + total + ' shown'" in js
 
     def test_count_line_numerator_is_the_rendered_count_naming_the_cap(self) -> None:
         """[W2-5] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: '500 of 500 shown' over
         a RENDER_CAP-truncated 200-row table was a lie — the numerator is now
         the count actually rendered and a capped table SAYS so."""
-        html = _template("screener.html")
-        assert "String(cap) + ' of ' + total + ' shown'" in html
-        assert "String(sorted.length) + ' of '" not in html  # the lying numerator is gone
-        # A-r4 (DEC-ONECLICK-PERF-CLUB-001): the cap/note math moved into the
-        # node-goldened BXScreener primitives — the page consumes them (the
-        # wording itself is pinned by test_dashboard_screener_math.py).
-        assert "window.BXScreener.renderCount(sorted.length, state.showAll)" in html
-        assert "window.BXScreener.capNote(cap, sorted.length, state.showAll)" in html
-        assert "window.BXScreener.inputCapNote(" in html
-        assert "window.BXScreener.inputCapRows(" in html
+        js = _static_js("bx-screener-panel.js")
+        assert "String(cap) + ' of ' + total + ' shown'" in js
+        assert "String(sorted.length) + ' of '" not in js  # the lying numerator is gone
+        # A-r4 (DEC-ONECLICK-PERF-CLUB-001): the cap/note math lives in the
+        # node-goldened BXScreener primitives — the shared panel consumes
+        # them (the wording itself is pinned by
+        # test_dashboard_screener_math.py). Re-pointed screener.html →
+        # bx-screener-panel.js at the DEC-OPERATOR-PAGE-CONSOLIDATE-001
+        # merge-reconcile (the IIFE moved into the panel, #1406 cap law
+        # ported with it).
+        assert "window.BXScreener.renderCount(sorted.length, state.showAll)" in js
+        # The count line composes the capNote/inputCapNote primitives via
+        # the node-goldened bxWinnersCountLine builder (its `screener`
+        # param IS window.BXScreener at the ONE render call site —
+        # executed-golden-proven in TestWinnersCountLine, stronger than a
+        # call-site string).
+        assert "line += screener.capNote(cap, sortedLen, showAll);" in js
+        assert "line += screener.inputCapNote(inputDropped, payloadLen);" in js
+        assert "applied.null_vix_excluded, window.BXScreener" in js
+        assert "window.BXScreener.inputCapRows(" in js
 
     def test_sort_basis_label_names_the_artifact_preset(self) -> None:
         """[11] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the visible sort-basis
@@ -399,32 +491,70 @@ class TestScreenerPage:
         assert "differs from /results (Rank-by metric, descending)" in html
 
     def test_null_vix_band_exclusion_is_counted(self) -> None:
-        html = _template("screener.html")
-        assert "null_vix_excluded" in html
-        assert "nullVixNote" in html
+        js = _static_js("bx-screener-panel.js")
+        assert "null_vix_excluded" in js
+        assert "nullVixNote" in js
 
     def test_row_click_reaches_the_strategy_page(self) -> None:
-        """≤2 clicks: Operator → Winners → strategy (R36)."""
-        html = _template("screener.html")
-        assert "/strategy?run_id=" in html
+        """≤2 clicks: Operator → Winners → strategy (R36). The href shape
+        lives in the ONE BXPortalState.strategyHref builder; the panel's
+        DEFAULT row click navigates through it."""
+        codec = _static_js("bx-portal-state.js")
+        assert "/strategy?run_id=" in codec
+        panel = _static_js("bx-screener-panel.js")
+        assert "window.BXPortalState.strategyHref" in panel
+        # The v29 drawer's open-full link consumes the SAME builder.
+        assert 'id="ocDrawerOpenFull"' in _template("v29.html")
+        assert "window.BXPortalState.strategyHref" in _static_js("bx-operator-portal.js")
 
     def test_render_cap_guard_present(self) -> None:
-        html = _template("screener.html")
-        assert "RENDER_CAP" in html
-        assert 'id="scShowAll"' in html
+        js = _static_js("bx-screener-panel.js")
+        assert "RENDER_CAP" in js
+        assert 'id="scShowAll"' in _template("screener.html")
 
     def test_ticker_strip_and_awaiting_state(self) -> None:
         html = _template("screener.html")
         assert 'id="bxTickerStrip"' in html
         assert _AWAITING in html
 
+    def test_resilience_columns_in_the_shared_config(self) -> None:
+        """The losing-streak resilience columns ride the ONE COLUMNS config
+        (dotted resilience.* / metrics.* keys — generic render, null → "—")."""
+        js = (_STATIC / "bx-screener.js").read_text(encoding="utf-8")
+        for key in (
+            "metrics.max_consecutive_losses",
+            "resilience.losing_streak_p95",
+            "resilience.worst_streak_len",
+            "resilience.worst_streak_pnl_paisa",
+            "resilience.longest_underwater_days",
+            "resilience.worst_loss_month_count",
+            "resilience.win_rate_year_spread",
+        ):
+            assert f'key: "{key}"' in js, key
+        # The worst-streak ₹ column formats via the money path (display 2dp).
+        assert (
+            '"resilience.worst_streak_pnl_paisa", label: "Worst streak ₹", type: "num", money: true'
+            in js
+        )
+        # FIX 1 (R4): the conflation is dead on /screener too. The by-COUNT
+        # column reads CLEARLY by count ("Longest streak (count)"), the worst
+        # streak BY ₹ carries its OWN run length ("Worst streak len") in the
+        # column immediately beside its ₹ — so a trader can never read "the
+        # longest streak (N losses) cost ₹X". The old bare, ambiguous "Worst
+        # streak" by-count label (which invited exactly that read) is GONE.
+        assert '"metrics.max_consecutive_losses", label: "Longest streak (count)"' in js
+        assert '"resilience.worst_streak_len", label: "Worst streak len"' in js
+        assert 'label: "Worst streak",' not in js
+
 
 class TestStrategyPage:
     def test_chart_first_layout_markers(self) -> None:
         html = _template("strategy.html")
         assert 'id="stChartHost"' in html
-        assert "/api/v1/db/candles" in html  # the EXISTING candles API
         assert "/static/bx-chart.js" in html
+        assert "/api/v1/db/candles" in _static_js(
+            "bx-strategy-panel.js"
+        )  # the EXISTING candles API
 
     def test_trades_section_is_inline_never_tab_gated(self) -> None:
         """F-M5: the trade table container renders at load — the page carries
@@ -436,80 +566,149 @@ class TestStrategyPage:
         assert "data-tab" not in html
 
     def test_trades_source_badge_visible(self) -> None:
-        """C-M5: the fixture/results_store source is a VISIBLE badge."""
+        """C-M5: the fixture/results_store source is a VISIBLE badge — under
+        the ONE renamed id (stTradesSource): v29 owns #ocTradesSource for its
+        rank-1 trades tab, and bx-oneclick writes THAT unconditionally, so
+        the strategy panel's badge carries its own st* id (the latent
+        cross-page stomp is dead)."""
         html = _template("strategy.html")
-        assert 'id="ocTradesSource"' in html
+        assert 'id="stTradesSource"' in html
+        assert 'id="ocTradesSource"' not in html  # the rename is total here
         assert "source: none" in html
+        assert "byId('stTradesSource')" in _static_js("bx-strategy-panel.js")
+        # The v29 drawer copy carries the SAME renamed badge (its own
+        # rank-1 #ocTradesSource stays, unstomped).
+        v29 = _template("v29.html")
+        assert 'id="stTradesSource"' in v29
+        assert 'id="ocTradesSource"' in v29  # the operator rank-1 badge remains
 
     def test_null_cost_rows_get_the_gross_equity_caveat(self) -> None:
         """[W2-4] DEC-ONECLICK-TOP100-OBJECT-ROOT-001: Ruling-18 null-cost
         rows render a LABELED gross curve on /strategy AND the operator page
         (never an empty chart / a mislabeled non-integer error)."""
-        html = _template("strategy.html")
-        assert "series.null_cost_rows" in html
-        assert "curve is gross of those costs" in html
+        panel = _static_js("bx-strategy-panel.js")
+        assert "series.null_cost_rows" in panel
+        assert "curve is gross of those costs" in panel
         js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "series.null_cost_rows" in js
         assert "curve is gross of those costs" in js
 
     def test_out_of_window_trade_drops_the_arrow_loudly(self) -> None:
         """F-B1: the -1 sentinel is honored — never a snapped wrong candle."""
-        html = _template("strategy.html")
-        assert "arrow.dropped" in html
-        assert "ARROW_DROPPED_NOTE" in html
+        panel = _static_js("bx-strategy-panel.js")
+        assert "arrow.dropped" in panel
+        assert "ARROW_DROPPED_NOTE" in panel
         js = (_STATIC / "bx-chart.js").read_text(encoding="utf-8")
         assert "trade outside chart window — widen range" in js
 
     def test_trade_centered_window(self) -> None:
-        """F-B1a: ?trade= centers the candle fetch on that trade's entry."""
-        html = _template("strategy.html")
-        assert "params.get('trade')" in html
-        assert "state.tradeIdx" in html
+        """F-B1a: ?trade= centers the candle fetch on that trade's entry
+        (the ?trade= parse lives in the pure BXPortalState codec)."""
+        assert "params.get('trade')" in _static_js("bx-portal-state.js")
+        assert "state.tradeIdx" in _static_js("bx-strategy-panel.js")
 
     def test_equity_curve_sources_are_honestly_labeled(self) -> None:
         """C-MINOR-7, superseded by DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item
         4C: the STORED minute-path series (the /api/v1/oneclick/equity route)
         renders when the sidecar exists, and the per-trade cumsum FALLBACK is
         relabeled so the smoother curve never masquerades as the minute path."""
-        html = _template("strategy.html")
-        assert "/api/v1/oneclick/equity" in html
-        assert "minute-path equity — the stored real series (R27)" in html
-        assert "per-trade close equity (minute-path unavailable for this run)" in html
+        panel = _static_js("bx-strategy-panel.js")
+        assert "/api/v1/oneclick/equity" in panel
+        assert "minute-path equity — the stored real series (R27)" in panel
+        assert "per-trade close equity (minute-path unavailable for this run)" in panel
         # The stale "lands with P3" deferral is DEAD — the route ships.
-        assert "minute-path equity lands with P3" not in html
+        assert "minute-path equity lands with P3" not in panel
         # Hostile-round fold: an ok-verdict sidecar with ZERO rows reads its
         # OWN honest label (empty-for-this-run ≠ unavailable).
-        assert "per-trade close equity (minute-path series empty for this run)" in html
-        assert "state.equityOkEmpty" in html
+        assert "per-trade close equity (minute-path series empty for this run)" in panel
+        assert "state.equityOkEmpty" in panel
         # Audit re-break MINOR: the per-trade fallback note total carries the
         # #12 gross/signal-only vocabulary — never a bare "net" claim.
-        assert "bits.push('gross signal ' + money(series.final_paisa));" in html
-        assert "bits.push('net ' + money(series.final_paisa));" not in html  # killed
+        assert "bits.push('gross signal ' + money(series.final_paisa));" in panel
+        assert "bits.push('net ' + money(series.final_paisa));" not in panel  # killed
+        # BOTH panel hosts exist — the strategy page AND the v29 drawer copy
+        # (the operator #ocEquityHost stays per-trade — the #48 ruling).
+        assert 'id="stEquityHost"' in _template("strategy.html")
+        v29 = _template("v29.html")
+        assert 'id="stEquityHost"' in v29
+        assert 'id="ocEquityHost"' in v29
 
     def test_vix_band_on_the_story_card(self) -> None:
         """R31 display duty — via the ONE shared builder ([W3-R4]): a
         null-lo/hi writer band reads the honest not-stamped copy, never
         "works when VIX between null–null"."""
-        html = _template("strategy.html")
-        assert 'id="stVixBand"' in html
-        assert "window.BXOneclick.vixBandText(row.vix_band)" in html
+        assert 'id="stVixBand"' in _template("strategy.html")
+        panel = _static_js("bx-strategy-panel.js")
+        assert "window.BXOneclick.vixBandText(row.vix_band)" in panel
+
+    def test_resilience_hero_panel_present_and_wired(self) -> None:
+        """The losing-streak resilience panel (DEC-RESILIENCE-STREAKS-001,
+        re-ported at the club-O merge-forward onto the
+        DEC-OPERATOR-PORTAL-REFOLD-001 extracted-panel layout): every cell
+        hook + the self-locate input in BOTH markup copies (strategy.html AND
+        the v29 #ocStrategyDrawer mirror — the hook-parity fence's twin-copy
+        law), and the ONE shared builder wiring in bx-strategy-panel.js
+        (textContent-only; no second inline copy anywhere)."""
+        page = _template("strategy.html")
+        v29 = _template("v29.html")
+        for html, where in ((page, "strategy.html"), (v29, "v29.html")):
+            assert 'aria-label="Losing-streak resilience"' in html, where
+            for hook in (
+                "stResWorstStreak",
+                "stResCost",
+                "stResUnderwater",
+                "stResWorstMonth",
+                "stResWinSpread",
+                "stResGuide",
+                "stResLossesIn",  # the pure-client "you are N losses in" input
+                "stResLocate",
+            ):
+                assert f'id="{hook}"' in html, f"{where}: {hook}"
+            # The honest signal-only / gross / per-unit caveat is on the panel.
+            assert "gross of brokerage &amp; taxes · per-unit (no sizing)" in html, where
+            # MINOR-1 (display honesty): the two cost/streak cells are DISTINCT
+            # runs — the by-COUNT cell keeps "Worst cold streak", the by-₹ cell
+            # is relabeled "Worst streak (by ₹)" (matching the CLI fix). The old
+            # anaphoric "That streak cost" header is GONE from every surface.
+            assert "Worst cold streak" in html, where
+            assert "Worst streak (by ₹)" in html, where
+            assert "That streak cost" not in html, where
+            # data-explain hooks so every cell hovers to its R27 line.
+            for key in (
+                "max_consecutive_losses",
+                "worst_streak_pnl",
+                "longest_underwater",
+                "win_rate_year_spread",
+            ):
+                assert f'data-explain="{key}"' in html, f"{where}: {key}"
+        # The MAX reads from metrics; every other cell from the sibling block —
+        # via the ONE shared pure builders in the extracted panel (no second
+        # copy; the pre-refold inline IIFE is dead).
+        panel = _static_js("bx-strategy-panel.js")
+        assert "window.BXOneclick.resilienceCells(row, money)" in panel
+        assert "window.BXOneclick.resilienceSelfLocate(Number(raw), state.resilienceRow)" in panel
+        assert "resilienceCells" not in page  # no inline copy on the page
         js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "works when VIX between" in js
         assert "VIX band not stamped for this run" in js
-        # The old inline undefined-only gate is gone from the template.
-        assert "works when VIX between" not in html
+        # The old inline undefined-only gate never returns — the panel
+        # delegates to the shared builder, no hand-rolled copy anywhere.
+        assert "works when VIX between" not in panel
+        assert "works when VIX between" not in _template("strategy.html")
 
     def test_candle_mapper_reads_the_route_timestamp_column(self) -> None:
         """[W3-R1]: the chart mapper is the ONE shared route-shape mapper —
         the dead ``idx.ts`` read (the /api/v1/db/candles column is named
         "timestamp") can never return; parsing + the session-day anchor are
         TZ-safe (never a browser-local Date roundtrip)."""
+        panel = _static_js("bx-strategy-panel.js")
+        assert "window.BXChart.candleRowsFromDbPayload(payload)" in panel
+        assert "window.BXChart.parseTsIst(raw)" in panel
+        assert "window.BXChart.istDateOfEpoch(anchor)" in panel
+        # The dead indexing EXPRESSION is gone (module AND template).
+        assert "[idx.ts]" not in panel
+        assert "toISOString().slice(0, 10)" not in panel
         html = _template("strategy.html")
-        assert "window.BXChart.candleRowsFromDbPayload(payload)" in html
-        assert "window.BXChart.parseTsIst(raw)" in html
-        assert "window.BXChart.istDateOfEpoch(anchor)" in html
-        # The dead indexing EXPRESSION is gone (the prose comment naming the
-        # bug deliberately remains — pin the code token, not the story).
         assert "[idx.ts]" not in html
         assert "toISOString().slice(0, 10)" not in html
         js = (_STATIC / "bx-chart.js").read_text(encoding="utf-8")
@@ -519,8 +718,8 @@ class TestStrategyPage:
     def test_screener_band_cell_uses_the_shared_builder(self) -> None:
         """[W3-R4] screener band column: a null-lo/hi band cell reads
         "not stamped", never "null–null"."""
-        html = _template("screener.html")
-        assert "window.BXOneclick.vixBandCellText(v)" in html
+        js = _static_js("bx-screener-panel.js")
+        assert "window.BXOneclick.vixBandCellText(v)" in js
 
     def test_beginner_pro_toggle_is_the_shared_mechanism(self) -> None:
         """C-MINOR-5: ONE mechanism — bxApplyMode over .jargon/.plain-eng."""
@@ -529,10 +728,19 @@ class TestStrategyPage:
             assert 'id="bxModeToggle"' in html, name
 
     def test_hover_explain_wiring(self) -> None:
+        """Hover explain is bound EXACTLY ONCE — by bx-oneclick's
+        presence-guarded init (#bxTip exists ⇒ bind); NEITHER panel module
+        may carry a second bind (the single-bind law)."""
         html = _template("strategy.html")
         assert 'id="bxTip"' in html
-        assert "bindExplainHover" in html
+        assert 'id="bxTip"' in _template("screener.html")
+        assert 'id="bxTip"' in _template("v29.html")  # the portal gains the node
         assert "data-explain=" in html
+        oneclick = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert "bindExplainHover" in oneclick
+        assert "bindExplainHover" not in _static_js("bx-strategy-panel.js")
+        assert "bindExplainHover" not in _static_js("bx-screener-panel.js")
+        assert "bindExplainHover" not in _static_js("bx-operator-portal.js")
 
     def test_regime_renders_and_family_stays_named_out_of_scope(self) -> None:
         """HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
@@ -540,18 +748,57 @@ class TestStrategyPage:
         data" deferral is DELETED (the data ships in the artifact); family
         drill-down (R34) stays a NAMED later PR."""
         html = _template("strategy.html")
+        panel = _static_js("bx-strategy-panel.js")
         assert "land with the P3 data they visualize" not in html  # killed token
+        assert "land with the P3 data they visualize" not in panel  # killed token
         assert 'id="stTrendSplit"' in html
         assert 'id="stRegimeWonder"' in html
-        assert "window.BXOneclick.trendSplitText(reg.by_trend, money)" in html
+        assert "window.BXOneclick.trendSplitText(reg.by_trend, money)" in panel
         assert (
             "window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis)"
-            in html
+            in panel
         )
         assert "family drill-down (R34) is a named later PR" in html
 
     def test_ticker_strip_present(self) -> None:
         assert 'id="bxTickerStrip"' in _template("strategy.html")
+
+    def test_buy_and_hold_benchmark_wiring(self) -> None:
+        """B1 (DEC-RESULTS-TRUST-HONESTY-001): the STORED baseline drives the
+        winner-card benchmark cell + the dashed equity overlay — served
+        verbatim from /api/v1/oneclick/baseline, never recomputed client-side
+        (the paisa parse is digit-wise over the exact stored 2-dp strings).
+        Pins REPOINTED at the club-Q merge-reconcile: the inline strategy
+        wiring moved VERBATIM into the extracted bx-strategy-panel.js + the
+        shared bx-oneclick-panels.css (the #1749 cascade-display relocation
+        precedent, DEC-OPERATOR-PORTAL-REFOLD-001 #1796); the markup lives
+        in BOTH copies — strategy.html AND v29's #ocStrategyDrawer (the
+        T-N2 hook-parity fence owns the both-copies law via
+        _PANEL_INVENTORY)."""
+        panel = _static_js("bx-strategy-panel.js")
+        assert "/api/v1/oneclick/baseline?run_id=" in panel
+        assert "function rupees2paisa(s)" in panel
+        assert "function benchSeriesPaisa()" in panel
+        assert "bx-buyhold-line" in panel
+        assert "stored by the results-depth pass — never recomputed" in panel
+        # The overlay shares ONE y-scale with the equity line (magnitude honesty)
+        # and states its per-unit / session-indexed envelope on the note line.
+        assert "ONE shared y-scale" in panel
+        assert "buy & hold overlay (dashed, per-unit, stored R27 baseline" in panel
+        assert "equity shows the loaded page" in panel
+        # The excess stat is arithmetic over STORED values only.
+        assert "combo net vs buy & hold (per-unit):" in panel
+        # DOM law: card + detail values land via textContent only.
+        assert "cell.textContent" in panel
+        assert "detail.textContent" in panel
+        # The dashed-overlay CSS lives in the ONE shared panel stylesheet.
+        css = (_STATIC / "bx-oneclick-panels.css").read_text(encoding="utf-8")
+        assert ".bx-stpanel .bx-buyhold-line" in css
+        # Markup: both copies carry the cell + the honest awaiting detail.
+        for html in (_template("strategy.html"), _template("v29.html")):
+            assert 'id="stBench"' in html
+            assert 'id="stBenchDetail"' in html
+            assert "benchmark: awaiting stored baseline artifact (R27)" in html
 
 
 # ---------------------------------------------------------------------------
@@ -564,9 +811,12 @@ class TestFailureLaw:
         js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "errorCard" in js
         assert "retry:" in js
-        for name in ("screener.html", "strategy.html"):
-            html = _template(name)
-            assert "oneshotFetch" in html, name
+        for name in ("bx-screener-panel.js", "bx-strategy-panel.js"):
+            panel = _static_js(name)
+            assert "oneshotFetch" in panel, name
+        # The templates hand their wiring to the self-mounting modules.
+        assert 'data-bx-autopanel="screener"' in _template("screener.html")
+        assert 'data-bx-autopanel="strategy"' in _template("strategy.html")
 
     @pytest.mark.parametrize("name", ["v29.html", "screener.html", "strategy.html"])
     def test_loading_is_never_a_terminal_element_state(self, name: str) -> None:
@@ -635,17 +885,133 @@ class TestRoutesEndToEnd:
             "alert(1)" in body
         )
         # The rendering layer: zero string-to-DOM sinks in every new surface.
-        sink = re.compile(r"\.innerHTML\s*\+?=|insertAdjacentHTML|document\.write\(")
-        for name in ("screener.html", "strategy.html"):
-            assert sink.search(_template(name)) is None, name
+        # v29.html JOINS the scan (DEC-OPERATOR-PAGE-CONSOLIDATE-001): its
+        # three static-string sink sites (confetti reset + the two toggle
+        # labels) were refactored sink-free in the SAME change.
+        # WIDENED (adversarial-review fold, S-M1 — refuter-validated: zero
+        # false positives on this exact corpus, 8/8 named bypass classes
+        # caught): outerHTML + bracket-access innerHTML/outerHTML +
+        # createContextualFragment + .srcdoc= + setAttribute('on…') +
+        # eval/new Function + javascript: URL literals join the ban. The
+        # raw-substring ban in test_dashboard_oneclick_frontend.py already
+        # covers the JS files' innerHTML/outerHTML word forms; this regex is
+        # the templates' (inline-script) guard + the executable-sink net.
+        # WIDENED AGAIN (fix round 2, seccov LOW-1 — the classic
+        # completeness regress: a second hostile iteration found classes
+        # outside round 1's named set; corpus re-verified 0 hits): the
+        # setHTMLUnsafe sink, DOMParser/parseFromString document
+        # construction, and the setAttribute('srcdoc'|'src', …) attribute
+        # form of the srcdoc/src sinks (the `.srcdoc=` property form was
+        # already caught; `setAttribute('href', …)` is deliberately NOT
+        # banned — the ONE bxStrategyHref builder legitimately sets
+        # component-encoded hrefs). NOTE: `el[v] = x` with a runtime
+        # v="innerHTML" stays caught for the 9 JS files by the raw-substring
+        # ban in test_dashboard_oneclick_frontend.py (the string literal
+        # itself trips it) — a residual gap only for template inline scripts
+        # and concatenated forms, stated honestly.
+        sink = re.compile(
+            r"\.(inner|outer)HTML\s*\+?=|\[[\"'](inner|outer)HTML[\"']\]\s*="
+            r"|insertAdjacentHTML|document\.write\(|createContextualFragment"
+            r"|\.srcdoc\s*=|setAttribute\(\s*[\"']on|\beval\(|new\s+Function\("
+            r"|[\"']javascript:"
+            r"|setHTMLUnsafe|new\s+DOMParser|parseFromString"
+            r"|setAttribute\(\s*[\"'](srcdoc|src)[\"']"
+        )
+        # Fix round 2 (seccov LOW-1): raw inline HTML `on*=` handler
+        # attributes are banned in the scanned templates' MARKUP (script
+        # bodies are excluded by the parser's CDATA content mode — JS
+        # comparisons like `a < b` must never false-positive; the JS-side
+        # `setAttribute('on…')` arm above covers dynamic handler
+        # injection). The one pre-existing benign specimen (v29's modal
+        # 'Got it' onclick) was converted to a proper addEventListener
+        # binding in the same change, so the corpus is genuinely zero-hit.
+        # CodeQL hardening (js/bad-tag-filter, alert 1010): the former
+        # regex `<script\b.*?</script>` stripper missed `</script >`-style
+        # end-tag variants — replaced by the HTMLParser-based
+        # _MarkupHandlerScanner (rationale on the class).
+        for name in ("screener.html", "strategy.html", "v29.html"):
+            html = _template(name)
+            assert sink.search(html) is None, name
+            assert _inline_handler_attrs(html) == [], name
         for js_name in (
             "bx-oneclick.js",
             "bx-poll.js",
             "bx-chart.js",
             "bx-screener.js",
             "bx-explain.js",
+            "bx-portal-state.js",
+            "bx-screener-panel.js",
+            "bx-strategy-panel.js",
+            "bx-operator-portal.js",
         ):
             assert sink.search((_STATIC / js_name).read_text(encoding="utf-8")) is None, js_name
+
+    @pytest.mark.parametrize(
+        "end_tag",
+        [
+            "</script>",
+            "</script >",
+            "</script\t\n>",
+            "</SCRIPT>",
+            "</Script >",
+        ],
+    )
+    def test_inline_handler_scan_catches_end_tag_spelling_variants(self, end_tag: str) -> None:
+        """CodeQL js/bad-tag-filter teeth (alert 1010): the retired regex
+        stripper spelled the end tag EXACTLY `</script>`, so a handler
+        hidden between a variant-spelled end tag and the NEXT real script
+        block was over-stripped out of the old scan (evasion, reproduced on
+        the pre-fix pattern for every whitespace-bearing spelling below;
+        the case-only variants were already covered by its IGNORECASE).
+        The parser-based scan must flag it for every one of these
+        stdlib-version-stable end-tag spellings."""
+        specimen = (
+            f"<script>var a = 1 < 2;{end_tag}"
+            '<img src=x onerror="alert(1)">'
+            "<script>var b = 2;</script>"
+        )
+        assert _inline_handler_attrs(specimen) == ["<img … onerror=…>"], end_tag
+
+    @pytest.mark.parametrize("end_tag", ["</script foo>", "</script/>"])
+    def test_inline_handler_scan_recovers_past_divergent_end_tag_spellings(
+        self, end_tag: str
+    ) -> None:
+        """HONEST residual (Golden Rule #10): attribute/slash-bearing end
+        tags (`</script foo>`, `</script/>`) DO terminate the script
+        element in a browser, but ``html.parser`` only honours them on
+        stdlib patch levels carrying the CDATA end-tag conformance
+        backport (present on e.g. 3.11.15; absent on 3.12.3) — on older
+        patch levels the in-between handler rides as script data,
+        unflagged. Tolerant arm: either outcome is accepted, but the scan
+        must NEVER go blind past the specimen — the next GENUINE
+        ``</script>`` always re-opens markup scanning, so a real handler
+        after it is flagged on EVERY stdlib (the invariant that matters
+        for scanning our own trusted templates, whose real scripts all end
+        ``</script>``)."""
+        specimen = (
+            f"<script>var a = 1 < 2;{end_tag}"
+            '<img src=x onerror="alert(1)">'
+            "<script>var b = 2;</script>"
+            '<div onclick="x">t</div>'
+        )
+        hits = _inline_handler_attrs(specimen)
+        assert hits in (
+            ["<div … onclick=…>"],  # pre-backport: divergent tag rode as data
+            ["<img … onerror=…>", "<div … onclick=…>"],  # conformant stdlib
+        ), (end_tag, hits)
+
+    def test_inline_handler_scan_never_false_positives_on_script_bodies(self) -> None:
+        """The CDATA false-positive guard survives the regex→parser move:
+        JS comparisons AND handler-shaped STRINGS inside a script body never
+        flag; a real markup handler outside one still does."""
+        clean = (
+            '<script>if (a < b && c > d) { s = "<div onclick=x>"; }</script><div class="k">t</div>'
+        )
+        assert _inline_handler_attrs(clean) == []
+        assert _inline_handler_attrs('<DIV ONCLICK="x">t</DIV>') == ["<div … onclick=…>"]
+        # Valueless handler attributes flag too (broader than the old regex,
+        # which required `=` — strictly stronger, stated on the scanner).
+        assert _inline_handler_attrs("<img src=x onerror>") == ["<img … onerror=…>"]
 
     def test_screener_and_strategy_serve_with_corpus_lake(self, tmp_path: Path) -> None:
         client = _client_with_corpus(tmp_path)

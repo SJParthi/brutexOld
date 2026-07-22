@@ -32,6 +32,7 @@ from brutex.engine.sweep_checkpoint import (
 )
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
 
 
 def _store(tmp_path: Path, **over: Any) -> SweepCheckpointStore:
@@ -195,7 +196,9 @@ def test_load_read_oserror_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     def _boom(*_a: Any, **_k: Any) -> str:
         raise OSError("eio")
 
-    monkeypatch.setattr(Path, "read_text", _boom)
+    # DEC-LAKE-READ-INODE-GUARD-001: the load path reads through the guarded
+    # deadline reader now — fault THAT seam (Path.read_text is no longer used).
+    monkeypatch.setattr(ckpt, "read_regular_text_deadline", _boom)
     with pytest.raises(SweepCheckpointError, match="Failed to read checkpoint"):
         s.load()
 
@@ -204,6 +207,31 @@ def test_load_malformed_json_raises(tmp_path: Path) -> None:
     p = tmp_path / "ckpt.json"
     p.write_text("{not json", encoding="utf-8")
     with pytest.raises(SweepCheckpointError, match="Malformed checkpoint JSON"):
+        _store(tmp_path).load()
+
+
+def test_load_invalid_utf8_raises_domain_error_not_unicodedecodeerror(tmp_path: Path) -> None:
+    """RES-4: on-disk bitrot / an external truncation (NOT a torn write from
+    this atomic tmp→fsync→os.replace writer) leaving invalid UTF-8 bytes makes
+    ``read_text`` raise ``UnicodeDecodeError`` (a ``ValueError``). That must map
+    to the typed ``SweepCheckpointError`` — like the malformed-JSON path — never
+    escape RAW past a consumer's narrow ``except SweepCheckpointError`` and fire
+    a false abort alert."""
+    p = tmp_path / "ckpt.json"
+    # A byte the utf-8 decoder rejects mid-stream (0xFF is never valid UTF-8).
+    p.write_bytes(b'{"version": 1, "sweep_id": "sweep-1"\xff}')
+    with pytest.raises(SweepCheckpointError, match="Undecodable checkpoint bytes"):
+        _store(tmp_path).load()
+
+
+def test_load_torn_leading_invalid_byte_raises_domain_error(tmp_path: Path) -> None:
+    """RES-4 (first-byte corrupt variant): a checkpoint overwritten by raw
+    invalid bytes (a UTF-16 BOM prefix / arbitrary binary — external corruption,
+    not this atomic writer) is also the typed error, not a raw
+    ``UnicodeDecodeError``."""
+    p = tmp_path / "ckpt.json"
+    p.write_bytes(b"\xff\xfe\x00 not utf8 {")
+    with pytest.raises(SweepCheckpointError, match="Undecodable checkpoint bytes"):
         _store(tmp_path).load()
 
 
@@ -254,6 +282,102 @@ def test_load_matching_resumes(tmp_path: Path) -> None:
     assert cp is not None
     assert cp.last_completed_index == 6
     assert s2.next_index == 7
+
+
+# ── load_or_quarantine (G12, DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001) ─────────────
+
+
+class TestLoadOrQuarantine:
+    """A corrupt resume checkpoint is quarantined + logged LOUD, never aborts.
+
+    The resilient resume loader: a clean/absent/foreign checkpoint behaves
+    exactly like ``load()``; a corrupt one is renamed aside to
+    ``<name>.corrupt-<ns>`` (forensic preservation), ``sweep.checkpoint_ignored``
+    is logged, and ``None`` is returned so the driver starts fresh from index 0.
+    """
+
+    @staticmethod
+    def _corrupt_siblings(tmp_path: Path) -> list[Path]:
+        return sorted(tmp_path.glob("ckpt.json.corrupt-*"))
+
+    def test_clean_file_returns_checkpoint_unchanged_no_rename(self, tmp_path: Path) -> None:
+        _store(tmp_path).record(6)
+        with capture_logs() as logs:
+            cp = _store(tmp_path).load_or_quarantine()
+        assert cp is not None
+        assert cp.last_completed_index == 6
+        assert (tmp_path / "ckpt.json").exists()
+        assert self._corrupt_siblings(tmp_path) == []
+        assert not any(e["event"] == "sweep.checkpoint_ignored" for e in logs)
+
+    def test_missing_file_returns_none_no_rename(self, tmp_path: Path) -> None:
+        s = _store(tmp_path)
+        assert s.load_or_quarantine() is None
+        assert s.next_index == 0
+        assert self._corrupt_siblings(tmp_path) == []
+
+    def test_corrupt_file_is_quarantined_and_starts_fresh(self, tmp_path: Path) -> None:
+        (tmp_path / "ckpt.json").write_text("{not valid json", encoding="utf-8")
+        s = _store(tmp_path)
+        with capture_logs() as logs:
+            result = s.load_or_quarantine(now=lambda: 1.0)
+        assert result is None
+        assert s.next_index == 0  # fresh start — never a half-adopted resume point
+        # The corrupt file is GONE from the original path, preserved as a sibling.
+        assert not (tmp_path / "ckpt.json").exists()
+        siblings = self._corrupt_siblings(tmp_path)
+        assert len(siblings) == 1
+        ignored = [e for e in logs if e["event"] == "sweep.checkpoint_ignored"]
+        assert len(ignored) == 1
+        assert ignored[0]["log_level"] == "warning"
+        assert ignored[0]["quarantine_path"] == str(siblings[0])
+
+    def test_same_id_total_mismatch_is_quarantined(self, tmp_path: Path) -> None:
+        # A same-sweep_id checkpoint with a mismatched total_combos raises
+        # SweepCheckpointError inside load() — the resilient loader quarantines
+        # it too (any SweepCheckpointError, not just malformed JSON).
+        _store(tmp_path, total_combos=10).record(4)
+        s = _store(tmp_path, total_combos=99)
+        with capture_logs() as logs:
+            assert s.load_or_quarantine(now=lambda: 2.0) is None
+        assert s.next_index == 0
+        assert len(self._corrupt_siblings(tmp_path)) == 1
+        assert any(e["event"] == "sweep.checkpoint_ignored" for e in logs)
+
+    def test_rename_collision_gets_counter_suffix(self, tmp_path: Path) -> None:
+        # A same-nanosecond re-run whose `.corrupt-<ns>` target already exists
+        # must NOT clobber the prior quarantine — a `-<counter>` suffix is used.
+        (tmp_path / "ckpt.json.corrupt-1000000000").write_text("prior", encoding="utf-8")
+        (tmp_path / "ckpt.json").write_text("{bad", encoding="utf-8")
+        s = _store(tmp_path)
+        assert s.load_or_quarantine(now=lambda: 1.0) is None
+        # The prior quarantine is untouched; the new one took the -1 suffix.
+        assert (tmp_path / "ckpt.json.corrupt-1000000000").read_text() == "prior"
+        assert (tmp_path / "ckpt.json.corrupt-1000000000-1").exists()
+
+    def test_rename_oserror_still_starts_fresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A rename that itself fails (OSError) must never re-abort the sweep:
+        # log `sweep.checkpoint_quarantine_failed` and STILL return None.
+        (tmp_path / "ckpt.json").write_text("{bad", encoding="utf-8")
+
+        def _boom(self: Path, _target: Path) -> None:
+            raise OSError("cross-device link")
+
+        monkeypatch.setattr(Path, "rename", _boom)
+        s = _store(tmp_path)
+        with capture_logs() as logs:
+            assert s.load_or_quarantine(now=lambda: 3.0) is None
+        assert s.next_index == 0
+        failed = [e for e in logs if e["event"] == "sweep.checkpoint_quarantine_failed"]
+        assert len(failed) == 1
+        assert failed[0]["log_level"] == "warning"
+        assert "cross-device link" in failed[0]["error"]
+        # The primary ignore WARN still fires with quarantine_path None.
+        ignored = [e for e in logs if e["event"] == "sweep.checkpoint_ignored"]
+        assert len(ignored) == 1
+        assert ignored[0]["quarantine_path"] is None
 
 
 def test_load_deeply_nested_json_raises_domain_error(tmp_path: Path) -> None:
@@ -462,3 +586,79 @@ def test_crash_resume_skips_completed(tmp_path: Path) -> None:
     assert cp is not None
     assert resumed.next_index == 5
     assert not cp.is_complete
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the record decision + adoption verdict.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    behavior-identical to the flag-OFF Python laws (which every OTHER test
+    in this file drives) — refusal MESSAGE bytes included; the atomic save
+    + the corruption-class mapping stay Python on both arms.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def _drive(self, path: Path) -> list[object]:
+        outcomes: list[object] = []
+        store = SweepCheckpointStore(path=path, sweep_id="s1", total_combos=10, clock=lambda: 5.0)
+        outcomes.append(store.record(0))
+        outcomes.append(store.record(3))
+        outcomes.append(store.record(2))  # noop — never rewind
+        with pytest.raises(SweepCheckpointError) as below:
+            store.record(-1)
+        outcomes.append(str(below.value))
+        with pytest.raises(SweepCheckpointError) as beyond:
+            store.record(10)
+        outcomes.append(str(beyond.value))
+        adopt = SweepCheckpointStore(path=path, sweep_id="s1", total_combos=10)
+        loaded = adopt.load()
+        assert loaded is not None
+        outcomes.append(loaded.last_completed_index)
+        outcomes.append(SweepCheckpointStore(path=path, sweep_id="other", total_combos=10).load())
+        with pytest.raises(SweepCheckpointError) as mismatch:
+            SweepCheckpointStore(path=path, sweep_id="s1", total_combos=99).load()
+        outcomes.append(str(mismatch.value))
+        return outcomes
+
+    def test_flag_on_matches_flag_off_including_message_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        off = self._drive(tmp_path / "off.json")
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = self._drive(tmp_path / "on.json")
+        finally:
+            self._reset_facade()
+        normalise = lambda items: [  # noqa: E731 — a tiny local twin-normaliser
+            str(x).replace("on.json", "X").replace("off.json", "X") for x in items
+        ]
+        assert normalise(on) == normalise(off)
+        assert on[:3] == [True, True, False]

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import struct
+from functools import partial
 from typing import Any
 
 import pytest
@@ -35,14 +36,22 @@ from brutex.ranking import (
     passes_gates,
     rank_combos,
 )
+from brutex.ranking.multi_select import (
+    SelectionInputs,
+    UnionSelection,
+    compute_union_selection,
+)
 
 from tests.fakes.metrics_fixtures import make_result_metrics
 
 
 def _columns(
-    entries: list[tuple[int, ResultMetrics]], *, with_overfit: bool = False
+    entries: list[tuple[int, ResultMetrics]],
+    *,
+    with_overfit: bool = False,
+    max_sl_hit_rate: float | None = None,
 ) -> SurvivorColumns:
-    columns = SurvivorColumns(with_overfit=with_overfit)
+    columns = SurvivorColumns(with_overfit=with_overfit, max_sl_hit_rate=max_sl_hit_rate)
     for mask, metrics in entries:
         columns.append(mask, metrics)
     return columns
@@ -53,11 +62,14 @@ def _assert_bounded_equals_batch(
     *,
     overfit: OverfitGateConfig | None,
     top_k: int,
+    max_sl_hit_rate: float | None = None,
 ) -> None:
     """The core oracle: bounded output == ``rank_combos(entries)[:top_k]`` exactly."""
-    ranked = rank_combos(entries, overfit=overfit)
+    ranked = rank_combos(entries, overfit=overfit, max_sl_hit_rate=max_sl_hit_rate)
     result = rank_survivor_columns(
-        _columns(entries, with_overfit=overfit is not None), overfit=overfit, top_k=top_k
+        _columns(entries, with_overfit=overfit is not None, max_sl_hit_rate=max_sl_hit_rate),
+        overfit=overfit,
+        top_k=top_k,
     )
     assert result.n_ranked == len(ranked)
     expected = ranked[:top_k]
@@ -112,6 +124,21 @@ class TestSurvivorColumnsRoundTrip:
         assert [columns.gate_passed(i) for i in range(3)] == [True, False, True]
         assert columns.gate_survivor_positions() == [0, 2]
 
+    def test_gate_bit_honours_the_sl_hit_rate_ceiling(self) -> None:
+        """Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): the gate bit
+        is recorded under the SAME ceiling the batch rank would use — an
+        over-ceiling (or unmeasured ``None``) row records ``False``; the
+        default knob leaves every bit byte-identical."""
+        under = make_result_metrics(sl_hit_rate=0.2)
+        over = make_result_metrics(sl_hit_rate=0.8)
+        absent = make_result_metrics(sl_hit_rate=None)
+        gated = _columns([(1, under), (2, over), (3, absent)], max_sl_hit_rate=0.5)
+        assert [gated.gate_passed(i) for i in range(3)] == [True, False, False]
+        assert gated.max_sl_hit_rate == 0.5
+        ungated = _columns([(1, under), (2, over), (3, absent)])
+        assert [ungated.gate_passed(i) for i in range(3)] == [True, True, True]
+        assert ungated.max_sl_hit_rate is None
+
     def test_term_columns_match_composite_term_inputs(self) -> None:
         metrics = make_result_metrics(
             sharpe_ratio=1.25,
@@ -154,14 +181,18 @@ class TestOwnedNbytes:
     def test_exact_payload_arithmetic_without_overfit(self) -> None:
         n = 20
         columns = _columns([(i, make_result_metrics()) for i in range(n)])
-        arrays = (2 + 1 + N_COMPOSITE_TERMS) * 8 * n  # mask limbs + sharpe + terms
+        # mask limbs + sharpe + terms + the 5 LANE-W1 selection-axis columns
+        # (net_pnl/win_rate/dd_pct/losing/expectancy —
+        # DEC-RANK-QUOTA-PERSIST-1000-001, always retained).
+        arrays = (2 + 1 + N_COMPOSITE_TERMS + 5) * 8 * n
         bit_sets = 2 * math.ceil(n / 8)  # gate + sharpe-None
         assert columns.owned_nbytes() == arrays + bit_sets
 
     def test_exact_payload_arithmetic_with_overfit(self) -> None:
         n = 9
         columns = _columns([(i, make_result_metrics()) for i in range(n)], with_overfit=True)
-        arrays = (2 + 1 + N_COMPOSITE_TERMS + 3) * 8 * n  # + trades/skew/kurt
+        # + trades/skew/kurt + the 5 LANE-W1 selection-axis columns.
+        arrays = (2 + 1 + N_COMPOSITE_TERMS + 3 + 5) * 8 * n
         bit_sets = 4 * math.ceil(n / 8)  # + skew/kurt None bits
         assert columns.owned_nbytes() == arrays + bit_sets
 
@@ -213,6 +244,17 @@ class TestRankSurvivorColumnsEqualsBatch:
             (4, _spread_metrics(4)),
         ]
         _assert_bounded_equals_batch(entries, overfit=None, top_k=10)
+
+    def test_sl_hit_rate_ceiling_filters_identically(self) -> None:
+        """Door 6 parity: bounded == batch under an active ceiling (over-limit
+        + unmeasured rows excluded by BOTH paths, survivors identical)."""
+        entries = [
+            (1, _spread_metrics(1, sl_hit_rate=0.1)),
+            (2, _spread_metrics(2, sl_hit_rate=0.9)),  # Door-6-fails
+            (3, _spread_metrics(3, sl_hit_rate=None)),  # fail-closed
+            (4, _spread_metrics(4, sl_hit_rate=0.5)),  # at-ceiling passes
+        ]
+        _assert_bounded_equals_batch(entries, overfit=None, top_k=10, max_sl_hit_rate=0.5)
 
     def test_all_gate_fail_yields_empty(self) -> None:
         entries = [(1, _spread_metrics(1, total_trades=2))]
@@ -393,3 +435,204 @@ class TestBoundedFinalistShape:
         finalist = BoundedFinalist(mask=3, composite_score=0.5, deflated_sharpe=None)
         with pytest.raises(AttributeError):
             finalist.mask = 4  # type: ignore[misc]
+
+    def test_selection_fields_default_none(self) -> None:
+        # The LANE-W1 provenance fields are ADDITIVE + defaulted — a legacy
+        # construction never stamps them (the back-compat law).
+        finalist = BoundedFinalist(mask=3, composite_score=0.5, deflated_sharpe=None)
+        assert finalist.selection_basis is None
+        assert finalist.pareto_member is None
+
+
+# ────── LANE-W1: selection-axis columns + the union arm ──────
+# (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001)
+
+
+class TestSelectionAxisColumns:
+    def test_axis_accessors_roundtrip(self) -> None:
+        entries = [
+            (
+                1,
+                make_result_metrics(
+                    net_pnl_paisa=123_456,
+                    win_rate=0.25,
+                    max_drawdown_pct=7.5,
+                    losing_trades=4,
+                    expectancy_paisa=-50,
+                ),
+            ),
+            (
+                2,
+                make_result_metrics(
+                    net_pnl_paisa=-9_900,
+                    win_rate=0.75,
+                    max_drawdown_pct=0.0,
+                    losing_trades=0,
+                    expectancy_paisa=12_345,
+                ),
+            ),
+        ]
+        columns = _columns(entries)
+        assert [columns.net_pnl_at(i) for i in range(2)] == [123_456, -9_900]
+        assert [columns.win_rate_at(i) for i in range(2)] == [0.25, 0.75]
+        assert [columns.dd_pct_at(i) for i in range(2)] == [7.5, 0.0]
+        assert [columns.losing_at(i) for i in range(2)] == [4, 0]
+        assert [columns.expectancy_at(i) for i in range(2)] == [-50, 12_345]
+
+    def test_axis_columns_retained_without_overfit_flag(self) -> None:
+        # The axis columns are ALWAYS retained — independent of with_overfit.
+        for with_overfit in (False, True):
+            columns = _columns(
+                [(1, make_result_metrics(net_pnl_paisa=777))], with_overfit=with_overfit
+            )
+            assert columns.net_pnl_at(0) == 777
+
+
+def _axis_metrics(seed: int, **overrides: Any) -> ResultMetrics:
+    """Gate-passing metrics with distinct composite AND selection-axis values."""
+    axes: dict[str, Any] = {
+        "net_pnl_paisa": 10_000 * seed - 25_000,
+        "max_drawdown_pct": 2.0 + 1.5 * ((seed * 3) % 5),
+        "losing_trades": 3 + (seed * 7) % 11,
+        "expectancy_paisa": 500 * ((seed * 5) % 9) - 1_000,
+    }
+    axes.update(overrides)
+    return _spread_metrics(seed, **axes)
+
+
+def _batch_union(
+    entries: list[tuple[int, ResultMetrics]],
+    *,
+    overfit: OverfitGateConfig | None,
+    top_k: int,
+    quota_m: int,
+    frontier_cap: int,
+) -> tuple[list[Any], UnionSelection]:
+    """The BATCH arm's union: ``rank_combos`` → ``SelectionInputs`` → composer."""
+    ranked = rank_combos(entries, overfit=overfit)
+    inputs = SelectionInputs(
+        masks=tuple(rc.mask for rc in ranked),
+        composites=tuple(rc.composite_score for rc in ranked),
+        net_pnl_paisa=tuple(rc.metrics.net_pnl_paisa for rc in ranked),
+        win_rate=tuple(rc.metrics.win_rate for rc in ranked),
+        max_dd_pct=tuple(rc.metrics.max_drawdown_pct for rc in ranked),
+        losing_trades=tuple(rc.metrics.losing_trades for rc in ranked),
+        expectancy_paisa=tuple(rc.metrics.expectancy_paisa for rc in ranked),
+    )
+    selection = compute_union_selection(
+        inputs, top_k=top_k, quota_m=quota_m, frontier_cap=frontier_cap
+    )
+    return list(ranked), selection
+
+
+class TestRankSurvivorColumnsUnion:
+    def _bounded_union(
+        self,
+        entries: list[tuple[int, ResultMetrics]],
+        *,
+        overfit: OverfitGateConfig | None = None,
+        top_k: int,
+        quota_m: int,
+        frontier_cap: int,
+    ) -> Any:
+        return rank_survivor_columns(
+            _columns(entries, with_overfit=overfit is not None),
+            overfit=overfit,
+            top_k=top_k,
+            union_selection_fn=partial(
+                compute_union_selection, quota_m=quota_m, frontier_cap=frontier_cap
+            ),
+        )
+
+    def test_union_matches_batch_composer_exactly(self) -> None:
+        entries = [(mask, _axis_metrics(mask)) for mask in range(1, 11)]
+        ranked, selection = _batch_union(entries, overfit=None, top_k=3, quota_m=2, frontier_cap=2)
+        result = self._bounded_union(entries, top_k=3, quota_m=2, frontier_cap=2)
+        assert [f.mask for f in result.finalists] == [
+            ranked[index].mask for index in selection.order
+        ]
+        for finalist, index in zip(result.finalists, selection.order, strict=True):
+            assert finalist.composite_score == ranked[index].composite_score
+            assert finalist.selection_basis == selection.basis_by_index[index]
+            assert finalist.pareto_member == (index in selection.frontier)
+        assert result.truncated == selection.truncated
+        assert result.frontier_dropped == selection.frontier_dropped
+        assert result.n_ranked == len(ranked)
+
+    def test_union_prefix_is_the_legacy_top_k(self) -> None:
+        entries = [(mask, _axis_metrics(mask)) for mask in range(1, 9)]
+        top_k = 3
+        legacy = rank_survivor_columns(_columns(entries), overfit=None, top_k=top_k)
+        union = self._bounded_union(entries, top_k=top_k, quota_m=2, frontier_cap=4)
+        prefix = union.finalists[:top_k]
+        assert [f.mask for f in prefix] == [f.mask for f in legacy.finalists]
+        for union_finalist, legacy_finalist in zip(prefix, legacy.finalists, strict=True):
+            assert union_finalist.composite_score == legacy_finalist.composite_score
+            assert union_finalist.deflated_sharpe == legacy_finalist.deflated_sharpe
+            assert union_finalist.selection_basis is not None
+            assert "composite" in union_finalist.selection_basis.split(",")
+
+    def test_union_extras_are_tagged_and_composite_ordered(self) -> None:
+        entries = [(mask, _axis_metrics(mask)) for mask in range(1, 9)]
+        union = self._bounded_union(entries, top_k=2, quota_m=2, frontier_cap=3)
+        extras = union.finalists[2:]
+        assert extras  # the tiny top_k forces union-only extras
+        for finalist in extras:
+            assert finalist.selection_basis is not None
+            tokens = set(finalist.selection_basis.split(","))
+            assert tokens & {
+                "composite",
+                "dd",
+                "losing_trades",
+                "win_rate",
+                "expectancy",
+                "frontier",
+            }
+        # Extras arrive in (-composite, mask) order — descending composite.
+        composites = [f.composite_score for f in extras]
+        assert composites == sorted(composites, reverse=True)
+
+    def test_union_with_overfit_carries_dsr(self) -> None:
+        overfit = OverfitGateConfig(dsr_min=0.0)
+        entries = [(mask, _axis_metrics(mask)) for mask in range(1, 7)]
+        ranked, selection = _batch_union(
+            entries, overfit=overfit, top_k=2, quota_m=1, frontier_cap=2
+        )
+        result = self._bounded_union(entries, overfit=overfit, top_k=2, quota_m=1, frontier_cap=2)
+        assert [f.mask for f in result.finalists] == [
+            ranked[index].mask for index in selection.order
+        ]
+        for finalist, index in zip(result.finalists, selection.order, strict=True):
+            assert finalist.deflated_sharpe == ranked[index].deflated_sharpe
+
+    def test_union_truncated_and_frontier_dropped_propagate(self) -> None:
+        entries = [(mask, _axis_metrics(mask)) for mask in range(1, 11)]
+        result = self._bounded_union(entries, top_k=1, quota_m=1, frontier_cap=1)
+        # top_k=1 + quota 1 + cap 1 cannot select all 10 survivors.
+        assert result.truncated > 0
+        assert result.truncated == result.n_ranked - len(result.finalists)
+        # The frontier over these spread axes exceeds cap 1 ⇒ drops counted.
+        assert result.frontier_dropped > 0
+        assert sum(1 for f in result.finalists if f.pareto_member) <= 1
+
+    def test_union_fn_not_called_when_no_survivors(self) -> None:
+        def bomb(*_args: Any, **_kwargs: Any) -> UnionSelection:
+            raise AssertionError("union_selection_fn must not run on an empty pool")
+
+        entries = [(1, _spread_metrics(1, total_trades=2))]  # gate-fails
+        result = rank_survivor_columns(
+            _columns(entries), overfit=None, top_k=5, union_selection_fn=bomb
+        )
+        assert result.finalists == ()
+        assert result.n_ranked == 0
+        assert result.truncated == 0
+        assert result.frontier_dropped == 0
+
+    def test_legacy_path_never_stamps_selection_fields(self) -> None:
+        entries = [(mask, _axis_metrics(mask)) for mask in range(1, 5)]
+        legacy = rank_survivor_columns(_columns(entries), overfit=None, top_k=4)
+        for finalist in legacy.finalists:
+            assert finalist.selection_basis is None
+            assert finalist.pareto_member is None
+        assert legacy.truncated == 0
+        assert legacy.frontier_dropped == 0

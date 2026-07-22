@@ -1,0 +1,64 @@
+# brutex-core — the BruteX root-leaf Rust conversion crate (slice T35,
+# DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943).
+#
+# Milestone 1 hosts the MONEY laws (`brutex/money.py` — DEC-MONEY-2DP-001):
+# 2dp half-away-from-zero rounding, the exact ×100 / ÷100 paisa shifts and
+# the `₹`-grouped display render, byte-locked to the CPython `Decimal`
+# oracle via exact decimal-STRING arithmetic (no floats anywhere; zero
+# third-party numeric deps — hand-rolled digit arithmetic is ~100 lines and
+# auditable, where a `bigdecimal` dependency would import thousands of
+# lines of somebody else's rounding table for four functions).
+#
+# Honesty banner (ADR-0020, mandatory verbatim): expected payoff ≈ 0 —
+# conversion is for uniformity, not speed.
+#
+# TWIN-IMPL COORDINATION (audit-session addendum, 2026-07-17): the ONE
+# half-up (away-from-zero) 2dp law has TWO coordinated non-Python impls —
+# this crate's `src/money.rs` digit arithmetic AND the polars-columnar
+# `_snap_price_expr` contract documented in
+# `brutex/data/parquet_writer.py` (floor(d*100 + 0.5)/100 for d >= 0,
+# ceil(d*100 - 0.5)/100 for d < 0 — the rust/brutex-lake render seam
+# consumes its pre-snapped output). Any change to the law must move BOTH
+# (plus the Python oracle) — the cross-crate consistency pin in
+# `src/money.rs` locks this crate to the SAME literal corpus
+# `tests/golden/test_writer_vectorized_snap_parity.py` pins on the
+# vectorized side.
+#
+# Standalone crate — deliberately NOT in any Cargo workspace (the sibling
+# rust/fno-math + rust/trading-core + rust/brutex-lake are standalone too;
+# this crate is built ONLY by its own dedicated workflow,
+# .github/workflows/core-rust-parity.yml).
+
+[package]
+name = "brutex-core"
+version = "0.4.0"
+edition = "2024"
+# Edition 2024 needs >= 1.85; no dependency pushes the floor higher (the
+# only dep is pyo3 0.29). ci.yml's shared RUST_VERSION (1.93.1) and the
+# local default toolchain both satisfy it.
+rust-version = "1.85"
+description = "BruteX root-leaf Rust seams — the DEC-MONEY-2DP-001 money laws as exact decimal-string arithmetic, byte-locked to the CPython Decimal oracle (slice T35)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published to crates.io (the fno-math precedent).
+publish = false
+
+[lib]
+name = "brutex_core"
+path = "src/lib.rs"
+# cdylib so Python's `import brutex_core._brutex_core` finds the built
+# extension; rlib so `cargo test` links the pure-Rust money core.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# PyO3 + maturin bridge — the exact sibling-crate configuration
+# (rust/brutex-lake): abi3-py312 per CLAUDE.md §4's Python 3.12 baseline.
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
+
+# Release profile: the cargo DEFAULT, matching rust/brutex-lake's reasoning —
+# NO `panic = "abort"` (a panic must surface across the FFI as a catchable
+# RuntimeError via the lib.rs catch_unwind boundary so the Python facade
+# degrades to the Decimal oracle; never a process abort). The digit
+# arithmetic here is Vec<u8> pushes and single-byte compares — no profile
+# knob is a byte contract.

@@ -70,6 +70,11 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 
 import structlog
 
+from brutex.data.guarded_read import (
+    open_regular_binary,
+    read_regular_text_deadline,
+)
+from brutex.engine.baseline import BaselineSeries, load_baseline
 from brutex.engine.top100_artifact import TOP100_SCHEMA_VERSION
 from brutex.engine.trade_store import (
     RESULTS_DEPTH_DIRNAME,
@@ -79,6 +84,7 @@ from brutex.engine.trade_store import (
     read_trade_page,
 )
 from brutex.money import format_inr
+from brutex.ranking.tiers import TIER_LABELS
 
 _LOG = structlog.get_logger(__name__)
 
@@ -101,6 +107,7 @@ __all__ = [
     "ArtifactProbe",
     "ArtifactStatus",
     "AwaitingTradesReader",
+    "BaselineResult",
     "CachedPayloadMissingError",
     "ChainNotVerifiedError",
     "EventsPage",
@@ -121,6 +128,7 @@ __all__ = [
     "discover_runs",
     "fixture_results_root",
     "is_safe_run_id",
+    "load_baseline_result",
     "load_manifest",
     "load_preflight_fixture",
     "load_top100",
@@ -613,6 +621,120 @@ def sibling_key_token(gate: OutageGate, *, coordinate: str, probe: ArtifactProbe
         return None
     gate.healthy(coordinate, probe.token)
     return probe.token
+
+
+#: Reader-memo capacity: TWO entries hold BOTH sides of a two-run (or
+#: two-rank) page alternation — the exact thrash shape the previous
+#: single-entry memos paid a full re-parse per flip on.
+_REVISION_MEMO_CAPACITY: Final[int] = 2
+
+
+class _RevisionMemo[MemoValueT]:
+    """Bounded keyed revision memo with per-key single-flight (fix 4b).
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001: the ONE consolidation of this
+    module's previously THREE hand-rolled single-entry ``(path, revision)``
+    reader memos (fixture trades parse / top100 parse / equity series),
+    which duplicated the same subtle memo logic, had NO single-flight
+    (N concurrent cold pollers each paid the full O(file) parse,
+    last-write-wins), and thrashed on a two-run alternation (a page flip
+    between two runs/ranks evicted the single entry on EVERY flip).
+
+    Deliberately NOT the :func:`serve_revision_cached` chokepoint (the
+    honest fix-4b escape clause, ledgered): that chokepoint is ROUTE-payload
+    machinery — its :class:`PayloadCache` protocol is dict-typed and injected
+    by the app, and its :class:`OutageGate` doctrine distinguishes ABSENT
+    from probe OUTAGE — while the reader seam's pre-existing contract is
+    byte-pinned the other way (:func:`artifact_revision` maps ANY stat
+    failure to ``None`` ⇒ compute fresh, cache NOTHING) and the readers are
+    constructed WITHOUT any injected cache across the standalone suite
+    (leaf discipline: this module never imports the dashboard cache).
+    Changing either would move route payloads/semantics; this memo changes
+    neither — every payload stays byte-identical (parity-pinned).
+
+    Semantics: per-key single-flight (N concurrent misses of one key pay
+    exactly one *compute*; a raising *compute* caches nothing and releases
+    the flight — the next caller recomputes); LRU-bounded at
+    :data:`_REVISION_MEMO_CAPACITY` entries; a hit refreshes recency.
+    Thread-safe; the lock is held only for O(1) dict work, never across a
+    compute.
+    """
+
+    def __init__(self, *, capacity: int = _REVISION_MEMO_CAPACITY) -> None:
+        if capacity < 1:
+            raise ValueError(f"capacity must be >= 1, got {capacity}")
+        self._capacity = capacity
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[tuple[str, ...], MemoValueT] = OrderedDict()
+        self._inflight: dict[tuple[str, ...], threading.Event] = {}
+
+    def peek(self, key: tuple[str, ...]) -> MemoValueT | None:
+        """Return the memoised value for *key* WITHOUT computing (``None`` on a miss).
+
+        The serve-last-known outage arm (DEC-CACHE-SERVE-LAST-KNOWN-001,
+        merge-composed onto this memo) peeks the last healthily-served
+        revision key during a stat-probe outage — a hit refreshes LRU
+        recency (a long outage keeps its last-known entry resident), a miss
+        falls back to the caller's honest fresh uncached parse.
+        """
+        with self._lock:
+            value = self._entries.get(key)
+            if value is not None:
+                self._entries.move_to_end(key)
+            return value
+
+    def get_or_compute(self, key: tuple[str, ...], compute: Callable[[], MemoValueT]) -> MemoValueT:
+        """Return the memoised value for *key*, running *compute* on a miss.
+
+        Parameters
+        ----------
+        key
+            The revision-carrying memo key (e.g. ``(path, revision)`` —
+            callers fold the stat token in, so staleness is impossible by
+            construction; a ``None`` revision must NOT reach here).
+        compute
+            The zero-arg loader. Exceptions propagate raw (cached nothing);
+            per-key single-flight means concurrent misses pay one call.
+
+        Returns
+        -------
+        _MemoValueT
+            The cached or freshly computed value.
+        """
+        while True:
+            with self._lock:
+                if key in self._entries:
+                    self._entries.move_to_end(key)
+                    return self._entries[key]
+                event = self._inflight.get(key)
+                if event is None:
+                    event = threading.Event()
+                    self._inflight[key] = event
+                    owner = True
+                else:
+                    owner = False
+            if not owner:
+                # A peer is computing this exact key: wait, then re-check —
+                # either the entry landed (hit) or the peer raised/was
+                # evicted, in which case this thread takes ownership on the
+                # next loop pass.
+                event.wait()
+                continue
+            try:
+                value = compute()
+            except BaseException:
+                with self._lock:
+                    self._inflight.pop(key, None)
+                event.set()
+                raise
+            with self._lock:
+                self._entries[key] = value
+                self._entries.move_to_end(key)
+                while len(self._entries) > self._capacity:
+                    self._entries.popitem(last=False)
+                self._inflight.pop(key, None)
+            event.set()
+            return value
 
 
 # ── Result types (split per artifact — the isinstance narrowing happens ONCE here) ──
@@ -1146,7 +1268,11 @@ def _read_artifact_text(path: Path, *, artifact: str) -> tuple[str | None, str |
     any other read/decode defect maps to a NAMED corrupt detail (logged).
     """
     try:
-        return path.read_text(encoding="utf-8"), None
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — every cached
+        # oneclick route's fresh parse lands here): a planted FIFO / wedged
+        # volume folds into the NAMED-corrupt arm below (both guard errors
+        # are OSError subclasses) instead of wedging the poll thread.
+        return read_regular_text_deadline(path, what="oneclick artifact read"), None
     except FileNotFoundError:
         return None, None
     except (OSError, UnicodeDecodeError) as exc:
@@ -1370,6 +1496,259 @@ def _bridge_cascade(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return bridged, False
 
 
+#: The tier-label wire vocabulary (DEC-RANKING-SPLUS-TIER-001 — the writer's
+#: :data:`brutex.ranking.tiers.TIER_LABELS`, imported never re-minted).
+_TIER_LABEL_TOKENS: Final[frozenset[str]] = frozenset(TIER_LABELS)
+
+
+def _tier_object_defect(tier: dict[str, Any]) -> str | None:
+    """The NAMED type defect of one entry's ``tier`` object, or ``None``.
+
+    The :func:`_cascade_object_defect` law applied to the writer's
+    ``{"label": "S+"|"S"|"A"|null, "blocked_next": [str, ...]}`` shape: an
+    unknown label token or any type violation names itself — the caller then
+    DROPS the key for that row (rendered "—") and counts it; the row itself
+    is KEPT (the #1631 named-partial-degrade law).
+    """
+    label = tier.get("label")
+    if label is not None and (not isinstance(label, str) or label not in _TIER_LABEL_TOKENS):
+        return f"unknown tier label {label!r}"
+    blocked = tier.get("blocked_next")
+    if not isinstance(blocked, list) or not all(isinstance(token, str) for token in blocked):
+        return "tier blocked_next is not a string array"
+    return None
+
+
+def _bridge_tier(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Validate + display-stamp one row's optional ``tier`` object.
+
+    The :func:`_bridge_cascade` law verbatim (DEC-RANKING-SPLUS-TIER-001):
+    a row without the key passes through untouched (a pre-change artifact —
+    absence renders "—"); a VALID object gains the server-built
+    ``status_text`` via the ONE
+    :func:`brutex.dashboard.oneclick_view.tier_status_text` builder (no tier
+    prose is ever composed in JS); an invalid object is DROPPED from the row
+    + flagged ``True`` so the caller counts it into the named partial
+    degrade — never a fabricated tier (Golden Rule #1).
+    """
+    if "tier" not in row:
+        return row, False
+    tier = row.get("tier")
+    if not isinstance(tier, dict) or _tier_object_defect(tier) is not None:
+        stripped = dict(row)
+        stripped.pop("tier", None)
+        return stripped, True
+    # Function-local import — the _bridge_cascade cycle law (oneclick_view
+    # imports THIS module at top level; the builder itself is pure).
+    from brutex.dashboard.oneclick_view import tier_status_text
+
+    label = tier.get("label")
+    blocked = tier.get("blocked_next")
+    stamped = dict(tier)
+    stamped["status_text"] = tier_status_text(
+        label if isinstance(label, str) else None,
+        blocked_next=tuple(blocked) if isinstance(blocked, list) else (),
+    )
+    bridged = dict(row)
+    bridged["tier"] = stamped
+    return bridged, False
+
+
+# ── The exec-sim / fill-sensitivity object bridges ───────────────────────────
+# `DEC-OPTIONS-EXEC-FEEDBACK-001` + DEC-FILL-EXEC-GRID-1M-001 — the
+# _bridge_cascade law applied to the three additive per-entry objects: key
+# absent → row untouched (a pre-change / provider-None artifact renders "—");
+# valid → pass through UNCHANGED (numeric objects — the screener renders raw
+# fields via the existing money/'—' laws, so unlike cascade there is NO
+# server-built status prose); invalid → key DROPPED + counted into the NAMED
+# partial, row kept — never a fabricated verdict (Golden Rule #1).
+
+
+def _int_field_defect(obj: dict[str, Any], keys: tuple[str, ...], label: str) -> str | None:
+    """Named defect when any *keys* member is not a genuine int (bools refused)."""
+    for key in keys:
+        value = obj.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"{label} {key} is not an integer"
+    return None
+
+
+def _nullable_number_defect(obj: dict[str, Any], keys: tuple[str, ...], label: str) -> str | None:
+    """Named defect when any *keys* member is neither null nor a number."""
+    for key in keys:
+        value = obj.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
+            return f"{label} {key} is not a number"
+    return None
+
+
+#: The writer's status vocabularies (the two-state options/fill law + the
+#: futures ExecutionKind arms — brutex.futures.leaderboard/exec_verdict).
+_OPTIONS_EXEC_STATUS_TOKENS: Final[frozenset[str]] = frozenset({"priced", "not_priced"})
+_FUTURES_EXEC_STATUS_TOKENS: Final[frozenset[str]] = frozenset(
+    {"executed", "stock_spot_deferred", "unsupported", "not_priced"}
+)
+_FILL_SENSITIVITY_STATUS_TOKENS: Final[frozenset[str]] = frozenset({"priced", "not_priced"})
+
+#: The priced options_exec object's REQUIRED integer fields.
+_OPTIONS_EXEC_INT_KEYS: Final[tuple[str, ...]] = (
+    "n_lots",
+    "n_signals",
+    "n_accepted",
+    "n_rejected",
+    "gross_pnl_paisa",
+    "total_charges_paisa",
+    "net_after_cost_paisa",
+    "n_winners",
+    "n_losers",
+)
+
+#: The executed futures_exec object's REQUIRED integer fields (the shipped
+#: annotation shape + the additive differential counter).
+_FUTURES_EXEC_INT_KEYS: Final[tuple[str, ...]] = (
+    "n_signals",
+    "n_accepted",
+    "n_rejected",
+    "n_rejected_lot_size_unknown",
+    "n_rejected_cost_regime_unverified",
+    "n_rejected_no_contract",
+    "n_rejected_no_data",
+    "n_rejected_stale_bar",
+    "gross_pnl_paisa",
+    "total_charges_paisa",
+    "net_pnl_paisa",
+    "n_winners",
+    "n_losers",
+    "n_vix_missing",
+    "differential_checked",
+)
+
+#: The priced fill_sensitivity object's REQUIRED integer fields.
+_FILL_SENSITIVITY_INT_KEYS: Final[tuple[str, ...]] = (
+    "n_trades",
+    "worst_case_net_pnl_paisa",
+    "reference_net_pnl_paisa",
+    "haircut_paisa",
+)
+
+
+def _not_priced_reason_defect(obj: dict[str, Any], label: str) -> str | None:
+    """Named defect of a ``not_priced`` arm — the reason must be a non-empty str."""
+    reason = obj.get("reason")
+    if not isinstance(reason, str) or not reason:
+        return f"{label} not_priced reason is not a non-empty string"
+    return None
+
+
+def _window_object_defect(obj: dict[str, Any], label: str) -> str | None:
+    """Named defect when the ``window`` member is not an object of str/null values."""
+    window = obj.get("window")
+    if not isinstance(window, dict):
+        return f"{label} window is not an object"
+    for key, value in window.items():
+        if value is not None and not isinstance(value, str):
+            return f"{label} window {key} is not a string"
+    return None
+
+
+def _options_exec_object_defect(obj: dict[str, Any]) -> str | None:
+    """The NAMED type defect of one entry's ``options_exec`` object, or ``None``."""
+    status = obj.get("status")
+    if not isinstance(status, str) or status not in _OPTIONS_EXEC_STATUS_TOKENS:
+        return f"unknown options_exec status {status!r}"
+    if status == "not_priced":
+        return _not_priced_reason_defect(obj, "options_exec")
+    for key in ("rule_name", "expiry_kind", "broker"):
+        if not isinstance(obj.get(key), str):
+            return f"options_exec {key} is not a string"
+    defect = _int_field_defect(obj, _OPTIONS_EXEC_INT_KEYS, "options_exec")
+    if defect is not None:
+        return defect
+    rejects = obj.get("rejects")
+    if not isinstance(rejects, dict):
+        return "options_exec rejects is not an object"
+    reject_defect = _int_field_defect(
+        rejects, tuple(str(key) for key in rejects), "options_exec rejects"
+    )
+    if reject_defect is not None:
+        return reject_defect
+    defect = _nullable_number_defect(
+        obj, ("priced_trade_pct", "drag_per_trade_paisa"), "options_exec"
+    )
+    if defect is not None:
+        return defect
+    sign_flip = obj.get("sign_flip")
+    if sign_flip is not None and not isinstance(sign_flip, bool):
+        return "options_exec sign_flip is not a bool"
+    return _window_object_defect(obj, "options_exec")
+
+
+def _futures_exec_object_defect(obj: dict[str, Any]) -> str | None:
+    """The NAMED type defect of one entry's ``futures_exec`` object, or ``None``."""
+    status = obj.get("status")
+    if not isinstance(status, str) or status not in _FUTURES_EXEC_STATUS_TOKENS:
+        return f"unknown futures_exec status {status!r}"
+    if status == "not_priced":
+        return _not_priced_reason_defect(obj, "futures_exec")
+    if status in ("stock_spot_deferred", "unsupported"):
+        if not isinstance(obj.get("note"), str):
+            return f"futures_exec {status} note is not a string"
+        return None
+    defect = _int_field_defect(obj, _FUTURES_EXEC_INT_KEYS, "futures_exec")
+    if defect is not None:
+        return defect
+    win_rate = obj.get("win_rate")
+    if isinstance(win_rate, bool) or not isinstance(win_rate, int | float):
+        return "futures_exec win_rate is not a number"
+    suspect = obj.get("suspect")
+    if not isinstance(suspect, bool):
+        return "futures_exec suspect is not a bool"
+    defect = _nullable_number_defect(obj, ("priced_trade_pct",), "futures_exec")
+    if defect is not None:
+        return defect
+    return _window_object_defect(obj, "futures_exec")
+
+
+def _fill_sensitivity_object_defect(obj: dict[str, Any]) -> str | None:
+    """The NAMED type defect of one entry's ``fill_sensitivity`` object, or ``None``."""
+    status = obj.get("status")
+    if not isinstance(status, str) or status not in _FILL_SENSITIVITY_STATUS_TOKENS:
+        return f"unknown fill_sensitivity status {status!r}"
+    if status == "not_priced":
+        return _not_priced_reason_defect(obj, "fill_sensitivity")
+    if not isinstance(obj.get("reference_basis"), str):
+        return "fill_sensitivity reference_basis is not a string"
+    defect = _int_field_defect(obj, _FILL_SENSITIVITY_INT_KEYS, "fill_sensitivity")
+    if defect is not None:
+        return defect
+    sign_flip = obj.get("sign_flip")
+    if sign_flip is not None and not isinstance(sign_flip, bool):
+        return "fill_sensitivity sign_flip is not a bool"
+    return None
+
+
+def _bridge_entry_object(
+    row: dict[str, Any],
+    key: str,
+    defect_of: Callable[[dict[str, Any]], str | None],
+) -> tuple[dict[str, Any], bool]:
+    """Validate one row's optional additive object under the #1631 partial law.
+
+    Returns ``(row, dropped)``: key absent → pass-through untouched; a VALID
+    object passes through UNCHANGED (no display stamping — numeric objects);
+    an invalid one is DROPPED from the row + flagged so the caller counts it
+    into the named partial (the row itself is kept, renders "—").
+    """
+    if key not in row:
+        return row, False
+    obj = row.get(key)
+    if isinstance(obj, dict) and defect_of(obj) is None:
+        return row, False
+    stripped = dict(row)
+    stripped.pop(key, None)
+    return stripped, True
+
+
 def load_top100(run_dir: Path) -> Top100Result:
     """Load ``top100.json`` — the WRITER's object root, entries validated per row.
 
@@ -1491,6 +1870,15 @@ def load_top100(run_dir: Path) -> Top100Result:
     cascade_join = cascade_join_raw if isinstance(cascade_join_raw, dict) else None
     rows: list[dict[str, Any]] = []
     cascade_dropped = 0
+    tier_dropped = 0
+    # `DEC-OPTIONS-EXEC-FEEDBACK-001` / DEC-FILL-EXEC-GRID-1M-001 — the three
+    # additive exec/annotation objects ride the SAME per-row bridge law as
+    # cascade (invalid → key dropped + counted NAMED partial, row kept).
+    object_dropped: dict[str, int] = {
+        "options_exec": 0,
+        "futures_exec": 0,
+        "fill_sensitivity": 0,
+    }
     for idx, row in enumerate(entries_raw):
         if not isinstance(row, dict):
             return Top100Result(
@@ -1524,6 +1912,17 @@ def load_top100(run_dir: Path) -> Top100Result:
         bridged, dropped = _bridge_cascade(_bridge_top100_arm(_map_top100_metrics(row)))
         if dropped:
             cascade_dropped += 1
+        bridged, dropped_tier = _bridge_tier(bridged)
+        if dropped_tier:
+            tier_dropped += 1
+        for key, defect_of in (
+            ("options_exec", _options_exec_object_defect),
+            ("futures_exec", _futures_exec_object_defect),
+            ("fill_sensitivity", _fill_sensitivity_object_defect),
+        ):
+            bridged, obj_dropped = _bridge_entry_object(bridged, key, defect_of)
+            if obj_dropped:
+                object_dropped[key] += 1
         rows.append(bridged)
     if cascade_dropped:
         _LOG.warning(
@@ -1531,19 +1930,221 @@ def load_top100(run_dir: Path) -> Top100Result:
             path=str(path),
             dropped=cascade_dropped,
         )
+    if tier_dropped:
+        _LOG.warning(
+            "oneclick.tier_object_dropped",
+            path=str(path),
+            dropped=tier_dropped,
+        )
+    for key, count in object_dropped.items():
+        if count:
+            _LOG.warning(
+                "oneclick.entry_object_dropped",
+                path=str(path),
+                key=key,
+                dropped=count,
+            )
     if cap_detail:
         return Top100Result("partial", tuple(rows), cap_detail, revision, preset, cascade_join)
+    # The named-partial detail: the cascade + tier families compose into ONE
+    # " + "-joined clause (the pre-change cascade-only wording byte-preserved —
+    # " + " joins only when BOTH drop), then each additive exec/annotation
+    # object is its OWN "; "-joined clause (the #1631 named-partial law).
+    clauses: list[str] = []
+    cascade_tier_parts: list[str] = []
     if cascade_dropped:
+        cascade_tier_parts.append(f"{cascade_dropped} row(s) carried an invalid cascade object")
+    if tier_dropped:
+        cascade_tier_parts.append(f"{tier_dropped} row(s) carried an invalid tier object")
+    if cascade_tier_parts:
+        clauses.append(
+            " + ".join(cascade_tier_parts) + " — dropped (those rows render the honest '—')"
+        )
+    for key, count in object_dropped.items():
+        if count:
+            clauses.append(
+                f"{count} row(s) carried an invalid {key} object — "
+                "dropped (those rows render the honest '—')"
+            )
+    if clauses:
         return Top100Result(
             "partial",
             tuple(rows),
-            f"{cascade_dropped} row(s) carried an invalid cascade object — "
-            "dropped (those rows render the honest '—')",
+            "; ".join(clauses),
             revision,
             preset,
             cascade_join,
         )
     return Top100Result("ok", tuple(rows), "", revision, preset, cascade_join)
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineResult:
+    """One resolved buy-&-hold baseline read (DEC-RESULTS-TRUST-HONESTY-001 · B1).
+
+    Attributes
+    ----------
+    status
+        ``ok`` = a validated stored series is served; ``awaiting`` = the
+        artifact chain is not there yet (absent top100 / array-root interim
+        top100 with no baselines map / no baseline recorded for the
+        instrument / baseline file absent); ``corrupt`` = present-but-damaged
+        (bad top100 JSON, a non-string-map ``baselines`` key, an UNSAFE
+        filename ref, or a baseline file failing the engine's validating
+        loader). NEVER a fabricated series (Golden Rule #1).
+    instrument
+        The RESOLVED instrument token (``None`` until resolvable).
+    filename
+        The baselines-map filename ref that was (or would be) read.
+    series
+        The validated :class:`~brutex.engine.baseline.BaselineSeries` on the
+        ``ok`` arm — STORED values only, never recomputed at serve.
+    instruments
+        The sorted instrument keys of the run's baselines map (empty when the
+        map itself is unavailable) — the honest "what IS stored" hint.
+    detail
+        Human-readable awaiting/defect note (empty when ``ok``).
+    revision
+        The served baseline FILE's ``mtime_ns:size`` stat token (``ok`` arm),
+        else ``None``.
+    """
+
+    status: ArtifactStatus
+    instrument: str | None
+    filename: str | None
+    series: BaselineSeries | None
+    instruments: tuple[str, ...]
+    detail: str
+    revision: str | None
+
+
+def _load_baselines_map(run_dir: Path) -> tuple[dict[str, str] | None, str]:
+    """Read the top100.json ROOT's ``baselines`` map → ``(map, detail)``.
+
+    ``(None, detail)`` = unavailable, with the detail carrying the honest
+    cause; the ARRAY-root interim contract (the shape :func:`load_top100`
+    pages rows from) carries NO baselines map and reads as an awaiting-style
+    absence, never corrupt. A present-but-wrong-typed ``baselines`` key IS
+    damage (``detail`` starts ``corrupt:`` — the caller maps it).
+    """
+    path = run_dir / TOP100_FILENAME
+    text, error = _read_artifact_text(path, artifact=TOP100_FILENAME)
+    if text is None:
+        if error is None:
+            return None, f"{AWAITING_DETAIL} — {TOP100_FILENAME} absent"
+        return None, f"corrupt: {error}"
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return None, f"corrupt: {TOP100_FILENAME} is not valid JSON"
+    if isinstance(obj, list):
+        return None, (
+            f"{TOP100_FILENAME} has an ARRAY root (the interim contract) — no baselines "
+            "map; re-run the results-depth pass to write the object-root artifact"
+        )
+    if not isinstance(obj, dict):
+        return None, f"corrupt: {TOP100_FILENAME} root is neither object nor array"
+    baselines = obj.get("baselines")
+    if baselines is None:
+        return None, f"{TOP100_FILENAME} object root carries no baselines map"
+    if not isinstance(baselines, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in baselines.items()
+    ):
+        return None, f"corrupt: {TOP100_FILENAME} baselines is not a string→string map"
+    return dict(baselines), ""
+
+
+def load_baseline_result(run_dir: Path, instrument: str | None) -> BaselineResult:
+    """Resolve one run's stored buy-&-hold baseline (R27) for the serve route.
+
+    Resolution law (DEC-RESULTS-TRUST-HONESTY-001 · B1 — STORED bytes only,
+    never a recompute): the filename comes from the run's top100.json object
+    root ``baselines`` map (the #1275 writer's instrument → filename record);
+    *instrument* ``None`` auto-selects IFF exactly ONE baseline is stored
+    (the common single-instrument sweep), else the awaiting detail NAMES the
+    stored instruments so the caller can re-ask precisely. The filename ref
+    is validated as ONE safe path segment BEFORE any disk touch (a tampered
+    map can never traverse — the ``sidecar_paths_from_ref`` posture), and the
+    file is read through the engine's VALIDATING :func:`load_baseline` (any
+    damage → ``corrupt``, never a half-trusted series).
+    """
+    baselines, detail = _load_baselines_map(run_dir)
+    if baselines is None:
+        if detail.startswith("corrupt: "):
+            return BaselineResult(
+                "corrupt", instrument, None, None, (), detail.removeprefix("corrupt: "), None
+            )
+        return BaselineResult("awaiting", instrument, None, None, (), detail, None)
+    instruments = tuple(sorted(baselines))
+    if instrument is None:
+        if len(instruments) == 1:
+            instrument = instruments[0]
+        else:
+            return BaselineResult(
+                "awaiting",
+                None,
+                None,
+                None,
+                instruments,
+                (
+                    f"instrument required — {len(instruments)} baseline(s) stored"
+                    + (f": {', '.join(instruments)}" if instruments else "")
+                ),
+                None,
+            )
+    filename = baselines.get(instrument)
+    if filename is None:
+        return BaselineResult(
+            "awaiting",
+            instrument,
+            None,
+            None,
+            instruments,
+            f"no stored baseline for {instrument!r}"
+            + (f" — stored: {', '.join(instruments)}" if instruments else ""),
+            None,
+        )
+    if not is_safe_run_id(filename):
+        _LOG.warning(
+            "oneclick.baseline_ref_unsafe",
+            run_dir=str(run_dir),
+            instrument=instrument,
+            filename=filename,
+        )
+        return BaselineResult(
+            "corrupt",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"baseline filename ref {filename!r} is not one safe path segment",
+            None,
+        )
+    path = run_dir / filename
+    revision = artifact_revision(path)
+    if revision is None:
+        return BaselineResult(
+            "awaiting",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"{AWAITING_DETAIL} — {filename} absent",
+            None,
+        )
+    series = load_baseline(path)
+    if series is None:
+        # load_baseline already logged the named reason (baseline.load_invalid).
+        return BaselineResult(
+            "corrupt",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"{filename} failed validation — rebuild via the results-depth pass",
+            None,
+        )
+    return BaselineResult("ok", instrument, filename, series, instruments, "", revision)
 
 
 def load_preflight_fixture(run_dir: Path) -> ManifestResult:
@@ -1643,7 +2244,11 @@ def tail_events(
     """
     path = run_dir / EVENTS_FILENAME
     try:
-        fh = path.open("rb")
+        # DEC-LAKE-READ-INODE-GUARD-001 defense (a): the fd-validated open —
+        # a planted FIFO at the events path blocked the plain open() forever;
+        # NotRegularFileError folds into the OSError corrupt arm below. The
+        # window reads themselves stay bounded (the 1 MiB cap law).
+        fh = open_regular_binary(path)
     except FileNotFoundError:
         return EventsPage(
             "awaiting", (), 0, 0, False, f"{AWAITING_DETAIL} — {EVENTS_FILENAME} absent"
@@ -1811,7 +2416,10 @@ def verify_events_chain(
     """
     path = run_dir / EVENTS_FILENAME
     try:
-        fh = path.open("rb")
+        # DEC-LAKE-READ-INODE-GUARD-001 defense (a): fd-validated open — the
+        # click-only chain verify must refuse a planted FIFO loudly, never
+        # block; NotRegularFileError folds into the OSError arm below.
+        fh = open_regular_binary(path)
     except FileNotFoundError:
         return (
             False,
@@ -2001,8 +2609,10 @@ class FixtureTradesReader:
     """FIXTURE-ONLY trades reader over the interim ``rank-%04d.json`` layout (§0.3).
 
     Activated ONLY when :func:`resolve_fixture_root` is non-``None``. Parses
-    the file ONCE per stat-token revision into a single-entry memo keyed by
-    ``(path, revision)``, so a repeat page click is an O(page) slice — the
+    the file ONCE per stat-token revision into the bounded single-flight
+    :class:`_RevisionMemo` keyed by ``(path, revision)`` (fix 4b,
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 — supersedes the hand-rolled
+    single-entry memo), so a repeat page click is an O(page) slice — the
     FIRST parse per revision is O(file), stated honestly.
 
     Attributes
@@ -2023,8 +2633,7 @@ class FixtureTradesReader:
             reader never leaves the fixture tree).
         """
         self._root = fixture_root
-        self._lock = threading.Lock()
-        self._memo: tuple[str, str, _ParsedTrades] | None = None
+        self._memo: _RevisionMemo[_ParsedTrades] = _RevisionMemo()
         self.parse_count: int = 0
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -2098,16 +2707,8 @@ class FixtureTradesReader:
         )
 
     def _parse_cached(self, path: Path, revision: str) -> _ParsedTrades:
-        """Serve the single-entry ``(path, revision)`` memo, parsing on a miss."""
-        key = str(path)
-        with self._lock:
-            memo = self._memo
-        if memo is not None and memo[0] == key and memo[1] == revision:
-            return memo[2]
-        parsed = self._parse(path)
-        with self._lock:
-            self._memo = (key, revision, parsed)
-        return parsed
+        """Serve the ``(path, revision)`` memo (single-flight, bounded), parsing on a miss."""
+        return self._memo.get_or_compute((str(path), revision), lambda: self._parse(path))
 
     def _parse(self, path: Path) -> _ParsedTrades:
         """Parse the whole interim trades file — O(file), once per revision."""
@@ -2186,6 +2787,8 @@ def sidecar_paths_from_ref(run_dir: Path, tuple_ref: str) -> SidecarPaths | None
         aggs=base / f"{stem}.aggs.parquet",
         equity=base / f"{stem}.equity.parquet",
         stamp=base / f"{stem}.stamp.json",
+        resilience=base / f"{stem}.resilience.parquet",
+        resilience_stamp=base / f"{stem}.resilience.stamp.json",
     )
 
 
@@ -2273,9 +2876,11 @@ class TradeStoreReader:
             The sweep results root; runs resolve via :func:`runs_root`.
         """
         self._results_root = results_root
-        self._lock = threading.Lock()
-        self._top100_memo: tuple[str, str, Top100Result] | None = None
-        self._equity_memo: tuple[tuple[str, str, str], tuple[dict[str, Any], ...]] | None = None
+        # fix 4b (DEC-MEMORY-FOOTPRINT-HARDENING-001): both memos ride the
+        # ONE bounded single-flight _RevisionMemo — a two-run/two-rank page
+        # alternation no longer re-parses on every flip.
+        self._top100_memo: _RevisionMemo[Top100Result] = _RevisionMemo()
+        self._equity_memo: _RevisionMemo[tuple[dict[str, Any], ...]] = _RevisionMemo()
         #: Reader-owned once-per-outage WARN bookkeeping for the top100 stat
         #: probe (DEC-CACHE-SERVE-LAST-KNOWN-001, reconciled onto the ONE
         #: repo-wide :class:`OutageGate` mechanism — #1406's C-r2-5 gate;
@@ -2346,7 +2951,8 @@ class TradeStoreReader:
 
         HONEST envelope: the stamp carries NO equity span index (unlike the
         trades' ``trade_spans``), so the FIRST read per (file revision, combo)
-        is an O(equity-file) ``run_id`` filter; the single-entry memo makes
+        is an O(equity-file) ``run_id`` filter; the bounded single-flight memo
+        (:class:`_RevisionMemo`, fix 4b) makes
         every repeat page an O(page) slice. ``limit`` clamps to
         ``[1, 5000]`` (one row per session ≈ 250/year — one fetch charts ~20
         years) and the clamp is named in ``detail``.
@@ -2470,7 +3076,7 @@ class TradeStoreReader:
         return combo_run_id, paths, outage_note
 
     def _equity_cached(self, path: Path, combo_run_id: str) -> tuple[dict[str, Any], ...]:
-        """Serve the single-entry ``(path, revision, combo)`` equity memo.
+        """Serve the ``(path, revision, combo)`` equity memo (single-flight, bounded).
 
         A ``None`` revision (absent/unstattable) reads fresh and caches
         NOTHING (the ``lake_revision`` doctrine — no stale illusion).
@@ -2483,18 +3089,13 @@ class TradeStoreReader:
         revision = artifact_revision(path)
         if revision is None:
             return _load_equity_records(path, combo_run_id)
-        key = (str(path), revision, combo_run_id)
-        with self._lock:
-            memo = self._equity_memo
-        if memo is not None and memo[0] == key:
-            return memo[1]
-        series = _load_equity_records(path, combo_run_id)
-        with self._lock:
-            self._equity_memo = (key, series)
-        return series
+        return self._equity_memo.get_or_compute(
+            (str(path), revision, combo_run_id),
+            lambda: _load_equity_records(path, combo_run_id),
+        )
 
     def _top100_cached(self, run_dir: Path) -> tuple[Top100Result, bool]:
-        """Serve the single-entry ``(path, revision)`` top100 memo, parsing on a miss.
+        """Serve the ``(path, revision)`` top100 memo (single-flight, bounded), parsing on a miss.
 
         Returns ``(result, served_last_known)``. A ``None`` revision splits
         (DEC-CACHE-SERVE-LAST-KNOWN-001): a merely-ABSENT artifact computes
@@ -2514,23 +3115,25 @@ class TradeStoreReader:
         key = str(path)
         if probe.token is None:
             if probe.outage:
-                self._outages.outage_key(key)  # once-per-outage WARN latch
-                with self._lock:
-                    memo = self._top100_memo
-                if memo is not None and memo[0] == key:
-                    return memo[2], True
+                # once-per-outage WARN latch; the returned last-known revision
+                # keys the bounded _RevisionMemo peek (merge-compose: #1719's
+                # serve-last-known doctrine over #1721's fix-4b memo — a
+                # two-run alternation may have evicted the entry, in which
+                # case the honest fresh uncached parse below stands).
+                last = self._outages.outage_key(key)
+                if last is not None:
+                    memo = self._top100_memo.peek((key, last))
+                    if memo is not None:
+                        return memo, True
             else:
                 self._outages.absent(key)
             self.parse_count += 1
             return load_top100(run_dir), False
         revision = probe.token
         self._outages.healthy(key, revision)
-        with self._lock:
-            memo = self._top100_memo
-        if memo is not None and memo[0] == key and memo[1] == revision:
-            return memo[2], False
-        self.parse_count += 1
-        parsed = load_top100(run_dir)
-        with self._lock:
-            self._top100_memo = (key, revision, parsed)
-        return parsed, False
+
+        def _parse() -> Top100Result:
+            self.parse_count += 1
+            return load_top100(run_dir)
+
+        return self._top100_memo.get_or_compute((key, revision), _parse), False

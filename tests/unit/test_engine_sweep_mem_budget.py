@@ -9,6 +9,7 @@ refusal NAMES both env knobs + concrete remedies).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 
 import pytest
@@ -257,3 +258,215 @@ class TestWatermarkMessage:
         # present in every PRE-FLIGHT refusal, pinned above).
         message = watermark_message(owned_bytes=2048, budget_bytes=1024, n_kept=17)
         assert BOUNDED_RANK_MODE_ENV not in message
+
+
+# ────── worker-aware budget — the DEC-SWEEP-SCALE-GUARDS-001 OOM pins, re-pinned
+# onto main's LANDED divisor (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 #1671) ──────
+
+
+class TestWorkerAwareBudgetScaleGuards:
+    """T2's OOM-guarantee pins over the landed ``resolve_mem_budget_bytes(workers=)``.
+
+    T2's delivery mechanism (a ``per_worker_mem_budget_bytes`` call-site
+    division at the plan seam) was DEDUPED to main's #1671 pool-initializer
+    divisor at the 2026-07-11 fold — main wins, incl. the override contract
+    (``BRUTEX_SWEEP_MEM_BUDGET_BYTES`` is PER-WORKER, never divided). These
+    keep ONLY the assertions unique to the scale-guards register — the §8-box
+    OOM arithmetic + the k=5 bounded-rank engagement flip; the divisor seam
+    itself is pinned in test_engine_sweep_mem_budget_workers.py.
+    """
+
+    def test_eight_workers_divide_the_default_total(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The 48 GiB §8 box: default total 8 GiB ÷ 8 eval workers == 1 GiB/tuple.
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        assert resolve_mem_budget_bytes({}, workers=8) == 1 * _GIB
+
+    def test_floor_is_one_byte_never_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A pathological derived // workers == 0 must never yield a zero budget
+        # (that would refuse every non-empty tuple); the COMMON
+        # memory_budget_bytes floors the divided figure at 1 byte.
+        _simulate_ram(monkeypatch, 12)  # 12 × 1/6 ÷ 8 = 0.25 → floored to 1
+        assert resolve_mem_budget_bytes({}, workers=8) == 1
+
+    @pytest.mark.parametrize("bad", [0, -1, -8])
+    def test_rejects_non_positive_worker_count(
+        self, bad: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A silently-wrong divisor must fail loud (Golden Rule #1).
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        with pytest.raises(ValueError, match="workers must be >= 1"):
+            resolve_mem_budget_bytes({}, workers=bad)
+
+    def test_eight_concurrent_k5_retention_stays_under_half_ram(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pin (a): the OOM guarantee. On the 48 GiB §8 box the default total is
+        # 8 GiB; under the bounded rank each of 8 concurrent tuples is capped at
+        # the per-worker budget, so the concurrent aggregate is well under half
+        # of RAM (8 × 1 GiB = 8 GiB ≤ 24 GiB) — never the ~42 GB the undivided
+        # budget allowed (8 × 5.21 GB).
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        total_ram = 48 * _GIB
+        workers = 8
+        per_tuple = resolve_mem_budget_bytes({}, workers=workers)
+        assert workers * per_tuple <= total_ram // 2
+
+    def test_k5_bounded_rank_engages_under_default_workers_but_not_single(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pin (c): a k=5 tuple's ~5.21 GB batch projection sat JUST UNDER the
+        # undivided 8 GiB gate, so the bounded rank NEVER engaged (silent OOM
+        # risk). Divided across 8 workers the gate is 1 GiB, so it now ENGAGES.
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        n_masks_k5 = math.comb(60, 5)  # 5,461,512 masks
+        projected = n_masks_k5 * BATCH_RANK_BYTES_PER_KEPT  # ~5.21 GB
+        assert resolve_mem_budget_bytes({}, workers=1) == 8 * _GIB
+        # The register's exact numbers: 5.21 GB projection under the 8 GiB gate.
+        assert 5 * _GIB < projected < 6 * _GIB
+
+        # Single worker (undivided): the projection is UNDER the gate → batch (never bounded).
+        single_plan = plan_rank_memory(
+            n_masks=n_masks_k5,
+            top_k=1000,
+            digest_path=True,
+            mode=BoundedRankMode.AUTO,
+            budget_bytes=resolve_mem_budget_bytes({}, workers=1),
+        )
+        assert single_plan.bounded is False
+
+        # Default 8 workers (divided): the 1 GiB gate is exceeded → bounded ENGAGES.
+        parallel_plan = plan_rank_memory(
+            n_masks=n_masks_k5,
+            top_k=1000,
+            digest_path=True,
+            mode=BoundedRankMode.AUTO,
+            budget_bytes=resolve_mem_budget_bytes({}, workers=8),
+        )
+        assert parallel_plan.bounded is True
+        assert parallel_plan.bounded_top_k == 1000
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1b routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the `plan_rank_memory` decision table.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    value-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives) — plans compare as frozen dataclasses, refusal
+    message bytes included.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_every_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_mem_budget import BoundedRankMode, plan_rank_memory
+
+        cases: list[dict[str, object]] = [
+            # batch (within budget)
+            {
+                "n_masks": 1000,
+                "top_k": 5,
+                "digest_path": True,
+                "mode": BoundedRankMode.AUTO,
+                "budget_bytes": 8 * 1024**2,
+            },
+            # bounded (auto, past budget, eligible)
+            {
+                "n_masks": 10_000_000,
+                "top_k": 5,
+                "digest_path": True,
+                "mode": BoundedRankMode.AUTO,
+                "budget_bytes": 1024,
+            },
+            # refuse_no_top_k
+            {
+                "n_masks": 10_000_000,
+                "top_k": None,
+                "digest_path": True,
+                "mode": BoundedRankMode.AUTO,
+                "budget_bytes": 1024,
+            },
+            # refuse_no_digest
+            {
+                "n_masks": 10_000_000,
+                "top_k": 5,
+                "digest_path": False,
+                "mode": BoundedRankMode.AUTO,
+                "budget_bytes": 1024,
+            },
+            # refuse_off
+            {
+                "n_masks": 10_000_000,
+                "top_k": 5,
+                "digest_path": True,
+                "mode": BoundedRankMode.OFF,
+                "budget_bytes": 1024,
+            },
+            # mode on → bounded regardless of budget
+            {
+                "n_masks": 10_000_000,
+                "top_k": 5,
+                "digest_path": True,
+                "mode": BoundedRankMode.ON,
+                "budget_bytes": 1024,
+            },
+        ]
+        off = [plan_rank_memory(**case) for case in cases]  # type: ignore[arg-type]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = [plan_rank_memory(**case) for case in cases]  # type: ignore[arg-type]
+            assert on == off
+        finally:
+            self._reset_facade()
+
+    def test_flag_on_mode_on_config_raises_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.engine.sweep_mem_budget import BoundedRankMode, plan_rank_memory
+
+        self._arm_fake_crate(monkeypatch)
+        try:
+            with pytest.raises(ValueError, match="LEGACY no-digest"):
+                plan_rank_memory(
+                    n_masks=10,
+                    top_k=5,
+                    digest_path=False,
+                    mode=BoundedRankMode.ON,
+                    budget_bytes=1024,
+                )
+            with pytest.raises(ValueError, match="requires a finite top_k"):
+                plan_rank_memory(
+                    n_masks=10,
+                    top_k=None,
+                    digest_path=True,
+                    mode=BoundedRankMode.ON,
+                    budget_bytes=1024,
+                )
+        finally:
+            self._reset_facade()

@@ -850,7 +850,7 @@ Track 2 entries must satisfy: `entry_strike.bar_price > 5 × TICK_PAISA`
 - **Dual validation oracle** (NOT py_vollib alone):
   1. **`lets_be_rational` (Jäckel 2015)** — for IV (gold standard, 2-iteration Householder, machine precision)
   2. **QuantLib `AnalyticEuropeanEngine` (C++)** — for prices + Greeks (independent implementation)
-  
+
   Tolerance: 1e-10 absolute for BSM-on-BSM cross-checks; 50bp for
   NSE-observed sanity checks (NSE uses r=10% fixed assumption).
 
@@ -1032,21 +1032,31 @@ flat 1-tick adverse on bar-open fills.
 | Within-bar fill sequence | Same |
 | Per-trade volume profile | Same |
 
-### 9.2 The model — flat 1-tick adverse
+### 9.2 The model — flat 1-tick adverse ON the worst-case bar extreme
+
+**AMENDED 2026-07-15 (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825):**
+worst-case is the ONLY fill law product-wide — the tick's ANCHOR moves
+from the bar OPEN to the fill bar's ADVERSE EXTREME (the retired PRECISE
+open anchor is deleted with its mode). Fill-bar timing is unchanged.
 
 ```
-   ENTRY (bar N+1 OPEN after signal at bar N close):
-     fill_price = bar(N+1).open + 1 tick   if side = buy
-                = bar(N+1).open - 1 tick   if side = sell
+   ENTRY (bar N+1 after signal at bar N close):
+     fill_price = bar(N+1).high + 1 tick   if side = buy
+                = bar(N+1).low  - 1 tick   if side = sell
 
-   EXIT (bar M+1 OPEN after exit signal at bar M close):
-     fill_price = bar(M+1).open + 1 tick   if side = buy
-                = bar(M+1).open - 1 tick   if side = sell
+   EXIT (bar M+1 after exit signal at bar M close):
+     fill_price = bar(M+1).high + 1 tick   if side = buy
+                = bar(M+1).low  - 1 tick   if side = sell
 
    tick = ₹0.05 (uniform for all NSE/BSE index options post-2020)
+   every fill floors at 1 tick (nothing trades below ₹0.05)
 ```
 
-That's it. No delta bucket. No ToD multiplier. No VIX multiplier.
+That's it. No delta bucket. No ToD multiplier. No VIX multiplier. On a
+flat bar (high == low == open) the fills equal the pre-amendment
+open±tick values exactly, so the worst-case fill can never flatter; on a
+ranged bar the buy prices one tick OUTSIDE the printed range — the honest
+adverse floor, not a printable price.
 
 ### 9.3 Why this is the right call given 1m-bar-only constraint
 

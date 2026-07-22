@@ -140,15 +140,48 @@ var BX_SCREENER_COLUMNS = [
   { key: "metrics.profit_factor", label: "PF", type: "num", explain: "profit_factor" },
   { key: "metrics.max_dd_paisa", label: "Max DD", type: "num", money: true, explain: "max_dd_paisa" },
   { key: "metrics.sharpe", label: "Sharpe", type: "num", explain: "sharpe" },
-  { key: "metrics.dsr", label: "DSR", type: "num", explain: "dsr" },
+  /* The tuple-N honesty label (DEC-RESULTS-TRUST-HONESTY-001 — the /results
+     law): the stored dsr is the per-tuple figure, never shown unlabeled. */
+  { key: "metrics.dsr", label: "DSR (tuple-N)", type: "num", explain: "dsr" },
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
+  /* DEC-ALPHA-BUYHOLD-METRIC-001: alpha vs buy-&-hold — additive artifact
+     metric; a pre-alpha artifact lacks the key entirely -> "—" (absent-
+     excluded-but-counted under a filter, the #1631 law — never a 0). */
+  { key: "metrics.alpha_pct", label: "Alpha %", type: "num", explain: "alpha_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
+  // Losing-streak resilience columns (the sibling block; dotted keys resolve
+  // row.resilience.* / row.metrics.* generically; null → "—", never a
+  // fabricated 0, and a null value sorts LAST — never sortable-into-a-lie).
+  // TWO DISTINCT runs — the conflation guard (R4): the LONGEST streak is
+  // measured BY COUNT (max_consecutive_losses); the WORST streak is measured
+  // BY ₹ (worst_streak_pnl_paisa) and is a DIFFERENT, commonly SHORTER run,
+  // so its OWN length (worst_streak_len) sits immediately beside its ₹ column
+  // — a trader can never read "the longest streak (N losses) cost ₹X".
+  { key: "metrics.max_consecutive_losses", label: "Longest streak (count)", type: "num", explain: "max_consecutive_losses" },
+  { key: "resilience.losing_streak_p95", label: "Cold streak P95", type: "num", explain: "losing_streak_p95" },
+  { key: "resilience.worst_streak_len", label: "Worst streak len", type: "num", explain: "worst_streak_len" },
+  { key: "resilience.worst_streak_pnl_paisa", label: "Worst streak ₹", type: "num", money: true, explain: "worst_streak_pnl" },
+  { key: "resilience.longest_underwater_days", label: "Underwater days", type: "num", explain: "longest_underwater" },
+  { key: "resilience.worst_loss_month_count", label: "Worst-month losses", type: "num", explain: "worst_loss_month" },
+  { key: "resilience.win_rate_year_spread", label: "Win-rate swing", type: "num", explain: "win_rate_year_spread" },
   { key: "vix_band", label: "VIX band", type: "vix", explain: "vix_band" },
   /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
      cascade.status_text is SERVER-built (oneclick_view.cascade_status_text);
      a pre-change artifact lacks the key entirely -> "—" (absent-excluded-
      but-counted under a filter, the #1631 law — never a fabricated PASS). */
   { key: "cascade.status_text", label: "Cascade", type: "str", explain: "cascade_status" },
+  /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier — tier.status_text is
+     SERVER-built (oneclick_view.tier_status_text); a pre-tier artifact lacks
+     the key entirely -> "—" (absent-excluded-but-counted under the exact
+     tier filter, the instrument law — never a fabricated tier). */
+  { key: "tier.status_text", label: "Tier", type: "str", explain: "tier" },
+  /* `DEC-OPTIONS-EXEC-FEEDBACK-001`: the post-sweep exec-sim verdicts.
+     Dotted paths into the additive options_exec/futures_exec objects — a
+     pre-change (or provider-None) artifact lacks the key entirely -> the
+     cell renders "—" via bxFieldValue's undefined and sorting puts the row
+     LAST (zero new mechanism; the absent-key law). */
+  { key: "options_exec.net_after_cost_paisa", label: "Opt net", type: "num", money: true, explain: "options_net_after_cost" },
+  { key: "futures_exec.net_pnl_paisa", label: "Fut net", type: "num", money: true, explain: "futures_net" },
   { key: "family_id", label: "Family", type: "str", explain: "family_id" },
   { key: "mask_hex", label: "Mask", type: "str", explain: "mask_hex" }
 ];
@@ -279,10 +312,20 @@ function bxVixOverlap(band, lo, hi) {
  * filters: { tf: string[]|null, direction: string|null,
  *            instrument: string|null (exact match; an absent-instrument row
  *            never matches an active filter),
+ *            tier: string|null (exact match on tier.label; an absent-tier /
+ *            null-label row never matches an active filter),
  *            min_win_rate: number|null, min_pf: number|null,
+ *            min_trades: number|null, min_dsr: number|null,
  *            max_abs_dd_paisa: number|null (magnitude cap — max_dd_paisa is
- *            stored NEGATIVE, the cap compares |dd|) }.
- * A null/absent filter key never excludes.
+ *            stored NEGATIVE, the cap compares |dd|),
+ *            executability: ""|"priced"|"positive"|undefined (the
+ *            options_exec selection — absent-key rows never match an active
+ *            filter, `DEC-OPTIONS-EXEC-FEEDBACK-001`) }.
+ * A null/absent filter key never excludes. min_dsr floors the row's
+ * metrics.dsr — the TUPLE-scoped Deflated Sharpe (an inflating under-count;
+ * the /results DSR label law, DEC-RESULTS-TRUST-HONESTY-001) — a row without
+ * the value cannot demonstrate an active floor and is excluded from that
+ * filtered view only (the >= comparison is false for null/undefined).
  *
  * @param {object} row - a top100 contract row.
  * @param {object|null} filters - the active filters.
@@ -306,11 +349,49 @@ function bxFilterRow(row, filters) {
   if (filters.instrument && row.instrument !== filters.instrument) {
     return false;
   }
+  // Tier is exact-match on the LABEL token (DEC-RANKING-SPLUS-TIER-001 —
+  // the instrument law verbatim): a row WITHOUT the additive `tier` object
+  // (or with a null label — judged "not tiered") never matches an ACTIVE
+  // filter; options are harvested ONLY from rows carrying a non-null label
+  // (bxHarvestFilterOptions), so a pre-tier artifact's dropdown stays empty.
+  if (filters.tier) {
+    var tierLabel = row.tier && typeof row.tier === "object" ? row.tier.label : undefined;
+    if (tierLabel !== filters.tier) {
+      return false;
+    }
+  }
+  // Executability (`DEC-OPTIONS-EXEC-FEEDBACK-001`): a row WITHOUT the
+  // additive options_exec object never matches an ACTIVE filter — a
+  // pre-change artifact (or a --no-options-sim run) filters to empty under
+  // "priced", never to a fabricated verdict; a not_priced row never matches
+  // either (presence of the KEY is not a priced verdict). Deliberately NO
+  // excluded-count line (unlike the null-VIX RANGE filter, where a null band
+  // is ambiguous evidence): this is a positive SELECTION whose whole point
+  // is presence — an absent/unpriced object is a definitive non-match.
+  if (filters.executability) {
+    var oe = row.options_exec;
+    var priced = !!oe && typeof oe === "object" && oe.status === "priced";
+    if (filters.executability === "priced" && !priced) {
+      return false;
+    }
+    if (
+      filters.executability === "positive" &&
+      !(priced && typeof oe.net_after_cost_paisa === "number" && oe.net_after_cost_paisa > 0)
+    ) {
+      return false;
+    }
+  }
   var m = row.metrics || {};
   if (typeof filters.min_win_rate === "number" && !(m.win_rate >= filters.min_win_rate)) {
     return false;
   }
   if (typeof filters.min_pf === "number" && !(m.profit_factor >= filters.min_pf)) {
+    return false;
+  }
+  if (typeof filters.min_trades === "number" && !(m.trades >= filters.min_trades)) {
+    return false;
+  }
+  if (typeof filters.min_dsr === "number" && !(m.dsr >= filters.min_dsr)) {
     return false;
   }
   if (typeof filters.max_abs_dd_paisa === "number") {

@@ -11,7 +11,12 @@ layer 1) — in three layers:
 
 1. **Frozen oracle.** :func:`_oracle_metrics_pre_slice0` is the VERBATIM
    pre-Slice-0 ``_compute_metrics_impl`` body (origin/main ``95955a71``),
-   inlined here so it can never drift with the refactor. It reuses ONLY
+   inlined here so it can never drift with the refactor. Since
+   DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001 the
+   oracle additionally carries the ADDITIVE loss/growth block (three new
+   required ``ResultMetrics`` fields) re-stated INLINE — clearly marked in
+   the body; every pre-existing expression stays the verbatim frozen text,
+   and the parity compare now also pins the additive expressions. It reuses ONLY
    helpers this slice does not touch (``_empty_metrics`` /
    ``_consecutive_runs`` / ``_accumulate_moments`` / ``_percentile`` /
    ``_safe_ratio`` / ``_skewness`` / ``_excess_kurtosis`` /
@@ -202,6 +207,30 @@ def _oracle_metrics_pre_slice0(
     skewness = _skewness(moments)
     kurtosis = _excess_kurtosis(moments)
 
+    # ── ADDITIVE loss/growth block (NOT part of the frozen pre-Slice-0
+    # body — DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001):
+    # ResultMetrics gained three required fields, so the oracle re-states the
+    # additive expressions INLINE (never imported from compute.py) — the
+    # parity compare therefore ALSO pins the new expressions at body level,
+    # while every pre-existing expression above stays the verbatim 95955a71
+    # body.
+    loss_rate = losers / n_trades
+    kelly_fraction: float | None = None
+    log_growth_at_half_kelly: float | None = None
+    if winners != 0 and losers != 0:
+        avg_win_f = gross_profit / winners
+        avg_loss_f = gross_loss_abs / losers
+        if avg_win_f != 0.0 and avg_loss_f != 0.0:
+            b = avg_win_f / avg_loss_f
+            p_win = winners / n_trades
+            q_loss = 1.0 - p_win
+            kelly_fraction = p_win - q_loss / b
+            half = kelly_fraction / 2.0
+            arg_win = 1.0 + half * b
+            arg_loss = 1.0 - half
+            if arg_win > 0.0 and arg_loss > 0.0:
+                log_growth_at_half_kelly = p_win * math.log(arg_win) + q_loss * math.log(arg_loss)
+
     return ResultMetrics(
         net_pnl_paisa=net_pnl,
         total_return_pct=total_return_pct,
@@ -226,6 +255,7 @@ def _oracle_metrics_pre_slice0(
         winning_trades=winners,
         losing_trades=losers,
         win_rate=win_rate,
+        loss_rate=loss_rate,
         profit_factor=profit_factor,
         avg_winning_trade_paisa=avg_win,
         avg_losing_trade_paisa=avg_loss_abs,
@@ -240,6 +270,8 @@ def _oracle_metrics_pre_slice0(
         skewness=skewness,
         kurtosis=kurtosis,
         returns_std_dev=std_dev,
+        kelly_fraction=kelly_fraction,
+        log_growth_at_half_kelly=log_growth_at_half_kelly,
     )
 
 

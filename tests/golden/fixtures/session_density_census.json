@@ -1,0 +1,24 @@
+{
+  "abstained": [
+    [
+      "boundary",
+      2
+    ]
+  ],
+  "flags": [
+    {
+      "expected": 375,
+      "fraction": 0.88,
+      "gap_end_ist": "10:45:00",
+      "gap_start_ist": "10:00:00",
+      "known_irregular": false,
+      "largest_gap_minutes": 45,
+      "observed": 330,
+      "session": "2024-01-03",
+      "shape": "intraday_hole"
+    }
+  ],
+  "known_irregular": [],
+  "note": "REAL 2024-01-02..04 calendar anchor, FABRICATED 45-min hole (DEC-SESSION-DENSITY-CENSUS-001 census golden)",
+  "sessions_checked": 1
+}

@@ -16,7 +16,9 @@ into three tiers; this slice ships the two bars-free tiers:
   :func:`recorded_context_from_audit`, never from memory — review condition
   2a). Re-derives every expected store path and every row's 9-field
   ``run_id``, checks mask membership/labels, and applies the killer cheap
-  check: ``rows > top_k`` under one digest is the #650 inflation signature —
+  check: ``rows > union_persist_bound(top_k)`` under one digest is the #650
+  inflation signature (LANE W1: a legitimate store holds the composite top-K
+  prefix PLUS the persist union's quota/frontier extras) —
   post-#654 the digest path always rewrites the FULL population, so an
   oversized store cannot occur legitimately. This detects the pre-#646
   inflation #654's envelope called "undetectable by the sweep" — without bars.
@@ -51,6 +53,7 @@ Honest envelope (Golden Rule #10)
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -58,7 +61,21 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
+from brutex.data.guarded_read import read_parquet_schema_regular, read_regular_bytes
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
+from brutex.engine.results_store import (
+    EXIT_QUALITY_FIELDS,
+    GROWTH_FIELDS,
+    RECENCY_FIELDS,
+    SELECTION_FIELDS,
+    VIX_FIELDS,
+    ResultsStore,
+    ResultsStoreError,
+)
+from brutex.engine.sweep_ops_rust import (
+    routed_recount_verdict,
+    sweep_ops_rust_enabled,
+)
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -68,6 +85,7 @@ from brutex.engine.sweep_orchestrator import (
 )
 from brutex.engine.sweep_run import canonical_trade_params, mask_run_id
 from brutex.engine.trial_stats import (
+    MODE_CENSUS_FIELDS,
     TrialStatsError,
     read_tuple_trial_stats,
     trial_stats_sidecar_path,
@@ -78,8 +96,12 @@ from brutex.engine.tuple_complete import (
     completion_sentinel_path,
     read_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
-from brutex.strategies.types import Side
+from brutex.ranking import OverfitGateConfig
+from brutex.ranking.multi_select import union_persist_bound
+from brutex.ranking.temporal import TemporalRobustnessConfig
+from brutex.strategies.types import PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
 if TYPE_CHECKING:
@@ -494,13 +516,85 @@ def _schedules_from_entries(
     return schedules
 
 
+def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path) -> None:
+    """Refuse a scoped generation whose recorded fill law is not the current one.
+
+    Enforces the TWO distinct fill-law refusals that together identify a
+    verifiable tree; either arm refuses LOUDLY, and the remediation for both
+    is a fresh sweep:
+
+    DEC-FILL-WORST-CASE-ONLY-001 (the fill-MODE arm): worst-case is the ONLY
+    fill model and every post-DEC ``SWEEP_START``/``SWEEP_LAUNCH`` line's
+    ``params`` carries the UNCONDITIONAL ``"fill_mode": "worst_case"`` key
+    (``canonical_trade_params`` emits it always). A context entry with NO key
+    is a precise-era line (the retired elide law recorded PRECISE by key
+    absence), and a literal ``"precise"`` token is the retired mode spelled
+    out — either way the generation's stores hold fills the deleted mode
+    produced, and verifying them as worst-case would launder precise-priced
+    results.
+
+    DEC-FILL-EXEC-GRID-1M-001 (the fill-GRID twin): the 1-minute execution
+    grid is the ONLY fill grid and every post-DEC line's ``params`` ALSO
+    carries the UNCONDITIONAL ``"execution_grid": "1m_next_bar"`` key. An
+    absent key (or any other token) is a decision-TF-era line whose stores
+    hold fills resolved on the DECISION bar, and verifying them as 1m-grid
+    results would launder pre-grid prices.
+
+    GENERATION-SCOPED: *entries* are the ONE generation's context entries
+    :func:`recorded_audit_facts` already selects — never the whole audit file.
+
+    Raises
+    ------
+    SweepVerifyError
+        If any scoped entry lacks the ``"fill_mode"`` key or records anything
+        other than ``"worst_case"`` (the DEC-FILL-WORST-CASE-ONLY-001 arm), OR
+        lacks the ``"execution_grid"`` key or records anything other than
+        ``"1m_next_bar"`` (the DEC-FILL-EXEC-GRID-1M-001 arm). A junk token
+        refuses identically on either arm — tampered or legacy, the tree is
+        not verifiable under the current fill laws.
+    """
+    expected = FillMode.WORST_CASE.value
+    for entry in entries:
+        params = entry.payload.get("params")
+        raw = params.get("fill_mode") if isinstance(params, dict) else None
+        if raw is None or str(raw) != expected:
+            raise SweepVerifyError(
+                f"precise-era sweep tree refused (DEC-FILL-WORST-CASE-ONLY-001): "
+                f"{audit_path} (seq {entry.seq}) records fill_mode={raw!r} — "
+                f"worst_case is the only fill model; this generation's stores "
+                f"were priced under the deleted mode machinery and cannot be "
+                f"verified. Re-run the sweep to produce a worst-case tree"
+            )
+        # DEC-FILL-EXEC-GRID-1M-001 (the fill_mode law's twin): every
+        # post-DEC context line's params ALSO carries the unconditional
+        # "execution_grid": "1m_next_bar" key. An absent key (or any other
+        # token) identifies a decision-TF-era generation whose stores hold
+        # fills resolved on the DECISION bar — verifying them as 1m-grid
+        # results would launder pre-grid prices. Refuse LOUDLY; the
+        # remediation is a fresh sweep.
+        raw_grid = params.get("execution_grid") if isinstance(params, dict) else None
+        if raw_grid is None or str(raw_grid) != EXECUTION_GRID_1M_NEXT_BAR:
+            raise SweepVerifyError(
+                f"decision-TF-era sweep tree refused (DEC-FILL-EXEC-GRID-1M-001): "
+                f"{audit_path} (seq {entry.seq}) records "
+                f"execution_grid={raw_grid!r} — the 1-minute execution grid is "
+                f"the only fill grid; this generation's stores were priced on "
+                f"the retired decision-TF grid and cannot be verified. Re-run "
+                f"the sweep to produce a 1m-grid tree"
+            )
+
+
 def recorded_audit_facts(
     audit_path: Path,
     *,
     snapshot: str | None = None,
     indicator_version: str | None = None,
     code_commit_sha: str | None = None,
-) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]], tuple[str, ...]]:
+) -> tuple[
+    RecordedContext | None,
+    dict[str, tuple[int, ...]],
+    tuple[str, ...],
+]:
     """Read the audit ONCE and derive ONE generation's context + schedules.
 
     The ``cmd_sweep_verify`` seam (review round-4 finding 5 — ONE shared parse
@@ -534,16 +628,28 @@ def recorded_audit_facts(
     schedules disagreeing is real corruption (the resume gate refuses a
     schedule-only drift at launch), not any sanctioned cadence.
 
+    The scoped generation is additionally REQUIRED to record BOTH current
+    fill laws (each a distinct enforced refusal): every context entry's
+    ``params`` must carry ``"fill_mode": "worst_case"``
+    (DEC-FILL-WORST-CASE-ONLY-001) AND ``"execution_grid": "1m_next_bar"``
+    (DEC-FILL-EXEC-GRID-1M-001). A precise-era generation (absent/``"precise"``
+    ``fill_mode``) or a decision-TF-era generation (absent/other
+    ``execution_grid``) REFUSES loudly via
+    :func:`_require_worst_case_entries` before any tier runs.
+
     Returns ``(None, {}, ())`` when the audit file is absent, and
     ``(None, {}, other_generations)`` when the explicit flags match no
-    recorded entry (the explicit-flags path — the caller supplies the full
-    context).
+    recorded entry (the explicit-flags path — the caller supplies the
+    context strings via flags).
 
     Raises
     ------
     SweepVerifyError
         If the audit log is unreadable/corrupt, a context-bearing payload is
-        malformed, or the SCOPED generation's schedules disagree.
+        malformed, the SCOPED generation's schedules disagree, or the scoped
+        generation is a refused precise-era tree
+        (DEC-FILL-WORST-CASE-ONLY-001) or decision-TF-era tree
+        (DEC-FILL-EXEC-GRID-1M-001).
     """
     if not audit_path.exists():
         return None, {}, ()
@@ -568,6 +674,7 @@ def recorded_audit_facts(
     target = candidates[-1]
     matching = [entry for entry, ctx in pairs if ctx == target]
     others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs if ctx != target))
+    _require_worst_case_entries(matching, audit_path)
     return (
         _context_from_entries(matching, audit_path),
         _schedules_from_entries(matching, audit_path),
@@ -993,7 +1100,7 @@ def verify_structural(root: Path) -> TreeVerifyReport:
                 "filename carries no 16-hex tuple digest — pairing unverifiable",
             )
             continue
-        actual_hash = hashlib.sha256(store_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(read_regular_bytes(store_path)).hexdigest()
 
         sidecar_path = trial_stats_sidecar_path(store_path)
         sidecar_ok = False
@@ -1164,6 +1271,10 @@ def plan_expected_stores(
             # from the manifest so the reconstructed tuple's run_id re-derives at
             # its ORIGINATING anchor (a non-prev-day cell would otherwise mismatch).
             fib_anchor=cell.fib_anchor,
+            # The refined cell's VWAP/EMA price source (DEC-NIFTY-PRICE-SOURCE-AXIS-001)
+            # — round-tripped so the reconstructed tuple's run_id re-derives at its
+            # ORIGINATING source bits (a non-default cell would otherwise mismatch).
+            price_source=PriceSourceCell(vwap_source=cell.vwap_source, ema_source=cell.ema_source),
         )
         plan[tuple_store_path(root, cell_tuple, train_grid)] = (cell_tuple, train_grid, False)
     return plan
@@ -1192,13 +1303,22 @@ def _verify_store_rows(
     except ResultsStoreError as exc:
         add("store_unreadable", "corrupt", str(exc))
         return
-    if is_grid_tuple and grid.top_k is not None and len(rows) > grid.top_k:
-        add(
-            "rows_exceed_top_k",
-            "corrupt",
-            f"{len(rows)} rows > top_k={grid.top_k} — the #650 subset-re-rank "
-            f"inflation signature (impossible legitimately, pre- AND post-#654)",
-        )
+    if is_grid_tuple and grid.top_k is not None:
+        # LANE W1 (review round 1 gate re-run): a legitimate store holds the
+        # composite top-K prefix PLUS the persist union's quota/frontier
+        # extras, so the #650 inflation signature is rows beyond the ONE
+        # union_persist_bound law — a bare `rows > top_k` would false-flag
+        # every legitimate union store as corrupt.
+        bound = union_persist_bound(grid.top_k)
+        if len(rows) > bound:
+            add(
+                "rows_exceed_top_k",
+                "corrupt",
+                f"{len(rows)} rows > the union persist bound {bound} at "
+                f"top_k={grid.top_k} (top_k + quota/frontier extras, "
+                f"DEC-RANK-QUOTA-PERSIST-1000-001) — the #650 subset-re-rank "
+                f"inflation signature (impossible legitimately, pre- AND post-#654)",
+            )
     try:
         cfg = tuple_.to_run_config(grid, roll_schedule=roll_schedule)
     except ValueError as exc:
@@ -1218,6 +1338,11 @@ def _verify_store_rows(
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
+        # The swept price-source axis is part of the run-identity
+        # (DEC-NIFTY-PRICE-SOURCE-AXIS-001, DEFAULT-OMITTED): a non-default cell's
+        # store re-derives its run_id at ITS OWN source, never a stale (HLC3, CLOSE).
+        vwap_source=cfg.vwap_source,
+        ema_source=cfg.ema_source,
         roll_schedule=cfg.roll_schedule,
     )
     expected_label = _direction_label(tuple_.direction)
@@ -1312,7 +1437,6 @@ def verify_identity(
         params — :func:`recorded_roll_schedules_from_audit` — never the
         operator's memory). ``None`` (the default / every spot tree) is the
         byte-identical pre-launch derivation.
-
     Raises
     ------
     SweepVerifyError
@@ -1321,7 +1445,9 @@ def verify_identity(
     if not root.is_dir():
         raise SweepVerifyError(f"results root not found or not a directory: {root}")
     findings: list[VerifyFinding] = []
-    plan = plan_expected_stores(root, grid, stage3=stage3)
+    plan: dict[Path, tuple[SweepTuple, SweepGridConfig, bool]] = dict(
+        plan_expected_stores(root, grid, stage3=stage3)
+    )
     found = _outside_quarantine(root, sorted(root.glob("**/*.parquet")))
 
     if plan and found and not any(path in plan for path in found):
@@ -1431,9 +1557,11 @@ class RecordedStage3Audit:
         its cell stores hold preloaded foreign-knob rows and are honestly
         non-reproducible; condition B4: cells inconclusive, never compared).
     optimizer_versions
-        The sorted unique ``(pycma, numpy)`` pairs from ``STAGE_3_REFINE_START``
-        lines — the refined-row identity folds them, so a drift changes
-        trajectories without changing the context triple (condition B3).
+        The sorted unique ``(optimizer_version, optimizer_build)`` pairs
+        from ``STAGE_3_REFINE_START`` lines (DEC-RUST-STAGE3-REFINE-001: the
+        brutex-refine crate version tag + its baked source digest) — the
+        refined-row identity folds them, so a drift changes trajectories
+        without changing the context triple (condition B3).
     """
 
     knobs: RecordedStage3Knobs | None
@@ -1470,7 +1598,9 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
         for entry in iter_entries(audit_path):
             if entry.action == "STAGE_3_REFINE_START":
                 payload = entry.payload
-                versions.add((str(payload.get("pycma_version")), str(payload.get("numpy_version"))))
+                versions.add(
+                    (str(payload.get("optimizer_version")), str(payload.get("optimizer_build")))
+                )
                 continue
             if entry.action != "STAGE_3_PASS_START":
                 continue
@@ -1502,38 +1632,431 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
     )
 
 
+#: The two mode-carrying START actions (DEC-SWEEP-APRIORI-DEFAULT-001): the
+#: sequential/parallel supervisor chain's ``SUPERVISOR_START`` (the production
+#: launcher — ``sweep-all-supervisor.jsonl``) and the grid orchestrator's
+#: ``GRID_SWEEP_START`` (library callers / the recount's own shadow chain).
+#: The per-tuple ``SWEEP_START`` lines deliberately do NOT carry the mode key,
+#: so they are NOT in this family.
+_MODE_START_ACTIONS: Final[frozenset[str]] = frozenset({"GRID_SWEEP_START", "SUPERVISOR_START"})
+
+
+# ── Temporal-gate recount support (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) ────────
+
+#: The exact key set ``sweep_run`` emits on every configured ``SWEEP_START``
+#: ``temporal_gate`` payload (the provenance-without-re-key channel) — the
+#: recount reader's fail-closed contract: a payload missing any key is a
+#: malformed tree, not a verifiable one (the Stage-3 knobs discipline).
+_TEMPORAL_GATE_KEYS: Final[tuple[str, ...]] = (
+    "mode",
+    "min_profitable_years_fraction",
+    "max_single_year_pnl_share",
+    "min_edge_year_sessions",
+    "min_judged_years",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedTemporalAudit:
+    """The tree's recorded temporal-gate history (``recorded_temporal_from_audit``).
+
+    ``config`` is the ONE recorded
+    :class:`~brutex.ranking.temporal.TemporalRobustnessConfig` when every
+    ``SWEEP_START`` line agrees (``None`` for a temporal-less tree — absent
+    audit, no ``SWEEP_START`` lines, or every line lacking the
+    ``temporal_gate`` key); ``consistent`` is ``False`` when the history is
+    MIXED (the ledgered resume envelope: the completion sentinel excludes the
+    gate config, so a resumed grid can mix gate regimes per tuple), in which
+    case ``config`` is ``None`` — one shadow config cannot reproduce a
+    mixed-regime tree, so the recount must degrade to INCONCLUSIVE, never
+    condemn.
+    """
+
+    config: TemporalRobustnessConfig | None
+    consistent: bool
+
+
+def recorded_temporal_from_audit(audit_path: Path) -> RecordedTemporalAudit:
+    """Read the tree's recorded temporal-gate config from its audit log.
+
+    The Tier-3 recount seam (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, the
+    condition-B1 twin of :func:`recorded_stage3_from_audit`): the launcher
+    threads ``SweepGridConfig.temporal`` (the shipped CLI default is
+    ``observe``) and BOTH modes capture the four emit-on-present period-stats
+    columns at the finalist re-sim — so a shadow re-sweep that does NOT run
+    the tree's RECORDED temporal regime byte-diverges on the columns (and, in
+    ``gate`` mode, on WHICH rows persist) and false-condemns every good store
+    as verdict-grade ``recount_divergence`` corruption (the VIX-stamper
+    round-2 BLOCKER class one config over). The gate config never enters run
+    identity, so the tree's own hash-chained ``SWEEP_START``
+    ``temporal_gate`` payloads are the ONE recorded channel — never the
+    verify-time environment (``$BRUTEX_TEMPORAL`` must not be consulted: an
+    operator verifying under a different env than the launch would otherwise
+    re-introduce the false divergence this reader kills).
+
+    Returns the no-history record (``config=None, consistent=True``) when the
+    file is absent. Streams the chain via
+    :func:`brutex.orchestrator.audit.iter_entries` — O(1) peak memory in
+    chain length (DEC-AUDIT-READERS-STREAM-001). HONEST residual: an
+    audit-less recount (rotated chain + explicit ``--data-snapshot-hash`` /
+    ``--indicator-version`` / ``--code-commit-sha`` overrides) has no
+    recorded channel and recounts temporal-less — over a temporal-recorded
+    tree that still byte-diverges (the Stage-3 audit-less-knobs residual's
+    exact shape).
+
+    Raises
+    ------
+    SweepVerifyError
+        If the audit log is unreadable (an :class:`AuditError` at the
+        ``iter_entries`` call or mid-iteration), a ``temporal_gate`` payload
+        is not a mapping / is missing a key, or its values do not form a
+        valid :class:`~brutex.ranking.temporal.TemporalRobustnessConfig`
+        (a malformed tree is not a verifiable tree).
+    """
+    if not audit_path.exists():
+        return RecordedTemporalAudit(config=None, consistent=True)
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    seen: set[TemporalRobustnessConfig | None] = set()
+    try:
+        # The try spans the ITERATION (streaming AuditError raises mid-loop).
+        for entry in iter_entries(audit_path):
+            if entry.action != "SWEEP_START":
+                continue
+            raw = entry.payload.get("temporal_gate")
+            if raw is None:
+                seen.add(None)
+                continue
+            if not isinstance(raw, Mapping):
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) is not a mapping"
+                )
+            missing = [key for key in _TEMPORAL_GATE_KEYS if key not in raw]
+            if missing:
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) missing {missing}"
+                )
+            try:
+                seen.add(
+                    TemporalRobustnessConfig(
+                        min_profitable_years_fraction=float(raw["min_profitable_years_fraction"]),
+                        max_single_year_pnl_share=float(raw["max_single_year_pnl_share"]),
+                        min_edge_year_sessions=int(raw["min_edge_year_sessions"]),
+                        min_judged_years=int(raw["min_judged_years"]),
+                        mode=str(raw["mode"]),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) is not a valid gate config: {exc}"
+                ) from exc
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+    if len(seen) > 1:
+        return RecordedTemporalAudit(config=None, consistent=False)
+    return RecordedTemporalAudit(config=next(iter(seen), None), consistent=True)
+
+
+def recorded_apriori_from_audit(results_root: Path) -> bool | None:
+    """Read the exploration MODE a sweep tree RECORDED (DEC-SWEEP-APRIORI-DEFAULT-001).
+
+    The ``recorded_stage3_from_audit`` precedent: the tree describes itself via
+    its audit chains, never the operator's memory. Both chains
+    (``audit/sweep-all-supervisor.jsonl`` and ``audit/sweep-all.jsonl``) are
+    scanned; within a chain the **LAST** mode-carrying START record
+    (:data:`_MODE_START_ACTIONS`) is that chain's candidate (review fix round 1
+    M2 — the ``recorded_audit_facts`` latest-generation posture: a multi-launch
+    daemon root accretes one START per launch, so the LATEST launch's mode
+    governs; the earlier first-record-wins read permanently downgraded every
+    recount after a mode flip), and the WINNER is the candidate with the latest
+    ``ts_utc`` ACROSS the chains (review fix round 2 probe D — the per-chain
+    ingest-first precedence mis-read a tree whose OTHER chain carried the
+    strictly NEWER launch: an old library ``GRID_SWEEP_START`` permanently
+    shadowed every later production ``SUPERVISOR_START`` mode flip). An exact
+    ``ts_utc`` tie keeps the SUPERVISOR chain's record (the production
+    launchers' chain — scanned first, overridden only on a strictly later
+    ingest record):
+
+    * the winning record's ``"apriori"`` key present-and-enabled ⇒ ``True``
+      (an extinction/Apriori tree).
+    * a winning START record WITHOUT the key ⇒ ``False`` — the
+      EMIT-ON-apriori law makes absence == legacy, which also classifies every
+      pre-flip tree correctly for free.
+    * no START record in either chain ⇒ ``None`` (abstain — no gate; the
+      code-commit context gate already protects such trees).
+
+    Each present chain is STREAMED exactly once via ``iter_entries`` — O(1)
+    memory, never a materialised list (review fix round 1 m4; the per-tuple
+    ``SWEEP_START``/``TUPLE_*`` records are skipped in-stream, untouched).
+    Neither file can be skipped outright: ``sweep-all-supervisor.jsonl``
+    carries the production launchers' ``SUPERVISOR_START`` and
+    ``sweep-all.jsonl`` can carry a library caller's ``GRID_SWEEP_START``
+    (the orchestrator appends it to whatever ingest audit it is handed), so
+    BOTH structurally admit :data:`_MODE_START_ACTIONS`.
+
+    Consumed by ``cmd_sweep_verify``'s recorded-mode gate: a recount-effective
+    mode ≠ recorded-mode recount is a CONTEXT mismatch (``n_enumerated`` is
+    mode-dependent AND sits in the byte-diffed trial-stats sidecar, so a
+    wrong-mode recount under an otherwise matched context would read
+    verdict-grade ``recount_divergence`` — the false-corrupt hazard) — the
+    downgrade is the existing context-mismatch mechanism, never verdict-grade.
+
+    Parameters
+    ----------
+    results_root
+        The sweep results tree root (the audit chains live under ``audit/``).
+
+    Returns
+    -------
+    bool | None
+        The recorded mode, or ``None`` when no START record exists.
+
+    Raises
+    ------
+    SweepVerifyError
+        If a present audit log is unreadable (a malformed tree is not a
+        verifiable tree — the ``recorded_stage3_from_audit`` contract).
+    """
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    winner_mode: bool | None = None
+    winner_ts = float("-inf")
+    # Supervisor chain FIRST so an exact ts_utc tie keeps ITS record (the
+    # production launchers' chain); the ingest chain overrides only on a
+    # STRICTLY later mode-carrying START.
+    for parts in (("audit", "sweep-all-supervisor.jsonl"), ("audit", "sweep-all.jsonl")):
+        audit_path = results_root.joinpath(*parts)
+        if not audit_path.exists():
+            continue
+        last_mode: bool | None = None
+        last_ts = float("-inf")
+        try:
+            for entry in iter_entries(audit_path):
+                if entry.action not in _MODE_START_ACTIONS:
+                    continue
+                recorded = entry.payload.get("apriori")
+                last_mode = isinstance(recorded, Mapping) and recorded.get("enabled") is True
+                last_ts = entry.ts_utc
+        except AuditError as exc:
+            raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+        if last_mode is not None and (winner_mode is None or last_ts > winner_ts):
+            winner_mode = last_mode
+            winner_ts = last_ts
+    return winner_mode
+
+
+# The recorded overfit leg is EXACTLY the 4-member `_gate_config_fragment`
+# order [dsr_min, weight, default_skew, default_excess_kurtosis] (#1336).
+_OVERFIT_LEG_LEN = 4
+
+
+def _overfit_from_recorded_leg(leg: object, *, audit_path: Path) -> OverfitGateConfig | None:
+    """Reconstruct the recorded overfit gate config from ONE START-record leg.
+
+    ``leg`` is the winning START record's ``payload["gate_config"]["overfit"]``
+    value — the :func:`~brutex.engine.sweep_identity._gate_config_fragment`
+    order ``[dsr_min, weight, default_skew, default_excess_kurtosis]`` — or
+    ``None`` when the record carries no overfit leg (legacy / ungated).
+
+    Raises
+    ------
+    SweepVerifyError
+        On a malformed leg (wrong shape / non-numeric / NON-FINITE members —
+        ``OverfitGateConfig.__post_init__`` never range-refuses a NaN/inf
+        ``weight``, and an adopted non-finite member would crash
+        ``cmd_verify`` later at its ``json.dumps(allow_nan=False)`` summary
+        instead of the loud typed refusal here; review fix round MINOR-1) or
+        a leg whose values :class:`~brutex.ranking.OverfitGateConfig` itself
+        refuses — a malformed tree is not a verifiable tree (the
+        ``recorded_stage3_from_audit`` contract).
+    """
+    if leg is None:
+        return None
+    if (
+        not isinstance(leg, Sequence)
+        or isinstance(leg, (str, bytes))
+        or len(leg) != _OVERFIT_LEG_LEN
+        or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            for v in leg
+        )
+    ):
+        raise SweepVerifyError(
+            f"malformed gate_config.overfit leg in the START record at {audit_path}: {leg!r}"
+        )
+    try:
+        return OverfitGateConfig(
+            dsr_min=float(leg[0]),
+            weight=float(leg[1]),
+            default_skew=float(leg[2]),
+            default_excess_kurtosis=float(leg[3]),
+        )
+    except ValueError as exc:
+        raise SweepVerifyError(
+            f"invalid recorded overfit gate config at {audit_path}: {exc}"
+        ) from exc
+
+
+def recorded_overfit_from_audit(results_root: Path) -> OverfitGateConfig | None:
+    """Read the OVERFIT gate config a sweep tree RECORDED at launch.
+
+    DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 — the recount-side recovery of the
+    overfit gate: the #1336 ``_tuple_digest`` folds the ACTIVE gate config into
+    every tuple store's ADDRESS, and the default-on overfit DSR gate flip means
+    a production tree's stores live at GATED addresses. ``sweep-verify
+    --recount`` re-plans addresses from ITS OWN grid (whose ``overfit`` default
+    is ``None``), so without this channel every healthy overfit-gated tree read
+    a ``grid_mismatch`` FALSE-POSITIVE — an alarm-fatigue regression, never a
+    false-clean. The tree describes itself: both audit chains are scanned
+    exactly like :func:`recorded_apriori_from_audit` (the SAME
+    :data:`_MODE_START_ACTIONS` family, last-START-per-chain, latest ``ts_utc``
+    across chains wins, the supervisor chain keeps an exact tie), and the
+    WINNING record's ``gate_config.overfit`` leg — persisted by the launch
+    sites in the :func:`~brutex.engine.sweep_identity._gate_config_fragment`
+    order — is reconstructed into an
+    :class:`~brutex.ranking.OverfitGateConfig`.
+
+    Returns
+    -------
+    OverfitGateConfig | None
+        The recorded gate config; ``None`` when the winning START record
+        carries no ``gate_config`` (an ungated / pre-channel tree — the
+        EMIT-ON-active law makes absence == legacy, so a legacy audit verifies
+        exactly as before this channel existed) or when no START record exists
+        in either READABLE chain.
+
+    Raises
+    ------
+    SweepVerifyError
+        If the winning record's leg is malformed / refused by
+        :class:`~brutex.ranking.OverfitGateConfig` (a malformed tree is not a
+        verifiable tree). An UNREADABLE chain deliberately does NOT raise —
+        unlike :func:`recorded_apriori_from_audit` (consulted CONDITIONALLY,
+        only when the mode can matter — the m2 law), THIS recovery is consulted
+        UNCONDITIONALLY by ``cmd_verify``, so a raise here would hard-fail
+        EVERY verify over one bit-rotted chain, violating the m2 survival law
+        ("an explicit-k no-recount verify never hard-fails on a corrupt
+        supervisor chain"). An unreadable chain is SKIPPED WHOLE (its partial
+        pre-corruption records are discarded — a broken hash chain is not
+        trusted piecemeal) with ONE loud
+        ``sweep_verify.overfit_recovery_chain_unreadable`` WARNING, and the
+        surviving READABLE chain — when it carries a START record — still
+        supplies the config. HONEST scope: only the LIBRARY grid entry
+        (:func:`~brutex.engine.sweep_orchestrator.run_sweep_grid`) records
+        GRID_SWEEP_START on the ingest chain; ``cmd_sweep_all``'s supervised
+        path records the config on SUPERVISOR_START ONLY (its ingest chain
+        carries per-tuple SWEEP_START lines, which are NOT the START family) —
+        so a gated ``cmd_sweep_all`` tree whose supervisor chain is unreadable
+        leaves the config UNRECOVERABLE: the recovery returns ``None`` and the
+        verify reads the honest ``grid_mismatch`` (correct-or-absent — never a
+        fabricated default config), while ``--recount`` still hard-fails at
+        its own verify-chain machinery (``recorded_audit_facts``).
+    """
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    winner_leg: object = None
+    winner_found = False
+    winner_ts = float("-inf")
+    winner_path: Path | None = None
+    # Supervisor chain FIRST so an exact ts_utc tie keeps ITS record (the
+    # production launchers' chain) — the recorded_apriori_from_audit law.
+    for parts in (("audit", "sweep-all-supervisor.jsonl"), ("audit", "sweep-all.jsonl")):
+        audit_path = results_root.joinpath(*parts)
+        if not audit_path.exists():
+            continue
+        last_leg: object = None
+        last_found = False
+        last_ts = float("-inf")
+        try:
+            for entry in iter_entries(audit_path):
+                if entry.action not in _MODE_START_ACTIONS:
+                    continue
+                gate_config = entry.payload.get("gate_config")
+                last_leg = gate_config.get("overfit") if isinstance(gate_config, Mapping) else None
+                last_found = True
+                last_ts = entry.ts_utc
+        except AuditError as exc:
+            # Tolerant per-chain law (see the Raises section): skip the
+            # unreadable chain WHOLE — discard any pre-corruption partial
+            # state — and let the intact sibling chain supply the config.
+            _LOG.warning(
+                "sweep_verify.overfit_recovery_chain_unreadable",
+                audit_path=str(audit_path),
+                error=str(exc),
+            )
+            continue
+        if last_found and (not winner_found or last_ts > winner_ts):
+            winner_leg = last_leg
+            winner_found = True
+            winner_ts = last_ts
+            winner_path = audit_path
+    if not winner_found or winner_path is None:
+        return None
+    return _overfit_from_recorded_leg(winner_leg, audit_path=winner_path)
+
+
+#: Every appended-last NULLABLE optional store column a pre-VIX-generation
+#: file necessarily predates: the VIX trio itself plus every LATER optional
+#: family (growth / exit-quality / recency — DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+#: / DEC-METRICS-KELLY-GROWTH-001 / DEC-METRICS-TRAILING-WINDOW-001, which
+#: landed strictly AFTER the trio, so a store missing the trio also misses
+#: them). Built from the ONE public per-family column source in
+#: ``results_store`` (CLAUDE.md §2 Rule 11 COMMON) — a family column added
+#: there widens the attribution nulling + the schema-migration strip here
+#: automatically.
+_APPENDED_NULLABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS + SELECTION_FIELDS
+)
+
+
 def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
     """Attribute a store-pair diff to the VIX trio — and name the SHAPE, or abstain.
 
     The attribution test behind the ``recount_vix_divergence`` finding family
-    (DEC-VIX-STAMP-WIRE-001): both stores must LOAD cleanly, hold the SAME
-    ``run_id`` set, agree on EVERY non-VIX field of every row, and either
-    disagree on at least one ``vix_mean``/``vix_min``/``vix_max`` value OR
-    differ ONLY in the trio columns' very EXISTENCE (the schema-generation
-    shape below). Anything less provable returns ``None`` — an unreadable
-    Parquet, a run_id-set drift, a non-VIX field difference, or fully-EQUAL
-    rows over IDENTICAL schemas (the byte diff then has an unknown non-row
-    cause) all fall back to the caller's normal corrupt/inconclusive ladder.
-    Honest attribution only, never a guess (Golden Rule #1).
+    (DEC-VIX-STAMP-WIRE-001, widened by the appended nullable families of
+    DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001 /
+    DEC-METRICS-TRAILING-WINDOW-001): both stores must LOAD cleanly, hold
+    the SAME ``run_id`` set, agree on EVERY field of every row OUTSIDE the
+    appended nullable columns (:data:`_APPENDED_NULLABLE_FIELDS`), and every
+    appended-nullable difference must itself be attributable — a VIX trio
+    difference under the trio laws below, or a LATER-family
+    (growth / exit-quality / recency) difference whose ORIGINAL side is
+    ``None`` (the sanctioned pre-extension None→value backfill; those
+    metrics are deterministic and INSIDE the run-identity envelope, so a
+    recorded non-``None`` value the recount cannot reproduce is NEVER
+    attributable here — it abstains to the corrupt ladder). Anything less
+    provable returns ``None`` — an unreadable Parquet, a run_id-set drift,
+    a non-nullable field difference, or fully-EQUAL rows over IDENTICAL
+    schemas (the byte diff then has an unknown non-row cause) all fall back
+    to the caller's normal corrupt/inconclusive ladder. Honest attribution
+    only, never a guess (Golden Rule #1).
 
-    A confirmed VIX-only diff is one of THREE cheaply-distinguishable shapes
+    A confirmed diff is one of THREE cheaply-distinguishable shapes
     (two row-level + one schema-level) — the round-4 panel caught the old
     single "the lake moved" wording claiming a cause it had not established
     for the first shape, and the round-5 panel caught the schema shape
     silently abstaining onto the generic ladder:
 
-    * ``"backfill"`` (row shape) — every differing trio field is ``None`` on
-      the ORIGINAL side (a VIX lake that has since GAINED coverage, or a
-      part-null store): nothing recorded was contradicted, and a plain redo
-      appends the trio as the sanctioned directional None→value backfill —
-      no quarantine needed.
+    * ``"backfill"`` (row shape) — every differing nullable field (trio
+      and/or later-family) is ``None`` on the ORIGINAL side (a VIX lake
+      that has since GAINED coverage, a part-null store, or a
+      pre-extension store whose recount computes the later-family
+      metrics): nothing recorded was contradicted, and a plain redo
+      appends the values as the sanctioned directional None→value
+      backfill — no quarantine needed.
     * ``"backfill"`` (schema shape) — every row fully EQUAL (both sides an
       all-``None`` trio) but the ORIGINAL file predates the trio COLUMNS
       themselves: a pre-VIX-generation store loads ``None`` per
       ``_row_from_record``'s optional read, while the recount's reflush
-      writes the current schema WITH the three all-null columns appended, so
-      such a tree can NEVER be byte-identical. Attributed iff the ONLY
-      schema difference is the missing trio
+      writes the current schema WITH the appended-last all-null nullable
+      columns (the trio + every LATER optional family a strictly-older
+      store also necessarily predates — growth / exit-quality / recency),
+      so such a tree can NEVER be byte-identical. Attributed iff the ONLY
+      schema difference is exactly those missing appended nullable columns,
+      the whole trio among them
       (:func:`_is_pre_vix_schema_migration`) — same family, same remedy.
     * ``"moved"`` — some recorded trio VALUE disagrees with the recount's
       (value-vs-value, or a recorded value the recount can no longer
@@ -1547,66 +2070,96 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
         return None  # unreadable/corrupt bytes are never VIX-attributable
     if set(original_rows) != set(scratch_rows):
         return None
-    vix_differs = False
+    nullable_differs = False
     recorded_value_differs = False
-    # Null the trio from the ONE public column source (results_store.VIX_FIELDS,
-    # CLAUDE.md §2 Rule 11 COMMON) — a fourth trio field added there is nulled
-    # here automatically, never a silently-desynced mirrored literal.
-    # dict[str, Any]: the trio fields are typed non-None on ResultRow's
+    # Null the appended nullable columns from the ONE public per-family
+    # column source (results_store.VIX_FIELDS + the later families,
+    # CLAUDE.md §2 Rule 11 COMMON) — a field added there is nulled here
+    # automatically, never a silently-desynced mirrored literal.
+    # dict[str, Any]: the nullable fields are typed non-None on ResultRow's
     # replace() signature, so a dict[str, None] splat fails strict mypy even
-    # though None is the valid null for every nullable trio column.
-    vix_nulled: dict[str, Any] = dict.fromkeys(VIX_FIELDS)
+    # though None is the valid null for every nullable column.
+    nulled: dict[str, Any] = dict.fromkeys(_APPENDED_NULLABLE_FIELDS)
     for run_id, ours in original_rows.items():
         theirs = scratch_rows[run_id]
         if ours == theirs:
             continue
-        if replace(ours, **vix_nulled) != replace(theirs, **vix_nulled):
-            return None  # a non-VIX field differs — not VIX-attributable
-        vix_differs = True
+        if replace(ours, **nulled) != replace(theirs, **nulled):
+            return None  # a non-nullable field differs — not attributable
+        nullable_differs = True
         for name in VIX_FIELDS:
             mine = getattr(ours, name)
             if mine != getattr(theirs, name) and mine is not None:
                 recorded_value_differs = True
-    if not vix_differs:
+        for name in (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS):
+            mine = getattr(ours, name)
+            if mine != getattr(theirs, name) and mine is not None:
+                # A later-family metric is deterministic + INSIDE the
+                # run-identity envelope: a recorded value the recount cannot
+                # reproduce is a genuine divergence, never backfill/moved.
+                return None
+    if not nullable_differs:
         # Rows fully EQUAL yet the caller saw a byte diff: the ONE provable
         # cause is the schema-generation migration (a pre-VIX-columns store
-        # vs the current writer's appended all-null trio — the round-5 panel
-        # shape); anything else honestly abstains to the normal ladder.
+        # vs the current writer's appended all-null nullable columns — the
+        # round-5 panel shape); anything else honestly abstains to the
+        # normal ladder.
         return "backfill" if _is_pre_vix_schema_migration(original, scratch) else None
     return "moved" if recorded_value_differs else "backfill"
 
 
 def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
-    """``True`` iff *original*'s Parquet schema is exactly *scratch*'s minus the VIX trio.
+    """``True`` iff *original*'s schema is exactly *scratch*'s minus the appended nullable columns.
 
     The schema test behind :func:`_stores_differ_only_in_vix`'s third shape
     (round-5 panel): a store written BEFORE the trio columns landed loads an
     all-``None`` trio, so its rows compare fully EQUAL to an unstamped
     recount's — yet the recount's reflush writes the CURRENT schema with the
-    three all-null trio columns and the bytes differ. That diff is
-    attributable iff the ONLY schema difference is the missing trio: the
-    scratch must carry all three columns, the original none, and stripping
-    the trio from the scratch schema must reproduce the original schema
-    EXACTLY (names AND dtypes, order-sensitively). Anything less provable —
-    partial trio presence, any other column/dtype drift, an unreadable
-    footer — returns ``False`` and the caller abstains to the normal ladder.
-    Honest attribution only, never a guess (Golden Rule #1). O(columns) —
-    two Parquet footer reads, no row data.
+    appended-last all-null nullable columns (the trio + the strictly-later
+    growth / exit-quality / recency families — and, post-LANE-W1, the two
+    ``SELECTION_FIELDS`` provenance columns (DEC-RANK-PARETO-PERSIST-001 /
+    DEC-RANK-QUOTA-PERSIST-1000-001), which join the SAME appended nullable
+    set: selection landed after VIX, so the genuine pre-VIX generation
+    carries neither — such a store also predates them all) and the bytes
+    differ. That diff is attributable iff the ONLY schema
+    difference is exactly those missing columns: the scratch must carry
+    EVERY always-appended nullable column (the trio + the later families +
+    the selection pair — a current-writer reflush always writes them all),
+    the original NONE of the appended nullable columns (a
+    partial presence of ANY of them is not the pre-VIX generation), and
+    stripping the appended nullable columns from the scratch schema must
+    reproduce the original schema EXACTLY (names AND dtypes,
+    order-sensitively). Anything less provable — partial presence, any
+    other column/dtype drift, an unreadable footer — returns ``False`` and
+    the caller abstains to the normal ladder. Honest attribution only,
+    never a guess (Golden Rule #1). O(columns) — two Parquet footer reads,
+    no row data.
     """
     import polars as pl  # deferred exactly like ResultsStore.load (the data extra)
 
     try:
-        original_schema = list(pl.read_parquet_schema(original).items())
-        scratch_schema = list(pl.read_parquet_schema(scratch).items())
+        # GUARDED footer probes (DEC-LAKE-READ-INODE-GUARD-001 fix round — the
+        # diagnostic-arm class sweep): both stores' BYTE reads above ride the
+        # guarded read_regular_bytes, so this attribution probe re-opening the
+        # SAME paths must not be the one raw-path open that wedges on a
+        # post-read inode swap. NotRegularFileError is an OSError → the
+        # existing abstain arm below absorbs it (never VIX-attributable).
+        original_schema = list(read_parquet_schema_regular(original).items())
+        scratch_schema = list(read_parquet_schema_regular(scratch).items())
     except (pl.exceptions.PolarsError, OSError):
         return False  # an unreadable footer is never VIX-attributable
     original_names = {name for name, _ in original_schema}
-    if any(name in original_names for name in VIX_FIELDS):
-        return False  # partial/total trio presence — not the pre-VIX generation
+    if any(name in original_names for name in _APPENDED_NULLABLE_FIELDS):
+        return False  # partial nullable-column presence — not the pre-VIX generation
     scratch_names = {name for name, _ in scratch_schema}
-    if any(name not in scratch_names for name in VIX_FIELDS):
-        return False  # the recount side lacks the trio — not this migration
-    stripped = [entry for entry in scratch_schema if entry[0] not in VIX_FIELDS]
+    if any(name not in scratch_names for name in _APPENDED_NULLABLE_FIELDS):
+        # The recount side lacks an ALWAYS-appended nullable column (the trio
+        # or a later family, the LANE-W1 selection pair included) — a
+        # current-writer reflush always writes them all, so this is not the
+        # migration shape (the member's #2059/#2060 tooth, generalized at the
+        # wave-2b fold from its selection-pair special case).
+        return False
+    stripped = [entry for entry in scratch_schema if entry[0] not in _APPENDED_NULLABLE_FIELDS]
     return stripped == original_schema
 
 
@@ -1703,6 +2256,82 @@ def _sidecar_diff_is_the_vix_repair(
     )
 
 
+def _census_fields_only_differ(ours: TupleTrialStats, theirs: TupleTrialStats) -> bool:
+    """``True`` iff the pair diverges EXACTLY inside :data:`MODE_CENSUS_FIELDS`.
+
+    The must-equal side is enumerated via :func:`dataclasses.fields` (the
+    :func:`_non_hash_fields_equal` drift-proof idiom): every field NOT in the
+    mode-census triple must compare equal — a field added to the sidecar model
+    LATER automatically joins the must-equal side, so a divergence in a new
+    field can never be attributed into the non-corrupt mixed-mode family (the
+    unsafe drift direction). The triple side must ACTUALLY differ in at least
+    one field (fully-equal sidecars have an unknown non-row byte-diff cause and
+    stay on the caller's normal ladder). ``schema_version`` is not a dataclass
+    field — :func:`read_tuple_trial_stats` accepts ONLY v1, so two READABLE
+    sidecars necessarily agree on it (the v1 payload contract).
+    """
+    census = frozenset(MODE_CENSUS_FIELDS)
+    if not all(
+        getattr(ours, field.name) == getattr(theirs, field.name)
+        for field in fields(ours)
+        if field.name not in census
+    ):
+        return False  # a mode-INVARIANT field differs — not the census residue
+    return any(getattr(ours, name) != getattr(theirs, name) for name in MODE_CENSUS_FIELDS)
+
+
+def _sidecar_diff_is_the_mode_census_residue(original_sidecar: Path, scratch_sidecar: Path) -> bool:
+    """``True`` iff the sidecars differ ONLY in the exploration-mode census triple.
+
+    The attribution test behind ``recount_mode_divergence``
+    (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752 review fix round 2):
+    both sidecars must READ valid (:func:`read_tuple_trial_stats` — which also
+    pins ``schema_version`` to v1 for both) and the field-level diff must be
+    confined EXACTLY to :data:`MODE_CENSUS_FIELDS` via the pure
+    :func:`_census_fields_only_differ`. An unreadable/invalid sidecar or any
+    mode-invariant field difference returns ``False`` and stays on the
+    caller's normal corrupt/inconclusive ladder — honest attribution only,
+    never a guess (Golden Rule #1). The caller has ALREADY proven the store
+    Parquet bytes identical and the completion sentinel matched, so the
+    embedded ``store_content_hash`` pair rides the must-equal side.
+    """
+    try:
+        ours = read_tuple_trial_stats(original_sidecar)
+        theirs = read_tuple_trial_stats(scratch_sidecar)
+    except TrialStatsError:
+        return False  # an unreadable/invalid sidecar is never mode-attributable
+    return _census_fields_only_differ(ours, theirs)
+
+
+def _recount_verdict_python(
+    vix_attributable: bool,
+    is_grid_tuple: bool,
+    context_match: bool,
+    cell_evidence: bool,
+    grid_corrupt_leaderboard: bool,
+) -> str:
+    """The pure recount post-byte-diff classification tail — the retained oracle.
+
+    The verbatim :func:`compare_recount` ladder over pre-computed flags (the
+    routed twin is the crate's ``recount_verdict`` — DEC-RUST-SWEEP-OPS-001
+    slice 5): a VIX-attributable divergence outranks everything; a GRID
+    tuple splits corrupt/inconclusive on the context match; a CELL is
+    collateral under a corrupt same-leaderboard grid (B5), verdict-grade
+    only under full context AND full cell evidence (B2), else inconclusive
+    (B1). The finding codes, severities, detail BYTES and the
+    ``grid_corrupt_leaderboards`` side effect stay with the caller.
+    """
+    if vix_attributable:
+        return "vix_divergence"
+    if is_grid_tuple:
+        return "grid_corrupt" if context_match else "grid_inconclusive"
+    if grid_corrupt_leaderboard:
+        return "cell_dependent"
+    if context_match and cell_evidence:
+        return "cell_corrupt"
+    return "cell_inconclusive"
+
+
 def compare_recount(
     original_root: Path,
     scratch_root: Path,
@@ -1763,6 +2392,32 @@ def compare_recount(
     that differs in anything but the honest re-pair falls through to the
     normal corrupt/inconclusive ladder.
 
+    THE MIXED-MODE RESIDUAL (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752
+    review fix round 2): the per-tuple store ADDRESS (``_tuple_digest``) is
+    deliberately MODE-BLIND — the exploration mode (legacy fixed-k vs Apriori
+    extinction) is not an identity axis, because both modes persist
+    bit-identical result rows. A resumed run under the OTHER mode therefore
+    legitimately resume-skips every tuple the first cycle completed, leaving a
+    MIXED tree: some tuples' trial-stats sidecars carry legacy census tallies,
+    some carry extinction tallies. A recount under EITHER matched mode then
+    re-derives the mode-DEPENDENT census triple
+    (``n_enumerated``/``n_conflict_pruned``/``n_minhits_dropped`` —
+    :data:`~brutex.engine.trial_stats.MODE_CENSUS_FIELDS`) for the tuples
+    minted under the other mode — a byte divergence on a HEALTHY tree the
+    recorded-mode context gate is structurally blind to (it is
+    necessary-not-sufficient: the recorded mode matched, the TREE is mixed).
+    A GRID trial-stats sidecar divergence is therefore classified
+    ``recount_mode_divergence`` (severity ``warn``, NEVER corrupt and never
+    heal-grade) IFF the divergence is CONFINED: (a) the store Parquet bytes
+    are byte-identical in both worlds, (b) the completion sentinel matches
+    (both absent, or byte-identical), and (c) the sidecar field diff sits
+    EXACTLY inside the census triple
+    (:func:`_sidecar_diff_is_the_mode_census_residue`). The store-byte
+    equality is the PROOF OBLIGATION — every result row reproduced exactly;
+    only the mode-dependent prune bookkeeping moved with the mode. Anything
+    beyond the confined shape (a tampered store byte, a sentinel drift, any
+    mode-invariant sidecar field) stays verdict-grade on the normal ladder.
+
     Parameters
     ----------
     original_root, scratch_root
@@ -1793,15 +2448,60 @@ def compare_recount(
     checked = 0
     grid_corrupt_leaderboards: set[tuple[str, str]] = set()
 
-    def _diff_store(store_path: Path, *, is_grid_tuple: bool, leaderboard: tuple[str, str]) -> None:
+    def _diff_store(
+        store_path: Path,
+        *,
+        tuple_: SweepTuple,
+        entry_grid: SweepGridConfig,
+        is_grid_tuple: bool,
+        leaderboard: tuple[str, str],
+    ) -> None:
         nonlocal checked
         sentinel_path = completion_sentinel_path(store_path)
+        sidecar_path = trial_stats_sidecar_path(store_path)
         artifacts = (
             store_path,
-            trial_stats_sidecar_path(store_path),
+            sidecar_path,
             sentinel_path,
         )
         scratch_store = scratch_root / store_path.relative_to(original_root)
+        # Memoised mixed-gate-config sibling probe (the (a) honesty floor,
+        # DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001): computed at most once per
+        # tuple, consulted only on the original-absent arm below.
+        mixed_sibling_memo: bool | None = None
+
+        def _mixed_gate_sibling_exists() -> bool:
+            """``True`` iff the ORIGINAL tree holds THIS SweepTuple's store at
+            the DIVERGENT gate-config address (digest-PRECISE — the review
+            fix round's MAJOR).
+
+            ``_tuple_digest`` folds the FULL tuple — combo AND the
+            SL/TP/proximity/fib-anchor knobs AND the gate config — into the
+            store address, so a SINGLE-config grid with ≥2 SL/TP/proximity
+            values legitimately writes many same-``{direction}_k{k}_``
+            stores; a same-prefix different-digest glob is therefore NOT
+            evidence of mixed gate configs (the pre-fix over-trigger). The
+            precise probe RE-PLANS this exact SweepTuple's address under the
+            ONE divergent overfit family — ``overfit=None`` when the
+            recovered grid is GATED (the ungated sibling family), the
+            default :class:`~brutex.ranking.OverfitGateConfig` when it is
+            UNGATED (the default-ON production family) — via
+            ``dataclasses.replace`` on the grid's overfit leg through the
+            SAME ``tuple_store_path`` the planner uses (never re-implemented
+            digest math; #1336 internals untouched), and checks for exactly
+            THAT file. A custom-parameter third family is honestly outside
+            this one-address probe: it reads ``recount_original_absent``
+            (never condemned), the pre-floor behaviour.
+            """
+            nonlocal mixed_sibling_memo
+            if mixed_sibling_memo is None:
+                alternate_overfit = None if entry_grid.overfit is not None else OverfitGateConfig()
+                alternate_path = tuple_store_path(
+                    original_root, tuple_, replace(entry_grid, overfit=alternate_overfit)
+                )
+                mixed_sibling_memo = alternate_path != store_path and alternate_path.is_file()
+            return mixed_sibling_memo
+
         # Memoised store-pair VIX verdict (one load per tuple; all three
         # artifacts of a VIX-diverged tuple consult it). The memo holds the
         # shape string — moved or backfill — or the not-VIX-attributable
@@ -1829,8 +2529,8 @@ def compare_recount(
             nonlocal store_digest_memo
             if store_digest_memo is None:
                 store_digest_memo = (
-                    hashlib.sha256(store_path.read_bytes()).hexdigest(),
-                    hashlib.sha256(scratch_store.read_bytes()).hexdigest(),
+                    hashlib.sha256(read_regular_bytes(store_path)).hexdigest(),
+                    hashlib.sha256(read_regular_bytes(scratch_store)).hexdigest(),
                 )
             return store_digest_memo
 
@@ -1857,6 +2557,35 @@ def compare_recount(
                 else None
             )
 
+        def _mode_census_only_repair(original: Path, scratch: Path) -> bool:
+            """``True`` iff this artifact diff is the CONFINED mixed-mode census residue.
+
+            The mixed-mode residual gate (see the docstring block above),
+            consulted AFTER the VIX branch. Applies ONLY to a GRID tuple's
+            trial-stats sidecar; the confinement conditions are checked in
+            proof-obligation order — (a) store bytes identical, (b) sentinel
+            matched (both absent or byte-identical), (c) the sidecar field
+            diff exactly the mode census triple.
+            """
+            if not is_grid_tuple or original != sidecar_path:
+                return False
+            # (a) the store Parquet bytes must be byte-identical in BOTH worlds
+            # — the proof every result row reproduced exactly.
+            if not (store_path.exists() and scratch_store.exists()):
+                return False
+            if store_path.read_bytes() != scratch_store.read_bytes():
+                return False
+            # (b) the completion sentinel must MATCH: both absent, or
+            # byte-identical (a sentinel drift is never mode-attributable).
+            scratch_sentinel = scratch_root / sentinel_path.relative_to(original_root)
+            sentinel_exists = sentinel_path.exists()
+            if sentinel_exists != scratch_sentinel.exists():
+                return False
+            if sentinel_exists and sentinel_path.read_bytes() != scratch_sentinel.read_bytes():
+                return False
+            # (c) the sidecar diff confined EXACTLY to the census triple.
+            return _sidecar_diff_is_the_mode_census_residue(original, scratch)
+
         for original in artifacts:
             scratch = scratch_root / original.relative_to(original_root)
             rel = _rel(original_root, original)
@@ -1880,6 +2609,41 @@ def compare_recount(
                 )
                 continue
             if not original_exists:
+                # The (a) honesty floor (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+                # digest-PRECISE since the review fix round): a GRID tuple
+                # absent at the recovered gate-config address while THIS
+                # EXACT SweepTuple's store exists at the DIVERGENT
+                # gate-config address (the ungated/default-gated sibling
+                # family, re-planned via the SAME address law) is a tree
+                # built under MIXED gate configs — this recount's single
+                # recovered config cannot verify the other family, so the
+                # verdict is honestly INCONCLUSIVE (rc 4 via the cmd_verify
+                # trigger), never CLEAN-by-silence and never condemned. A
+                # benign incomplete single-config tree (many legitimate
+                # same-prefix SL/TP/proximity sibling digests) reads the
+                # plain original-absent below — never rc 4. Cell (non-grid)
+                # artifacts keep the original-absent read verbatim — their
+                # addresses ride the stage-3 knob fold, not this probe.
+                if is_grid_tuple and _mixed_gate_sibling_exists():
+                    findings.append(
+                        VerifyFinding(
+                            path=rel,
+                            code="recount_mixed_mode_unverifiable",
+                            severity="warn",
+                            detail=(
+                                "the recount produced this artifact at the "
+                                "recovered gate-config address but the tree "
+                                "lacks it AND holds this exact tuple's store "
+                                "at the DIVERGENT gate-config address — a "
+                                "tree built under MIXED gate configs; "
+                                "unverifiable under this recount's single "
+                                "recovered config (re-verify with the other "
+                                "config to cover its digest family), never "
+                                "classified as corruption"
+                            ),
+                        )
+                    )
+                    continue
                 findings.append(
                     VerifyFinding(
                         path=rel,
@@ -1893,7 +2657,7 @@ def compare_recount(
                     )
                 )
                 continue
-            if original.read_bytes() == scratch.read_bytes():
+            if read_regular_bytes(original) == read_regular_bytes(scratch):
                 continue  # byte-identical — verified (silence is the verdict)
             # VIX-only divergence (see the docstring's VIX RESIDUAL). All
             # THREE artifacts necessarily ride a VIX-only lake movement: the
@@ -1904,7 +2668,28 @@ def compare_recount(
             # field, and re-pairs its OWN store's actual bytes; anything less
             # provable stays on the normal ladder.
             vix_shape = _artifact_vix_shape(original, scratch)
-            if vix_shape is not None:
+            # The pure classification tail may route through the sweep-ops
+            # crate (DEC-RUST-SWEEP-OPS-001 slice 5); the finding
+            # codes/details, the corrupt-leaderboard side effect and the
+            # run-identity seams stay Python, keyed off the token.
+            verdict_args = (
+                vix_shape is not None,
+                is_grid_tuple,
+                context_match,
+                cell_evidence,
+                leaderboard in grid_corrupt_leaderboards,
+            )
+            if sweep_ops_rust_enabled():
+
+                def _verdict_oracle(
+                    args: tuple[bool, bool, bool, bool, bool] = verdict_args,
+                ) -> str:
+                    return _recount_verdict_python(*args)
+
+                verdict = routed_recount_verdict(*verdict_args, python_law=_verdict_oracle)
+            else:
+                verdict = _recount_verdict_python(*verdict_args)
+            if verdict == "vix_divergence":
                 # Two honestly-distinguished variants (round-4 panel): the
                 # old single detail definitively claimed "the lake moved",
                 # which is FALSE for the reachable backfill shape (a
@@ -1923,15 +2708,15 @@ def compare_recount(
                     )
                 else:
                     cause_and_remedy = (
-                        "The original rows carry NO trio values — a store "
-                        "written before the VIX columns landed, or a VIX lake "
-                        "that has since GAINED coverage; nothing recorded was "
-                        "contradicted. VIX is deliberately OUTSIDE the recorded "
-                        "context and the run identity (CLAUDE.md §2 Rule 3), so "
-                        "this is NOT evidence of corruption and never "
-                        "heal-grade. Remedy: a plain redo appends the trio as "
-                        "the sanctioned directional None→value backfill — no "
-                        "quarantine needed"
+                        "The original rows carry NO values on the diverging "
+                        "nullable columns — a store written before those "
+                        "columns landed, or (for the trio) a VIX lake that "
+                        "has since GAINED coverage; nothing recorded was "
+                        "contradicted. Every diverging value lands as the "
+                        "sanctioned directional None→value backfill, so this "
+                        "is NOT evidence of corruption and never heal-grade. "
+                        "Remedy: a plain redo appends the missing values as "
+                        "that backfill — no quarantine needed"
                     )
                 findings.append(
                     VerifyFinding(
@@ -1943,49 +2728,81 @@ def compare_recount(
                         ),
                         severity="warn",
                         detail=(
-                            "ONLY the REFERENCE-ONLY vix_mean/vix_min/vix_max trio "
-                            "diverges (the pairing sidecar/sentinel re-pair that "
-                            "store's hash) — every run_id and every non-VIX column "
-                            f"reproduced exactly. {cause_and_remedy}"
+                            "ONLY appended nullable columns diverge (the "
+                            "REFERENCE-ONLY vix_mean/vix_min/vix_max trio and/or "
+                            "the nullable growth/exit-quality/recency metrics as "
+                            "an original-side-None backfill; the pairing "
+                            "sidecar/sentinel re-pair that store's hash) — every "
+                            "run_id and every other column reproduced exactly. "
+                            f"{cause_and_remedy}"
                         ),
                     )
                 )
                 continue
-            if is_grid_tuple:
-                if context_match:
-                    grid_corrupt_leaderboards.add(leaderboard)
-                    findings.append(
-                        VerifyFinding(
-                            path=rel,
-                            code="recount_divergence",
-                            severity="corrupt",
-                            detail=(
-                                "bytes diverge from the shadow re-sweep under a "
-                                "FULLY MATCHED recorded context — verdict-grade "
-                                "corruption (the only state heal-grade evidence "
-                                "may ever come from)"
-                            ),
-                        )
+            # Mixed-mode census residue (see the docstring's MIXED-MODE
+            # RESIDUAL block) — consulted AFTER the VIX branch: a GRID
+            # trial-stats sidecar whose diff is CONFINED to the
+            # exploration-mode census triple over a byte-identical store +
+            # matched sentinel is the mode-blind resume-skip residue of a
+            # MIXED tree, never corruption evidence.
+            if _mode_census_only_repair(original, scratch):
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_mode_divergence",
+                        severity="warn",
+                        detail=(
+                            "ONLY the exploration-MODE-dependent census triple "
+                            "(n_enumerated/n_conflict_pruned/n_minhits_dropped) "
+                            "diverge — the store Parquet bytes and the completion "
+                            "sentinel reproduced EXACTLY (the proof obligation). "
+                            "The tree is MIXED-mode: the mode-blind tuple digest "
+                            "legitimately resume-skips a tuple minted under the "
+                            "OTHER exploration mode (legacy fixed-k vs Apriori "
+                            "extinction), so a matched-mode recount re-derives the "
+                            "mode-dependent prune tallies without contradicting "
+                            "any result byte. NOT evidence of corruption and never "
+                            "heal-grade. Remedy: none required — or quarantine + "
+                            "redo the tuple to re-mint the census under the "
+                            "current mode"
+                        ),
                     )
-                else:
-                    findings.append(
-                        VerifyFinding(
-                            path=rel,
-                            code="recount_divergence_inconclusive",
-                            severity="warn",
-                            detail=(
-                                "bytes diverge BUT the recorded context does not "
-                                "match the current environment — NOT evidence of "
-                                "corruption (changed code/indicators/lake change "
-                                "results legitimately; ADR-0008 drift channels)"
-                            ),
-                        )
+                )
+                continue
+            if verdict == "grid_corrupt":
+                grid_corrupt_leaderboards.add(leaderboard)
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_divergence",
+                        severity="corrupt",
+                        detail=(
+                            "bytes diverge from the shadow re-sweep under a "
+                            "FULLY MATCHED recorded context — verdict-grade "
+                            "corruption (the only state heal-grade evidence "
+                            "may ever come from)"
+                        ),
                     )
+                )
+            elif verdict == "grid_inconclusive":
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_divergence_inconclusive",
+                        severity="warn",
+                        detail=(
+                            "bytes diverge BUT the recorded context does not "
+                            "match the current environment — NOT evidence of "
+                            "corruption (changed code/indicators/lake change "
+                            "results legitimately; ADR-0008 drift channels)"
+                        ),
+                    )
+                )
             # Stage-3 cell stores (DEC-STAGE3-RECOUNT-001): a DISTINCT code
             # family — the heal consumes ONLY `recount_divergence` (its C1
             # gate raises on non-grid paths), so cell findings must never
             # alias the grid code (condition B2).
-            elif leaderboard in grid_corrupt_leaderboards:
+            elif verdict == "cell_dependent":
                 # Condition B5: scratch cells derive from scratch GRID stores,
                 # so cell divergence under grid corruption in the same
                 # leaderboard is collateral, not independent evidence.
@@ -2002,7 +2819,7 @@ def compare_recount(
                         ),
                     )
                 )
-            elif context_match and cell_evidence:
+            elif verdict == "cell_corrupt":
                 findings.append(
                     VerifyFinding(
                         path=rel,
@@ -2034,18 +2851,22 @@ def compare_recount(
     # GRID stores first — their verdicts feed the cell collateral rule (B5).
     ordered = sorted(plan)
     for store_path in ordered:
-        tuple_, _, is_grid = plan[store_path]
+        tuple_, grid_, is_grid = plan[store_path]
         if is_grid:
             _diff_store(
                 store_path,
+                tuple_=tuple_,
+                entry_grid=grid_,
                 is_grid_tuple=True,
                 leaderboard=(tuple_.instrument, tuple_.tf.label),
             )
     for store_path in ordered:
-        tuple_, _, is_grid = plan[store_path]
+        tuple_, grid_, is_grid = plan[store_path]
         if not is_grid:
             _diff_store(
                 store_path,
+                tuple_=tuple_,
+                entry_grid=grid_,
                 is_grid_tuple=False,
                 leaderboard=(tuple_.instrument, tuple_.tf.label),
             )
@@ -2076,14 +2897,18 @@ __all__ = [
     "RecordedContext",
     "RecordedStage3Audit",
     "RecordedStage3Knobs",
+    "RecordedTemporalAudit",
     "SweepVerifyError",
     "TreeVerifyReport",
     "VerifyFinding",
     "compare_recount",
     "plan_expected_stores",
+    "recorded_apriori_from_audit",
     "recorded_context_from_audit",
+    "recorded_overfit_from_audit",
     "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
+    "recorded_temporal_from_audit",
     "stale_roll_schedule_refusal",
     "verify_identity",
     "verify_structural",

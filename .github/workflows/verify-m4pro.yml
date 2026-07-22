@@ -92,11 +92,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Bootstrap (venv + deps + both Rust kernels + doctor)
+      - name: Bootstrap (venv + deps + Rust kernels + doctor)
         run: |
           # The repo's own turnkey bootstrap is the single source of truth
           # (CLAUDE.md §11 COMMON): 3.12 venv, [dev,data,ui] + optimize extras,
-          # fno_math + trading_core via maturin, then `brutex doctor`.
+          # fno_math + trading_core + brutex_identity via maturin, then
+          # `brutex doctor`.
           python -m venv .venv
           . .venv/bin/activate
           pip install --upgrade pip
@@ -120,6 +121,13 @@ jobs:
           }
           build_with_retry rust/fno-math
           build_with_retry rust/trading-core
+          # brutex_identity is a HARD import of brutex.engine /
+          # brutex.strategies.combo / brutex.data.window_ledger_store since
+          # DEC-RUST-RUNID-STORES-001 — without this build the mypy/pyright/
+          # pytest steps below die at collection with ModuleNotFoundError
+          # (caught by the lane's independent refuter round; the round-1
+          # "whole-workflow job census" had missed this self-hosted workflow).
+          build_with_retry rust/brutex-identity
 
       - name: Lint + format (ruff)
         run: |
@@ -159,10 +167,12 @@ jobs:
         # A silent full-workspace verification failure hides a macOS/arm64
         # build/test/type/doctor regression. Mirror safety.yml's proven alert
         # step (COMMON, Golden Rule #11): dedup-by-title (per-sha) then open a
-        # labelled issue. `failure()` fires on ANY earlier step failing (incl.
-        # any verification gate); scheduled runs only (an operator-watched
+        # labelled issue. `failure() || cancelled()` fires on ANY earlier step
+        # failing AND on a timeout-KILL (a job killed by its own timeout-minutes
+        # reports CANCELLED, not FAILED — DEC-MUTATION-ALERT-CANCELLED-001,
+        # live-probed run 28748795864); scheduled runs only (an operator-watched
         # dispatch needs no issue).
-        if: failure() && github.event_name == 'schedule'
+        if: (failure() || cancelled()) && github.event_name == 'schedule'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |

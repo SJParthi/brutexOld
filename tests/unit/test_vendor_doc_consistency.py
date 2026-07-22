@@ -1,11 +1,15 @@
 """Vendor single-source-of-truth guard (DEC-DHAN-DOC-RECONCILE-001).
 
 Vendor-state guard, updated for the Dhan -> Groww re-migration
-(DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009) and again for the AWS-SSM-only
-credential cutover (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065). The vendor
-cutover is COMPLETE: the operator-facing docs now describe the AWS Parameter
-Store credential flow, and BOTH retired secret env-var families (Dhan AND the
-pre-AWS ``BRUTEX_GROWW_*`` pair) are scrubbed from every operator surface. The
+(DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009), the AWS-SSM-only credential cutover
+(DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065), and the Dhan RE-ADMISSION as a
+standalone READ-ONLY SPOT feed track (DEC-DHAN-SPOT-FEED-001 /
+DEC-DHAN-READONLY-AUTH-001 / DEC-DHAN-GUARD-RETIRE-002, ADR-0022). Groww remains
+the PRIMARY vendor; Dhan is now ALSO live but its credentials are AWS-SSM-only
+(``/tickvault/prod/dhan/*`` — read via ``BRUTEX_TOKEN_PARAM_DHAN_*`` path
+overrides), so a SECRET-carrying ``BRUTEX_DHAN_ACCESS_TOKEN`` / ``BRUTEX_DHAN_CLIENT_ID``
+env var was NEVER a valid Dhan credential path and must still never appear in an
+operator doc (Golden Rule #1 — a token is read from SSM, never an env var). The
 `groww` optional extra IS present and declares `growwapi`; `bootstrap.sh` still
 must NOT install the optional extra (installing it is what broke `make setup`
 historically). So these assertions check:
@@ -13,8 +17,9 @@ historically). So these assertions check:
 * the ``groww`` pip extra IS present and declares ``growwapi`` (re-migration), AND
 * ``bootstrap.sh`` does NOT pip-install it (it stays optional -- unchanged), AND
 * the operator-facing docs describe the AWS-SSM-only credential flow
-  (DEC-AWS-ONLY-CREDS-001) and carry NO instruction to set the retired
-  ``BRUTEX_GROWW_*`` auth env vars (nor any ``BRUTEX_DHAN_*``).
+  (DEC-AWS-ONLY-CREDS-001) and carry NO instruction to set a secret-carrying
+  ``BRUTEX_GROWW_*`` OR ``BRUTEX_DHAN_*`` auth env var (both vendors read their
+  tokens ONLY from AWS Parameter Store).
 
 Scope is deliberately narrow (the *breaking* surfaces only): the legacy
 ``brutex.orchestrator.adaptive_rate_limiter`` reads vendor-neutral
@@ -41,7 +46,10 @@ _AUTH_DOCS: tuple[Path, ...] = (
     _REPO_ROOT / "docs" / "runbooks" / "lake-backup-restore.md",
 )
 
-#: The retired Dhan auth env vars that must never reappear in operator docs.
+#: The secret-carrying Dhan auth env vars that were NEVER a valid credential path
+#: (Dhan is AWS-SSM-only, DEC-DHAN-READONLY-AUTH-001) and must never appear in an
+#: operator doc — the token is read from SSM via ``BRUTEX_TOKEN_PARAM_DHAN_*`` path
+#: overrides, never carried in an env var (Golden Rule #1).
 _WRONG_AUTH_VARS: tuple[str, ...] = (
     "BRUTEX_DHAN_ACCESS_TOKEN",
     "BRUTEX_DHAN_CLIENT_ID",
@@ -94,7 +102,14 @@ def test_bootstrap_does_not_install_groww_extra() -> None:
 
 
 def test_operator_docs_have_no_retired_dhan_auth_vars() -> None:
-    """No operator-facing doc may instruct a retired ``BRUTEX_DHAN_*`` auth var."""
+    """No operator-facing doc may instruct a secret-carrying ``BRUTEX_DHAN_*`` auth var.
+
+    Dhan is re-admitted as a standalone read-only SPOT feed (DEC-DHAN-SPOT-FEED-001)
+    whose credentials are AWS-SSM-only (DEC-DHAN-READONLY-AUTH-001), so a token-in-env
+    ``BRUTEX_DHAN_ACCESS_TOKEN`` / ``BRUTEX_DHAN_CLIENT_ID`` is never a valid path — the
+    non-secret ``BRUTEX_TOKEN_PARAM_DHAN_*`` SSM-path overrides are a different, allowed
+    family (they carry no secret).
+    """
     for doc in _AUTH_DOCS:
         text = doc.read_text(encoding="utf-8")
         for var in _WRONG_AUTH_VARS:

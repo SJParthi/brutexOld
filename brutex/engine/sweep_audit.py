@@ -66,6 +66,11 @@ from typing import Any, BinaryIO, Final, Self
 
 import blake3
 
+from brutex.engine.sweep_ops_rust import (
+    routed_audit_entry_hash,
+    routed_chain_verify_step,
+    sweep_ops_rust_enabled,
+)
 from brutex.models import BruteXError
 
 # ────────────────────────────────────────────────────────────────────────
@@ -136,6 +141,42 @@ def _canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _entry_hash_python(
+    seq_str: str,
+    prev_hash: str,
+    ts_str: str,
+    actor: str,
+    action: str,
+    subject: str,
+    payload_json: str,
+) -> str:
+    """The verbatim BLAKE3 entry-hash law over the PRE-RENDERED field strings.
+
+    The LIVE parity oracle for the DEC-RUST-SWEEP-OPS-001 routed law
+    (``routed_audit_entry_hash``): :meth:`SweepAuditEntry.compute_hash`'s
+    hashing body, extracted with the three rendered strings (``str(seq)`` /
+    ``str(ts_utc)`` / ``_canonical_json(payload)``) hoisted to the caller —
+    byte-identical, since the hasher consumed exactly those encodings.
+    """
+    h = blake3.blake3()
+    h.update(seq_str.encode("utf-8"))
+    h.update(b"|")
+    h.update(prev_hash.encode("utf-8"))
+    h.update(b"|")
+    h.update(ts_str.encode("utf-8"))
+    h.update(b"|")
+    h.update(actor.encode("utf-8"))
+    h.update(b"|")
+    h.update(action.encode("utf-8"))
+    h.update(b"|")
+    h.update(subject.encode("utf-8"))
+    h.update(b"|")
+    h.update(payload_json.encode("utf-8"))
+    # str(...) — the twin_detect.py idiom: the isolated pre-commit mypy env
+    # lacks the blake3 wheel, so hexdigest() reads Any there (no-any-return).
+    return str(h.hexdigest())
+
+
 # ────────────────────────────────────────────────────────────────────────
 # SweepAuditEntry
 # ────────────────────────────────────────────────────────────────────────
@@ -163,22 +204,44 @@ class SweepAuditEntry:
 
         Does NOT mutate ``self`` — returns a fresh 64-char hex string the
         caller can compare against the stored :attr:`entry_hash`.
+
+        Python renders every field string (``str(seq)``, the float-repr
+        ``str(ts_utc)``, the canonical payload JSON — the repr laws stay
+        Python BY LAW) and the hashing law routes through the default-OFF
+        DEC-RUST-SWEEP-OPS-001 seam with :func:`_entry_hash_python` as the
+        LIVE oracle (flag OFF = the verbatim Python hash, byte-identical).
         """
-        h = blake3.blake3()
-        h.update(str(self.seq).encode("utf-8"))
-        h.update(b"|")
-        h.update(self.prev_hash.encode("utf-8"))
-        h.update(b"|")
-        h.update(str(self.ts_utc).encode("utf-8"))
-        h.update(b"|")
-        h.update(self.actor.encode("utf-8"))
-        h.update(b"|")
-        h.update(self.action.encode("utf-8"))
-        h.update(b"|")
-        h.update(self.subject.encode("utf-8"))
-        h.update(b"|")
-        h.update(_canonical_json(self.payload).encode("utf-8"))
-        return h.hexdigest()
+        seq_str = str(self.seq)
+        ts_str = str(self.ts_utc)
+        payload_json = _canonical_json(self.payload)
+        if sweep_ops_rust_enabled():
+            return routed_audit_entry_hash(
+                seq_str,
+                self.prev_hash,
+                ts_str,
+                self.actor,
+                self.action,
+                self.subject,
+                payload_json,
+                python_law=lambda: _entry_hash_python(
+                    seq_str,
+                    self.prev_hash,
+                    ts_str,
+                    self.actor,
+                    self.action,
+                    self.subject,
+                    payload_json,
+                ),
+            )
+        return _entry_hash_python(
+            seq_str,
+            self.prev_hash,
+            ts_str,
+            self.actor,
+            self.action,
+            self.subject,
+            payload_json,
+        )
 
     def to_json_line(self) -> str:
         """Serialise to a single JSONL line (no trailing newline)."""
@@ -772,6 +835,46 @@ def read_entries(path: Path) -> list[SweepAuditEntry]:
     return _read_entries(path)
 
 
+#: The verify-step failure tokens → the frozen corruption reason bytes.
+_VERIFY_STEP_REASONS: Final[dict[str, str]] = {
+    "seq_out_of_order": "seq number out of order",
+    "prev_hash_mismatch": "prev_hash does not match previous entry's entry_hash",
+    "entry_hash_mismatch": "entry_hash does not match recomputed hash (content tampered)",
+}
+
+
+def _verify_step_python(
+    expected_seq: int,
+    prev_expected: str,
+    seq: int,
+    prev_hash: str,
+    ts_str: str,
+    actor: str,
+    action: str,
+    subject: str,
+    payload_json: str,
+    entry_hash: str,
+) -> tuple[str, str, str]:
+    """The verbatim per-entry verify decision — ``(token, expected, actual)``.
+
+    The LIVE parity oracle for the DEC-RUST-SWEEP-OPS-001 routed step law
+    (``routed_chain_verify_step``): :func:`verify_chain`'s three checks in
+    their frozen order (seq → prev-hash linkage → recomputed content hash),
+    first failure wins; ``"ok"`` carries the recomputed hash. Message BYTES
+    stay with :func:`verify_chain` (the :data:`_VERIFY_STEP_REASONS` map).
+    """
+    if seq != expected_seq:
+        return ("seq_out_of_order", str(expected_seq), str(seq))
+    if prev_hash != prev_expected:
+        return ("prev_hash_mismatch", prev_expected, prev_hash)
+    recomputed = _entry_hash_python(
+        str(seq), prev_hash, ts_str, actor, action, subject, payload_json
+    )
+    if entry_hash != recomputed:
+        return ("entry_hash_mismatch", recomputed, entry_hash)
+    return ("ok", recomputed, "")
+
+
 def verify_chain(path: Path) -> int:
     """Stream *path* and verify the BLAKE3 hash chain end-to-end — O(1) memory.
 
@@ -780,7 +883,10 @@ def verify_chain(path: Path) -> int:
     the running count — a multi-GB sweep log verifies without materialising
     the whole chain into memory (the prior implementation built the full entry
     list first). The three per-entry checks are unchanged: seq ordering,
-    ``prev_hash`` linkage, recomputed ``entry_hash``.
+    ``prev_hash`` linkage, recomputed ``entry_hash`` — expressed as the ONE
+    per-entry step decision (:func:`_verify_step_python`, the LIVE oracle the
+    default-OFF DEC-RUST-SWEEP-OPS-001 seam routes; Python renders the field
+    strings + owns every raise and message byte).
 
     Returns the number of entries verified. ``0`` means the file exists but is
     empty (trivially valid).
@@ -796,27 +902,36 @@ def verify_chain(path: Path) -> int:
     verified = 0
 
     for expected_seq, entry in enumerate(iter_entries(path)):
-        if entry.seq != expected_seq:
+        ts_str = str(entry.ts_utc)
+        payload_json = _canonical_json(entry.payload)
+        step_args = (
+            expected_seq,
+            prev_hash,
+            entry.seq,
+            entry.prev_hash,
+            ts_str,
+            entry.actor,
+            entry.action,
+            entry.subject,
+            payload_json,
+            entry.entry_hash,
+        )
+        if sweep_ops_rust_enabled():
+
+            def _oracle(
+                args: tuple[int, str, int, str, str, str, str, str, str, str] = step_args,
+            ) -> tuple[str, str, str]:
+                return _verify_step_python(*args)
+
+            token, expected, actual = routed_chain_verify_step(*step_args, python_law=_oracle)
+        else:
+            token, expected, actual = _verify_step_python(*step_args)
+        if token != "ok":  # noqa: S105 # nosec B105 — verdict token, not a secret
             raise SweepAuditChainCorruption(
                 seq=entry.seq,
-                expected=str(expected_seq),
-                actual=str(entry.seq),
-                reason="seq number out of order",
-            )
-        if entry.prev_hash != prev_hash:
-            raise SweepAuditChainCorruption(
-                seq=entry.seq,
-                expected=prev_hash,
-                actual=entry.prev_hash,
-                reason="prev_hash does not match previous entry's entry_hash",
-            )
-        recomputed = entry.compute_hash()
-        if entry.entry_hash != recomputed:
-            raise SweepAuditChainCorruption(
-                seq=entry.seq,
-                expected=recomputed,
-                actual=entry.entry_hash,
-                reason="entry_hash does not match recomputed hash (content tampered)",
+                expected=expected,
+                actual=actual,
+                reason=_VERIFY_STEP_REASONS[token],
             )
         prev_hash = entry.entry_hash
         verified += 1

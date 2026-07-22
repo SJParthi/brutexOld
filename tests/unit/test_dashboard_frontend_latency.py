@@ -267,24 +267,32 @@ class TestLaunchPoller:
 
 class TestDebouncedInputs:
     def test_screener_filter_inputs_are_debounced(self) -> None:
-        html = _tpl("screener.html")
-        assert "function renderDebounced()" in html
-        assert "setTimeout(render, 200)" in html
-        assert "byId(id).addEventListener('input', renderDebounced);" in html
+        # Re-pointed screener.html → bx-screener-panel.js at the
+        # DEC-OPERATOR-PAGE-CONSOLIDATE-001 merge-reconcile: the screener
+        # IIFE moved VERBATIM into the shared panel module (which now serves
+        # /screener AND the operator winners section), and the #1430
+        # debounce was ported with it. Assertions unchanged.
+        js = _js("bx-screener-panel.js")
+        assert "function renderDebounced()" in js
+        assert "setTimeout(render, 200)" in js
+        assert "byId(id).addEventListener('input', renderDebounced);" in js
         # The per-keystroke direct bind is gone.
-        assert "byId(id).addEventListener('input', render);" not in html
+        assert "byId(id).addEventListener('input', render);" not in js
         # The sort/th-click path stays synchronous (a single discrete action).
-        assert "render();" in html
+        assert "render();" in js
+        # The template itself carries no inline wiring anymore.
+        assert "renderDebounced" not in _tpl("screener.html")
 
     def test_results_top_n_input_is_debounced(self) -> None:
         html = _tpl("results.html")
         assert "const FTOP_DEBOUNCE_MS = 200;" in html
         assert "fTopDebounceTimer = setTimeout(load, FTOP_DEBOUNCE_MS);" in html
         assert "fTop.onchange = load;" not in html
-        # The selects keep the immediate load (nothing to coalesce).
+        # The selects keep the immediate load (nothing to coalesce) — the
+        # array grew fGate with DEC-SWEEP-SERVING-GATE-PROVENANCE-001.
         assert (
-            "[fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });"
-            in html
+            "[fInstrument, fTf, fDirection, fGate, fRankBy]"
+            ".forEach((el) => { el.onchange = load; });" in html
         )
 
 
@@ -506,6 +514,15 @@ def _inline_script_bodies(html: str) -> list[str]:
 def test_touched_template_inline_scripts_parse_under_node_check(name: str, tmp_path: Path) -> None:
     """Every src-less inline ``<script>`` block of a touched template parses."""
     blocks = _inline_script_bodies(_tpl(name))
+    if name == "screener.html":
+        # DEC-OPERATOR-PAGE-CONSOLIDATE-001 merge-reconcile: the screener's
+        # ONE inline IIFE moved VERBATIM into the shared
+        # /static/bx-screener-panel.js (node --check'd directly by the
+        # portal/frontend suites), so the template legitimately carries
+        # ZERO inline scripts — pinned here so a stray inline block
+        # returning still gets node-checked below.
+        assert not blocks, "screener.html must stay inline-script-free (panel extraction)"
+        return
     assert blocks, f"{name}: expected at least one inline script block"
     for i, body in enumerate(blocks):
         target = tmp_path / f"{name}.{i}.js"

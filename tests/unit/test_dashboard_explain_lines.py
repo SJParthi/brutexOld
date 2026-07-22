@@ -110,6 +110,42 @@ class TestExplainLookup:
         out = _node_call("E.AWAITING_TEXT")
         assert out == _EXPECTED_AWAITING_TEXT
 
+    def test_every_resilience_explain_key_has_a_nonempty_line(self) -> None:
+        """The panel/guide keys not covered by a screener column still hover."""
+        keys = [
+            "max_consecutive_losses",
+            "losing_streak_p50",
+            "losing_streak_p95",
+            "worst_streak_pnl",
+            "worst_streak_len",
+            "longest_underwater",
+            "worst_loss_month",
+            "win_rate_year_spread",
+            "resilience_guide",
+        ]
+        out = _node_call("ARGS[0].map((k) => E.explain(k))", json.dumps(keys))
+        assert all(isinstance(line, str) and line for line in out)
+        # R27 no-hallucination: the worst-streak line names the exact honest scope.
+        worst = _node_call('E.explain("worst_streak_pnl")')
+        assert "gross of" in worst and "per-unit (no position sizing)" in worst
+        # FIX 2 (R4): both SHARED tooltips (panel + /operator + /screener)
+        # distinguish the longest streak (by count) from the worst streak (by ₹
+        # — a shorter run of larger losses can cost more) SURFACE-AGNOSTICALLY:
+        # NO panel-specific "(see 'X')" cross-ref that dangles on /operator /
+        # /screener, and NO "THAT run's own length" (false where no length shows).
+        assert "measured in ₹" in worst and "different run" in worst
+        longest = _node_call('E.explain("max_consecutive_losses")')
+        assert "measured by count" in longest and "different run" in longest
+        for line in (worst, longest):
+            assert "(see '" not in line, line
+            assert "THAT run" not in line, line
+        # The new /screener worst_streak_len column hovers to its own line.
+        wlen = _node_call('E.explain("worst_streak_len")')
+        assert "consecutive losses" in wlen and "SHORTER" in wlen
+        # The win-rate-swing line names the ≥20-trade floor + the <2-year "—" rule.
+        swing = _node_call('E.explain("win_rate_year_spread")')
+        assert "at least 20 trades" in swing and "fewer than two" in swing
+
 
 class TestPaisaToRupees:
     """bxPaisaToRupees — exact integer/string conversion (DEC-MONEY-2DP-001)."""
@@ -236,3 +272,38 @@ class TestModeText:
         """Never an invented sentence — the note names where the phrasing lands."""
         out = _node_call('E.modeText("beginner", "PDH_CROSS_UP", null)')
         assert out == "PDH_CROSS_UP (plain-English phrasing lands with the P3 phrase table)"
+
+
+class TestExecExplainEntries:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001`: the two exec-column hover lines.
+
+    The screener's "Opt net" / "Fut net" columns hover to FIXED lines (the
+    R27 lookup law — never generated text); both pinned verbatim so the UI
+    copy cannot drift. (The file pins no exact entry COUNT — the screener
+    column-coverage test above already walks S.COLUMNS, which now includes
+    both explain keys.)
+    """
+
+    def test_options_net_after_cost_line_pinned_verbatim(self) -> None:
+        out = _node_call('E.explain("options_net_after_cost")')
+        assert out == (
+            "Net P&L after translating each spot signal to its ATM option and "
+            "charging the full Indian cost stack (brokerage · STT · ETC · SEBI · "
+            "IPFT · stamp · GST). Priceable only within the verified ETC window "
+            "(from 2024-10-01) — '—' means the options sim did not price this "
+            "strategy; see the coverage % in the entry's options_exec object."
+        )
+
+    def test_futures_net_line_pinned_verbatim(self) -> None:
+        out = _node_call('E.explain("futures_net")')
+        assert out == (
+            "Net P&L re-priced on the front-month futures contract (index futures "
+            "are cost-free — net equals gross). '—' means the futures sim did not "
+            "run for this strategy."
+        )
+
+    def test_both_keys_are_wired_screener_columns(self) -> None:
+        """The explain keys are exactly the two exec columns' hover tokens."""
+        out = _node_call("S.COLUMNS.map((c) => c.explain)")
+        assert "options_net_after_cost" in out
+        assert "futures_net" in out

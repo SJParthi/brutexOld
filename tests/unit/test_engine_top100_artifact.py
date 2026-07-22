@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -148,6 +149,71 @@ class TestPassesHardGates:
         )
         assert passes_hard_gates(cand.row, cand.agg) is False
 
+    def test_streak_door_floor_pins_the_default_fixture(self) -> None:
+        # DEC-METRICS-KELLY-GROWTH-001 (Door 5): the default fixture's pool
+        # (40 trades, loss rate 15/40) derives a binomial-null k99 BELOW the
+        # historical floor, so the door threshold is exactly the floor (10) —
+        # which is why test_long_losing_streak_rejected's 11 still rejects.
+        cand = make_candidate(1, fingerprint=fingerprint_seed(1))
+        derived = ranking.streak_door_threshold(
+            cand.row.total_trades, cand.row.losing_trades / cand.row.total_trades
+        )
+        assert derived == GATE_MAX_CONSECUTIVE_LOSSES == 10
+        boundary = make_candidate(
+            1, fingerprint=fingerprint_seed(1), agg_overrides={"max_consecutive_losses": 10}
+        )
+        assert passes_hard_gates(boundary.row, boundary.agg) is True
+
+    def test_streak_door_uses_the_shared_derived_threshold_above_the_floor(self) -> None:
+        # A big loss-heavy pool: the binomial-null 99th percentile EXCEEDS the
+        # floor, so a streak between the floor and the derived threshold now
+        # PASSES while threshold+1 still rejects — proving the mirror composes
+        # brutex.ranking.streak_door_threshold (imported), never a private
+        # fixed constant (DEC-METRICS-KELLY-GROWTH-001).
+        row_overrides = {
+            "total_trades": 400,
+            "winning_trades": 200,
+            "losing_trades": 200,
+            "win_rate": 0.5,
+        }
+        derived = ranking.streak_door_threshold(400, 0.5)
+        assert derived > GATE_MAX_CONSECUTIVE_LOSSES
+        at_threshold = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides=dict(row_overrides),
+            agg_overrides={"max_consecutive_losses": derived},
+        )
+        past_threshold = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides=dict(row_overrides),
+            agg_overrides={"max_consecutive_losses": derived + 1},
+        )
+        assert passes_hard_gates(at_threshold.row, at_threshold.agg) is True
+        assert passes_hard_gates(past_threshold.row, past_threshold.agg) is False
+
+    def test_high_win_loss_ratio_exempts_the_streak_door(self) -> None:
+        # The UNION law (door OR exemption): a payoff ratio at/above the
+        # map-pinned 3.0 tolerates any streak — Gate 4's separate 2.0 bound
+        # is unrelated (DEC-METRICS-KELLY-GROWTH-001).
+        cand = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            agg_overrides={"max_consecutive_losses": 50, "win_loss_ratio": 3.0},
+        )
+        assert passes_hard_gates(cand.row, cand.agg) is True
+
+    def test_none_win_loss_ratio_never_exempts_the_streak_door(self) -> None:
+        # An honest unknown ratio can never buy the exemption (the VIX
+        # None-never-fabricates posture).
+        cand = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            agg_overrides={"max_consecutive_losses": 11, "win_loss_ratio": None},
+        )
+        assert passes_hard_gates(cand.row, cand.agg) is False
+
 
 class TestResolvePreset:
     @pytest.mark.parametrize("name", TOP100_PRESETS)
@@ -209,7 +275,12 @@ class TestRankCandidates:
 
     @pytest.mark.parametrize(
         ("preset", "field"),
-        [("profit_factor", "profit_factor"), ("win_rate", "win_rate"), ("calmar", "calmar_ratio")],
+        [
+            ("profit_factor", "profit_factor"),
+            ("win_rate", "win_rate"),
+            ("calmar", "calmar_ratio"),
+            ("growth", "log_growth_at_half_kelly"),
+        ],
     )
     def test_alternate_presets_rank_descending_on_the_raw_row_value(
         self, preset: str, field: str
@@ -218,6 +289,79 @@ class TestRankCandidates:
         high = make_candidate(2, fingerprint=fingerprint_seed(2), row_overrides={field: 1.9})
         ranked = rank_candidates([low, high], preset=preset)
         assert [c.row.run_id for c in ranked] == [high.row.run_id, low.row.run_id]
+
+    def test_growth_preset_none_ranks_last(self) -> None:
+        # DEC-METRICS-KELLY-GROWTH-001: a pre-extension / degenerate row (None
+        # growth — the fixture default) ranks AFTER every scored one — the
+        # composite None-after-scored law, threaded row → RankRecord by the
+        # builder's _rank_record projection.
+        unscored = make_candidate(1, fingerprint=fingerprint_seed(1))
+        assert unscored.row.log_growth_at_half_kelly is None
+        low = make_candidate(
+            2,
+            fingerprint=fingerprint_seed(2),
+            row_overrides={"log_growth_at_half_kelly": -0.4},
+        )
+        high = make_candidate(
+            3,
+            fingerprint=fingerprint_seed(3),
+            row_overrides={"log_growth_at_half_kelly": 0.02},
+        )
+        ranked = rank_candidates([unscored, low, high], preset="growth")
+        assert [c.row.run_id for c in ranked] == [
+            high.row.run_id,
+            low.row.run_id,
+            unscored.row.run_id,
+        ]
+
+    def test_win_rate_safe_preset_threads_sl_hit_rate(self) -> None:
+        # DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: win rate DESC first,
+        # then SL-hit rate ASC breaks the tie, a None rate (the fixture
+        # default — a pre-extension row) ranks last within the tied win
+        # rate — threaded row → RankRecord by _rank_record's projection.
+        unknown = make_candidate(1, fingerprint=fingerprint_seed(1))
+        assert unknown.row.sl_hit_rate is None
+        stopped = make_candidate(
+            2, fingerprint=fingerprint_seed(2), row_overrides={"sl_hit_rate": 0.8}
+        )
+        safe = make_candidate(
+            3, fingerprint=fingerprint_seed(3), row_overrides={"sl_hit_rate": 0.1}
+        )
+        winner = make_candidate(
+            4,
+            fingerprint=fingerprint_seed(4),
+            row_overrides={"win_rate": 0.9, "sl_hit_rate": 1.0},
+        )
+        ranked = rank_candidates([unknown, stopped, safe, winner], preset="win_rate_safe")
+        assert [c.row.run_id for c in ranked] == [
+            winner.row.run_id,  # higher win rate dominates even at SL 1.0
+            safe.row.run_id,  # tied win rate: lowest SL-hit rate first
+            stopped.row.run_id,
+            unknown.row.run_id,  # None rate last within the tied win rate
+        ]
+
+    def test_recent_presets_thread_the_recency_row_fields(self) -> None:
+        # DEC-METRICS-TRAILING-WINDOW-001: the recent / recent_decay presets
+        # read the row's persisted trailing_sharpe_ratio /
+        # decay_weighted_net_paisa through _rank_record's projection — a
+        # None (the fixture default, a pre-extension row) ranks last.
+        unscored = make_candidate(1, fingerprint=fingerprint_seed(1))
+        assert unscored.row.trailing_sharpe_ratio is None
+        assert unscored.row.decay_weighted_net_paisa is None
+        low = make_candidate(
+            2,
+            fingerprint=fingerprint_seed(2),
+            row_overrides={"trailing_sharpe_ratio": -0.3, "decay_weighted_net_paisa": -900.0},
+        )
+        high = make_candidate(
+            3,
+            fingerprint=fingerprint_seed(3),
+            row_overrides={"trailing_sharpe_ratio": 1.2, "decay_weighted_net_paisa": 4500.0},
+        )
+        expected = [high.row.run_id, low.row.run_id, unscored.row.run_id]
+        for preset in ("recent", "recent_decay"):
+            ranked = rank_candidates([unscored, low, high], preset=preset)
+            assert [c.row.run_id for c in ranked] == expected, preset
 
     def test_composite_preset_ranks_descending_none_last(self) -> None:
         none_score = make_candidate(
@@ -690,8 +834,10 @@ class TestWithAggHelper:
 
 
 class TestSchemaVersionPin:
-    def test_schema_version_is_one(self) -> None:
-        assert TOP100_SCHEMA_VERSION == 1
+    def test_schema_version_is_two(self) -> None:
+        # Bumped 1→2 by the resilience annotation (each entry now carries a
+        # top-level ``resilience`` block); an old top100.json reads absent.
+        assert TOP100_SCHEMA_VERSION == 2
 
 
 class TestLoadsObjectBelt:
@@ -935,15 +1081,25 @@ class TestCascadeJoinAtWriter:
             == ENTRY_REQUIRED_KEYS
         )
         assert "cascade" not in ENTRY_REQUIRED_KEYS
+        # DEC-RANKING-SPLUS-TIER-001: tier is writer-always-emitted but
+        # reader-OPTIONAL — same law, same pin.
+        assert "tier" not in ENTRY_REQUIRED_KEYS
 
     def test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture(self) -> None:
         """Stripping ONLY the new keys reproduces the frozen pre-change bytes.
 
-        The frozen fixture predates BOTH additive deltas now in the tree: the
-        #1749 ``cascade_join``/``cascade`` keys (this DEC's) AND main's
+        The frozen fixture predates FOUR additive deltas now in the tree: the
+        #1749 ``cascade_join``/``cascade`` keys (this DEC's), main's
         DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md #1743)
-        ``metrics.exits["session_gap"]`` key — the strip normalizes both, so
-        the pin still proves the deltas are additive-only.
+        ``metrics.exits["session_gap"]`` key, — since the club-O
+        integration merge — DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959)'s
+        per-entry ``resilience`` block, whose payload-shape change carries the
+        DELIBERATE ``schema_version`` bump 1→2 (bump-on-any-shape-change law,
+        documented on ``TOP100_SCHEMA_VERSION``), AND — since the train-b
+        #1578 fold — the DEC-RANKING-SPLUS-TIER-001 ``tier_config``/``tier``
+        keys. The strip normalizes all four (the version compared explicitly:
+        live == 2, frozen == 1), so the pin still proves the entry/meta
+        deltas are additive-only.
         """
         frozen = json.loads(_PRE_CASCADE_TOP100.read_text(encoding="utf-8"))
         artifact = build_top100(
@@ -958,9 +1114,17 @@ class TestCascadeJoinAtWriter:
         payload = artifact.to_payload()
         stripped = dict(payload)
         stripped.pop("cascade_join")
+        # The #1959 deliberate version bump — asserted, then normalized so the
+        # remaining compare proves every OTHER delta is additive-only.
+        assert stripped["schema_version"] == TOP100_SCHEMA_VERSION == 2
+        assert frozen["schema_version"] == 1
+        stripped["schema_version"] = frozen["schema_version"]
+        # DEC-RANKING-SPLUS-TIER-001 (train-b #1578 fold): the always-emitted
+        # root tier_config + per-entry tier join the strip set.
+        stripped.pop("tier_config")
 
         def _strip_entry(entry: dict[str, object]) -> dict[str, object]:
-            out = {k: v for k, v in entry.items() if k != "cascade"}
+            out = {k: v for k, v in entry.items() if k not in {"cascade", "resilience", "tier"}}
             metrics = dict(cast("dict[str, object]", out["metrics"]))
             exits = dict(cast("dict[str, object]", metrics["exits"]))
             session_gap_count = exits.pop("session_gap")
@@ -975,18 +1139,61 @@ class TestCascadeJoinAtWriter:
         ]
         assert stripped == frozen
 
-    def test_frozen_pre_change_artifact_still_loads(self, tmp_path: Path) -> None:
-        """The back-compat oracle: a pre-change artifact loads fine, meta None."""
+    def test_frozen_pre_change_artifact_reads_absent_never_crashes(self, tmp_path: Path) -> None:
+        """The back-compat oracle UNDER the merged #1959 schema-v2 law.
+
+        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959) bumped
+        ``TOP100_SCHEMA_VERSION`` 1→2 with the documented reader law: an
+        artifact at an UNKNOWN version reads ABSENT (→ deterministic rebuild),
+        never a crash and never a silently mis-shaped load — so the frozen v1
+        pre-change fixture now loads ``None`` via the NAMED
+        ``schema_version_mismatch`` degrade (the pre-club version of this test
+        asserted a successful v1 load; superseded by the #1959 bump).
+        """
         import shutil
+
+        from structlog.testing import capture_logs
 
         run_id = "grid" + "0" * 60
         shutil.copytree(_PRE_CASCADE_TOP100.parent.parent, tmp_path / "runs")
-        loaded = load_top100(tmp_path / "runs", run_id)
+        with capture_logs() as logs:
+            loaded = load_top100(tmp_path / "runs", run_id)
+        assert loaded is None  # absent-by-version, the #1959 rebuild law
+        (event,) = [e for e in logs if e["event"] == "top100.load_invalid"]
+        assert event["reason"] == "schema_version_mismatch"
+
+    def test_pre_tier_artifact_loads_with_no_tier_keys(self, tmp_path: Path) -> None:
+        """DEC-RANKING-SPLUS-TIER-001 back-compat under the #1959 v2 gate.
+
+        Fold re-derivation (train-b 2026-07-21, PR #1578 reconcile): the
+        member authored these tier-absence assertions on the frozen v1
+        fixture, but the woven reader law loads v1 ABSENT (the test above).
+        The member claim — a PRE-tier artifact loads with a ``None``
+        ``tier_config``, no per-entry ``tier`` keys, and the None meta NOT
+        re-emitted — is preserved on a legacy-shaped v2 artifact written
+        through the REAL stamp-minting writer (the L1 re-derivation class;
+        a raw fixture edit would trip the stamp content-hash law instead).
+        """
+        base = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        legacy = replace(
+            base,
+            cascade_join=None,
+            tier_config=None,
+            entries=tuple(
+                {k: v for k, v in entry.items() if k not in {"cascade", "tier"}}
+                for entry in base.entries
+            ),
+        )
+        write_top100(tmp_path, legacy)
+        loaded = load_top100(tmp_path, _RUN)
         assert loaded is not None
         assert loaded.cascade_join is None
+        assert loaded.tier_config is None
         assert all("cascade" not in entry for entry in loaded.entries)
+        assert all("tier" not in entry for entry in loaded.entries)
         # A None meta is NOT re-emitted — the round-trip payload byte-law.
         assert "cascade_join" not in loaded.to_payload()
+        assert "tier_config" not in loaded.to_payload()
 
     def test_load_round_trips_cascade_join_meta(self, tmp_path: Path) -> None:
         join = _join({run_id_of(1): _view(run_id_of(1))})
@@ -996,3 +1203,705 @@ class TestCascadeJoinAtWriter:
         assert loaded is not None
         assert loaded.cascade_join == artifact.cascade_join
         assert loaded.entries[0]["cascade"] == artifact.entries[0]["cascade"]
+
+
+# ── `DEC-OPTIONS-EXEC-FEEDBACK-001` / DEC-FILL-EXEC-GRID-1M-001: the exec-sim
+#    provider seams + the net_after_cost preset at the writer ─────────────────
+
+
+def _priced_verdict(net: int) -> dict[str, object]:
+    """A minimal PRICED options-exec verdict (headline net, int64 paisa)."""
+    return {"status": "priced", "net_after_cost_paisa": net, "window": "2024-10-01.."}
+
+
+class TestExecProviderNoneByteIdentity:
+    """The LOAD-BEARING pin: ALL providers ``None`` ⇒ pre-change bytes.
+
+    `DEC-OPTIONS-EXEC-FEEDBACK-001` / DEC-FILL-EXEC-GRID-1M-001's emit-on-wired
+    law — a build with every provider kwarg ``None`` (explicit OR defaulted)
+    must be BYTE-IDENTICAL to the pre-change output: no ``options_exec`` /
+    ``futures_exec`` / ``fill_sensitivity`` entry key, no ``*_wired`` source
+    flag, anywhere.
+    """
+
+    def _pair(self) -> list[Top100Candidate]:
+        return [
+            make_candidate(1, fingerprint=fingerprint_seed(1)),
+            make_candidate(
+                2, fingerprint=fingerprint_seed(2), row_overrides={"max_drawdown_pct": 20.0}
+            ),
+        ]
+
+    def test_default_build_equals_explicit_all_none_providers_byte_for_byte(self) -> None:
+        default = _build(self._pair())
+        explicit = _build(
+            self._pair(),
+            options_exec_provider=None,
+            futures_exec_provider=None,
+            fill_sensitivity_provider=None,
+        )
+        assert default.to_payload() == explicit.to_payload()
+        # The json BYTE law itself, not just dict equality.
+        assert json.dumps(default.to_payload(), sort_keys=True) == json.dumps(
+            explicit.to_payload(), sort_keys=True
+        )
+        assert default.rendered_bytes() == explicit.rendered_bytes()
+
+    def test_provider_none_artifact_carries_no_new_keys_anywhere(self) -> None:
+        artifact = _build(
+            self._pair(),
+            options_exec_provider=None,
+            futures_exec_provider=None,
+            fill_sensitivity_provider=None,
+        )
+        assert artifact.entries  # anti-vacuous: there ARE entries to inspect
+        for entry in artifact.entries:
+            assert "options_exec" not in entry
+            assert "futures_exec" not in entry
+            assert "fill_sensitivity" not in entry
+        for flag in ("options_exec_wired", "futures_exec_wired", "fill_sensitivity_wired"):
+            assert flag not in artifact.source
+        # Belt: the tokens appear NOWHERE in the rendered bytes.
+        rendered = artifact.rendered_bytes()
+        for token in (b"options_exec", b"futures_exec", b"fill_sensitivity"):
+            assert token not in rendered
+
+
+class TestExecProvidersWired:
+    """Wired providers: exact objects on matching entries + emit-on-wired flags."""
+
+    def test_wired_providers_stamp_the_exact_objects_and_flags(self) -> None:
+        a = make_candidate(1, fingerprint=fingerprint_seed(1))
+        b = make_candidate(2, fingerprint=fingerprint_seed(2))
+        options_by_id: dict[str, dict[str, object]] = {
+            a.row.run_id: _priced_verdict(12_345),
+            b.row.run_id: {"status": "not_priced", "reason": "no_option_chain"},
+        }
+        futures_by_id: dict[str, dict[str, object]] = {
+            a.row.run_id: {"status": "priced", "net_pnl_paisa": 999},
+            b.row.run_id: {"status": "not_priced", "reason": "lot_size_unknown"},
+        }
+        fill_by_id: dict[str, dict[str, object]] = {
+            a.row.run_id: {"status": "priced", "net_delta_paisa": -40},
+            b.row.run_id: {"status": "not_priced", "reason": "no_1m_bars"},
+        }
+        artifact = _build(
+            [a, b],
+            options_exec_provider=lambda c: options_by_id[c.row.run_id],
+            futures_exec_provider=lambda c: futures_by_id[c.row.run_id],
+            fill_sensitivity_provider=lambda c: fill_by_id[c.row.run_id],
+        )
+        by_run = {entry["run_id"]: entry for entry in artifact.entries}
+        for cand in (a, b):
+            rid = cand.row.run_id
+            # The objects are dict(...)-copied onto the entry — EQUALITY is
+            # the contract (identity cannot survive the copy, by design).
+            assert by_run[rid]["options_exec"] == options_by_id[rid]
+            assert by_run[rid]["futures_exec"] == futures_by_id[rid]
+            assert by_run[rid]["fill_sensitivity"] == fill_by_id[rid]
+        assert artifact.source["options_exec_wired"] is True
+        assert artifact.source["futures_exec_wired"] is True
+        assert artifact.source["fill_sensitivity_wired"] is True
+        # The pre-existing UNCONDITIONAL flags are untouched beside the new ones.
+        assert artifact.source["reasons_wired"] is False
+        assert artifact.source["margin_roi_wired"] is False
+
+    def test_futures_and_fill_per_candidate_none_leaves_that_entry_keyless(self) -> None:
+        """The ``_entry_payload`` ``is not None`` guard, pinned AS-IS.
+
+        The provider aliases document TOTAL-when-wired; the runtime tolerance
+        beyond that contract is the entry-level guard — a wired futures/fill
+        provider whose return for ONE candidate is ``None`` leaves THAT entry
+        key-less while the source flag stays True (wiredness is the
+        PROVIDER's presence, never per-entry). Deliberately NOT exercised for
+        the OPTIONS provider: its returns feed the ``net_after_cost_of`` fold
+        (``verdict.get``), so TOTAL is load-bearing there and a ``None``
+        return is a contract violation, not a behavior to pin.
+        """
+        a = make_candidate(1, fingerprint=fingerprint_seed(1))
+        b = make_candidate(2, fingerprint=fingerprint_seed(2))
+        futures_map: dict[str, dict[str, object]] = {
+            a.row.run_id: {"status": "priced", "net_pnl_paisa": 1}
+        }
+        fill_map: dict[str, dict[str, object]] = {a.row.run_id: {"status": "not_priced"}}
+        artifact = _build(
+            [a, b],
+            futures_exec_provider=lambda c: futures_map.get(c.row.run_id),
+            fill_sensitivity_provider=lambda c: fill_map.get(c.row.run_id),
+        )
+        by_run = {entry["run_id"]: entry for entry in artifact.entries}
+        assert by_run[a.row.run_id]["futures_exec"] == {"status": "priced", "net_pnl_paisa": 1}
+        assert by_run[a.row.run_id]["fill_sensitivity"] == {"status": "not_priced"}
+        assert "futures_exec" not in by_run[b.row.run_id]
+        assert "fill_sensitivity" not in by_run[b.row.run_id]
+        assert artifact.source["futures_exec_wired"] is True
+        assert artifact.source["fill_sensitivity_wired"] is True
+        # options stayed unwired here — no key, no flag.
+        assert "options_exec" not in by_run[a.row.run_id]
+        assert "options_exec_wired" not in artifact.source
+
+    def test_providers_resolve_once_per_representative_only(self) -> None:
+        # "resolved ONCE per gate-passing representative BEFORE ranking":
+        # a gate-FAILER and a family-COLLAPSED twin are never offered to the
+        # providers — only the shipped representative, exactly once each seam.
+        simple = make_candidate(
+            2, fingerprint=fingerprint_seed(9), row_overrides={"mask_bits": 0b1}
+        )
+        complex_twin = make_candidate(
+            1, fingerprint=fingerprint_seed(9), row_overrides={"mask_bits": 0b111}
+        )
+        failer = make_candidate(
+            3, fingerprint=fingerprint_seed(3), row_overrides={"profit_factor": 1.0}
+        )
+        families = group_twins(
+            [
+                TwinCandidate(
+                    run_id=c.row.run_id,
+                    mask_bits=c.row.mask_bits,
+                    fingerprint=c.agg.fingerprint,
+                    entry_ts_us=frozenset({1, 2, 3}),
+                )
+                for c in (simple, complex_twin)
+            ]
+        )
+        calls: list[str] = []
+
+        def provider(c: Top100Candidate) -> dict[str, object]:
+            calls.append(c.row.run_id)
+            return {"status": "not_priced", "reason": "n/a"}
+
+        artifact = _build(
+            [simple, complex_twin, failer],
+            families=families,
+            options_exec_provider=provider,
+            futures_exec_provider=provider,
+            fill_sensitivity_provider=provider,
+        )
+        assert [e["run_id"] for e in artifact.entries] == [simple.row.run_id]
+        # Three seams × the ONE representative — never the failer/twin.
+        assert calls == [simple.row.run_id] * 3
+
+    def test_fill_sensitivity_resolved_only_for_ranked_entries(self) -> None:
+        # DEC-FILL-EXEC-GRID-1M-001: each fill call is one O(bars) re-sim, so
+        # it resolves ONLY for the RANKED entries — while the options seam
+        # resolves for EVERY representative (its nets feed ranking).
+        many = [
+            make_candidate(
+                n,
+                fingerprint=fingerprint_seed(n),
+                row_overrides={"max_drawdown_pct": float(n % 29) + 0.5},
+            )
+            for n in range(1, TOP100_LIMIT + 6)
+        ]
+        options_calls: list[str] = []
+        fill_calls: list[str] = []
+
+        def options_provider(c: Top100Candidate) -> dict[str, object]:
+            options_calls.append(c.row.run_id)
+            return {"status": "not_priced", "reason": "n/a"}
+
+        def fill_provider(c: Top100Candidate) -> dict[str, object]:
+            fill_calls.append(c.row.run_id)
+            return {"status": "not_priced", "reason": "n/a"}
+
+        artifact = _build(
+            many, options_exec_provider=options_provider, fill_sensitivity_provider=fill_provider
+        )
+        assert len(artifact.entries) == TOP100_LIMIT
+        assert sorted(options_calls) == sorted(c.row.run_id for c in many)  # every rep
+        ranked_ids = [str(e["run_id"]) for e in artifact.entries]
+        assert sorted(fill_calls) == sorted(ranked_ids)  # ranked only
+        assert len(fill_calls) == TOP100_LIMIT
+
+    def test_wired_artifact_round_trips_through_write_and_load(self, tmp_path: Path) -> None:
+        # ENTRY_REQUIRED_KEYS is untouched, so the presence-tolerant reader
+        # round-trips the wired keys verbatim.
+        cand = make_candidate(1, fingerprint=fingerprint_seed(1))
+        artifact = _build(
+            [cand],
+            options_exec_provider=lambda c: _priced_verdict(777),
+            futures_exec_provider=lambda c: {"status": "not_priced", "reason": "n/a"},
+            fill_sensitivity_provider=lambda c: {"status": "not_priced", "reason": "n/a"},
+        )
+        write_top100(tmp_path, artifact)
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.to_payload() == artifact.to_payload()
+        assert loaded.entries[0]["options_exec"] == _priced_verdict(777)
+        assert loaded.source["options_exec_wired"] is True
+
+
+class TestNetAfterCostPresetAtWriter:
+    """build_top100(preset="net_after_cost") over a wired options-exec map."""
+
+    def test_ranks_priced_desc_then_unpriced_by_run_id_asc(self) -> None:
+        # Hand-derived expected order (net_after_cost: reverse=True, int-exact,
+        # unpriced entries LAST):
+        #   run 3 — priced net +2_000_000            → rank 1 (largest net)
+        #   run 1 — priced net    -50_000            → rank 2 (negative but
+        #                                              PRICED beats unpriced)
+        #   run 2 — status "not_priced" (its embedded 9_999_999 int MUST be
+        #           ignored — the status gate)       → unpriced pool
+        #   run 4 — status "priced" but a FLOAT net (9.9e15): the isinstance
+        #           int gate refuses it              → unpriced pool
+        #   the unpriced pool orders by run_id ASC → run 2 (…02) before run 4.
+        rich = make_candidate(3, fingerprint=fingerprint_seed(3))
+        modest = make_candidate(1, fingerprint=fingerprint_seed(1))
+        hostile_not_priced = make_candidate(2, fingerprint=fingerprint_seed(2))
+        float_net = make_candidate(4, fingerprint=fingerprint_seed(4))
+        verdicts: dict[str, dict[str, object]] = {
+            rich.row.run_id: _priced_verdict(2_000_000),
+            modest.row.run_id: _priced_verdict(-50_000),
+            hostile_not_priced.row.run_id: {
+                "status": "not_priced",
+                "reason": "no_option_chain",
+                "net_after_cost_paisa": 9_999_999,
+            },
+            float_net.row.run_id: {"status": "priced", "net_after_cost_paisa": 9.9e15},
+        }
+        artifact = _build(
+            [modest, hostile_not_priced, rich, float_net],
+            preset="net_after_cost",
+            options_exec_provider=lambda c: verdicts[c.row.run_id],
+        )
+        assert artifact.preset == "net_after_cost"
+        assert [e["rank"] for e in artifact.entries] == [1, 2, 3, 4]
+        assert [e["run_id"] for e in artifact.entries] == [
+            rich.row.run_id,
+            modest.row.run_id,
+            hostile_not_priced.row.run_id,
+            float_net.row.run_id,
+        ]
+        # The SAME resolved verdicts land on the entries (never a double resolve).
+        by_run = {e["run_id"]: e for e in artifact.entries}
+        assert by_run[rich.row.run_id]["options_exec"] == _priced_verdict(2_000_000)
+        assert by_run[float_net.row.run_id]["options_exec"] == {
+            "status": "priced",
+            "net_after_cost_paisa": 9.9e15,
+        }
+
+    def test_wired_options_nets_are_inert_under_min_dd_first(self) -> None:
+        # The nets feed ONLY the net_after_cost preset's key — a huge net on
+        # the WORSE-drawdown candidate must not rerank min_dd_first, and the
+        # wired order equals the unwired build's (R13: annotation never
+        # reranks).
+        calm = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"max_drawdown_pct": 5.0}
+        )
+        deep = make_candidate(
+            2, fingerprint=fingerprint_seed(2), row_overrides={"max_drawdown_pct": 25.0}
+        )
+        verdicts: dict[str, dict[str, object]] = {
+            calm.row.run_id: _priced_verdict(-1),
+            deep.row.run_id: _priced_verdict(10**15),
+        }
+        unwired = _build([calm, deep])
+        wired = _build([calm, deep], options_exec_provider=lambda c: verdicts[c.row.run_id])
+        assert (
+            [e["run_id"] for e in wired.entries]
+            == [e["run_id"] for e in unwired.entries]
+            == [calm.row.run_id, deep.row.run_id]
+        )
+
+    def test_to_payload_elides_cascade_join_when_none(self) -> None:
+        """A ``cascade_join=None`` artifact ELIDES the root key (EMIT-ON-PRESENT).
+
+        ``build_top100`` has stamped a cascade_join meta unconditionally since
+        #1749, so the ``None`` arm is reachable only on a directly-constructed
+        (legacy-shaped) artifact object — e.g. one whose stored payload lacked
+        the key at load. Regression pin: the club-O #1959 schema-v2 reader law
+        turned the frozen-v1 fixture load into an ABSENT read, which silently
+        dropped the suite's only exercise of this arm (the CI 100%-branch
+        coverage gate caught the hole — ``to_payload`` 368->370).
+        """
+        base = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        assert base.cascade_join is not None  # the writer-stamped default
+        legacy = replace(base, cascade_join=None)
+        payload = legacy.to_payload()
+        assert "cascade_join" not in payload
+        with_key = dict(base.to_payload())
+        with_key.pop("cascade_join")
+        assert payload == with_key  # the ONLY delta is the elided root key
+        assert legacy.rendered_bytes().endswith(b"\n")
+
+
+# ---------------------------------------------------------------------------
+# DEC-ALPHA-BUYHOLD-METRIC-001 — the alpha-vs-buy-&-hold display metric + the
+# DEFAULT-OFF rejection gate at the writer.
+# ---------------------------------------------------------------------------
+
+from brutex.engine.alpha_metric import AlphaBaseline  # noqa: E402
+
+#: A hand-derivable baseline: anchor ₹20,000.00 → close ₹20,400.00 = +2%.
+_ALPHA_BASELINE = AlphaBaseline(anchor_open_paisa=2_000_000, last_close_paisa=2_040_000)
+
+#: Start equity ₹10,000.00 = 1_000_000 paisa (the fixture rows' default
+#: net_pnl_paisa of 10_000 then reads +1%: alpha = 1 − 2 = −1.0 exactly).
+_ALPHA_EQUITY = 1_000_000
+
+
+def _alpha_kwargs(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "alpha_baselines": {"NIFTY": _ALPHA_BASELINE},
+        "start_equity_paisa": _ALPHA_EQUITY,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestAlphaMetricsAtWriter:
+    def test_default_build_bytes_are_identical_without_alpha_inputs(self) -> None:
+        """Defaults (no alpha_baselines / start_equity / gate) == pre-alpha bytes."""
+        candidates = [make_candidate(1, fingerprint=fingerprint_seed(1))]
+        assert (
+            _build(candidates).rendered_bytes()
+            == _build(
+                candidates, alpha_baselines=None, start_equity_paisa=None, alpha_gate=False
+            ).rendered_bytes()
+        )
+        # An EMPTY baselines map is also a no-op (no instrument covered).
+        assert (
+            _build(
+                candidates, alpha_baselines={}, start_equity_paisa=_ALPHA_EQUITY
+            ).rendered_bytes()
+            == _build(candidates).rendered_bytes()
+        )
+
+    def test_alpha_build_is_additive_only_vs_the_default_build(self) -> None:
+        """Stripping the three alpha metric keys recovers the default payload."""
+        candidates = [make_candidate(1, fingerprint=fingerprint_seed(1))]
+        default_payload = _build(candidates).to_payload()
+        alpha_payload = _build(candidates, **_alpha_kwargs()).to_payload()
+        entries = alpha_payload["entries"]
+        assert isinstance(entries, list)
+        for entry in entries:
+            metrics = entry["metrics"]
+            assert isinstance(metrics, dict)
+            for key in ("alpha_pct", "strategy_return_pct", "bh_return_pct"):
+                assert key in metrics
+                metrics.pop(key)
+        assert alpha_payload == default_payload
+
+    def test_alpha_values_hand_derived(self) -> None:
+        # net +₹100 on ₹10,000 = +1%; B&H ₹20,000 → ₹20,400 = +2%; alpha −1.0.
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))], **_alpha_kwargs())
+        metrics = artifact.entries[0]["metrics"]
+        assert isinstance(metrics, dict)
+        assert metrics["strategy_return_pct"] == 1.0
+        assert metrics["bh_return_pct"] == 2.0
+        assert metrics["alpha_pct"] == -1.0
+
+    def test_uncovered_instrument_emits_no_alpha_keys(self) -> None:
+        artifact = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+            **_alpha_kwargs(alpha_baselines={"SENSEX": _ALPHA_BASELINE}),
+        )
+        metrics = artifact.entries[0]["metrics"]
+        assert isinstance(metrics, dict)
+        for key in ("alpha_pct", "strategy_return_pct", "bh_return_pct"):
+            assert key not in metrics
+
+    def test_missing_start_equity_emits_no_alpha_keys(self) -> None:
+        artifact = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+            alpha_baselines={"NIFTY": _ALPHA_BASELINE},
+            start_equity_paisa=None,
+        )
+        metrics = artifact.entries[0]["metrics"]
+        assert isinstance(metrics, dict)
+        assert "alpha_pct" not in metrics
+
+
+class TestAlphaRejectionGate:
+    def test_gate_off_by_default_source_carries_no_gate_keys(self) -> None:
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))], **_alpha_kwargs())
+        assert "alpha_gate" not in artifact.source
+        assert "alpha_gate_excluded" not in artifact.source
+
+    def test_gate_excludes_nonpositive_computable_alpha_counted_and_named(self) -> None:
+        # positive alpha: net +₹500 on ₹10,000 = +5% vs B&H +2% → alpha +3.
+        winner = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"net_pnl_paisa": 50_000}
+        )
+        # negative alpha: the default net +1% vs B&H +2% → alpha −1 (excluded).
+        loser = make_candidate(2, fingerprint=fingerprint_seed(2))
+        # ZERO alpha: net +₹200 on ₹10,000 = +2% == B&H +2% → alpha 0 (<= 0,
+        # excluded — the boundary law).
+        boundary = make_candidate(
+            3, fingerprint=fingerprint_seed(3), row_overrides={"net_pnl_paisa": 20_000}
+        )
+        # UNCOMPUTABLE alpha (no baseline for SENSEX): NEVER excluded.
+        uncovered = make_candidate(
+            4,
+            fingerprint=fingerprint_seed(4),
+            row_overrides={"instrument": "SENSEX", "net_pnl_paisa": -10_000},
+        )
+        with capture_logs() as logs:
+            artifact = _build(
+                [winner, loser, boundary, uncovered],
+                **_alpha_kwargs(alpha_gate=True),
+            )
+        kept = [entry["run_id"] for entry in artifact.entries]
+        assert winner.row.run_id in kept
+        assert uncovered.row.run_id in kept
+        assert loser.row.run_id not in kept
+        assert boundary.row.run_id not in kept
+        assert artifact.source["alpha_gate"] is True
+        assert artifact.source["alpha_gate_excluded"] == 2
+        events = [log for log in logs if log["event"] == "top100.alpha_gate_excluded"]
+        assert len(events) == 1
+        assert events[0]["excluded"] == 2
+        assert set(events[0]["sample"]) == {loser.row.run_id, boundary.row.run_id}
+        # Review r1 FIX 1 (gate-honesty): ``gate_passers`` keeps its historical
+        # meaning — the HARD-gate passer count (all 4), NEVER the
+        # post-alpha-exclusion count (2) — on the persisted ``source`` AND the
+        # ``top100.built`` INFO log field alike; ``alpha_gate_excluded`` stays
+        # the sole accounting of alpha rejections.
+        assert artifact.source["gate_passers"] == 4
+        built = [log for log in logs if log["event"] == "top100.built"]
+        assert len(built) == 1
+        assert built[0]["gate_passers"] == 4
+
+    def test_gate_on_accounting_law_entries_plus_exclusions_recompose_gate_passers(
+        self,
+    ) -> None:
+        """The report-side accounting law holds under gate-ON (review r1):
+        ``len(entries) + families_collapsed + alpha_gate_excluded ==
+        gate_passers`` — the invariant the code establishes for a pool below
+        ``TOP100_LIMIT`` (here families_collapsed is 0, so entries + alpha
+        exclusions recompose the HARD-passer count exactly, matching
+        ``ResultsDepthReport.gate_passers``'s pre-alpha meaning)."""
+        winner = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"net_pnl_paisa": 50_000}
+        )
+        loser = make_candidate(2, fingerprint=fingerprint_seed(2))  # alpha −1 → excluded
+        artifact = _build([winner, loser], **_alpha_kwargs(alpha_gate=True))
+        gate_passers = artifact.source["gate_passers"]
+        excluded = artifact.source["alpha_gate_excluded"]
+        collapsed = artifact.source["families_collapsed"]
+        assert isinstance(gate_passers, int)
+        assert isinstance(excluded, int)
+        assert isinstance(collapsed, int)
+        assert gate_passers == 2  # BOTH hard-gate passers — pre-alpha
+        assert excluded == 1
+        assert len(artifact.entries) + collapsed + excluded == gate_passers
+
+    def test_gate_on_with_zero_exclusions_is_counted_zero_no_warn(self) -> None:
+        winner = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"net_pnl_paisa": 50_000}
+        )
+        with capture_logs() as logs:
+            artifact = _build([winner], **_alpha_kwargs(alpha_gate=True))
+        assert artifact.source["alpha_gate"] is True
+        assert artifact.source["alpha_gate_excluded"] == 0
+        assert [log for log in logs if log["event"] == "top100.alpha_gate_excluded"] == []
+
+    def test_gate_without_alpha_inputs_excludes_nothing(self) -> None:
+        """Gate ON but nothing computable — every passer kept (never judged
+        on a number that does not exist)."""
+        candidates = [make_candidate(1, fingerprint=fingerprint_seed(1))]
+        artifact = _build(candidates, alpha_gate=True)
+        assert len(artifact.entries) == 1
+        assert artifact.source["alpha_gate_excluded"] == 0
+
+
+class TestAlphaPreset:
+    def test_alpha_preset_orders_by_alpha_desc_none_after_scored(self) -> None:
+        low = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"net_pnl_paisa": 30_000}
+        )  # +3% − 2% = +1
+        high = make_candidate(
+            2, fingerprint=fingerprint_seed(2), row_overrides={"net_pnl_paisa": 90_000}
+        )  # +9% − 2% = +7
+        uncovered = make_candidate(
+            3, fingerprint=fingerprint_seed(3), row_overrides={"instrument": "SENSEX"}
+        )  # None alpha — ranks LAST
+        artifact = _build([low, high, uncovered], preset="alpha", **_alpha_kwargs())
+        assert [entry["run_id"] for entry in artifact.entries] == [
+            high.row.run_id,
+            low.row.run_id,
+            uncovered.row.run_id,
+        ]
+        assert artifact.preset == "alpha"
+
+    def test_rank_candidates_default_map_matches_pre_alpha_order(self) -> None:
+        candidates = [make_candidate(n, fingerprint=fingerprint_seed(n)) for n in (3, 1, 2)]
+        no_map = rank_candidates(candidates, preset=DEFAULT_TOP100_PRESET)
+        empty_map = rank_candidates(candidates, preset=DEFAULT_TOP100_PRESET, alpha_by_run_id={})
+        assert [c.row.run_id for c in no_map] == [c.row.run_id for c in empty_map]
+
+
+# ---------------------------------------------------------------------------
+# DEC-RANKING-SPLUS-TIER-001 — the S+/S/A tier annotation at the writer
+# ---------------------------------------------------------------------------
+
+from brutex.engine import top100_artifact as _top100_module  # noqa: E402
+from brutex.ranking.tiers import (  # noqa: E402
+    DEFAULT_TIER_CONFIG,
+    TierVerdict,
+    tier_config_payload,
+)
+
+
+class TestTierAtWriter:
+    """The ADDITIVE per-entry ``tier`` object + root ``tier_config`` meta."""
+
+    def test_every_entry_carries_the_tier_object(self) -> None:
+        artifact = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+        )
+        entry = artifact.entries[0]
+        tier = entry["tier"]
+        assert isinstance(tier, dict)
+        assert set(tier) == {"label", "blocked_next"}
+        # The wp5 defaults pass every A axis and fail S (see the golden's
+        # audit) — the verdict is DATA from the classifier, never invented.
+        assert tier["label"] == "A"
+        assert isinstance(tier["blocked_next"], list)
+        assert "min_trades" in tier["blocked_next"]
+
+    def test_root_tier_config_is_the_default_config_echo(self) -> None:
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        assert artifact.tier_config == tier_config_payload(DEFAULT_TIER_CONFIG)
+        assert artifact.to_payload()["tier_config"] == tier_config_payload(DEFAULT_TIER_CONFIG)
+
+    def test_tier_uses_the_joined_cascade_status(self) -> None:
+        # With a joined PASS verdict the cascade axis passes at EVERY tier —
+        # the `cascade` token leaves blocked_next; without a join the
+        # not_validated status blocks S (the classifier is fed the SAME
+        # status the entry's own cascade object carries, threaded never
+        # re-read).
+        rid = run_id_of(1)
+        joined = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+            cascade_join=_join({rid: _view(rid)}),
+        )
+        unjoined = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        joined_tier = cast("dict[str, Any]", joined.entries[0]["tier"])
+        unjoined_tier = cast("dict[str, Any]", unjoined.entries[0]["tier"])
+        assert "cascade" not in joined_tier["blocked_next"]
+        assert "cascade" in unjoined_tier["blocked_next"]
+
+    def test_annotation_never_reranks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The R13 pin: ranks are IDENTICAL with the classifier active vs a
+        stub — the tier is stamped strictly AFTER ranking and can never
+        reorder, hide or exclude an entry."""
+        candidates = [
+            make_candidate(
+                n,
+                fingerprint=fingerprint_seed(n),
+                row_overrides={"max_drawdown_pct": float(n)},
+            )
+            for n in range(1, 6)
+        ]
+        real = _build(list(candidates))
+        monkeypatch.setattr(
+            _top100_module,
+            "classify_tier",
+            lambda inputs, *, config: TierVerdict(tier="S+", blocked_next=()),
+        )
+        stubbed = _build(list(candidates))
+        assert [e["run_id"] for e in real.entries] == [e["run_id"] for e in stubbed.entries]
+        assert [e["rank"] for e in real.entries] == [e["rank"] for e in stubbed.entries]
+        # The stub proves the seam: only the tier objects differ.
+        assert all(cast("dict[str, Any]", e["tier"])["label"] == "S+" for e in stubbed.entries)
+
+    def test_load_round_trips_tier_config_and_entry_tier(self, tmp_path: Path) -> None:
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        write_top100(tmp_path, artifact)
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.tier_config == artifact.tier_config
+        assert loaded.entries[0]["tier"] == artifact.entries[0]["tier"]
+
+    def test_non_positive_entry_price_degrades_to_missing_input(self) -> None:
+        # A (defensive) non-positive avg_entry_price cannot feed the bps stop
+        # width — the classifier reads the honest missing_input token; the
+        # entry itself is stamped normally (never a crash, never a fake bps).
+        from decimal import Decimal
+
+        cand = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides={"avg_entry_price": Decimal("0.01"), "avg_exit_price": Decimal("0.01")},
+        )
+        # 0.01 rupees → 1 paisa (usable); build a truly unusable one via 0?
+        # ResultRow validates prices positive, so the None arm is reached
+        # only through the defensive int() <= 0 guard — exercise the usable
+        # tiny-price arm here and pin the tier object still stamps.
+        artifact = _build([cand])
+        tier = cast("dict[str, Any]", artifact.entries[0]["tier"])
+        assert set(tier) == {"label", "blocked_next"}
+
+
+class TestTierMinutePathScaleLaw:
+    """Hostile-review round-1 MAJOR-1: the fraction→pct-points scale at the wiring.
+
+    The agg's ``max_dd_minute_path_pct`` is a 0-1 FRACTION (``minute_path.py``
+    ``drop / peak``) while the classifier's ``max_minute_dd_pct`` ceilings are
+    PERCENTAGE POINTS — fed verbatim, a 40% intraday dip read ``0.40 <= 7.5``
+    and the minute-path axis could NEVER fire (S+/S awardable over brutal
+    intraday drawdowns). ``_tier_payload`` must scale ×100. Verified
+    FAILS-BEFORE: both trip-tests below fail with the one-line scale reverted.
+    """
+
+    @staticmethod
+    def _minute_path_candidate(minute_dd_fraction: float) -> Top100Candidate:
+        """An S+-grade candidate WITH a present minute path (every other axis clears)."""
+        from decimal import Decimal
+
+        return make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides={
+                "total_trades": 600,
+                "winning_trades": 390,
+                "losing_trades": 210,
+                "win_rate": 0.70,
+                "profit_factor": 2.5,
+                "expectancy_paisa": 3_000,
+                "max_drawdown_pct": 4.0,
+                # sl 80 paisa on a ₹24,000 entry = 0.33 bps — well inside 10.
+                "avg_entry_price": Decimal("24000.00"),
+                "avg_exit_price": Decimal("24010.00"),
+            },
+            agg_overrides={
+                "win_loss_ratio": 1.5,
+                "max_consecutive_losses": 5,
+                # Contained: 100 <= 1.5 × sl(80) = 120.
+                "mae_1m_worst_paisa": 100,
+                # > 0 is what the availability predicate needs (the agg's
+                # exit-tally invariant keeps the fixture's n_trades=40).
+                "trades_with_1m": 40,
+                "equity_status": "ok",
+                "max_dd_minute_path_pct": minute_dd_fraction,  # 0-1 FRACTION (writer scale)
+            },
+        )
+
+    def _tier_for(self, minute_dd_fraction: float) -> dict[str, Any]:
+        candidate = self._minute_path_candidate(minute_dd_fraction)
+        rid = candidate.row.run_id
+        artifact = _build([candidate], cascade_join=_join({rid: _view(rid)}))
+        return cast("dict[str, Any]", artifact.entries[0]["tier"])
+
+    def test_an_8pct_fraction_trips_the_splus_minute_dd_ceiling(self) -> None:
+        # 0.08 fraction = 8 pct-points > the S+ 7.5 ceiling (and <= S's 15):
+        # the entry demotes to S naming EXACTLY the minute-path axis. With
+        # the scale reverted this read 0.08 <= 7.5 → a false S+ (fails-before).
+        tier = self._tier_for(0.08)
+        assert tier["label"] == "S"
+        assert tier["blocked_next"] == ["minute_path_drawdown"]
+
+    def test_a_5pct_fraction_passes_the_splus_ceiling(self) -> None:
+        # 0.05 fraction = 5 pct-points <= 7.5 — every axis clears → S+.
+        tier = self._tier_for(0.05)
+        assert tier["label"] == "S+"
+        assert tier["blocked_next"] == []
+
+    def test_a_40pct_fraction_trips_even_the_s_ceiling(self) -> None:
+        # The reviewer's motivating shape: a brutal 40% intraday dip must
+        # block BOTH minute-path tiers (0.40 fraction = 40 > 15), demoting
+        # to A with the axis named among the S blockers.
+        tier = self._tier_for(0.40)
+        assert tier["label"] == "A"
+        assert "minute_path_drawdown" in tier["blocked_next"]

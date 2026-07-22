@@ -56,13 +56,17 @@ import structlog
 
 from brutex.data.derive_lock import derive_write_lock
 
-# Re-export: `frame_to_candle_bars` LIVES in `spot_daily_resample` — the
-# import-graph LEAF of the pair (this module already imports its daily-derive
-# seam) — so the shared batched converter (DEC-PREBUILD-GIL-VECTORIZE-001) is
-# one-directional and the former `spot_daily_resample ↔ timeframe_materialize`
-# cycle (CodeQL py/cyclic-import) cannot re-form. Kept in `__all__` for the
-# original call sites/tests.
-from brutex.data.spot_daily_resample import frame_to_candle_bars
+# Re-export: `frame_to_candle_bars` LIVES in `brutex.data.frame_bars` — the
+# TRUE import-graph LEAF (DEC-PREBUILD-FRAME-WRITE-001 review fold; it moved
+# on from `spot_daily_resample` when the frame-write lane's sink/parquet_writer
+# degrade paths re-formed a CodeQL py/cyclic-import cycle with that module's
+# own lazy sink/writer imports) — so the shared batched converter
+# (DEC-PREBUILD-GIL-VECTORIZE-001) stays one-directional and neither the
+# former `spot_daily_resample ↔ timeframe_materialize` cycle nor the
+# `sink ↔ spot_daily_resample` one can re-form (drift-pinned by
+# `TestImportCycleDriftPin`). Kept in `__all__` for the original call
+# sites/tests.
+from brutex.data.frame_bars import frame_to_candle_bars
 from brutex.data.timeframes import (
     ALL_TF_MINUTES,
     DAILY_TF_MINUTES,
@@ -78,6 +82,7 @@ if TYPE_CHECKING:
 
     import polars as pl
 
+    from brutex.data.frame_write_gate import FrameWriteStats
     from brutex.data.models import CandleBar
     from brutex.models import Instrument
 
@@ -683,8 +688,25 @@ def materialize_lake_timeframes(
             with_open_interest=kind is not PrebuildKind.SPOT,
             months=months,
         )
+        # Frame-write gate stats (DEC-PREBUILD-FRAME-WRITE-001): one collector
+        # per symbol derive when the gate is engaged, folded into the
+        # write_summary INFO below as ADDITIVE fields; ``None`` (the PR-1
+        # default-OFF path) keeps the summary payload byte-identical.
+        from brutex.data.frame_write_gate import (
+            FrameWriteMode,
+            FrameWriteStats,
+            resolve_frame_write_mode,
+        )
+
+        frame_stats: FrameWriteStats | None = (
+            FrameWriteStats() if resolve_frame_write_mode() is not FrameWriteMode.OFF else None
+        )
         write_tf = make_lake_write_tf(
-            lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+            lake_root=lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            frame_stats=frame_stats,
         )
         resampler = intraday_resampler_for(kind)
 
@@ -718,6 +740,19 @@ def materialize_lake_timeframes(
             per symbol carrying the timeframe count + total derived bars — the
             aggregate form of the per-partition fields the forensics rely on.
             """
+            # Frame-write counters (DEC-PREBUILD-FRAME-WRITE-001): ADDITIVE
+            # fields, emitted ONLY while the gate is engaged — the flag-OFF
+            # summary payload stays byte-identical to the pre-change one
+            # (existing fields untouched, V3 C14).
+            frame_fields: dict[str, object] = {}
+            if frame_stats is not None:
+                frame_fields = {
+                    "frame_fast": frame_stats.fast,
+                    "frame_degraded": frame_stats.degraded,
+                    "frame_degrade_reasons": dict(frame_stats.degrade_reasons),
+                    "frame_shadow_checked": frame_stats.shadow_checked,
+                    "frame_shadow_mismatches": frame_stats.shadow_mismatches,
+                }
             _LOG.info(
                 "lake.derived.write_summary",
                 exchange=exchange,
@@ -727,6 +762,7 @@ def materialize_lake_timeframes(
                 total_bars=result.total_bars,
                 skipped=len(result.skipped),
                 include_daily=include_daily,
+                **frame_fields,
             )
 
         if not include_daily:
@@ -741,6 +777,7 @@ def materialize_lake_timeframes(
             fill_daily_from_minute,
             make_lake_write_1day,
             observe_daily_open_substitutions,
+            observe_extreme_daily_ranges,
         )
 
         # Read the 1-minute base ONCE and share the frame between the intraday
@@ -800,6 +837,14 @@ def materialize_lake_timeframes(
             opens_substituted = observe_daily_open_substitutions(
                 df_1m, before=effective_before, symbol=symbol, dense=dense_symbol
             )
+            # OBSERVE-ONLY >9% daily-range detector (DEC-HALT-DAY-TREATMENT-001)
+            # — INDEX only (``dense_symbol`` ⇔ a SPOT INDEX per the #1031 gate;
+            # market-wide circuit breakers are an index phenomenon — a 750-stock
+            # scan would be a false-positive machine). Same in-memory frame,
+            # zero extra lake I/O; guarded inside (an error logs + returns 0);
+            # derived/stored bytes byte-unchanged either way (pinned).
+            if dense_symbol:
+                observe_extreme_daily_ranges(df_1m, before=effective_before, symbol=symbol)
         _stamp(
             last_1m_ist_date=None if last_bar_ist is None else last_bar_ist.date().isoformat(),
             daily_before_iso=effective_before.isoformat(),
@@ -990,27 +1035,67 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     :class:`ValueError` contract is kept in BOTH modes (a months set matching
     nothing on disk raises, mirroring the empty-tree raise).
 
-    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001): the collected frame is
+    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001; finiteness added by
+    DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): the collected frame is
     validated by the COMMON
-    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (positivity
-    + OHLC ordering, one vectorized pass) BEFORE it reaches any resampler — a
-    corrupt 1m bar (e.g. ``high < low``) previously LAUNDERED into
-    self-consistent-looking derived buckets across all 19 TFs + ``1day``
-    (live-reproduced: an emitted derived ``low: 0.0``). The raised
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (finiteness
+    + positivity + OHLC ordering, one vectorized pass) BEFORE it reaches any
+    resampler — a corrupt 1m bar (e.g. ``high < low``, or a planted
+    ``high = inf``/``NaN`` the pre-fix mask was blind to) previously LAUNDERED
+    into self-consistent-looking derived buckets across all 19 TFs + ``1day``
+    (live-reproduced: an emitted derived ``low: 0.0``; the assurance session's
+    executed repro: a derived 5-minute bucket ``high = inf``). The raised
     :class:`~brutex.data.errors.ResampleInputError` is already in the
     prebuild's per-symbol quarantine set, so the symbol is quarantined +
     NAMED and its derived TFs are NOT written — rows are never silently
     dropped or "fixed".
+
+    Timestamp-range gate (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): BEFORE the
+    price gate the collected frame's ``ts_utc`` is validated by the COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_ts_datetime_range` — a
+    stored out-of-``datetime``-range timestamp (e.g. a planted ``2**62``-us
+    stamp) survives the vectorized resample and then PANICS the Rust→Python
+    conversion (``pyo3_runtime.PanicException``, a BaseException) at
+    ``frame_to_candle_bars``'s ``to_list()``, past every ``except Exception``
+    per-symbol quarantine (executed-repro'd: ONE poisoned symbol aborted the
+    WHOLE crossverify prebuild leg). The gate raises the SAME quarantining
+    :class:`~brutex.data.errors.ResampleInputError` deterministically at the
+    read boundary instead; clean frames pay one vectorized i64 min/max pass.
+
+    Bad-tick screen (DEC-READ-GUARD-PARITY-001): after the sanity gate the
+    frame is screened by :func:`~brutex.data.bad_tick.screen_frame_bad_ticks`
+    (the engine read boundary's screen, frame form — same 4.0x threshold, same
+    ``BRUTEX_BAD_TICK_SCREEN`` kill switch, one ``feed.bad_tick_skipped`` WARN
+    per session with a ``prebuild:``-prefixed source), so a self-consistent
+    scaled 1m spike is dropped-and-counted before it can poison the derived
+    bucket HIGH/LOW or the ``1day`` anchor. Clean frames are returned
+    object-identical (zero-copy); clean lakes stay byte-identical.
+
+    Wave-D core (ADR-0020 §6, DEC-RUST-LAKE-WAVED-001 ENDGAME): the COLLECT
+    body (scan → rename/select/sort → the two gates → the screen) is OWNED
+    by the ``brutex_lake`` crate via
+    :func:`brutex.data.lake_rust_waved.read_1m_via_rust` — the Python
+    ``_collect`` oracle is DELETED. A crate-side refusal (a genuine gate
+    violation, a corrupt file, a crate panic) raises the SAME typed
+    quarantining :class:`~brutex.data.errors.ResampleInputError` with the
+    Rust-rendered reason (the ruled endgame semantics — message TEXT is the
+    crate's, the CLASS + isolation posture are unchanged). The ONE
+    exception is the inode-guard class (D-31): a NON-REGULAR inode — a
+    planted FIFO/device/dir — in the read set keeps its pre-Wave-D typed
+    :class:`~brutex.data.sidecar_read.NotRegularFileError` (an ``OSError``
+    — DEC-LAKE-READ-INODE-GUARD-001/-002; crossed from the crate as a real
+    ``OSError``, restored facade-side), raised eagerly and folding into
+    the same ``parquet_read_skip_errors()`` quarantine arms. The months /
+    whole-tree / empty-partition SOURCE DECISION — with its pinned raises —
+    runs BEFORE the seam in ``_resolve_source``. An absent/stale wheel
+    raises the typed
+    :class:`~brutex.data.errors.LakeRustWavedUnavailableError` (the
+    REQUIRED-wheel law).
     """
-    import polars as pl
+    from brutex.data.bad_tick import bad_tick_screen_enabled
+    from brutex.data.lake_rust_waved import read_1m_via_rust
 
-    from brutex.data.price_sanity import validate_frame_price_sanity
-
-    columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
-    if with_open_interest:
-        columns = (*columns, "open_interest")
-
-    def _read() -> pl.DataFrame:
+    def _resolve_source() -> str | list[str]:
         base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
         if months is not None:
             # Month-bounded read (DEC-TF-REBUILD-MONTH-BOUND-001): the explicit
@@ -1044,23 +1129,25 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
                 "returned no data for this symbol (windows settled EMPTY), "
                 "there is nothing to derive — no action needed"
             )
-        # Schema-tolerant tree read (DEC-GREEKS-ENGINE-PR2B-001): an enriched
-        # OPTION contract's month files may mix the raw 7-column and the
-        # Greeks-enriched 17-column shape (plan §15.3); only the base
-        # OHLCV(+OI) columns are selected below, which every shape carries —
-        # byte-identical for a uniform tree.
-        df = pl.scan_parquet(
-            source,
-            missing_columns="insert",
-            extra_columns="ignore",
-        ).collect()
-        frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
-        # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
-        # frame to the resamplers (raises the quarantining ResampleInputError).
-        validate_frame_price_sanity(
-            frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
+        return source
+
+    def _read() -> pl.DataFrame:
+        source = _resolve_source()
+        # The Wave-D core (see the builder docstring): the collect body is
+        # crate-owned. The source decision above already ran (its raises
+        # live there); the months arm passes the explicit file list, the
+        # whole-tree arm passes the partition dir (the crate walks exact
+        # paths — the glob=False law holds by construction).
+        base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
+        context = f"{exchange}/{segment}/{symbol}/1minute"
+        return read_1m_via_rust(
+            files=None if isinstance(source, str) else source,
+            tree_root=base.as_posix() if isinstance(source, str) else None,
+            with_open_interest=with_open_interest,
+            screen_enabled=bad_tick_screen_enabled(),
+            warn_source=f"prebuild:{context}",
+            context=context,
         )
-        return frame
 
     return _read
 
@@ -1071,6 +1158,7 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     exchange: str,
     segment: str,
     symbol: str,
+    frame_stats: FrameWriteStats | None = None,
 ) -> Callable[[str, pl.DataFrame], int]:
     """Build the injected per-timeframe writer for :func:`materialize_timeframes`.
 
@@ -1084,7 +1172,17 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     partition (:data:`INTRADAY_TF_INTERVALS`). ``open_interest`` is carried from
     the resampled frame when the OI-aware F&O futures resampler emitted it
     (DEC-PREBUILD-SELECT-001), else ``0`` (the spot convention — spot frames
-    have no OI column; a present-but-null OI bucket also maps to 0). The sink
+    have no OI column). A present-but-NULL OI bucket on an OI-carrying frame
+    is stored ``None`` (DEC-PREOPEN-DAY-FRESHNESS-001, the B-3 fold — ALIGNED
+    with the F&O DAILY derive, whose
+    :func:`~brutex.data.fno_daily_resample.resample_1m_to_fno_daily` stores
+    ``None`` for a null carry-last OI, and with the canonical resampler's own
+    "a null OI source bar yields a null bucket OI — preserved, NEVER
+    fabricated as 0" law; the former unconditional default fabricated a
+    stored ``0`` — an un-ledgered divergence, /db-display-visible,
+    FUT-reachable since DEC-OPTIONS-PREBUILD-RETIRE-001 retired the options
+    derived TFs. Already-stored ``0``s stay inert until the next latest-wins
+    re-materialise — derived partitions are recomputable caches). The sink
     snaps prices to the 2-decimal tick grid + merges idempotently by
     ``(year, month)`` (CLAUDE.md §7 / DEC-SPOT-PRICE-2DP-001) in
     **latest-wins** mode (DEC-TF-REMAT-LATEST-WINS-001 — a re-materialised
@@ -1096,7 +1194,23 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     lake I/O — ``# pragma: no cover``; exercised by the round-trip integration
     test. Moved here from the dashboard route glue (DEC-TF-MATERIALIZE-002) —
     one builder for every caller.
+
+    **Frame-direct gate (DEC-PREBUILD-FRAME-WRITE-001, Seam A — the ONLY
+    call-site change):** the ``BRUTEX_PREBUILD_FRAME_WRITE`` kill switch is
+    resolved ONCE at builder time (the ``resolve_market_closed`` resolve-once
+    precedent). Engaged (``on``/``shadow``) → the returned writer calls the
+    NEW verify-or-degrade
+    :meth:`~brutex.data.sink.ParquetBarSink.append_frame` sibling
+    (``absent_open_interest=0`` — the intraday convention above, reproduced
+    columnar; V3 C6); disabled (the PR-1 DEFAULT — dark) → the VERBATIM
+    legacy ``append(bars=frame_to_candle_bars(frame), …)`` call below, kept
+    in place so the OFF path is byte-identical BY CONSTRUCTION (no fast-lane
+    code touches the frame — negative-pinned). *frame_stats* (optional)
+    collects the per-symbol fast/degrade/shadow counters
+    ``materialize_lake_timeframes`` folds into the
+    ``lake.derived.write_summary`` INFO as additive fields.
     """
+    from brutex.data.frame_write_gate import FrameWriteMode, resolve_frame_write_mode
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
@@ -1109,14 +1223,39 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     # (materialize_lake_timeframes); the live-pull vendor writers keep INFO.
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root, partition_log_level="debug"))
 
+    # Resolve the frame-write gate ONCE per builder (DEC-PREBUILD-FRAME-WRITE-001).
+    use_frame_lane = resolve_frame_write_mode() is not FrameWriteMode.OFF
+
     def _write(tf_label: str, frame: pl.DataFrame) -> int:
         interval = INTRADAY_TF_INTERVALS[tf_label]
+        if use_frame_lane:
+            # FRAME-DIRECT lane (DEC-PREBUILD-FRAME-WRITE-001): the sink/writer
+            # siblings own the admission guards, the burn-in/shadow cross-check
+            # and the per-partition degrade back to the verbatim legacy path.
+            frame_result = sink.append_frame(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                frame=frame,
+                merge_mode="latest-wins",
+                absent_open_interest=0,
+                stats=frame_stats,
+            )
+            return frame_result.bars_appended
         result = sink.append(
             exchange=exchange,
             segment=segment,
             symbol=symbol,
             interval=interval,
-            bars=frame_to_candle_bars(frame),
+            # OI-carrying (F&O) frames keep a null bucket OI as stored None —
+            # the F&O daily derive's law (DEC-PREOPEN-DAY-FRESHNESS-001 B-3
+            # fold; see the docstring). Spot frames (no OI column) keep the
+            # legacy stored-0 convention byte-identically.
+            bars=frame_to_candle_bars(
+                frame,
+                absent_open_interest=None if "open_interest" in frame.columns else 0,
+            ),
             # LATEST-WINS on the DERIVED intraday partitions (DEC-TF-REMAT-LATEST-WINS-001,
             # mirroring the derived ``1day``'s make_lake_write_1day): a re-materialise
             # recomputes every bucket from the CURRENT stored 1-minute, so the fresh

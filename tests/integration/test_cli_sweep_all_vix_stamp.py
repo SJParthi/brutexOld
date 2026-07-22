@@ -53,20 +53,34 @@ _END = "2024-02-01"
 
 
 def _bars() -> list[CandleBar]:
-    """A multi-day upward-drifting minute window — BUY combos clear the gates."""
+    """A multi-day GAP-UP minute window — BUY combos clear the gates under
+    the ONE worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001: entries fill
+    at the bar HIGH, so the old ±0.5-pad drift SL'd every entry on its own
+    bar; narrow gap-up bars rank at the suite's sl=80/tp=50)."""
     bars: list[CandleBar] = []
+    cycle = 0
     for day in range(15):
         price = 100.0
         for minute in range(120):
-            close = price + 0.6 if minute % 3 else price - 0.3
+            k = minute % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar (below-EMA bits fire)
+                o = price
+                close, hi, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                close, hi, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar (the next bar's low clears the TP)
+                o = price + 3.0
+                close, hi, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2024, 1, 2, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
             ).astimezone(UTC)
-            hi, lo = max(price, close) + 0.5, min(price, close) - 0.5
             bars.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
+                    open=Decimal(str(round(o, 2))),
                     high=Decimal(str(round(hi, 2))),
                     low=Decimal(str(round(lo, 2))),
                     close=Decimal(str(round(close, 2))),
@@ -134,18 +148,29 @@ def _long_bars() -> list[CandleBar]:
     from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
 
     bars: list[CandleBar] = []
+    cycle = 0
     for day in range(LOCKBOX_DEFAULT_WINDOW_DAYS + 8):
         price = 100.0
         for minute in range(30):
-            close = price + 0.6 if minute % 3 else price - 0.3
+            k = minute % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar (below-EMA bits fire)
+                o = price
+                close, hi, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                close, hi, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar (the next bar's low clears the TP)
+                o = price + 3.0
+                close, hi, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2024, 1, 2, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
             ).astimezone(UTC)
-            hi, lo = max(price, close) + 0.5, min(price, close) - 0.5
             bars.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
+                    open=Decimal(str(round(o, 2))),
                     high=Decimal(str(round(hi, 2))),
                     low=Decimal(str(round(lo, 2))),
                     close=Decimal(str(round(close, 2))),
@@ -268,6 +293,7 @@ def _sweep_verify_recount(
     *,
     start: str = _START,
     end: str = _END,
+    directions: str = "BUY",
 ) -> int:
     return cli.cmd_sweep_verify(
         lake_root=lake_root,
@@ -279,7 +305,7 @@ def _sweep_verify_recount(
         intervals=_INTERVAL,
         start=start,
         end=end,
-        directions="BUY",
+        directions=directions,
         k="1",
         conditions="0,1,2",
         sl="80",
@@ -383,6 +409,93 @@ def test_recount_after_a_vix_lake_move_warns_precisely_never_condemns(
     assert "CORRUPT" not in out
 
 
+def test_recount_reads_the_recorded_temporal_regime_never_the_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 recount law: the RECORDED channel wins.
+
+    The launcher ships with the ``observe`` default, so the tree's stores
+    carry the four emit-on-present period-stats columns. A recount run under
+    a DIFFERENT verify-time env (``BRUTEX_TEMPORAL=off``) must still
+    round-trip CLEAN — the shadow re-sweep threads the tree's OWN recorded
+    ``SWEEP_START`` ``temporal_gate`` config, never the environment. A
+    regression to env/default resolution (or to no threading at all — the
+    2026-07-19 CI shard-3/-4 reds) re-sweeps temporal-less, byte-diverges on
+    the columns, and false-condemns every store as CORRUPT here.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)
+    assert _sweep_all(lake_root, catalog_path, results_root) == 0  # observe default
+
+    monkeypatch.setenv("BRUTEX_TEMPORAL", "off")  # the hostile verify-time env
+    rc = _sweep_verify_recount(lake_root, catalog_path, results_root, tmp_path / "scratch")
+
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_OK
+    assert "recount_divergence" not in out
+    assert "CORRUPT" not in out
+
+
+def test_recount_of_a_temporal_off_tree_under_an_observe_env_stays_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The symmetric arm: a ``--temporal-mode off`` tree (no period-stats
+    columns recorded) recounts CLEAN even though the verify-time env default
+    would resolve ``observe`` — the shadow must NOT add the columns."""
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)
+    assert _sweep_all(lake_root, catalog_path, results_root, temporal_mode="off") == 0
+
+    monkeypatch.setenv("BRUTEX_TEMPORAL", "observe")  # the hostile verify-time env
+    rc = _sweep_verify_recount(lake_root, catalog_path, results_root, tmp_path / "scratch")
+
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_OK
+    assert "recount_divergence" not in out
+    assert "CORRUPT" not in out
+
+
+def test_recount_of_a_mixed_temporal_history_is_inconclusive_never_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A MIXED per-tuple temporal history degrades the recount to INCONCLUSIVE.
+
+    The completion sentinel excludes the gate config (the ledgered resume
+    envelope), so one root can legitimately hold tuples recorded under
+    DIFFERENT regimes — here a BUY tuple under the ``observe`` default and a
+    SELL tuple under ``off``. ONE shadow config cannot reproduce that
+    per-tuple capture, so the recount must refuse as a context mismatch
+    (exit ``EXIT_VERIFY_INCONCLUSIVE``) — never run a meaningless byte-diff
+    that condemns the healthy tree as CORRUPT.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)
+    assert _sweep_all(lake_root, catalog_path, results_root, directions="BUY") == 0
+    assert (
+        _sweep_all(lake_root, catalog_path, results_root, directions="SELL", temporal_mode="off")
+        == 0
+    )
+
+    rc = _sweep_verify_recount(
+        lake_root, catalog_path, results_root, tmp_path / "scratch", directions="BUY,SELL"
+    )
+
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_VERIFY_INCONCLUSIVE
+    assert "MIXED temporal-gate configs" in out
+    # The literal token "CORRUPT" legitimately appears in the refusal's own
+    # "(INCONCLUSIVE, never CORRUPT)" wording — pin the verdict/finding
+    # renders instead.
+    assert "verdict: CORRUPT" not in out
+    assert "[CORRUPT]" not in out
+
+
 def test_cmd_sweep_all_relaunch_after_vix_move_warns_and_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -410,7 +523,7 @@ def test_cmd_sweep_all_relaunch_after_vix_move_warns_and_exits_nonzero(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # cma emits a matplotlib UserWarning at import
-        pytest.importorskip("cma")
+        pytest.importorskip("brutex_refine")
 
     # The LONG fixture: the stage-3 train slice must be non-empty (the 15-day
     # default window sits entirely inside the 182-day lockbox → the pass

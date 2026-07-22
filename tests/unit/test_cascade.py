@@ -27,6 +27,7 @@ from brutex.metrics.cascade import (
     _zscore_clamped,
     run_stage4_cascade,
 )
+from brutex.metrics.deflated_sharpe import deflated_sharpe_ratio
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
     LOCKBOX_DEFAULT_WINDOW_DAYS,
@@ -925,3 +926,404 @@ class TestCpcvRateCapture:
 
         v = CandidateVerdict(candidate_id="x", passed=False, rejected_at=None, detail="d")
         assert v.cpcv_pass_rate is None
+
+
+# ── DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the corrected DSR is
+# RETAINED on every verdict whose filter-#2 evaluation succeeded — pass AND
+# reject alike — instead of being discarded on the pass path. ──────────────
+
+
+def _independent_dsr(c: CandidateInput, cfg: CascadeConfig, pool: list[CandidateInput]) -> float:
+    """The test-side oracle: recompute filter #2's exact pool-fallback DSR."""
+    pool_sharpes = [p.sharpe_ratio for p in pool]
+    trial_var = statistics.pvariance(pool_sharpes) if len(pool_sharpes) >= 2 else 0.0
+    return deflated_sharpe_ratio(
+        c.sharpe_ratio,
+        n_trials=len(pool),
+        trial_sharpe_variance=trial_var,
+        sample_length=max(c.total_trades, 2),
+        skew=c.skew,
+        kurtosis=c.kurtosis,
+    ).deflated_sharpe_ratio
+
+
+def test_dsr_corrected_retained_on_pass_and_threshold_reject() -> None:
+    """A PASS verdict carries the evaluated DSR (previously discarded) and a
+    filter-#2 threshold reject carries the same figure — bit-identical to an
+    independent recompute of the exact deflation inputs (full precision).
+    """
+    cfg = _pass_config()
+    pool = [_candidate("a", seed=1), _candidate("b", seed=2, sharpe_ratio=1.9)]
+    rep = run_stage4_cascade(pool, cfg)
+    by_id = {v.candidate_id: v for v in rep.verdicts}
+    assert by_id["a"].passed is True
+    assert by_id["a"].dsr_corrected == _independent_dsr(pool[0], cfg, pool)
+    # Threshold reject: an impossible dsr_min rejects at filter #2 while the
+    # evaluated figure still rides the verdict.
+    strict = _pass_config(dsr_min=1.01)
+    rep2 = run_stage4_cascade(pool, strict)
+    for cand, verdict in zip(pool, rep2.verdicts, strict=True):
+        assert verdict.rejected_at is FilterStage.DEFLATED_SHARPE
+        assert verdict.dsr_corrected == _independent_dsr(cand, strict, pool)
+
+
+def test_dsr_corrected_none_when_never_evaluated() -> None:
+    """A hard-gate reject never reaches filter #2 → honest ``None`` (never a
+    fabricated 0), and a filter-#2 evaluation ERROR (non-finite skew) also
+    reads ``None`` — the figure exists only when genuinely computed.
+    """
+    cfg = _pass_config()
+    rep = run_stage4_cascade([_candidate("x", seed=1, total_trades=10)], cfg)
+    (v,) = rep.verdicts
+    assert v.rejected_at is FilterStage.HARD_GATES
+    assert v.dsr_corrected is None
+
+
+def test_dsr_corrected_survives_onto_later_stage_rejects() -> None:
+    """A candidate rejected at a LATER stage (CPCV here) keeps its filter-#2
+    figure — the retained value is per-candidate, not pass-only.
+    """
+    cfg = _pass_config(cpcv_min_pass_rate=1.01)
+    pool = [_candidate("x", seed=1)]
+    rep = run_stage4_cascade(pool, cfg)
+    (v,) = rep.verdicts
+    assert v.rejected_at is FilterStage.CPCV
+    assert v.dsr_corrected == _independent_dsr(pool[0], cfg, pool)
+
+
+def test_dsr_corrected_uses_leaderboard_stats_when_supplied() -> None:
+    """With frozen leaderboard trial stats the retained figure is the
+    corrected search-N deflation (dsr_n_source="leaderboard"), matching an
+    independent recompute against the supplied N/V.
+    """
+    cfg = _pass_config()
+    pool = [_candidate("a", seed=1)]
+    stats = DsrTrialStats(n_trials=50_000, sharpe_variance=0.25, n_finite=50_000)
+    rep = run_stage4_cascade(pool, cfg, trial_stats=stats)
+    assert rep.dsr_n_source == "leaderboard"
+    (v,) = rep.verdicts
+    expected = deflated_sharpe_ratio(
+        pool[0].sharpe_ratio,
+        n_trials=stats.n_trials,
+        trial_sharpe_variance=stats.sharpe_variance,
+        sample_length=max(pool[0].total_trades, 2),
+        skew=pool[0].skew,
+        kurtosis=pool[0].kurtosis,
+    ).deflated_sharpe_ratio
+    assert v.dsr_corrected == expected
+
+
+# ── DEC-CASCADE-STAT-TIER-WIRE-001: the SPA join / embargo threading / the ──
+# per-candidate PBO. The join law: filter #4 is RC-first (byte-identical
+# historical detail) with Hansen's SPA-consistent as the primary test once the
+# RC floor passes — monotone-tightening, never a loosening.
+
+
+def _rc_spa_split_pool() -> list[CandidateInput]:
+    """A REAL pool whose RC p-value (0.37) < Hansen-SPA consistent (0.595).
+
+    Found by numeric probe under ``_pass_config()``'s BootstrapConfig
+    (seed=7, n_resamples=200): one modest edge + two poor high-variance
+    alternatives — exactly the pool shape Hansen (2005) shows White's RC is
+    distorted by. Any ``spa_alpha`` strictly between the two p-values makes
+    the RC floor PASS while the SPA primary REJECTS.
+    """
+    rng = np.random.default_rng(0)
+    a = tuple((rng.standard_normal(32) * 1.0 + 0.25).tolist())
+    b = tuple((rng.standard_normal(32) * 3.0 - 0.5).tolist())
+    c = tuple((rng.standard_normal(32) * 3.0 - 0.5).tolist())
+    return [
+        _candidate("a", seed=1, returns=a),
+        _candidate("b", seed=2, returns=b),
+        _candidate("c", seed=3, returns=c),
+    ]
+
+
+def _pool_matrix_of(cands: list[CandidateInput]) -> npt.NDArray[np.float64]:
+    return np.column_stack([np.asarray(c.returns, dtype=np.float64) for c in cands])
+
+
+class TestSpaJoin:
+    """Filter #4 = the RC-floor + Hansen-SPA-primary monotone-tightening join."""
+
+    def test_rc_reject_keeps_the_byte_identical_detail_and_skips_spa(self) -> None:
+        from brutex.metrics.spa import reality_check
+
+        cfg = _pass_config()
+        noise = [
+            _candidate("a", seed=1, returns=_strong_returns(1, edge=0.0)),
+            _candidate("b", seed=2, returns=_strong_returns(2, edge=0.0)),
+        ]
+        rep = run_stage4_cascade(noise, cfg)
+        rc = reality_check(_pool_matrix_of(noise), cfg.bootstrap())
+        assert rc.pvalue >= cfg.spa_alpha  # the premise: the RC floor fails
+        by = {v.candidate_id: v for v in rep.verdicts}
+        for cid in ("a", "b"):
+            assert by[cid].rejected_at is FilterStage.REALITY_CHECK_SPA
+            # The EXACT pre-join detail string — the historical floor's
+            # rejection is byte-identical to the shipped cascade.
+            assert by[cid].detail == (f"pool Reality-Check p {rc.pvalue:.4f} >= {cfg.spa_alpha}")
+        assert rep.pool_rc_pvalue == rc.pvalue
+        # The SPA arm never ran — None is DISTINGUISHABLE from a measured p.
+        assert rep.pool_spa_pvalue is None
+
+    def test_rc_pass_spa_fail_rejects_with_the_hansen_detail(self) -> None:
+        from brutex.metrics.spa import hansen_spa, reality_check
+
+        pool = _rc_spa_split_pool()
+        cfg = _pass_config(spa_alpha=0.5)
+        boot = cfg.bootstrap()
+        rc = reality_check(_pool_matrix_of(pool), boot)
+        spa = hansen_spa(_pool_matrix_of(pool), boot)
+        assert rc.pvalue < cfg.spa_alpha <= spa.pvalue_consistent  # the premise
+        rep = run_stage4_cascade(pool, cfg)
+        assert rep.n_survived == 0
+        assert rep.stage_survivors["reality_check_spa"] == 0
+        for v in rep.verdicts:
+            assert v.rejected_at is FilterStage.REALITY_CHECK_SPA
+            assert v.detail == (
+                f"pool Hansen-SPA consistent p {spa.pvalue_consistent:.4f} >= {cfg.spa_alpha}"
+            )
+        # BOTH measured p-values are recorded — the RC passed, the SPA killed.
+        assert rep.pool_rc_pvalue == rc.pvalue
+        assert rep.pool_spa_pvalue == spa.pvalue_consistent
+
+    def test_both_pass_records_both_pvalues_and_survives(self) -> None:
+        cfg = _pass_config()
+        rep = run_stage4_cascade([_candidate("a", seed=1), _candidate("b", seed=2)], cfg)
+        assert rep.n_survived == 2
+        assert rep.pool_rc_pvalue is not None and rep.pool_rc_pvalue < cfg.spa_alpha
+        assert rep.pool_spa_pvalue is not None and rep.pool_spa_pvalue < cfg.spa_alpha
+
+    def test_pool_never_reaching_filter_4_records_neither(self) -> None:
+        cfg = _pass_config()
+        rep = run_stage4_cascade([_candidate("x", seed=1, total_trades=1)], cfg)
+        assert rep.pool_rc_pvalue is None
+        assert rep.pool_spa_pvalue is None
+
+    def test_all_degenerate_pool_records_neither(self) -> None:
+        # Constant returns are degenerate-rejected BEFORE the pool matrix is
+        # built — the RC never runs, both p-values honestly None.
+        cfg = _pass_config()
+        rep = run_stage4_cascade([_candidate("x", seed=1, returns=(0.1,) * 32)], cfg)
+        (v,) = rep.verdicts
+        assert v.rejected_at is FilterStage.REALITY_CHECK_SPA
+        assert "degenerate returns" in v.detail
+        assert rep.pool_rc_pvalue is None
+        assert rep.pool_spa_pvalue is None
+
+    def test_report_defaults_are_none(self) -> None:
+        rep = run_stage4_cascade([], _pass_config())
+        assert rep.pool_rc_pvalue is None
+        assert rep.pool_spa_pvalue is None
+
+
+class TestEmbargoThreading:
+    """``embargo_bars`` reaches BOTH engines; ``None`` is byte-identical to 0."""
+
+    def test_embargo_reaches_cpcv_and_wfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.metrics import cascade as cascade_module
+
+        seen: dict[str, list[int]] = {"cpcv": [], "wfo": []}
+        real_cpcv = cascade_module.cpcv_pass_rate
+        real_wfo = cascade_module.wfo_pass_rate
+
+        def cpcv_spy(returns: object, **kwargs: object) -> float:
+            seen["cpcv"].append(int(kwargs["embargo"]))  # type: ignore[call-overload]
+            assert kwargs["label_span"] == 0  # per-bar labels: 1-bar horizon
+            return real_cpcv(returns, **kwargs)  # type: ignore[arg-type]
+
+        def wfo_spy(returns: object, scheme: object, **kwargs: object) -> float:
+            seen["wfo"].append(int(kwargs["embargo"]))  # type: ignore[call-overload]
+            return real_wfo(returns, scheme, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(cascade_module, "cpcv_pass_rate", cpcv_spy)
+        monkeypatch.setattr(cascade_module, "wfo_pass_rate", wfo_spy)
+        rep = cascade_module.run_stage4_cascade(
+            [_candidate("a", seed=1)], _pass_config(), embargo_bars=3
+        )
+        assert rep.n_survived == 1
+        assert seen["cpcv"] == [3]
+        assert seen["wfo"] == [3, 3, 3]  # all three WFO schemes
+
+    def test_none_is_byte_identical_to_zero(self) -> None:
+        cfg = _pass_config()
+        cands = [_candidate("a", seed=1), _candidate("b", seed=2)]
+        assert run_stage4_cascade(cands, cfg) == run_stage4_cascade(cands, cfg, embargo_bars=0)
+
+    def test_negative_embargo_raises(self) -> None:
+        with pytest.raises(ValueError, match="embargo_bars must be >= 0"):
+            run_stage4_cascade([], _pass_config(), embargo_bars=-1)
+
+    def test_embargo_that_leaves_no_walks_rejects_at_wfo(self) -> None:
+        # n=32, train_size=10: embargo 32 puts the first test start at 42 > 32
+        # → the WFO engine's "yields no walks" ValueError → the EXISTING
+        # short-series degrade arm rejects at the walk-forward stage (never a
+        # raise out of the cascade).
+        cfg = _pass_config()
+        rep = run_stage4_cascade([_candidate("a", seed=1)], cfg, embargo_bars=32)
+        (v,) = rep.verdicts
+        assert v.rejected_at is FilterStage.WALK_FORWARD
+        assert "WFO could not be evaluated" in v.detail
+        assert "yields no walks" in v.detail
+
+    def test_embargo_shifts_the_wfo_walks_for_real(self) -> None:
+        # The WFO threading is a GENUINE change (unlike CPCV): the same
+        # candidate passes with embargo=0 yet loses walks under embargo=8 —
+        # proven by the engine's walk count over the same windows.
+        from brutex.metrics.wfo import WFOScheme, walk_forward_splits
+
+        n = 32
+        cfg = _pass_config()
+        walks_0 = walk_forward_splits(
+            n,
+            WFOScheme.ROLLING,
+            train_size=cfg.wfo_train_size,
+            test_size=cfg.wfo_test_size,
+            step=cfg.wfo_step,
+        )
+        walks_8 = walk_forward_splits(
+            n,
+            WFOScheme.ROLLING,
+            train_size=cfg.wfo_train_size,
+            test_size=cfg.wfo_test_size,
+            step=cfg.wfo_step,
+            embargo=8,
+        )
+        assert len(walks_8) < len(walks_0)
+
+
+class TestPerCandidatePbo:
+    """Filter #5's per-candidate CSCV over the candidate's OWN search family."""
+
+    @staticmethod
+    def _family_for(cand: CandidateInput, seed: int, k: int) -> tuple[tuple[float, ...], ...]:
+        """A family: the candidate's own series + ``k - 1`` sibling columns."""
+        rng = np.random.default_rng(seed)
+        siblings = [
+            tuple((rng.standard_normal(len(cand.returns)) * 0.5).tolist()) for _ in range(k - 1)
+        ]
+        return (cand.returns, *siblings)
+
+    @staticmethod
+    def _oracle_pbo(family: tuple[tuple[float, ...], ...], n_splits: int) -> float:
+        n_obs = len(family[0])
+        usable = (n_obs // n_splits) * n_splits
+        return pbo_probability(
+            [[float(column[t]) for column in family] for t in range(n_obs - usable, n_obs)],
+            n_splits=n_splits,
+        ).pbo
+
+    @staticmethod
+    def _lucky_family(cand: CandidateInput) -> tuple[tuple[float, ...], ...]:
+        """An overfit-shaped family: five HIGH-variance lucky siblings whose
+        IS-best regularly flops OOS (probe-verified CSCV PBO ≈ 0.157 > 0)."""
+        rng = np.random.default_rng(49)
+        siblings = [
+            tuple((rng.standard_normal(len(cand.returns)) * 8.0 + 1.0).tolist()) for _ in range(5)
+        ]
+        return (cand.returns, *siblings)
+
+    def test_reject_carries_the_measured_value_and_detail(self) -> None:
+        cfg = _pass_config()
+        cand = _candidate("a", seed=1)
+        family = self._lucky_family(cand)
+        oracle = self._oracle_pbo(family, cfg.pbo_n_splits)
+        assert oracle > 0.1  # anti-vacuous: the reject threshold below bites
+        tight = _pass_config(pbo_max=0.1)
+        rep = run_stage4_cascade([_candidate("a", seed=1, family_returns=family)], tight)
+        (v,) = rep.verdicts
+        assert v.rejected_at is FilterStage.PBO
+        assert v.detail == f"candidate PBO {oracle:.4f} > {tight.pbo_max}"
+        assert v.candidate_pbo == oracle
+        assert rep.stage_survivors["pbo"] == 0
+
+    def test_pass_carries_the_measured_value(self) -> None:
+        cfg = _pass_config()  # pbo_max=1.0 — nothing rejects
+        cand = _candidate("a", seed=1)
+        family = self._family_for(cand, seed=99, k=4)
+        rep = run_stage4_cascade([_candidate("a", seed=1, family_returns=family)], cfg)
+        (v,) = rep.verdicts
+        assert v.passed is True
+        assert v.candidate_pbo == self._oracle_pbo(family, cfg.pbo_n_splits)
+
+    def test_two_column_family_is_the_minimum_that_proceeds(self) -> None:
+        # Boundary law (hostile-review round 1, MINOR-2): _MIN_POOL_FOR_PBO
+        # == 2 is an INCLUSIVE floor — a K=2 family runs the per-candidate
+        # CSCV and records the measured value (kills the `<` -> `<=` skip
+        # mutant, under which a 2-column family would abstain with None; the
+        # K=1 skip side is pinned by test_single_column_family_skips below).
+        cfg = _pass_config()
+        cand = _candidate("a", seed=1)
+        family = self._family_for(cand, seed=99, k=2)
+        assert len(family) == 2
+        rep = run_stage4_cascade([_candidate("a", seed=1, family_returns=family)], cfg)
+        (v,) = rep.verdicts
+        assert v.passed is True
+        assert v.candidate_pbo is not None
+        assert v.candidate_pbo == self._oracle_pbo(family, cfg.pbo_n_splits)
+
+    def test_no_family_skips_with_none(self) -> None:
+        rep = run_stage4_cascade([_candidate("a", seed=1)], _pass_config())
+        (v,) = rep.verdicts
+        assert v.passed is True
+        assert v.candidate_pbo is None
+
+    def test_single_column_family_skips(self) -> None:
+        cand = _candidate("a", seed=1)
+        rep = run_stage4_cascade(
+            [_candidate("a", seed=1, family_returns=(cand.returns,))], _pass_config()
+        )
+        (v,) = rep.verdicts
+        assert v.passed is True
+        assert v.candidate_pbo is None
+
+    def test_short_series_family_skips(self) -> None:
+        # pbo_n_splits=64 > n=32 → usable=0 → the per-candidate check (and
+        # the pool half) honestly abstain.
+        cfg = _pass_config(pbo_n_splits=64)
+        cand = _candidate("a", seed=1)
+        family = self._family_for(cand, seed=99, k=3)
+        rep = run_stage4_cascade([_candidate("a", seed=1, family_returns=family)], cfg)
+        (v,) = rep.verdicts
+        assert v.passed is True
+        assert v.candidate_pbo is None
+        assert rep.pool_pbo is None
+
+    def test_pool_pbo_runs_first_and_a_pool_kill_skips_the_per_candidate_check(
+        self,
+    ) -> None:
+        # pbo_max=-1.0: the pool PBO (>= 0 always) rejects EVERYTHING at the
+        # pool half, so the per-candidate half never runs — candidate_pbo
+        # stays None even though a family is present (ordering law).
+        cfg = _pass_config(pbo_max=-1.0)
+        a = _candidate("a", seed=1)
+        fam_a = self._family_for(a, seed=99, k=3)
+        rep = run_stage4_cascade(
+            [
+                _candidate("a", seed=1, family_returns=fam_a),
+                _candidate("b", seed=2),
+            ],
+            cfg,
+        )
+        by = {v.candidate_id: v for v in rep.verdicts}
+        assert by["a"].rejected_at is FilterStage.PBO
+        assert by["a"].detail.startswith("pool PBO ")
+        assert by["a"].candidate_pbo is None
+        assert rep.pool_pbo is not None
+
+    def test_family_validation_rejects_mismatched_length(self) -> None:
+        with pytest.raises(ValueError, match="must share len"):
+            _candidate("a", seed=1, family_returns=((0.1, 0.2),))
+
+    def test_family_validation_rejects_non_finite(self) -> None:
+        bad = tuple([float("nan")] + [0.1] * 31)
+        cand = _candidate("a", seed=1)
+        with pytest.raises(ValueError, match="all-finite"):
+            _candidate("a", seed=1, family_returns=(cand.returns, bad))
+
+    def test_verdict_default_candidate_pbo_none(self) -> None:
+        from brutex.metrics.cascade import CandidateVerdict
+
+        v = CandidateVerdict(candidate_id="x", passed=True, rejected_at=None, detail="d")
+        assert v.candidate_pbo is None

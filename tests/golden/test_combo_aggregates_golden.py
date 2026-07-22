@@ -68,8 +68,8 @@ _BARS = [
     _bar(9, 19, "100.00", "100.05", "99.90", "99.95"),
     _bar(9, 20, "100.00", "100.10", "99.60", "99.70"),
     _bar(15, 17, "100", "100", "100", "100"),
-    _bar(15, 18, "100.00", "100.20", "99.80", "100.10"),
-    _bar(15, 19, "100.00", "100.30", "99.90", "100.20"),
+    _bar(15, 18, "100.00", "100.20", "99.95", "100.10"),  # low ABOVE SL 99.90
+    _bar(15, 19, "100.00", "100.30", "99.95", "100.20"),  # low ABOVE SL 99.90
     _bar(15, 20, "100.15", "101.00", "100.00", "100.50"),
 ]
 _BAR_BITS = [1 if i in (0, 3, 6) else 0 for i in range(len(_BARS))]
@@ -100,13 +100,27 @@ _LENS = SessionLens(
 #: Locked digests (sha256 hex). Regeneration is a deliberate, ledgered act.
 #: Re-locked 2026-07-11 for DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md
 #: #1743) — SCHEMA-ADDITIVE ONLY: the exit-reason vocabulary gained
-#: ``session_gap``, so the canonical record + the aggs parquet schema gained
-#: the ``exits_session_gap`` counter column (audited: value 0 on BOTH fixture
-#: combos — the single-session Fixture-A feed has no session-tail hole, so
-#: every trade VALUE, every other counter and both write-twice identities are
-#: byte-unchanged; the only diff vs the prior lock is the new zero-count key).
-_GOLDEN_AGG_CANONICAL_SHA256 = "ddc35b28a3cd24884a7b0ea86db5507afa76730d05cd3e3e214227e230d9bfcc"
-_GOLDEN_AGGS_PARQUET_SHA256 = "ddd2cfc6d59f911b213b175963b62f519d2be5c921572471619008629597e6fc"
+#: ``session_gap`` (value 0 on BOTH fixture combos).
+#: RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (the ONE worst-case fill law) —
+#: the fixture trades RE-DERIVED BY HAND: entry fills at the entry bar HIGH,
+#: level fills clamp to the trigger bar's adverse extreme, the forced 15:20
+#: exit prices the bar's adverse LOW (the 15:18/15:19 lows raised to 99.95 so
+#: the third trade still reaches the forced window instead of a same-bar
+#: stop): TP −20 (entry 10_010, fill @low 9_990) · SL −45 (entry 10_005,
+#: fill @low 9_960) · forced −20 (entry 10_020, fill @low 10_000) →
+#: net −85, all three losers.
+#: RE-LOCKED for DEC-FILL-EXEC-GRID-1M-001 — SCHEMA-ADDITIVE ONLY: the
+#: aggregate vocabulary gained the five 1m-grid counters
+#: (``exits_deferred`` · ``signals_dropped_collision`` ·
+#: ``fill_slid_minutes`` · ``exit_fill_slid_minutes`` ·
+#: ``forced_fill_slid_minutes``; AGG_COLUMNS 50 → 55), each MEASURED 0 on
+#: BOTH fixture combos (no trade exits on its own entry bar, no collision,
+#: no slid fill event on any executed trade), so the canonical digest moves
+#: by the five new zero-valued keys and the parquet digest by the five new
+#: INT64 columns alone; every trade value (−20 TP / −45 SL / −20 forced,
+#: net −85) verified verbatim by the hand-verified spot-values test.
+_GOLDEN_AGG_CANONICAL_SHA256 = "8aaa25bc156bcec1eff55406272503958e583fa5fe39f2c0770fe0c676d00c50"
+_GOLDEN_AGGS_PARQUET_SHA256 = "16a1d53928a81ae481f9c4a35af92cca82f319f61522da84c1020bd5ff004dd3"
 
 
 def _row(run_id: str, mask: int, pnls: list[int]) -> ResultRow:
@@ -139,7 +153,7 @@ def _row(run_id: str, mask: int, pnls: list[int]) -> ResultRow:
 def _fixture() -> list[tuple[ComboAggregate, ComboCapture]]:
     index = MinuteIndex.from_bars(_BARS)
     stamper = TradeReferenceStamper.from_vix_bars(_VIX_BARS)
-    row_trades = _row(_RUN_TRADES, 0b1, [50, -30, 15])
+    row_trades = _row(_RUN_TRADES, 0b1, [-20, -45, -20])
     row_zero = _row(_RUN_ZERO, 0b10, [])
     capture_trades = capture_combo(
         row_trades,
@@ -150,6 +164,8 @@ def _fixture() -> list[tuple[ComboAggregate, ComboCapture]]:
         tp_paisa=50,
         minute_index=index,
         stamper=stamper,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=_BARS,
     )
     capture_zero = capture_combo(
         row_zero,
@@ -160,6 +176,8 @@ def _fixture() -> list[tuple[ComboAggregate, ComboCapture]]:
         tp_paisa=50,
         minute_index=index,
         stamper=stamper,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=_BARS,
     )
     agg_trades = aggregate_combo(
         capture_trades,
@@ -197,9 +215,11 @@ def test_aggregate_canonical_serialization_golden() -> None:
 def test_aggregate_spot_values_hand_verified() -> None:
     """Belt for the digest: the headline numbers re-derived by hand.
 
-    The WP1 fixture's three trades are TP (+50), SL (−30), forced-15:20 (+15)
-    — all on the UP-trending, double-flagged fixture day with a full 1-minute
-    path and full VIX stamps.
+    Under the ONE worst-case fill law the WP1 fixture's three trades are
+    TP (−20), SL (−45), forced-15:20 (−20) — all losers (entry at the
+    adverse HIGH, exits clamped to the adverse LOW), net −85 — on the
+    UP-trending, double-flagged fixture day with a full 1-minute path and
+    full VIX stamps.
     """
     (agg, capture), (agg_zero, _) = _fixture()
     assert agg.n_trades == 3
@@ -209,19 +229,20 @@ def test_aggregate_spot_values_hand_verified() -> None:
     assert agg.equity_status == "ok"
     assert agg.vix_stamped_trades == 3
     assert agg.vix_missing_trades == capture.vix_missing_trades == 0
-    assert json.loads(agg.pnl_by_year_json) == {"2024": 35}
-    assert json.loads(agg.pnl_by_trend_json) == {"up": 35}
+    assert json.loads(agg.pnl_by_year_json) == {"2024": -85}
+    assert json.loads(agg.pnl_by_trend_json) == {"up": -85}
     assert json.loads(agg.event_day_counts_json) == {"expiry": 3, "muhurat": 3}
-    assert json.loads(agg.event_day_pnl_json) == {"expiry": 35, "muhurat": 35}
-    assert agg.one_regime_wonder is True  # all profit in 2024 / in "up"
-    assert agg.regime_wonder_axis == "year"
+    assert json.loads(agg.event_day_pnl_json) == {"expiry": -85, "muhurat": -85}
+    # The wonder fold only fires on POSITIVE net (net −85 → never a wonder).
+    assert agg.one_regime_wonder is False
+    assert agg.regime_wonder_axis is None
     assert agg.exits_take_profit == 1
     assert agg.exits_stop_loss == 1
     assert agg.exits_forced_1520 == 1
-    assert agg.max_consecutive_losses == 1
-    assert agg.max_consecutive_wins == 1
+    assert agg.max_consecutive_losses == 3  # all three trades lose
+    assert agg.max_consecutive_wins == 0
     assert agg.composite_score == _COMPOSITE
-    assert agg.recovery_factor == 35 / 30  # row net 35 / row stored DD 30
+    assert agg.recovery_factor == -85 / 30  # row net −85 / row stored DD 30
     assert agg_zero.n_trades == 0
     assert agg_zero.zero_trades is True
     assert agg_zero.mae_avg_paisa is None

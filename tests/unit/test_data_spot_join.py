@@ -160,3 +160,41 @@ class TestSpotCloseByTsWindow:
         )
         assert join.close_by_ts[_TS] == Decimal("21500.0")
         assert join.close_by_ts[feb_ts] == Decimal("21600.0")
+
+
+class TestGlobMetacharUnderlyingDir:
+    """DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 (the #1594 round-15 metachar law)
+    — FAILS-BEFORE: a `[`-carrying underlying dir's month-file list was
+    glob-interpreted, joining the SIBLINGS' spot closes into this underlying's
+    Greeks spot join."""
+
+    def test_bracket_underlying_reads_literal_files_only(self, tmp_path: Path) -> None:
+        import polars as pl
+
+        _write_spot(tmp_path, "CASH", "NSE-X1", [_bar(_TS, "111")])
+        _write_spot(tmp_path, "CASH", "NSE-X2", [_bar(_TS, "222")])
+        # The bracket dir is planted RAW — the production writer now REFUSES to
+        # mint it (partition._FORBIDDEN_SYMBOL_CHARS gained `[`/`]`), so this
+        # models a hostile / legacy out-of-band dir exactly like the repro.
+        target = (
+            tmp_path
+            / "bars"
+            / "NSE"
+            / "CASH"
+            / "NSE-X[12]"
+            / "1minute"
+            / f"{_TS.year:04d}"
+            / f"{_TS.month:02d}.parquet"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"timestamp": [_TS], "close": [555.0]}).write_parquet(target)
+        join = spot_close_by_ts_window(
+            tmp_path,
+            exchange="NSE",
+            underlying="NSE-X[12]",
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+        )
+        assert join.segment == "CASH"
+        assert join.close_by_ts == {_TS: Decimal("555.0")}  # the literal dir's OWN close

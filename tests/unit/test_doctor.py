@@ -338,7 +338,7 @@ class TestRunDoctor:
     def test_all_skip_returns_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Skip the wheel-freshness stages via their shared env override so
         # this aggregate test stays hermetic (all-SKIP regardless of wheel
-        # state). ONE escape hatch covers BOTH wheels deliberately.
+        # state). ONE escape hatch covers ALL the wheels deliberately.
         monkeypatch.setenv("BRUTEX_SKIP_WHEEL_FRESHNESS", "1")
         report = run_doctor(
             audit_file=None,
@@ -347,14 +347,19 @@ class TestRunDoctor:
             lake_root=tmp_path / "no_lake",
         )
         assert report.ok is True
-        # 9 checks: audit_chain + runtime_file + audit_replay + derived_freshness
+        # 13 checks: audit_chain + runtime_file + audit_replay + derived_freshness
         # + lake_uniqueness (DEC-LAKE-HEAL-001) + wheel_freshness (R2-CC-G1)
         # + wheel_freshness_fno_math (DEC-FNOMATH-WHEEL-FRESHNESS-001)
+        # + wheel_freshness_brutex_identity (DEC-RUST-RUNID-STORES-001)
         # + wheel_source_digest + wheel_source_digest_fno_math
-        #   (DEC-RUST-SOURCE-DIGEST-TWIN-001 — the ONE
-        #   BRUTEX_SKIP_WHEEL_FRESHNESS escape hatch covers all four wheel
-        #   stages, deliberately)
-        assert len(report.checks) == 9
+        #   (DEC-RUST-SOURCE-DIGEST-TWIN-001)
+        # + wheel_freshness_brutex_lake + wheel_source_digest_brutex_lake
+        #   (DEC-BRUTEX-LAKE-BOX-WHEEL-001 — the OPTIONAL lake wheel joins
+        #   the watch set)
+        # + wheel_source_digest_brutex_identity (DEC-RUST-SOURCE-DIGEST-TWIN-001);
+        #   the ONE BRUTEX_SKIP_WHEEL_FRESHNESS escape hatch covers all eight
+        #   wheel stages, deliberately
+        assert len(report.checks) == 13
         statuses = {c.name: c.status for c in report.checks}
         assert statuses == {
             "audit_chain": "SKIP",
@@ -364,8 +369,12 @@ class TestRunDoctor:
             "lake_uniqueness": "SKIP",
             "wheel_freshness": "SKIP",
             "wheel_freshness_fno_math": "SKIP",
+            "wheel_freshness_brutex_identity": "SKIP",
             "wheel_source_digest": "SKIP",
             "wheel_source_digest_fno_math": "SKIP",
+            "wheel_freshness_brutex_lake": "SKIP",
+            "wheel_source_digest_brutex_lake": "SKIP",
+            "wheel_source_digest_brutex_identity": "SKIP",
         }
 
     def test_audit_pass_runtime_skip(self, good_audit_log: Path, tmp_path: Path) -> None:
@@ -538,6 +547,41 @@ class TestDerivedFreshness:
         result = check_derived_freshness(tmp_path)
         assert result.status == "FAIL"
         assert "5minute" in result.detail
+        # The FAIL detail names the ghost-bucket escape (the ONE stale shape a
+        # prebuild re-run can never clear — DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001;
+        # the prune is the named follow-up).
+        assert "ghost bucket" in result.detail
+        assert "DEC-DERIVED-GHOST-BUCKET-PRUNE-001" in result.detail
+
+    def test_pass_on_screened_spike_lake(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILS-BEFORE (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001, the B-1 doctor
+        false wedge): a stored 1-minute holding ONE self-consistent >=4x
+        in-session spike (write-side guards accept it; the bad-tick screen drops
+        it) beside a derived table built from the SCREENED 1-minute — exactly
+        what the production prebuild writes (DEC-READ-GUARD-PARITY-001) — read a
+        permanent FAIL because the doctor's re-derivation was UNSCREENED. With
+        screen parity it PASSes."""
+        import polars as pl
+        from brutex.data.bad_tick import screen_frame_bad_ticks
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        spiked = df_1m.with_columns(
+            pl.when(pl.int_range(pl.len()) == 9).then(pl.col(c) * 5.0).otherwise(pl.col(c)).alias(c)
+            for c in ("open", "high", "low", "close")
+        )
+        _write_lake_partition(tmp_path, "1minute", spiked)
+        # The prebuild's stored output: derived from the SCREENED 1-minute.
+        _write_lake_partition(
+            tmp_path, "5minute", resample_1m_to_tf(screen_frame_bad_ticks(spiked), 5)
+        )
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "PASS"
+        assert "NIFTY" in result.detail
 
     def test_skip_when_symbol_has_derived_but_no_1minute_base(self, tmp_path: Path) -> None:
         # A derived partition with NO 1minute base: the symbol cannot be
@@ -552,6 +596,69 @@ class TestDerivedFreshness:
         result = check_derived_freshness(tmp_path)
         assert result.status == "SKIP"
         assert "no symbol has stored derived timeframes" in result.detail
+
+    def test_option_contract_stale_derived_tf_never_reds_the_doctor(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE: DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling
+        of 2026-07-15 as relayed via the coordinator — ADR-0021 RULING B,
+        draft PR #1555) — a CE/PE contract's stored derived TFs are FROZEN
+        (options are 1-minute-native, never re-derived), so a stale option
+        partition must be EXCLUDED from the derived-freshness verdicts, never
+        a red doctor. Pre-gate the probe picked the CE dir first (FNO sorts
+        before INDEX) and FAILed on the frozen drift."""
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        # A CE contract with a STALE (frozen) derived 5minute beside its 1minute.
+        ce_dir = tmp_path / "bars" / "NSE" / "FNO" / "NSE-NIFTY-26Jun25-20000-CE"
+        stale = resample_1m_to_tf(df_1m, 5).with_columns((pl.col("close") + 1.0).alias("close"))
+        for interval, frame in (("1minute", df_1m), ("5minute", stale)):
+            out = ce_dir / interval / "2025"
+            out.mkdir(parents=True, exist_ok=True)
+            frame.rename({"ts_utc": "timestamp"}).write_parquet(out / "06.parquet")
+        # A FRESH spot symbol — the verdict must land here, unchanged.
+        _write_lake_partition(tmp_path, "1minute", df_1m)
+        _write_lake_partition(tmp_path, "5minute", resample_1m_to_tf(df_1m, 5))
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "PASS"
+        assert "NIFTY" in result.detail
+
+    def test_option_only_lake_with_stale_tf_is_skip_not_fail(self, tmp_path: Path) -> None:
+        """With ONLY a (frozen-stale) CE derived TF in the lake the probe
+        reads the honest SKIP — never a FAIL on retired option TFs."""
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        ce_dir = tmp_path / "bars" / "NSE" / "FNO" / "NSE-NIFTY-26Jun25-20000-PE"
+        stale = resample_1m_to_tf(df_1m, 5).with_columns((pl.col("close") + 1.0).alias("close"))
+        for interval, frame in (("1minute", df_1m), ("5minute", stale)):
+            out = ce_dir / interval / "2025"
+            out.mkdir(parents=True, exist_ok=True)
+            frame.rename({"ts_utc": "timestamp"}).write_parquet(out / "06.parquet")
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "SKIP"
+        assert "no symbol has stored derived timeframes" in result.detail
+
+    def test_fno_future_stale_tf_still_fails(self, tmp_path: Path) -> None:
+        """FUT verdicts are UNCHANGED — futures keep their derived TFs under
+        the ruling, so a stale FUT partition still reds the probe."""
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        fut_dir = tmp_path / "bars" / "NSE" / "FNO" / "NSE-NIFTY-26Jun25-FUT"
+        stale = resample_1m_to_tf(df_1m, 5).with_columns((pl.col("close") + 1.0).alias("close"))
+        for interval, frame in (("1minute", df_1m), ("5minute", stale)):
+            out = fut_dir / interval / "2025"
+            out.mkdir(parents=True, exist_ok=True)
+            frame.rename({"ts_utc": "timestamp"}).write_parquet(out / "06.parquet")
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "FAIL"
+        assert "5minute" in result.detail
 
     def test_fail_when_probe_errors_on_corrupt_parquet(self, tmp_path: Path) -> None:
         # A corrupt 1minute parquet makes the probe raise — the check must

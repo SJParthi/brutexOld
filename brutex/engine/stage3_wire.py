@@ -73,6 +73,7 @@ from brutex.engine.cascade_wire import (
     spec_from_store_rows,
 )
 from brutex.engine.combo_mask import popcount
+from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL, ExecGridMap, build_exec_grid_map
 from brutex.engine.results_store import ResultRow, ResultsStore, VixTrioConflictError
 from brutex.engine.snapshot_hash import data_snapshot_hash
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
@@ -107,7 +108,7 @@ from brutex.engine.trial_stats import (
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
 from brutex.models import BruteXError
 from brutex.ranking import RankedCombo
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import FibAnchorKind, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -133,7 +134,7 @@ STAGE3_ACTION_PASS_COMPLETE: Final[str] = "STAGE_3_PASS_COMPLETE"  # noqa: S105 
 class Stage3WireError(BruteXError):
     """Raised for any Stage-3 wiring failure.
 
-    Covers a missing ``optimize`` extra at pass time, non-chronological bars in
+    Covers an unavailable Stage-3 Rust runtime at pass time, non-chronological bars in
     the train-slice helper, a survivor whose grid cell cannot be recovered by
     run-identity match, an unknown direction label / timeframe label on a
     persisted row, and a refined cell carrying a disabled (``None``) SL/TP leg.
@@ -141,32 +142,35 @@ class Stage3WireError(BruteXError):
 
 
 def ensure_stage3_runtime() -> tuple[str, str]:
-    """Fail fast (and loudly) when the pinned ``optimize`` extra is absent.
+    """Fail fast (and loudly) when the Stage-3 Rust runtime is unavailable.
 
     Called by the launcher BEFORE any Stage-3 work (and again at pass start) so
-    an enabled run can never crash on a missing ``cma`` import AFTER the whole
-    grid persisted — the same fail-fast rationale as the on-grid axis
-    validation in :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig`.
+    an enabled run can never crash on a missing ``brutex_refine`` wheel AFTER
+    the whole grid persisted — the same fail-fast rationale as the on-grid
+    axis validation in :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig`.
 
     Returns
     -------
     tuple[str, str]
-        ``(pycma_version, numpy_version)`` — the identity fields of ADR-0007
-        condition 4, proving both libraries import.
+        ``(optimizer_version, optimizer_build)`` — the identity fields of
+        ADR-0007 condition 4 (DEC-RUST-STAGE3-REFINE-001: the crate version
+        tag + the wheel's baked crate-source digest), proving the wheel
+        engages.
 
     Raises
     ------
     Stage3WireError
-        If the ``optimize`` extra (exact-pinned pycma,
-        DEC-STAGE3-OPTIMIZE-EXTRA-001) is not installed.
+        If the ``brutex_refine`` wheel cannot be engaged (absent/stale wheel,
+        or a falsy/junk ``BRUTEX_REFINE_RUST`` — the Python optimizer math is
+        deleted, there is no fallback).
     """
+    from brutex.engine.refine_rust import RefineRustUnavailableError
+
     try:
         return optimizer_versions()
-    except ImportError as exc:
+    except RefineRustUnavailableError as exc:
         raise Stage3WireError(
-            "--stage3-enable requires the 'optimize' extra (pinned pycma) — "
-            "install with: pip install -e '.[optimize]' "
-            f"(import failed: {exc})"
+            f"--stage3-enable requires the Stage-3 Rust runtime (DEC-RUST-STAGE3-REFINE-001): {exc}"
         ) from exc
 
 
@@ -212,7 +216,42 @@ def _ist_day_ordinal(bar: CandleBar) -> int:
     return bar.timestamp.astimezone(IST).date().toordinal()
 
 
-def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
+def lockbox_boundary(bars: Sequence[CandleBar]) -> int | None:
+    """Return *bars*' own default-lockbox START day ordinal (``None`` when empty).
+
+    The per-STREAM half of the dual-stream train-slice law (design §7.2/Q3,
+    DEC-FILL-EXEC-GRID-1M-001): with ``max_day`` the last bar's IST day
+    ordinal, the lockbox window starts at ``max_day -
+    LOCKBOX_DEFAULT_WINDOW_DAYS + 1``. :func:`run_stage3_pass` resolves ONE
+    boundary per instrument — the EARLIEST across the decision stream(s) and
+    the 1-minute execution stream (divergence = a tail-skew WARN) — and
+    applies it to BOTH streams via :func:`train_slice_bars`.
+
+    Raises
+    ------
+    Stage3WireError
+        If the bars' IST day ordinals are not non-decreasing.
+    """
+    if not bars:
+        return None
+    ordinals = _validated_day_ordinals(bars)
+    return ordinals[-1] - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+
+
+def _validated_day_ordinals(bars: Sequence[CandleBar]) -> list[int]:
+    """IST day ordinals of *bars*, refusing a non-chronological stream loudly."""
+    ordinals = [_ist_day_ordinal(bar) for bar in bars]
+    for prev, cur in itertools.pairwise(ordinals):
+        if cur < prev:
+            raise Stage3WireError(
+                "train_slice_bars: bars must be chronological (non-decreasing IST day ordinals)"
+            )
+    return ordinals
+
+
+def train_slice_bars(
+    bars: Sequence[CandleBar], *, boundary: int | None = None
+) -> tuple[CandleBar, ...]:
     """Return the lockbox-excluded training slice of *bars* (ADR-0007 condition 7).
 
     Mirrors :func:`brutex.metrics.lockbox.lockbox_evaluation`'s DEFAULT
@@ -232,6 +271,12 @@ def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
     ----------
     bars
         Chronologically ordered bars for one ``(instrument, interval)``.
+    boundary
+        Optional PRE-RESOLVED lockbox-start day ordinal (the dual-stream ONE
+        BOUNDARY of design §7.2/Q3 — :func:`run_stage3_pass` resolves it per
+        instrument as the EARLIEST :func:`lockbox_boundary` across the
+        decision + execution streams). ``None`` (the default) derives this
+        stream's OWN boundary — byte-identical to the pre-PR-B behaviour.
 
     Returns
     -------
@@ -247,13 +292,10 @@ def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
     """
     if not bars:
         return ()
-    ordinals = [_ist_day_ordinal(bar) for bar in bars]
-    for prev, cur in itertools.pairwise(ordinals):
-        if cur < prev:
-            raise Stage3WireError(
-                "train_slice_bars: bars must be chronological (non-decreasing IST day ordinals)"
-            )
-    lockbox_start = ordinals[-1] - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+    ordinals = _validated_day_ordinals(bars)
+    lockbox_start = (
+        boundary if boundary is not None else ordinals[-1] - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+    )
     return tuple(bar for bar, day in zip(bars, ordinals, strict=True) if day < lockbox_start)
 
 
@@ -262,20 +304,22 @@ def recover_survivor_cell(
     grid: SweepGridConfig,
     *,
     roll_schedule: tuple[int, ...] | None = None,
-) -> tuple[int, int, ProximityParams | None, FibAnchorKind]:
-    """Recover *row*'s grid cell ``(sl_paisa, tp_paisa, proximity, fib_anchor)`` by identity match.
+) -> tuple[int, int, ProximityParams | None, FibAnchorKind, PriceSourceCell]:
+    """Recover *row*'s grid cell ``(sl, tp, proximity, fib_anchor, price_source)`` by identity match.
 
     A persisted row folds its trade-sim params into the BLAKE3 ``run_id`` but
     does not store them as columns, so the survivor's refinement start cell is
     re-derived (review F4): for each point of the grid's ``stop_losses ×
-    take_profits × proximities × fib_anchors`` product, the 9-field
-    :func:`~brutex.engine.sweep_run.mask_run_id` is recomputed from the row's
-    own labels + the grid's shared context and compared to ``row.run_id``. The
-    first (cryptographically unique) match is the cell — never guessed. The Fib
-    anchor is part of the product (DEC-NIFTY-FIB-AXIS-001) because it now enters
+    take_profits × proximities × fib_anchors × price_source_cells`` product, the
+    9-field :func:`~brutex.engine.sweep_run.mask_run_id` is recomputed from the
+    row's own labels + the grid's shared context and compared to ``row.run_id``.
+    The first (cryptographically unique) match is the cell — never guessed. The
+    Fib anchor AND the price-source cell are part of the product
+    (DEC-NIFTY-FIB-AXIS-001 / DEC-NIFTY-PRICE-SOURCE-AXIS-001) because both enter
     the run-identity via ``canonical_trade_params``, so the row's ``run_id`` only
-    reproduces at the ORIGINATING anchor — and Stage-3 must refine that survivor
-    against ITS OWN anchor's Fib levels (never a stale prev-day one).
+    reproduces at the ORIGINATING anchor + source — and Stage-3 must refine that
+    survivor against ITS OWN anchor's Fib levels + ITS OWN VWAP/EMA source bits
+    (never a stale prev-day / (HLC3, CLOSE) one).
 
     Parameters
     ----------
@@ -293,8 +337,9 @@ def recover_survivor_cell(
 
     Returns
     -------
-    tuple[int, int, ProximityParams | None, FibAnchorKind]
-        The survivor's ``(sl_paisa, tp_paisa, proximity, fib_anchor)`` start cell.
+    tuple[int, int, ProximityParams | None, FibAnchorKind, PriceSourceCell]
+        The survivor's ``(sl_paisa, tp_paisa, proximity, fib_anchor, price_source)``
+        start cell.
 
     Raises
     ------
@@ -304,8 +349,12 @@ def recover_survivor_cell(
         Stage-3 refinement needs an on-grid numeric start point (the enabled
         config forbids ``None`` axes up front; this guards direct callers).
     """
-    for sl, tp, proximity, fib_anchor in itertools.product(
-        grid.stop_losses, grid.take_profits, grid.proximities, grid.fib_anchors
+    for sl, tp, proximity, fib_anchor, price_source in itertools.product(
+        grid.stop_losses,
+        grid.take_profits,
+        grid.proximities,
+        grid.fib_anchors,
+        grid.price_source_cells,
     ):
         params = canonical_trade_params(
             sl_paisa=sl,
@@ -314,6 +363,8 @@ def recover_survivor_cell(
             proximity=proximity,
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
+            vwap_source=price_source.vwap_source,
+            ema_source=price_source.ema_source,
             roll_schedule=roll_schedule,
         )
         candidate = mask_run_id(
@@ -333,11 +384,11 @@ def recover_survivor_cell(
                     f"recover_survivor_cell: run {row.run_id[:16]} matched a cell with a "
                     f"disabled leg (sl={sl}, tp={tp}) — Stage-3 needs numeric on-grid legs"
                 )
-            return sl, tp, proximity, fib_anchor
+            return sl, tp, proximity, fib_anchor, price_source
     raise Stage3WireError(
-        f"recover_survivor_cell: no (sl × tp × proximity × fib_anchor) cell of this grid "
-        f"reproduces run {row.run_id[:16]}… for mask {row.mask_bits:#x} — the row does not "
-        f"belong to this grid's identity context"
+        f"recover_survivor_cell: no (sl × tp × proximity × fib_anchor × price_source) cell of "
+        f"this grid reproduces run {row.run_id[:16]}… for mask {row.mask_bits:#x} — the row "
+        f"does not belong to this grid's identity context"
     )
 
 
@@ -385,6 +436,8 @@ def _make_evaluator(
     mask: int,
     side: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap,
     start_equity_paisa: int,
     reference_stamper: TradeReferenceStamper | None,
 ) -> Evaluator:
@@ -393,6 +446,9 @@ def _make_evaluator(
     The production binding of the slice-4 engine seam: each call is one
     standalone :func:`~brutex.engine.sweep_driver.metrics_for_mask` backtest at
     a quantized on-grid ``(sl_paisa, tp_paisa)`` — O(bars) per call, never O(1).
+    Every fill resolves on the TRAIN-CUT 1-minute execution stream through the
+    once-per-(instrument, tf) ``exec_map`` (DEC-FILL-EXEC-GRID-1M-001 — the
+    map is SL/TP-independent, so one build serves every refinement eval).
     The run's India-VIX stamper rides each evaluation's trade sim
     (DEC-VIX-STAMP-WIRE-001; required, no default — the caller decides).
     """
@@ -404,6 +460,8 @@ def _make_evaluator(
             mask,
             direction=side,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
@@ -529,6 +587,7 @@ def run_stage3_pass(
     end: str,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     stamper_for: Callable[[], TradeReferenceStamper | None] | None = None,
+    rollup_paths_hook: Callable[[Sequence[Path]], None] | None = None,
 ) -> Stage3PassReport:
     """Run the Stage-3 refinement post-pass over a persisted grid — single-threaded.
 
@@ -536,7 +595,7 @@ def run_stage3_pass(
     the supervised grid returns (review F10). Sequence:
 
     1. No-op fast path when ``grid.stage3_enable`` is ``False``.
-    2. :func:`ensure_stage3_runtime` (fail fast on a missing ``optimize`` extra).
+    2. :func:`ensure_stage3_runtime` (fail fast on an unavailable Rust runtime).
     3. Select survivors from ONLY this grid's Stage-2 cell files
        (:func:`~brutex.engine.sweep_orchestrator.iter_sweep_tuples` +
        :func:`~brutex.engine.sweep_orchestrator.tuple_store_path`), grouped to
@@ -596,6 +655,14 @@ def run_stage3_pass(
         the provider); the resolved stamper (or
         an honest ``None``) rides every refinement evaluation AND the
         persisted refined-row projection. ``None`` (default) = unstamped.
+    rollup_paths_hook
+        Optional ``/results`` rollup batch-merge seam
+        (DEC-RESULTS-TOPK-ROLLUP-001 Hook A, stage-3 arm —
+        ``RollupMergeHook.merge_paths``), fired ONCE per pass with the
+        flushed cell-store paths after the cell loop completes (never per
+        cell). FENCED INTERNALLY at BLOCKER-1 strength — never raises into
+        the pass. ``None`` (the default) is byte-identical to the
+        pre-rollup pass.
 
     Returns
     -------
@@ -605,7 +672,7 @@ def run_stage3_pass(
     Raises
     ------
     Stage3WireError
-        Missing ``optimize`` extra, an unrecoverable survivor cell, an unknown
+        Unavailable Stage-3 Rust runtime, an unrecoverable survivor cell, an unknown
         direction/timeframe label, or non-chronological bars.
     """
     if not grid.stage3_enable:
@@ -635,10 +702,31 @@ def run_stage3_pass(
     leaderboards = group_survivors(grid_rows, top_k=grid.stage3_top_k)
     survivors_total = sum(len(rows) for rows in leaderboards.values())
 
+    # Dual-stream train slices (design §7.2/Q3, DEC-FILL-EXEC-GRID-1M-001):
+    # per instrument, ONE lockbox boundary — the EARLIEST across the decision
+    # stream(s) AND the 1-minute execution stream — applied to BOTH, so no
+    # train trade can ever price an exec bar at/after the boundary; a stream
+    # whose own boundary differs is a tail-skew WARN, never a silent split.
+    # The CUT exec slices enter the SAME train fold (train_hash) below.
     train_slices: dict[tuple[str, str], tuple[CandleBar, ...]] = {}
+    labels = list(dict.fromkeys([tf.label for tf in grid.timeframes] + [EXEC_INTERVAL_LABEL]))
     for instrument in grid.instruments:
-        for tf in grid.timeframes:
-            train_slices[(instrument, tf.label)] = train_slice_bars(bars_for(instrument, tf.label))
+        streams = {label: bars_for(instrument, label) for label in labels}
+        boundaries = {
+            label: bound
+            for label, stream in streams.items()
+            if (bound := lockbox_boundary(stream)) is not None
+        }
+        boundary = min(boundaries.values()) if boundaries else None
+        if boundary is not None and any(bound != boundary for bound in boundaries.values()):
+            _LOG.warning(
+                "stage3_wire.lockbox_tail_skew",
+                instrument=instrument,
+                boundaries=dict(sorted(boundaries.items())),
+                resolved=boundary,
+            )
+        for label, stream in streams.items():
+            train_slices[(instrument, label)] = train_slice_bars(stream, boundary=boundary)
     train_hash = data_snapshot_hash(
         exchange=exchange, segment=segment, start=start, end=end, slices=train_slices
     )
@@ -670,15 +758,35 @@ def run_stage3_pass(
     cell_rows: dict[SweepTuple, list[ResultRow]] = {}
     cell_sharpes: dict[SweepTuple, dict[str, float | None]] = {}
     bits_memo: dict[
-        tuple[str, str, ProximityParams | None, FibAnchorKind, tuple[int, ...] | None],
+        tuple[
+            str,
+            str,
+            ProximityParams | None,
+            FibAnchorKind,
+            PriceSourceCell,
+            tuple[int, ...] | None,
+        ],
         Sequence[int],
     ] = {}
+    exec_map_memo: dict[tuple[str, str], ExecGridMap] = {}
     for key, survivors in leaderboards.items():
         train_bars = train_slices.get((key.instrument, key.tf), ())
-        if not train_bars:
+        exec_train_bars = train_slices.get((key.instrument, EXEC_INTERVAL_LABEL), ())
+        if not train_bars or not exec_train_bars:
+            # No decision train window — or no 1-minute EXECUTION train
+            # window to fill on (the dual-feed law: a refinement eval without
+            # its exec stream would be a decision-TF-era backtest, never a
+            # silent fallback — DEC-FILL-EXEC-GRID-1M-001 §3.3).
             skipped_empty_train += 1
             continue
         tf = _timeframe_for_label(key.tf, grid)
+        exec_key = (key.instrument, key.tf)
+        exec_map = exec_map_memo.get(exec_key)
+        if exec_map is None:
+            # ONE map per (instrument, tf) over the TRAIN cuts — reused by
+            # every survivor + every refinement eval (mask/SL/TP-independent).
+            exec_map = build_exec_grid_map(train_bars, exec_train_bars, tf_minutes=tf.minutes)
+            exec_map_memo[exec_key] = exec_map
         roll_schedule = (
             roll_schedule_by_instrument.get(key.instrument)
             if roll_schedule_by_instrument is not None
@@ -686,14 +794,16 @@ def run_stage3_pass(
         )
         for row in survivors:
             side = _side_for_direction(row.direction)
-            start_sl, start_tp, proximity, fib_anchor = recover_survivor_cell(
+            start_sl, start_tp, proximity, fib_anchor, price_source = recover_survivor_cell(
                 row, grid, roll_schedule=roll_schedule
             )
-            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001)
-            # AND roll-schedule-specific (DEC-STAGE1A-ROLL-RESET-001), so the memo
-            # key + the build carry both — a survivor is refined against ITS OWN
-            # anchor's Group-4 Fib levels + ITS OWN roll boundaries, never stale ones.
-            memo_key = (key.instrument, key.tf, proximity, fib_anchor, roll_schedule)
+            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001),
+            # price-source-specific (DEC-NIFTY-PRICE-SOURCE-AXIS-001: the swept
+            # VWAP/EMA source moves bits 52-53 / 0-5) AND roll-schedule-specific
+            # (DEC-STAGE1A-ROLL-RESET-001), so the memo key + the build carry ALL
+            # THREE — a survivor is refined against ITS OWN Fib levels + ITS OWN
+            # source bits + ITS OWN roll boundaries, never stale ones.
+            memo_key = (key.instrument, key.tf, proximity, fib_anchor, price_source, roll_schedule)
             bar_bits = bits_memo.get(memo_key)
             if bar_bits is None:
                 bar_bits = build_bar_bits(
@@ -701,6 +811,8 @@ def run_stage3_pass(
                     proximity=proximity,
                     prior_n=grid.prior_n,
                     fib_anchor=fib_anchor,
+                    vwap_source=price_source.vwap_source,
+                    ema_source=price_source.ema_source,
                     roll_schedule=roll_schedule,
                     apply_1day_mask=apply_1day_mask_for(key.instrument, key.tf),
                 )
@@ -715,6 +827,8 @@ def run_stage3_pass(
                     mask=row.mask_bits,
                     side=side,
                     tf_minutes=tf.minutes,
+                    exec_bars_1m=exec_train_bars,
+                    exec_map=exec_map,
                     start_equity_paisa=grid.start_equity_paisa,
                     reference_stamper=reference_stamper,
                 ),
@@ -738,6 +852,8 @@ def run_stage3_pass(
                         proximity=proximity,
                         start_equity_paisa=grid.start_equity_paisa,
                         fib_anchor=fib_anchor,
+                        vwap_source=price_source.vwap_source,
+                        ema_source=price_source.ema_source,
                         roll_schedule=roll_schedule,
                     ),
                     data_snapshot_hash=train_hash,
@@ -764,6 +880,8 @@ def run_stage3_pass(
                     tf_minutes=tf.minutes,
                     sl_paisa=refined_eval.sl_paisa,
                     tp_paisa=refined_eval.tp_paisa,
+                    exec_bars_1m=exec_train_bars,
+                    exec_map=exec_map,
                     # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the refined
                     # row's re-simulation feeds the PERSISTED cell store.
                     reference_stamper=reference_stamper,
@@ -777,6 +895,7 @@ def run_stage3_pass(
                     tp_paisa=refined_eval.tp_paisa,
                     proximity=proximity,
                     fib_anchor=fib_anchor,
+                    price_source=price_source,
                 )
                 cell_rows.setdefault(cell, []).append(refined_row)
                 # Raw float|None Sharpe keyed by refined_id — the V-moment
@@ -863,6 +982,14 @@ def run_stage3_pass(
             )
         cells.append(Stage3RefinedCell(tuple_=cell, path=cell_path, rows=len(store)))
 
+    if rollup_paths_hook is not None and cells:
+        # Hook A, stage-3 arm (DEC-RESULTS-TOPK-ROLLUP-001): ONE rollup merge
+        # per PASS over the flushed cell stores (never per cell — the doc's
+        # one-merge-per-pass law). A VIX-conflicted cell above was NOT flushed
+        # and is deliberately absent from `cells`. The hook is fenced
+        # internally (BLOCKER-1) — it never raises into the pass.
+        rollup_paths_hook([cell.path for cell in cells])
+
     payload = {
         "masks_refined": masks_refined,
         "evals_total": evals_total,
@@ -905,6 +1032,21 @@ def cascade_specs_for_refined_cells(
     own quantized coordinates over the cascade's bars, exactly as Amendment A1
     describes.
 
+    Stage-3 search FAMILY (DEC-CASCADE-STAT-TIER-WIRE-001): per condition 6
+    EVERY stage-3 eval is persisted as a ResultRow — the same mask lands in
+    one refined-cell store per DISTINCT quantized ``(sl_paisa, tp_paisa)`` it
+    was tried at, so a mask's search family is recoverable HERE (the one
+    place the cells + their rows are all in hand) as the set of cell
+    coordinates whose store holds a row with that mask, per
+    ``(instrument, tf, direction)`` group. Each cell's spec carries
+    ``family_sl_tp`` = its winner masks' COMMON family (sorted; the cell's
+    own pair is a member by construction — the cell contributed itself).
+    HONEST LIMIT (spec-level field, recorded deviation): a cell whose rows
+    span MULTIPLE masks with DIFFERING family sets cannot be expressed by
+    ONE spec-level family — it is skipped LOUDLY
+    (``stage3_wire.family_ambiguous_cell``; the per-candidate PBO abstains
+    for that cell, never a fabricated family).
+
     Parameters
     ----------
     cells
@@ -917,8 +1059,26 @@ def cascade_specs_for_refined_cells(
     list[CascadeTupleSpec]
         One spec per non-empty refined cell.
     """
+    # ONE load per cell store (reused for the family map AND the spec rows).
+    loaded: list[tuple[Stage3RefinedCell, tuple[ResultRow, ...]]] = [
+        (cell, tuple(ResultsStore.load(cell.path).rows())) for cell in cells
+    ]
+    # (instrument, tf_label, direction_label) -> mask -> {(sl, tp), ...}
+    family_by_mask: dict[tuple[str, str, str], dict[int, set[tuple[int, int]]]] = {}
+    for cell, rows in loaded:
+        tuple_ = cell.tuple_
+        if tuple_.sl_paisa is None or tuple_.tp_paisa is None:
+            # Structurally unreachable for refined cells ("refined cells never
+            # carry a disabled leg" — Stage3CellRecord's > 0 law); defensive
+            # totality so a hand-built cell can never poison the map.
+            continue
+        key = (tuple_.instrument, tuple_.tf.label, _direction_label(tuple_.direction))
+        per_mask = family_by_mask.setdefault(key, {})
+        for row in rows:
+            per_mask.setdefault(row.mask_bits, set()).add((tuple_.sl_paisa, tuple_.tp_paisa))
+
     specs: list[CascadeTupleSpec] = []
-    for cell in cells:
+    for cell, rows in loaded:
         tuple_ = cell.tuple_
         proximity = tuple_.proximity
         proximity_bps = (
@@ -930,6 +1090,25 @@ def cascade_specs_for_refined_cells(
                 proximity.fib_proximity_bps,
             )
         )
+        family_sl_tp: tuple[tuple[int, int], ...] | None = None
+        if rows and tuple_.sl_paisa is not None and tuple_.tp_paisa is not None:
+            key = (tuple_.instrument, tuple_.tf.label, _direction_label(tuple_.direction))
+            per_mask = family_by_mask[key]
+            families = {frozenset(per_mask[row.mask_bits]) for row in rows}
+            if len(families) == 1:
+                family_sl_tp = tuple(sorted(next(iter(families))))
+            else:
+                _LOG.warning(
+                    "stage3_wire.family_ambiguous_cell",
+                    cell_path=str(cell.path),
+                    n_masks=len({row.mask_bits for row in rows}),
+                    n_distinct_families=len(families),
+                    detail=(
+                        "the cell's winner masks carry differing search families — "
+                        "the spec-level family_sl_tp cannot express them; the "
+                        "per-candidate PBO is skipped for this cell"
+                    ),
+                )
         spec = spec_from_store_rows(
             instrument=tuple_.instrument,
             tf_label=tuple_.tf.label,
@@ -940,9 +1119,12 @@ def cascade_specs_for_refined_cells(
             prior_n=grid.prior_n,
             proximity_bps=proximity_bps,
             start_equity_paisa=grid.start_equity_paisa,
-            rows=ResultsStore.load(cell.path).rows(),
+            rows=rows,
             top_k=None,
             fib_anchor=tuple_.fib_anchor,
+            vwap_source=tuple_.price_source.vwap_source,
+            ema_source=tuple_.price_source.ema_source,
+            family_sl_tp=family_sl_tp,
         )
         if spec is not None:
             specs.append(spec)
@@ -1021,6 +1203,8 @@ def stage3_manifest_record(
                 ),
                 rel_path=rel_path,
                 fib_anchor=tuple_.fib_anchor,
+                vwap_source=tuple_.price_source.vwap_source,
+                ema_source=tuple_.price_source.ema_source,
             )
         )
     return Stage3ManifestRecord(

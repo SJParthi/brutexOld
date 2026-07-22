@@ -228,6 +228,23 @@ class TestWindowLedgerRowsGuard:
         rows = window_ledger_rows_cached(tmp_path)
         assert len(rows) == 1  # nothing was latched under the outage token
 
+    def test_page_eio_degrades_not_500(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The window_ledger_rows_page twin (the #1721 x #1386 merge-compose:
+        # the /db grid route rides the PAGE function, so the stat-guard +
+        # named read degrade must cover it too): EIO → one named WARN + an
+        # empty page with total 0 this poll — never a raise/500.
+        _seed_ledger(tmp_path)
+        self._patch_ledger_path(monkeypatch, _EioPath)
+        with capture_logs() as logs:
+            total, page = db_view.window_ledger_rows_page(tmp_path, offset=0, limit=10)
+        assert (total, page) == (0, ())
+        assert [e for e in logs if e["event"] == "db.window_ledger_read_degraded"]
+        monkeypatch.undo()
+        total, page = db_view.window_ledger_rows_page(tmp_path, offset=0, limit=10)
+        assert total == 1 and len(page) == 1  # nothing latched — recovery serves
+
     def test_absent_ledger_keeps_honest_empty_grid(self, tmp_path: Path) -> None:
         with capture_logs() as logs:
             assert window_ledger_rows_cached(tmp_path) == ()

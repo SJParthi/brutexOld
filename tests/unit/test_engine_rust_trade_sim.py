@@ -1,13 +1,21 @@
-"""Unit + parity tests for the resident Rust trade-sim seam.
+"""Unit + parity tests for the resident Rust trade-sim seam (dual-feed).
 
-DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). Exercises
+DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563), rebuilt on the 1-minute
+EXECUTION grid by DEC-FILL-EXEC-GRID-1M-001. Exercises
 :class:`brutex.engine.rust_trade_sim.ResidentTradeSim` to 100% line + branch:
-construction validation, the ``n_bars`` view, the ``HOLD``/empty guards, both the
-Rust path (the default when the ``fno_math`` wheel is built — CI) AND the
-pure-Python fallback (forced by clearing ``_rust`` / shadowing the import), every
-``FillPolicy`` → kernel-flag mapping, and BUY/SELL. The parity assertions pin the
-seam's contract: its output equals the
-:func:`brutex.engine.trade_sim.simulate_trades` oracle field-for-field.
+construction validation (both streams + the exec-map / precomputed-columns
+injection seams), the ``n_bars`` / ``n_exec_bars`` / ``exec_map`` views, the
+``HOLD``/empty guards, both the Rust path (the default when the ``fno_math``
+wheel is built — CI) AND the pure-Python fallback (forced by clearing
+``_rust`` / shadowing the import), the NEW ``exec_grid_kernel_stale``
+pre-construction signature probe, BUY/SELL, and coarse decision timeframes
+over a REAL 1-minute execution stream — all under the ONE hardcoded
+worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001) on the 1m grid. The parity
+assertions pin the seam's contract: its output equals the
+:func:`brutex.engine.trade_sim.simulate_trades` dual-feed oracle
+field-for-field. At ``tf_minutes == 1`` the same sequence serves both streams
+(the design §6 degenerate fixed point), so the single-feed-era expectations
+carry over verbatim.
 """
 
 from __future__ import annotations
@@ -21,33 +29,46 @@ from typing import cast
 import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
-from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
-from brutex.engine.reference_series import TradeReferenceStamper
 
-# Whitebox friend access (DEC-P0-017 per-site convention): the guard seam is
-# module-private; each COLUMN of its envelope check is pinned directly here
+# Whitebox friend access (DEC-P0-017 per-site convention): the guard seams are
+# module-private; each COLUMN of the envelope check is pinned directly here
 # because a single-column corrupt bar is unrepresentable through CandleBar's
-# OHLC invariant (see TestEnvelopeGuardSeamPerColumn).
+# OHLC invariant (see TestEnvelopeGuardSeamPerColumn), and the exec-grid /
+# tail-hole helpers are probed at their pure seams.
+from brutex.engine import rust_trade_sim as _rts_module
+from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
+from brutex.engine.exec_grid import build_exec_grid_map
+from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.rust_trade_sim import (
     _MAX_KERNEL_PRICE_PAISA,  # pyright: ignore[reportPrivateUsage]
     _TAIL_HOLE_WARN_CAP,  # pyright: ignore[reportPrivateUsage]
     _U128_MASK,  # pyright: ignore[reportPrivateUsage]
+    PriceColumns,
     ResidentTradeSim,
     _construction_fallback_reason,  # pyright: ignore[reportPrivateUsage]
+    _kernel_exec_grid_current,  # pyright: ignore[reportPrivateUsage]
     _warn_session_tail_holes,  # pyright: ignore[reportPrivateUsage]
+    derive_price_columns,
 )
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.trade_sim import (
-    FillPolicy,
-    LevelFill,
-    SameBarTie,
     simulate_trades,
+    simulate_trades_with_exit_counts,
 )
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 from structlog.typing import EventDict
 
 _DAY = date(2024, 1, 2)  # a regular NSE trading Tuesday
+
+#: The counted kernel batch shape — one (records, exit_counts) pair per mask
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
+_CountedBatch = list[
+    tuple[
+        list[tuple[int, int, int, int, int, int]],
+        tuple[int, int, int, int, int, int],
+    ]
+]
 
 
 def _ts(hh: int, mm: int) -> datetime:
@@ -69,7 +90,7 @@ def _bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
 
 
 def _feed() -> list[CandleBar]:
-    """A small intraday feed with enough movement to open + close trades."""
+    """A small intraday 1-minute feed with enough movement to open + close trades."""
     return [
         _bar(9, 15, "100", "101", "99", "100"),
         _bar(9, 16, "100", "110", "92", "100"),
@@ -79,60 +100,156 @@ def _feed() -> list[CandleBar]:
     ]
 
 
+def _sim(bars: list[CandleBar], bar_bits: list[int], **kwargs: object) -> ResidentTradeSim:
+    """The tf=1 degenerate build: the SAME sequence serves both streams (§6)."""
+    return ResidentTradeSim(
+        bars,
+        bar_bits,
+        tf_minutes=1,
+        exec_bars_1m=bars,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
 def _oracle(
-    bars: list[CandleBar],
+    decision_bars: list[CandleBar],
     bar_bits: list[int],
     mask: int,
     *,
     direction: Side,
-    tf_minutes: int,
-    stop_loss_paisa: int | None,
-    take_profit_paisa: int | None,
-    policy: FillPolicy,
+    tf_minutes: int = 1,
+    exec_bars_1m: list[CandleBar] | None = None,
+    stop_loss_paisa: int | None = None,
+    take_profit_paisa: int | None = None,
 ) -> list:
-    """The pure-Python oracle trades for one mask (what the seam must match)."""
+    """The pure-Python dual-feed oracle trades for one mask (what the seam must match)."""
     return simulate_trades(
-        bars,
+        decision_bars,
         mask_to_entry_signals(bar_bits, mask),
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=decision_bars if exec_bars_1m is None else exec_bars_1m,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
-        policy=policy,
     )
+
+
+def _coarse_1m_feed() -> list[CandleBar]:
+    """A 15-bar 1-minute execution stream 09:15..09:29 (five 3-minute buckets)."""
+    bars: list[CandleBar] = []
+    for i in range(15):
+        lo = 100 - (i % 3)
+        hi = 105 + (i % 4)
+        bars.append(_bar(9, 15 + i, str(lo + 1), str(hi), str(lo), str(lo + 2)))
+    return bars
+
+
+def _aggregate_decision(exec_bars_1m: list[CandleBar], tf_minutes: int) -> list[CandleBar]:
+    """Aggregate a 1m stream into decision-TF bars (bucket-START labels, 09:15-anchored).
+
+    The house resampler labelling law in miniature: every stored 1m bar joins
+    the ``tf_minutes`` bucket its session-minute falls in; the decision bar is
+    labelled at the bucket START even when the bucket's first minute is a
+    hole. Shared with the property parity suite (imported there — never a
+    second copy).
+    """
+    if tf_minutes == 1:
+        return list(exec_bars_1m)
+    open_minute = 9 * 60 + 15
+    groups: dict[tuple[date, int], list[CandleBar]] = {}
+    order: list[tuple[date, int]] = []
+    for bar in exec_bars_1m:
+        ist = bar.timestamp.astimezone(IST)
+        minute = ist.hour * 60 + ist.minute
+        start = open_minute + ((minute - open_minute) // tf_minutes) * tf_minutes
+        key = (ist.date(), start)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(bar)
+    out: list[CandleBar] = []
+    for day, start in order:
+        group = groups[(day, start)]
+        label = datetime(day.year, day.month, day.day, start // 60, start % 60, tzinfo=IST)
+        out.append(
+            CandleBar(
+                timestamp=label.astimezone(UTC),
+                open=group[0].open,
+                high=max(b.high for b in group),
+                low=min(b.low for b in group),
+                close=group[-1].close,
+                volume=0,
+                open_interest=None,
+            )
+        )
+    return out
+
+
+class _RetiredSingleFeedKernel:
+    """A PRE-exec-grid kernel class: the retired 7-arg constructor (no ``arm_source``).
+
+    The signature probe (:func:`_kernel_exec_grid_current`) must demote a
+    wheel exposing THIS shape BEFORE construction — the ctor/batch bodies
+    assert they are never reached.
+    """
+
+    def __init__(
+        self,
+        exec_open: list[int],
+        exec_high: list[int],
+        exec_low: list[int],
+        exec_close: list[int],
+        exec_is_forced: list[bool],
+        exec_session_idx: list[int],
+        bar_bits: list[int],
+    ) -> None:
+        raise AssertionError("a stale exec-grid kernel must never be constructed")
+
+    def simulate_masks(
+        self, masks: list[int], is_buy: bool, sl_paisa: int | None, tp_paisa: int | None
+    ) -> list[list[tuple[int, int, int, int, int, int]]]:
+        raise AssertionError("a stale exec-grid kernel must never serve a batch")
 
 
 # ── construction validation ──────────────────────────────────────────────────
 
 
 class TestConstruction:
-    def test_empty_bars_rejected(self) -> None:
-        with pytest.raises(ValueError, match="bars must be non-empty"):
-            ResidentTradeSim([], [], tf_minutes=1)
+    def test_empty_decision_bars_rejected(self) -> None:
+        with pytest.raises(ValueError, match="decision_bars must be non-empty"):
+            ResidentTradeSim([], [], tf_minutes=1, exec_bars_1m=_feed())
+
+    def test_empty_exec_bars_rejected(self) -> None:
+        bars = _feed()
+        with pytest.raises(ValueError, match="exec_bars_1m must be non-empty"):
+            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=[])
 
     def test_bar_bits_length_mismatch_rejected(self) -> None:
         bars = _feed()
         with pytest.raises(ValueError, match="bar_bits length"):
-            ResidentTradeSim(bars, [0, 0], tf_minutes=1)
+            ResidentTradeSim(bars, [0, 0], tf_minutes=1, exec_bars_1m=bars)
 
     def test_tf_minutes_below_one_rejected(self) -> None:
         bars = _feed()
         bar_bits = build_bar_bits(bars)
         with pytest.raises(ValueError, match="tf_minutes must be >= 1"):
-            ResidentTradeSim(bars, bar_bits, tf_minutes=0)
+            ResidentTradeSim(bars, bar_bits, tf_minutes=0, exec_bars_1m=bars)
 
-    def test_n_bars_reports_window_length(self) -> None:
-        bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
-        assert sim.n_bars == len(bars)
+    def test_n_bars_and_n_exec_bars_report_the_two_stream_lengths(self) -> None:
+        exec_bars = _coarse_1m_feed()
+        decision = _aggregate_decision(exec_bars, 3)
+        sim = ResidentTradeSim(decision, [0] * len(decision), tf_minutes=3, exec_bars_1m=exec_bars)
+        assert sim.n_bars == len(decision) == 5
+        assert sim.n_exec_bars == len(exec_bars) == 15
+        assert sim.exec_bars == tuple(exec_bars)
 
     def test_out_of_coverage_weekday_bar_refuses_loud_at_construction(self) -> None:
-        # Calendar-correctness pack: the OLD silent behaviour is GONE — a bar
-        # dated on a weekday OUTSIDE the published holiday span used to get a
-        # silently-FABRICATED regular 15:20 forced-exit flag; construction now
-        # raises HolidayDataUnavailableError via the strict
-        # ``get_session_checked``, in lock-step with the streaming walker
-        # (byte-parity preserved: both paths refuse the same date).
+        # Calendar-correctness pack: a bar dated on a weekday OUTSIDE the
+        # published holiday span raises HolidayDataUnavailableError via the
+        # strict ``get_session_checked`` at the forced/session derivation —
+        # in lock-step with the streaming walker (byte-parity preserved:
+        # both paths refuse the same date), never a silently-fabricated
+        # 15:20 boundary.
         from brutex.calendars.nse import HolidayDataUnavailableError
 
         out_day = date(2027, 1, 4)  # Monday, above the 2026 coverage ceiling
@@ -149,15 +266,15 @@ class TestConstruction:
             )
         ]
         with pytest.raises(HolidayDataUnavailableError):
-            ResidentTradeSim(bars, [0], tf_minutes=1)
+            ResidentTradeSim(bars, [0], tf_minutes=1, exec_bars_1m=bars)
 
     def test_multi_pathology_window_raises_the_calendar_error_first(self) -> None:
-        # Refuter RF2 C-1 regression: the forced/session loop must run BEFORE
-        # the price-column derivation (main's pre-W2-rider statement order),
-        # so a window holding BOTH an out-of-coverage weekday bar AND an
-        # over-precision price — each ACCEPTED by CandleBar validation
-        # (Decimal("1E+40") is positive + ordered) — raises the class
-        # contract's HolidayDataUnavailableError, never the price snap's
+        # Refuter RF2 C-1 regression on the dual-feed shape: the forced/
+        # session loop must run BEFORE the price-column derivation, so a
+        # CHRONOLOGICAL window holding an over-precision price (EARLIER bar —
+        # Decimal("1E+40") validates: positive + ordered) AND an
+        # out-of-coverage weekday bar (LATER bar) raises the class contract's
+        # HolidayDataUnavailableError, never the price snap's
         # decimal.InvalidOperation.
         from brutex.calendars.nse import HolidayDataUnavailableError
 
@@ -173,10 +290,37 @@ class TestConstruction:
                 open_interest=None,
             )
 
-        out_of_coverage = _dated(date(2030, 1, 2), "100")  # Wednesday, > 2026 ceiling
         over_precision = _dated(date(2026, 1, 5), "1E+40")  # validates; snap raises
+        out_of_coverage = _dated(date(2030, 1, 2), "100")  # Wednesday, > 2026 ceiling
+        bars = [over_precision, out_of_coverage]
         with pytest.raises(HolidayDataUnavailableError):
-            ResidentTradeSim([out_of_coverage, over_precision], [0, 0], tf_minutes=1)
+            ResidentTradeSim(bars, [0, 0], tf_minutes=1, exec_bars_1m=bars)
+
+    def test_in_coverage_weekend_bar_constructs_and_matches_oracle(self) -> None:
+        # Saturday 2024-01-06 — IN coverage, no session: the forced/session
+        # loop's ``session is None`` arm (deterministic 15:20 fallback via
+        # ``is_forced_exit_bar``), never a raise. Both arms simulate it
+        # identically (the walker takes the same fallback).
+        sat = date(2024, 1, 6)
+
+        def _sat_bar(hh: int, mm: int) -> CandleBar:
+            ts = datetime(sat.year, sat.month, sat.day, hh, mm, tzinfo=IST).astimezone(UTC)
+            return CandleBar(
+                timestamp=ts,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100.50"),
+                volume=0,
+                open_interest=None,
+            )
+
+        bars = [_sat_bar(9, 15), _sat_bar(9, 16), _sat_bar(9, 17)]
+        bits = [1, 0, 0]
+        sim = _sim(bars, bits)
+        got = sim.simulate_masks([1], direction=Side.BUY)
+        assert got == [_oracle(bars, bits, 1, direction=Side.BUY)]
+        assert len(got[0]) == 1  # anti-vacuity: the weekend window traded
 
     def test_missing_kernel_falls_back_without_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Shadow `import fno_math` with a module lacking ResidentSweepSim so the
@@ -186,20 +330,45 @@ class TestConstruction:
         monkeypatch.setitem(sys.modules, "fno_math", fake)
         bars = _feed()
         bar_bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        sim = _sim(bars, bar_bits)
         out = sim.simulate_masks([0], direction=Side.BUY)
-        assert out == [
-            _oracle(
-                bars,
-                bar_bits,
-                0,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        assert out == [_oracle(bars, bar_bits, 0, direction=Side.BUY)]
+
+
+class TestExecMapSeam:
+    """The ``exec_map`` injection seam + the public map view (design §1.2/§3.8)."""
+
+    def test_injected_map_is_used_and_matches_the_derived_build(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        injected = build_exec_grid_map(bars, bars, tf_minutes=1)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars, exec_map=injected)
+        assert sim.exec_map is injected  # the instance's OWN map — no re-derivation
+        derived = _sim(bars, bits)
+        assert derived.exec_map == injected  # same mapping either way
+        masks = [0, 1]
+        assert sim.simulate_masks(masks, direction=Side.BUY) == derived.simulate_masks(
+            masks, direction=Side.BUY
+        )
+
+    def test_mismatched_exec_map_is_refused_on_either_dimension(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        # (a) wrong n_decision (the first arm of the `or`).
+        short_decision = build_exec_grid_map(bars[:-1], bars, tf_minutes=1)
+        with pytest.raises(ValueError, match="exec_map covers"):
+            ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars, exec_map=short_decision)
+        # (b) right n_decision, wrong n_exec (the second arm).
+        short_exec = build_exec_grid_map(bars, bars[:-1], tf_minutes=1)
+        with pytest.raises(ValueError, match="exec_map covers"):
+            ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars, exec_map=short_exec)
+
+    def test_exec_map_property_reports_the_stream_dimensions(self) -> None:
+        exec_bars = _coarse_1m_feed()
+        decision = _aggregate_decision(exec_bars, 3)
+        sim = ResidentTradeSim(decision, [1, 0, 1, 0, 0], tf_minutes=3, exec_bars_1m=exec_bars)
+        assert sim.exec_map.n_decision == sim.n_bars == 5
+        assert sim.exec_map.n_exec == sim.n_exec_bars == 15
 
 
 # ── simulate_masks guards ────────────────────────────────────────────────────
@@ -208,35 +377,21 @@ class TestConstruction:
 class TestGuards:
     def test_hold_direction_rejected(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         with pytest.raises(ValueError, match="must be BUY or SELL"):
             sim.simulate_masks([0], direction=Side.HOLD)
 
     def test_empty_masks_returns_empty(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         assert sim.simulate_masks([], direction=Side.BUY) == []
 
 
 # ── parity: seam == oracle (Rust path AND forced fallback) ───────────────────
 
 
-_POLICIES = [
-    FillPolicy(),  # AT_LEVEL / AT_LEVEL / SL_FIRST (default)
-    FillPolicy(stop_loss=LevelFill.NEXT_OPEN),
-    FillPolicy(take_profit=LevelFill.NEXT_OPEN),
-    FillPolicy(same_bar=SameBarTie.TP_FIRST),
-    FillPolicy(
-        stop_loss=LevelFill.NEXT_OPEN,
-        take_profit=LevelFill.NEXT_OPEN,
-        same_bar=SameBarTie.TP_FIRST,
-    ),
-]
-
-
 class TestParity:
     @pytest.mark.parametrize("direction", [Side.BUY, Side.SELL])
-    @pytest.mark.parametrize("policy", _POLICIES)
     @pytest.mark.parametrize(
         ("sl", "tp"),
         [(None, None), (300, None), (None, 400), (300, 400)],
@@ -244,31 +399,22 @@ class TestParity:
     def test_seam_matches_oracle_rust_path(
         self,
         direction: Side,
-        policy: FillPolicy,
         sl: int | None,
         tp: int | None,
     ) -> None:
         bars = _feed()
         bar_bits = build_bar_bits(bars)
         masks = [0, 1, 1 << 63]  # fire-every / sometimes / never
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        sim = _sim(bars, bar_bits)
         got = sim.simulate_masks(
             masks,
             direction=direction,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
-            policy=policy,
         )
         expected = [
             _oracle(
-                bars,
-                bar_bits,
-                m,
-                direction=direction,
-                tf_minutes=1,
-                stop_loss_paisa=sl,
-                take_profit_paisa=tp,
-                policy=policy,
+                bars, bar_bits, m, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp
             )
             for m in masks
         ]
@@ -280,7 +426,7 @@ class TestParity:
         bars = _feed()
         bar_bits = build_bar_bits(bars)
         masks = [0, 1, 1 << 63]
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        sim = _sim(bars, bar_bits)
         # Exercise the pure-Python fallback branch on purpose.
         sim._rust = None
         got = sim.simulate_masks(
@@ -291,14 +437,7 @@ class TestParity:
         )
         expected = [
             _oracle(
-                bars,
-                bar_bits,
-                m,
-                direction=direction,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=400,
-                policy=FillPolicy(),
+                bars, bar_bits, m, direction=direction, stop_loss_paisa=300, take_profit_paisa=400
             )
             for m in masks
         ]
@@ -309,17 +448,91 @@ class TestParity:
         bars = _feed()
         bar_bits = build_bar_bits(bars)
         masks = [0, 1, 2, 3]
-        rust = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        rust = _sim(bars, bar_bits)
         rust_out = rust.simulate_masks(
             masks, direction=Side.BUY, stop_loss_paisa=300, take_profit_paisa=400
         )
-        fallback = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        fallback = _sim(bars, bar_bits)
         # Force the fallback path for the cross-path comparison.
         fallback._rust = None
         fb_out = fallback.simulate_masks(
             masks, direction=Side.BUY, stop_loss_paisa=300, take_profit_paisa=400
         )
         assert rust_out == fb_out
+
+
+# ── coarse decision TF over a REAL 1-minute execution stream ─────────────────
+
+
+class TestCoarseTfParity:
+    """tf_minutes=3 decision bars over a genuine 15-bar 1m stream (design §3.4)."""
+
+    def test_coarse_signal_fills_on_the_next_1m_bar_and_matches_oracle(self) -> None:
+        exec_bars = _coarse_1m_feed()
+        decision = _aggregate_decision(exec_bars, 3)
+        bits = [1, 0, 1, 0, 0]
+        masks = [0, 1, 1 << 59]
+        sim = ResidentTradeSim(decision, bits, tf_minutes=3, exec_bars_1m=exec_bars)
+        assert sim.rust_active is True
+        got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=500)
+        expected = [
+            _oracle(
+                decision,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=3,
+                exec_bars_1m=exec_bars,
+                stop_loss_paisa=500,
+            )
+            for m in masks
+        ]
+        assert got == expected
+        # Absolute: the mask-1 signal on decision bar 0 (label 09:15, close
+        # instant 09:18) fills on the 09:18 1-MINUTE bar — never a decision
+        # bar's own timestamp.
+        assert got[1]
+        assert got[1][0].entry_ts == _ts(9, 18)
+
+    def test_coarse_rust_and_fallback_agree(self) -> None:
+        exec_bars = _coarse_1m_feed()
+        decision = _aggregate_decision(exec_bars, 3)
+        bits = [1, 0, 1, 0, 1]
+        rust = ResidentTradeSim(decision, bits, tf_minutes=3, exec_bars_1m=exec_bars)
+        assert rust.rust_active is True
+        fallback = ResidentTradeSim(decision, bits, tf_minutes=3, exec_bars_1m=exec_bars)
+        fallback._rust = None
+        masks = [0, 1]
+        assert rust.simulate_masks(
+            masks, direction=Side.SELL, stop_loss_paisa=400, take_profit_paisa=300
+        ) == fallback.simulate_masks(
+            masks, direction=Side.SELL, stop_loss_paisa=400, take_profit_paisa=300
+        )
+
+    def test_coarse_hole_slides_the_fill_to_the_next_stored_minute(self) -> None:
+        # Drop the exact fill minute (09:18) from the 1m stream: the RATIFIED
+        # session-bounded SLIDE law fills at the next STORED minute (09:19) —
+        # bit-identically on both engines.
+        full = _coarse_1m_feed()
+        exec_bars = [b for b in full if b.timestamp != _ts(9, 18)]
+        decision = _aggregate_decision(exec_bars, 3)
+        bits = [1, 0, 0, 0, 0]
+        sim = ResidentTradeSim(decision, bits, tf_minutes=3, exec_bars_1m=exec_bars)
+        assert sim.rust_active is True
+        got = sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=500)
+        assert got == [
+            _oracle(
+                decision,
+                bits,
+                1,
+                direction=Side.BUY,
+                tf_minutes=3,
+                exec_bars_1m=exec_bars,
+                stop_loss_paisa=500,
+            )
+        ]
+        assert got[0]
+        assert got[0][0].entry_ts == _ts(9, 19)  # the SLID fill minute
 
 
 # ── parity on a NON-regular session (DEC-SESSION-FORCED-EXIT-001) ────────────
@@ -361,7 +574,7 @@ class TestSessionAwareForcedExitParity:
     def test_rust_kernel_forced_flags_session_aware_match_oracle(self) -> None:
         # An afternoon-Muhurat feed straddling the 14:35 forced exit. The Rust
         # kernel + the simulate_trades oracle must agree field-for-field (the
-        # kernel's `forced` array is now resolved against the 14:35 boundary).
+        # kernel's `forced` array is resolved against the 14:35 boundary).
         bars = [
             _muhurat_bar(14, 0, "100", "100", "100", "100"),
             _muhurat_bar(14, 33, "100", "100", "100", "100"),
@@ -371,7 +584,7 @@ class TestSessionAwareForcedExitParity:
         ]
         bar_bits = build_bar_bits(bars)
         masks = [0, 1, 1 << 63]
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        sim = _sim(bars, bar_bits)
         got = sim.simulate_masks(
             masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
         )
@@ -381,10 +594,8 @@ class TestSessionAwareForcedExitParity:
                 bar_bits,
                 m,
                 direction=Side.BUY,
-                tf_minutes=1,
                 stop_loss_paisa=100_000,
                 take_profit_paisa=100_000,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
@@ -395,7 +606,7 @@ class TestSessionAwareForcedExitParity:
         fire_trades = got[0]
         assert len(fire_trades) == 1
         assert fire_trades[0].exit_ts == _muhurat_ts(14, 35)
-        assert fire_trades[0].pnl_paisa == 20  # forced at OPEN 100.20, not 200
+        assert fire_trades[0].pnl_paisa == 0  # forced at the bar LOW 100.00, not 200
 
     def test_rust_and_fallback_agree_on_muhurat(self) -> None:
         # The Rust path and the forced pure-Python fallback agree on a Muhurat
@@ -408,11 +619,11 @@ class TestSessionAwareForcedExitParity:
         ]
         bar_bits = build_bar_bits(bars)
         masks = [0, 1, 2, 3]
-        rust = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        rust = _sim(bars, bar_bits)
         rust_out = rust.simulate_masks(
             masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
         )
-        fallback = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        fallback = _sim(bars, bar_bits)
         fallback._rust = None
         fb_out = fallback.simulate_masks(
             masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
@@ -420,18 +631,70 @@ class TestSessionAwareForcedExitParity:
         assert rust_out == fb_out
 
     def test_rust_kernel_multi_day_forced_flags_match_oracle(self) -> None:
-        # A SINGLE window spanning day-1 regular (exits 15:20) + day-2 Muhurat
+        # ONE window spanning day-1 regular (exits 15:20) + day-2 Muhurat
         # (exits 14:35) pins the 1-slot date-cache RE-RESOLVE branch in the
-        # kernel's `forced` precompute against the oracle.
+        # kernel's `forced` precompute against the oracle — with a forced
+        # close at BOTH boundaries (anti-vacuity).
         bars = [
-            _bar(15, 18, "100", "100", "100", "100"),  # day-1 regular, near 15:20
+            _bar(15, 18, "100", "100", "100", "100"),
+            _bar(15, 19, "100", "100", "100", "100"),  # day-1 entry bar
             _bar(15, 20, "100.30", "101", "100", "100.50"),  # day-1 forced @ 15:20
-            _muhurat_bar(14, 34, "100", "100", "100", "100"),  # day-2 NOT forced
-            _muhurat_bar(14, 35, "100.10", "101", "100", "100.30"),  # day-2 forced @ 14:35
+            _muhurat_bar(14, 33, "100", "100", "100", "100"),
+            _muhurat_bar(14, 34, "100", "100", "100", "100"),  # day-2 entry bar
+            _muhurat_bar(14, 35, "100.10", "101", "100", "100.30"),  # forced @ 14:35
         ]
         bar_bits = build_bar_bits(bars)
         masks = [0, 1]
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        sim = _sim(bars, bar_bits)
+        got = sim.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        expected = [
+            _oracle(
+                bars,
+                bar_bits,
+                m,
+                direction=Side.BUY,
+                stop_loss_paisa=100_000,
+                take_profit_paisa=100_000,
+            )
+            for m in masks
+        ]
+        assert got == expected
+        fire_trades = got[0]
+        assert [t.exit_ts for t in fire_trades] == [_ts(15, 20), _muhurat_ts(14, 35)]
+
+    def test_rust_kernel_extended_outage_day_matches_oracle_at_1650(self) -> None:
+        # DEC-EXTENDED-SESSION-OUTAGE-001 (fails-before pin, Rust ≡ Python):
+        # on the 2021-02-24 extended day (close 17:00 IST at NSE + BSE + MSEI,
+        # SEBI press releases verified 2026-07-11) the kernel's forced flags
+        # resolve the 16:50 boundary — a 15:25 bar is NOT forced (the pre-fix
+        # resolver forced every bar >= 15:20), and both paths agree
+        # field-for-field.
+        outage = date(2021, 2, 24)
+
+        def _outage_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
+            ts = datetime(outage.year, outage.month, outage.day, hh, mm, tzinfo=IST).astimezone(UTC)
+            return CandleBar(
+                timestamp=ts,
+                open=Decimal(o),
+                high=Decimal(h),
+                low=Decimal(lo),
+                close=Decimal(c),
+                volume=0,
+                open_interest=None,
+            )
+
+        bars = [
+            _outage_bar(15, 18, "100", "100", "100", "100"),
+            _outage_bar(15, 25, "100", "100", "100", "100"),  # NOT forced (pre-fix: forced)
+            _outage_bar(16, 49, "100", "100", "100", "100"),  # NOT forced
+            _outage_bar(16, 50, "100.60", "101", "100", "100.80"),  # forced @ 16:50
+            _outage_bar(16, 51, "200", "200", "200", "200"),  # never reached
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1, 1 << 63]
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1, exec_bars_1m=bars)
         got = sim.simulate_masks(
             masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
         )
@@ -444,11 +707,60 @@ class TestSessionAwareForcedExitParity:
                 tf_minutes=1,
                 stop_loss_paisa=100_000,
                 take_profit_paisa=100_000,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
         assert got == expected
+        # Anti-vacuity: the fire-every-bar mask opens AND force-exits at the
+        # 16:50 extended boundary (NOT 15:20, NOT the 200-print next bar).
+        # Worst-case fill hand-derivation (DEC-FILL-WORST-CASE-ONLY-001 — the
+        # member authored this pin pre-#1825's open-anchored law): BUY entry
+        # fills at bar[1]'s adverse HIGH 100.00; the forced exit fills at the
+        # decided bar[3]'s adverse LOW 100.00 → pnl 0. The 16:50 bar's prices
+        # still provably fold: mfe 60 paisa = its 100.60 open over the 100.00
+        # entry. A 15:20-forced exit or a bar[4] leak (200-print → pnl
+        # 10_000 paisa) would fail BOTH the exit_ts and the pnl pins.
+        fire_trades = got[0]
+        assert len(fire_trades) == 1
+        assert fire_trades[0].exit_ts == bars[3].timestamp
+        assert fire_trades[0].pnl_paisa == 0  # adverse LOW 100.00, never 200
+        assert fire_trades[0].mfe_paisa == 60  # the 100.60 open registered
+
+    def test_rust_and_fallback_agree_on_extended_outage_day(self) -> None:
+        # The Rust path and the forced pure-Python fallback agree on the
+        # extended day too (the whole contract on the new session tier).
+        outage = date(2021, 2, 24)
+        bars = [
+            CandleBar(
+                timestamp=datetime(
+                    outage.year, outage.month, outage.day, hh, mm, tzinfo=IST
+                ).astimezone(UTC),
+                open=Decimal(o),
+                high=Decimal(h),
+                low=Decimal(lo),
+                close=Decimal(c),
+                volume=0,
+                open_interest=None,
+            )
+            for hh, mm, o, h, lo, c in [
+                (16, 40, "100", "100", "100", "100"),
+                (16, 49, "100", "100", "100", "100"),
+                (16, 50, "100.50", "101", "100", "100.90"),
+                (16, 51, "100", "100", "100", "100"),
+            ]
+        ]
+        bar_bits = build_bar_bits(bars)
+        masks = [0, 1, 2, 3]
+        rust = ResidentTradeSim(bars, bar_bits, tf_minutes=1, exec_bars_1m=bars)
+        rust_out = rust.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        fallback = ResidentTradeSim(bars, bar_bits, tf_minutes=1, exec_bars_1m=bars)
+        fallback._rust = None
+        fb_out = fallback.simulate_masks(
+            masks, direction=Side.BUY, stop_loss_paisa=100_000, take_profit_paisa=100_000
+        )
+        assert rust_out == fb_out
 
 
 # ── cross-session pending-entry drop parity (R2-OC-2) ─────────────────────────
@@ -473,7 +785,7 @@ def _next_day_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBa
 
 
 class TestCrossSessionPendingEntryParity:
-    """R2-OC-2: the kernel drops a cross-session pending entry like the oracle."""
+    """R2-OC-2 on the 1m grid: a cross-session fill candidate DROPS (map-baked)."""
 
     def _two_session_feed(self) -> tuple[list[CandleBar], list[int]]:
         """Two-session feed + bar_bits whose bit0 fires ONLY on day-1's last bar."""
@@ -490,33 +802,23 @@ class TestCrossSessionPendingEntryParity:
 
     def test_rust_kernel_drops_cross_session_entry_and_matches_oracle(self) -> None:
         # Parity AND the absolute verdict: BOTH sides produce ZERO trades for a
-        # last-bar signal followed by the next session's open (pre-fix both
-        # produced one trade entering at 119.00 = the overnight gap at zero
-        # slippage — the absolute pin catches a lock-step regression).
+        # last-bar signal whose fill candidate is the next session's open (the
+        # session-bounded slide law's cross-session DROP, baked into
+        # arm_source at map build — the absolute pin catches a lock-step
+        # regression toward the overnight-gap fill).
         bars, bits = self._two_session_feed()
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         got = sim.simulate_masks([1], direction=Side.BUY)
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                1,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        expected = [_oracle(bars, bits, 1, direction=Side.BUY)]
         assert got == expected
         assert got == [[]]  # absolute: no overnight trade on EITHER side
 
     def test_rust_and_fallback_agree_on_cross_session_drop(self) -> None:
         # The forced pure-Python fallback path takes the same drop decision.
         bars, bits = self._two_session_feed()
-        rust = ResidentTradeSim(bars, bits, tf_minutes=1)
+        rust = _sim(bars, bits)
         assert rust._rust is not None  # the wheel is built in CI — a real Rust run
-        fallback = ResidentTradeSim(bars, bits, tf_minutes=1)
+        fallback = _sim(bars, bits)
         fallback._rust = None
         assert rust.simulate_masks([1], direction=Side.BUY) == fallback.simulate_masks(
             [1], direction=Side.BUY
@@ -534,20 +836,9 @@ class TestCrossSessionPendingEntryParity:
         signals = [True, True, False, False]
         raw = build_bar_bits(bars)
         bits = [(b | 1) if sig else (b & ~1) for b, sig in zip(raw, signals, strict=True)]
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         got = sim.simulate_masks([1], direction=Side.BUY)
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                1,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        expected = [_oracle(bars, bits, 1, direction=Side.BUY)]
         assert got == expected
         assert len(got[0]) == 1
         assert got[0][0].entry_ts == bars[2].timestamp  # 09:16 day-2, NOT 09:15
@@ -575,12 +866,12 @@ def _call_fallback_events(logs: list[EventDict]) -> list[EventDict]:
 class TestRustActiveProperty:
     def test_true_when_the_wheel_serves_the_window(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         assert sim.rust_active is True  # the wheel is built in CI
 
     def test_false_on_the_forced_fallback(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         sim._rust = None
         assert sim.rust_active is False
 
@@ -591,12 +882,28 @@ class TestConstructionEnvelopeGuards:
         monkeypatch.setitem(sys.modules, "fno_math", fake)
         bars = _feed()
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+            sim = _sim(bars, build_bar_bits(bars))
         assert sim.rust_active is False
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["reason"] == "wheel_missing"
         assert events[0]["n_bars"] == len(bars)
+        assert events[0]["n_exec_bars"] == len(bars)  # tf=1: same stream
+
+    def test_wheel_import_error_at_construction_also_wheel_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The ImportError posture (module import itself fails — the
+        # ``sys.modules[name] = None`` idiom) lands in the SAME except arm.
+        monkeypatch.setitem(sys.modules, "fno_math", None)
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        with capture_logs() as logs:
+            sim = _sim(bars, bits)
+        assert sim.rust_active is False
+        assert [e["reason"] for e in _fallback_events(logs)] == ["wheel_missing"]
+        got = sim.simulate_masks([0], direction=Side.BUY)
+        assert got == [_oracle(bars, bits, 0, direction=Side.BUY)]
 
     def test_bar_bits_wide_window_served_by_u128_kernel(self) -> None:
         # DEC-TRADE-SIM-U128-KERNEL-001: a bar_bits value in (U64_MASK,
@@ -608,25 +915,13 @@ class TestConstructionEnvelopeGuards:
         bits[0] |= 1 << 100  # inside the u128 headroom (MAX_VOCAB_BITS = 128)
         masks = [0, 1, 1 << 100]
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+            sim = _sim(bars, bits)
         assert sim.rust_active is True
         assert _fallback_events(logs) == []
         with capture_logs() as call_logs:
             got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
         assert _call_fallback_events(call_logs) == []  # the wide kernel served it
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in masks
-        ]
+        expected = [_oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks]
         assert got == expected
         # Anti-vacuity: the wide mask actually produced a trade through Rust.
         assert len(got[2]) >= 1
@@ -637,25 +932,13 @@ class TestConstructionEnvelopeGuards:
         bits[0] |= 1 << 130  # beyond even the u128 headroom (MAX_VOCAB_BITS = 128)
         masks = [0, 1]
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+            sim = _sim(bars, bits)
         assert sim.rust_active is False
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["reason"] == "bar_bits_beyond_u128"
         got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in masks
-        ]
+        expected = [_oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks]
         assert got == expected
 
     def test_bar_bits_wide_window_on_stale_wheel_falls_back_wheel_missing(
@@ -674,24 +957,13 @@ class TestConstructionEnvelopeGuards:
         bits = build_bar_bits(bars)
         bits[0] |= 1 << 100
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+            sim = _sim(bars, bits)
         assert sim.rust_active is False
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["reason"] == "wheel_missing"
         got = sim.simulate_masks([1 << 100], direction=Side.BUY)
-        assert got == [
-            _oracle(
-                bars,
-                bits,
-                1 << 100,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        assert got == [_oracle(bars, bits, 1 << 100, direction=Side.BUY)]
 
     @pytest.mark.parametrize("rupees", ["200000000000000000", "-200000000000000000"])
     def test_price_out_of_envelope_falls_back_and_matches_oracle(self, rupees: str) -> None:
@@ -699,11 +971,8 @@ class TestConstructionEnvelopeGuards:
 
         2·10¹⁷ rupees = 2·10¹⁹ paisa > the #1090 ceiling (≈1.15·10¹⁸) — the
         kernel ctor would raise ValueError; the wrapper routes to the oracle
-        (which simulates arbitrary-precision ints) instead, both signs.
-        Hand-crafted bar_bits: Stage-1A's own kernels cannot digest such a
-        price either (its VWAP paisa crosses an i64 FFI edge upstream), so in
-        production the corruption fails EARLIER — this pins the COMMON seam's
-        contract for direct callers of the wrapper.
+        (which simulates arbitrary-precision ints) instead, both signs. The
+        guard scans the EXECUTION price columns (the kernel's walk domain).
         """
         big = Decimal(rupees)
         bars = [*_feed()]
@@ -718,24 +987,13 @@ class TestConstructionEnvelopeGuards:
         )
         bits = [1 if i % 2 == 0 else 0 for i in range(len(bars))]
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+            sim = _sim(bars, bits)
         assert sim.rust_active is False
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["reason"] == "price_out_of_envelope"
         got = sim.simulate_masks([0], direction=Side.BUY)
-        assert got == [
-            _oracle(
-                bars,
-                bits,
-                0,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        assert got == [_oracle(bars, bits, 0, direction=Side.BUY)]
 
     @pytest.mark.parametrize("column", ["high", "low"])
     def test_single_column_corruption_falls_back_and_matches_oracle(self, column: str) -> None:
@@ -762,24 +1020,13 @@ class TestConstructionEnvelopeGuards:
         )
         bits = [1 if i % 2 == 0 else 0 for i in range(len(bars))]
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+            sim = _sim(bars, bits)
         assert sim.rust_active is False
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["reason"] == "price_out_of_envelope"
         got = sim.simulate_masks([1], direction=Side.BUY)
-        assert got == [
-            _oracle(
-                bars,
-                bits,
-                1,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        assert got == [_oracle(bars, bits, 1, direction=Side.BUY)]
 
     def test_negative_bar_bits_falls_back_and_matches_oracle(self) -> None:
         """A NEGATIVE bar_bits value (API misuse only) routes to the oracle too.
@@ -796,25 +1043,143 @@ class TestConstructionEnvelopeGuards:
         bits[0] = -1
         masks = [0, 1]
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+            sim = _sim(bars, bits)
         assert sim.rust_active is False
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["reason"] == "bar_bits_beyond_u128"
         got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
         assert got == [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in masks
+            _oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks
         ]
+
+
+# ── the exec-grid constructor probe (DEC-FILL-EXEC-GRID-1M-001) ──────────────
+
+
+class TestExecGridKernelStale:
+    """A wheel whose kernel class PREDATES the exec-grid constructor is demoted.
+
+    :func:`_kernel_exec_grid_current` inspects the CLASS signature for the
+    ``arm_source`` parameter BEFORE construction — a stale wheel's window
+    serves the bit-exact dual-feed Python oracle (warn-once
+    ``exec_grid_kernel_stale``), never a constructor ``TypeError`` and never
+    a wrong-law (retired decision-TF) kernel answer.
+    """
+
+    def test_probe_matrix(self) -> None:
+        import fno_math as real_fno_math
+
+        class _CurrentShape:
+            def __init__(
+                self,
+                exec_open: list[int],
+                exec_high: list[int],
+                exec_low: list[int],
+                exec_close: list[int],
+                exec_is_forced: list[bool],
+                exec_session_idx: list[int],
+                arm_source: list[int],
+                bar_bits: list[int],
+            ) -> None:
+                raise NotImplementedError  # signature probe only — never invoked
+
+        class _StarArgs:
+            def __init__(self, *args: object) -> None:
+                raise NotImplementedError
+
+        assert _kernel_exec_grid_current(real_fno_math.ResidentSweepSim) is True
+        assert _kernel_exec_grid_current(real_fno_math.ResidentSweepSimU128) is True
+        assert _kernel_exec_grid_current(_CurrentShape) is True
+        assert _kernel_exec_grid_current(_RetiredSingleFeedKernel) is False
+        # No NAMED arm_source parameter → conservative STALE (the probe never
+        # guesses a *args ctor implements the new law).
+        assert _kernel_exec_grid_current(_StarArgs) is False
+        # Uninspectable classes → conservative STALE: ``inspect.signature``
+        # raises ValueError for the builtin ``type`` and TypeError for a
+        # non-callable int — the oracle serves either way.
+        assert _kernel_exec_grid_current(type) is False
+        assert _kernel_exec_grid_current(42) is False
+
+    def test_stale_constructor_wheel_demotes_whole_object_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = ModuleType("fno_math")
+        fake.ResidentSweepSim = _RetiredSingleFeedKernel  # type: ignore[attr-defined]
+        fake.ResidentSweepSimU128 = _RetiredSingleFeedKernel  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "fno_math", fake)
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        with capture_logs() as logs:
+            sim = _sim(bars, bits)  # the fake ctor would AssertionError if invoked
+        assert sim.rust_active is False
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "exec_grid_kernel_stale"
+        assert events[0]["n_exec_bars"] == len(bars)
+        masks = [0, 1]
+        got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        assert got == [
+            _oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks
+        ]
+
+    def test_stale_wide_class_demotes_the_wide_window_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A WIDE window selects ResidentSweepSimU128 — a stale u128 class is
+        # probed identically (the same pre-construction demotion).
+        fake = ModuleType("fno_math")
+        fake.ResidentSweepSim = _RetiredSingleFeedKernel  # type: ignore[attr-defined]
+        fake.ResidentSweepSimU128 = _RetiredSingleFeedKernel  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "fno_math", fake)
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[0] |= 1 << 100
+        with capture_logs() as logs:
+            sim = _sim(bars, bits)
+        assert sim.rust_active is False
+        assert [e["reason"] for e in _fallback_events(logs)] == ["exec_grid_kernel_stale"]
+        got = sim.simulate_masks([1 << 100], direction=Side.BUY)
+        assert got == [_oracle(bars, bits, 1 << 100, direction=Side.BUY)]
+
+    def test_uninspectable_kernel_class_reads_stale_conservatively(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``inspect.signature(type)`` raises ValueError — the conservative
+        # STALE arm demotes the window (the oracle serves it correctly).
+        fake = ModuleType("fno_math")
+        fake.ResidentSweepSim = type  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "fno_math", fake)
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        with capture_logs() as logs:
+            sim = _sim(bars, bits)
+        assert sim.rust_active is False
+        assert [e["reason"] for e in _fallback_events(logs)] == ["exec_grid_kernel_stale"]
+
+    def test_wide_promotion_on_stale_exec_grid_sibling_is_wheel_missing_u128(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The u64 kernel was built from the REAL wheel; the promotion then
+        # sees a module whose ResidentSweepSimU128 predates the exec-grid
+        # constructor — an old-constructor sibling cannot take arm_source, so
+        # the promotion memoises unavailability and the wide batch serves the
+        # oracle (warn-once wheel_missing_u128).
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = _sim(bars, bits)
+        assert sim.rust_active is True
+        fake = ModuleType("fno_math")
+        fake.ResidentSweepSimU128 = _RetiredSingleFeedKernel  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "fno_math", fake)
+        wide = [(1 << 64) | 1]
+        with capture_logs() as logs:
+            got = sim.simulate_masks(wide, direction=Side.BUY)
+        assert [e["reason"] for e in _call_fallback_events(logs)] == ["wheel_missing_u128"]
+        assert sim._wide_unavailable is True  # the stale verdict is memoised
+        assert sim._rust_wide is None
+        assert got == [_oracle(bars, bits, (1 << 64) | 1, direction=Side.BUY)]
+        assert sim.rust_active is True  # u64 batches stay Rust-served
 
 
 class TestEnvelopeGuardSeamPerColumn:
@@ -899,7 +1264,7 @@ class TestPerCallEnvelopeGuards:
     def test_mask_beyond_u128_falls_back_for_that_call_only(self) -> None:
         bars = _feed()
         bits = build_bar_bits(bars)  # u64-clean (bits 0-59)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         assert sim.rust_active is True
         masks = [(1 << 128) | 1, 1]  # a beyond-u128 mask + a real firing mask
         with capture_logs() as logs:
@@ -908,19 +1273,7 @@ class TestPerCallEnvelopeGuards:
         assert len(events) == 1
         assert events[0]["reason"] == "mask_beyond_u128"
         assert events[0]["n_masks"] == 2
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in masks
-        ]
+        expected = [_oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks]
         assert got == expected
         # Per-CALL, not sticky: the kernel stays active and a clean follow-up
         # call crosses the FFI boundary again (no new fallback warning).
@@ -941,7 +1294,7 @@ class TestPerCallEnvelopeGuards:
         """
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         assert sim.rust_active is True
         masks = [-1, 1]
         with capture_logs() as logs:
@@ -950,17 +1303,7 @@ class TestPerCallEnvelopeGuards:
         assert len(events) == 1
         assert events[0]["reason"] == "mask_beyond_u128"
         assert got == [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in masks
+            _oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks
         ]
         # The kernel stays active for clean follow-up calls.
         assert sim.rust_active is True
@@ -976,7 +1319,7 @@ class TestPerCallEnvelopeGuards:
         """
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         beyond_masks = [(1 << 128) | 1]
         with capture_logs() as logs1:
             first = sim.simulate_masks(beyond_masks, direction=Side.BUY, stop_loss_paisa=300)
@@ -984,18 +1327,7 @@ class TestPerCallEnvelopeGuards:
         with capture_logs() as logs2:
             second = sim.simulate_masks(beyond_masks, direction=Side.BUY, stop_loss_paisa=300)
         assert _call_fallback_events(logs2) == []  # memoised — no re-warn
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                (1 << 128) | 1,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        expected = [_oracle(bars, bits, (1 << 128) | 1, direction=Side.BUY, stop_loss_paisa=300)]
         assert first == expected  # the fallback STILL served both calls,
         assert second == expected  # bit-exactly — only the warning is deduped
 
@@ -1003,7 +1335,7 @@ class TestPerCallEnvelopeGuards:
         """The warn-once memo is per REASON — a different cause is still loud."""
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         with capture_logs() as logs1:
             sim.simulate_masks([(1 << 130) | 1], direction=Side.BUY)
         events1 = _call_fallback_events(logs1)
@@ -1023,7 +1355,7 @@ class TestPerCallEnvelopeGuards:
     def test_oversized_distance_falls_back_and_matches_oracle(self, leg: str, reason: str) -> None:
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         distance = _MAX_KERNEL_PRICE_PAISA + 1  # kernel would ValueError; oracle simulates
         sl = distance if leg == "stop_loss_paisa" else None
         tp = distance if leg == "take_profit_paisa" else None
@@ -1040,10 +1372,8 @@ class TestPerCallEnvelopeGuards:
                 bits,
                 1,
                 direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=distance if leg == "stop_loss_paisa" else None,
-                take_profit_paisa=distance if leg == "take_profit_paisa" else None,
-                policy=FillPolicy(),
+                stop_loss_paisa=sl,
+                take_profit_paisa=tp,
             )
         ]
 
@@ -1051,7 +1381,7 @@ class TestPerCallEnvelopeGuards:
         """EXACTLY the ceiling is kernel-valid (the guard is strict-greater)."""
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         with capture_logs() as logs:
             got = sim.simulate_masks(
                 [1],
@@ -1066,10 +1396,8 @@ class TestPerCallEnvelopeGuards:
                 bits,
                 1,
                 direction=Side.BUY,
-                tf_minutes=1,
                 stop_loss_paisa=_MAX_KERNEL_PRICE_PAISA,
                 take_profit_paisa=_MAX_KERNEL_PRICE_PAISA,
-                policy=FillPolicy(),
             )
         ]
 
@@ -1086,7 +1414,7 @@ class TestPerCallEnvelopeGuards:
         never change the error behaviour (DEC-SWEEP-RUST-TRADESIM-WIRE-001).
         """
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         if forced_fallback:
             sim._rust = None
         sl = value if leg == "stop_loss_paisa" else None
@@ -1109,39 +1437,27 @@ class TestWideMaskPromotion:
     most once per instance, one ``wide_kernel_promoted`` INFO) and the WHOLE
     batch routes wide — the old mixed-batch whole-chunk oracle degrade is
     dissolved. u64-fit batches keep the resident u64 kernel byte-identically;
-    only a stale wheel lacking the class falls back (warn-once
-    ``wheel_missing_u128``).
+    only a stale wheel lacking the class (or carrying a pre-exec-grid class)
+    falls back (warn-once ``wheel_missing_u128``).
     """
 
     def test_wide_mask_promotes_and_matches_oracle(self) -> None:
         bars = _feed()
         bits = build_bar_bits(bars)  # u64-fit → the u64 kernel is resident
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         assert sim.rust_active is True
         masks = [(1 << 64) | 1, 1]  # a wide mask + a u64-fit firing mask
         with capture_logs() as logs:
             got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
         assert _call_fallback_events(logs) == []  # NOT a fallback any more
         assert len(_promoted_events(logs)) == 1
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in masks
-        ]
+        expected = [_oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks]
         assert got == expected
         assert sim.rust_active is True  # the u64 kernel stays resident
 
     def test_wide_kernel_built_once_and_memoised(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         wide = [(1 << 64) | 1]
         with capture_logs() as logs1:
             first = sim.simulate_masks(wide, direction=Side.BUY)
@@ -1161,37 +1477,27 @@ class TestWideMaskPromotion:
         """
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         sim.simulate_masks([(1 << 64) | 1], direction=Side.BUY)  # trigger promotion
         real_wide = sim._rust_wide
         assert real_wide is not None
         calls: list[list[int]] = []
 
         class _RecordingWide:
-            def simulate_masks(
+            def simulate_masks_with_exit_counts(
                 self, masks: list[int], *args: object
-            ) -> list[list[tuple[int, int, int, int, int, int]]]:
+            ) -> _CountedBatch:
                 calls.append(list(masks))
-                result = real_wide.simulate_masks(masks, *args)  # type: ignore[attr-defined]
-                return cast("list[list[tuple[int, int, int, int, int, int]]]", result)
+                result = real_wide.simulate_masks_with_exit_counts(  # type: ignore[attr-defined]
+                    masks, *args
+                )
+                return cast("_CountedBatch", result)
 
         sim._rust_wide = _RecordingWide()
         mixed = [1, (1 << 64) | 1]
         got = sim.simulate_masks(mixed, direction=Side.BUY)
         assert calls == [mixed]  # the WHOLE batch went wide, positionally intact
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in mixed
-        ]
+        expected = [_oracle(bars, bits, m, direction=Side.BUY) for m in mixed]
         assert got == expected
         calls.clear()
         u64_only = sim.simulate_masks([1], direction=Side.BUY)
@@ -1202,30 +1508,19 @@ class TestWideMaskPromotion:
         """mask == U64_MASK stays on the u64 kernel (promotion is strictly greater)."""
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         with capture_logs() as logs:
             got = sim.simulate_masks([U64_MASK], direction=Side.BUY)
         assert _promoted_events(logs) == []
         assert _call_fallback_events(logs) == []
         assert sim._rust_wide is None
-        assert got == [
-            _oracle(
-                bars,
-                bits,
-                U64_MASK,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        assert got == [_oracle(bars, bits, U64_MASK, direction=Side.BUY)]
 
     def test_u64_mask_plus_one_promotes_and_u128_mask_is_served(self) -> None:
         """Boundary inclusivity: U64_MASK+1 promotes; _U128_MASK crosses the FFI."""
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         with capture_logs() as logs:
             got = sim.simulate_masks([U64_MASK + 1, _U128_MASK], direction=Side.BUY)
         assert len(_promoted_events(logs)) == 1
@@ -1245,7 +1540,7 @@ class TestWideMaskPromotion:
         bars = _feed()
         bits = build_bar_bits(bars)
         bits[0] |= 1 << 100
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         assert sim.rust_active is True
         masks = [1, (1 << 100) | 1]
         with capture_logs() as logs:
@@ -1253,19 +1548,7 @@ class TestWideMaskPromotion:
         assert _promoted_events(logs) == []
         assert _call_fallback_events(logs) == []
         assert sim._rust_wide is None
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in masks
-        ]
+        expected = [_oracle(bars, bits, m, direction=Side.BUY) for m in masks]
         assert got == expected
 
     def test_wide_mask_on_stale_wheel_warns_once_and_uses_oracle(
@@ -1283,7 +1566,7 @@ class TestWideMaskPromotion:
 
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         assert sim.rust_active is True
         fake = ModuleType("fno_math")
         fake.ResidentSweepSim = real_fno_math.ResidentSweepSim  # type: ignore[attr-defined]
@@ -1295,19 +1578,7 @@ class TestWideMaskPromotion:
         assert len(events) == 1
         assert events[0]["reason"] == "wheel_missing_u128"
         assert "offending_value" not in events[0]  # not a width reason
-        expected = [
-            _oracle(
-                bars,
-                bits,
-                m,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=300,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-            for m in wide
-        ]
+        expected = [_oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in wide]
         assert got == expected
         with capture_logs() as logs2:
             again = sim.simulate_masks(wide, direction=Side.BUY, stop_loss_paisa=300)
@@ -1323,25 +1594,14 @@ class TestWideMaskPromotion:
         """The ImportError arm of the promotion (module vanished) → same reason."""
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         assert sim.rust_active is True
         monkeypatch.setitem(sys.modules, "fno_math", None)  # import → ImportError
         with capture_logs() as logs:
             got = sim.simulate_masks([(1 << 64) | 1], direction=Side.BUY)
         events = _call_fallback_events(logs)
         assert [e["reason"] for e in events] == ["wheel_missing_u128"]
-        assert got == [
-            _oracle(
-                bars,
-                bits,
-                (1 << 64) | 1,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        assert got == [_oracle(bars, bits, (1 << 64) | 1, direction=Side.BUY)]
 
 
 # ── width-fallback WARNINGs NAME the offending word (DEC-SWEEP-RUST-WIRE-001 p1) ─
@@ -1362,7 +1622,7 @@ class TestWidthOffenderNamedInWarning:
         bits[1] |= 1 << 130  # first offender positionally (beyond u128)
         bits[3] |= 1 << 128  # a second offender — must NOT be the one named
         with capture_logs() as logs:
-            ResidentTradeSim(bars, bits, tf_minutes=1)
+            _sim(bars, bits)
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["reason"] == "bar_bits_beyond_u128"
@@ -1374,7 +1634,7 @@ class TestWidthOffenderNamedInWarning:
         bits = build_bar_bits(bars)
         bits[0] = -1
         with capture_logs() as logs:
-            ResidentTradeSim(bars, bits, tf_minutes=1)
+            _sim(bars, bits)
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["offending_value"] == "-0x1"
@@ -1387,7 +1647,7 @@ class TestWidthOffenderNamedInWarning:
         monkeypatch.setitem(sys.modules, "fno_math", fake)
         bars = _feed()
         with capture_logs() as logs:
-            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+            _sim(bars, build_bar_bits(bars))
         events = _fallback_events(logs)
         assert len(events) == 1
         assert events[0]["reason"] == "wheel_missing"
@@ -1396,7 +1656,7 @@ class TestWidthOffenderNamedInWarning:
 
     def test_call_oversize_mask_names_value_and_bit(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         assert sim.rust_active is True
         with capture_logs() as logs:
             sim.simulate_masks([1, (1 << 128) | 1], direction=Side.BUY)
@@ -1408,7 +1668,7 @@ class TestWidthOffenderNamedInWarning:
 
     def test_call_negative_mask_names_value_with_none_bit(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         assert sim.rust_active is True
         with capture_logs() as logs:
             sim.simulate_masks([-7, 1], direction=Side.BUY)
@@ -1419,7 +1679,7 @@ class TestWidthOffenderNamedInWarning:
 
     def test_call_non_width_reason_carries_no_offender_fields(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         assert sim.rust_active is True
         with capture_logs() as logs:
             sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=(2**63 - 1) // 8 + 1)
@@ -1434,15 +1694,15 @@ class TestWidthOffenderNamedInWarning:
 
 
 class TestSimulateMasksWithExitIndices:
-    """The pair-shaped batch spine + the double certification."""
+    """The pair-shaped batch spine + the double certification (1m indices)."""
 
-    def _sim(self) -> ResidentTradeSim:
+    def _build_sim(self) -> ResidentTradeSim:
         bars = _feed()
-        return ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        return _sim(bars, build_bar_bits(bars))
 
     def test_rust_arm_indices_match_the_trade_exit_timestamps(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         assert sim.rust_active is True
         pairs = sim.simulate_masks_with_exit_indices(
             [0], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
@@ -1456,10 +1716,27 @@ class TestSimulateMasksWithExitIndices:
             assert bars[idx].timestamp == trade.exit_ts
         assert exit_indices == sorted(set(exit_indices))  # strictly increasing
 
+    def test_exit_indices_are_execution_stream_indices_on_a_coarse_tf(self) -> None:
+        # Design §2.6: every index/holding is a 1-MINUTE quantity — the exit
+        # indices resolve into the EXECUTION stream (which is three times the
+        # decision stream's length here), never the decision stream.
+        exec_bars = _coarse_1m_feed()
+        decision = _aggregate_decision(exec_bars, 3)
+        sim = ResidentTradeSim(decision, [1, 0, 1, 0, 0], tf_minutes=3, exec_bars_1m=exec_bars)
+        assert sim.rust_active is True
+        pairs = sim.simulate_masks_with_exit_indices([1], direction=Side.BUY, stop_loss_paisa=500)
+        trades, exit_indices = pairs[0]
+        assert trades
+        assert exit_indices is not None
+        for trade, idx in zip(trades, exit_indices, strict=True):
+            assert exec_bars[idx].timestamp == trade.exit_ts
+        # A 1m index past the decision length — provably EXECUTION-domain.
+        assert max(exit_indices) >= len(decision)
+
     def test_python_fallback_arm_emits_identical_pairs(self) -> None:
         bars = _feed()
-        wired = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
-        fallback = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        wired = _sim(bars, build_bar_bits(bars))
+        fallback = _sim(bars, build_bar_bits(bars))
         fallback._rust = None  # pyright: ignore[reportPrivateUsage] — the forcing seam
         assert wired.simulate_masks_with_exit_indices(
             [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
@@ -1468,7 +1745,7 @@ class TestSimulateMasksWithExitIndices:
         )
 
     def test_simulate_masks_is_the_thin_delegate(self) -> None:
-        sim = self._sim()
+        sim = self._build_sim()
         pairs = sim.simulate_masks_with_exit_indices(
             [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
         )
@@ -1477,12 +1754,12 @@ class TestSimulateMasksWithExitIndices:
         ) == [trades for trades, _ in pairs]
 
     def test_uncertified_window_withholds_indices_on_both_arms(self) -> None:
-        """A duplicate timestamp fails the construction certificate — trades
-        still simulate, indices are None (the dict path serves downstream)."""
+        """A duplicate EXECUTION timestamp fails the construction certificate —
+        trades still simulate, indices are None (the dict path serves)."""
         bars = [*_feed(), _feed()[-1]]  # duplicate final timestamp
         bar_bits = [*build_bar_bits(_feed()), 0]
         for force_python in (False, True):
-            sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+            sim = _sim(bars, bar_bits)
             if force_python:
                 sim._rust = None  # pyright: ignore[reportPrivateUsage]
             pairs = sim.simulate_masks_with_exit_indices(
@@ -1495,15 +1772,21 @@ class TestSimulateMasksWithExitIndices:
     def test_non_monotonic_kernel_stream_is_refused_with_one_warning(self) -> None:
         """A kernel returning out-of-order records (an ordering regression)
         gets its indices withheld LOUDLY — once per instance."""
-        sim = self._sim()
+        sim = self._build_sim()
 
         class _ShuffledKernel:
             """Returns two well-formed records with REVERSED exit order."""
 
-            def simulate_masks(self, *args: object) -> list[list[tuple[int, ...]]]:
+            def simulate_masks_with_exit_counts(
+                self, *args: object
+            ) -> list[tuple[list[tuple[int, ...]], tuple[int, ...]]]:
                 record_late = (100, 100, 0, 2, 2, 3)
                 record_early = (50, 50, 0, 1, 1, 1)
-                return [[record_late, record_early], [record_early, record_late]]
+                counts = (2, 0, 0, 0, 0, 0)
+                return [
+                    ([record_late, record_early], counts),
+                    ([record_early, record_late], counts),
+                ]
 
         sim._rust = _ShuffledKernel()  # pyright: ignore[reportPrivateUsage]
         with capture_logs() as logs:
@@ -1525,15 +1808,17 @@ class TestSimulateMasksWithExitIndices:
         duplicate-record bug emitting the same exit index twice must be
         refused exactly like a reversed stream (the ``<=`` → ``<`` hand-mutant
         killer)."""
-        sim = self._sim()
+        sim = self._build_sim()
 
         class _DuplicateKernel:
             """Returns two well-formed records sharing ONE exit index."""
 
-            def simulate_masks(self, *args: object) -> list[list[tuple[int, ...]]]:
+            def simulate_masks_with_exit_counts(
+                self, *args: object
+            ) -> list[tuple[list[tuple[int, ...]], tuple[int, ...]]]:
                 record_a = (50, 50, 0, 1, 0, 1)
                 record_b = (60, 60, 0, 1, 1, 1)  # duplicate exit_idx 1
-                return [[record_a, record_b]]
+                return [([record_a, record_b], (2, 0, 0, 0, 0, 0))]
 
         sim._rust = _DuplicateKernel()  # pyright: ignore[reportPrivateUsage]
         with capture_logs() as logs:
@@ -1543,6 +1828,136 @@ class TestSimulateMasksWithExitIndices:
         events = [e for e in logs if e["event"] == "rust_trade_sim.exit_indices_uncertified"]
         assert len(events) == 1
         assert events[0]["reason"] == "exit_indices_not_monotonic"
+
+
+# ── exit-reason counters (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ───────
+
+
+class TestSimulateMasksWithExitCounts:
+    """The counted triple spine: kernel counters ≡ walker counters, validated."""
+
+    def _sim(self) -> ResidentTradeSim:
+        bars = _feed()
+        return ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
+
+    def test_kernel_counts_match_the_python_walker(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars)
+        assert sim.rust_active is True
+        masks = [0, 1]
+        triples = sim.simulate_masks_with_exit_counts(
+            masks, direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+        for mask, (trades, exit_indices, counts) in zip(masks, triples, strict=True):
+            py_trades, py_idx, py_counts = simulate_trades_with_exit_counts(
+                bars,
+                mask_to_entry_signals(bits, mask),
+                direction=Side.BUY,
+                tf_minutes=1,
+                exec_bars_1m=bars,
+                stop_loss_paisa=200,
+                take_profit_paisa=300,
+            )
+            assert trades == py_trades
+            assert exit_indices == py_idx
+            assert counts == py_counts
+            assert sum(counts) == len(trades)
+
+    def test_python_fallback_arm_emits_identical_triples(self) -> None:
+        bars = _feed()
+        wired = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
+        fallback = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
+        fallback._rust = None  # pyright: ignore[reportPrivateUsage] — the forcing seam
+        assert wired.simulate_masks_with_exit_counts(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        ) == fallback.simulate_masks_with_exit_counts(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+
+    def test_exit_indices_delegate_drops_the_counts(self) -> None:
+        sim = self._sim()
+        triples = sim.simulate_masks_with_exit_counts(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+        assert sim.simulate_masks_with_exit_indices(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        ) == [(trades, idx) for trades, idx, _counts in triples]
+
+    def test_u128_kernel_counts_match_the_python_walker(self) -> None:
+        """The wide (u128-resident) kernel accumulates identically."""
+        bars = _feed()
+        bits = [b | (1 << 100) for b in build_bar_bits(bars)]
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars)
+        assert sim.rust_active is True
+        mask = (1 << 100) | 1
+        with capture_logs() as logs:
+            triples = sim.simulate_masks_with_exit_counts(
+                [mask], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+            )
+        assert _call_fallback_events(logs) == []  # genuinely kernel-served
+        py_trades, py_idx, py_counts = simulate_trades_with_exit_counts(
+            bars,
+            mask_to_entry_signals(bits, mask),
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            stop_loss_paisa=200,
+            take_profit_paisa=300,
+        )
+        assert triples == [(py_trades, py_idx, py_counts)]
+
+    def test_stale_wheel_without_counted_twin_serves_the_oracle_warn_once(self) -> None:
+        """A kernel object lacking ``simulate_masks_with_exit_counts`` (a
+        hand-imported stale wheel) serves the WHOLE call through the Python
+        oracle — triples identical, one ``wheel_missing_exit_counts`` WARNING
+        per instance, silent on repeat."""
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
+
+        class _StaleKernel:
+            """Only the PRE-counter surface — no counted twin."""
+
+            def simulate_masks(self, *args: object) -> list[list[tuple[int, ...]]]:
+                raise AssertionError("the stale surface must never be called")
+
+        sim._rust = _StaleKernel()  # pyright: ignore[reportPrivateUsage]
+        oracle = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
+        oracle._rust = None  # pyright: ignore[reportPrivateUsage]
+        with capture_logs() as logs:
+            got = sim.simulate_masks_with_exit_counts(
+                [0, 1], direction=Side.BUY, stop_loss_paisa=200
+            )
+        events = _call_fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "wheel_missing_exit_counts"
+        assert got == oracle.simulate_masks_with_exit_counts(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200
+        )
+        # Repeat call: already warned — silent oracle service.
+        with capture_logs() as logs2:
+            sim.simulate_masks_with_exit_counts([0], direction=Side.BUY)
+        assert _call_fallback_events(logs2) == []
+
+    def test_kernel_count_sum_mismatch_raises_value_error(self) -> None:
+        """A kernel whose counters do not sum to its trade count is a
+        marshalling bug — refused with ``ValueError`` (rides the sweep's
+        chunk-failure ladder), never a silently wrong sl_hit_rate."""
+        sim = self._sim()
+
+        class _MiscountingKernel:
+            def simulate_masks_with_exit_counts(
+                self, *args: object
+            ) -> list[tuple[list[tuple[int, ...]], tuple[int, ...]]]:
+                record = (50, 50, 0, 1, 0, 1)
+                return [([record], (2, 0, 0, 0, 0, 0))]  # sum 2 != 1 trade
+
+        sim._rust = _MiscountingKernel()  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(ValueError, match="exit_counts sum 2 != trade count 1"):
+            sim.simulate_masks_with_exit_counts([0], direction=Side.BUY)
+
+    def test_empty_masks_returns_empty(self) -> None:
+        assert self._sim().simulate_masks_with_exit_counts([], direction=Side.BUY) == []
 
 
 # ── reference-stamper seam (per-module 100% gate; DEC-VIX-STAMP-WIRE-001) ────
@@ -1578,20 +1993,20 @@ class TestReferenceStamperSeam:
 
     def test_reference_stamper_property_default_is_none(self) -> None:
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = _sim(bars, build_bar_bits(bars))
         assert sim.reference_stamper is None
 
     def test_reference_stamper_property_returns_bound_stamper(self) -> None:
         bars = _feed()
         stamper = _vix_stamper_for(bars)
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, reference_stamper=stamper)
+        sim = _sim(bars, build_bar_bits(bars), reference_stamper=stamper)
         assert sim.reference_stamper is stamper
 
     def test_stamped_trades_resolve_vix_at_the_conversion_seam(self) -> None:
         bars = _feed()
         stamper = _vix_stamper_for(bars)
         bar_bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1, reference_stamper=stamper)
+        sim = _sim(bars, bar_bits, reference_stamper=stamper)
         (trades,) = sim.simulate_masks([0], direction=Side.BUY)
         assert trades
         for trade in trades:
@@ -1603,14 +2018,8 @@ class TestReferenceStamperSeam:
 
 # ────────────────────────────────────────────────────────────────────────
 # PriceColumns + derive_price_columns + the injection/memo seams
-# (DEC-STAGE1A-RUST-BATCH-001 — the W2 rider)
+# (DEC-STAGE1A-RUST-BATCH-001 — the W2 rider, on the EXECUTION stream)
 # ────────────────────────────────────────────────────────────────────────
-
-from brutex.engine import rust_trade_sim as _rts_module  # noqa: E402
-from brutex.engine.rust_trade_sim import (  # noqa: E402
-    PriceColumns,
-    derive_price_columns,
-)
 
 
 class TestPriceColumns:
@@ -1650,10 +2059,8 @@ class TestPriceColumns:
     def test_precomputed_arm_equals_the_derive_arm_bit_for_bit(self) -> None:
         bars = _feed()
         bits = build_bar_bits(bars)
-        derived = ResidentTradeSim(bars, bits, tf_minutes=1)
-        injected = ResidentTradeSim(
-            bars, bits, tf_minutes=1, precomputed_columns=derive_price_columns(bars)
-        )
+        derived = _sim(bars, bits)
+        injected = _sim(bars, bits, precomputed_columns=derive_price_columns(bars))
         # The assembled kernel-input 6-tuples are bit-equal…
         assert (
             derived._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
@@ -1667,12 +2074,45 @@ class TestPriceColumns:
             masks, direction=Side.BUY, stop_loss_paisa=300
         ) == injected.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
 
+    def test_precomputed_columns_cover_the_execution_stream_on_a_coarse_tf(self) -> None:
+        # The W2 seam, rebased onto the EXECUTION stream: the columns derive
+        # from ``exec_bars_1m`` (15 bars), never the decision stream (5).
+        exec_bars = _coarse_1m_feed()
+        decision = _aggregate_decision(exec_bars, 3)
+        bits = [1, 0, 1, 0, 0]
+        injected = ResidentTradeSim(
+            decision,
+            bits,
+            tf_minutes=3,
+            exec_bars_1m=exec_bars,
+            precomputed_columns=derive_price_columns(exec_bars),
+        )
+        plain = ResidentTradeSim(decision, bits, tf_minutes=3, exec_bars_1m=exec_bars)
+        assert injected.simulate_masks(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=500
+        ) == plain.simulate_masks([0, 1], direction=Side.BUY, stop_loss_paisa=500)
+
     def test_length_mismatched_precomputed_columns_are_refused_naming_both(self) -> None:
         bars = _feed()
         bits = build_bar_bits(bars)
         short = derive_price_columns(bars[:-1])
-        with pytest.raises(ValueError, match=r"cover 4 bars != bars length 5"):
-            ResidentTradeSim(bars, bits, tf_minutes=1, precomputed_columns=short)
+        with pytest.raises(ValueError, match=r"cover 4 bars != exec_bars_1m length 5"):
+            _sim(bars, bits, precomputed_columns=short)
+
+    def test_decision_length_columns_are_refused_on_a_coarse_tf(self) -> None:
+        # A holder mistakenly deriving columns from the DECISION stream (the
+        # single-feed-era shape) is refused loudly — the columns must cover
+        # the EXECUTION stream.
+        exec_bars = _coarse_1m_feed()
+        decision = _aggregate_decision(exec_bars, 3)
+        with pytest.raises(ValueError, match=r"cover 5 bars != exec_bars_1m length 15"):
+            ResidentTradeSim(
+                decision,
+                [0] * len(decision),
+                tf_minutes=3,
+                exec_bars_1m=exec_bars,
+                precomputed_columns=derive_price_columns(decision),
+            )
 
     def test_default_none_is_the_flag_independent_byte_path(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1682,9 +2122,9 @@ class TestPriceColumns:
         monkeypatch.delenv("BRUTEX_SWEEP_RUST_STAGE1A", raising=False)
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         monkeypatch.setenv("BRUTEX_SWEEP_RUST_STAGE1A", "1")
-        sim_on = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim_on = _sim(bars, bits)
         assert (
             sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
             == sim_on._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
@@ -1707,7 +2147,7 @@ class TestKernelInputsMemo:
         monkeypatch.setattr(_rts_module, "derive_price_columns", _counting)
         bars = _feed()
         bits = build_bar_bits(bars)  # u64-fit bits
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = _sim(bars, bits)
         assert calls[0] == 1
         # A >64-bit mask promotes the window to the u128 sibling kernel …
         wide_mask = 1 << 100
@@ -1716,18 +2156,7 @@ class TestKernelInputsMemo:
         assert [e for e in logs if e.get("event") == "rust_trade_sim.wide_kernel_promoted"]
         # … WITHOUT a second derivation (the memo handoff).
         assert calls[0] == 1
-        assert got == [
-            _oracle(
-                bars,
-                bits,
-                wide_mask,
-                direction=Side.BUY,
-                tf_minutes=1,
-                stop_loss_paisa=None,
-                take_profit_paisa=None,
-                policy=FillPolicy(),
-            )
-        ]
+        assert got == [_oracle(bars, bits, wide_mask, direction=Side.BUY)]
 
     def test_injected_columns_skip_the_local_derivation_entirely(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1740,7 +2169,7 @@ class TestKernelInputsMemo:
             "derive_price_columns",
             lambda *_a, **_k: pytest.fail("injected columns re-derived"),
         )
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1, precomputed_columns=columns)
+        sim = _sim(bars, bits, precomputed_columns=columns)
         assert sim.rust_active is True
         first = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
         second = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
@@ -1750,13 +2179,14 @@ class TestKernelInputsMemo:
 class TestSessionTailHoleWarn:
     """The mask-independent session-tail-hole WARN (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
 
-    ``_derive_kernel_inputs`` ends with ONE capped sweep naming every
-    NON-final session whose stored bars never reach a forced-exit bar — the
-    exact shape the walker's (A2) ``session_gap`` guard fires on. Once per
-    derivation (never per mask, never inside ``_close`` — the
-    DEC-SWEEP-LOG-VOLUME-GUARD-001 posture), capped at
-    ``_TAIL_HOLE_WARN_CAP`` with ONE suppressed summary past it (the house
-    preopen capped-warn pattern).
+    ``_derive_kernel_inputs`` ends with ONE capped sweep over the 1-MINUTE
+    EXECUTION stream naming every NON-final session whose stored bars never
+    reach a forced-exit bar — the exact shape the walker's (A2)
+    ``session_gap`` guard fires on. Once per derivation (never per mask,
+    never inside ``_close`` — the DEC-SWEEP-LOG-VOLUME-GUARD-001 posture),
+    capped at ``_TAIL_HOLE_WARN_CAP`` with ONE suppressed summary past it
+    (the house preopen capped-warn pattern); a memo HIT RE-EMITS the sweep
+    (main-parity warn frequency).
     """
 
     @staticmethod
@@ -1773,12 +2203,29 @@ class TestSessionTailHoleWarn:
             _next_day_bar(9, 15, "600", "601", "599", "600"),
         ]
         with capture_logs() as logs:
-            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+            _sim(bars, build_bar_bits(bars))
         holes = self._tail_hole_events(logs)
         assert len(holes) == 1
         assert holes[0]["session"] == "2024-01-02"
         assert holes[0]["bars"] == 3
         assert [e for e in logs if e["event"] == "trade_sim.session_tail_hole_suppressed"] == []
+
+    def test_memo_hit_reemits_the_sweep_on_the_wide_promotion(self) -> None:
+        # Main-parity warn frequency: the u128 promotion's memo HIT re-emits
+        # the tail-hole sweep from the memoised columns — the second
+        # derivation warns exactly as a full derivation would.
+        bars = [
+            _bar(11, 10, "100", "101", "99", "100"),
+            _bar(11, 11, "100", "101", "99", "100"),
+            _next_day_bar(9, 15, "600", "601", "599", "600"),
+        ]
+        bits = build_bar_bits(bars)
+        with capture_logs() as logs1:
+            sim = _sim(bars, bits)
+        assert len(self._tail_hole_events(logs1)) == 1
+        with capture_logs() as logs2:
+            sim.simulate_masks([(1 << 64) | 1], direction=Side.BUY)  # promotes
+        assert len(self._tail_hole_events(logs2)) == 1  # the memo-hit RE-EMIT
 
     def test_silent_for_a_healthy_window_and_for_the_final_session(self) -> None:
         # (a) day-1 REACHES its forced-exit bar (15:20) → not a hole; (b) the
@@ -1790,7 +2237,7 @@ class TestSessionTailHoleWarn:
             _next_day_bar(9, 16, "600", "601", "599", "600"),
         ]
         with capture_logs() as logs:
-            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+            _sim(bars, build_bar_bits(bars))
         assert self._tail_hole_events(logs) == []
 
     def test_single_session_window_never_warns(self) -> None:
@@ -1798,7 +2245,7 @@ class TestSessionTailHoleWarn:
         # end-of-window shape end_of_data already names; zero WARNs.
         bars = _feed()
         with capture_logs() as logs:
-            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+            _sim(bars, build_bar_bits(bars))
         assert self._tail_hole_events(logs) == []
 
     def test_cap_20_plus_one_suppressed_summary(self) -> None:
@@ -1898,7 +2345,7 @@ class TestSessionTailHoleWarn:
             "2024-01-02",
         ]
         with capture_logs() as logs:
-            sim = ResidentTradeSim(bars, [0, 0], tf_minutes=1)
+            sim = _sim(bars, [0, 0])
             derived = sim._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
         session_days = derived[5]
         # Container glue only (the W2 memo stores immutable tuples — review

@@ -69,12 +69,28 @@ _EXPECTED_ROLL_SCHEDULE = (_EXPIRY_JUN.toordinal(), _EXPIRY_JUL.toordinal())
 
 #: The frozen full-content bxsnap2 digest of the stitched 600-bar slice —
 #: any ownership-cut / stitch-order / bar-content drift re-keys it.
-_EXPECTED_SNAPSHOT_HASH = "a360405b1465e63d6cdbb0ab6efb37ad192425a916c7b07bc1c2a2acdfa08e01"
+# RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): the fixture was
+# re-crafted to the rankable gap-up shape (see _day_bars), so the stitched
+# slice's bytes — and hence the snapshot hash — moved by design.
+_EXPECTED_SNAPSHOT_HASH = "1a8f36dd8d04452a77a49ba878dd2c473bc6d5418cdabf732348661704c8434e"
 
 #: The frozen run identity of mask 0b101 under the futures context (the
 #: params carry the recorded ``roll_schedule`` — the aliasing kill-shot's
 #: identity surface).
-_EXPECTED_RUN_ID = "f6a08f4cf381544a4eba2c5005b0fc02aef2e11e822f42d082f02ccd8db1b4c9"
+# RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): the params layout
+# now carries the UNCONDITIONAL ``fill_mode: worst_case`` token AND the
+# snapshot moved with the re-crafted fixture — the run identity moved by
+# design (the precise-era digest f6a08f4c…b1b4c9 is permanently unreachable).
+# RE-LOCKED for DEC-FILL-EXEC-GRID-1M-001 (2026-07-18): the ONE preimage
+# change is that ``canonical_trade_params`` now UNCONDITIONALLY emits the
+# additive ``execution_grid: "1m_next_bar"`` key into the canonical params
+# dict (the anti-aliasing token vs PR-A run_ids), so the blake3 run-identity
+# digest moved by design. Every OTHER identity input is byte-unchanged —
+# the snapshot-hash literal above still passes UNMODIFIED, and
+# mask/direction/instrument/tf/mode/indicator_version/code_commit_sha are
+# the same literals (the PR-A digest 2aa8c684…020ca is permanently
+# unreachable).
+_EXPECTED_RUN_ID = "31b6fd548d03df1fd591b4550d7844e01e26e124e7586768935eb26829457aa6"
 
 #: The frozen end-to-end store content hash (polars/zstd-build sensitive —
 #: see the module docstring).
@@ -86,30 +102,69 @@ _EXPECTED_RUN_ID = "f6a08f4cf381544a4eba2c5005b0fc02aef2e11e822f42d082f02ccd8db1
 #: the prior literal ``82211c97…``): dropping the trio leaves the 4×25 frame
 #: byte-for-byte frame-equal — every non-VIX row value, every run_id, the
 #: roll_schedule / snapshot-hash / run-id literals above all unchanged.
-_EXPECTED_STORE_HASH = "27c92c83159b8cadff6e39e099d73038b3c82c055ea0ef127be52df01d3d8482"
+# RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): worst-case fills
+# over the re-crafted fixture — regenerated on THIS tree, two-run
+# byte-determinism pinned in the literal test below.
+# RE-LOCKED for DEC-FILL-EXEC-GRID-1M-001 × TRAIN-B FOLD: the persisted store
+# is the UNION of the member's exec-grid identity and the woven additive
+# columns. (1) Every row's ``run_id`` re-keys on the additive
+# ``execution_grid: "1m_next_bar"`` params token — the same preimage change as
+# ``_EXPECTED_RUN_ID`` above; the TRADES are unchanged: a per-mask walker probe
+# over this exact stitched slice (masks 1/2/4/8/16, SL 80 / TP 50) measured
+# ``exits_deferred == 0`` on every mask (no entry 1m bar here touches a level,
+# so the §2.4 same-bar deferral is inert and the B3 carve-out never applies) —
+# the 142-trade worst-case shape (122 TP × +50 + 20 SL stop-outs, net +3_890)
+# survives (loss_rate = 20/142; every loss is an SL fill under worst-case →
+# sl_hit_rate == loss_rate). (2) The ResultRow schema carries the woven W2
+# metrics-depth family (8 appended-LAST nullable columns: the growth trio +
+# sl_hit_rate + the recency four, MIGRATION.md #1974–#1976) PLUS the LANE-W1
+# selection-provenance pair (`pareto_member` Boolean + `selection_basis` Utf8,
+# #2059/#2060; TAGS only at `top_k=None`, `_EXPECTED_RUN_ID` byte-identical).
+# So NEITHER parent literal reproduces on the folded tree (train-b's
+# `b0a3bed9…1bae` lacked the exec-grid run_ids; the member's `7671178b…02ec`
+# lacked the additive columns) — RE-DERIVED FRESH in the Train-B integrity pass
+# (the house law: goldens are re-derived, never merged textually; two-run
+# byte-determinism + persisted>0 pinned below, polars/zstd-build sensitive per
+# the module docstring).
+_EXPECTED_STORE_HASH = "e9dd823a17f215f5db9e55d176c739e8226aa5f231e0bf050f42c541d8f37bc0"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:
-    """The sweep-run golden's drifting intraday shape, anchored on *day*."""
+    """The worst-case-rankable gap-up intraday shape, anchored on *day*.
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (the old wide-range drift
+    SL'd every worst-case entry on its own bar — nothing persisted): narrow
+    gap-up bars (open = prior close + 3.00, range 0.50 < the SL 0.80; the
+    next gap-up's low clears the TP level → +50 wins), a shallow bearish bar
+    each 7-bar cycle, and a DEEP bearish bar (range 0.85) every 4th cycle
+    whose stop-out keeps profit_factor finite.
+    """
     out: list[CandleBar] = []
     price = base
     for m in range(n):
-        close = price + 0.6 if m % 3 else price - 0.3
+        k = m % 7
+        if k == 3:  # shallow bearish bar
+            o = price
+            c, h, lo = o - 0.3, o + 0.1, o - 0.4
+        elif k == 4 and (m // 7) % 4 == 0:  # deep bearish loss carrier
+            o = price
+            c, h, lo = o - 0.65, o + 0.1, o - 0.75
+        else:  # narrow gap-up win bar
+            o = price + 3.0
+            c, h, lo = o + 0.3, o + 0.4, o - 0.1
         ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=_IST) + timedelta(minutes=m)
-        hi = max(price, close) + 0.5
-        lo = min(price, close) - 0.5
         out.append(
             CandleBar(
                 timestamp=ts.astimezone(UTC),
-                open=Decimal(str(round(price, 2))),
-                high=Decimal(str(round(hi, 2))),
+                open=Decimal(str(round(o, 2))),
+                high=Decimal(str(round(h, 2))),
                 low=Decimal(str(round(lo, 2))),
-                close=Decimal(str(round(close, 2))),
+                close=Decimal(str(round(c, 2))),
                 volume=100,
                 open_interest=None,
             )
         )
-        price = close
+        price = c
     return out
 
 
@@ -190,7 +245,12 @@ def _run(tmp_path: Path, tag: str, bars: list[CandleBar], cfg: SweepRunConfig) -
     store = ResultsStore(path=tmp_path / f"{tag}.parquet")
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
-        return run_persisted_sweep(bars, cfg, store=store, dedup=dedup, audit=audit)
+        # The stitched slice IS the real 1-minute stream (interval "1minute",
+        # tf_minutes == 1) — the §6 fixed point: it is passed as BOTH the
+        # decision and the execution feed (DEC-FILL-EXEC-GRID-1M-001).
+        return run_persisted_sweep(
+            bars, cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+        )
 
 
 # ────── the frozen chain ──────
@@ -209,11 +269,15 @@ def test_golden_stitched_slice_shape(stitched: tuple[list[CandleBar], tuple[int,
     assert len(bars) == 5 * _BARS_PER_DAY
     assert all(a.timestamp < b.timestamp for a, b in itertools.pairwise(bars))
     # Expiry-day ownership: 26 Jun bars carry the Jun contract's price plane
-    # (base 100, drifting to ~136 intraday), never the Jul contract's
-    # basis-gapped plane (base 140, drifting upward from there).
+    # (base 100 — the day's FIRST gap-up bar opens at 103.00), never the Jul
+    # contract's basis-gapped plane (base 140 — its first bar would open at
+    # 143.00). The gap-up fixture drifts ~+400 intraday so the whole-day
+    # ranges overlap between planes; the first-bar open is the clean
+    # discriminator.
     expiry_day = [b for b in bars if b.timestamp.astimezone(_IST).date() == _EXPIRY_JUN]
     assert len(expiry_day) == _BARS_PER_DAY
-    assert all(b.open < Decimal("139") for b in expiry_day)
+    assert expiry_day[0].open == Decimal("103.00")
+    assert expiry_day[0].open < Decimal("139")  # the Jun plane, never Jul's
 
 
 def test_golden_snapshot_hash_literal(

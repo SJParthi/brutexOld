@@ -5,11 +5,11 @@ mechanism is the EXISTING engine contract, exercised here over a REAL
 2-contract mini-lake stitched by the REAL alias loader:
 
 * every roll boundary is a session-DATE boundary (ownership is IST-date
-  granular), and the trade-sim walker **DROPS a pending entry whose fill bar
-  lands on a later session date** — R2-OC-2, the feed-contract rule cited at
-  ``brutex/engine/trade_sim.py:290-310`` ("a pending entry whose fill bar
-  lands on a LATER session date … is DROPPED, never filled at the next
-  session's open");
+  granular), and under DEC-FILL-EXEC-GRID-1M-001 the drop is baked at the
+  exec-grid MAP build: a signal whose next-1m fill bar would land on a later
+  IST session date has NO fill bar (``cross_session_dropped``) — the R2-OC-2
+  guarantee ("never filled at the next session's open"), now structural in
+  :func:`brutex.engine.exec_grid.build_exec_grid_map`'s same-session gate;
 * a position still open on expiry day is closed by the session-aware forced
   exit (#1019) at session close − 10 min (15:20 IST on the regular expiry
   session) ON the expiring contract — entry AND exit inside its bars; when
@@ -158,17 +158,19 @@ def test_entry_armed_on_expiry_days_last_usable_bar_produces_no_trade(
 ) -> None:
     """THE ADR-0012 §4.5 row-2 obligation, through the sweep path (R2-OC-2).
 
-    An entry signal armed on the expiry day's LAST bar would fill at the next
-    bar's open — but the next bar in the stitched stream is the NEXT session
-    on the NEXT contract, so the walker DROPS the pending entry
-    (``trade_sim.py:290-310``): no trade exists, and in particular no fill at
-    the post-roll session's basis-gapped open.
+    An entry signal armed on the expiry day's LAST bar (15:29 IST) closes at
+    15:30 — but the first stored 1m bar at/after that instant is the NEXT
+    session on the NEXT contract, so the exec-grid map's same-IST-date fill
+    gate arms NO fill bar (``cross_session_dropped``,
+    DEC-FILL-EXEC-GRID-1M-001): no trade exists, and in particular no fill
+    at the post-roll session's basis-gapped open.
     """
     bars, _ = stitched
     last_expiry_index = max(i for i, b in enumerate(bars) if _ist_date(b) == _EXPIRY)
     signals = [False] * len(bars)
     signals[last_expiry_index] = True
-    trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+    # tf==1 fixed point: the stitched 1m slice is decision AND exec stream.
+    trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
     assert trades == []
 
 
@@ -184,7 +186,8 @@ def test_same_day_control_arm_fills_the_entry(
     first_expiry_index = min(i for i, b in enumerate(bars) if _ist_date(b) == _EXPIRY)
     signals = [False] * len(bars)
     signals[first_expiry_index] = True
-    trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+    # tf==1 fixed point: the stitched 1m slice is decision AND exec stream.
+    trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
     assert len(trades) == 1
     assert _ist_date_of(trades[0].entry_ts) == _EXPIRY
 
@@ -202,8 +205,11 @@ def test_position_open_on_expiry_day_force_exits_on_the_expiring_contract(
     bars, _ = stitched
     first_expiry_index = min(i for i, b in enumerate(bars) if _ist_date(b) == _EXPIRY)
     signals = [False] * len(bars)
-    signals[first_expiry_index] = True  # fills at the NEXT bar's open (15:12 IST)
-    trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+    # The 15:10 signal's next-1m fill bar is 15:11 (DEC-FILL-EXEC-GRID-1M-001
+    # mapping — close instant 15:10 + 1min), at its adverse extreme.
+    signals[first_expiry_index] = True
+    # tf==1 fixed point: the stitched 1m slice is decision AND exec stream.
+    trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
     assert len(trades) == 1
     trade = trades[0]
     assert _ist_date_of(trade.entry_ts) == _EXPIRY
@@ -213,7 +219,8 @@ def test_position_open_on_expiry_day_force_exits_on_the_expiring_contract(
     # session-aware forced exit can close this position).
     exit_ist = trade.exit_ts.astimezone(IST)
     assert (exit_ist.hour, exit_ist.minute) == (15, 20)
-    # holding_bars: filled 15:12, forced at 15:20 — strictly within the session.
+    # holding_bars (a 1-MINUTE count): filled 15:11, forced at 15:20 —
+    # strictly within the session.
     assert trade.holding_bars >= 1
 
 
@@ -291,9 +298,13 @@ def test_expiry_day_tail_hole_closes_open_position_at_last_stored_jun_bar(
     assert len(expiry_indices) == 5  # the truncated tail really is 5 bars
     first_expiry_index = expiry_indices[0]
     signals = [False] * len(bars)
-    signals[first_expiry_index] = True  # fills at the NEXT bar's open (15:11 IST)
+    # The 15:10 signal's next-1m fill bar is 15:11 (DEC-FILL-EXEC-GRID-1M-001).
+    signals[first_expiry_index] = True
+    # tf==1 fixed point: the stitched 1m slice is decision AND exec stream.
     sink: list[TradeDetail] = []
-    trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+    trades = simulate_trades(
+        bars, signals, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, detail_sink=sink
+    )
     assert len(trades) == 1
     trade = trades[0]
     # Entry AND exit inside the expiry session, on the EXPIRING contract.
@@ -302,13 +313,21 @@ def test_expiry_day_tail_hole_closes_open_position_at_last_stored_jun_bar(
     exit_ist = trade.exit_ts.astimezone(IST)
     assert (exit_ist.hour, exit_ist.minute) == (15, 14)  # the LAST stored Jun bar
     assert [d.exit_reason for d in sink] == ["session_gap"]
-    # Fills on the Jun plane (base 110): entry = 15:11 open 111.00, exit =
-    # 15:14 close 115.00 — the ~+30-point roll-basis gap is NOT in the pnl.
-    assert sink[0].entry_fill_paisa == 11_100
-    assert sink[0].exit_fill_paisa == 11_500
-    assert trade.pnl_paisa == 400
-    # Excursions bounded by the Jun contract's own bars (never the Jul plane):
-    # per-bar high = close + 1 → best high 116.00 → MFE = 500; every low ≥
-    # open − 1 → MAE ≤ 100. A Jul-plane leak would read thousands of paisa.
-    assert trade.mfe_paisa == 500
-    assert trade.mae_paisa == 100
+    # HAND-DERIVED, unchanged from the PR-A lock (the two PR-B laws are inert:
+    # no SL/TP legs → the §2.4 deferral changes nothing, and the last stored
+    # Jun bar (15:14, idx entry+3) is NOT the entry bar → no B3 CLOSE
+    # carve-out). Fills on the Jun plane under the ONE worst-case law
+    # (DEC-FILL-WORST-CASE-ONLY-001): entry = the 15:11 bar's adverse HIGH
+    # 113.00 (o=111, c=112, high=c+1), session_gap exit = the LAST stored Jun
+    # bar's adverse LOW 113.00 (15:14: o=114, low=o−1) — the ~+30-point
+    # roll-basis gap is NOT in the pnl → pnl = 11_300 − 11_300 = 0.
+    assert sink[0].entry_fill_paisa == 11_300
+    assert sink[0].exit_fill_paisa == 11_300
+    assert trade.pnl_paisa == 0
+    # Excursions bounded by the Jun contract's own bars (never the Jul
+    # plane), measured from the worst-case entry fill 113.00: best high
+    # 116.00 (15:14 bar) → MFE = 300; worst low 110.00 (the 15:11 entry
+    # bar's o−1; the entry bar folds its range — §2.4) → MAE = 300. A
+    # Jul-plane leak would read thousands of paisa.
+    assert trade.mfe_paisa == 300
+    assert trade.mae_paisa == 300

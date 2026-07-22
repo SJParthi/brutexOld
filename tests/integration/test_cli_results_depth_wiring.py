@@ -89,22 +89,34 @@ def _persist(tmp_path: Path) -> tuple[Path, Path]:
 
 def _trading_bars() -> list[CandleBar]:
     """The proven trade-PRODUCING fixture (the depth unit suite's 12-day
-    upward-drift bars, verbatim shape) — the tiny 8-bar lake above persists
-    zero trades, which cannot exercise VIX stamping."""
+    GAP-UP drift, verbatim shape — DEC-FILL-WORST-CASE-ONLY-001: a worst-case
+    entry fills at the bar HIGH, so the old ±0.5-pad drift SL'd every entry
+    on its own bar; narrow gap-up bars rank at sl=80/tp=50) — the tiny 8-bar
+    lake above persists zero trades, which cannot exercise VIX stamping."""
     out: list[CandleBar] = []
+    cycle = 0
     for d in range(12):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar (below-EMA bits fire)
+                o = price
+                close, hi, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                close, hi, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                close, hi, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
+                    open=Decimal(str(round(o, 2))),
                     high=Decimal(str(round(hi, 2))),
                     low=Decimal(str(round(lo, 2))),
                     close=Decimal(str(round(close, 2))),
@@ -291,7 +303,11 @@ def test_vix_lake_coordinate_is_real_and_stamps_every_captured_trade(
     from brutex.engine.trade_store import SidecarPaths, read_trade_page
 
     (run_dir,) = [p for p in (results_root.parent / "sweep_runs").iterdir() if p.is_dir()]
-    stamp_paths = sorted(run_dir.glob("results-depth/*/*/*.stamp.json"))
+    stamp_paths = sorted(
+        p
+        for p in run_dir.glob("results-depth/*/*/*.stamp.json")
+        if not p.name.endswith(".resilience.stamp.json")  # exclude the sibling resilience stamp
+    )
     assert stamp_paths
     stamped_rows = 0
     for stamp_path in stamp_paths:
@@ -302,6 +318,8 @@ def test_vix_lake_coordinate_is_real_and_stamps_every_captured_trade(
             aggs=base / f"{stem}.aggs.parquet",
             equity=base / f"{stem}.equity.parquet",
             stamp=stamp_path,
+            resilience=base / f"{stem}.resilience.parquet",
+            resilience_stamp=base / f"{stem}.resilience.stamp.json",
         )
         spans = json.loads(stamp_path.read_text(encoding="utf-8"))["trade_spans"]
         for run_id, (_start_row, count) in spans.items():
@@ -370,6 +388,28 @@ def test_junk_kill_switch_is_a_clean_pre_sweep_user_error(
     assert rc == cli.EXIT_USER_ERROR
     captured = capsys.readouterr()
     assert "BRUTEX_RESULTS_DEPTH" in captured.err
+    assert "sweep-all done" not in captured.out  # the sweep never launched …
+    assert not (results_root / "audit").exists()  # … and wrote nothing
+    assert fired == []  # a config error is not an abort — never a false alert
+
+
+def test_junk_alpha_gate_is_a_clean_pre_sweep_user_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DEC-ALPHA-BUYHOLD-METRIC-001: a junk BRUTEX_ALPHA_GATE refuses BEFORE
+    any compute — the eager fail-loud-at-launch law (the results-depth /
+    resume-store-guard precedent); never a false abort alert."""
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    fired: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", fired.append)
+    monkeypatch.setenv("BRUTEX_ALPHA_GATE", "maybe")
+
+    rc = _sweep_all(lake_root, catalog_path, results_root)
+
+    assert rc == cli.EXIT_USER_ERROR
+    captured = capsys.readouterr()
+    assert "BRUTEX_ALPHA_GATE" in captured.err
     assert "sweep-all done" not in captured.out  # the sweep never launched …
     assert not (results_root / "audit").exists()  # … and wrote nothing
     assert fired == []  # a config error is not an abort — never a false alert

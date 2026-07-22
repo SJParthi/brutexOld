@@ -261,6 +261,11 @@ class ComboAggregate:
     exits_forced_1520: int
     exits_end_of_data: int
     exits_session_gap: int
+    exits_deferred: int
+    signals_dropped_collision: int
+    fill_slid_minutes: int
+    exit_fill_slid_minutes: int
+    forced_fill_slid_minutes: int
     max_consecutive_losses: int
     max_consecutive_wins: int
     composite_score: float | None
@@ -297,6 +302,20 @@ class ComboAggregate:
             raise ComboAggregateError(
                 f"ComboAggregate exit tallies {exits} must be >= 0 and sum to "
                 f"n_trades={self.n_trades}"
+            )
+        grid_counters = (
+            self.exits_deferred,
+            self.signals_dropped_collision,
+            self.fill_slid_minutes,
+            self.exit_fill_slid_minutes,
+            self.forced_fill_slid_minutes,
+        )
+        if any(count < 0 for count in grid_counters):
+            # The 1m-grid counter family (DEC-FILL-EXEC-GRID-1M-001) is a set
+            # of EVENT tallies, deliberately NOT a partition of n_trades (a
+            # trade can defer AND slide; a dropped signal never trades).
+            raise ComboAggregateError(
+                f"ComboAggregate 1m-grid counters {grid_counters} must be >= 0"
             )
 
     def to_record(self) -> dict[str, object]:
@@ -350,6 +369,11 @@ class ComboAggregate:
             "exits_forced_1520": self.exits_forced_1520,
             "exits_end_of_data": self.exits_end_of_data,
             "exits_session_gap": self.exits_session_gap,
+            "exits_deferred": self.exits_deferred,
+            "signals_dropped_collision": self.signals_dropped_collision,
+            "fill_slid_minutes": self.fill_slid_minutes,
+            "exit_fill_slid_minutes": self.exit_fill_slid_minutes,
+            "forced_fill_slid_minutes": self.forced_fill_slid_minutes,
             "max_consecutive_losses": self.max_consecutive_losses,
             "max_consecutive_wins": self.max_consecutive_wins,
             "composite_score": self.composite_score,
@@ -618,6 +642,11 @@ def aggregate_combo(
         exits_forced_1520=exit_tally["forced_1520"],
         exits_end_of_data=exit_tally["end_of_data"],
         exits_session_gap=exit_tally["session_gap"],
+        exits_deferred=capture.exits_deferred,
+        signals_dropped_collision=capture.signals_dropped_collision,
+        fill_slid_minutes=capture.fill_slid_minutes,
+        exit_fill_slid_minutes=capture.exit_fill_slid_minutes,
+        forced_fill_slid_minutes=capture.forced_fill_slid_minutes,
         max_consecutive_losses=max_losses,
         max_consecutive_wins=max_wins,
         composite_score=composite_score,

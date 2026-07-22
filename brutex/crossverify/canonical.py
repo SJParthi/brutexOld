@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Final
 
+from brutex.crossverify import rust_seam
 from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
 
 SEGMENT_IDX: Final[str] = "IDX_I"
@@ -103,16 +104,13 @@ def symbol_key_safe(symbol: str) -> bool:
     return all(ch in _SYMBOL_ALLOWED_CHARS for ch in symbol)
 
 
-def canonical_identity(
+def _canonical_identity_python(
     *, exchange: str, segment: str, lake_symbol: str
 ) -> CanonicalIdentity | None:
-    """Map one lake coordinate to its canonical export identity, or ``None``.
+    """The verbatim Python mapping — the LIVE parity oracle (flag-OFF path).
 
-    ``None`` = excluded (skip + count at the caller): a BSE index other than
-    SENSEX (the universe IDX fetch rule's mirror), any CE/PE leg, an unparsed
-    FNO dir, a non-allowlisted FUT underlying (the STRUCTURAL arm), an
-    exchange/segment outside the contract, or a key-unsafe symbol.
-    Case-exact; never raises. O(1) — O(len(symbol)) for the charset check.
+    The original ``canonical_identity`` body, extracted unchanged
+    (DEC-CROSSVERIFY-RUST-CORE, the Slice-0 pattern).
     """
     if segment == "INDEX":
         # The WHOLE spot-index universe (#1788): every key-safe NSE index;
@@ -165,14 +163,96 @@ def canonical_identity(
     return None
 
 
+def _identity_fields(
+    identity: CanonicalIdentity | None,
+) -> tuple[str, str, str, str, str, str] | None:
+    """Project an identity onto its six-field tuple (the seam compare shape)."""
+    if identity is None:
+        return None
+    return (
+        identity.exchange,
+        identity.lake_segment,
+        identity.lake_symbol,
+        identity.canonical_symbol,
+        identity.segment_token,
+        identity.instrument_class,
+    )
+
+
+def canonical_identity(
+    *, exchange: str, segment: str, lake_symbol: str
+) -> CanonicalIdentity | None:
+    """Map one lake coordinate to its canonical export identity, or ``None``.
+
+    ``None`` = excluded (skip + count at the caller): a BSE index other than
+    SENSEX (the universe IDX fetch rule's mirror), any CE/PE leg, an unparsed
+    FNO dir, a non-allowlisted FUT underlying (the STRUCTURAL arm), an
+    exchange/segment outside the contract, or a key-unsafe symbol.
+    Case-exact; never raises. O(1) — O(len(symbol)) for the charset check.
+
+    DEC-CROSSVERIFY-RUST-CORE: behind the default-OFF
+    ``BRUTEX_CROSSVERIFY_RUST`` flag the pure mapping law is routed through
+    :mod:`brutex.crossverify.rust_seam` — the F&O grammar stays PYTHON
+    (:func:`parse_fno_symbol` is never re-implemented; its parsed fields
+    cross the FFI as plain strings), deny-by-default in BOTH arms; flag OFF
+    runs the verbatim Python body in place, byte-identical.
+    """
+    if not (rust_seam.crossverify_rust_enabled() and not rust_seam.rust_seam_disabled()):
+        return _canonical_identity_python(
+            exchange=exchange, segment=segment, lake_symbol=lake_symbol
+        )
+    parts = parse_fno_symbol(lake_symbol) if segment == "FNO" else None
+    fields = rust_seam.routed_canonical_identity(
+        exchange=exchange,
+        segment=segment,
+        lake_symbol=lake_symbol,
+        fno_underlying=None if parts is None else parts.underlying,
+        fno_expiry_iso=None if parts is None else parts.expiry.isoformat(),
+        fno_is_future=parts is not None and parts.instrument_type == FUTURE_TYPE,
+        fno_exchange=None if parts is None else parts.exchange,
+        python_oracle=lambda: _identity_fields(
+            _canonical_identity_python(exchange=exchange, segment=segment, lake_symbol=lake_symbol)
+        ),
+    )
+    if fields is None:
+        return None
+    return CanonicalIdentity(
+        exchange=fields[0],
+        lake_segment=fields[1],
+        lake_symbol=fields[2],
+        canonical_symbol=fields[3],
+        segment_token=fields[4],
+        instrument_class=fields[5],
+    )
+
+
+def _s3_key_python(*, prefix: str, day: date, identity: CanonicalIdentity) -> str:
+    """The verbatim Python key law — the LIVE parity oracle (flag-OFF path)."""
+    return f"{prefix}/{day.isoformat()}/{identity.segment_token}/{identity.canonical_symbol}.csv"
+
+
 def s3_key(*, prefix: str, day: date, identity: CanonicalIdentity) -> str:
     """The ONE S3 key law: ``<prefix>/<YYYY-MM-DD>/<segment_token>/<symbol>.csv``.
 
     RAW canonical symbol in the key (``M&M.csv`` — ``&`` is a legal S3 key
     char; boto3 percent-encodes at transport only, never in the stored key).
     Deterministic per ``(day, symbol)`` — no timestamps, no run ids.
+
+    DEC-CROSSVERIFY-RUST-CORE: flag-ON routes the assembly through
+    :mod:`brutex.crossverify.rust_seam` with the DAY pre-formatted by the
+    caller-side ``day.isoformat()`` (never re-derived crate-side — a
+    ``datetime`` subclass day renders identically in both arms by
+    construction); flag OFF runs the verbatim body in place.
     """
-    return f"{prefix}/{day.isoformat()}/{identity.segment_token}/{identity.canonical_symbol}.csv"
+    if not (rust_seam.crossverify_rust_enabled() and not rust_seam.rust_seam_disabled()):
+        return _s3_key_python(prefix=prefix, day=day, identity=identity)
+    return rust_seam.routed_s3_key(
+        prefix=prefix,
+        day_iso=day.isoformat(),
+        segment_token=identity.segment_token,
+        canonical_symbol=identity.canonical_symbol,
+        python_oracle=lambda: _s3_key_python(prefix=prefix, day=day, identity=identity),
+    )
 
 
 __all__ = [

@@ -14,6 +14,9 @@ Verifies per-date lookup against the citation-grounded table in
   Jan 2026     → NIFTY 65 (current)
 """
 
+# Whitebox pins on the private Python oracles (DEC-OPTCOST-TAILS-RUST-001):
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from datetime import date
@@ -150,3 +153,48 @@ class TestSEBI20Nov2024_BigRebase:
         assert on_day[OptionsUnderlying.NIFTY] == 75
         assert on_day[OptionsUnderlying.BANKNIFTY] == 30
         assert on_day[OptionsUnderlying.SENSEX] == 20
+
+
+# ── DEC-OPTCOST-TAILS-RUST-001: the flag-ON seam (ON == OFF, refusal bytes) ──
+
+
+class TestOptcostRustSeamOn:
+    """`get_lot_size` under `BRUTEX_OPTCOST_TAILS_RUST=1` — kernel-routed
+    answers match the Python oracle across every transition boundary, and
+    the pre-history ValueError keeps its exact message bytes."""
+
+    @pytest.fixture(autouse=True)
+    def _seam_on(self, monkeypatch: pytest.MonkeyPatch):
+        import brutex.optcost_rust as ocr
+
+        pytest.importorskip("fno_math")
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "1")
+        ocr.reset_optcost_rust_for_tests()  # burn-in armed — oracle runs beside
+        yield
+        ocr.reset_optcost_rust_for_tests()
+
+    def test_every_transition_boundary_matches_the_oracle(self) -> None:
+        from datetime import timedelta
+
+        import brutex.optcost_rust as ocr
+        from brutex.options.lot_size_history import (
+            _HISTORY_BY_UNDERLYING,
+            _get_lot_size_python,
+        )
+
+        for instrument, history in _HISTORY_BY_UNDERLYING.items():
+            for boundary, _lot in history:
+                for delta in (0, 1):
+                    on = boundary + timedelta(days=delta)
+                    assert get_lot_size(instrument, on) == _get_lot_size_python(
+                        history, on, instrument
+                    )
+        assert not ocr.optcost_rust_disabled()
+
+    def test_prehistory_refusal_bytes_match_the_oracle(self) -> None:
+        on = date(2020, 12, 31)
+        with pytest.raises(ValueError) as seam_exc:
+            get_lot_size(OptionsUnderlying.NIFTY, on)
+        assert str(seam_exc.value) == (
+            f"on_date {on} is before recorded history start (2021-01-01 for NIFTY)"
+        )

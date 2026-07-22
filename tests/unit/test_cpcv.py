@@ -16,7 +16,9 @@ whitebox tests, DEC-P0-017).
 
 from __future__ import annotations
 
+import importlib
 import math
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -290,6 +292,95 @@ class TestPassRate:
         assert cpcv_pass_rate(returns) == cpcv_pass_rate(returns)
 
 
+class TestEmbargoInvariance:
+    """DEC-CASCADE-STAT-TIER-WIRE-001: ``cpcv_pass_rate``'s ``label_span``/
+    ``embargo`` kwargs are validated + declared but PROVABLY rate-inert —
+    the model-free metric evaluates TEST folds only, and purge/embargo govern
+    the training set it never constructs. This class is the honesty PIN:
+    threading the Stage-4 embargo through CPCV is not a tightening."""
+
+    @pytest.mark.parametrize("embargo", [0, 1, 7, 375, 10_000])
+    def test_rate_is_identical_for_every_valid_embargo(self, embargo: int) -> None:
+        rng = np.random.default_rng(19)
+        returns = rng.normal(0.001, 0.01, 96)
+        baseline = cpcv_pass_rate(returns, n_groups=8, n_test_groups=4)
+        assert cpcv_pass_rate(returns, n_groups=8, n_test_groups=4, embargo=embargo) == baseline
+
+    @pytest.mark.parametrize("label_span", [0, 1, 5, 500])
+    def test_rate_is_identical_for_every_valid_label_span(self, label_span: int) -> None:
+        rng = np.random.default_rng(23)
+        returns = rng.normal(0.001, 0.01, 96)
+        baseline = cpcv_pass_rate(returns, n_groups=8, n_test_groups=4)
+        assert (
+            cpcv_pass_rate(returns, n_groups=8, n_test_groups=4, label_span=label_span) == baseline
+        )
+
+    def test_huge_embargo_never_makes_a_valid_call_raise(self) -> None:
+        # _validate_params bounds label_span/embargo at >= 0 ONLY — a large
+        # embargo can never turn a previously-valid call into a ValueError
+        # (the Stage-4 driver's resolved embargo must never crash the cascade).
+        rate = cpcv_pass_rate([1.0, 2.0, -3.0, -4.0], n_groups=4, n_test_groups=2, embargo=10**9)
+        assert rate == 1.0 / 6.0
+
+    def test_negative_embargo_raises(self) -> None:
+        with pytest.raises(ValueError, match="embargo must be >= 0"):
+            cpcv_pass_rate([1.0, 2.0, 3.0, 4.0], n_groups=4, n_test_groups=2, embargo=-1)
+
+    def test_negative_label_span_raises(self) -> None:
+        with pytest.raises(ValueError, match="label_span must be >= 0"):
+            cpcv_pass_rate([1.0, 2.0, 3.0, 4.0], n_groups=4, n_test_groups=2, label_span=-1)
+
+    def test_kernel_arm_parity_unaffected_by_embargo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Both dispatch arms are test-fold-only, so the embargo cannot desync
+        the Rust kernel from the Python oracle: the flag-ON rate with a
+        non-zero embargo equals the flag-OFF zero-embargo rate.
+
+        Engagement-honest (hostile-review round 1, MINOR-3): a wheel-absent
+        environment degrades the ON arm to the Python oracle, so the parity
+        would pass VACUOUSLY (Python == Python). The test therefore SKIPS
+        loudly when the kernel symbol is unavailable and, when available,
+        SPIES on the dispatch (wrapped, never replaced — the real kernel
+        still runs) asserting the call was genuinely SERVED by the kernel
+        (a non-``None`` pass-count), never the oracle fallback.
+        """
+        from brutex.metrics import rust_stats
+
+        try:
+            fno_math = importlib.import_module("fno_math")
+        except ImportError:
+            fno_math = None
+        if fno_math is None:
+            pytest.skip("fno_math wheel absent — the CPCV kernel cannot engage")
+        if not callable(getattr(fno_math, "stats_cpcv_pass_count", None)):
+            pytest.skip(
+                "fno_math wheel is stale (no stats_cpcv_pass_count symbol) — "
+                "the CPCV kernel cannot engage"
+            )
+
+        returns = [1.0, 2.0, -3.0, -4.0]
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+        rust_stats.reset_self_check_for_tests("cpcv")
+        rust_stats.reset_observability_memo_for_tests()
+
+        served: list[object] = []
+        real_dispatch = rust_stats.cpcv_pass_count_via_kernel
+
+        def spy(*args: object, **kwargs: object) -> int | None:
+            result = real_dispatch(*args, **kwargs)  # type: ignore[arg-type]
+            served.append(result)
+            return result
+
+        monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", spy)
+        on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, embargo=375)
+        assert on == off == 1.0 / 6.0
+        # The kernel ENGAGED: exactly ONE dispatch, SERVED by the kernel —
+        # the returned pass-count is 1 of C(4,2)=6 folds, never the
+        # ``None`` oracle-fallback sentinel.
+        assert served == [1]
+
+
 class TestParameterValidation:
     @pytest.mark.parametrize(
         ("kwargs", "match"),
@@ -313,3 +404,62 @@ class TestParameterValidation:
     def test_pass_rate_rejects_bad_groups(self) -> None:
         with pytest.raises(ValueError, match="cannot exceed n_samples"):
             cpcv_pass_rate([1.0, 2.0, 3.0], n_groups=8)
+
+
+class TestRustStatsDispatch:
+    """The DEC-METRICS-RUST-STATS-001 seam dispatch inside ``cpcv_pass_rate``.
+
+    Wheel-independent by design (the seam function is monkeypatched): pins
+    that a kernel-served count is ADOPTED (the Python fold loop is skipped),
+    that a ``None`` from the seam falls through to the retained-forever
+    oracle byte-identically, and that the flag-OFF default never consults
+    the seam at all. Kernel-vs-oracle value parity lives in
+    ``tests/unit/test_rust_stats.py`` + the property/golden suites.
+    """
+
+    _RETURNS: ClassVar[list[float]] = [1.0, 2.0, -3.0, -4.0]  # golden: 1 of 6 folds pass
+
+    def test_flag_off_never_consults_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.metrics import rust_stats
+
+        def _forbidden(*args: object, **kwargs: object) -> int:
+            raise AssertionError("the seam must not be consulted when the flag is OFF")
+
+        monkeypatch.delenv(rust_stats.STATS_RUST_ENV, raising=False)
+        monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", _forbidden)
+        rate = cpcv_pass_rate(self._RETURNS, n_groups=4, n_test_groups=2)
+        assert rate == 1.0 / 6.0
+
+    def test_flag_on_kernel_count_is_adopted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A seam-served count feeds the SAME exact division expression; the
+        stubbed count of 6 (≠ the oracle's 1) proves the adoption."""
+        from brutex.metrics import rust_stats
+
+        seen: dict[str, object] = {}
+
+        def _kernel_stub(*args: object, **kwargs: object) -> int:
+            seen["n_total"] = kwargs["n_total"]
+            oracle = kwargs["oracle"]
+            assert callable(oracle)
+            seen["oracle_value"] = oracle()
+            return 6
+
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+        monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", _kernel_stub)
+        rate = cpcv_pass_rate(self._RETURNS, n_groups=4, n_test_groups=2)
+        assert rate == 1.0  # 6/6 — the stub's count, not the oracle's 1
+        assert seen["n_total"] == 6
+        # The oracle closure handed to the seam IS the extracted fold loop.
+        assert seen["oracle_value"] == 1
+
+    def test_flag_on_seam_none_falls_through_to_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``None`` (latched / wheel-absent / kernel error / refused result)
+        serves the call from the Python fold loop — byte-identical to OFF."""
+        from brutex.metrics import rust_stats
+
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+        monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", lambda *a, **k: None)
+        rate = cpcv_pass_rate(self._RETURNS, n_groups=4, n_test_groups=2)
+        assert rate == 1.0 / 6.0

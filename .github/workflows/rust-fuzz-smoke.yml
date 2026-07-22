@@ -68,6 +68,8 @@ jobs:
             path: rust/trading-core
           - crate: fno-math
             path: rust/fno-math
+          - crate: brutex-feed
+            path: rust/brutex-feed
     defaults:
       run:
         working-directory: ${{ matrix.path }}
@@ -91,7 +93,7 @@ jobs:
           key: fuzz-smoke-${{ matrix.crate }}
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-fuzz
 
@@ -125,8 +127,8 @@ jobs:
           done
 
       - name: Upload crash artifacts (on failure)
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-artifacts-${{ matrix.crate }}
           path: ${{ matrix.path }}/fuzz/artifacts/

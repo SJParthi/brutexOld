@@ -110,6 +110,106 @@ else
   fi
 fi
 
+# ────────── 6b. brutex_identity wheel (REQUIRED) ──────────
+# DEC-RUST-RUNID-STORES-001: the run-identity + store kernel — a HARD import
+# of brutex/strategies/combo.py, brutex/engine/{snapshot_hash,results_store}.py
+# and brutex/data/window_ledger_store.py (the fno_math posture: the retired
+# Python computation bodies have no oracle to degrade to), so a build failure
+# ABORTS bootstrap.
+_step "Step 6b/7 — build + install brutex_identity Rust extension"
+if python -c "import brutex_identity" 2>/dev/null; then
+  _ok "brutex_identity already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-identity && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_identity" 2>/dev/null; then
+    _ok "brutex_identity built + installed via maturin"
+  else
+    _err "maturin develop failed; see output above"
+    exit 1
+  fi
+fi
+
+# ────────── 6a. brutex_feed wheel (optional) ──────────
+# DEC-FEED-RUST-CORE-001: the default-OFF feed decision kernel. OPTIONAL —
+# nothing imports it at module scope and BRUTEX_FEED_RUST is default-OFF
+# (the feed degrades to the Python oracle without it), so a build failure
+# WARNS but never aborts bootstrap.
+_step "Step 6a/7 — build + install brutex_feed Rust extension (optional)"
+if python -c "import brutex_feed" 2>/dev/null; then
+  _ok "brutex_feed already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-feed && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_feed" 2>/dev/null; then
+    _ok "brutex_feed built + installed via maturin"
+  else
+    _warn "brutex_feed build failed — OPTIONAL kernel (BRUTEX_FEED_RUST default-OFF degrades to the Python oracle)"
+  fi
+fi
+
+# ────────── 6a2. brutex_refine wheel (REQUIRED for Stage-3) ──────────
+# DEC-RUST-STAGE3-REFINE-001: the DEFAULT-ON Stage-3 optimizer core
+# (restarted CMA-ES + Mode-A grid + top-K selection). The pycma Python
+# math is DELETED, so Stage-3 grid/selection/refinement REFUSES loudly
+# without this wheel — build it like fno_math/trading_core (a failure
+# aborts bootstrap: unlike brutex_feed there is no Python fallback).
+_step "Step 6a2/7 — build + install brutex_refine Rust extension"
+if python -c "import brutex_refine" 2>/dev/null; then
+  _ok "brutex_refine already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-refine && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_refine" 2>/dev/null; then
+    _ok "brutex_refine built + installed via maturin"
+  else
+    _err "maturin develop failed; see output above"
+    exit 1
+  fi
+fi
+
+# ────────── 6a3. brutex_lake wheel ──────────
+# DEC-BRUTEX-LAKE-BOX-WHEEL-001: the data-lake Rust crate (ADR-0020).
+# Since DEC-RUST-LAKE-WAVED-001 (W-6a) the ``brutex_lake`` wheel is the ONE
+# production arm of the four waved lake cores (a missing/stale wheel is the
+# fail-loud ``LakeRustWavedUnavailableError`` at USE time — the Python cores
+# are deleted), but it is NOT module-top imported by brutex/, so bootstrap
+# keeps this step's shipped WARN-not-abort control flow: a build failure
+# warns loudly and bootstrap proceeds (`import brutex` still works; lake
+# operations refuse loudly until the operator re-runs the build).
+# COST: a cold build compiles the rev-pinned polars graph from source —
+# minutes of wall time and ~12 GB of rust/brutex-lake/target/ disk.
+_step "Step 6a3/7 — build + install brutex_lake Rust extension (cold build compiles the pinned polars graph — minutes + ~12 GB target/)"
+if python -c "import brutex_lake" 2>/dev/null; then
+  _ok "brutex_lake already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-lake && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_lake" 2>/dev/null; then
+    _ok "brutex_lake built + installed via maturin"
+  else
+    _warn "brutex_lake build failed — lake Rust ops will refuse loudly (LakeRustWavedUnavailableError, DEC-RUST-LAKE-WAVED-001) until it is built; re-run: cd rust/brutex-lake && maturin develop --release"
+  fi
+fi
+
+# ────────── 6c. brutex_pull_state wheel ──────────
+# The pull-state decision plane is Rust-only and fail-closed (module-top
+# imported by brutex/), so it is a REQUIRED build prerequisite — build it the
+# same way as fno_math/trading_core and ABORT bootstrap on failure.
+_step "Step 6c/7 — build + install brutex_pull_state Rust extension"
+if python -c "import brutex_pull_state" 2>/dev/null; then
+  _ok "brutex_pull_state already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-pull-state && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_pull_state" 2>/dev/null; then
+    _ok "brutex_pull_state built + installed via maturin"
+  else
+    _err "maturin develop failed; see output above"
+    exit 1
+  fi
+fi
+
 # ────────── 6b. git hooks (pre-commit + commit-msg + pre-push) ──────────
 # DEC-PRE-PUSH-HOOK-001: install ALL hook stages so the local gates
 # (.pre-commit-config.yaml) actually fire — including the new pre-push

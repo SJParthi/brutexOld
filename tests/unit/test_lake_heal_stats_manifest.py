@@ -46,6 +46,12 @@ BARS_KEY: dict[str, str] = {
 OPTIONS_KEY: dict[str, str] = {"series": "NSE_FNO__13__WEEK__0__ATM__CALL"}
 
 
+@pytest.fixture(autouse=True)
+def _endgame_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the ONE (Rust) heal/scan arm — W-6a deleted the Python cores."""
+    monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
+
+
 def _state(lake: Path) -> _BatchState:
     return _BatchState(
         lake_root=lake,

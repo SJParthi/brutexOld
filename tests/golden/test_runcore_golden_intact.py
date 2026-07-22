@@ -53,6 +53,9 @@ def _golden_grid() -> SweepGridConfig:
         data_snapshot_hash="snap0001",
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law — the
+        # golden pair was RE-LOCKED on the rankable gap-up fixture (see the
+        # source module's re-lock note); the grid carries no mode field.
     )
 
 
@@ -170,4 +173,9 @@ def test_golden_store_bytes_identical_run_core_on_vs_off(tmp_path: Path) -> None
                 )
         return tuple_store_path(root, tuple_, grid).read_bytes()
 
-    assert _run(tmp_path / "on", core_on=True) == _run(tmp_path / "off", core_on=False)
+    # Hoisted out of the assert (the fills-track side-effecting-assert NIT:
+    # under `python -O` a bare `assert _run(...) == _run(...)` strips BOTH
+    # sweep executions, silently voiding the byte-identity gate).
+    on_bytes = _run(tmp_path / "on", core_on=True)
+    off_bytes = _run(tmp_path / "off", core_on=False)
+    assert on_bytes == off_bytes

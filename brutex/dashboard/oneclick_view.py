@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from brutex.dashboard.oneclick_artifacts import (
+    BaselineResult,
     EventsPage,
     ManifestResult,
     RunInfo,
@@ -39,6 +40,8 @@ from brutex.dashboard.oneclick_artifacts import (
 
 __all__ = [
     "CHAIN_STAGES",
+    "TIER_GROSS_NOTE",
+    "build_baseline_payload",
     "build_equity_payload",
     "build_events_payload",
     "build_manifest_payload",
@@ -50,8 +53,16 @@ __all__ = [
     "chain_links",
     "reconcile_funnel",
     "run_pill_state",
+    "tier_status_text",
     "verify_checks",
 ]
+
+#: The ONE persistent tier honesty chip (DEC-RANKING-SPLUS-TIER-001 — rendered
+#: verbatim beside the tier on /strategy AND the operator rank-1 card;
+#: template-pinned against THIS constant): the tier judges gross signal-only
+#: P&L — no metric is computed under a literal worst-case fill today; the
+#: haircut H is the v1 surrogate (follow-up DEC-TIER-PESSIMISTIC-FILL-002).
+TIER_GROSS_NOTE: Final[str] = "tier on gross signal P&L; worst-case-fill re-sim deferred"
 
 #: The R41 chain-map stage order (fixed — preflight→…→display).
 CHAIN_STAGES: Final[tuple[str, ...]] = (
@@ -250,6 +261,36 @@ def cascade_status_text(
     return "—"
 
 
+#: What the NEXT tier up is called per tier label (the blocked-from phrase) —
+#: ``None`` label reads "blocked from A" (the entry earned no tier at all).
+_TIER_NEXT_UP: Final[dict[str, str]] = {"S": "S+", "A": "S"}
+
+
+def tier_status_text(label: str | None, *, blocked_next: tuple[str, ...] = ()) -> str:
+    """The ONE server-built tier display string (DEC-RANKING-SPLUS-TIER-001).
+
+    Every surface (the one-click bridge ``oneclick_artifacts._bridge_tier``
+    AND the ``/results`` row projection) renders THIS builder's output via
+    ``textContent`` — no client ever composes tier prose. ``"S+"`` reads
+    "exceptional (all axes passed)"; ``"S"``/``"A"`` name the axes blocking
+    the NEXT tier up (the writer's stable reason tokens, verbatim); a ``None``
+    label reads the honest "not tiered" (+ its A blockers when known). An
+    UNKNOWN label token → "—" (never a guess).
+    """
+    if label == "S+":
+        return "S+ — exceptional (all axes passed)"
+    next_up = _TIER_NEXT_UP.get(label) if label is not None else None
+    if label is not None and next_up is not None:
+        if not blocked_next:
+            return label
+        return f"{label} — blocked from {next_up}: {', '.join(blocked_next)}"
+    if label is None:
+        if not blocked_next:
+            return "not tiered"
+        return f"not tiered — blocked from A: {', '.join(blocked_next)}"
+    return "—"
+
+
 def build_top100_payload(
     run_id: str, top100: Top100Result, *, fixture_root_active: bool
 ) -> dict[str, Any]:
@@ -294,6 +335,61 @@ def build_top100_payload(
         "fixture_root_active": fixture_root_active,
         "cascade_join": top100.cascade_join,
     }
+
+
+def build_baseline_payload(
+    run_id: str, result: BaselineResult, *, fixture_root_active: bool
+) -> dict[str, Any]:
+    """Project one baseline read into the ``GET /api/v1/oneclick/baseline`` payload.
+
+    STORED values only (DEC-RESULTS-TRUST-HONESTY-001 · B1 — the R27 series is
+    served verbatim, never recomputed): prices stay the artifact's exact 2-dp
+    strings, ``total_return_pct`` stays the raw full-precision float (a
+    statistical figure — never rounded, CLAUDE.md §4). A non-``ok`` read keeps
+    the series keys ``null`` with the honest detail + the run's stored
+    ``instruments`` so the client can re-ask precisely.
+
+    Parameters
+    ----------
+    run_id
+        The requested run id (echoed).
+    result
+        The adapter's :class:`~brutex.dashboard.oneclick_artifacts.BaselineResult`.
+    fixture_root_active
+        Stamped into the payload (C-MINOR-1).
+
+    Returns
+    -------
+    dict
+        ``{status, run_id, instrument, filename, instruments[], anchor_open,
+        start, end, sessions[], total_return_pct, source_note, detail,
+        revision, fixture_root_active}``.
+    """
+    series = result.series
+    payload: dict[str, Any] = {
+        "status": result.status,
+        "run_id": run_id,
+        "instrument": result.instrument,
+        "filename": result.filename,
+        "instruments": list(result.instruments),
+        "anchor_open": None,
+        "start": None,
+        "end": None,
+        "sessions": None,
+        "total_return_pct": None,
+        "source_note": None,
+        "detail": result.detail,
+        "revision": result.revision,
+        "fixture_root_active": fixture_root_active,
+    }
+    if series is not None:
+        payload["anchor_open"] = str(series.anchor_open)
+        payload["start"] = series.start.isoformat()
+        payload["end"] = series.end.isoformat()
+        payload["sessions"] = [[day.isoformat(), str(close)] for day, close in series.sessions]
+        payload["total_return_pct"] = series.total_return_pct
+        payload["source_note"] = series.source_note
+    return payload
 
 
 def build_events_payload(

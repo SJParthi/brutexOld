@@ -10,13 +10,27 @@ sum with no float drift over a long sequence (**P-04**).
 
 Correct-by-construction fixture (no un-runnable hand-math): the corpus is **12
 identical copies** of the already-hand-derived + golden-locked Fixture-A trade 1
-from ``test_engine_trade_sim_golden.py`` — a long that enters at the next bar's
-OPEN 100.00 and take-profits at the +50p level (high 100.60 crosses level
-100.50) → **pnl +50, mfe 60, mae 10, holding 2**. Twelve back-to-back round-trips
-(signal → entry → TP, three bars each, 09:15-onward so the 15:20 forced-exit
-rule never fires) ⇒ **Σ pnl = 12 × 50 = 600 paisa** exactly. For Track-1
-signal-only spot there is NO brokerage (CLAUDE.md §7), so **net == gross**: the
-600-paisa gross IS the net.
+from ``test_engine_trade_sim_golden.py`` under the ONE worst-case fill law
+(DEC-FILL-WORST-CASE-ONLY-001) — a long that enters at the entry bar's adverse
+HIGH 100.10 (10_010p); the +50p target level 10_060 is touched by the next
+bar's high 100.60 and fills at ``min(level, low 99.90)`` = 9_990 →
+**pnl −20, mfe 50, mae 20, holding 2** (excursions vs 10_010: entry bar fav 0
+/ adv 15; TP bar fav 50 / adv 20). Twelve back-to-back round-trips (signal →
+entry → TP, three bars each, 09:15-onward so the 15:20 forced-exit rule never
+fires) ⇒ **Σ pnl = 12 × −20 = −240 paisa** exactly. For Track-1 signal-only
+spot there is NO brokerage (CLAUDE.md §7), so **net == gross**: the −240-paisa
+gross IS the net.
+
+Re-locked UNCHANGED for the 1-minute execution grid
+(DEC-FILL-EXEC-GRID-1M-001): the run is the ``tf_minutes == 1`` fixed point
+(the same list passed as decision AND execution stream — fill on 1m bar N+1,
+the historical timing) and the two new laws are provably inert here — each
+round-trip's ENTRY bar range [99.95, 100.10] touches neither the SL level
+99.80 (= 100.10 − 0.30) nor the TP level 100.60 (= 100.10 + 0.50), so the
+§2.4 same-bar deferral changes nothing, and every trade exits via TP (never
+end_of_data/session_gap), so the B3 terminal-CLOSE carve-out never applies.
+``holding_bars`` 2 is now a 1-MINUTE count (exit_idx − entry_idx + 1 =
+(base+2) − (base+1) + 1), numerically identical at this fixed point.
 
 Any walker regression (fill timing, the same-bar tie-break, MFE/MAE folding,
 paisa P&L, or float creeping into the Σ) breaks this test (NFR-DET-001
@@ -45,9 +59,9 @@ _TAKE_PROFIT_PAISA = 50
 
 #: The per-trade oracle (one take-profit round-trip), hand-derived + already
 #: golden-locked in ``test_engine_trade_sim_golden.py`` (Fixture A, trade 1).
-_PER_TRADE_PNL = 50
-_PER_TRADE_MFE = 60
-_PER_TRADE_MAE = 10
+_PER_TRADE_PNL = -20
+_PER_TRADE_MFE = 50
+_PER_TRADE_MAE = 20
 _PER_TRADE_HOLDING = 2
 
 
@@ -82,11 +96,11 @@ def _build_fixture() -> tuple[list[CandleBar], list[bool]]:
         # bar 0 — flat signal bar; entry fires on the NEXT bar's open.
         bars.append(_bar(base, "100", "100", "100", "100"))
         signals.append(True)
-        # bar 1 — entry bar (fills at open 100.00); excursion fav 10 / adv 5.
+        # bar 1 — entry bar (worst fill = HIGH 100.10); excursion fav 0 / adv 15.
         bars.append(_bar(base + 1, "100.00", "100.10", "99.95", "100.05"))
         signals.append(False)
-        # bar 2 — take-profit bar (high 100.60 crosses the +50 level 100.50);
-        # excursion fav 60 / adv 10 → mfe 60, mae 10; holding 2.
+        # bar 2 — take-profit bar (high 100.60 touches level 100.60; fill
+        # clamps to the low 99.90); excursion fav 50 / adv 20 → mfe 50, mae 20.
         bars.append(_bar(base + 2, "100.00", "100.60", "99.90", "100.40"))
         signals.append(False)
     return bars, signals
@@ -113,11 +127,13 @@ def _expected_trades() -> list[ClosedTrade]:
 
 def _run() -> list[ClosedTrade]:
     bars, signals = _build_fixture()
+    # tf==1 fixed point: the same list is decision AND execution stream.
     return simulate_trades(
         bars,
         signals,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         stop_loss_paisa=_STOP_LOSS_PAISA,
         take_profit_paisa=_TAKE_PROFIT_PAISA,
     )
@@ -129,10 +145,10 @@ def test_twelve_fills_emit_one_closed_trade_each() -> None:
 
 
 def test_sigma_pnl_is_exact_int64_sum() -> None:
-    """P-04: Σ PnL is the EXACT integer sum (no float drift) — 12 × 50 = 600 paisa."""
+    """P-04: Σ PnL is the EXACT integer sum (no float drift) — 12 × −20 = −240 paisa."""
     trades = _run()
     total = sum(t.pnl_paisa for t in trades)
-    assert total == _N_TRADES * _PER_TRADE_PNL == 600
+    assert total == _N_TRADES * _PER_TRADE_PNL == -240
     assert isinstance(total, int)  # int64 paisa, never a float
 
 
@@ -141,7 +157,7 @@ def test_net_equals_gross_for_signal_only_spot() -> None:
     trades = _run()
     gross = sum(t.pnl_paisa for t in trades)
     net = gross  # no cost model applied for signal-only spot
-    assert net == gross == 600
+    assert net == gross == -240
 
 
 def test_every_trade_is_identical_in_paisa() -> None:

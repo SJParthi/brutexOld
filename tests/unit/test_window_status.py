@@ -113,3 +113,34 @@ class TestWindowStatusLog:
         restored = WindowStatusLog.from_records(rows)
         assert restored.to_records() == rows
         assert restored.count == 2
+
+
+class TestG8RoutingPins:
+    """DEC-LAKE-RUST-WINDOW-LEDGER-001 — the routed public law ≡ its oracle."""
+
+    def test_classify_equals_python_oracle(self) -> None:
+        from brutex.data.window_status import (
+            _classify_window_status_python,
+            classify_window_status,
+        )
+
+        for raw_bars in (0, 1, 375):
+            for error_type in (None, "GrowwTimeoutError"):
+                for degraded in (False, True):
+                    assert classify_window_status(
+                        raw_bars, error_type, degraded=degraded
+                    ) == _classify_window_status_python(raw_bars, error_type, degraded=degraded)
+
+    def test_window_key_python_law(self) -> None:
+        from brutex.data.window_status import WindowStatusLog, window_key_python
+
+        key = WindowKey(
+            market="groww",
+            security_id="NSE-NIFTY",
+            interval="1minute",
+            start=date(2024, 1, 2),
+            end=date(2024, 1, 3),
+        )
+        expected = ("groww", "NSE-NIFTY", "1minute", "2024-01-02", "2024-01-03")
+        assert window_key_python(key) == expected
+        assert WindowStatusLog._key(key) == expected

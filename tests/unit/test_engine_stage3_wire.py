@@ -25,6 +25,7 @@ O(bars)-per-eval offline work, Golden Rule #10 — no O(1) claim anywhere here).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -35,6 +36,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.cascade_wire import Stage3ManifestRecord
+from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL, build_exec_grid_map
 from brutex.engine.reference_series import ReferenceSeries, TradeReferenceStamper
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.stage1a import build_bar_bits
@@ -51,6 +53,7 @@ from brutex.engine.stage3_wire import (
     cascade_specs_for_refined_cells,
     data_snapshot_hash,
     ensure_stage3_runtime,
+    lockbox_boundary,
     recover_survivor_cell,
     run_stage3_pass,
     stage3_manifest_record,
@@ -69,14 +72,20 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluation
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import (
+    DEFAULT_PRICE_SOURCE_CELL,
+    FibAnchorKind,
+    PriceSource,
+    PriceSourceCell,
+    Side,
+)
 from brutex.vocabulary import ProximityParams
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
     from brutex.metrics.compute import ResultMetrics
 
-pytest.importorskip("cma")  # the optimize extra — installed in the CI unit job
+pytest.importorskip("brutex_refine")  # the Stage-3 Rust wheel — built in the CI unit job
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -130,15 +139,56 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
+def _bar_ohlc(day: int, minute: int, o: float, h: float, lo: float, c: float) -> CandleBar:
+    """Build one IST-session minute bar with EXPLICIT extremes (worst-case fixture)."""
+    ts = (
+        datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
+    ).astimezone(UTC)
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(str(round(o, 2))),
+        high=Decimal(str(round(h, 2))),
+        low=Decimal(str(round(lo, 2))),
+        close=Decimal(str(round(c, 2))),
+        volume=100,
+        open_interest=None,
+    )
+
+
 def _trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos win often via the TP leg."""
+    """A gap-up drift both masks RANK on under the ONE worst-case fill law.
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (a worst-case entry fills at
+    the bar HIGH, so the old wide-range drift SL'd every entry on its own
+    bar): 7-bar cycles of NARROW gap-up bars (open = prior close + 3.00,
+    range 0.50 < the SL 0.80 — no same-bar stop-out; the NEXT gap-up's low
+    clears the TP level so the win banks exactly +50), a shallow BEARISH
+    signal bar at cycle position 3 (feeds the k=1 bit-1 mask), and — every
+    4th cycle — a DEEP bearish bar at position 4 (range 0.85 > the SL) whose
+    stop-out keeps profit_factor FINITE for BOTH masks (losses −85 entering
+    the deep bar itself / −115 stopped from the prior bar's fill). Measured
+    on this tree at sl=80/tp=50: FULL mask-0 PF 3.72 · mask-2 PF 3.77; TRAIN
+    slice 72 / 30 trades — every hard rank gate passes on both masks.
+    """
     bars: list[CandleBar] = []
+    cycle = 0
     for d in range(n_days):
         price = 100.0
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
-            bars.append(_bar(d, m, price, close))
-            price = close
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish SIGNAL bar (bit 1 fires)
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+            bars.append(_bar_ohlc(d, m, o, h, lo, c))
+            price = c
     return bars
 
 
@@ -279,6 +329,44 @@ class TestTrainSliceBars:
         with pytest.raises(Stage3WireError, match="chronological"):
             train_slice_bars(bars)
 
+    def test_explicit_earlier_boundary_overrides_the_default(self) -> None:
+        # The dual-stream ONE-BOUNDARY seam (DEC-FILL-EXEC-GRID-1M-001 design
+        # §7.2/Q3): a pre-resolved boundary REPLACES the stream's own default
+        # derivation. 10 daily bars, boundary = day 4's ordinal → the slice
+        # keeps days 0..3 only (strictly before), while the default window
+        # (182 ≫ 10 days) would keep nothing.
+        bars = [_bar(d, 0, 100.0, 101.0) for d in range(10)]
+        day4 = bars[4].timestamp.astimezone(_IST).date().toordinal()
+        train = train_slice_bars(bars, boundary=day4)
+        assert [b.timestamp for b in train] == [b.timestamp for b in bars[:4]]
+        assert train_slice_bars(bars) == ()  # the default is byte-preserved
+
+    def test_default_equals_own_lockbox_boundary(self) -> None:
+        # boundary=None ≡ boundary=lockbox_boundary(bars) — the pre-PR-B
+        # behaviour is the explicit-boundary law's fixed point.
+        bars = [_bar(d, 0, 100.0, 101.0) for d in range(190)]
+        assert train_slice_bars(bars) == train_slice_bars(bars, boundary=lockbox_boundary(bars))
+
+
+class TestLockboxBoundary:
+    """`lockbox_boundary` — the per-STREAM half of the dual-stream train law."""
+
+    def test_empty_bars_yield_none(self) -> None:
+        assert lockbox_boundary([]) is None
+
+    def test_boundary_is_last_day_minus_window_plus_one(self) -> None:
+        # 190 daily bars (days 0..189): with W = LOCKBOX_DEFAULT_WINDOW_DAYS
+        # the boundary is ord(day 189) − W + 1 — the exact lockbox default
+        # start `train_slice_bars` cuts at.
+        bars = [_bar(d, 0, 100.0, 101.0) for d in range(190)]
+        last_day = bars[-1].timestamp.astimezone(_IST).date().toordinal()
+        assert lockbox_boundary(bars) == last_day - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+
+    def test_non_chronological_bars_rejected(self) -> None:
+        bars = [_bar(5, 0, 100.0, 101.0), _bar(1, 0, 100.0, 101.0)]
+        with pytest.raises(Stage3WireError, match="chronological"):
+            lockbox_boundary(bars)
+
 
 # ────── data_snapshot_hash (shared non-CLI helper, Amendment A1) ──────
 
@@ -397,6 +485,7 @@ def _run_id_for(
     tp: int | None,
     mask: int = 0,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    price_source: PriceSourceCell = DEFAULT_PRICE_SOURCE_CELL,
 ) -> str:
     return mask_run_id(
         mask=mask,
@@ -411,6 +500,8 @@ def _run_id_for(
             proximity=None,
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
+            vwap_source=price_source.vwap_source,
+            ema_source=price_source.ema_source,
         ),
         data_snapshot_hash=grid.data_snapshot_hash,
         indicator_version=grid.indicator_version,
@@ -422,13 +513,15 @@ class TestRecoverSurvivorCell:
     def test_recovers_a_non_first_cell_by_identity_match(self) -> None:
         grid = _grid(stop_losses=[80, 100], take_profits=[50, 120])
         run_id = _run_id_for(grid, sl=100, tp=120)
-        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001);
-        # the default prev-day grid recovers PREV_DAY.
+        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001)
+        # AND the price-source cell (DEC-NIFTY-PRICE-SOURCE-AXIS-001); the default
+        # prev-day / (HLC3, CLOSE) grid recovers PREV_DAY + the baseline cell.
         assert recover_survivor_cell(_row_for(run_id), grid) == (
             100,
             120,
             None,
             FibAnchorKind.PREV_DAY,
+            DEFAULT_PRICE_SOURCE_CELL,
         )
 
     def test_recovers_a_non_prev_day_anchor_cell(self) -> None:
@@ -441,10 +534,29 @@ class TestRecoverSurvivorCell:
             50,
             None,
             FibAnchorKind.ROLLING_WEEKLY,
+            DEFAULT_PRICE_SOURCE_CELL,
+        )
+
+    def test_recovers_a_non_default_price_source_cell(self) -> None:
+        # A survivor swept under a NON-default price-source cell recovers THAT cell —
+        # proving the source is part of the identity re-derivation (Golden Rule #4);
+        # the row's run_id ONLY reproduces at its ORIGINATING (vwap, ema) source.
+        non_default = PriceSourceCell(vwap_source=PriceSource.OPEN, ema_source=PriceSource.CLOSE)
+        grid = _grid(price_source_cells=[DEFAULT_PRICE_SOURCE_CELL, non_default])
+        run_id = _run_id_for(grid, sl=80, tp=50, price_source=non_default)
+        assert recover_survivor_cell(_row_for(run_id), grid) == (
+            80,
+            50,
+            None,
+            FibAnchorKind.PREV_DAY,
+            non_default,
         )
 
     def test_unmatchable_row_raises(self) -> None:
-        with pytest.raises(Stage3WireError, match="no \\(sl × tp × proximity × fib_anchor\\) cell"):
+        with pytest.raises(
+            Stage3WireError,
+            match="no \\(sl × tp × proximity × fib_anchor × price_source\\) cell",
+        ):
             recover_survivor_cell(_row_for("ab" * 32), _grid())
 
     def test_matched_cell_with_disabled_sl_leg_raises(self) -> None:
@@ -507,18 +619,21 @@ class TestHelpers:
 
 
 class TestEnsureRuntime:
-    def test_returns_versions_when_optimize_extra_present(self) -> None:
-        pycma_version, numpy_version = ensure_stage3_runtime()
-        assert pycma_version and numpy_version
+    def test_returns_versions_when_rust_wheel_present(self) -> None:
+        optimizer_version, optimizer_build = ensure_stage3_runtime()
+        assert optimizer_version.startswith("brutex-refine-")
+        assert optimizer_build  # the baked crate-source digest
 
-    def test_missing_optimizer_raises_with_install_hint(
+    def test_unavailable_runtime_raises_with_build_hint(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from brutex.engine.refine_rust import RefineRustUnavailableError
+
         def _boom() -> tuple[str, str]:
-            raise ImportError("No module named 'cma'")
+            raise RefineRustUnavailableError("the brutex_refine wheel is not importable")
 
         monkeypatch.setattr("brutex.engine.stage3_wire.optimizer_versions", _boom)
-        with pytest.raises(Stage3WireError, match="optimize"):
+        with pytest.raises(Stage3WireError, match="DEC-RUST-STAGE3-REFINE-001"):
             ensure_stage3_runtime()
 
 
@@ -579,6 +694,186 @@ class TestRunStage3PassEdges:
         assert report.skipped_empty_train == 1
         assert report.masks_refined == 0
         assert report.cells == ()
+
+
+class TestDualStreamTrainSlices:
+    """The dual-stream train-slice law (DEC-FILL-EXEC-GRID-1M-001 §7.2/Q3).
+
+    Per instrument, ONE lockbox boundary — the EARLIEST across the decision
+    stream(s) and the 1-minute EXECUTION stream — is applied to BOTH streams,
+    a divergence is a ``stage3_wire.lockbox_tail_skew`` WARN, and the CUT
+    exec slice enters the same train fold (``train_snapshot_hash``).
+    """
+
+    def _coarse_grid(self, **overrides: object) -> SweepGridConfig:
+        """A 2-minute decision grid — the exec stream is a DISTINCT label."""
+        base: dict[str, object] = {"timeframes": [Timeframe("2minute", 2)]}
+        base.update(overrides)
+        return _grid(**base)
+
+    def test_exec_tail_skew_warns_and_the_earliest_boundary_cuts_both(self, tmp_path: Path) -> None:
+        # Decision ("2minute") daily bars over days 0..189; exec ("1minute")
+        # daily bars over days 0..186 — the exec stream's last day is THREE
+        # days earlier, so its own boundary (ord(day186) − W + 1) is 3 days
+        # before the decision one (ord(day189) − W + 1). The resolved
+        # boundary is the EARLIEST (the exec one), applied to BOTH streams:
+        # each slice keeps days strictly before ord(day186) − W + 1 =
+        # ord(day0) + (186 − W + 1) = days 0..4 (W = 182 ⇒ 5 bars each).
+        decision = [_bar(d, 0, 100.0, 101.0) for d in range(190)]
+        exec_1m = [_bar(d, 1, 100.0, 101.0) for d in range(187)]
+        streams = {"2minute": decision, "1minute": exec_1m}
+        calls: list[tuple[str, str]] = []
+
+        def bars_for(instrument: str, tf_label: str) -> list[CandleBar]:
+            calls.append((instrument, tf_label))
+            return streams[tf_label]
+
+        grid = self._coarse_grid()
+        audit_path = tmp_path / "audit.jsonl"
+        with AuditWriter.open(audit_path) as audit, capture_logs() as logs:
+            report = run_stage3_pass(
+                grid,
+                results_root=tmp_path,
+                bars_for=bars_for,
+                audit=audit,
+                **_SCOPE,
+            )
+        # The pass fetched BOTH streams — the exec stream via the canonical
+        # "1minute" label (bars_for MUST answer that key now).
+        assert EXEC_INTERVAL_LABEL == "1minute"
+        assert set(calls) == {("NIFTY", "2minute"), ("NIFTY", EXEC_INTERVAL_LABEL)}
+        boundary_dec = lockbox_boundary(decision)
+        boundary_exec = lockbox_boundary(exec_1m)
+        assert boundary_dec is not None and boundary_exec is not None
+        assert boundary_exec == boundary_dec - 3  # the crafted skew
+        skew = [e for e in logs if e["event"] == "stage3_wire.lockbox_tail_skew"]
+        assert len(skew) == 1
+        assert skew[0]["instrument"] == "NIFTY"
+        assert skew[0]["resolved"] == boundary_exec  # the EARLIEST wins
+        assert skew[0]["boundaries"] == {"1minute": boundary_exec, "2minute": boundary_dec}
+        # The train fold hashes BOTH one-boundary cuts — including the
+        # (instrument, "1minute") exec entry (design §7.2: the exec cut is
+        # part of the train-slice snapshot identity).
+        expected_hash = data_snapshot_hash(
+            **_SCOPE,
+            slices={
+                ("NIFTY", "2minute"): train_slice_bars(decision, boundary=boundary_exec),
+                ("NIFTY", "1minute"): train_slice_bars(exec_1m, boundary=boundary_exec),
+            },
+        )
+        assert report.train_snapshot_hash == expected_hash
+        # Sanity: the resolved cut is 5 bars per stream (days 0..4) — the
+        # decision stream's OWN default cut would have kept days 0..7.
+        assert len(train_slice_bars(decision, boundary=boundary_exec)) == 5
+        assert len(train_slice_bars(exec_1m, boundary=boundary_exec)) == 5
+        assert len(train_slice_bars(decision)) == 8
+
+    def test_empty_exec_train_slice_skips_the_leaderboard(self, tmp_path: Path) -> None:
+        # A survivor leaderboard whose EXEC train slice is empty (the exec
+        # stream covers ONLY the lockbox window) is SKIPPED + counted — a
+        # refinement eval without its exec stream would be a decision-TF-era
+        # backtest (DEC-FILL-EXEC-GRID-1M-001 §3.3), never a silent fallback.
+        grid = self._coarse_grid(k_values=[0])
+        # Fabricate ONE persisted survivor at the grid's own tuple path (the
+        # skip fires BEFORE any cell recovery, so the row content is inert
+        # plumbing — only its (instrument, tf, mode) leaderboard key matters).
+        [tuple_] = iter_sweep_tuples(grid)
+        store_path = tuple_store_path(tmp_path, tuple_, grid)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store = ResultsStore(path=store_path)
+        store.append(dataclasses.replace(_row_for("ab" * 32), tf="2minute"))
+        store.flush()
+
+        decision = [_bar(d, 0, 100.0, 101.0) for d in range(190)]
+        # Exec stream: days 8..189 EXACTLY — its own boundary equals the
+        # decision one (same last day), so the resolved boundary is shared
+        # (no skew) and every exec bar is AT/AFTER it ⇒ empty exec train cut,
+        # while the decision train cut keeps days 0..7 (8 bars).
+        exec_1m = [_bar(d, 1, 100.0, 101.0) for d in range(8, 190)]
+        streams = {"2minute": decision, "1minute": exec_1m}
+        audit_path = tmp_path / "audit.jsonl"
+        with AuditWriter.open(audit_path) as audit, capture_logs() as logs:
+            report = run_stage3_pass(
+                grid,
+                results_root=tmp_path,
+                bars_for=lambda _i, tf_label: streams[tf_label],
+                audit=audit,
+                **_SCOPE,
+            )
+        assert lockbox_boundary(exec_1m) == lockbox_boundary(decision)  # no skew
+        assert not [e for e in logs if e["event"] == "stage3_wire.lockbox_tail_skew"]
+        assert train_slice_bars(decision) != ()  # the DECISION train is non-empty
+        assert report.leaderboards == 1
+        assert report.survivors_total == 1
+        assert report.skipped_empty_train == 1  # the exec-empty arm, counted
+        assert report.masks_refined == 0
+        assert report.cells == ()
+
+    def test_exec_map_is_memoised_per_instrument_tf(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # TWO leaderboards sharing ONE (instrument, tf) — same instrument,
+        # modes "A"/"B" (LeaderboardKey = (instrument, tf, mode)) — share ONE
+        # ExecGridMap build: the first board builds (the miss arm), the
+        # second reads the memo (the hit arm). The map is mask/SL/TP/mode-
+        # independent (design §1.5). The spy wraps stage3_wire's OWN
+        # reference so nothing else's builds are counted.
+        from brutex.engine import stage3_wire as stage3_mod
+
+        grid = _grid(k_values=[0])
+        # Fabricate ONE persisted store holding a mode-"A" and a mode-"B"
+        # survivor (mask 0, the grid's only sl=80/tp=50 cell) — each run_id
+        # re-derived exactly as recover_survivor_cell will (row.mode enters
+        # mask_run_id, so the two ids differ and each board recovers).
+        run_id_a = _run_id_for(grid, sl=80, tp=50)
+        run_id_b = mask_run_id(
+            mask=0,
+            direction="bull",
+            instrument="NIFTY",
+            tf="1minute",
+            mode="B",
+            params=canonical_trade_params(
+                sl_paisa=80,
+                tp_paisa=50,
+                prior_n=grid.prior_n,
+                proximity=None,
+                start_equity_paisa=grid.start_equity_paisa,
+            ),
+            data_snapshot_hash=grid.data_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        [tuple_] = iter_sweep_tuples(grid)
+        store_path = tuple_store_path(tmp_path, tuple_, grid)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store = ResultsStore(path=store_path)
+        store.append(_row_for(run_id_a))
+        store.append(dataclasses.replace(_row_for(run_id_b), mode="B"))
+        store.flush()
+
+        real_build = stage3_mod.build_exec_grid_map
+        built: list[int] = []
+
+        def counting_build(
+            decision_bars: object, exec_bars_1m: object, *, tf_minutes: int
+        ) -> object:
+            built.append(tf_minutes)
+            return real_build(decision_bars, exec_bars_1m, tf_minutes=tf_minutes)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(stage3_mod, "build_exec_grid_map", counting_build)
+        bars = _trending_bars(_N_DAYS)
+        audit_path = tmp_path / "audit.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            report = run_stage3_pass(
+                grid,
+                results_root=tmp_path,
+                bars_for=lambda _i, _t: bars,
+                audit=audit,
+                **_SCOPE,
+            )
+        assert report.leaderboards == 2  # (NIFTY, 1minute, A) + (…, B)
+        assert report.masks_refined == 2  # both boards refined...
+        assert built == [1]  # ...over ONE memoised (instrument, tf) map build
 
 
 class TestRunStage3PassFull:
@@ -658,12 +953,17 @@ class TestRunStage3PassFull:
         train_bars = train_slice_bars(_trending_bars(_N_DAYS))
         bar_bits = build_bar_bits(train_bars, proximity=None, prior_n=grid.prior_n)
         assert cell.tuple_.sl_paisa is not None and cell.tuple_.tp_paisa is not None
+        # Dual-feed fixed point (DEC-FILL-EXEC-GRID-1M-001): the grid tf label
+        # IS "1minute" == EXEC_INTERVAL_LABEL, so the pass's exec train slice
+        # equals the decision train slice (one boundary, same stream) — the
+        # re-evaluation passes the SAME cut as exec_bars_1m.
         metrics: ResultMetrics = metrics_for_mask(
             train_bars,
             bar_bits,
             row.mask_bits,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=train_bars,
             stop_loss_paisa=cell.tuple_.sl_paisa,
             take_profit_paisa=cell.tuple_.tp_paisa,
             start_equity_paisa=grid.start_equity_paisa,
@@ -686,6 +986,290 @@ class TestRunStage3PassFull:
         # Bracketing (F10): nothing STAGE_3 outside START..COMPLETE, and the
         # pass lines appear AFTER the sweep's grid lines (same single thread).
         assert actions.index(STAGE3_ACTION_PASS_START) > actions.index("GRID_SWEEP_COMPLETE")
+
+
+# ────── non-default price-source cell threading (DEC-NIFTY-PRICE-SOURCE-AXIS-001) ──────
+
+
+class TestStage3NonDefaultPriceSource:
+    """MAJOR-1 regression: a non-default price-source cell + Stage-3 COMPLETES.
+
+    Before the fix, ``recover_survivor_cell`` iterated ``sl × tp × proximity ×
+    fib_anchor`` only and always hashed the DEFAULT ``(HLC3, CLOSE)`` source, so a
+    survivor swept under e.g. ``open:close`` never matched its own ``run_id`` and
+    the whole staged use case aborted with ``Stage3WireError``. These tests pin
+    that the pass now completes AND refines against the ORIGINATING source bits.
+    """
+
+    _CELL = PriceSourceCell(vwap_source=PriceSource.OPEN, ema_source=PriceSource.CLOSE)
+
+    def test_full_pass_completes_and_refines_against_the_swept_source(self, tmp_path: Path) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        # Would raise Stage3WireError pre-fix; now the pass runs end-to-end.
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        assert report.enabled is True
+        assert report.masks_refined >= 1
+        assert report.cells
+        # Every refined cell carries the ORIGINATING non-default source (never a
+        # silent (HLC3, CLOSE) fallback).
+        for cell in report.cells:
+            assert cell.tuple_.price_source == self._CELL
+
+    def test_refined_row_identity_re_derives_with_the_non_default_source(
+        self, tmp_path: Path
+    ) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        assert report.train_snapshot_hash is not None
+        cell = report.cells[0]
+        row = ResultsStore.load(cell.path).rows()[0]
+        # The stored run_id ONLY reproduces when canonical_trade_params is fed the
+        # cell's OWN (vwap, ema) source — the correctness teeth for the thread.
+        expected = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=canonical_trade_params(
+                sl_paisa=cell.tuple_.sl_paisa,
+                tp_paisa=cell.tuple_.tp_paisa,
+                prior_n=grid.prior_n,
+                proximity=cell.tuple_.proximity,
+                start_equity_paisa=grid.start_equity_paisa,
+                vwap_source=self._CELL.vwap_source,
+                ema_source=self._CELL.ema_source,
+            ),
+            data_snapshot_hash=report.train_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        assert row.run_id == expected
+        # And it does NOT reproduce at the default source (the false-green a
+        # missing thread would have produced).
+        wrong = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=canonical_trade_params(
+                sl_paisa=cell.tuple_.sl_paisa,
+                tp_paisa=cell.tuple_.tp_paisa,
+                prior_n=grid.prior_n,
+                proximity=cell.tuple_.proximity,
+                start_equity_paisa=grid.start_equity_paisa,
+            ),
+            data_snapshot_hash=report.train_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        assert row.run_id != wrong
+
+    def test_manifest_record_and_cascade_specs_carry_the_source(self, tmp_path: Path) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        record = stage3_manifest_record(report)
+        assert record.refined_cells
+        for rec in record.refined_cells:
+            assert rec.vwap_source is self._CELL.vwap_source
+            assert rec.ema_source is self._CELL.ema_source
+        specs = cascade_specs_for_refined_cells(report.cells, grid=grid)
+        assert specs
+        for spec in specs:
+            assert spec.vwap_source is self._CELL.vwap_source
+            assert spec.ema_source is self._CELL.ema_source
+
+    def test_ema_varying_cell_moves_refined_bar_bits_0_to_5(self, tmp_path: Path) -> None:
+        """GAP-2: an EMA-source-varying cell demonstrably changes REFINED bits 0-5.
+
+        The sibling acceptance test above sweeps ``(OPEN vwap, CLOSE ema)`` — on
+        this volume-flat spot fixture the swept VWAP source is INERT (bits 52-53
+        need traded volume to separate) and the only swept condition is bit 1 (an
+        EMA bit), so ``(OPEN, CLOSE)`` refines against bar_bits that differ from
+        the default at ZERO positions: it proved the identity-hash thread but NOT
+        that the source moves any refined bit. Here the cell varies ``ema_source``
+        (``hlc3:open``), which flips bits 0-5, and we assert the refined bar_bits
+        the pass built for the cell genuinely differ from the ``(HLC3, CLOSE)``
+        default on the SAME train slice + params — and that the change is CONFINED
+        to the EMA group 0-5 (the ``build_bar_bits`` source-locality contract).
+        """
+        ema_cell = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.OPEN)
+        # Drift zig-zag + EOD-only exits: the gap-up _trending_bars ranks under
+        # the one law but its OPEN series is a level-shifted CLOSE copy, so an
+        # EMA-source change moves NO bit on it (see _drift_trending_bars).
+        # Axis-MAX legal levels the micro fixture can never trigger (see
+        # _drift_trending_bars) — every trade session-gap-closes at EOD.
+        grid = _grid(
+            price_source_cells=[ema_cell],
+            stop_losses=[200],
+            take_profits=[500],
+        )
+        bars = _drift_trending_bars(_N_DAYS)
+        report = _run_full(tmp_path, bars, grid)
+        assert report.enabled is True
+        assert report.masks_refined >= 1
+        assert report.cells
+        for cell in report.cells:
+            assert cell.tuple_.price_source == ema_cell
+
+        # Reconstruct the exact train-slice bar_bits the pass used for this cell
+        # vs the (HLC3, CLOSE) default, same proximity=None / prior_n / anchor.
+        train = train_slice_bars(bars)
+        default_bits = build_bar_bits(train, prior_n=grid.prior_n)
+        ema_bits = build_bar_bits(train, prior_n=grid.prior_n, ema_source=PriceSource.OPEN)
+        moved = {
+            bit
+            for base, ema in zip(default_bits, ema_bits, strict=True)
+            for bit in range(128)
+            if ((base ^ ema) >> bit) & 1
+        }
+        # The refined bits genuinely MOVE (unlike the (OPEN, CLOSE) sibling) …
+        assert moved, "ema_source=open must flip at least one EMA bit vs the default"
+        # … and the movement is confined to the EMA group 0-5 (source locality).
+        assert moved <= set(range(6))
+        assert moved & set(range(6))
+
+
+# ────── the bar_bits memo MUST be price-source-keyed (GAP-1) ──────
+
+
+def _drift_trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
+    """MICRO-scale drift zig-zag — rankable under the ONE worst-case fill law
+    at STAGE-3-LEGAL integer levels, and EMA-source-sensitive.
+
+    Two constraints meet here (DEC-FILL-WORST-CASE-ONLY-001 ×
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001): (a) Stage-3 grids REQUIRE integer sl/tp
+    on the locked Mode-A axes (SL ∈ [5,200] / TP ∈ [10,500] paisa — ADR-0007
+    condition 3), and under the one law a level a fixture's bars can REACH
+    always fills at the adverse extreme; so the bars are scaled to ±6/3-paisa
+    zig moves with 5-paisa pads (bar range ≈ 16 paisa, daily excursion ≈ ±90
+    paisa) and the consuming tests pass the axis-MAX ``sl=[200], tp=[500]`` —
+    legal ints the fixture can never trigger, so every trade rides to the
+    #1743 session-gap EOD close (up days win, the every-5th DOWN day keeps
+    ``profit_factor`` finite for the rank gates; measured: masks_refined=2 on
+    the k∈{0,1} bit-1 grid). (b) The EMA-source bit-flip demonstrations need
+    a source series whose SHAPE differs from CLOSE — a pure LEVEL shift
+    cancels in the source-vs-its-own-EMA comparison (the gap-up
+    :func:`_trending_bars`' OPEN series is exactly such a shift, measured
+    ZERO flips), while this zig-zag's one-bar open/close PHASE shift moves
+    the EMA crossings (measured: ``ema_source=open`` flips bits {0,1,2,3},
+    ``ema_source=hlc3`` flips bits {0,1} on the train slice).
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        down_day = d % 5 == 4
+        for m in range(per_day):
+            if down_day:
+                close = price - 0.06 if m % 3 else price + 0.03
+            else:
+                close = price + 0.06 if m % 3 else price - 0.03
+            open_ = price
+            hi = max(open_, close) + 0.05
+            lo = min(open_, close) - 0.05
+            bars.append(_bar_ohlc(d, m, open_, hi, lo, close))
+            price = close
+    return bars
+
+
+class TestStage3MemoIsPriceSourceKeyed:
+    """GAP-1 kill: the Stage-3 ``bits_memo`` key MUST include ``price_source``.
+
+    Dropping ``price_source`` from the memo key (``stage3_wire.py`` — the
+    ``memo_key = (instrument, tf, proximity, fib_anchor, price_source)`` line)
+    survived the whole prior suite: every earlier fixture's surviving masks were
+    source-INDEPENDENT (a k=0 enter-every-bar mask, or a bit the swept source
+    never moved), so the second-processed cell being served the first cell's bits
+    produced no observable difference.
+
+    Here TWO cells differ ONLY in ``ema_source`` and BOTH produce a surviving k=1
+    bit-1 (``close_below_ema20``) mask whose train-slice bar_bits genuinely differ
+    (measured 196 vs 83 fires). If the memo key drops the source, whichever cell
+    is processed SECOND is served the first cell's bar_bits and refines WRONG.
+
+    The order-independent oracle: each cell's refined rows in the 2-cell pass must
+    byte-match that SAME cell's refined rows in a SINGLE-cell pass (where no memo
+    collision is possible). Under the mutation the second-processed cell diverges
+    from its single-cell baseline (verified: applying the mutation flips one of
+    the two equalities to False), so asserting BOTH catches it regardless of the
+    intra-leaderboard processing order.
+    """
+
+    _A = DEFAULT_PRICE_SOURCE_CELL  # (HLC3, CLOSE)
+    _B = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.HLC3)
+
+    @staticmethod
+    def _rows_by_source(
+        report: Stage3PassReport,
+    ) -> dict[PriceSourceCell, list[tuple[object, ...]]]:
+        """Aggregate every refined-cell row, grouped by the recovered source cell."""
+        out: dict[PriceSourceCell, list[tuple[object, ...]]] = {}
+        for cell in report.cells:
+            rows = ResultsStore.load(cell.path).rows()
+            out.setdefault(cell.tuple_.price_source, []).extend(
+                (r.mask_bits, r.run_id, r.net_pnl_paisa, r.total_trades) for r in rows
+            )
+        return {src: sorted(v) for src, v in out.items()}
+
+    def test_each_cell_refines_against_its_own_source_bits(self, tmp_path: Path) -> None:
+        bars = _drift_trending_bars(_N_DAYS)
+        # top_k / stage3_top_k widened so the merged (instrument, tf, mode)
+        # leaderboard keeps BOTH cells' masks (2 masks × 2 cells) — otherwise the
+        # bounding could drop a cell and mask the collision.
+        single_a = self._rows_by_source(
+            _run_full(
+                tmp_path / "a",
+                bars,
+                _grid(
+                    price_source_cells=[self._A],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
+            )
+        )[self._A]
+        single_b = self._rows_by_source(
+            _run_full(
+                tmp_path / "b",
+                bars,
+                _grid(
+                    price_source_cells=[self._B],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
+            )
+        )[self._B]
+        both = self._rows_by_source(
+            _run_full(
+                tmp_path / "ab",
+                bars,
+                _grid(
+                    price_source_cells=[self._A, self._B],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
+            )
+        )
+
+        # Precondition (guards against a coinciding fixture silently tautologising
+        # the test): the two cells genuinely refine to DIFFERENT rows, and BOTH
+        # produced the ema-sensitive k=1 bit-1 (mask == 0b10) survivor.
+        assert single_a != single_b
+        assert any(mask == 0b10 for mask, *_ in single_a)
+        assert any(mask == 0b10 for mask, *_ in single_b)
+
+        # The kill: in the 2-cell pass each cell reproduces its OWN single-cell
+        # refinement (its own source bits), never the sibling's. Under the
+        # dropped-source memo mutation the second-processed cell diverges from its
+        # single-cell baseline, flipping one of these equalities to False.
+        assert both[self._A] == single_a
+        assert both[self._B] == single_b
 
 
 # ────── the A/B determinism oracle (review F11) + idempotent re-run ──────
@@ -1113,3 +1697,206 @@ class TestManifestRecordRelPath:
         (tmp_path / "root").mkdir()
         with pytest.raises(Stage3WireError, match="not under"):
             stage3_manifest_record(self._report_with_cell(outside), results_root=tmp_path / "root")
+
+
+# ────── The WORST_CASE evaluator threading pin (fix round 2) ──────
+
+
+class TestEvaluatorOneLawWorstCase:
+    """DEC-FILL-WORST-CASE-ONLY-001 on the 1m grid: stage3_wire's
+    ``_make_evaluator`` runs the ONE hardcoded worst-case law — the
+    fill_mode/policy seam is DELETED — with fills on the 1-minute execution
+    stream (DEC-FILL-EXEC-GRID-1M-001; tf=1minute fixed point here).
+
+    Hand-derived pins on ``_trending_bars(3)`` (3 days x 30 bars) at
+    ``evaluate(80, 50)``, mask=0 (a signal on EVERY decision bar):
+
+    * CADENCE (the delta vs the retired PR-A 27-trade pin): the exec-grid
+      map arms bar ``j`` from decision bar ``j-1``'s signal, and the walker
+      fills a due entry whenever it is flat and nothing closed ON that bar
+      — so after a TP exit on bar ``i``, bar ``i+1`` (armed by the EXIT
+      bar's own signal) fills immediately: a 2-bar win cycle
+      (entry j @HIGH, TP exit j+1), not PR-A's 3-bar one.
+    * WINS: entry at a narrow gap-up bar's HIGH = o+0.40; the next gap-up
+      opens +3.00 with low o'-0.10 far above the TP level (entry+0.50), so
+      the fill is AT level → exactly +50 each. A shallow bar interposing
+      (range o_s+0.10 .. o_s-0.10 vs TP entry+0.50 / SL entry-0.80) exits
+      nothing — the win completes on the following gap-up (3-bar hold).
+    * LOSSES: a trade entered on the gap-up BEFORE a shallow+deep pair
+      (entry h = o+0.40, SL floor o-0.40) survives the shallow bar
+      (low o-0.10) and stops on the deep bar (low o-0.75 <= floor):
+      adverse fill min(floor, low) = o-0.75 → −115. One deep bar per day
+      (cycles 4/8/12) → 3 losses.
+    * PER DAY: entries at bars 1,3,5,7,9 · 12,14,16 · 19,21,23 · 26,28
+      (the shallow bars at m=3,10,17,24 shift the cadence by one; the
+      cross-session drop kills each day's bar-0 arm) = 13 trades/day, 12
+      wins + 1 deep-bar loss → totals 39 trades, 36 wins, 3 losses:
+      gross_profit 36 × 50 = 1_800, gross_loss 3 × 115 = 345,
+      net 1_800 − 345 = +1_455.
+    """
+
+    def test_one_law_evaluation_reproduces_the_worst_case_pins(self) -> None:
+        import inspect
+
+        from brutex.engine import stage3_wire as stage3_mod
+
+        assert "fill_mode" not in inspect.signature(stage3_mod._make_evaluator).parameters
+        bars = _trending_bars(3)
+        bar_bits = build_bar_bits(bars)
+        # tf == 1minute fixed point (DEC-FILL-EXEC-GRID-1M-001 design §6):
+        # exec stream == decision stream + the once-per-(instrument, tf) map.
+        # Per-fill prices are PR-A-identical (no same-bar SL/TP trigger
+        # exists: narrow 0.50-range entry bars < the 0.80 stop; entry-bar
+        # high o+0.40 < the o+0.90 TP level, so the same-bar deferral never
+        # engages) — only the entry CADENCE changed (class docstring).
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
+        evaluate = stage3_mod._make_evaluator(
+            bars=bars,
+            bar_bits=bar_bits,
+            mask=0,
+            side=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            exec_map=exec_map,
+            start_equity_paisa=10_000_000,
+            reference_stamper=None,
+        )
+        worst = evaluate(80, 50)
+        # 39 trades = 3 days × 13 (class-docstring cadence derivation);
+        # 36 wins × 50 = 1_800; 3 deep-bar stops × 115 = 345; net +1_455.
+        assert worst.total_trades == 39
+        assert worst.net_pnl_paisa == 1_455
+        assert worst.gross_profit_paisa == 1_800
+        assert worst.gross_loss_paisa == 345
+
+
+class TestCascadeSpecsFamilyCarriage:
+    """DEC-CASCADE-STAT-TIER-WIRE-001: each refined cell's spec carries its
+    winner masks' Stage-3 search family — the (sl, tp) cell coordinates the
+    SAME mask was persisted at across the (instrument, tf, direction) group
+    (condition 6: every stage-3 eval is a ResultRow in one cell store per
+    distinct quantized pair)."""
+
+    @staticmethod
+    def _cell(
+        path: Path,
+        rows: list[ResultRow],
+        *,
+        sl: int,
+        tp: int,
+        direction: Side = Side.BUY,
+    ) -> Stage3RefinedCell:
+        store = ResultsStore(path=path)
+        for row in rows:
+            store.append(row)
+        store.flush()
+        return Stage3RefinedCell(
+            tuple_=SweepTuple(
+                instrument="NIFTY",
+                tf=Timeframe("1minute", 1),
+                direction=direction,
+                k=1,
+                sl_paisa=sl,
+                tp_paisa=tp,
+                proximity=None,
+            ),
+            path=path,
+            rows=len(rows),
+        )
+
+    def test_family_spans_cells_sharing_a_mask(self, tmp_path: Path) -> None:
+        # ONE mask (5) refined into TWO quantized cells → BOTH specs carry the
+        # two-pair family, sorted ascending, each cell's own pair included.
+        cell_a = self._cell(tmp_path / "a.parquet", [_row_for("a" * 64, mask=5)], sl=80, tp=50)
+        cell_b = self._cell(tmp_path / "b.parquet", [_row_for("b" * 64, mask=5)], sl=60, tp=90)
+        spec_a, spec_b = cascade_specs_for_refined_cells([cell_a, cell_b], grid=_grid())
+        assert spec_a.family_sl_tp == ((60, 90), (80, 50))
+        assert spec_b.family_sl_tp == ((60, 90), (80, 50))
+
+    def test_single_cell_family_is_its_own_pair(self, tmp_path: Path) -> None:
+        cell = self._cell(tmp_path / "solo.parquet", [_row_for("c" * 64, mask=3)], sl=80, tp=50)
+        (spec,) = cascade_specs_for_refined_cells([cell], grid=_grid())
+        # A 1-pair family is recorded honestly; the cascade skips K < 2.
+        assert spec.family_sl_tp == ((80, 50),)
+
+    def test_direction_isolates_the_family(self, tmp_path: Path) -> None:
+        # The SAME mask in a BEAR cell never joins the BULL family — the
+        # grouping key is (instrument, tf, direction).
+        bull = self._cell(tmp_path / "bull.parquet", [_row_for("d" * 64, mask=5)], sl=80, tp=50)
+        bear = self._cell(
+            tmp_path / "bear.parquet",
+            [_row_for("e" * 64, mask=5, direction="bear")],
+            sl=60,
+            tp=90,
+            direction=Side.SELL,
+        )
+        spec_bull, spec_bear = cascade_specs_for_refined_cells([bull, bear], grid=_grid())
+        assert spec_bull.family_sl_tp == ((80, 50),)
+        assert spec_bear.family_sl_tp == ((60, 90),)
+
+    def test_ambiguous_multimask_cell_skips_the_family_loudly(self, tmp_path: Path) -> None:
+        # Cell X holds masks 5 AND 9; mask 5 was ALSO refined into cell Y but
+        # mask 9 only into X → the two masks' families DIFFER and the
+        # spec-level field cannot express them: family None + one loud WARN
+        # (the recorded deviation — never a fabricated union family).
+        cell_x = self._cell(
+            tmp_path / "x.parquet",
+            [_row_for("f" * 64, mask=5), _row_for("1" * 64, mask=9)],
+            sl=80,
+            tp=50,
+        )
+        cell_y = self._cell(tmp_path / "y.parquet", [_row_for("2" * 64, mask=5)], sl=60, tp=90)
+        with capture_logs() as logs:
+            spec_x, spec_y = cascade_specs_for_refined_cells([cell_x, cell_y], grid=_grid())
+        assert spec_x.family_sl_tp is None
+        # Cell Y is single-mask → its family (both cells' pairs) is expressible.
+        assert spec_y.family_sl_tp == ((60, 90), (80, 50))
+        warned = [e for e in logs if e["event"] == "stage3_wire.family_ambiguous_cell"]
+        assert len(warned) == 1
+        assert warned[0]["n_masks"] == 2
+        assert warned[0]["n_distinct_families"] == 2
+
+    def test_disabled_leg_cell_never_poisons_the_family_map(self, tmp_path: Path) -> None:
+        # Structurally unreachable for REAL refined cells (they never carry a
+        # disabled leg — Stage3CellRecord's > 0 law); the defensive-totality
+        # arm: a hand-built sl/tp-less cell contributes NOTHING to the family
+        # map (its shared mask never gains a phantom pair) and its own spec
+        # carries family_sl_tp=None.
+        normal = self._cell(tmp_path / "n.parquet", [_row_for("3" * 64, mask=5)], sl=80, tp=50)
+        legless_path = tmp_path / "legless.parquet"
+        store = ResultsStore(path=legless_path)
+        store.append(_row_for("4" * 64, mask=5))
+        store.flush()
+        legless = Stage3RefinedCell(
+            tuple_=SweepTuple(
+                instrument="NIFTY",
+                tf=Timeframe("1minute", 1),
+                direction=Side.BUY,
+                k=1,
+                sl_paisa=None,
+                tp_paisa=None,
+                proximity=None,
+            ),
+            path=legless_path,
+            rows=1,
+        )
+        spec_normal, spec_legless = cascade_specs_for_refined_cells([normal, legless], grid=_grid())
+        # Mask 5 is SHARED, yet the normal cell's family stays its OWN pair
+        # only — the legless cell was skipped, never a (None, None) member.
+        assert spec_normal.family_sl_tp == ((80, 50),)
+        assert spec_legless.family_sl_tp is None
+
+    def test_pipeline_cells_carry_consistent_families(
+        self, pipeline: tuple[Path, Stage3PassReport]
+    ) -> None:
+        # The REAL stage-3 pass output: every produced spec's family (when
+        # present) is sorted, unique and contains the cell's own pair.
+        _, report = pipeline
+        specs = cascade_specs_for_refined_cells(report.cells, grid=_grid())
+        assert specs, "the pipeline fixture must produce refined cells"
+        for spec in specs:
+            if spec.family_sl_tp is None:
+                continue
+            family = spec.family_sl_tp
+            assert list(family) == sorted(set(family))
+            assert (spec.sl_paisa, spec.tp_paisa) in family

@@ -318,6 +318,38 @@ class CatalogError(DataLakeError):
     """
 
 
+class LakeRustWavedUnavailableError(DataLakeError):
+    """The REQUIRED ``brutex_lake`` crate wheel is absent, stale or drifted.
+
+    DEC-RUST-LAKE-WAVED-001 ENDGAME (Wave-D design §D post-delete posture):
+    the Python implementation cores of the four converted lake modules
+    (``timeframe_materialize`` read · ``lake_heal`` mutation ·
+    ``catalog_reconcile`` per-file scan · ``lake_invariants`` scan) are
+    DELETED — the crate is the ONLY implementation, so an absent wheel, a
+    wheel missing any ``_CRATE_API`` callable (a pre-endgame install), or a
+    wheel whose pinned polars diverges from the installed one is a LOUD
+    typed precondition failure — never a silent fallback, never a
+    fabricated verdict (the ``fno_math``-for-engine REQUIRED-wheel
+    precedent). Remedy: ``pip install rust/brutex-lake`` (the lockstep
+    ritual — ``docs/runbooks/lake-rust-render-lockstep.md``).
+    """
+
+
+class LakeRustWavedFlagRemovedError(DataLakeError):
+    """The retired ``$BRUTEX_LAKE_WAVED_RUST`` flag is set — refuse loudly.
+
+    DEC-RUST-LAKE-WAVED-001 ENDGAME: the Wave-D seam is no longer
+    flag-gated (the Python cores are deleted; the Rust cores are the one
+    implementation), so a SET flag — ANY non-empty value, ``1`` included —
+    marks a stale config whose intent (an oracle to fall back to, or a
+    kill switch) can no longer be honoured. The ``$BRUTEX_FILL_MODE``
+    retirement precedent (DEC-FILL-WORST-CASE-ONLY-001): refuse for every
+    value rather than silently bless the spelling that happens to match
+    the one behaviour; an unset or empty-string variable passes (the
+    ``VAR= cmd`` unset idiom).
+    """
+
+
 def parquet_read_skip_errors() -> tuple[type[BaseException], ...]:
     """Exception types that mean a single Parquet file is unreadable → skip / quarantine it.
 

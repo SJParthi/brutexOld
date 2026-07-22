@@ -21,6 +21,7 @@ from __future__ import annotations
 import threading
 
 from brutex.engine.sweep_progress import (
+    STATE_CANCELLED,
     STATE_DONE,
     STATE_ERROR,
     STATE_IDLE,
@@ -157,6 +158,28 @@ def test_finish_and_fail() -> None:
     assert s.detail == "boom"
 
 
+def test_cancelled_terminal_state() -> None:
+    """cancelled() is the honest operator-cancel terminal (DEC-JOB-COOPERATIVE-CANCEL-001).
+
+    The state reads ``cancelled`` (never ``error``/``done``), ``running`` flips
+    False (so the v29 settle branch fires), the detail names the boundary, the
+    clock stamps the mutation, and the wire dict round-trips the state string.
+    """
+    clk = _Clock()
+    sp = SweepProgress(clock=clk)
+    sp.start(enumerated=4)
+    clk.t = 2.0
+    sp.cancelled(detail="cancelled at tuple 2/4")
+    s = sp.snapshot()
+    assert s.state == STATE_CANCELLED
+    assert s.state == "cancelled"
+    assert s.detail == "cancelled at tuple 2/4"
+    assert s.running is False
+    assert s.updated_at == 2.0
+    assert s.to_dict()["state"] == "cancelled"
+    assert s.to_dict()["running"] is False
+
+
 def test_start_resets_for_reuse() -> None:
     clk = _Clock()
     sp = SweepProgress(clock=clk)
@@ -242,3 +265,99 @@ def test_thread_safe_concurrent_advance() -> None:
     s = sp.snapshot()
     assert s.evaluated == 1000  # no lost updates
     assert s.survivors == 1000
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1b routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the snapshot derived-metric cluster.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    value-identical to the flag-OFF Python laws (which every OTHER test in
+    this file drives).
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _snapshot(**overrides):  # type: ignore[no-untyped-def]
+        from dataclasses import replace
+
+        from brutex.engine.sweep_progress import STATE_RUNNING, SweepProgressSnapshot
+
+        base = SweepProgressSnapshot(
+            state=STATE_RUNNING,
+            enumerated=200,
+            evaluated=25,
+            survivors=4,
+            skipped=1,
+            current="combo-25",
+            detail="",
+            started_at=100.0,
+            updated_at=110.0,
+        )
+        return replace(base, **overrides)
+
+    def test_flag_on_matches_python_law_mid_run(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        snap = self._snapshot()
+        off = (
+            snap.percent,
+            snap.elapsed_seconds,
+            snap.combos_per_sec,
+            snap.eta_seconds,
+            snap.survivor_rate,
+        )
+        off_dict = snap.to_dict()
+        assert off == (12.5, 10.0, 2.5, 70.0, 0.16)
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = (
+                snap.percent,
+                snap.elapsed_seconds,
+                snap.combos_per_sec,
+                snap.eta_seconds,
+                snap.survivor_rate,
+            )
+            assert on == off
+            assert snap.to_dict() == off_dict
+        finally:
+            self._reset_facade()
+
+    def test_flag_on_matches_python_law_idle_and_done(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        idle = self._snapshot(
+            enumerated=0, evaluated=0, survivors=0, started_at=0.0, updated_at=0.0
+        )
+        done = self._snapshot(evaluated=200)
+        off = [idle.to_dict(), done.to_dict()]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert [idle.to_dict(), done.to_dict()] == off
+            assert idle.eta_seconds is None  # the Option/None FFI arm
+            assert done.eta_seconds == 0.0
+        finally:
+            self._reset_facade()

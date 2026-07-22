@@ -54,6 +54,12 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
+from brutex.calendars.nse import IST_UTC_OFFSET
+from brutex.engine.sweep_ops_rust import (
+    routed_resume_decision,
+    routed_schedule_next_fire,
+    sweep_ops_rust_enabled,
+)
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:
@@ -69,7 +75,9 @@ _LOG = structlog.get_logger(__name__)
 #: India Standard Time offset (UTC+5:30) in seconds — the natural anchor for a
 #: "nightly, after the incremental vendor pull" daily schedule on an IST market.
 #: The CLI passes this so ``daily@02:30`` means 02:30 **IST**, not 02:30 UTC.
-IST_OFFSET_SECONDS: Final[int] = 5 * 3600 + 30 * 60  # 19_800
+#: DERIVED from the ONE canonical :data:`brutex.calendars.nse.IST_UTC_OFFSET`
+#: root (DEC-TIMESTAMP-IST-SINGLESOURCE-001), never a second literal.
+IST_OFFSET_SECONDS: Final[int] = int(IST_UTC_OFFSET.total_seconds())  # 19_800
 
 #: Seconds in a calendar day (no leap-seconds — epoch arithmetic is UTC-linear).
 _SECONDS_PER_DAY: Final[int] = 86_400
@@ -229,19 +237,32 @@ class Schedule:
         float
             The next fire epoch in UTC seconds (``>= now``).
         """
-        if self.kind is ScheduleKind.INTERVAL:
-            anchor = now if last_fire is None else last_fire
-            candidate = anchor + self.interval_seconds
-            return candidate if candidate > now else now
-
-        # Daily: find local midnight on-or-before `now`, add the fire offset.
-        local_now = now + self.tz_offset_seconds
-        day_start_utc = math.floor(local_now / _SECONDS_PER_DAY) * _SECONDS_PER_DAY
-        today_fire = day_start_utc + self.second_of_day - self.tz_offset_seconds
-        candidate = today_fire if today_fire >= now else today_fire + _SECONDS_PER_DAY
-        if last_fire is not None and candidate <= last_fire:
-            candidate += _SECONDS_PER_DAY
-        return candidate
+        is_interval = self.kind is ScheduleKind.INTERVAL
+        if sweep_ops_rust_enabled():
+            return routed_schedule_next_fire(
+                is_interval,
+                self.interval_seconds,
+                self.second_of_day,
+                self.tz_offset_seconds,
+                now,
+                last_fire,
+                python_law=lambda: _next_fire_python(
+                    is_interval,
+                    self.interval_seconds,
+                    self.second_of_day,
+                    self.tz_offset_seconds,
+                    now,
+                    last_fire,
+                ),
+            )
+        return _next_fire_python(
+            is_interval,
+            self.interval_seconds,
+            self.second_of_day,
+            self.tz_offset_seconds,
+            now,
+            last_fire,
+        )
 
     def seconds_until(self, now: float, *, last_fire: float | None = None) -> float:
         """Return the non-negative sleep, in seconds, until the next fire — O(1).
@@ -251,6 +272,38 @@ class Schedule:
         """
         delta = self.next_fire_after(now, last_fire=last_fire) - now
         return delta if delta > 0.0 else 0.0
+
+
+def _next_fire_python(
+    is_interval: bool,
+    interval_seconds: int,
+    second_of_day: int,
+    tz_offset_seconds: int,
+    now: float,
+    last_fire: float | None,
+) -> float:
+    """The pure next-fire arithmetic — the retained Python oracle.
+
+    The verbatim :meth:`Schedule.next_fire_after` body over the schedule's
+    fields (the routed twin is the crate's ``schedule_next_fire`` —
+    DEC-RUST-SWEEP-OPS-001 slice 4). The daily arm's exact INT arithmetic
+    (``math.floor`` → ``int``) is preserved token-for-token, so the fire
+    epoch's TYPE (``int`` for daily, ``float`` for interval) — and with it
+    the daemon's ``json.dumps`` audit bytes — is byte-identical either arm.
+    """
+    if is_interval:
+        anchor = now if last_fire is None else last_fire
+        candidate = anchor + interval_seconds
+        return candidate if candidate > now else now
+
+    # Daily: find local midnight on-or-before `now`, add the fire offset.
+    local_now = now + tz_offset_seconds
+    day_start_utc = math.floor(local_now / _SECONDS_PER_DAY) * _SECONDS_PER_DAY
+    today_fire = day_start_utc + second_of_day - tz_offset_seconds
+    candidate = today_fire if today_fire >= now else today_fire + _SECONDS_PER_DAY
+    if last_fire is not None and candidate <= last_fire:
+        candidate += _SECONDS_PER_DAY
+    return candidate
 
 
 class ResumeKind(Enum):
@@ -374,22 +427,29 @@ def decide_resume(view: CheckpointView) -> ResumeDecision:
     ResumeDecision
         The pure verdict.
     """
-    if not view.exists:
+    args = (view.exists, view.sweep_id_matches, view.next_index, view.total_combos)
+    if sweep_ops_rust_enabled():
+        token, index = routed_resume_decision(
+            *args, python_law=lambda: _resume_decision_python(*args)
+        )
+    else:
+        token, index = _resume_decision_python(*args)
+    if token == "fresh_absent":  # noqa: S105 # nosec B105 — resume token, not a secret
         return ResumeDecision(
             kind=ResumeKind.FRESH,
-            resume_from_index=0,
+            resume_from_index=index,
             reason="no checkpoint for this grid identity — fresh sweep from tuple 0",
         )
-    if not view.sweep_id_matches:
+    if token == "fresh_foreign":  # noqa: S105 # nosec B105 — resume token, not a secret
         return ResumeDecision(
             kind=ResumeKind.FRESH,
-            resume_from_index=0,
+            resume_from_index=index,
             reason="checkpoint belongs to a different grid identity — fresh sweep from tuple 0",
         )
-    if view.next_index >= view.total_combos:
+    if token == "already_complete":  # noqa: S105 # nosec B105 — resume token, not a secret
         return ResumeDecision(
             kind=ResumeKind.ALREADY_COMPLETE,
-            resume_from_index=view.total_combos,
+            resume_from_index=index,
             reason=(
                 f"checkpoint already covers all {view.total_combos} tuples — "
                 "nothing to run this cycle"
@@ -397,12 +457,35 @@ def decide_resume(view: CheckpointView) -> ResumeDecision:
         )
     return ResumeDecision(
         kind=ResumeKind.RESUME,
-        resume_from_index=view.next_index,
+        resume_from_index=index,
         reason=(
             f"resuming from tuple {view.next_index} of {view.total_combos} "
             "(prior cycle was interrupted)"
         ),
     )
+
+
+def _resume_decision_python(
+    exists: bool,
+    sweep_id_matches: bool,
+    next_index: int,
+    total_combos: int,
+) -> tuple[str, int]:
+    """The pure resume classification — the retained Python oracle.
+
+    The verbatim :func:`decide_resume` fold as a 4-way token + index (the
+    routed twin is the crate's ``resume_decision`` — DEC-RUST-SWEEP-OPS-001
+    slice 4); the two FRESH arms carry DISTINCT tokens because their
+    rendered reason strings differ, and :func:`decide_resume` maps token →
+    (:class:`ResumeKind`, reason) so the reason BYTES stay Python-owned.
+    """
+    if not exists:
+        return ("fresh_absent", 0)
+    if not sweep_id_matches:
+        return ("fresh_foreign", 0)
+    if next_index >= total_combos:
+        return ("already_complete", total_combos)
+    return ("resume", next_index)
 
 
 @dataclass(frozen=True, slots=True)

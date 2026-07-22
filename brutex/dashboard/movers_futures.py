@@ -97,6 +97,7 @@ from brutex.dashboard.movers_underlying_class import (
     normalize_underlying_class,
 )
 from brutex.data.bar_screen import screen_frame
+from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
 from brutex.data.lake_keys import StockDriftMap, spot_recovery_candidates
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -1001,6 +1002,16 @@ def resolve_prev_oi(
     (movers_futures) so the DEC-LAKE-READ-UNIQUE-001 bypass-gate allowlist keeps
     its wired dedup entry for this module.
 
+    A CE/PE OPTION contract SKIPS the ``1day`` read entirely and goes straight
+    to the 1-minute walk-back (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator
+    ruling of 2026-07-15 as relayed via the coordinator, ADR-0021 RULING B,
+    draft PR #1555): the derived option ``1day`` is retired, so a stored one
+    is FROZEN at retirement eve — reading it first would serve a stale OI
+    baseline (a wrong OI %-move) for weeks. FUT keeps the 1day-first read
+    byte-identically (futures keep their daily prebuild under the ruling; the
+    gate is the COMMON
+    :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
+
     HONEST residual (DEC-DASHBOARD-READ-SCREEN-001): like ``resolve_prev_close``,
     this baseline read is NOT screened, so a prior-session spike in the last 1-day
     bar's OI would skew the OI %-move on the BASELINE side (the live OI side IS
@@ -1023,15 +1034,18 @@ def resolve_prev_oi(
     """
     import polars as pl
 
+    from brutex.data.guarded_read import read_parquet_glob_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
-    if base.is_dir() and any(base.rglob("*.parquet")):
+    if not is_option_contract_coords(segment, symbol) and (
+        base.is_dir() and any(base.rglob("*.parquet"))
+    ):
         # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): the `.tail(1)` below
         # would otherwise pick a poisoned-era duplicate re-statement over the
         # first stored bar — warned, never silent.
         df, _dropped = dedup_bars_frame(
-            pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+            read_parquet_glob_regular(base.as_posix() + "/**/*.parquet"),
             source=f"movers_futures_oi:{exchange}/{segment}/{symbol}",
         )
         prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(

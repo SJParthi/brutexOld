@@ -206,6 +206,265 @@ function bxVixBandCellText(band) {
   return "not stamped";
 }
 
+/* ── Losing-streak resilience (sibling sidecar → /strategy hero panel +
+   /operator rank-1 hooks; DEC-<resilience>). The MAX cold streak reads from
+   row.metrics.max_consecutive_losses (the existing agg field — no rival
+   column persisted); every other cell reads from row.resilience.* (the
+   sibling block). NULL/absent (stats_live !== true) → every cell "—" + the
+   honest unavailable guide, NEVER a fabricated streak (R27/Golden Rule #1).
+   All ₹ are GROSS of costs, per-unit (no sizing) — the panel caveat. ── */
+
+/** The honest "no resilience stats" copy (ONE constant — parity-failed/no-trades). */
+var BX_RESILIENCE_UNAVAILABLE =
+  "Resilience stats unavailable (re-simulation parity mismatch or no trades).";
+
+/** A value or the honest em-dash when null/undefined (never a fabricated 0). */
+function bxResDash(value) {
+  return value === null || value === undefined ? "—" : String(value);
+}
+
+/* The ONE 2dp ROUND_HALF_UP display formatter (bx-format.js, §11 COMMON):
+   the browser global (bx-format.js is loaded BEFORE this file on the
+   strategy/operator pages) or the CommonJS export under the node golden — so
+   the resilience display % rounds to 2dp EXACTLY like the CLI's
+   `f"{pct:.2f}%"` (never a raw IEEE float such as -12.333333333333334 beside a
+   2dp ₹ — the same datum reads the same on every surface). */
+var bxFmt2 =
+  typeof window !== "undefined" && typeof window.bxFixed2 === "function"
+    ? window.bxFixed2
+    : typeof require === "function"
+      ? require("./bx-format.js").bxFixed2
+      : null;
+
+/**
+ * A signed percent string with the page's minus convention (U+2212, matching
+ * the money() ₹ formatter) and 2dp ROUND_HALF_UP rounding (matching the CLI)
+ * — never a mix of ASCII "-" and U+2212, and never a raw full-precision float.
+ * "—" for a null/undefined pct (never a fabricated 0%).
+ *
+ * @param {*} pct - worst_streak_pnl_pct (a signed float, ≤ 0 for live records).
+ * @returns {string} e.g. -12.5 -> "−12.50%"; -12.3333 -> "−12.33%"; "—" null.
+ */
+function bxResPct(pct) {
+  if (pct === null || pct === undefined) {
+    return "—";
+  }
+  var body = bxFmt2 ? bxFmt2(pct) : String(pct);
+  return (body + "%").replace(/^-/, "−");
+}
+
+/**
+ * The ONE shared win-rate-year-spread display law (broker-grade, cross-surface
+ * consistent — every surface that shows the spread agrees byte-for-byte). The
+ * spread is a ratio in [0,1] (max−min of the per-year wins/total win rate); it
+ * is a DESCRIPTIVE stability figure, NOT a true statistical metric (CLAUDE.md
+ * §4 protects Sharpe/DSR/p-values/iv — a win-rate spread is not in that list),
+ * so it is rendered — NOT the stored value, which is untouched — as PERCENTAGE
+ * POINTS at a fixed 2dp through the shared ROUND_HALF_UP ``bxFixed2`` law, never
+ * a raw 17-digit IEEE fraction ("0.15000000000000002"). "—" for a null/undefined
+ * spread (< 2 qualifying years), never a fabricated 0pp.
+ *
+ * @param {*} spread - win_rate_year_spread (a [0,1] ratio, or null).
+ * @returns {string} e.g. 0.15000000000000002 -> "15.00pp"; "—" when null.
+ */
+function bxWinRateSpread(spread) {
+  if (spread === null || spread === undefined) {
+    return "—";
+  }
+  var pp = Number(spread) * 100;
+  return (bxFmt2 ? bxFmt2(pp) : String(pp)) + "pp";
+}
+
+/**
+ * ISO-8601 UTC → "YYYY-MM-DD HH:MM IST" (pure epoch arithmetic — the fixed
+ * +05:30 IST offset, TZ-invariant like bx-chart's bxIstDateOfEpoch); "—" for
+ * a null/unparseable input (never a NaN string).
+ *
+ * @param {*} isoUtc - the worst-streak start/end ISO-8601 UTC string.
+ * @returns {string} the IST datetime, or "—".
+ */
+function bxIstDateTime(isoUtc) {
+  if (typeof isoUtc !== "string" || isoUtc === "") {
+    return "—";
+  }
+  var t = Date.parse(isoUtc);
+  if (isNaN(t)) {
+    return "—";
+  }
+  var d = new Date(t + 330 * 60000).toISOString();
+  return d.slice(0, 10) + " " + d.slice(11, 16) + " IST";
+}
+
+/**
+ * The plain-English hold-through guide (client-side, only shipped numbers;
+ * R27 — never an invented cause). Branch order: 0-loss first (no streaks),
+ * then still-underwater (lower-bound honesty), then the normal envelope read.
+ *
+ * @param {object} r - the row.resilience block (stats_live true).
+ * @returns {string} the guide sentence.
+ */
+function bxResilienceGuide(r) {
+  if (r.losing_streak_count === 0) {
+    return (
+      "This strategy had NO losing streaks in the backtest — treat any live " +
+      "cold run as unmapped territory and size down."
+    );
+  }
+  if (r.still_underwater_at_end === true) {
+    return (
+      "This strategy had NOT recovered by the backtest end — the " +
+      bxResDash(r.longest_underwater_days) +
+      "-day underwater figure is a lower bound, not a promise of recovery."
+    );
+  }
+  return (
+    "Inside its envelope: cold streaks typically run " +
+    bxResDash(r.losing_streak_p50) +
+    ", 95% stay at or under " +
+    bxResDash(r.losing_streak_p95) +
+    " — hold if you're inside it, reassess only past its worst ever."
+  );
+}
+
+/**
+ * The /strategy resilience panel cell strings (pure; textContent-rendered —
+ * never a string-to-HTML sink). The MAX reads from row.metrics.max_consecutive_losses;
+ * every other cell from row.resilience.* . A NULL/absent record
+ * (stats_live !== true) → every cell "—" + the unavailable guide. Money
+ * cells format via the injected fmtMoney (bx-explain owns the ONE exact
+ * paisa→₹ converter, §11 COMMON); a missing formatter reads "—" (honest,
+ * never raw paisa).
+ *
+ * @param {object} row - a top100 contract row.
+ * @param {Function} [fmtMoney] - signed integer-paisa → ₹ string.
+ * @returns {object} the cell strings for the panel.
+ */
+function bxResilienceCells(row, fmtMoney) {
+  var m = row && row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  var r = row && row.resilience && typeof row.resilience === "object" ? row.resilience : null;
+  var money = typeof fmtMoney === "function" ? fmtMoney : function () {
+    return "—";
+  };
+  if (!r || r.stats_live !== true) {
+    return {
+      live: false,
+      worstStreak: "—",
+      worstStreakSub: "—",
+      cost: "—",
+      costSub: "—",
+      underwater: "—",
+      underwaterBadge: "—",
+      badgeLevel: "na",
+      worstMonth: "—",
+      worstMonthSub: "",
+      winSpread: "—",
+      guide: BX_RESILIENCE_UNAVAILABLE
+    };
+  }
+  var hasWorst = r.worst_streak_pnl_paisa !== null && r.worst_streak_pnl_paisa !== undefined;
+  var pctText = bxResPct(r.worst_streak_pnl_pct);
+  var hasLen = r.worst_streak_len !== null && r.worst_streak_len !== undefined;
+  // A missing/failed money formatter reads a clean "—" (never "— (pct%)").
+  var costMoney = hasWorst ? money(r.worst_streak_pnl_paisa) : "—";
+  return {
+    live: true,
+    worstStreak: bxResDash(m.max_consecutive_losses) + " in a row",
+    worstStreakSub:
+      "typical " + bxResDash(r.losing_streak_p50) + " · P95 " + bxResDash(r.losing_streak_p95),
+    cost: hasWorst && costMoney !== "—" ? costMoney + " (" + pctText + ")" : "—",
+    costSub: hasLen
+      ? String(r.worst_streak_len) +
+        " losses · " +
+        bxIstDateTime(r.worst_streak_start) +
+        " → " +
+        bxIstDateTime(r.worst_streak_end)
+      : "no losing runs recorded",
+    underwater:
+      bxResDash(r.longest_underwater_trades) +
+      " trades · " +
+      bxResDash(r.longest_underwater_days) +
+      " days",
+    underwaterBadge: r.still_underwater_at_end === true ? "STILL UNDERWATER at backtest end" : "● recovered",
+    badgeLevel: r.still_underwater_at_end === true ? "bad" : "ok",
+    worstMonth:
+      r.worst_loss_month === null || r.worst_loss_month === undefined
+        ? "no losing month"
+        : String(r.worst_loss_month) + " (" + bxResDash(r.worst_loss_month_count) + " losses)",
+    worstMonthSub:
+      r.worst_loss_week === null || r.worst_loss_week === undefined
+        ? ""
+        : "worst week " + String(r.worst_loss_week),
+    winSpread: bxWinRateSpread(r.win_rate_year_spread),
+    guide: bxResilienceGuide(r)
+  };
+}
+
+/**
+ * The pure "you are N losses in" self-locate verdict (zero backend — compares
+ * ONLY the shipped numbers: P95 from row.resilience.losing_streak_p95, MAX
+ * from row.metrics.max_consecutive_losses). A live-streak counter is out of
+ * Track-1 scope (signal-only, DEC-LIVE-REMOVE-001) — this locates the operator
+ * against the backtest envelope only.
+ *
+ * @param {number} n - losses-in-a-row the operator typed.
+ * @param {object} row - the top100 row.
+ * @returns {{level: string, symbol: string, text: string}} the verdict.
+ */
+function bxResilienceSelfLocate(n, row) {
+  var m = row && row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  var r = row && row.resilience && typeof row.resilience === "object" ? row.resilience : null;
+  var maxN =
+    typeof m.max_consecutive_losses === "number" && isFinite(m.max_consecutive_losses)
+      ? m.max_consecutive_losses
+      : null;
+  if (!r || r.stats_live !== true || maxN === null) {
+    return { level: "na", symbol: "○", text: "resilience stats unavailable for this strategy" };
+  }
+  if (typeof n !== "number" || !isFinite(n) || n < 0 || Math.floor(n) !== n) {
+    return { level: "na", symbol: "○", text: "enter a whole number of losses in a row" };
+  }
+  // A 0-loss strategy has p95 === null → the envelope collapses to max (0), so
+  // n === 0 reads ok and any n ≥ 1 reads unprecedented (never the warn tier).
+  var p95 =
+    typeof r.losing_streak_p95 === "number" && isFinite(r.losing_streak_p95)
+      ? r.losing_streak_p95
+      : maxN;
+  if (n <= p95) {
+    return { level: "ok", symbol: "●", text: "inside envelope — historically normal, hold" };
+  }
+  if (n <= maxN) {
+    return { level: "warn", symbol: "▲", text: "rare but seen — this strategy has been here and recovered" };
+  }
+  return {
+    level: "bad",
+    symbol: "✕",
+    text: "unprecedented — deeper than anything in the backtest. Reassess."
+  };
+}
+
+/**
+ * The /operator rank-1 resilience hook strings (pure; setOc-rendered). Gated
+ * on stats_live — the defense-in-depth MIRROR of the /strategy panel's gate,
+ * so a NULL / absent / parity-failed record yields "—" for EVERY field and can
+ * never render a fabricated 0 (never trusts the wire payload's per-field null
+ * discipline alone). worst_streak_pnl_pct / longest_underwater_days come from
+ * row.resilience.* (the sibling block).
+ *
+ * @param {object} row - the top100 rank-1 row.
+ * @returns {{worstStreakPct: string, uwDays: string}} the cell strings.
+ */
+function bxResilienceRankOneCells(row) {
+  var r = row && row.resilience && typeof row.resilience === "object" ? row.resilience : null;
+  if (!r || r.stats_live !== true) {
+    return { worstStreakPct: "—", uwDays: "—" };
+  }
+  var days = r.longest_underwater_days;
+  return {
+    worstStreakPct: bxResPct(r.worst_streak_pnl_pct),
+    uwDays: days === null || days === undefined ? "—" : String(days)
+  };
+}
+
 /**
  * The instrument display cell/label (DEC-ONECLICK-INSTRUMENT-DISPLAY-001,
  * pure — textContent-rendered on the operator rank-1 card, the combos
@@ -581,6 +840,46 @@ function bxFunnelProvenance(source, runId) {
   var EVENTS_PAGE_LIMIT = 200;
   var TRADES_PAGE_LIMIT = 100;
 
+  /* ── one fetch, N consumers (DEC-OPERATOR-PAGE-CONSOLIDATE-001) ──
+     A page-lifetime PROMISE MEMO keyed on runId: the operator card, the
+     combos table, the winners section and the strategy drawer all consume
+     ONE /api/v1/oneclick/top100 network fetch per run selection.
+     Invalidated on run switch (selectRun + the runs poller's first
+     programmatic auto-selection). HONEST: a memo within one page lifetime,
+     NOT a TTL cache — server freshness rides the run-switch invalidation. */
+  var top100Memo = { runId: null, promise: null };
+  function getTop100(runId) {
+    if (top100Memo.runId === runId && top100Memo.promise) {
+      return top100Memo.promise;
+    }
+    var promise = window.BXPoll.fetchJson(
+      TOP100_URL + "?run_id=" + encodeURIComponent(runId),
+      12000
+    );
+    top100Memo = { runId: runId, promise: promise };
+    // a REJECTED promise self-evicts so Retry genuinely refetches:
+    promise.catch(function () {
+      if (top100Memo.promise === promise) {
+        top100Memo = { runId: null, promise: null };
+      }
+    });
+    return promise;
+  }
+
+  /* Run-change observer registry: the ONLY correct hook for a run switch —
+     the runs poller's programmatic auto-selection sets select.value WITHOUT
+     firing a DOM 'change' event, so a listener on the select would miss it. */
+  var runChangeSubs = [];
+  function notifyRunChange(runId) {
+    for (var s = 0; s < runChangeSubs.length; s++) {
+      try {
+        runChangeSubs[s](runId);
+      } catch (subErr) {
+        void subErr; // one bad subscriber never breaks the rest
+      }
+    }
+  }
+
   /**
    * Fan a poll result out to page-registered subscribers
    * (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): template
@@ -605,6 +904,41 @@ function bxFunnelProvenance(source, runId) {
         /* subscriber isolation — one bad subscriber never breaks the rest */
       }
     }
+  }
+
+  /* The last manifest payload the poller rendered (the strategy panel's
+     zero-fetch symbol source when it is for the SAME run). */
+  var lastManifestPayload = null;
+
+  /* ~one-shot /runs read for cold-start deep links (portal use). */
+  function latestRun() {
+    return window.BXPoll.fetchJson(RUNS_URL, 12000);
+  }
+
+  /* In-flight /manifest dedupe (adversarial-review fold, P-M1): a cold
+     deep-link drawer open (the strategy panel's manifest one-shot) and the
+     manifest poller can request the SAME run's manifest concurrently — the
+     second caller rides the FIRST in-flight promise instead of paying a
+     duplicate network fetch. HONEST: an IN-FLIGHT dedupe ONLY, never a
+     payload cache — the memo self-evicts on settle (resolve AND reject) so
+     the poller always refetches fresh on its next tick. */
+  var manifestInflight = { runId: null, promise: null };
+  function getManifestOnce(runId, timeoutMs) {
+    if (manifestInflight.runId === runId && manifestInflight.promise) {
+      return manifestInflight.promise;
+    }
+    var promise = window.BXPoll.fetchJson(
+      MANIFEST_URL + "?run_id=" + encodeURIComponent(runId),
+      timeoutMs === undefined ? 12000 : timeoutMs
+    );
+    manifestInflight = { runId: runId, promise: promise };
+    var evict = function () {
+      if (manifestInflight.promise === promise) {
+        manifestInflight = { runId: null, promise: null };
+      }
+    };
+    promise.then(evict, evict); // settle-evict — an in-flight dedupe only
+    return promise;
   }
 
   var state = {
@@ -746,6 +1080,7 @@ function bxFunnelProvenance(source, runId) {
   /* ── Awaiting banner + run pill (manifest poller) ── */
 
   function renderManifest(payload) {
+    lastManifestPayload = payload; // the BXOneclick.lastManifest() source
     var awaiting = byId("ocAwaiting");
     if (awaiting) {
       if (payload.status === "awaiting") {
@@ -939,6 +1274,9 @@ function bxFunnelProvenance(source, runId) {
     setOc("r1_sharpe", metricText(m.sharpe));
     setOc("r1_dsr", metricText(m.dsr));
     setOc("r1_cpcv", metricText(m.cpcv_pass_pct));
+    /* DEC-ALPHA-BUYHOLD-METRIC-001: alpha vs buy-&-hold — absent on a
+       pre-alpha artifact -> the honest "—", never a fabricated 0. */
+    setOc("r1_alpha", metricText(m.alpha_pct));
     /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
        status_text is SERVER-built (oneclick_view.cascade_status_text via the
        artifact bridge; no verdict prose is ever composed here — a missing/
@@ -948,6 +1286,15 @@ function bxFunnelProvenance(source, runId) {
     var casc = row.cascade && typeof row.cascade === "object" ? row.cascade : null;
     setOc("r1_cascade", casc && casc.status_text ? String(casc.status_text) : "—");
     setOcClass("r1_cascade", "oc-cascade-fail", !!(casc && casc.status === "fail"));
+    /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier — status_text is
+       SERVER-built (oneclick_view.tier_status_text via the artifact bridge;
+       no tier prose composed here — a missing/pre-tier artifact reads the
+       honest "—"); S+/S paint the green .oc-tier-good badge, A stays
+       neutral (flagged annotation, never a re-rank). */
+    var tier = row.tier && typeof row.tier === "object" ? row.tier : null;
+    setOc("r1_tier", tier && tier.status_text ? String(tier.status_text) : "—");
+    setOcClass("r1_tier", "oc-tier-good",
+      !!(tier && (tier.label === "S+" || tier.label === "S")));
     setOc("r1_trades", metricText(m.trades));
     setOc("r1_vix_band", vixBandText(row.vix_band));
     /* Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown +
@@ -957,6 +1304,12 @@ function bxFunnelProvenance(source, runId) {
     setOc("r1_trend_split", bxTrendSplitText(reg.by_trend, paisaText));
     setOc("r1_regime_wonder", bxRegimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis));
     setOc("r1_worst5", bxWorst5DaysText(m.worst5_days, paisaText));
+    // Losing-streak resilience rank-1 hooks (the sibling block; the pure
+    // builder is stats_live-gated, so a NULL/parity-failed record → "—",
+    // never a fabricated 0 — defense-in-depth mirror of the /strategy panel).
+    var rc = bxResilienceRankOneCells(row);
+    setOc("r1_worst_streak_pct", rc.worstStreakPct);
+    setOc("r1_uw_days", rc.uwDays);
   }
 
   /* Build the #combosBody rows from the top-100 artifact. Cells carry the
@@ -1031,8 +1384,9 @@ function bxFunnelProvenance(source, runId) {
     if (!state.selectedRunId) {
       return;
     }
-    var url = TOP100_URL + "?run_id=" + encodeURIComponent(state.selectedRunId);
-    window.BXPoll.fetchJson(url, 12000)
+    // Fetch plumbing only: the memo'd getTop100 promise (one network fetch
+    // per run selection, shared with the winners section + the drawer).
+    getTop100(state.selectedRunId)
       .then(function (payload) {
         if (!payload || typeof payload !== "object") {
           return;
@@ -1525,7 +1879,12 @@ function bxFunnelProvenance(source, runId) {
         lastRuns = data;
         if (!state.selectedRunId && data.latest_run_id) {
           state.selectedRunId = data.latest_run_id;
+          top100Memo = { runId: null, promise: null }; // fresh run, fresh memo
           loadRunScoped(); // first selection: fetch the run-scoped one-shots
+          // The programmatic FIRST auto-selection notifies observers too —
+          // a portal mounted before the poller landed would otherwise show
+          // stale/awaiting winners for the auto-selected run.
+          notifyRunChange(state.selectedRunId);
         }
         var select = byId("ocRunSelect");
         if (select && data.runs) {
@@ -1561,10 +1920,10 @@ function bxFunnelProvenance(source, runId) {
         if (!state.selectedRunId) {
           return Promise.resolve({ status: "awaiting", detail: "no run selected" });
         }
-        return window.BXPoll.fetchJson(
-          MANIFEST_URL + "?run_id=" + encodeURIComponent(state.selectedRunId),
-          timeoutMs
-        );
+        // Rides the in-flight dedupe: a concurrent cold drawer open shares
+        // this tick's fetch (the memo self-evicts on settle, so the NEXT
+        // poll tick always refetches fresh).
+        return getManifestOnce(state.selectedRunId, timeoutMs);
       },
       onData: function (data) {
         renderManifest(data);
@@ -1596,6 +1955,7 @@ function bxFunnelProvenance(source, runId) {
     TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
     TIMELINE_RENDER_CAP: BX_TIMELINE_RENDER_CAP,
     VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
+    RESILIENCE_UNAVAILABLE: BX_RESILIENCE_UNAVAILABLE,
     ringPush: bxRingPush,
     ringAdd: bxRingAdd,
     ringFilter: bxRingFilter,
@@ -1617,9 +1977,25 @@ function bxFunnelProvenance(source, runId) {
     regimeWonderText: bxRegimeWonderText,
     avgExtremeText: bxAvgExtremeText,
     minutePathDdText: bxMinutePathDdText,
+    winRateSpreadText: bxWinRateSpread,
+    resilienceCells: bxResilienceCells,
+    resilienceRankOneCells: bxResilienceRankOneCells,
+    resilienceSelfLocate: bxResilienceSelfLocate,
+    resilienceGuide: bxResilienceGuide,
+    istDateTime: bxIstDateTime,
     oneshotFetch: bxOneshotFetch,
     renderChainMap: renderChainMap,
+    getTop100: getTop100,
+    onRunChange: function (cb) {
+      runChangeSubs.push(cb);
+    },
+    lastManifest: function () {
+      return lastManifestPayload;
+    },
+    getManifestOnce: getManifestOnce,
+    latestRun: latestRun,
     selectRun: function (runId) {
+      top100Memo = { runId: null, promise: null }; // run switch invalidates
       state.selectedRunId = runId;
       state.ring = [];
       state.ringSeen = {};
@@ -1629,6 +2005,7 @@ function bxFunnelProvenance(source, runId) {
       state.lastTimelineToken = null; // ring content reset — force the next render
       renderTimeline();
       loadRunScoped();
+      notifyRunChange(runId);
     }
   };
 
@@ -1647,6 +2024,7 @@ if (typeof module !== "undefined" && module.exports) {
     BX_TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
     BX_TIMELINE_RENDER_CAP: BX_TIMELINE_RENDER_CAP,
     BX_VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
+    BX_RESILIENCE_UNAVAILABLE: BX_RESILIENCE_UNAVAILABLE,
     bxRingPush: bxRingPush,
     bxRingAdd: bxRingAdd,
     bxRingFilter: bxRingFilter,
@@ -1667,6 +2045,12 @@ if (typeof module !== "undefined" && module.exports) {
     bxTrendSplitText: bxTrendSplitText,
     bxRegimeWonderText: bxRegimeWonderText,
     bxAvgExtremeText: bxAvgExtremeText,
-    bxMinutePathDdText: bxMinutePathDdText
+    bxMinutePathDdText: bxMinutePathDdText,
+    bxWinRateSpread: bxWinRateSpread,
+    bxResilienceCells: bxResilienceCells,
+    bxResilienceRankOneCells: bxResilienceRankOneCells,
+    bxResilienceSelfLocate: bxResilienceSelfLocate,
+    bxResilienceGuide: bxResilienceGuide,
+    bxIstDateTime: bxIstDateTime
   };
 }

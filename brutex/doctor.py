@@ -36,8 +36,15 @@ Currently implemented checks
    ``__build_crate_version__``) against its in-repo expected
    fingerprint (``rust/<crate>/python/<package>/EXPECTED_BUILD.json``).
    A mismatch is a non-fatal ``WARN`` with an actionable rebuild
-   message; ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` skips BOTH wheel stages
+   message; ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` skips EVERY wheel stage
    ONLY (one escape hatch, deliberately shared).
+   DEC-BRUTEX-LAKE-BOX-WHEEL-001 binds the SAME helper to the OPTIONAL
+   ``brutex_lake`` wheel (``wheel_freshness_brutex_lake``): the lake
+   facades degrade to the Python law when it is absent, so its
+   not-importable arm is a genuine advisory WARN (the box build should
+   have produced it), never a FAIL — and it IS CLI-reachable (nothing
+   imports ``brutex_lake`` at module top, so the shim ImportError
+   short-circuit of the required wheels does not apply).
    HONEST reachability envelope (Golden Rule #10): via the ``brutex``
    CLI these stages' WARN teeth are the drift classes that still
    IMPORT (crate-version mismatch, unexpected extra symbols, a
@@ -61,7 +68,10 @@ Currently implemented checks
    checkout's ``rust/<crate>`` tree. Mismatch / absent stamp = non-fatal
    ``WARN`` (consistent with the freshness stage);
    ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` skips these stages too (still ONE
-   escape hatch for all wheel stages). HONEST scope (Golden Rule #10):
+   escape hatch for all wheel stages; the OPTIONAL ``brutex_lake``
+   binding ``wheel_source_digest_brutex_lake`` — the crate's ONLY real
+   stale signal at its frozen 0.1.0 version — rides the same helper,
+   DEC-BRUTEX-LAKE-BOX-WHEEL-001). HONEST scope (Golden Rule #10):
    LOCAL machines only — CI builds every wheel from source per job
    (no committed wheel exists anywhere), so CI can never see a stale
    wheel; the exposure is a developer wheel built from older source at
@@ -367,6 +377,23 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     Any drift — a stale table left behind by a 1m backfill, or a
     pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid — is a loud ``FAIL``.
 
+    CE/PE OPTION contract partitions are EXCLUDED from the verdicts
+    (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+    relayed via the coordinator, ADR-0021 RULING B, draft PR #1555): the
+    derived option TFs are retired (options are 1-minute-native), so a
+    stored legacy option TF is FROZEN by design and its inevitable staleness
+    must never red the doctor. SPOT + FUT verdicts are unchanged (the gate
+    is the COMMON :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
+
+    Screen parity (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001): the 1-minute
+    BASE read runs the SAME bad-tick screen the prebuild's read runs (one
+    ``BRUTEX_BAD_TICK_SCREEN`` switch — screened-vs-screened), so a lake
+    whose stored 1-minute legitimately holds a self-consistent >=4x
+    in-session spike (exactly the class the screen exists for) no longer
+    reads a permanent false FAIL. A lake that STAYS stale after a prebuild
+    re-run holds ghost bucket(s) with no surviving screened source — the
+    FAIL detail names the escape (DEC-DERIVED-GHOST-BUCKET-PRUNE-001).
+
     SKIP (a valid state, not a failure) when: the lake root is absent, no
     symbol has derived partitions yet (the auto-derive opt-in is OFF), or
     polars is unavailable.
@@ -381,21 +408,38 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     try:
         import polars as pl
 
+        from brutex.data.fno_candle_lake import is_option_contract_coords
         from brutex.data.tf_autoderive import compare_derived_freshness, read_lake_bars_frame
         from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
         from brutex.data.timeframes import parse_label
 
         interval_to_label = {v: k for k, v in INTRADAY_TF_INTERVALS.items()}
 
-        def _read(symbol_dir: Path, interval: str) -> pl.DataFrame:
+        def _read(
+            symbol_dir: Path, interval: str, *, screen_bad_ticks: bool = False
+        ) -> pl.DataFrame:
             # ONE COMMON reader with the sweep-preflight freshness gate
             # (DEC-SUSPICION-SWEEP-FIXES-001 G1) — keep-FIRST read dedup BEFORE
             # the sort (DEC-LAKE-READ-UNIQUE-001), doctor-labelled dedup source.
+            # The 1-minute BASE read opts into the prebuild-parity bad-tick
+            # screen (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001 — screened-vs-
+            # screened, one BRUTEX_BAD_TICK_SCREEN switch); the stored DERIVED
+            # reads stay unscreened (they are the prebuild's screened output).
             return read_lake_bars_frame(
-                symbol_dir, interval, source=f"doctor:{symbol_dir.name}/{interval}"
+                symbol_dir,
+                interval,
+                source=f"doctor:{symbol_dir.name}/{interval}",
+                screen_bad_ticks=screen_bad_ticks,
             )
 
         for symbol_dir in sorted(p for p in bars_root.glob("*/*/*") if p.is_dir()):
+            # The path shape is bars/<exchange>/<segment>/<symbol>: exclude
+            # CE/PE option contract dirs (DEC-OPTIONS-PREBUILD-RETIRE-001 —
+            # their derived TFs are retired + frozen, never re-derived, so
+            # comparing them against a fresh re-derivation is meaningless
+            # and would red the doctor on a healthy lake).
+            if is_option_contract_coords(symbol_dir.parent.name, symbol_dir.name):
+                continue
             base = symbol_dir / "1minute"
             if not (base.is_dir() and any(base.rglob("*.parquet"))):
                 continue
@@ -406,7 +450,7 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
             )
             if not stored_intervals:
                 continue
-            df_1m = _read(symbol_dir, "1minute")
+            df_1m = _read(symbol_dir, "1minute", screen_bad_ticks=True)
             stale: list[str] = []
             for interval in stored_intervals:
                 tf_minutes = parse_label(interval_to_label[interval])
@@ -421,7 +465,12 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                     detail=(
                         f"{symbol}: stored derived TFs drift from a fresh re-derivation: "
                         f"{stale} — re-derive via the pipeline's automatic prebuild "
-                        "stage (▶ Pull · full pipeline, DEC-PIPELINE-AUTOPREBUILD-001)"
+                        "stage (▶ Pull · full pipeline, DEC-PIPELINE-AUTOPREBUILD-001); "
+                        "if it stays stale after that prebuild, the stored table holds "
+                        "ghost bucket(s) with no surviving screened 1-minute source "
+                        "(the latest-wins derived writer never deletes — "
+                        "DEC-DERIVED-GHOST-BUCKET-PRUNE-001): delete the symbol's "
+                        "derived TF partition dirs, then re-run the prebuild"
                     ),
                 )
             return CheckResult(
@@ -599,6 +648,21 @@ _FNO_MATH_WHEEL = _WheelSpec(
     crate_dir="rust/fno-math",
 )
 
+_BRUTEX_LAKE_WHEEL = _WheelSpec(
+    check_name="wheel_freshness_brutex_lake",
+    package="brutex_lake",
+    compiled_submodule="_brutex_lake",
+    crate_dir="rust/brutex-lake",
+)
+
+
+_BRUTEX_IDENTITY_WHEEL = _WheelSpec(
+    check_name="wheel_freshness_brutex_identity",
+    package="brutex_identity",
+    compiled_submodule="_brutex_identity",
+    crate_dir="rust/brutex-identity",
+)
+
 
 def _check_one_wheel_freshness(
     spec: _WheelSpec,
@@ -647,8 +711,13 @@ def _check_one_wheel_freshness(
     by the SIBLING :func:`_check_one_wheel_source_digest` stage
     (DEC-RUST-SOURCE-DIGEST-TWIN-001: the build.rs-baked source digest vs the
     Python-twin recompute over the repo crate tree), which closed the
-    follow-up previously named here; the CI golden/parity suites remain the
-    behavioral correctness proof. Likewise, a NON-editable wheel install whose
+    follow-up previously named here; behavioral correctness itself is proven
+    by LAYERED CI nets — the in-crate cargo bit-level tests (exact-value +
+    bitwise-refold pins, cargo-mutants-gated) at the Rust-source level, plus
+    the Python-side parity/golden suites whose ULP-boundary discriminators
+    kill rounding-order drift in the shipped WHEEL itself (refuter round 5,
+    MIGRATION.md #1928 — value-level parity cases alone were proven blind to
+    a 1-ULP fold-op-order mutant wheel). Likewise, a NON-editable wheel install whose
     default fingerprint ships inside the wheel itself self-snapshots at
     build time; the check has teeth when the fingerprint read is the repo
     checkout's (the editable/`maturin develop` layout).
@@ -773,8 +842,11 @@ def check_fno_math_wheel_freshness(
     ``ResidentSweepSim`` UNFLAGGED into the sweep hot path, so a stale
     installed ``_fno_math`` wheel is an always-on production risk (this very
     container shipped a stale wheel that SIGABRTed suites). Runtime
-    stale-wheel tripwire only — the CI golden/parity suites remain the
-    correctness proof.
+    stale-wheel tripwire only — correctness itself is proven by the layered
+    CI nets: the in-crate cargo bit-level tests at the Rust-source level plus
+    the Python-side parity/golden suites, whose ULP-boundary discriminators
+    reach WHEEL-level rounding-order drift too (refuter round 5, MIGRATION.md
+    #1928 — value-level parity cases alone were proven blind to that class).
 
     Parameters
     ----------
@@ -786,6 +858,64 @@ def check_fno_math_wheel_freshness(
         Environment mapping (injected for tests). ``None`` = ``os.environ``.
     """
     return _check_one_wheel_freshness(_FNO_MATH_WHEEL, fingerprint_file, env)
+
+
+def check_brutex_lake_wheel_freshness(
+    fingerprint_file: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel-source freshness handshake for the OPTIONAL brutex_lake wheel.
+
+    DEC-BRUTEX-LAKE-BOX-WHEEL-001 — the brutex_lake twin of
+    :func:`check_wheel_freshness`, bound to the SAME common helper. The lake
+    wheel is OPTIONAL (every ``brutex/data/*_rust*`` facade degrades to the
+    Python law when it is absent), so the not-importable arm's WARN is a
+    genuine "the box build didn't produce it" signal — after the same DEC
+    wired ``rust/brutex-lake`` into ``make run-raw`` + ``bootstrap.sh``
+    (best-effort), an absent wheel means that build step failed. HONEST
+    limits (Golden Rule #10): the version+symbol check alone is nearly
+    toothless for this crate (the crate version is frozen at 0.1.0) — the
+    sibling :func:`check_brutex_lake_wheel_source_digest` stage is the real
+    stale-``.so`` detector; and a PASS here does NOT prove polars lockstep
+    (a fresh wheel can still be latched OFF by the facades' own polars
+    version guard — that condition is the facades' loud WARN, out of doctor
+    scope).
+
+    Parameters
+    ----------
+    fingerprint_file
+        Explicit path to the expected-fingerprint JSON. ``None`` = the
+        ``EXPECTED_BUILD.json`` next to the installed ``brutex_lake``
+        package (which IS the repo copy under ``maturin develop``).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_freshness(_BRUTEX_LAKE_WHEEL, fingerprint_file, env)
+
+
+def check_brutex_identity_wheel_freshness(
+    fingerprint_file: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel-source freshness handshake for the brutex_identity wheel.
+
+    DEC-RUST-RUNID-STORES-001 (independent refuter round 2) — the
+    run-identity + stores kernel is the THIRD hard-imported wheel
+    (``brutex.strategies.combo`` / ``brutex.engine`` /
+    ``brutex.data.window_ledger_store`` import it unconditionally; the
+    Python computation bodies were deleted in the same lane), so it joins
+    the SAME common freshness helper the trading_core/fno_math wheels ride.
+
+    Parameters
+    ----------
+    fingerprint_file
+        Explicit path to the expected-fingerprint JSON. ``None`` = the
+        ``EXPECTED_BUILD.json`` next to the installed ``brutex_identity``
+        package (which IS the repo copy under ``maturin develop``).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_freshness(_BRUTEX_IDENTITY_WHEEL, fingerprint_file, env)
 
 
 def _default_crate_root(spec: _WheelSpec) -> Path:
@@ -933,6 +1063,21 @@ _FNO_MATH_SOURCE_DIGEST = _WheelSpec(
     crate_dir=_FNO_MATH_WHEEL.crate_dir,
 )
 
+_BRUTEX_LAKE_SOURCE_DIGEST = _WheelSpec(
+    check_name="wheel_source_digest_brutex_lake",
+    package=_BRUTEX_LAKE_WHEEL.package,
+    compiled_submodule=_BRUTEX_LAKE_WHEEL.compiled_submodule,
+    crate_dir=_BRUTEX_LAKE_WHEEL.crate_dir,
+)
+
+
+_BRUTEX_IDENTITY_SOURCE_DIGEST = _WheelSpec(
+    check_name="wheel_source_digest_brutex_identity",
+    package=_BRUTEX_IDENTITY_WHEEL.package,
+    compiled_submodule=_BRUTEX_IDENTITY_WHEEL.compiled_submodule,
+    crate_dir=_BRUTEX_IDENTITY_WHEEL.crate_dir,
+)
+
 
 def check_wheel_source_digest(
     crate_root: Path | None = None,
@@ -977,6 +1122,57 @@ def check_fno_math_wheel_source_digest(
     return _check_one_wheel_source_digest(_FNO_MATH_SOURCE_DIGEST, crate_root, env)
 
 
+def check_brutex_lake_wheel_source_digest(
+    crate_root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel source-digest handshake for the OPTIONAL brutex_lake wheel.
+
+    The brutex_lake twin of :func:`check_wheel_source_digest`, bound to the
+    SAME common helper (DEC-RUST-SOURCE-DIGEST-TWIN-001 mechanism;
+    DEC-BRUTEX-LAKE-BOX-WHEEL-001 binding). THE stale-``.so`` detector for
+    this crate — its version is frozen at 0.1.0 and its symbol surface moves
+    only when seams land, so the freshness stage alone cannot see a rebuilt
+    same-surface wheel from older source. HONEST limit (Golden Rule #10): a
+    digest match still does not prove polars lockstep (the facades' own
+    version guard owns that condition and WARNs loudly on drift).
+
+    Parameters
+    ----------
+    crate_root
+        Explicit crate directory to digest. ``None`` = the repo checkout's
+        ``rust/brutex-lake`` resolved next to the installed ``brutex``
+        package (absent → honest SKIP).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_source_digest(_BRUTEX_LAKE_SOURCE_DIGEST, crate_root, env)
+
+
+def check_brutex_identity_wheel_source_digest(
+    crate_root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel source-digest handshake for the brutex_identity wheel.
+
+    The brutex_identity twin of :func:`check_wheel_source_digest`, bound to
+    the SAME common helper (DEC-RUST-SOURCE-DIGEST-TWIN-001 mechanism;
+    DEC-RUST-RUNID-STORES-001 independent refuter round 2 — added together
+    with the freshness stage so the third hard-imported wheel gets BOTH
+    drift nets).
+
+    Parameters
+    ----------
+    crate_root
+        Explicit crate directory to digest. ``None`` = the repo checkout's
+        ``rust/brutex-identity`` resolved next to the installed ``brutex``
+        package (absent → honest SKIP).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_source_digest(_BRUTEX_IDENTITY_SOURCE_DIGEST, crate_root, env)
+
+
 def run_doctor(
     audit_file: Path | None = None,
     audit_dir: Path = DEFAULT_AUDIT_DIR,
@@ -986,8 +1182,12 @@ def run_doctor(
     lake_root: Path | None = None,
     wheel_fingerprint_file: Path | None = None,
     fno_math_wheel_fingerprint_file: Path | None = None,
+    brutex_lake_wheel_fingerprint_file: Path | None = None,
+    brutex_identity_wheel_fingerprint_file: Path | None = None,
     wheel_source_crate_root: Path | None = None,
     fno_math_wheel_source_crate_root: Path | None = None,
+    brutex_lake_wheel_source_crate_root: Path | None = None,
+    brutex_identity_wheel_source_crate_root: Path | None = None,
 ) -> DoctorReport:
     """Run all health checks and return the aggregated report.
 
@@ -1019,6 +1219,20 @@ def run_doctor(
         stage (DEC-FNOMATH-WHEEL-FRESHNESS-001). ``None`` = the
         ``EXPECTED_BUILD.json`` shipped next to the installed ``fno_math``
         package.
+    brutex_lake_wheel_fingerprint_file
+        Explicit expected-fingerprint JSON for the OPTIONAL brutex_lake
+        wheel-freshness stage (DEC-BRUTEX-LAKE-BOX-WHEEL-001). ``None`` =
+        the ``EXPECTED_BUILD.json`` shipped next to the installed
+        ``brutex_lake`` package (an absent wheel reads the stage's advisory
+        WARN, never a FAIL).
+    brutex_identity_wheel_fingerprint_file
+        Explicit expected-fingerprint JSON for the brutex_identity
+        wheel-freshness stage (DEC-RUST-RUNID-STORES-001). ``None`` = the
+        ``EXPECTED_BUILD.json`` shipped next to the installed
+        ``brutex_identity`` package.
+    brutex_identity_wheel_source_crate_root
+        Explicit crate directory for the brutex_identity wheel-source-digest
+        stage. ``None`` = the repo checkout's ``rust/brutex-identity``.
     wheel_source_crate_root
         Explicit crate directory for the trading_core wheel-source-digest
         stage (DEC-RUST-SOURCE-DIGEST-TWIN-001). ``None`` = the repo
@@ -1026,6 +1240,10 @@ def run_doctor(
     fno_math_wheel_source_crate_root
         Explicit crate directory for the fno_math wheel-source-digest stage.
         ``None`` = the repo checkout's ``rust/fno-math``.
+    brutex_lake_wheel_source_crate_root
+        Explicit crate directory for the brutex_lake wheel-source-digest
+        stage (DEC-BRUTEX-LAKE-BOX-WHEEL-001). ``None`` = the repo
+        checkout's ``rust/brutex-lake``.
 
     Returns
     -------
@@ -1053,6 +1271,27 @@ def run_doctor(
     report.add(check_fno_math_wheel_freshness(fingerprint_file=fno_math_wheel_fingerprint_file))
     report.add(check_wheel_source_digest(crate_root=wheel_source_crate_root))
     report.add(check_fno_math_wheel_source_digest(crate_root=fno_math_wheel_source_crate_root))
+    # DEC-BRUTEX-LAKE-BOX-WHEEL-001: the OPTIONAL brutex_lake wheel joins the
+    # watch set (appended AFTER the required-wheel pairs — the doctor-daily
+    # cron's envelope-honesty step classifies these two as deterministic WARN
+    # in its hermetic wheel-absent env; supersedes-in-part
+    # DEC-DOCTOR-DAILY-CHECKSET-9-001's 9-check set → 11).
+    report.add(
+        check_brutex_lake_wheel_freshness(fingerprint_file=brutex_lake_wheel_fingerprint_file)
+    )
+    report.add(
+        check_brutex_identity_wheel_freshness(
+            fingerprint_file=brutex_identity_wheel_fingerprint_file
+        )
+    )
+    report.add(
+        check_brutex_lake_wheel_source_digest(crate_root=brutex_lake_wheel_source_crate_root)
+    )
+    report.add(
+        check_brutex_identity_wheel_source_digest(
+            crate_root=brutex_identity_wheel_source_crate_root
+        )
+    )
     return report
 
 
@@ -1065,8 +1304,12 @@ def main(
     lake_root: Path | None = None,
     wheel_fingerprint_file: Path | None = None,
     fno_math_wheel_fingerprint_file: Path | None = None,
+    brutex_lake_wheel_fingerprint_file: Path | None = None,
+    brutex_identity_wheel_fingerprint_file: Path | None = None,
     wheel_source_crate_root: Path | None = None,
     fno_math_wheel_source_crate_root: Path | None = None,
+    brutex_lake_wheel_source_crate_root: Path | None = None,
+    brutex_identity_wheel_source_crate_root: Path | None = None,
 ) -> int:
     """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
     report = run_doctor(
@@ -1078,8 +1321,12 @@ def main(
         lake_root=lake_root,
         wheel_fingerprint_file=wheel_fingerprint_file,
         fno_math_wheel_fingerprint_file=fno_math_wheel_fingerprint_file,
+        brutex_lake_wheel_fingerprint_file=brutex_lake_wheel_fingerprint_file,
+        brutex_identity_wheel_fingerprint_file=brutex_identity_wheel_fingerprint_file,
         wheel_source_crate_root=wheel_source_crate_root,
         fno_math_wheel_source_crate_root=fno_math_wheel_source_crate_root,
+        brutex_lake_wheel_source_crate_root=brutex_lake_wheel_source_crate_root,
+        brutex_identity_wheel_source_crate_root=brutex_identity_wheel_source_crate_root,
     )
     print(report.format())
     return 0 if report.ok else 1

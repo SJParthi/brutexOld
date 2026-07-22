@@ -66,6 +66,21 @@ it 1:1 with zero re-derivation.
 * Pure + O(1): a handful of string comparisons over already-recorded state —
   no I/O, no clock, no lake read; it changes NO pull behaviour and the
   brute-force ENGINE (NIFTY/BANKNIFTY/SENSEX) is untouched.
+
+## The Rust decision kernel (DEC-RUST-PULL-STATE-001, flip phase)
+
+The ARM decision is served by the ``brutex_pull_state`` Rust kernel as MACHINE
+CODES — ``classify_pull_outcome`` + the ``verdict_correlates`` run-id law —
+and the kernel is THE ONLY decision path: the Python classify-ladder oracle
+was DELETED with the flip, and every kernel fault (wheel absent/stale, a
+kernel raise, poisoned codes) raises the typed
+:class:`brutex.pull_state_rust.PullStateKernelError` — FAIL-CLOSED, never a
+silent degrade and never an unvalidated token on the wire.  Every human
+string stays HERE: the code→wording tables below compose the pinned
+headlines/details, and the ``@verdict`` / ``@verdict_prepull`` markers hand
+the banner fold back to :func:`_from_verdict` so
+:func:`brutex.dashboard.verdict_banner.banner_for` stays the ONE colour
+authority (CLAUDE.md §11 COMMON).
 """
 
 from __future__ import annotations
@@ -74,6 +89,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.dashboard.pull_jobs import RetainedPullState
 from brutex.dashboard.verdict_banner import banner_for
 
@@ -99,7 +115,10 @@ OUTCOME_UNKNOWN: Final[str] = "unknown"
 #: The market-hours START-gate deferral detail prefix — the EXACT message
 #: :meth:`brutex.dashboard.pull_jobs.BackgroundPullJob.start` records
 #: (DEC-GROWW-MARKET-HOURS-GUARD-001); drift-pinned by the unit suite against
-#: the real ``start()`` refusal.
+#: the real ``start()`` refusal.  The prefix-MATCH law itself lives in the
+#: Rust kernel (its literal twin in ``rust/brutex-pull-state`` is pinned by
+#: the frozen golden); this constant remains the ONE Python-side spelling the
+#: producers + tests couple to.
 MARKET_HOURS_DEFERRAL_PREFIX: Final[str] = "deferred — inside NSE market-hours window"
 
 #: Failed-run detail classification: the job worker records a failed run as
@@ -215,52 +234,124 @@ def _from_verdict(verdict: Mapping[str, Any], *, provenance: str = "") -> LastPu
     )
 
 
-def _from_error_detail(detail: str) -> LastPullOutcome:
-    """Classify a FAILED run's recorded ``detail`` string (recorded evidence only)."""
-    if detail.startswith(MARKET_HOURS_DEFERRAL_PREFIX):
-        # The START gate refused to begin a vendor pull inside the NSE window
-        # (DEC-GROWW-MARKET-HOURS-GUARD-001) — a deliberate deferral, not a failure.
-        return LastPullOutcome(
-            outcome=OUTCOME_DEFERRED_MARKET_HOURS,
-            tone=TONE_WARN,
-            headline="pull deferred — NSE market hours (08:45-15:35 IST)",
-            detail=detail,
-        )
-    name = detail.split(":", 1)[0]
-    if name == "LakeWriteHalt":
-        # ``LakeWriteHalt`` messages read "lake write halted: <reason>" with
-        # reason ∈ {disk_full, out_of_memory} (brutex/data/errors.py — pinned
-        # by the unit suite against the real class).
-        if "disk_full" in detail:
-            return LastPullOutcome(
-                outcome="halted_disk_full",
-                tone=TONE_BAD,
-                headline="pull HALTED — disk full",
-                detail=detail,
-            )
-        if "out_of_memory" in detail:
-            return LastPullOutcome(
-                outcome="halted_oom",
-                tone=TONE_BAD,
-                headline="pull HALTED — out of memory",
-                detail=detail,
-            )
-        return LastPullOutcome(
-            outcome="halted_lake_write",
-            tone=TONE_BAD,
-            headline="pull HALTED — lake write halted",
-            detail=detail,
-        )
-    mapped = _HALT_NAME_OUTCOMES.get(name)
-    if mapped is not None:
-        outcome, tone, headline = mapped
-        return LastPullOutcome(outcome=outcome, tone=tone, headline=headline, detail=detail)
-    return LastPullOutcome(
-        outcome=OUTCOME_ERROR,
-        tone=TONE_BAD,
-        headline="pull FAILED",
-        detail=detail,
+# --- the Rust decision kernel (DEC-RUST-PULL-STATE-001, flip phase) ---------
+# The ARM decision is served by the ``brutex_pull_state`` kernel as MACHINE
+# CODES — the ONLY decision path since the flip deleted the Python oracle.
+# The tables below compose the pinned human wordings Python-side (the
+# frontend wire contract stays single-sourced here — headlines are the
+# byte-copies of the pre-flip oracle arms, equality-pinned by the frozen
+# golden), and the ``@verdict`` markers hand the banner fold back to the
+# RETAINED ``_from_verdict`` so ``verdict_banner.banner_for`` stays the ONE
+# colour authority (CLAUDE.md §11).  Out-of-contract codes (only a
+# stale/corrupt wheel produces them) are REFUSED — the typed
+# ``PullStateKernelError`` raise, never an unvalidated token on the wire.
+
+#: headline code → the pinned wording (codes NOT here: ``completed_failures``
+#: composes the failed count; ``halt:<Name>`` keys ``_HALT_NAME_OUTCOMES``).
+_RUST_HEADLINES: Final[dict[str, str]] = {
+    "wedged": "pull WEDGED — restart required",
+    "stalled": "pull running — STALLED-SUSPECT (no progress beats)",
+    "running": "pull running",
+    "deferred_market_hours": "pull deferred — NSE market hours (08:45-15:35 IST)",
+    "halted_disk_full": "pull HALTED — disk full",
+    "halted_oom": "pull HALTED — out of memory",
+    "halted_lake_write": "pull HALTED — lake write halted",
+    "failed": "pull FAILED",
+    "completed": "pull finished",
+    "never_run": "no pull has run in this dashboard process",
+}
+
+#: The CLOSED outcome vocabulary the kernel may emit directly (the banner
+#: outcomes — ``clean`` / ``verdict_*`` / ``unknown`` — only ever come out of
+#: the Python-side ``_from_verdict`` fold, never the kernel).
+_RUST_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {
+        OUTCOME_NEVER_RUN,
+        OUTCOME_RUNNING,
+        OUTCOME_RUNNING_STALLED,
+        OUTCOME_WEDGED,
+        OUTCOME_COMPLETED,
+        OUTCOME_COMPLETED_WITH_FAILURES,
+        OUTCOME_DEFERRED_MARKET_HOURS,
+        OUTCOME_ERROR,
+        "halted_disk_full",
+        "halted_oom",
+        "halted_lake_write",
+    }
+    | {outcome for outcome, _tone, _headline in _HALT_NAME_OUTCOMES.values()}
+)
+
+#: The heartbeat tone vocabulary (refuse-poison gate for kernel codes).
+_RUST_TONES: Final[frozenset[str]] = frozenset({TONE_OK, TONE_WARN, TONE_BAD, TONE_IDLE})
+
+
+def _refuse_codes(detail: str) -> _pull_state_rust.PullStateKernelError:
+    """Build the typed refusal for out-of-contract kernel codes — fail-closed.
+
+    The module-side twin of the facade's refuse-poison gates (the facade
+    validates the SHAPE — a 4-tuple of str; the code-level VOCABULARY lives
+    here beside the composition tables): only a stale/corrupt wheel emits an
+    unrecognisable code, and with the Python oracle deleted the honest
+    disposition is the typed raise (``reason=kernel_invalid``), never a
+    fabricated wire token (DEC-RUST-PULL-STATE-001, flip phase).
+    """
+    return _pull_state_rust.PullStateKernelError(
+        f"pull-state kernel result for 'classify_pull_outcome' refused "
+        f"(reason=kernel_invalid, detail={detail}) — fail-closed: the Python "
+        f"oracle was deleted (DEC-RUST-PULL-STATE-001)"
     )
+
+
+def _compose_from_codes(
+    codes: tuple[str, str, str, str],
+    *,
+    detail: str,
+    failed: int,
+    verdict: Mapping[str, Any] | None,
+) -> LastPullOutcome:
+    """Compose the wire outcome from the kernel's decision codes.
+
+    Pure string composition over the code→wording tables — the kernel
+    DECIDED, this renders.  Out-of-contract codes (a verdict marker with no
+    verdict to fold, an unknown outcome/tone/headline/detail code — each
+    structurally impossible from the real drift-pinned kernel) RAISE the
+    typed error, never serve an unvalidated token on the wire.
+
+    Raises
+    ------
+    brutex.pull_state_rust.PullStateKernelError
+        On any out-of-vocabulary code (``reason=kernel_invalid``).
+    """
+    outcome, tone, headline_code, detail_code = codes
+    if outcome in ("@verdict", "@verdict_prepull"):
+        if verdict is None:
+            # A poisoned kernel claiming the verdict arm with no verdict to
+            # fold — structurally impossible from the real kernel.
+            raise _refuse_codes("verdict marker without a verdict")
+        if outcome == "@verdict":
+            return _from_verdict(verdict)
+        return _from_verdict(verdict, provenance="stamped before any pull started")
+    headline: str | None
+    if headline_code == "completed_failures":
+        headline = f"pull finished — {failed} unit(s) failed/quarantined (will re-pull)"
+    elif headline_code.startswith("halt:"):
+        mapped = _HALT_NAME_OUTCOMES.get(headline_code.removeprefix("halt:"))
+        headline = None if mapped is None else mapped[2]
+    else:
+        headline = _RUST_HEADLINES.get(headline_code)
+    if headline is None or outcome not in _RUST_OUTCOMES or tone not in _RUST_TONES:
+        raise _refuse_codes(f"unrecognised outcome codes {codes!r}")
+    if detail_code == "input":
+        composed_detail = detail
+    elif detail_code == "empty":
+        composed_detail = ""
+    elif detail_code == "completed":
+        composed_detail = (
+            detail if detail else "completed — no classified verdict recorded for this run"
+        )
+    else:
+        raise _refuse_codes(f"unrecognised detail code {detail_code!r}")
+    return LastPullOutcome(outcome=outcome, tone=tone, headline=headline, detail=composed_detail)
 
 
 def classify_last_pull_outcome(
@@ -296,78 +387,23 @@ def classify_last_pull_outcome(
     -------
     LastPullOutcome
         The display-ready outcome.  Every arm is deterministic; nothing is
-        fabricated — an unclassifiable input degrades to an honest
+        fabricated — an unclassifiable input reads an honest
         ``unknown``/``error``, never a green.
+
+    Raises
+    ------
+    brutex.pull_state_rust.PullStateFlagRemovedError
+        When the removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
+    brutex.pull_state_rust.PullStateKernelError
+        Wheel absent/stale, the kernel raised, or it served out-of-contract
+        codes — FAIL-CLOSED: the pre-flip Python classify ladder was deleted
+        (DEC-RUST-PULL-STATE-001), so an honest outcome cannot be fabricated
+        without the kernel.
     """
-    if state == "running":
-        if wedged:
-            return LastPullOutcome(
-                outcome=OUTCOME_WEDGED,
-                tone=TONE_BAD,
-                headline="pull WEDGED — restart required",
-                detail=detail,
-            )
-        if stalled:
-            return LastPullOutcome(
-                outcome=OUTCOME_RUNNING_STALLED,
-                tone=TONE_WARN,
-                headline="pull running — STALLED-SUSPECT (no progress beats)",
-                detail=detail,
-            )
-        return LastPullOutcome(
-            outcome=OUTCOME_RUNNING, tone=TONE_OK, headline="pull running", detail=detail
-        )
-    if state == "error":
-        return _from_error_detail(detail)
-    if state == "done":
-        if detail.startswith(MARKET_HOURS_DEFERRAL_PREFIX):
-            # The pipeline's BETWEEN-PHASES market-hours stop is CAUGHT (never
-            # raised): ``run_full_pipeline`` returns ``stopped_after=
-            # "market_hours"`` with the deferral note, so the run finishes
-            # ``done`` and its note becomes the finish detail
-            # (``pull_jobs._finish_detail``). Checked BEFORE the verdict fold —
-            # the route stamps the SPOT phase's (often clean) verdict for the
-            # /universe banner, which must never paint this deferred run green
-            # (hostile-review M3). The prefix is drift-pinned against the REAL
-            # ``pipeline_pull._market_hours_stop_note()``.
-            return LastPullOutcome(
-                outcome=OUTCOME_DEFERRED_MARKET_HOURS,
-                tone=TONE_WARN,
-                headline="pull deferred — NSE market hours (08:45-15:35 IST)",
-                detail=detail,
-            )
-        if failed > 0:
-            # THIS run's own quarantine tally outranks the verdict — never
-            # green over recorded failures.
-            return LastPullOutcome(
-                outcome=OUTCOME_COMPLETED_WITH_FAILURES,
-                tone=TONE_WARN,
-                headline=f"pull finished — {failed} unit(s) failed/quarantined (will re-pull)",
-                detail=detail,
-            )
-        if verdict is not None:
-            return _from_verdict(verdict)
-        return LastPullOutcome(
-            outcome=OUTCOME_COMPLETED,
-            tone=TONE_OK,
-            headline="pull finished",
-            # Carry the run's own recorded note when one exists (e.g. a
-            # pipeline that stopped after a later phase gate) — the honest
-            # story is never discarded for a canned line.
-            detail=detail if detail else "completed — no classified verdict recorded for this run",
-        )
-    # ``idle`` — nothing has run on the slot this process lifetime.  A stamped
-    # verdict can still exist (the pre-pull credentials REFUSAL is stamped at
-    # the route gate BEFORE any start — DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001) —
-    # surface it honestly instead of a blank neutral.
-    if verdict is not None:
-        return _from_verdict(verdict, provenance="stamped before any pull started")
-    return LastPullOutcome(
-        outcome=OUTCOME_NEVER_RUN,
-        tone=TONE_IDLE,
-        headline="no pull has run in this dashboard process",
-        detail="",
+    codes = _pull_state_rust.rust_classify_pull_outcome(
+        state, detail, failed, stalled, wedged, verdict is not None
     )
+    return _compose_from_codes(codes, detail=detail, failed=failed, verdict=verdict)
 
 
 def classify_retained_pull_outcome(
@@ -387,14 +423,21 @@ def classify_retained_pull_outcome(
     deferral/refusal record carries ``""`` and correlates with nothing), except
     on the never-ran slot, where the only legitimate writer is the pre-pull
     credentials-refusal gate.  Pure + O(1); the app probe and the tests drive
-    THIS function, so the correlation law has exactly one home (CLAUDE.md §11).
+    THIS function, so the correlation law has exactly one home (CLAUDE.md §11) —
+    served by the kernel's ``verdict_correlates`` since the flip
+    (DEC-RUST-PULL-STATE-001; a kernel fault raises
+    :class:`~brutex.pull_state_rust.PullStateKernelError`, fail-closed).
     """
     if retained is None:
         return classify_last_pull_outcome(
             state="idle", detail="", failed=0, stalled=False, wedged=False, verdict=verdict
         )
     snap = retained.snapshot
-    correlated = verdict if (retained.pull_id and verdict_pull_id == retained.pull_id) else None
+    correlated = (
+        verdict
+        if _pull_state_rust.rust_verdict_correlates(retained.pull_id, verdict_pull_id)
+        else None
+    )
     return classify_last_pull_outcome(
         state=snap.state,
         detail=snap.detail,

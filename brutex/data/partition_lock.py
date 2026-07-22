@@ -83,6 +83,7 @@ from typing import Final
 from brutex.config.deadline import resolve_env_seconds
 from brutex.data.atomic_io import lake_write_guard
 from brutex.data.errors import PartitionLockTimeout
+from brutex.data.lake_rust_locks import rust_flock_attempt, rust_flock_release
 from brutex.observability.progress_beat import emit_progress_beat
 
 __all__ = [
@@ -150,6 +151,23 @@ def resolve_partition_lock_timeout_seconds() -> float:
     return resolve_env_seconds(PARTITION_LOCK_TIMEOUT_ENV, DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS)
 
 
+def _flock_attempt(fd: int) -> bool:
+    """One non-blocking exclusive ``flock`` attempt — the Python oracle arm.
+
+    ``True`` = acquired; ``False`` = a peer holds it (``BlockingIOError`` —
+    the retryable verdict); any OTHER ``OSError`` (``EBADF``, …) propagates
+    raw, exactly as ``fcntl.flock`` raises it. The verbatim pre-PR-4 attempt
+    semantics, extracted so :func:`_acquire_bounded` can route the attempt
+    through the Rust twin (DEC-LAKE-RUST-LOCKS-ATOMIC-001) while the loop /
+    deadline / beat law stays HERE on both arms.
+    """
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
 def _acquire_bounded(
     fd: int,
     *,
@@ -160,26 +178,28 @@ def _acquire_bounded(
 ) -> None:
     """Acquire an exclusive ``flock`` on *fd*, retrying NON-BLOCKING under a deadline.
 
-    Loops ``fcntl.flock(fd, LOCK_EX | LOCK_NB)`` catching ``BlockingIOError`` (the peer
-    holds it), firing a liveness :func:`~brutex.observability.progress_beat.emit_progress_beat`
+    Loops one non-blocking ``LOCK_EX`` attempt (:func:`_flock_attempt` — or its
+    Rust twin when ``BRUTEX_LAKE_RUST_LOCKS`` routes, DEC-LAKE-RUST-LOCKS-ATOMIC-001;
+    the routing is attempt-GRAINED so this loop, its injected *clock* / *sleep*,
+    the liveness beats and the timeout law run IDENTICALLY on both arms), firing
+    :func:`~brutex.observability.progress_beat.emit_progress_beat`
     + sleeping *poll_seconds* between tries, until the lock is taken or *timeout_seconds*
     of monotonic time has elapsed. On expiry raises
     :class:`~brutex.data.errors.PartitionLockTimeout` (the TRANSIENT defer signal) — never
     an unbounded block. *clock* / *sleep* are injected for deterministic tests.
     """
+    attempt = rust_flock_attempt(_flock_attempt)
     deadline = clock() + timeout_seconds
     while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if attempt(fd):
             return
-        except BlockingIOError:
-            # The peer holds the lock. Beat the watchdog (a slow-but-progressing pull
-            # contending here must keep its heartbeat alive — DEC-PULL-CONTENTION-
-            # ANTISTALL-001 GAP #15) then re-check the deadline.
-            emit_progress_beat()
-            if clock() >= deadline:
-                raise PartitionLockTimeout(timeout_seconds) from None
-            sleep(poll_seconds)
+        # The peer holds the lock. Beat the watchdog (a slow-but-progressing pull
+        # contending here must keep its heartbeat alive — DEC-PULL-CONTENTION-
+        # ANTISTALL-001 GAP #15) then re-check the deadline.
+        emit_progress_beat()
+        if clock() >= deadline:
+            raise PartitionLockTimeout(timeout_seconds) from None
+        sleep(poll_seconds)
 
 
 #: Default cap on the number of interned per-partition :class:`threading.Lock`
@@ -401,5 +421,8 @@ def partition_write_lock(
     finally:
         # Closing the fd releases the advisory lock — an ``flock`` is tied to the
         # open file description, so the close both unlocks and frees the fd in one
-        # step, on every (success or error) exit.
-        os.close(fd)
+        # step, on every (success or error) exit. Routed through the Rust
+        # release twin when ``BRUTEX_LAKE_RUST_LOCKS`` is ON
+        # (DEC-LAKE-RUST-LOCKS-ATOMIC-001); OFF (the default) this IS
+        # ``os.close(fd)`` — the facade returns to the injected close verbatim.
+        rust_flock_release(fd, python_close=os.close)

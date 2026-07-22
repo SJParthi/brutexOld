@@ -94,6 +94,13 @@ def _m(**overrides: Any) -> ResultMetrics:
         "skewness": 0.0,
         "kurtosis": 0.0,
         "returns_std_dev": 0.0,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate consistent with the
+        # counts above (losing 20 / total 50); the Kelly pair defaults
+        # None (undefined) — override per test where the value matters.
+        "loss_rate": 0.4,
+        "kelly_fraction": None,
+        "log_growth_at_half_kelly": None,
     }
     base.update(overrides)
     return ResultMetrics(**base)
@@ -120,13 +127,18 @@ class TestComposeVerdict:
 
 
 class TestValidateCandidate:
+    # tf == 1minute FIXED POINT (DEC-FILL-EXEC-GRID-1M-001 design §6): the
+    # decision stream IS the execution stream — every call passes
+    # exec_bars_1m=bars (empty input mirrors with exec_bars_1m=[]).
     def test_empty_bars_raises(self) -> None:
         with pytest.raises(ValueError, match="bars must be non-empty"):
-            validate_candidate([], 0, [], direction=Side.BUY, tf_minutes=1)
+            validate_candidate([], 0, [], direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])
 
     def test_runs_all_three_and_composes(self) -> None:
         bars = _multiday(4, bars_per_day=5)
-        result = validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
+        result = validate_candidate(
+            bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         assert isinstance(result, CandidateVerdict)
         assert result.mask == 0
         assert isinstance(result.oos, OOSValidation)
@@ -170,6 +182,7 @@ class TestValidateCandidate:
             [(0, _m())],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             roll_schedule=covering,
             apply_1day_mask=True,
         )
@@ -192,5 +205,23 @@ class TestValidateCandidate:
 
         monkeypatch.setattr(validation_mod, "build_bar_bits", _spy_for("oos"))
         monkeypatch.setattr(robustness_mod, "build_bar_bits", _spy_for("cpcv"))
-        validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
+        validate_candidate(
+            bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         assert seen == {"oos": (None, False), "cpcv": (None, False)}
+
+    def test_no_fill_policy_seam_survives(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law, so
+        # the round-2 policy pass-through is DELETED — validate_candidate and
+        # both composed re-simulations (the OOS holdout + the CPCV
+        # return-series producer) carry NO policy/fill_mode seam; a knob
+        # sneaking back in fails this killed-token pin.
+        import inspect
+
+        from brutex.engine.robustness import combo_returns
+        from brutex.engine.validation import validate_out_of_sample
+
+        for fn in (validate_candidate, validate_out_of_sample, combo_returns):
+            params = inspect.signature(fn).parameters
+            assert "policy" not in params, fn.__name__
+            assert "fill_mode" not in params, fn.__name__

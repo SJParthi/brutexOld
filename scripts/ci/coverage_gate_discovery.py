@@ -42,7 +42,8 @@ Determinism: every discovered collection is sorted; nothing depends on
 
 Usage::
 
-    python scripts/ci/coverage_gate_discovery.py [--base <ref>] [--list]
+    python scripts/ci/coverage_gate_discovery.py [--base <ref>] [--list] \
+        [--shard K/N]
 
 Exit codes: 0 = all touched modules at 100% (or none touched, or only
 warn-skipped modifications); 1 = a newly added module has no test OR a
@@ -50,6 +51,15 @@ verified module is below 100%; 2 = script/setup error (e.g. git
 unavailable / no merge base). Fail-closed, mirroring the sibling CI gates.
 ``--list`` prints the discovered plan and exits 0 without running coverage
 (a fast dry-run for the workflow log + local debugging).
+``--shard K/N`` (1-based) runs only the K-th deterministic round-robin
+slice of the discovered ``entries`` — the CI matrix seam, so a
+wide-touch PR (a merge train touching 100+ modules) fits the per-job
+wall clock by fanning the SAME plan across N parallel jobs. Slicing is
+``entries[K-1::N]`` over the sorted plan, so the N shards PARTITION the
+full plan (disjoint, union == whole — pinned by tests). A NEW module
+with no verified test still FAILS on EVERY shard (the fail-closed law is
+deliberately never sliced away), and the warn-skip list prints on every
+shard (harmless repetition beats a silent gap).
 """
 
 from __future__ import annotations
@@ -108,6 +118,18 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # per-module gate in ci.yml (which runs exactly that 5-file suite at
         # --cov-fail-under=100) + the whole-package floor — DEC-WRITE-BATCH-COALESCE-001.
         "brutex/dashboard/pull_controller.py",
+        # The pull-state Rust facade (DEC-RUST-PULL-STATE-001, Waves 1A/1B/1C).
+        # Its 100% line+branch is a MULTI-FILE-suite property by construction:
+        # each wave's kernel-accessor section is exercised by that wave's OWN
+        # seam suite, stem-named for the CONSUMER module it gates
+        # (test_pull_outcome_rust_seam.py / test_pull_scope_rust_seam.py) —
+        # the stem-matched test_pull_state_rust*.py pair alone measures ~62%
+        # standalone, so the discovery gate's stem mapping is a structural
+        # mismatch that would block every facade-touching PR. The dedicated
+        # STATIC per-module gate in ci.yml runs exactly the curated static
+        # per-module suite enumerated there at --cov-fail-under=100 (+ the
+        # whole-package floor) — the pull_controller.py precedent.
+        "brutex/pull_state_rust.py",
         # The ~1050-statement ``/db`` lake-viewer module. Its 100% line+branch is
         # reached by the WHOLE db_view test FAMILY collectively — SEVENTEEN files
         # as of the DEC-DASHBOARD-READ-SCREEN-001 merge with main's
@@ -213,6 +235,37 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # honest instead of coupling every credentials.py-touching PR to the discovery
         # stem-map heuristic (DEC-AWS-ONLY-CREDS-001).
         "brutex/config/credentials.py",
+        # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): the NEW losing-streak
+        # resilience module (fold + sidecar + annotation). Its 100% line+branch
+        # is reached by a CURATED multi-file suite — test_resilience_streaks.py
+        # (the pure fold/streak primitives) + test_resilience_sidecar.py (the
+        # sidecar write/read + annotation branches) + the integration
+        # test_resilience_end_to_end.py; the stem file alone tops out at ~62.94%
+        # because the fold/annotation/backfill branches live in the differently
+        # stemmed sidecar + integration files. The discovery gate maps a module
+        # ONLY to its stem-matching tests (test_resilience_streaks*), so it sees
+        # just the one unit file — the SAME multi-file-suite structural mismatch
+        # as pull_controller.py / db_view.py / stage1a.py / sweep_driver.py.
+        # Duplicating the sidecar/integration coverage into the streaks stem file
+        # would be a Golden-Rule-#11 COMMON (no copy-paste) violation. Its real
+        # 100% gate is the DEDICATED static per-module gate in ci.yml (which runs
+        # exactly that three-file suite at --cov-fail-under=100) + the
+        # whole-package --cov=brutex.engine floor; excluding it here keeps the
+        # discovery complement honest instead of blocking on an unreachable
+        # single-file 100%.
+        "brutex/engine/resilience_streaks.py",
+        # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959): results_depth_pass.py
+        # gains an adoption-backfill + resilience-fence path whose new lines
+        # (~492-528, 760-773) are exercised by the differently stemmed
+        # test_resilience_sidecar.py + the integration test_resilience_end_to_end.py
+        # — test_engine_results_depth_pass.py alone tops out at ~94.88%. Same
+        # curated-multi-file-suite mismatch as sweep_driver.py above; its real
+        # 100% gate is the DEDICATED static per-module gate in ci.yml (which runs
+        # that three-file suite together at --cov-fail-under=100) + the
+        # whole-package floor. Excluding it here keeps the discovery complement
+        # honest instead of coupling every results_depth_pass-touching PR to the
+        # single-stem-file heuristic.
+        "brutex/engine/results_depth_pass.py",
     }
 )
 
@@ -524,6 +577,40 @@ class Plan:
         return not (self.entries or self.missing_added or self.skipped_modified)
 
 
+def parse_shard(spec: str) -> tuple[int, int]:
+    """Parse a ``K/N`` shard spec (1-based) into ``(k, n)``.
+
+    Parameters
+    ----------
+    spec:
+        The ``--shard`` argument, e.g. ``"3/8"``.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(k, n)`` with ``1 <= k <= n``.
+
+    Raises
+    ------
+    DiscoveryError
+        On any malformed or out-of-range spec — the CLI maps this to the
+        setup-error exit code 2 (never a silent full/empty run: a typo'd
+        matrix expression must fail LOUDLY, not quietly re-run the whole
+        plan on every leg or run nothing anywhere).
+    """
+    head, sep, tail = spec.partition("/")
+    if not sep:
+        raise DiscoveryError(f"--shard must be 'K/N' (1-based), got {spec!r}")
+    try:
+        k = int(head)
+        n = int(tail)
+    except ValueError as exc:
+        raise DiscoveryError(f"--shard must be 'K/N' with integer K and N, got {spec!r}") from exc
+    if n < 1 or k < 1 or k > n:
+        raise DiscoveryError(f"--shard out of range: {spec!r} (need 1 <= K <= N)")
+    return k, n
+
+
 def build_plan(base: str) -> Plan:
     """Discover the coverage plan for the diff against *base*.
 
@@ -828,13 +915,45 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the discovered plan and exit (no coverage run)",
     )
+    parser.add_argument(
+        "--shard",
+        default=None,
+        help=(
+            "run only the K-th of N deterministic round-robin slices of the"
+            " discovered plan, as 'K/N' (1-based) — the CI matrix seam; a"
+            " NEW module with no test still fails on EVERY shard"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    # Validate the shard spec BEFORE any git work: a junk matrix expression
+    # must exit 2 immediately, never after an expensive discovery pass.
+    shard: tuple[int, int] | None = None
+    if args.shard is not None:
+        try:
+            shard = parse_shard(args.shard)
+        except DiscoveryError as exc:
+            print(f"ERROR: {exc}")
+            return 2
 
     try:
         plan = build_plan(args.base)
     except DiscoveryError as exc:
         print(f"ERROR: {exc}")
         return 2
+
+    if shard is not None:
+        k, n = shard
+        sliced = plan.entries[k - 1 :: n]
+        print(
+            f"coverage-gate discovery: shard {k}/{n} — "
+            f"{len(sliced)} of {len(plan.entries)} discovered module(s) in this slice"
+        )
+        plan = Plan(
+            entries=sliced,
+            missing_added=plan.missing_added,
+            skipped_modified=plan.skipped_modified,
+        )
 
     if plan.is_empty():
         print("coverage-gate discovery: no touched brutex modules — nothing to check (PASS)")

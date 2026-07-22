@@ -40,7 +40,7 @@ from itertools import pairwise
 
 from brutex.calendars.nse import IST, is_forced_exit_bar
 from brutex.data.models import CandleBar
-from brutex.engine.trade_sim import FillPolicy, LevelFill, SameBarTie, simulate_trades
+from brutex.engine.trade_sim import simulate_trades
 from brutex.metrics.compute import compute_metrics
 from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.strategies.types import Side
@@ -110,20 +110,11 @@ def _scenarios(draw: st.DrawFn) -> tuple[list[CandleBar], list[bool], list[bool]
     return bars, entry, exit_
 
 
-_POLICIES = st.builds(
-    FillPolicy,
-    stop_loss=st.sampled_from(list(LevelFill)),
-    take_profit=st.sampled_from(list(LevelFill)),
-    same_bar=st.sampled_from(list(SameBarTie)),
-)
-
-
 @given(
     scenario=_scenarios(),
     direction=st.sampled_from([Side.BUY, Side.SELL]),
     sl=st.none() | _LEG_PAISA,
     tp=st.none() | _LEG_PAISA,
-    policy=_POLICIES,
 )
 @settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
 def test_deterministic(
@@ -131,7 +122,6 @@ def test_deterministic(
     direction: Side,
     sl: int | None,
     tp: int | None,
-    policy: FillPolicy,
 ) -> None:
     bars, entry, exit_ = scenario
     first = simulate_trades(
@@ -139,20 +129,22 @@ def test_deterministic(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
-        policy=policy,
     )
     second = simulate_trades(
         bars,
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
-        policy=policy,
     )
     assert first == second
 
@@ -162,7 +154,6 @@ def test_deterministic(
     direction=st.sampled_from([Side.BUY, Side.SELL]),
     sl=st.none() | _LEG_PAISA,
     tp=st.none() | _LEG_PAISA,
-    policy=_POLICIES,
     data=st.data(),
 )
 @settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
@@ -171,7 +162,6 @@ def test_no_lookahead_future_mutation(
     direction: Side,
     sl: int | None,
     tp: int | None,
-    policy: FillPolicy,
     data: st.DataObject,
 ) -> None:
     bars, entry, exit_ = scenario
@@ -193,10 +183,11 @@ def test_no_lookahead_future_mutation(
             entry,
             direction=direction,
             tf_minutes=1,
+            # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+            exec_bars_1m=feed,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
             exit_signals=exit_,
-            policy=policy,
         )
 
     base = [t for t in _run(bars) if t.exit_ts <= cutoff]
@@ -210,7 +201,6 @@ def test_no_lookahead_future_mutation(
     direction=st.sampled_from([Side.BUY, Side.SELL]),
     sl=st.none() | _LEG_PAISA,
     tp=st.none() | _LEG_PAISA,
-    policy=_POLICIES,
 )
 @settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
 def test_trades_never_overlap(
@@ -218,7 +208,6 @@ def test_trades_never_overlap(
     direction: Side,
     sl: int | None,
     tp: int | None,
-    policy: FillPolicy,
 ) -> None:
     bars, entry, exit_ = scenario
     trades = simulate_trades(
@@ -226,10 +215,11 @@ def test_trades_never_overlap(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
-        policy=policy,
     )
     # Single-position: each trade's entry is strictly after the prior exit, and
     # every trade already satisfies the ClosedTrade invariants by construction.
@@ -283,7 +273,6 @@ def _equity_curve(initial_paisa: int, pnls: Sequence[int]) -> tuple[EquityCurve,
     direction=st.sampled_from([Side.BUY, Side.SELL]),
     sl=st.none() | _LEG_PAISA,
     tp=st.none() | _LEG_PAISA,
-    policy=_POLICIES,
     initial=_INITIAL_BALANCE_PAISA,
 )
 @settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
@@ -292,7 +281,6 @@ def test_p03_per_trade_pnl_sums_to_balance_delta(
     direction: Side,
     sl: int | None,
     tp: int | None,
-    policy: FillPolicy,
     initial: int,
 ) -> None:
     """P-03: Σ per-trade paper_pnl == final_balance − initial_balance (exact paise)."""
@@ -302,10 +290,11 @@ def test_p03_per_trade_pnl_sums_to_balance_delta(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
-        policy=policy,
     )
     pnls = [t.pnl_paisa for t in trades]
     equity, curve = _equity_curve(initial, pnls)
@@ -331,7 +320,6 @@ def test_p03_per_trade_pnl_sums_to_balance_delta(
     direction=st.sampled_from([Side.BUY, Side.SELL]),
     sl=st.none() | _LEG_PAISA,
     tp=st.none() | _LEG_PAISA,
-    policy=_POLICIES,
     initial=_INITIAL_BALANCE_PAISA,
 )
 @settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
@@ -340,7 +328,6 @@ def test_p04_gross_minus_costs_equals_net(
     direction: Side,
     sl: int | None,
     tp: int | None,
-    policy: FillPolicy,
     initial: int,
 ) -> None:
     """P-04: gross_pnl − Σ costs == net_pnl (Track 1: costs=0, so gross == net)."""
@@ -350,10 +337,11 @@ def test_p04_gross_minus_costs_equals_net(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
-        policy=policy,
     )
     pnls = [t.pnl_paisa for t in trades]
     equity, _curve = _equity_curve(initial, pnls)
@@ -408,7 +396,6 @@ def _forced_scenarios(draw: st.DrawFn) -> tuple[list[CandleBar], list[bool], lis
     direction=st.sampled_from([Side.BUY, Side.SELL]),
     sl=st.none() | _LEG_PAISA,
     tp=st.none() | _LEG_PAISA,
-    policy=_POLICIES,
 )
 @settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
 def test_p09_forced_exit_no_trade_survives_1520(
@@ -416,7 +403,6 @@ def test_p09_forced_exit_no_trade_survives_1520(
     direction: Side,
     sl: int | None,
     tp: int | None,
-    policy: FillPolicy,
 ) -> None:
     """P-09: no trade survives 15:20 IST — entries open before, exits land by, the boundary."""
     bars, entry, exit_ = scenario
@@ -433,10 +419,11 @@ def test_p09_forced_exit_no_trade_survives_1520(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
-        policy=policy,
     )
     for trade in trades:
         # No position opens on or after the forced bar...
@@ -498,7 +485,6 @@ def _two_session_scenarios(draw: st.DrawFn) -> tuple[list[CandleBar], list[bool]
     direction=st.sampled_from([Side.BUY, Side.SELL]),
     sl=st.none() | _LEG_PAISA,
     tp=st.none() | _LEG_PAISA,
-    policy=_POLICIES,
 )
 @settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
 def test_entry_fill_never_crosses_a_session_boundary(
@@ -506,7 +492,6 @@ def test_entry_fill_never_crosses_a_session_boundary(
     direction: Side,
     sl: int | None,
     tp: int | None,
-    policy: FillPolicy,
 ) -> None:
     """R2-OC-2: every entry fill shares its arming bar's IST session date."""
     bars, entry, exit_ = scenario
@@ -515,10 +500,11 @@ def test_entry_fill_never_crosses_a_session_boundary(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
-        policy=policy,
     )
     ts_to_idx = {bar.timestamp: i for i, bar in enumerate(bars)}
     for trade in trades:
@@ -536,7 +522,6 @@ def test_entry_fill_never_crosses_a_session_boundary(
     direction=st.sampled_from([Side.BUY, Side.SELL]),
     sl=st.none() | _LEG_PAISA,
     tp=st.none() | _LEG_PAISA,
-    policy=_POLICIES,
 )
 @settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
 def test_session_boundary_close_is_truncation_equivalent(
@@ -544,7 +529,6 @@ def test_session_boundary_close_is_truncation_equivalent(
     direction: Side,
     sl: int | None,
     tp: int | None,
-    policy: FillPolicy,
 ) -> None:
     """DEC-TRADESIM-OPEN-SESSION-GUARD-001 — suffix independence by construction.
 
@@ -567,10 +551,11 @@ def test_session_boundary_close_is_truncation_equivalent(
             entries,
             direction=direction,
             tf_minutes=1,
+            # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+            exec_bars_1m=feed,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
             exit_signals=exits,
-            policy=policy,
         )
 
     full = _run(bars, entry, exit_)

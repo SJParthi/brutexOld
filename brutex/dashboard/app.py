@@ -46,12 +46,25 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
+from typing import TYPE_CHECKING, Any, Final, TypeVar
+from urllib.parse import quote, urlsplit
+
+if TYPE_CHECKING:
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
 
 import structlog
 
+from brutex.adapters.dhan.constants import (
+    DHAN_FLOOR_MARGIN_DAYS,
+    DHAN_SPOT_INDEX_SYMBOLS,
+    dhan_history_floor,
+    dhan_rolling_options_floor,
+)
+from brutex.adapters.dhan.live_controller import build_dhan_live_controller
+from brutex.adapters.dhan.rolling_option_constants import (
+    DHAN_ROLLING_HISTORY_FLOOR_REQUESTED,
+)
+from brutex.adapters.dhan.rolling_option_plan import DHAN_ROLLING_PLAN_KEY_COUNT
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
 from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
 from brutex.adapters.groww.symbol_form_preference import PersistentSymbolFormPreference
@@ -62,8 +75,10 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.calendars.auto_pull_gate import compose_market_closed
 from brutex.calendars.market_hours import resolve_market_closed
+from brutex.calendars.nse import IST as _IST_TZ
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
+from brutex.config.hardware_envelope import memory_budget_bytes
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard import oneclick_artifacts, oneclick_view
 from brutex.dashboard.auto_pull_scheduler import AutoLaunchResult, AutoPullScheduler
@@ -89,6 +104,7 @@ from brutex.dashboard.composite_pull import (
     _underlying_kind_map,  # pyright: ignore[reportPrivateUsage]
     pull_historical_for_underlyings,
 )
+from brutex.dashboard.coverage_missing import build_missing_sessions_payload
 from brutex.dashboard.coverage_view import (
     build_coverage_payload,
     build_option_coverage_payload,
@@ -97,6 +113,7 @@ from brutex.dashboard.coverage_view import (
 from brutex.dashboard.db_view import (
     REGISTRY_CONTRACT_COLUMNS,
     REGISTRY_EXPIRY_COLUMNS,
+    SPOT_VERDICT_INTERVALS,
     fno_candle_lake_schema,
     list_candle_datasets,
     list_columns,
@@ -114,10 +131,23 @@ from brutex.dashboard.db_view import (
     sample_rows,
     spot_window_rollup,
     summarize_option_datasets,
+    summarize_spot_datasets,
     summarize_spot_verdict_datasets,
     table_summary,
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
+from brutex.dashboard.dhan_pull import (
+    DhanPullReport,
+    DhanPullRequest,
+    DhanSpotPullFn,
+    default_dhan_spot_pull,
+    dhan_credentials_error,
+)
+from brutex.dashboard.dhan_rolling_pull import (
+    DhanRollingOptionPullFn,
+    DhanRollingOptionPullReport,
+    default_dhan_rolling_option_pull,
+)
 from brutex.dashboard.discovery_warm import (
     DB_DATASETS_KEY,
     FNO_CASCADE_KEY,
@@ -183,6 +213,7 @@ from brutex.dashboard.movers_snapshot import (
     asof_through_label,
     build_snapshot_payload,
     compute_spot_candidates,
+    interval_minutes,
     is_intraday_interval,
     parse_snapshot_date,
     pending_asset_payload,
@@ -263,6 +294,7 @@ from brutex.dashboard.pull_scope import (
     spot_only_metadata_report,
 )
 from brutex.dashboard.rate_bridge_cache import (
+    BRIDGE_SOURCE_UNVERIFIED,
     BRIDGE_SOURCE_UNWIRED,
     BridgeReadResult,
     RateBridgeCache,
@@ -276,7 +308,7 @@ from brutex.dashboard.spot_cascade import (
     build_spot_cascade,
     symbol_to_json,
 )
-from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache, SummaryColdWaitTimeout
 from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 
 if TYPE_CHECKING:  # runtime import is LAZY inside build_app — anyio is [ui]-only
@@ -288,19 +320,38 @@ from brutex.dashboard.sweep_results_view import (
     MAX_TOP_N as SWEEP_LEADERBOARD_MAX_TOP_N,
 )
 from brutex.dashboard.sweep_results_view import (
+    REGIME_ROBUST_PRESET,
     SWEEPS_DIRNAME,
+    RollupServe,
     SweepScan,
+    UnknownGateCoordinateError,
     build_sweep_leaderboard,
     load_cascade_join_file,
     load_sweep_scan,
+    load_sweep_scan_via_rollup,
+    parse_filter_float,
+    parse_filter_int,
     resolve_preset_param,
+    resolve_rank_by_param,
     store_error_payload,
 )
 from brutex.dashboard.sweep_runner import (
     default_results_root,
+    oneclick_preflight_for_plan,
+    resolve_oneclick_sweep_plan,
     resolve_sweep_request,
     run_sweep_from_request,
+    sweep_finish_note,
     sweep_progress_file,
+)
+from brutex.dashboard.sweep_temporal_view import (
+    TEMPORAL_HORIZONS,
+    build_sidecar_index,
+    is_valid_run_id,
+    sidecar_horizon_payload,
+    stamp_stat_token,
+    stored_horizon_payload,
+    sweep_runs_token,
 )
 from brutex.dashboard.universe_cache import (
     STORE_FAULT_TYPES,
@@ -316,6 +367,7 @@ from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
 from brutex.data.errors import CatalogError
+from brutex.data.feed_root import feed_lake_root
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.greeks_backfill import (
     dry_run_backfill_report,
@@ -343,10 +395,12 @@ from brutex.data.mapping_integrity import (
 )
 from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
+from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
+from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.engine.results_store import ResultsStoreError
 from brutex.models import Exchange, Instrument, InstrumentType
@@ -860,7 +914,9 @@ class DashboardState:
     ) -> dict[str, Any]:
         """Return the current live sweep-progress snapshot for the dashboard route.
 
-        Resolution order (crash-tolerant — a dashboard poll NEVER raises):
+        Resolution order (crash-tolerant on data faults — a dashboard poll
+        never raises on the DEFAULT arm; the injected NONBLOCK-CACHE file arm
+        can raise the fail-closed pull-state kernel error, see *file_read*):
 
         1. :attr:`sweep_progress_path` if configured + readable — the
            cross-process file bridge a CLI ``brutex sweep-all`` publishes to (the
@@ -870,7 +926,14 @@ class DashboardState:
 
         A missing / malformed progress file falls through to (2)/(3) — never an
         error (delegated to :func:`brutex.engine.sweep_supervisor.read_progress`,
-        which returns the idle view on any read/parse failure).
+        which returns the idle view on any read/parse failure). A file whose
+        ``running=True`` claim is STALE — its ``wall_time`` stamp older than
+        :data:`~brutex.engine.sweep_supervisor.SWEEP_PROGRESS_MAX_AGE_S` (or
+        missing) — is DEAD EVIDENCE ≡ absent (the #1593 rate-bridge posture):
+        a SIGKILLed/power-lost ``brutex sweep-all`` can never leave a phantom
+        "running" view (+ Stop button) on the dashboard forever
+        (DEC-JOB-COOPERATIVE-CANCEL-001 review fold). Terminal files
+        (done/cancelled/error) never decay — a finished sweep's record stands.
 
         *file_read* is the DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 seam: the
         route injects :meth:`SweepProgressCache.read
@@ -879,10 +942,21 @@ class DashboardState:
         lake volume serves the last-known payload labelled ``unverified``
         instead of blocking) — it returns the file payload to serve, or
         ``None`` to fall through to (2)/(3), exactly like the direct
-        ``exists()`` check. The default ``None`` keeps the direct,
-        byte-identical legacy read (the in-process test/consumer contract).
+        ``exists()`` check (the staleness law above applies to BOTH arms).
+        Post-flip that read's serve-arm DECISION is the
+        fail-closed Rust kernel (DEC-RUST-PULL-STATE-001), so a wheel-absent/
+        stale/poisoned kernel raises its typed error
+        (:class:`brutex.pull_state_rust.PullStateKernelError` /
+        :class:`~brutex.pull_state_rust.PullStateFlagRemovedError`) out through
+        this method — the caller does NOT catch it. The default ``None`` keeps
+        the direct, byte-identical legacy read (the in-process test/consumer
+        contract), which never raises.
         """
-        from brutex.engine.sweep_supervisor import idle_progress, read_progress
+        from brutex.engine.sweep_supervisor import (
+            idle_progress,
+            progress_bridge_stale,
+            read_progress,
+        )
 
         with self._lock:
             path = self.sweep_progress_path
@@ -890,10 +964,12 @@ class DashboardState:
         if path is not None:
             if file_read is not None:
                 payload = file_read(path)
-                if payload is not None:
+                if payload is not None and not progress_bridge_stale(payload):
                     return payload
             elif path.exists():
-                return read_progress(path)
+                parsed = read_progress(path)
+                if not progress_bridge_stale(parsed):
+                    return parsed
         if in_process is not None:
             return dict(in_process)
         return idle_progress()
@@ -1086,6 +1162,74 @@ def _registry_unreadable_payload(columns: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
+_T = TypeVar("_T")
+
+
+def _registry_key_component(lake_root: Path) -> str:
+    """The ``registry.duckdb`` content token folded into every registry-derived cache key.
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 — the options expiry-calendar +
+    strike-chain caches (and the options CANDIDATE key that bakes both
+    verdicts into its rows) were keyed on the write generation ONLY, which a
+    CROSS-PROCESS metadata pull (nightly headless / second dashboard / CLI)
+    never bumps: the registry moved, the caches did not. Folding this token
+    into the KEY (the ``_nav_latency_key`` ``coverage_revision`` precedent,
+    DEC-STALENESS-CACHE-TRUTH-001) makes a committed registry write yield a
+    fresh key on the next poll — never a stale expiry tier / ATM step.
+
+    A probe OUTAGE (:func:`registry_revision` → ``None`` — a non-missing-file
+    :class:`OSError`, already WARNed by the probe) folds the stable
+    ``"unknown"`` sentinel instead: the key DEGRADES to the pre-fix
+    generation-only staleness envelope for the outage's duration — never
+    WORSE than the behaviour this fix replaces, and self-healing the moment
+    the probe recovers (the recovered token differs from ``"unknown"``, so
+    the next poll re-keys). Distinct by construction from every real token
+    (the composite ``"<main token>|<wal token>"`` — the main file plus its
+    DuckDB ``.wal`` sibling since the hostile-review m1 widening, which
+    catches a commit landing in the WAL before any checkpoint moves the main
+    file's stat; every real composite carries a ``|``) and from the
+    absent-registry ``"absent|absent"`` composite.
+
+    The probe is the ONE consolidated :func:`registry_revision` (the
+    DEC-O1-GUARANTEE-HARDEN-001 H1 token — the two in-flight twins collapsed
+    at the merge-reconcile, Golden Rule #11 COMMON); the
+    ``lake_root / "registry.duckdb"`` path expression is this file's existing
+    metadata-pull idiom (the sibling-of-the-master law
+    ``db_view.registry_path_for`` encodes — integration-pinned equal to it).
+    """
+    token = registry_revision(lake_root / "registry.duckdb")
+    return "unknown" if token is None else token
+
+
+class _RegistryKeyedCache:
+    """Fold a registry content token into every key of a wrapped cache.
+
+    The :class:`~brutex.dashboard.registry_strikes.StrikeChainCache`-shaped
+    adapter (structural — only ``get_or_compute``) the options strike-chain
+    loader rides (DEC-MEMORY-FOOTPRINT-HARDENING-001): the per-chain keys are
+    built INSIDE :func:`~brutex.dashboard.registry_strikes.make_registry_chain_loader`
+    (``registry_chain_key``), so the registry content token is folded here at
+    the app.py key-build seam — keeping that loader's public signature
+    byte-stable — as ``"<key>|r=<token>"`` (the ``r=`` marker plus the token
+    grammar — components are ``<mtime_ns>:<size>`` / ``absent`` / the
+    ``unknown`` outage sentinel, none of which can contain ``r=`` — keep the
+    fold collision-free across tokens for any fixed key). Every other key
+    component + the generation stamp pass through untouched.
+    """
+
+    __slots__ = ("_inner", "_token")
+
+    def __init__(self, inner: MoversSnapshotCache, token: str) -> None:
+        self._inner = inner
+        self._token = token
+
+    def get_or_compute(self, key: str, *, generation: int, compute: Callable[[], _T]) -> _T:
+        """Delegate with the registry token folded into *key* (stamp untouched)."""
+        return self._inner.get_or_compute(
+            f"{key}|r={self._token}", generation=generation, compute=compute
+        )
+
+
 # ── Host / cross-origin hardening (R2-DS-F1) ────────────────────────────────
 # The dashboard carries no auth/CSRF tokens, so a browser on the operator's
 # machine can be induced to fire state-changing POSTs at this localhost
@@ -1114,6 +1258,31 @@ _SERVER_ERROR_FLOOR: Final[int] = 500
 
 #: 403 detail returned for a browser-initiated cross-site state change.
 _CROSS_ORIGIN_DETAIL: Final = "cross-origin request blocked"
+
+#: Cap for a reflected user token in a 400 detail — bounds an 8000-char hostile
+#: ``?gate=`` token to a sane length (info-leak / log-spam guard).
+_GATE_DETAIL_MAX_LEN: Final[int] = 64
+
+
+def _sanitize_gate_token(token: str) -> str:
+    """Bound + strip a user ``?gate=`` token for safe reflection in a 400 detail.
+
+    Non-printable characters are dropped per :meth:`str.isprintable` — every
+    character in the Unicode "Other" (Cc/Cf/Cs/Co/Cn) or "Separator"
+    (Zs/Zl/Zp) categories except the ASCII space, a BROADER drop than the
+    bare ASCII control set (``ord < 0x20`` plus DEL) — so a token cannot
+    smuggle newlines/escape sequences into a log line or error body, and the
+    result is truncated to :data:`_GATE_DETAIL_MAX_LEN` (with a trailing
+    ``…`` marker when it overflows) so an 8000-char hostile token cannot
+    spam the wire. The full raw token is never reflected — only this bounded, printable
+    form (the ``store_error_payload`` sibling suppresses ``str(exc)`` entirely;
+    the gate 400 must still name the offending coordinate, so it reflects this
+    sanitised slice rather than nothing).
+    """
+    cleaned = "".join(ch for ch in token if ch.isprintable())
+    if len(cleaned) > _GATE_DETAIL_MAX_LEN:
+        return cleaned[:_GATE_DETAIL_MAX_LEN] + "…"
+    return cleaned
 
 
 def _trusted_host_patterns(allowed_hosts: Sequence[str] | None) -> list[str]:
@@ -1218,6 +1387,42 @@ def _cross_origin_reason(
     return _CROSS_ORIGIN_DETAIL
 
 
+# ── Byte watermarks for the two heaviest shared-cache instances ─────────────
+# DEC-MEMORY-FOOTPRINT-HARDENING-001: the COMMON `MoversSnapshotCache` bounds
+# ENTRIES, not bytes — measured 84.9 MB at capacity 256 with 750-row dict
+# payloads (339.7 KiB/entry), and `_sweep_leaderboard_cache` retains whole
+# `SweepScan`s (~1.1 KB/ResultRow — a 100k-row store parses to ~105 MB
+# resident, several revisions can co-reside until LRU aging). The two
+# heavy-payload instances therefore opt into the byte watermark, each budget
+# derived from the COMMON RAM envelope (`memory_budget_bytes`,
+# DEC-RAM-BUDGETS-001 — the fraction reproduces a conservative share of the
+# CLAUDE.md §8 48 GiB reference box; an undetected-RAM sandbox gets the floor
+# EXACTLY; no new env var — the derivation is not operator-tunable here).
+# Every OTHER instance keeps `max_bytes=None` → byte-identical behaviour.
+#: /results sweep-leaderboard cache: 1/16 of total RAM (3 GiB on the §8 box);
+#: floor 1 GiB — the latency audit's derived pre-fix worst-case retention, so
+#: the unknown-RAM fallback never bounds TIGHTER than the measured status quo.
+_SWEEP_LEADERBOARD_CACHE_FRACTION: Final[float] = 1.0 / 16.0
+_SWEEP_LEADERBOARD_CACHE_FLOOR_BYTES: Final[int] = 1 << 30  # 1 GiB
+#: One-click artifact cache: 1/32 of total RAM (1.5 GiB on the §8 box); floor
+#: 512 MiB — its payloads (manifest/top100/verify + the chain verdict) are
+#: smaller but the instance is shared across five expensive key families.
+_ONECLICK_CACHE_FRACTION: Final[float] = 1.0 / 32.0
+_ONECLICK_CACHE_FLOOR_BYTES: Final[int] = 512 * 1024 * 1024  # 512 MiB
+#: One-click EVENTS-page cache capacity (fix 4a,
+#: DEC-MEMORY-FOOTPRINT-HARDENING-001): the events route mints one key per
+#: json([rid, offset, limit, kind, q, token, fx]) — ALL client-typed — so on
+#: the pre-partition SHARED instance 256 distinct hostile/varied event-page
+#: polls LRU-evicted the EXPENSIVE families (runs/manifest/top100/verify +
+#: the `oc_chain|` verdict, which only re-runs on an operator click; the
+#: OutageGate got its own 512 cap for exactly this hazard — the payload
+#: cache was never partitioned). The events family now rides its OWN
+#: capacity-capped instance: churn stays bounded to the cheap O(page) tail
+#: reads and can never evict an expensive payload. 128 entries × the ≤1 MiB
+#: read window bounds the family's resident bytes without a watermark.
+_ONECLICK_EVENTS_CACHE_CAPACITY: Final[int] = 128
+
+
 def build_app(
     state: DashboardState,
     *,
@@ -1236,6 +1441,8 @@ def build_app(
     pull_intent_store: PullIntentStore | None = None,
     oneclick_trades_reader: oneclick_artifacts.TradesReader | None = None,
     session_rate: SessionRateController | None = None,
+    dhan_spot_pull: DhanSpotPullFn | None = None,
+    dhan_rolling_option_pull: DhanRollingOptionPullFn | None = None,
     census_spawn: Callable[[Callable[[], None]], None] | None = None,
     census_clock: Callable[[], float] | None = None,
     pull_outcome_probe: Callable[[], LastPullOutcome] | None = None,
@@ -1724,6 +1931,15 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _run_lake = lake_offload if lake_offload is not None else _LakeOffload()
 
+    # Dedup baseline for the dead-bridge WARN (GET /api/v1/pull/rate). A dead CLI
+    # bridge (a stuck +inf/NaN/future wall_time, OR a live publisher with a badly-future
+    # clock rewriting a fresh future stamp each second) is PERSISTENT and the widget polls
+    # site-wide every ~3 s, so the WARN is emitted ONCE per persistent dead-CLASS episode
+    # and re-armed to None when the bridge is healthy/absent (DEC-PULL-RATE-BRIDGE-
+    # NONBLOCK-CACHE-001; see the route body). Touched only on the event loop, so no
+    # lock. App-instance state (no module-global mutable state — CLAUDE.md §4).
+    _last_warned_dead_class: str | None = None
+
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
@@ -1934,9 +2150,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # index is an O(datasets) build over a lake dir-walk; memoised here behind the SAME
     # write-generation as the caches above so a pull rebuilds it but every cascade click
     # (underlyings / expiries / contracts) is an O(1) handoff — tiny lazy payloads, never
-    # the flat thousand-row dropdown. Now the COMMON `MoversSnapshotCache` (keyed
+    # the flat thousand-row dropdown. The COMMON `MoversSnapshotCache` (keyed
     # FNO_CASCADE_KEY) so it shares the pull-time floor + the discovery warm; the
-    # bespoke single-slot `FnoCascadeCache` class is superseded at this wiring site.
+    # bespoke single-slot `FnoCascadeCache` class this superseded was production-dead
+    # and DELETED (fix 6a, DEC-MEMORY-FOOTPRINT-HARDENING-001).
     # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the THREE discovery-walk memos
     # additionally opt into stale-while-revalidate — PAST the adaptive floor a
     # mid-pull poll serves the last-known index IMMEDIATELY and at most ONE
@@ -2022,7 +2239,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # read — re-run on EVERY options poll. The calendar is invariant between metadata
     # pulls, so it is memoised behind the SAME write generation as the caches above
     # (a metadata pull bumps it → re-read; otherwise an options poll is an O(1) handoff),
-    # keyed per exchange. REUSES the COMMON `MoversSnapshotCache` (one calendar key).
+    # keyed per exchange PLUS the registry.duckdb content token
+    # (`_registry_key_component` — DEC-MEMORY-FOOTPRINT-HARDENING-001: a
+    # CROSS-PROCESS metadata pull writes the registry with NO generation bump,
+    # so the generation-only key served the pre-pull calendar until an
+    # unrelated ledger write). REUSES the COMMON `MoversSnapshotCache`.
     _options_calendar_cache = MoversSnapshotCache()
     # The Options-tab AUTHORITATIVE strike-chain cache (DEC-MONEYNESS-REGISTRY-STEP-001):
     # the ATM±N strike-grid step derives from the FULL vendor strike chain of each
@@ -2034,7 +2255,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # invariant between metadata pulls, so it is memoised behind the SAME write
     # generation as the calendar cache above (a metadata pull bumps it → re-read;
     # otherwise an options poll is an O(1) handoff), keyed per (exchange, underlying,
-    # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
+    # expiry) — `registry_chain_key` — PLUS the registry.duckdb content token folded
+    # by the `_RegistryKeyedCache` adapter at both key-build seams (the calendar
+    # cache's cross-process staleness class, DEC-MEMORY-FOOTPRINT-HARDENING-001).
+    # REUSES the COMMON `MoversSnapshotCache` (LRU: a
     # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
     _options_strikes_cache = MoversSnapshotCache()
     # The Futures/Options underlying-CLASS kind map cache (DEC-MOVERS-UNDERLYING-CLASS-001):
@@ -2140,6 +2364,18 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # same envelope the discovery memos above accept). REUSES the COMMON
     # generation-stamped LRU `MoversSnapshotCache` (no new class).
     _coverage_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    # The /coverage/missing-sessions drill cache (DEC-COVERAGE-MISSING-SESSIONS-001): the
+    # session_dates-enriched spot scan is a SEPARATE execution of the same scan SHAPE
+    # /coverage runs (the array_agg(DISTINCT ist_date) rides one pass WITHIN the drill's
+    # own scan) — HONEST: it is NOT shared with the /coverage SPOT `_summary_cache` entry
+    # (whose rows carry no session dates), so an operator using both surfaces pays TWO
+    # full O(bars) spot scans per write-generation, one each. Memoised here per
+    # write-generation — HONEST scope (fix round 4, Golden Rule #10): only the O(bars)
+    # SCAN rows are memoised; a repeat drill re-uses them in O(1) but re-pays the
+    # O(datasets × sessions) set-difference + payload build per request (the filters +
+    # range override vary per request, so the built payload is deliberately not cached).
+    # A pull re-derives the scan; the resident cost is the per-dataset distinct-date set.
+    _missing_sessions_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache(
         pull_active_probe=_pull_live, adaptive_floor=True
     )
@@ -2182,9 +2418,29 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # serve-last-known prefix (DEC-CACHE-SERVE-LAST-KNOWN-001 — see
     # `api_sweep_leaderboard`). REUSES the COMMON LRU `MoversSnapshotCache`
     # (no new class — CLAUDE.md §11 COMMON); the LRU ages out old keys.
+    # The RAM-derived byte watermark bounds the resident SweepScan payload
+    # bytes (DEC-MEMORY-FOOTPRINT-HARDENING-001 — the constants + rationale
+    # live at the module-level block above build_app).
     _sweep_leaderboard_cache = MoversSnapshotCache(
-        pull_active_probe=_pull_live, adaptive_floor=True
+        pull_active_probe=_pull_live,
+        adaptive_floor=True,
+        max_bytes=memory_budget_bytes(
+            fraction=_SWEEP_LEADERBOARD_CACHE_FRACTION,
+            floor_bytes=_SWEEP_LEADERBOARD_CACHE_FLOOR_BYTES,
+        ),
     )
+    # The rollup serve-path log gates (DEC-RESULTS-TOPK-ROLLUP-001, MINOR-2):
+    # `sweep_results.rollup_fallback` / `rollup_stale_served` are deduped per
+    # (revision, reason) through ONE LRU-bounded gate (the #1711 OutageGate
+    # precedent — a poll loop against one bad state logs ONCE, never per
+    # poll), and the Hook-C serve-side rebuild fires at most once per
+    # revision through its own gate. LogGate lives in the COMMON stdlib-only
+    # leaf (the PR #1436 CodeQL bidirectional-cycle fix) — imported from
+    # there, never from the engine rollup module.
+    from brutex.observability.log_gate import LogGate as _RollupLogGate
+
+    _rollup_log_gate = _RollupLogGate()
+    _rollup_rebuild_gate = _RollupLogGate()
     # The one-click artifact read memo (DEC-OPERATOR-PAGE-REAL-001): every
     # `/api/v1/oneclick/*` read (runs listing, manifest, top100, events tail
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
@@ -2204,8 +2460,22 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # non-oneclick keystone sites below).
     # HONEST envelope (Golden Rule #10): the FIRST read per revision pays the
     # O(artifact) parse; the cached hit is O(1) vs run count / artifact size.
-    # REUSES the COMMON `MoversSnapshotCache`.
-    _oneclick_cache = MoversSnapshotCache()
+    # REUSES the COMMON `MoversSnapshotCache`, with the RAM-derived byte
+    # watermark bounding the six shared key families' resident payload bytes
+    # (DEC-MEMORY-FOOTPRINT-HARDENING-001 — constants above build_app).
+    _oneclick_cache = MoversSnapshotCache(
+        max_bytes=memory_budget_bytes(
+            fraction=_ONECLICK_CACHE_FRACTION,
+            floor_bytes=_ONECLICK_CACHE_FLOOR_BYTES,
+        )
+    )
+    # The events-page family's OWN partition (fix 4a,
+    # DEC-MEMORY-FOOTPRINT-HARDENING-001): its keys fold CLIENT-TYPED page
+    # params, so keeping it on the shared instance let a varied/hostile
+    # events poller LRU-evict the expensive runs/manifest/top100/verify/chain
+    # payloads. Same key strings, same chokepoint, same OutageGate — only the
+    # PayloadCache instance differs (see _ONECLICK_EVENTS_CACHE_CAPACITY).
+    _oneclick_events_cache = MoversSnapshotCache(capacity=_ONECLICK_EVENTS_CACHE_CAPACITY)
     _oneclick_outages = oneclick_artifacts.OutageGate()
 
     def _probe_outage_payload(
@@ -2261,11 +2531,42 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             status_code=503,
         )
 
+    def _summary_warming_response(kind: str) -> JSONResponse:
+        """Honest 503 for a cold summary whose FIRST scan blew the wait budget.
+
+        DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-1), the
+        :func:`_store_outage_response` structural twin: a truly COLD kind has
+        NOTHING last-known, so a labeled empty 200 would fabricate an empty
+        lake (the ``_store_outage_response`` Golden-Rule-#1 argument,
+        verbatim) — the honest degrade is a machine-readable "first scan
+        still running — retry shortly" at 503. Reachable ONLY cold + past the
+        ``BRUTEX_SUMMARY_COLD_WAIT_S`` budget (previously an indefinite
+        threadpool-worker hang). The body is byte-STABLE across polls
+        (constant strings — the skip-render poller discipline); the pollers
+        already treat a non-ok tick as a counted failure + backoff
+        (DEC-PULL-UI-STALENESS-001), so no JS edits ride this.
+        """
+        return JSONResponse(
+            {
+                "available": False,
+                "error": "first lake summary scan still running — retry shortly",
+                "error_type": "summary_scan_pending",
+                "kind": kind,
+            },
+            status_code=503,
+        )
+
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
     # (DEC-RATE-METER-LIFECYCLE-001 test seam); ``None`` builds the production holder.
     _session_rate = session_rate if session_rate is not None else SessionRateController()
+    # A SEPARATE rate controller for the standalone Dhan SPOT feed track
+    # (DEC-DHAN-PULL-SURFACE-001): its own 5 r/s + 100k/day ceiling
+    # (``build_dhan_live_controller``), so a Dhan pull's learned rate never mixes
+    # with the Groww ``_session_rate`` and a Dhan+Groww pull can pace independently
+    # (they write to DISJOINT lake trees — the top root vs ``feeds/dhan/``).
+    _dhan_session_rate = SessionRateController(factory=build_dhan_live_controller)
     # The Greeks-enrichment consecutive-failure health counter
     # (DEC-GREEKS-ENRICH-OBSERVE-001): the fully-guarded post-pull Greeks pass can
     # NEVER fail a pull, so a persistently broken enrichment used to be one
@@ -2359,8 +2660,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         {``live``, ``cached``, ``unverified``, ``unwired``} + ``bridge_probe_age_s`` —
         stamped by the ONE :func:`~brutex.dashboard.rate_bridge_cache.stamp_bridge_freshness`.
         """
-        from brutex.dashboard.pull_rate_view import build_pull_rate_view_merged
+        from brutex.dashboard.pull_rate_view import (
+            bridge_age_seconds,
+            build_pull_rate_view_merged,
+            dead_bridge_class,
+            should_warn_dead_bridge,
+        )
 
+        nonlocal _last_warned_dead_class
         now_monotonic = time.monotonic()
         with state._lock:  # pyright: ignore[reportPrivateUsage]
             panel = state.rate_limit
@@ -2400,10 +2707,60 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         if bridge_lake_root is None:
             bridge_result = BridgeReadResult(None, BRIDGE_SOURCE_UNWIRED, None)
         else:
+            # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — the
+            # deadline-guarded RateBridgeCache memo (#1522) caps the worker hold per
+            # outage, and this liveness poll must stay startable through a lake
+            # outage; sanctioned in the threadpool pin allowlist (#1757).
             bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
         snapshot = bridge_result.snapshot
         if snapshot is not None:
-            bridge_age = max(0.0, time.time() - snapshot.wall_time)
+            # DEC-RATE-METER-LIFECYCLE-001 audit-C3, hardened: a non-finite or
+            # materially-FUTURE ``wall_time`` is DEAD EVIDENCE. The old
+            # ``max(0.0, now - wall_time)`` CLAMPED such a stamp to a maximally-fresh
+            # ``0.0`` FOREVER (it can never grow past ``BRIDGE_MAX_AGE_S``), so the
+            # ``build_pull_rate_view_merged`` ``isfinite`` dead-evidence guard never
+            # acted and a SIGKILLed CLI's stuck ``pull_active=True`` +inf/NaN/future
+            # bridge fabricated a permanent "flowing". ``bridge_age_seconds`` yields an
+            # ``inf`` age (⇒ the merged guard treats the bridge as ABSENT ⇒ idle) for
+            # that class while tolerating a few seconds of ordinary cross-host clock
+            # skew; a fresh (past) ``wall_time`` is byte-identical to the old clamp.
+            now_wall = time.time()
+            bridge_age, bridge_dead_evidence = bridge_age_seconds(now_wall, snapshot.wall_time)
+            if bridge_dead_evidence:
+                # Label the served provenance ``unverified`` (never a trusted "live")
+                # so a corrupt/skewed publisher is visible, not silent. The WARN is
+                # DEDUPED per persistent dead-CLASS episode: the widget polls this route
+                # site-wide every ~3 s and a dead bridge (a SIGKILLed CLI's stuck
+                # +inf/NaN/future stamp, OR a live publisher whose badly-future clock
+                # rewrites a DISTINCT future stamp each second) is a PERSISTENT condition,
+                # so an unthrottled WARN would fire ~20/min forever. Keying the dedup on
+                # the dead CLASS (via ``dead_bridge_class``) — not the exact stamp —
+                # collapses that live-rewriting-future subcase to ONE warn too;
+                # ``should_warn_dead_bridge`` fires once per persistent class, re-warns on
+                # a class transition, and the healthy/absent arms below re-arm the dedup so
+                # a NEW dead episode after a recovery re-warns (CLAUDE.md §11 deduped-per-key
+                # WARN convention). ``_last_warned_dead_class`` is touched only on the event
+                # loop between awaits, so it needs no lock.
+                current_dead_class = dead_bridge_class(now_wall, snapshot.wall_time)
+                bridge_result = BridgeReadResult(
+                    snapshot, BRIDGE_SOURCE_UNVERIFIED, bridge_result.probe_age_s
+                )
+                if should_warn_dead_bridge(current_dead_class, _last_warned_dead_class):
+                    _LOG.warning(
+                        "pull_rate.bridge_dead_wall_time",
+                        wall_time=snapshot.wall_time,
+                        dead_class=current_dead_class,
+                        detail=(
+                            "CLI rate-bridge wall_time is non-finite or materially in the "
+                            "future — DEAD EVIDENCE, treated as absent (idle), never a "
+                            "fabricated 'flowing'"
+                        ),
+                    )
+                _last_warned_dead_class = current_dead_class
+            else:
+                # Bridge healthy again → re-arm the dead-bridge WARN dedup so a NEW
+                # dead episode after this recovery re-warns exactly once.
+                _last_warned_dead_class = None
             bridge_effective_rps = snapshot.effective_rps
             bridge_current_rps = snapshot.current_rps
             bridge_recent_minute = snapshot.recent_minute
@@ -2412,6 +2769,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             bridge_recent_600s = snapshot.recent_600s
             bridge_recent_3600s = snapshot.recent_3600s
             bridge_pull_active = snapshot.pull_active
+        else:
+            # No bridge snapshot (unwired / missing / unreadable) → re-arm the
+            # dead-bridge WARN dedup: a later dead episode is a fresh one.
+            _last_warned_dead_class = None
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,
@@ -2483,7 +2844,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         :class:`~brutex.engine.sweep_progress.SweepProgress` (wired into
         :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`). Serves the
         freshest of the cross-process file bridge, the in-process push, or an idle
-        snapshot, and never raises (see :meth:`DashboardState.sweep_progress_view`).
+        snapshot; a missing / malformed file degrades to the idle view, and the
+        only raise is the injected cache's fail-closed pull-state kernel error on
+        a wheel-absent/stale/poisoned kernel (see
+        :meth:`DashboardState.sweep_progress_view`, DEC-RUST-PULL-STATE-001).
 
         HONEST envelope (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 — this route's
         prior "pure O(1) read that never touches the lake" claim was FALSE): the
@@ -3097,6 +3461,33 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         lake_root_resolver=_job_lake_root_resolver(instrument_store),
     )
 
+    # The standalone Dhan SPOT feed pull job (DEC-DHAN-PULL-SURFACE-001) — a
+    # SEPARATE BackgroundPullJob so it never collides with Groww's ``_pull_job``.
+    # Its cross-process single-flight flock keys on the DHAN WRITE root
+    # (``feeds/dhan/`` — the ``_dhan_job_lake_root_resolver`` nesting), distinct
+    # from Groww's top-root flock, so a Dhan pull and a Groww pull can run
+    # concurrently (disjoint lake trees) while two Dhan pulls serialise. Its meter
+    # clear rides the Dhan session controller.
+    _dhan_pull_job = BackgroundPullJob(
+        summary_cache=_summary_cache,
+        on_run_end=_dhan_session_rate.clear_meter,
+        lake_root_resolver=_dhan_job_lake_root_resolver(instrument_store),
+    )
+
+    # The standalone Dhan ROLLING-ATM option pull job (DEC-DHAN-ROLLING-OPTIONS-001) —
+    # a SEPARATE BackgroundPullJob from the spot ``_dhan_pull_job`` so a rolling-ATM
+    # option pull and a Dhan SPOT pull never collide in-process. Its cross-process
+    # single-flight flock keys on the SAME DHAN WRITE root (``feeds/dhan/`` — the
+    # ``_dhan_job_lake_root_resolver`` nesting), so it serialises with a concurrent
+    # Dhan pull sharing the same account/lake (they write DISJOINT subtrees —
+    # ``rolling_options/`` vs ``bars/`` — but share the one Dhan read-only account
+    # rate budget). Its meter clear rides the SHARED Dhan session controller.
+    _dhan_option_pull_job = BackgroundPullJob(
+        summary_cache=_summary_cache,
+        on_run_end=_dhan_session_rate.clear_meter,
+        lake_root_resolver=_dhan_job_lake_root_resolver(instrument_store),
+    )
+
     # The bulk Greeks v1→v2 backfill job (DEC-GREEKS-BULK-REENRICH-001) — a
     # SEPARATE BackgroundPullJob so its progress feed never collides with a
     # pull's. The ACCOUNT-keyed lock is skipped via the existing graceful-skip
@@ -3564,6 +3955,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 until_clean=True,
                 on_ledger_sync=_ledger_sync,
                 floor_store=instrument_store,
+                # Cooperative cancel at the spot WINDOW boundary
+                # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this surface was
+                # un-wired, so the cancel route fabricated success for it).
+                should_stop=_pull_job.cancel_requested,
                 # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
                 # into the NSE market-hours window (the shared-account belt). The env
                 # kill switch is parsed ONCE here (fail-loud); the bound predicate then
@@ -3572,7 +3967,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 market_closed=resolve_market_closed(),
             )
             _stamp_pull_verdict(report.verdict.to_dict())
-            return report
+            # Return the Mapping shape so _finish_detail can surface the report's
+            # emit-on-cancel "note" as the job's completion headline — a cancelled
+            # pull reads CANCELLED, never the bare back-compat "done"
+            # (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3; an uncancelled
+            # payload carries no note, so its headline stays "done" verbatim).
+            return report.to_dict()
 
         # Initial total = symbols × the chosen fetch intervals (1d / 1m / both) — a
         # placeholder the first per-WINDOW ledger sync re-scales to the planned window
@@ -3801,11 +4201,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         # NOT by the per-pair 4-arg hook — so it fills 0→100% instead of freezing
         # (DEC-METADATA-LIVE-PROGRESS-001). The initial total is the instrument count, a
         # placeholder the first cell-settle resync re-scales to cells (then cells+jobs).
+        # cancellable=False (DEC-JOB-COOPERATIVE-CANCEL-001 review fold): the
+        # metadata spine (pull_expiries_contracts) has NO should_stop seam, so a
+        # cancel token would never be observed — /api/v1/pull/cancel refuses
+        # HONESTLY for this surface instead of fabricating {"cancelling": true}.
         started = _pull_job.start(
             _work,
             total=len(instruments),
             detail=detail,
             ledger_synced=True,
+            cancellable=False,
             # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
             market_hours_exempt=dry_run,
         )
@@ -3938,6 +4343,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     form_preference=PersistentSymbolFormPreference(
                         None if dry_run else instrument_store
                     ),
+                    # Cooperative cancel at the F&O (contract, interval) window
+                    # boundary (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this
+                    # surface was un-wired, so the cancel route fabricated
+                    # success for it).
+                    should_stop=_pull_job.cancel_requested,
                 )
             return report.to_dict()
 
@@ -4184,6 +4594,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     form_preference=PersistentSymbolFormPreference(
                         None if dry_run else instrument_store
                     ),
+                    # Cooperative cancel at the F&O (contract, interval) window
+                    # boundary (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this
+                    # surface was un-wired, so the cancel route fabricated
+                    # success for it).
+                    should_stop=_pull_job.cancel_requested,
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
@@ -4458,6 +4873,27 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # movers are NEVER left blocked by a failed pull.
             prebuild_ok = False
 
+            if spot_only and not dry_run:
+                # DEC-CROSSVERIFY-OWED-SENTINEL-001: the moment this REAL
+                # spot-only pull COMMITS to owing the day a cross-verify —
+                # BEFORE the pull/prebuild chain runs — write the durable
+                # owed marker, so a box that dies/sleeps/closes anywhere
+                # downstream (the crossverify tail below is the launcher's
+                # LAST step) leaves a persistent sentinel the next run's
+                # step-D3 owed catchup completes. Best-effort + kill-switch
+                # coherent (mark_owed_for_pull marks nothing under
+                # BRUTEX_CROSSVERIFY=off / BRUTEX_CROSSVERIFY_PUBLISH=off /
+                # junk env — one WARN, never a failed pull); the runner
+                # clears the marker at the day's completed material verdict.
+                # HONEST (round-1 review MINOR-2): a launch that crosses
+                # midnight leaves THIS launch_day's marker while the tail
+                # runs config.day = the NEW day — benign + convergent: the
+                # tail clears nothing for launch_day, and the NEXT run's D3
+                # completes it idempotently (zero double-puts).
+                from brutex.crossverify.owed import mark_owed_for_pull
+
+                mark_owed_for_pull(lake_root, launch_day, source="dashboard-pipeline")
+
             # ONE durable &-form winner map for the WHOLE pipeline run
             # (DEC-FORM-WINNER-PERSIST-001): the metadata phase's %26 win reorders
             # the historical phase's very first fetch for that underlying (both key
@@ -4526,6 +4962,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     until_clean=True,
                     on_ledger_sync=_ledger_sync,
                     floor_store=instrument_store,
+                    # Cooperative cancel at the spot WINDOW boundary
+                    # (DEC-JOB-COOPERATIVE-CANCEL-001).
+                    should_stop=_pull_job.cancel_requested,
                     # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull
                     # crosses into the NSE market-hours window (shared-account belt).
                     market_closed=_market_closed,
@@ -4603,6 +5042,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         on_ledger_sync=_hist_ledger_sync,
                         form_preference=form_preference,
                         prior_steps=prior_steps,
+                        # Cooperative cancel at the F&O (contract, interval)
+                        # window boundary (DEC-JOB-COOPERATIVE-CANCEL-001).
+                        should_stop=_pull_job.cancel_requested,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -4803,13 +5245,19 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # The stored-master kind map + its content token (review round 1 —
                 # see the futures warm above): correct stamps + route key parity.
                 underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
+                # The registry.duckdb content token — folded into the SAME three
+                # keys the route folds it into (calendar / chains / candidate), so
+                # the warmed entries are actually HIT by the route's composite key
+                # (key parity, CLAUDE.md §11 COMMON) and a cross-process registry
+                # write re-keys them (DEC-MEMORY-FOOTPRINT-HARDENING-001).
+                warm_registry_token = _registry_key_component(lake_root)
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
                 ) -> Callable[[], int]:
                     tier, trk = normalize_options_selectors(raw_tier, raw_track)
                     calendar_expiries = _options_calendar_cache.get_or_compute(
-                        f"options_calendar|{exch or ''}",
+                        f"options_calendar|{exch or ''}|r={warm_registry_token}",
                         generation=gen,
                         compute=lambda: load_registry_expiries(registry_path, exchange=exch),
                     )
@@ -4821,7 +5269,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     registry_chain_for = make_registry_chain_loader(
                         registry_path,
                         exchange=exch,
-                        cache=_options_strikes_cache,
+                        cache=_RegistryKeyedCache(_options_strikes_cache, warm_registry_token),
                         generation=gen,
                     )
 
@@ -4836,7 +5284,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                                 expiry_tier=tier,
                                 expiry_track=trk,
                             )
-                            + f"|m={kinds_token}",
+                            + f"|m={kinds_token}|r={warm_registry_token}",
                             generation=gen,
                             compute=lambda: compute_options_candidates(
                                 lake_root=lake_root,
@@ -5096,6 +5544,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         warm_options_movers=None if spot_only else _warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                         strict_gate=strict_gate,
+                        # Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001):
+                        # the sequencer probes the job's per-run token BETWEEN
+                        # phases; the spot/historical bodies below thread the
+                        # SAME probe to their window boundaries. A cancelled
+                        # pull settles via the NORMAL path (amber partial with
+                        # the honest "(cancelled)" stop — never a red error,
+                        # never a fabricated green).
+                        should_stop=_pull_job.cancel_requested,
                         # DEC-GROWW-MARKET-HOURS-GUARD-001: if this pipeline pull
                         # reaches the sequencer inside the NSE market-hours window,
                         # skip the whole vendor chain (spot/metadata/historical), and
@@ -5430,6 +5886,334 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
             return JSONResponse(await _run_lake(_toggle))
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # DHAN SPOT feed pull (DEC-DHAN-PULL-SURFACE-001 / DEC-DHAN-SPOT-FEED-001).
+    # The standalone read-only Dhan SPOT track: pulls NIFTY/BANKNIFTY/SENSEX
+    # 1-minute (+ INDIA VIX reference-only) into its OWN ``feeds/dhan/`` lake,
+    # via the lean Dhan spot spine + a Dhan-scoped prebuild (bound to dhan_root).
+    # It reuses NOTHING of the Groww ``BulkSpotReport``-coupled ``run_full_pipeline``
+    # (DEC-FEED-SPINE-GENERALIZE-001, option b — the deferred full-spine unification);
+    # movers-warm is deferred with it (a feed-aware movers reader is the named
+    # follow-up DEC-DHAN-MOVERS-FEED-AWARE-001).
+    # ─────────────────────────────────────────────────────────────────────────
+    def _default_dhan_spot_pull_production(
+        request: DhanPullRequest,
+    ) -> DhanPullReport:  # pragma: no cover — production wiring: real SSM + dhanhq + LMDB
+        """The production Dhan pull seam: the real SSM/dhanhq pull paced by the Dhan controller."""
+        return default_dhan_spot_pull(request, pace=_dhan_session_rate.get().pace)
+
+    _dhan_spot_pull_fn: DhanSpotPullFn = (
+        dhan_spot_pull if dhan_spot_pull is not None else _default_dhan_spot_pull_production
+    )
+
+    def _launch_dhan_pipeline(
+        *, from_date: str | None, to_date: str | None, dry_run: bool
+    ) -> dict[str, Any]:
+        """The ``/pull-pipeline-dhan`` launch body: validate → resolve dhan_root → start.
+
+        Credential gate FIRST (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): a real Dhan pull
+        with missing/unreachable read-only SSM credentials is a LOUD **HTTP 503**
+        carrying the actionable fix text, never a silent synthetic downgrade; an
+        explicit ``?dry_run=true`` is exempt (no creds resolved). The operator date
+        range is validated EAGERLY via
+        :func:`~brutex.dashboard.pull_controller.resolve_candle_range` (a reversed /
+        non-ISO pick → clean 400); blank ⇒ the canonical ``[2020-01-01, prev day]``
+        default, whose start the ROLLING FLOOR then CLAMPS
+        (DEC-DHAN-ROLLING-FLOOR-001): ``today_ist`` is resolved ONCE here and
+        threaded on the request; a range ending on/before
+        ``dhan_history_floor(today_ist)`` is a LOUD **HTTP 400** naming the floor
+        (Dhan cannot serve any of it — zero vendor calls, zero job start), and a
+        partially-pre-floor start is clamped at the plan chokepoint
+        (``max(start, floor)`` — one ``dhan.window_floor_clamped`` INFO + the
+        clamp note on the report; NEVER doomed pre-floor requests recorded as
+        clean-empty SUCCESS windows). The pull runs on the SEPARATE single-flight
+        ``_dhan_pull_job`` (own flock
+        on ``feeds/dhan/`` — no collision with Groww's ``_pull_job``), and is
+        ``market_hours_exempt`` because Dhan uses its OWN account (the 08:45-15:35 NSE
+        guard exists only to free the SHARED Groww account for TickVault → the Dhan
+        pull passes ``market_closed=None``).
+
+        A ``dry_run`` start is fully OFFLINE (Golden Rule #1): the production seam
+        (:func:`~brutex.dashboard.dhan_pull.default_dhan_spot_pull`) short-circuits
+        after resolving the securityId map — it builds NO adapter, loads NO AWS
+        credentials, issues NO vendor call, and writes nothing — so the start skips the
+        cross-process guards (``cross_process_lock=False``, the ``_greeks_backfill_job``
+        dry-run precedent), meaning a dry-run never resolves the account-lock key from
+        AWS. The WET run keeps the cross-process lock.
+        """
+        refusal = gate_pull_credentials(
+            dry_run_requested=dry_run, credentials_error=dhan_credentials_error
+        )
+        if refusal is not None:
+            _LOG.error(
+                "universe.pull_pipeline_dhan.refused_no_credentials", reason=refusal.auth_cause
+            )
+            raise HTTPException(status_code=503, detail=verdict_message(refusal))
+        from_date = (from_date or "").strip() or None
+        to_date = (to_date or "").strip() or None
+        try:
+            start_dt, end_dt = resolve_candle_range(
+                from_date=from_date, to_date=to_date, year=None, now=datetime.now(UTC)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # DEC-DHAN-ROLLING-FLOOR-001: the IST "today" is resolved EXACTLY ONCE per
+        # launch and threaded (the pull never re-reads the clock mid-plan). A range
+        # ending on/before the floor is structurally unservable — refuse LOUDLY
+        # (zero vendor calls, zero job start) instead of recording doomed
+        # clean-empty windows; end_dt.date() is the EXCLUSIVE day.
+        today_ist = now_ist().date()
+        floor = dhan_history_floor(today_ist)
+        if end_dt.date() <= floor:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "requested range ends before the Dhan rolling 5-year floor "
+                    f"({floor.isoformat()} = today−5y+{DHAN_FLOOR_MARGIN_DAYS}d margin) — "
+                    "Dhan cannot serve any of it; nothing was pulled"
+                ),
+            )
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        dhan_root = feed_lake_root(lake_root, feed="dhan")
+        request = DhanPullRequest(
+            lake_root=lake_root,
+            start=start_dt.date(),
+            end=end_dt.date(),
+            dry_run=dry_run,
+            today=today_ist,
+        )
+        _LOG.info(
+            "universe.pull_pipeline_dhan.requested",
+            start=request.start.isoformat(),
+            end=request.end.isoformat(),
+            dry_run=dry_run,
+            dhan_root=str(dhan_root),
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — job thread
+            """Background body: run the Dhan spot pull (+ Dhan-scoped prebuild)."""
+            _dhan_pull_job.set_phase("spot")
+            report = _dhan_spot_pull_fn(request)
+            return report.to_dict()
+
+        detail = "dhan spot pipeline"
+        if dry_run:
+            detail = label_synthetic(detail)
+        started = _dhan_pull_job.start(
+            _work,
+            total=len(DHAN_SPOT_INDEX_SYMBOLS),
+            detail=detail,
+            # A DRY-RUN is fully OFFLINE: the real seam short-circuits after resolving
+            # the securityId map (no adapter build, no vendor call, no write), so it
+            # needs NO cross-process guards — skipping them means the dry-run never
+            # resolves the account-lock key from AWS (the `_greeks_backfill_job`
+            # dry-run precedent). The WET run keeps the cross-process lock.
+            cross_process_lock=not dry_run,
+            market_hours_exempt=True,
+        )
+        payload: dict[str, Any] = {
+            "started": started,
+            "feed": "dhan",
+            "total": len(DHAN_SPOT_INDEX_SYMBOLS),
+            "dry_run": dry_run,
+        }
+        # EMIT-ON-CLAMP additive keys (DEC-DHAN-ROLLING-FLOOR-001): a start before
+        # the floor names the clamp on the start payload too (the report carries
+        # the same two keys computed from the SAME threaded today).
+        if request.start < floor:
+            payload["floor"] = floor.isoformat()
+            payload["effective_start"] = max(request.start, floor).isoformat()
+        return payload
+
+    @app.post("/api/v1/universe/pull-pipeline-dhan")
+    async def api_universe_pull_pipeline_dhan(
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-pipeline-dhan — the standalone Dhan SPOT pull.
+
+        Thin delegator over :func:`_launch_dhan_pipeline`, offloaded via ``_run_lake``
+        (the app.py offload doctrine — the launch acquires the cross-process
+        single-flight guards synchronously). ``HTTPException``s (400 validation / 503
+        credential refusal) propagate unchanged.
+        """
+        return JSONResponse(
+            await _run_lake(
+                lambda: _launch_dhan_pipeline(from_date=from_date, to_date=to_date, dry_run=dry_run)
+            )
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DHAN ROLLING-ATM OPTION feed pull (DEC-DHAN-ROLLING-OPTIONS-001).
+    # The standalone read-only Dhan rolling-ATM option track (ATM±N per bar, NOT
+    # per-contract — Dhan serves no option chain): pulls the PURE cartesian of 1008
+    # rolling keys (3 indices × {WEEK,MONTH} × EC{0..3} × ATM±10 × {CALL,PUT}) at
+    # 1-minute into ``feeds/dhan/rolling_options/``, on a SEPARATE single-flight
+    # ``_dhan_option_pull_job`` (own flock on ``feeds/dhan/`` — no Groww collision).
+    # ``market_closed=None`` (Dhan uses its OWN account). Servability is UNVERIFIED —
+    # an unservable key degrades to an honest EMPTY / a DH-905 re-pullable FAILED
+    # window; never a fabricated bar (§7 gate, Golden Rule #1).
+    # ─────────────────────────────────────────────────────────────────────────
+    def _default_dhan_rolling_option_pull_production(
+        request: DhanPullRequest,
+    ) -> DhanRollingOptionPullReport:  # pragma: no cover — production wiring: real SSM + dhanhq
+        """The production Dhan rolling-ATM pull seam: the real SSM/dhanhq pull, Dhan-paced."""
+        return default_dhan_rolling_option_pull(request, pace=_dhan_session_rate.get().pace)
+
+    _dhan_rolling_option_pull_fn: DhanRollingOptionPullFn = (
+        dhan_rolling_option_pull
+        if dhan_rolling_option_pull is not None
+        else _default_dhan_rolling_option_pull_production
+    )
+
+    def _launch_dhan_rolling_pipeline(
+        *, from_date: str | None, to_date: str | None, dry_run: bool
+    ) -> dict[str, Any]:
+        """The ``/pull-rolling-options-dhan`` launch body: validate → resolve → start.
+
+        The rolling-ATM options sibling of :func:`_launch_dhan_pipeline`. Credential
+        gate FIRST (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — reuses the SAME read-only
+        Dhan SSM gate as spot); the operator date range is validated EAGERLY (a
+        reversed / non-ISO pick → clean 400); blank ⇒ the canonical default range,
+        whose start the UNIFIED rolling-options floor then CLAMPS
+        (DEC-DHAN-ROLLING-FLOOR-UNIFY-001 — ``dhan_rolling_options_floor(today) =
+        max(dhan_history_floor(today), the requested 2022-06-01 start)``, the spot
+        route's exact floor posture): ``today_ist`` is resolved ONCE here and
+        threaded on the request; a range ending on/before the unified floor is a
+        LOUD **HTTP 400** naming both terms (zero vendor calls, zero job start),
+        and a partially-pre-floor start is clamped at the rolling plan chokepoint
+        (``max(start, floor)`` — one ``dhan.rolling_option.window_floor_clamped``
+        INFO; NEVER doomed pre-floor requests recorded as clean-empty SUCCESS
+        windows). Within the post-floor span the rolling honest-degrade still
+        records clean-empty windows for a not-yet-servable date (the true floor
+        stays UNVERIFIED until ``DHAN_ROLLING_HISTORY_FLOOR`` is probe-verified,
+        Golden Rule #1). The
+        pull runs on the SEPARATE single-flight ``_dhan_option_pull_job`` (own flock on
+        ``feeds/dhan/``), and is ``market_hours_exempt`` because Dhan uses its OWN
+        account (the 08:45-15:35 NSE guard exists only to free the SHARED Groww account
+        → the Dhan pull passes ``market_closed=None``).
+
+        A ``dry_run`` start is fully OFFLINE (Golden Rule #1): the production seam
+        (:func:`~brutex.dashboard.dhan_rolling_pull.default_dhan_rolling_option_pull`)
+        short-circuits after planning the pure cartesian — it builds NO adapter, loads
+        NO AWS credentials, issues NO vendor call, and writes nothing — so the start
+        skips the cross-process guards (``cross_process_lock=False``, the
+        ``_greeks_backfill_job`` dry-run precedent), meaning a dry-run never resolves
+        the account-lock key from AWS. The WET run keeps the cross-process lock.
+        """
+        refusal = gate_pull_credentials(
+            dry_run_requested=dry_run, credentials_error=dhan_credentials_error
+        )
+        if refusal is not None:
+            _LOG.error(
+                "universe.pull_rolling_options_dhan.refused_no_credentials",
+                reason=refusal.auth_cause,
+            )
+            raise HTTPException(status_code=503, detail=verdict_message(refusal))
+        from_date = (from_date or "").strip() or None
+        to_date = (to_date or "").strip() or None
+        try:
+            start_dt, end_dt = resolve_candle_range(
+                from_date=from_date, to_date=to_date, year=None, now=datetime.now(UTC)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # DEC-DHAN-ROLLING-FLOOR-UNIFY-001: the IST "today" is resolved EXACTLY ONCE
+        # per launch and threaded (the pull never re-reads the clock mid-plan). A
+        # range ending on/before the UNIFIED floor is refused LOUDLY (zero vendor
+        # calls, zero job start) instead of recording doomed pre-floor clean-empty
+        # windows; end_dt.date() is the EXCLUSIVE day.
+        today_ist = now_ist().date()
+        floor = dhan_rolling_options_floor(today_ist)
+        if end_dt.date() <= floor:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "requested range ends before the unified Dhan rolling-options "
+                    f"floor ({floor.isoformat()} = max(today−5y+"
+                    f"{DHAN_FLOOR_MARGIN_DAYS}d margin, the requested "
+                    f"{DHAN_ROLLING_HISTORY_FLOOR_REQUESTED.isoformat()} start)) — "
+                    "the rolling-options track never requests pre-floor data; "
+                    "nothing was pulled"
+                ),
+            )
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        dhan_root = feed_lake_root(lake_root, feed="dhan")
+        request = DhanPullRequest(
+            lake_root=lake_root,
+            start=start_dt.date(),
+            end=end_dt.date(),
+            dry_run=dry_run,
+            today=today_ist,
+        )
+        _LOG.info(
+            "universe.pull_rolling_options_dhan.requested",
+            start=request.start.isoformat(),
+            end=request.end.isoformat(),
+            dry_run=dry_run,
+            dhan_root=str(dhan_root),
+            keys=DHAN_ROLLING_PLAN_KEY_COUNT,
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — job thread
+            """Background body: run the Dhan rolling-ATM option pull."""
+            _dhan_option_pull_job.set_phase("rolling-options")
+            report = _dhan_rolling_option_pull_fn(request)
+            return report.to_dict()
+
+        detail = "dhan rolling-ATM options pipeline"
+        if dry_run:
+            detail = label_synthetic(detail)
+        started = _dhan_option_pull_job.start(
+            _work,
+            total=DHAN_ROLLING_PLAN_KEY_COUNT,
+            detail=detail,
+            # A DRY-RUN is fully OFFLINE: the real seam short-circuits after planning
+            # the pure cartesian (no adapter build, no vendor call, no write), so it
+            # needs NO cross-process guards — skipping them means the dry-run never
+            # resolves the account-lock key from AWS (the `_greeks_backfill_job`
+            # dry-run precedent). The WET run keeps the cross-process lock.
+            cross_process_lock=not dry_run,
+            market_hours_exempt=True,
+        )
+        rolling_payload: dict[str, Any] = {
+            "started": started,
+            "feed": "dhan",
+            "dataset": "rolling-ATM",
+            "total": DHAN_ROLLING_PLAN_KEY_COUNT,
+            "dry_run": dry_run,
+        }
+        # EMIT-ON-CLAMP additive keys (DEC-DHAN-ROLLING-FLOOR-UNIFY-001, the spot
+        # launcher's exact posture): a start before the unified floor names the
+        # clamp on the start payload (the plan chokepoint clamps from the SAME
+        # threaded today).
+        if request.start < floor:
+            rolling_payload["floor"] = floor.isoformat()
+            rolling_payload["effective_start"] = max(request.start, floor).isoformat()
+        return rolling_payload
+
+    @app.post("/api/v1/universe/pull-rolling-options-dhan")
+    async def api_universe_pull_rolling_options_dhan(
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-rolling-options-dhan — the Dhan rolling-ATM pull.
+
+        Thin delegator over :func:`_launch_dhan_rolling_pipeline`, offloaded via
+        ``_run_lake`` (the launch acquires the cross-process single-flight guards
+        synchronously). ``HTTPException``s (400 validation / 503 credential refusal)
+        propagate unchanged. Rolling-ATM (ATM±N per bar) — NOT per-contract.
+        """
+        return JSONResponse(
+            await _run_lake(
+                lambda: _launch_dhan_rolling_pipeline(
+                    from_date=from_date, to_date=to_date, dry_run=dry_run
+                )
+            )
+        )
+
     if pull_intent_store is not None:
         _intent_store: PullIntentStore = pull_intent_store
 
@@ -5622,6 +6406,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 auto_retry=True,
                 until_clean=until_clean,
                 floor_store=instrument_store,
+                # Cooperative cancel at the spot WINDOW boundary
+                # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: retry-failed was
+                # un-wired, so the cancel route fabricated success for it).
+                should_stop=_pull_job.cancel_requested,
                 # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
                 # into the NSE market-hours window (the shared-account belt). The env
                 # kill switch is parsed ONCE here (fail-loud); the bound predicate then
@@ -5630,7 +6418,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 market_closed=resolve_market_closed(),
             )
             _stamp_pull_verdict(report.verdict.to_dict())
-            return report
+            # Mapping shape → _finish_detail surfaces the emit-on-cancel "note"
+            # (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3): a cancelled
+            # retry-failed run headlines CANCELLED, never a bare "done".
+            return report.to_dict()
 
         unit_total = len(instruments) * len(fetch_intervals)
         started = _pull_job.start(
@@ -5782,9 +6573,24 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 batch_size=batch,
                 pause_s=pause_s,
                 on_progress=_sync,
+                # Cooperative cancel at the BETWEEN-BATCHES boundary
+                # (DEC-JOB-CANCEL-CONTROL-001 — the Greeks-backfill arm of the
+                # DEC-JOB-COOPERATIVE-CANCEL-001 mechanism): the runner probes
+                # the job's per-run token before each batch; a cancelled run
+                # RETURNS its honest CANCELLED report (resume correct — the
+                # frozen checkpoint when one was recorded, the stored stamps
+                # otherwise) — never a raise, so the job settles "done" with
+                # the cancelled note as its headline and the alert below still
+                # fires the ⏹ summary. HONEST cancel-blind span: the O(files)
+                # scan above has no interior probe — a Stop acked mid-scan is
+                # honored at the FIRST batch boundary (the #1369 metadata-
+                # phase precedent; a per-contract scan probe is a named
+                # follow-up, not claimed).
+                should_stop=_greeks_backfill_job.cancel_requested,
             )
             # EXACTLY-ONCE completion summary — the one dashboard chokepoint
-            # (the halt path is covered by the job's is_pull_halt handling).
+            # (the halt path is covered by the job's is_pull_halt handling; a
+            # CANCELLED run reads the honest ⏹ head under a distinct dedupe key).
             emit_greeks_backfill_complete_alert(report)
             return report.to_dict()
 
@@ -5799,6 +6605,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
             ledger_synced=True,
             cross_process_lock=not dry_run,
+            # cancellable=not dry_run (DEC-JOB-CANCEL-CONTROL-001, the #1369
+            # standalone-metadata-pull precedent): the DRY-RUN work is scan +
+            # report ONLY — it never observes the cancel token — so the cancel
+            # route refuses HONESTLY ("uncancellable") instead of fabricating a
+            # {"cancelling": true} the run could never act on. The WET run
+            # genuinely observes it at every between-batches boundary.
+            cancellable=not dry_run,
             # DEC-GROWW-MARKET-HOURS-GUARD-001: the Greeks backfill re-enriches
             # ALREADY-STORED bars and makes ZERO Groww API calls, so it is EXEMPT
             # from the market-hours start gate (safe to run in the trading window).
@@ -5831,9 +6644,55 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
         The backfill job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
         (state / total / completed / failed / bars / current / detail / percent …)
-        — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001).
+        — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001). The
+        ADDITIVE ``cancelling`` key (DEC-JOB-CANCEL-CONTROL-001, the
+        pull-progress idiom) reads ``True`` while the CURRENT run's cooperative
+        cancel token is set — the panel shows "stopping · finishing current
+        batch…" until the job settles; every pre-existing key is byte-identical.
         """
-        return JSONResponse(_greeks_backfill_job.snapshot().to_dict())
+        snap = _greeks_backfill_job.snapshot().to_dict()
+        snap["cancelling"] = _greeks_backfill_job.cancel_requested()
+        return JSONResponse(snap)
+
+    @app.post("/api/v1/universe/greeks-backfill-cancel")
+    async def api_universe_greeks_backfill_cancel() -> JSONResponse:
+        """POST /api/v1/universe/greeks-backfill-cancel — cooperative backfill Stop.
+
+        DEC-JOB-CANCEL-CONTROL-001 (the Stop button on the ``universe.html``
+        backfill panel) — the Greeks-backfill arm of the
+        DEC-JOB-COOPERATIVE-CANCEL-001 mechanism, on the SAME
+        ``request_cancel_verdict`` core and the SAME
+        ``{"cancelling": bool, "reason"?}`` wire as ``/api/v1/pull/cancel``.
+        NO ``expected_kind`` gate, deliberately: ``_greeks_backfill_job`` is a
+        DEDICATED job instance only this route family ever starts (unlike the
+        shared pull/sweep job the pull route must kind-gate), so a kind
+        compare would be vacuous. The verdict likewise carries NO
+        run-identity token (the ``/api/v1/pull/cancel`` wire, kept
+        deliberately): if run A finishes AND the operator restarts within the
+        ONE HTTP round-trip a Stop POST is in flight, the cancel lands on the
+        fresh run — an accepted, disclosed window (hostile-review #1748;
+        the cancel is graceful + lossless and the run trivially restarts).
+        Refusal reasons: ``"idle"`` (no run in
+        flight — a between-runs or after-finish request can never pre-poison a
+        later run, the fresh-Event-per-start identity gate) and
+        ``"uncancellable"`` (a DRY-RUN is scan + report only, started
+        ``cancellable=False`` — its work never observes the token, so the
+        refusal is honest, never a fabricated ack). A double-Stop on a live
+        wet run is an idempotent ``{"cancelling": true}``. HONEST latency
+        (Golden Rule #10): cooperative — the in-flight batch (default 25
+        contracts) completes its driver writes + checkpoint record first, and
+        the O(files) SCAN phase has NO interior probe (a Stop acked mid-scan
+        is honored at the FIRST batch boundary — the #1369 metadata-phase
+        cancel-blind-span precedent). The stopped run settles as an honest
+        "done" whose headline reads CANCELLED + resumable; a frozen
+        checkpoint (when one was recorded) makes the next same-plan run
+        fast-resume, and the stored stamps keep resume correct regardless.
+        """
+        cancelling, reason = _greeks_backfill_job.request_cancel_verdict()
+        payload: dict[str, object] = {"cancelling": bool(cancelling)}
+        if reason is not None:
+            payload["reason"] = reason
+        return JSONResponse(payload)
 
     @app.post("/api/v1/crossverify/run")
     async def api_crossverify_run(
@@ -5945,6 +6804,23 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             return None
         return load_last_run(lake_root)
 
+    def _crossverify_owed_days() -> list[str]:
+        """Owed-day names for the panel (DEC-CROSSVERIFY-OWED-SENTINEL-001).
+
+        A NAMES-only ``os.scandir`` of ``<lake_root>/.crossverify/owed/`` —
+        no entry is ever OPENED, so a planted FIFO/device symlink can never
+        hang the poll; corruption-tolerant (junk entries WARN + skip inside
+        :func:`~brutex.crossverify.owed.list_owed_days`); honest ``[]`` on
+        no resolvable lake root — never a 500. Runs on the threadpool via
+        the route so a wedged volume can never block the event loop.
+        """
+        from brutex.crossverify.owed import list_owed_days
+
+        lake_root = _rate_bridge_lake_root_or_none(instrument_store)
+        if lake_root is None:
+            return []
+        return [owed.isoformat() for owed in list_owed_days(lake_root)]
+
     @app.get("/api/v1/crossverify/progress")
     async def api_crossverify_progress() -> JSONResponse:
         """GET /api/v1/crossverify/progress — the producer job snapshot.
@@ -5957,10 +6833,23 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         failed keys + detail), so a finished failure survives a page reload
         AND a dashboard restart (DEC-CROSSVERIFY-WITHHELD-REGATE-001). One
         O(1) small-sidecar stat+read per poll, off the event loop; ``null``
-        when absent/corrupt/unresolvable — never a fabricated record.
+        when absent/corrupt/unresolvable — never a fabricated record. The
+        EMIT-ON-PRESENT ``owed_days`` field (DEC-CROSSVERIFY-OWED-SENTINEL-001)
+        lists days whose pull committed to a cross-verify that never reached a
+        completed verdict — the no-owed payload stays byte-identical.
         """
         snapshot = _crossverify_job.snapshot().to_dict()
-        snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
+        # Both `.crossverify/` sidecar reads ride the 32-token lake limiter, not
+        # the bare default pool (DEC-DASHBOARD-LAKE-IO-LIMITER-001/-002 — the same
+        # re-route the limiter applied to every other lake-touching closure;
+        # still off the event loop, DEC-CROSSVERIFY-PRODUCER-001 unchanged).
+        snapshot["last_run"] = await _run_lake(_crossverify_last_run)
+        owed_days = await _run_lake(_crossverify_owed_days)
+        if owed_days:
+            # EMIT-ON-PRESENT + additive-only (DEC-CROSSVERIFY-OWED-SENTINEL-001):
+            # the no-owed wire stays BYTE-IDENTICAL to the pre-change payload
+            # (pinned); an owed day reads loud on the /universe panel.
+            snapshot["owed_days"] = owed_days
         return JSONResponse(snapshot)
 
     @app.get("/api/v1/universe/pull-progress")
@@ -6019,7 +6908,187 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             )
 
         snap["phases"] = await _run_lake(_phases)
+        # ADDITIVE cancel visibility (DEC-JOB-COOPERATIVE-CANCEL-001): True while
+        # the CURRENT run's cooperative-cancel token is set — the frontend shows
+        # "cancelling — finishing current window…" until the job settles. Every
+        # pre-existing snapshot key is unchanged.
+        snap["cancelling"] = _pull_job.cancel_requested()
+        # ADDITIVE job kind (review fold — the on-load Stop-button attach):
+        # "pull"/"sweep" while the shared single-flight job runs, null when
+        # idle, so a freshly-loaded /universe attaches its watch (and shows the
+        # Stop button) ONLY to a PULL-kind run — a running dashboard SWEEP on
+        # the same job never fabricates a pull watch.
+        snap["job_kind"] = _pull_job.running_job_kind
         return JSONResponse(snap)
+
+    @app.post("/api/v1/pull/cancel")
+    async def api_pull_cancel() -> JSONResponse:
+        """POST /api/v1/pull/cancel — request a COOPERATIVE cancel of the running pull.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 (the Stop button beside the pull/pipeline
+        Run buttons). Kind-gated: cancels ONLY a running PULL-kind job — a
+        running SWEEP is never cancelled through this route (use
+        ``/api/v1/sweep/cancel``), and an idle job is a ``{"cancelling": false}``
+        no-op. The kind gate is a COMPARE-AND-SET inside
+        ``request_cancel(expected_kind=…)`` — ONE lock hold, so a run
+        transition between a separate kind read and the cancel can never land
+        the request on the wrong run (review fold). HONEST scope: the
+        standalone metadata pull (``/universe/pull-expiries-contracts``) has NO
+        cancel seam in its spine, so it starts ``cancellable=False`` and this
+        route returns an honest ``{"cancelling": false}`` for it — never a
+        fabricated true the run could not observe. A refusal additionally
+        carries the ADDITIVE ``reason`` key (fix round 4 — the wire previously
+        conflated "idle" with "running-but-uncancellable", so the UI rendered
+        "No running pull to cancel" above a visibly-running metadata pull):
+        ``"idle"`` / ``"wrong_kind"`` / ``"uncancellable"`` — the label seam
+        ``universe.html`` renders distinctly; a successful ack omits it.
+        HONEST latency (Golden Rule
+        #10): cooperative — WITHIN a fetch phase the stop lands at the window
+        boundary: the in-flight window's fetch completes, the async
+        pipeline's already-queued tail writes DRAIN (each bounded by the 90 s
+        write deadline), and the ledger persists first; the F&O post-pull tail
+        (the O(pulled-scope) L2 heal + the FULL Greeks-enrichment pass) is
+        WITHHELD on cancel (combined-PR fix round 2 — the note reads "withheld
+        (cancelled) — re-attempted next pull"; the next pull heals + re-enriches,
+        nothing is lost), and the SPOT post-drain L2 heal is likewise WITHHELD
+        (continuation-v2 — one ``pull.cancel_heal_skipped`` WARN; the next
+        pull's L2 heal, plus L1/L3, covers the slice). CANCEL-BLIND SPANS (review fold — the pipeline probes
+        only BETWEEN phases): a Stop acked mid-METADATA (~750 underlyings ×
+        ``get_expiries``+``get_contracts`` at the paced vendor rate — minutes)
+        is observed only once that WHOLE phase settles (its spine has no
+        interior probe), and a Stop arriving after the PREBUILD stage launches
+        is NOT observed by the prebuild at all (the pipeline's last probe runs
+        before it starts, so the prebuild + movers warm run to completion and
+        the pipeline settles un-attributed). Threading per-underlying /
+        per-symbol probes into those two spans is a NAMED follow-up, not
+        claimed. Then the job settles via the NORMAL path as an honest
+        amber partial ("(cancelled)" stop) — never a red ✕, never a fabricated
+        green; the durable ledger makes the next pull resume exactly the
+        unsettled remainder.
+        """
+        cancelling, reason = _pull_job.request_cancel_verdict(expected_kind=JOB_KIND_PULL)
+        payload: dict[str, object] = {"cancelling": bool(cancelling)}
+        if reason is not None:
+            payload["reason"] = reason
+        return JSONResponse(payload)
+
+    @app.post("/api/v1/sweep/cancel")
+    async def api_sweep_cancel() -> JSONResponse:
+        """POST /api/v1/sweep/cancel — request a COOPERATIVE cancel of the running sweep.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 (the Stop button beside 🚀 Run Sweep).
+        Writes the DURABLE cancel sidecar ``<results_root>/.sweep_cancel.json``
+        the engine probes at the tuple boundary — ONE mechanism covering the
+        dashboard's in-process sweep (``target: "in-process"``), a DETACHED
+        launch-page sweep whose live pid the launch state names
+        (``target: "detached"``), AND a terminal-launched DEFAULT-root
+        ``brutex sweep-all`` visible only through the FRESH running progress
+        file bridge (``target: "bridge"`` — the sidecar lands at the default
+        ``<lake>/sweeps`` root that run probes; review fold — previously this
+        case was a false "nothing to cancel" refusal while the Stop button,
+        keyed on the same bridge, was showing). Nothing running — including a
+        STALE running bridge claim (a SIGKILLed writer's frozen file, decayed
+        per ``SWEEP_PROGRESS_MAX_AGE_S``) ⇒ ``{"cancelling": false}``
+        and NO sidecar is written (a stray request must never pre-poison the
+        next launch — which also clears stale sidecars itself). HONEST latency
+        (Golden Rule #10): cooperative — the in-flight tuple (sequential) / the
+        drain of up to ``workers-1`` in-flight tuples (parallel) completes its
+        durable write chain first; a heavy k=5 tuple legitimately runs many
+        minutes, and a wedged worker ignores it (the stall watchdog remains
+        that class's terminal). A cancelled sweep's checkpoint is a CLEAN
+        resumable boundary — run again to resume. HONEST race windows
+        (DISCLOSED, combined-PR fix round 2 — Golden Rule #10): (a) a Stop
+        POSTed in the ``_pull_job.start()`` → ``cmd_sweep_all`` LAUNCH window
+        is deleted by the launch-time stale-sidecar guard (indistinguishable
+        from a prior run's leftover — the guard exists so a leftover can never
+        kill a fresh/resumed run), so that acked cancel is LOST; (b) the
+        running-check → sidecar-write sequence here can ack a JUST-SETTLED
+        sweep with ``{"cancelling": true}`` (the orphan sidecar is then
+        harmlessly cleared by the next launch). Remedy for both: press Stop
+        again once the run is visibly underway — DURING THE GRID the sidecar
+        is probed at EVERY tuple boundary, so a re-press always lands there.
+        POST-GRID TAIL scope (fix round 4 — Golden Rule #10): after the grid
+        completes, ``cmd_sweep_all`` probes the sidecar BETWEEN each remaining
+        pass (before options-sim, before the cascade, before results-depth) —
+        a Stop landing in the tail skips every later pass (the grid results
+        are already durable; re-run to rebuild the skipped passes) — but a
+        pass ALREADY RUNNING is never interrupted, and a request arriving
+        after the LAST probe is unobservable: the run completes normally and
+        clears the orphan sidecar at exit. A sidecar WRITE failure (ENOSPC /
+        read-only / wedged lake) is an honest ``{"cancelling": false,
+        "error": …}`` refusal, never a 500.
+        """
+        from brutex.dashboard.launch_button import read_launch_state, state_liveness
+        from brutex.engine.sweep_cancel import request_cancel as request_sweep_cancel
+        from brutex.engine.sweep_supervisor import progress_bridge_stale, read_progress
+
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        root = default_results_root(lake)
+
+        def _request(target_root: Path, *, source: str, target: str) -> dict[str, object]:
+            """Write the cancel sidecar; degrade a filesystem failure HONESTLY.
+
+            Fix round 4: ``request_cancel`` mkdirs the root + writes via the
+            guard-free ``atomic_write_simple`` (DEC-ATOMIC-WRITE-CONSOLIDATE-001
+            — raw ``OSError`` propagates), so an ENOSPC / read-only / wedged
+            lake previously 500'd the route at precisely the moment an operator
+            pressed Stop. One WARN + an actionable ``{"cancelling": false,
+            "error": …}`` refusal instead (the pull twin is lock-only and
+            cannot fail this way).
+            """
+            try:
+                request_sweep_cancel(target_root, source=source)
+            except OSError as exc:
+                _LOG.warning(
+                    "sweep_cancel.request_write_failed",
+                    root=str(target_root),
+                    source=source,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return {
+                    "cancelling": False,
+                    "error": f"cancel sidecar write failed: {type(exc).__name__}",
+                }
+            return {"cancelling": True, "target": target}
+
+        def _cancel() -> dict[str, object]:
+            """Resolve the running-sweep target + write the sidecar (threadpool)."""
+            if _pull_job.running_job_kind == JOB_KIND_SWEEP:
+                return _request(root, source="route", target="in-process")
+            detached = read_launch_state(lake)
+            if detached is not None and state_liveness(detached) == "running":
+                # Write the sidecar at the root the DETACHED run actually
+                # probes — the launch state's recorded results_root
+                # (<lake>/sweeps/launch-<stamp>-<card>), confined under
+                # <lake>/sweeps; NOT the default root, which that run's
+                # cmd_sweep_all(out_root=…) would never stat (review fold —
+                # the fabricated-success class).
+                return _request(
+                    _detached_sweep_cancel_root(detached, lake, default=root),
+                    source="route-detached",
+                    target="detached",
+                )
+            # THIRD arm (review fold — the false-refusal class): a DEFAULT-root
+            # terminal `brutex sweep-all` (no in-process job, no launch state)
+            # is visible ONLY through the progress FILE bridge — exactly the
+            # source the Stop button keys on — so refusing here contradicted
+            # the button ("No running sweep to cancel." while a sidecar at the
+            # default root WOULD cancel that run). A FRESH running bridge file
+            # at the default root ⇒ write the sidecar there (the run's
+            # cmd_sweep_all probes <default root>/.sweep_cancel.json at every
+            # tuple boundary). A STALE running claim (SIGKILLed writer) is dead
+            # evidence — honest {"cancelling": false}, mirroring the button's
+            # own decayed view.
+            bridge = read_progress(sweep_progress_file(root))
+            if bridge.get("running") and not progress_bridge_stale(bridge):
+                return _request(root, source="route-bridge", target="bridge")
+            return {"cancelling": False}
+
+        return JSONResponse(await _run_lake(_cancel))
 
     @app.get("/api/v1/universe/pull-verdict")
     async def api_universe_pull_verdict() -> JSONResponse:  # pragma: no cover — thin route
@@ -6093,6 +7162,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         app.py offload doctrine) so the event loop never touches the
         filesystem; a corrupt state file is a NAMED degraded lane, never a 500.
         """
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter): the
+        # payload is a bounded scandir + three tiny local JSON reads (nightly
+        # report.json / backup deadman.json / in-process pull outcome), NEVER a
+        # lake scan (DEC-OPERATOR-HEALTH-TRUTH-001, #1747) — the api_logs
+        # non-lake precedent. Routing it through `_run_lake` would consume the
+        # 32-token lake budget for a poll that never touches the lake.
         return JSONResponse(await run_in_threadpool(_health_hub.payload))
 
     @app.get("/api/v1/coverage/counters")
@@ -6331,7 +7406,113 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 SPOT, build_spot_coverage_payload(rows, spot_window_rollup(lake))
             )
 
-        return JSONResponse(await _run_lake(_rows_and_rollup))
+        try:
+            return JSONResponse(await _run_lake(_rows_and_rollup))
+        except SummaryColdWaitTimeout:
+            # COLD + first scan past the wait budget: nothing last-known
+            # exists — the honest 503, never a fabricated empty lake
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("spot")
+
+    @app.get("/api/v1/coverage/missing-sessions")
+    async def api_coverage_missing_sessions(
+        symbol: str | None = None,
+        exchange: str | None = None,
+        interval: str | None = None,
+        range_start: str | None = None,
+        range_end: str | None = None,
+    ) -> JSONResponse:
+        """GET /api/v1/coverage/missing-sessions — the per-date trading-day gap drill.
+
+        DEC-COVERAGE-MISSING-SESSIONS-001 — closes the long-disclaimed *"per-window gap
+        audit not claimed"* hole: for every fetched-``1minute`` spot dataset it lists the
+        EXACT NSE/BSE trading sessions with no stored bar over the audited range, so the
+        operator can re-pull precisely the missing dates BEFORE committing a 2-4 day sweep
+        (this also feeds the night-pull short-day check). Optional ``?symbol=``/
+        ``?exchange=``/``?interval=`` filters (case-insensitive exact) narrow the drill;
+        ``?range_start=``/``?range_end=`` (ISO ``YYYY-MM-DD``) override the default
+        ``[first_date, last_date]`` interior-gap range (e.g. to audit against the 2020 pull
+        floor). CAVEAT on that floor audit (combined-PR fix round 2): a ``range_start``
+        earlier than a symbol's FIRST stored session counts dates the lake never held —
+        for a late-listed symbol those are un-pullable pre-listing dates, NOT vendor
+        holes; each row's ``missing_before_first_stored`` (+ the payload's
+        ``total_missing_before_first_stored``) splits them out of the "sessions to
+        re-pull" counts so the two classes are never conflated. TODAY/future-end
+        clamp (continuation-v2 fix + the continuation-v3 residue fix): a
+        ``range_end`` AT OR LATER than today-IST would count not-yet-occurred
+        sessions — and TODAY's own un-pullable session (pre-close it has not
+        occurred; post-close ``resolve_candle_range`` still caps at the previous
+        day) — as re-pullable vendor holes, so the audit end is clamped to
+        ``now_ist().date() − 1 day`` with the clamp NAMED per row
+        (``range_end_clamped_to_today`` + the clamped ``range_end`` echo), never
+        silently applied. READ-ONLY — no pull logic.
+
+        **Honest envelope (Golden Rule #10):** the distinct stored dates come from a
+        SEPARATE ``session_dates``-enriched execution of the same scan SHAPE
+        ``/coverage`` runs (the ``array_agg(DISTINCT ist_date)`` rides one pass WITHIN
+        the drill's own scan) — ONE additional O(bars) pass per write-generation on the
+        first drill use, cached in the drill's own memo, deliberately NOT shared with
+        the ``/coverage`` SPOT cache (whose rows carry no session dates); the
+        set-difference per dataset is O(sessions), NOT O(1), with the expected-session
+        calendar walk memoised per distinct range within one payload build. Muhurat
+        evening sessions fall on holidays, so
+        they are never *expected* and never flagged missing. The audit ABSTAINS (an honest
+        ``abstain_reason``, never a fabricated "0 gaps") on an unparseable EXPLICIT
+        range override (``bad_range_override`` — never a silent fall-back to the stored
+        span), an out-of-coverage
+        range or missing stored dates. No filesystem-backed store → a well-shaped empty
+        payload, never a 500.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse(build_missing_sessions_payload([]))
+        lake = lake_root.parent
+
+        def _recompute() -> list[dict[str, Any]]:
+            """The session_dates-enriched spot scan (cache-miss / dirty path only).
+
+            Runs on a threadpool worker, building ``store.connection`` here so the store
+            RLock stays on one thread. FNO-pruned + bounded to the spot verdict intervals
+            (the ~10⁵-10⁶ F&O contract partitions never carry a spot gap audit); the
+            ``session_date_segments`` opt-in adds the DISTINCT-ist-date ``array_agg`` to the
+            existing single per-session CTE — no second lake pass.
+            """
+            return summarize_spot_datasets(
+                store.connection,
+                lake,
+                exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
+                intervals=SPOT_VERDICT_INTERVALS,
+                session_date_segments=frozenset(SPOT_PROBE_SEGMENTS),
+            )
+
+        def _work() -> dict[str, Any]:
+            """Serve the payload from the generation-keyed cache (threadpool worker).
+
+            The cache hit is O(1) per write generation; a miss/dirty poll pays
+            one ``_recompute`` scan, then projects the requested filter window.
+            """
+            rows = _missing_sessions_cache.get_or_compute(
+                "coverage_missing_sessions",
+                generation=_summary_cache.generation,
+                compute=_recompute,
+            )
+            return build_missing_sessions_payload(
+                rows,
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                range_start=range_start,
+                range_end=range_end,
+                # The IST audit clock (continuation-v2 fix + the v3 residue
+                # fix): an at/after-today range_end is clamped to today − 1 so
+                # neither a not-yet-occurred session nor today's still
+                # un-pullable one reads as a re-pullable hole; the pure module
+                # takes it injected.
+                today=now_ist().date(),
+            )
+
+        return JSONResponse(await _run_lake(_work))
 
     @app.get("/api/v1/completeness/scoreboard")
     async def api_completeness_scoreboard() -> JSONResponse:
@@ -6352,7 +7533,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         pulled-counts + stability, never an invented percentage. No lake root wired → an
         empty (well-shaped) scoreboard, never a 500.
         """
-        return JSONResponse(await _completeness_board())
+        try:
+            return JSONResponse(await _completeness_board())
+        except SummaryColdWaitTimeout:
+            # The scoreboard rides the SAME cached SPOT scan — the same honest
+            # cold degrade (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("spot")
 
     # Per-app fingerprint gate for the reconcile diagnostic (DEC-TELEMETRY-RECONCILE-
     # LEDGERSAVE-001): suppresses byte-identical repeats of the mismatch WARNING / the
@@ -6476,7 +7662,17 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         -underlying DETAIL) so the operator can answer "how many indices vs equities have the
         full set?" in Excel. READ-ONLY; an empty (well-shaped) report when no lake is wired.
         """
-        content = await _completeness_csv()
+        try:
+            content = await _completeness_csv()
+        except SummaryColdWaitTimeout:
+            # A fake-EMPTY CSV would fabricate an empty lake for a one-shot
+            # curl/Excel reader — the honest text/plain 503 instead
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return Response(
+                "first lake summary scan still running — retry shortly",
+                status_code=503,
+                media_type="text/plain",
+            )
         return Response(
             content=content,
             media_type="text/csv; charset=utf-8",
@@ -6538,6 +7734,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             per_symbol = await _run_lake(_cached_per_symbol)
         except UniverseStoreOutageError:
             return _store_outage_response()
+        except SummaryColdWaitTimeout:
+            # The per-symbol map rides the SAME cached SPOT scan — the same
+            # honest cold degrade (DEC-DASHBOARD-COLD-IO-DEADLINE-001);
+            # narrower store-outage arm kept BESIDE this one.
+            return _summary_warming_response("spot")
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -6558,6 +7759,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         eligible set is scoped to TRADABLE F&O underlyings (``tradable_only=True``), so the
         ~539 NIFTY-Total-Market REFERENCE_ONLY constituents (no option chain) never inflate
         the gate (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
+
+        DEC-MAPPING-INTEGRITY-FORM-KEY-001: the coverage ledger is keyed on the PRIMARY
+        F&O underlying form (``metadata_pull._resolve_underlying_forms`` —
+        ``BAJAJ-AUTO`` rows land under ``BAJAJAUTO``), while the eligible set is
+        SPOT-spelled — so the builder injects the ordered forms superset per eligible
+        symbol (``key_forms``, built through the ONE COMMON ``fno_underlying_forms``)
+        and the reconciler unions coverage / matches attempts across the forms. The
+        fold lives INSIDE the cached compute (one reconcile per
+        (generation, master-revision) token; aliases resolved ONCE per compute, never
+        per row; zero new store reads).
         """
         store = _require_store()
         eligible = [
@@ -6565,6 +7776,18 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             for exch, sym in store.fno_eligible_underlyings(tradable_only=True)
         ]
         coverage = store.list_coverage()
+        # DEC-MAPPING-INTEGRITY-FORM-KEY-001: the coverage ledger is keyed on the
+        # PRIMARY F&O form (metadata_pull._resolve_underlying_forms — "BAJAJAUTO");
+        # the eligible set is SPOT-spelled ("BAJAJ-AUTO"). Inject the ordered forms
+        # superset per eligible symbol (alias / normalized / raw — the app.py
+        # _resolve_historical_contracts idiom, DEC-PULL-FORENSIC-WAVE2-001) so the
+        # reconciler's compare crosses the keyspace: hyphenated/aliased names read
+        # their real coverage and the attempted-and-zero alarm can fire. Aliases
+        # resolved ONCE per cached compute (never per row).
+        aliases = resolve_fno_index_aliases()
+        key_forms = {
+            spot.symbol: fno_underlying_forms(spot.symbol, aliases=aliases) for spot in eligible
+        }
         return reconcile_mapping_integrity(
             eligible_spots=eligible,
             covered_years=coverage_years_from_records(coverage),
@@ -6572,6 +7795,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             attempted=attempted_pairs_from_records(coverage),
             whitelist=(),
             now=datetime.now(UTC),
+            key_forms=key_forms,
         )
 
     def _build_mapping_integrity_report_cached() -> tuple[MappingIntegrityReport, bool, bool]:
@@ -6616,7 +7840,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         (``store.fno_eligible_underlyings``) against the coverage ledger
         (``store.list_coverage``) and returns the honest integrity verdict: each eligible spot
         that pulled ZERO expiries (gating RED — e.g. M&M, the special-character options-fetch
-        bug F2 fixes) or only PART of the 2020→today span (amber — e.g. BAJAJ-AUTO's 2024-only).
+        bug F2 fixes) or only PART of the 2020→today span (amber — a genuine late listing).
+        The compare crosses the eligible set's SPOT spellings into the coverage writer's
+        PRIMARY-F&O-form keyspace via the injected ``key_forms`` map
+        (DEC-MAPPING-INTEGRITY-FORM-KEY-001 — ``BAJAJ-AUTO`` reads its real ``BAJAJAUTO``
+        coverage instead of ``not_attempted`` forever).
         This is the real-time, self-checking guarantee that the core spot↔options mapping is
         precise, surfaced as ``is_green`` + a drill-down. Pure delegation to
         :mod:`brutex.data.mapping_integrity` (its grouping + reconciliation are at 100%
@@ -7097,7 +8325,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # thread (DEC-DASHBOARD-FASTREAD-001).
             return summarize_option_datasets(store.connection, lake)
 
-        rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        try:
+            rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        except SummaryColdWaitTimeout:
+            # COLD + first OPTIONS scan past the wait budget — the honest 503
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("options")
         # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
         # mirrors /coverage/spot: a pull-time stale serve is visible, never silent.
         return JSONResponse(
@@ -7163,7 +8396,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             weekday rule — Golden Rule #1); ``weekly`` = the rest.
         interval
             The lake timeframe to snapshot (default ``1day``); the 21-timeframe
-            vocab (1minute … 1day). An unknown label degrades to "pull spot first".
+            vocab (1minute … 1day). An unknown label is a clean 400 naming the
+            parameter, BEFORE any lake read, on all three tabs
+            (DEC-MOVERS-DAILY-FRESHNESS-001 folded MINOR — the pre-fix degrade
+            served a FALSE "No futures in the lake yet" / "No spot data" note
+            for junk intervals on a POPULATED lake).
         date
             The single ISO ``YYYY-MM-DD`` snapshot day; blank ⇒ today (UTC). A
             malformed value is a 400.
@@ -7187,6 +8424,26 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         day's close; volume/value are the cumulative FRESH session from 09:15.
         """
         store = _require_store()
+        # Interval VALIDATION (DEC-MOVERS-DAILY-FRESHNESS-001 folded MINOR):
+        # an interval token outside the canonical lake vocabulary (the ONE
+        # `LAKE_INTERVAL_LABELS` source of truth `interval_minutes` inverts —
+        # exactly the set all three tabs accept) is a clean 400 naming the
+        # parameter, BEFORE any lake read (before even the prebuild-gate
+        # flock probe). Pre-fix the junk token flowed into the compute and
+        # collapsed to an EMPTY candidate set whose payload minted the FALSE
+        # "No futures in the lake yet — pull the F&O futures first" /
+        # "No spot data in the lake yet" note on a POPULATED lake (executed
+        # repro, `interval=banana`, instrument_count:0). The pure
+        # `compute_*_candidates` degrade contracts are unchanged — this kills
+        # the misleading note at the one wire chokepoint.
+        if interval_minutes(interval) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unknown interval {interval!r}; "
+                    f"allowed: {sorted(LAKE_INTERVAL_LABELS.values())}"
+                ),
+            )
         # ECHO HONESTY (DEC-MOVERS-DAILY-ASOF-ECHO-HONEST-001): a non-intraday
         # interval (``1day`` / any unknown label) has NO intraday as-of — the bar
         # IS the day, so the VALUE already ignores ``time``
@@ -7361,14 +8618,25 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     # near) + the All/Monthly/Weekly cadence track (blank ⇒ all),
                     # normalised so the key and the computed set agree.
                     tier, trk = normalize_options_selectors(expiry, track)
+                    # The registry.duckdb CONTENT token (DEC-MEMORY-FOOTPRINT-HARDENING-001):
+                    # folded into the calendar / strike-chain / candidate keys below so a
+                    # CROSS-PROCESS metadata pull (nightly headless, second dashboard, CLI)
+                    # — which writes the registry WITHOUT bumping the write generation —
+                    # re-keys them on the next poll instead of serving the PRE-pull expiry
+                    # tiers + ATM steps until an unrelated ledger write. One os.stat on the
+                    # threadpool worker; a probe outage degrades to the pre-fix
+                    # generation-only envelope (see `_registry_key_component`).
+                    registry_token = _registry_key_component(lake_root)
                     # The AUTHORITATIVE vendor expiry calendar (DEC-MOVERS-CALENDAR-TIERS-001):
                     # the Near/Next/Far + Weekly/Monthly tier classification reads the FULL
                     # calendar from registry.duckdb (not the sparse lake-partition set), so a
                     # sparsely-pulled lake no longer mislabels a tier. Memoised once per write
-                    # generation (a metadata pull bumps it → re-read); `None` when the registry
+                    # generation AND per registry content token (a metadata pull in THIS
+                    # process bumps the generation; one in ANOTHER process moves the token —
+                    # either way a re-read); `None` when the registry
                     # is absent/empty → the lake-partition fallback (a CLI-only lake stays correct).
                     calendar_expiries = _options_calendar_cache.get_or_compute(
-                        f"options_calendar|{exch or ''}",
+                        f"options_calendar|{exch or ''}|r={registry_token}",
                         generation=generation,
                         compute=lambda: load_registry_expiries(
                             registry_path_for(store_path), exchange=exch
@@ -7387,7 +8655,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     registry_chain_for = make_registry_chain_loader(
                         registry_path_for(store_path),
                         exchange=exch,
-                        cache=_options_strikes_cache,
+                        # The registry content token folded into every chain key at
+                        # THIS key-build seam (the loader's signature stays stable)
+                        # — DEC-MEMORY-FOOTPRINT-HARDENING-001.
+                        cache=_RegistryKeyedCache(_options_strikes_cache, registry_token),
                         generation=generation,
                     )
                     # The stored-master index-vs-stock kind map for the RANK-time
@@ -7400,6 +8671,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     # below — the candidates carry the map's verdict STAMPED per row,
                     # so stale stamps would defeat a fresh map.
                     underlying_kinds, kinds_token = _underlying_kinds_cached(store)
+                    # The registry token is ALSO folded into the candidate key (the
+                    # kinds_token stamped-verdict precedent right above): the computed
+                    # candidates BAKE IN the calendar's tier resolution + the strike
+                    # chains' ATM steps, so a fresh calendar beside a stale cached
+                    # candidate set would still serve the pre-pull tiers
+                    # (DEC-MEMORY-FOOTPRINT-HARDENING-001, closed end-to-end).
                     key = (
                         candidate_key(
                             asset="options",
@@ -7410,7 +8687,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                             expiry_tier=tier,
                             expiry_track=trk,
                         )
-                        + f"|m={kinds_token}"
+                        + f"|m={kinds_token}|r={registry_token}"
                     )
                     opt_cands = _movers_cache.get_or_compute(
                         key,
@@ -7781,6 +9058,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
         # The workbook serialisation is CPU-bound over every report row — off the
         # event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
+        # CPU render of rows already fetched via _run_lake above, no lake I/O at
+        # render time; sanctioned in the threadpool pin allowlist (#1757).
         return Response(
             content=await run_in_threadpool(render_xlsx, rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
@@ -7856,6 +9136,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
         # One xlsx per year + zip packing is CPU-bound over every report row —
         # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
+        # CPU render of rows already fetched via _run_lake above, no lake I/O at
+        # render time; sanctioned in the threadpool pin allowlist (#1757).
         blob = await run_in_threadpool(
             render_report_zip, rows, mode=report_mode, min_pct=Decimal(str(min_pct))
         )
@@ -7883,15 +9166,21 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         return _render_reports_html()
 
     @app.get("/movers", response_class=HTMLResponse)
-    async def movers_page() -> str:
+    async def movers_page() -> HTMLResponse:
         """GET /movers — the reference-only markets-screen-style movers page (DEC-MOVERS-SNAPSHOT-VIEW-001).
 
         A point-in-time snapshot view (Spot / Futures / Options tabs; single date
         + timeframe + auto-filled time; click-to-sort on every column) over the
         ingested lake. The page loads on open + on every control change / manual
         Refresh (no auto-poll timer); each load is an O(P) one-time lake pass.
+
+        ``Cache-Control: no-store`` so a redeployed page is never shadowed by a
+        browser-cached older ``movers.html`` whose time-dropdown logic no longer
+        matches (DEC-MOVERS-TIME-SNAP-UX-001 — the operator's observed 09:15
+        reset was the stale pre-#1243 page served from the browser cache; the
+        exact ``/db`` precedent, DEC-DB-VIEWER-NOSTORE-001).
         """
-        return _render_movers_html()
+        return HTMLResponse(_render_movers_html(), headers={"Cache-Control": "no-store"})
 
     @app.get("/results", response_class=HTMLResponse)
     async def results_page() -> str:
@@ -7979,6 +9268,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         segment: str | None = Query(default=None),
         start: str | None = Query(default=None),
         end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/sweep/run — launch the brute-force grid sweep from the dashboard.
 
@@ -8003,6 +9293,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         The sweep reads the LOCAL lake (no vendor creds, no network); an empty /
         partly-pulled lake simply sweeps whatever slices exist and reports the
         honest tuple count in the progress feed (Golden Rule #10).
+
+        This single-exchange surface stays available for a targeted launch;
+        the multi-exchange R2 "blank ⇒ all 3 (NIFTY-first)" ONE-CLICK
+        institutional button — with the full R4 preflight + R20 estimator —
+        is ``POST /api/v1/sweep/oneclick/run`` (gap-hunt ruling 1/2/9).
+        ``acknowledge_sla_overrun`` threads straight to ``cmd_sweep_all``'s
+        parameter of the same name (ruling 2) — the kwargs it builds now pin
+        the SAME institutional defaults (R5) as the one-click route.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -8023,6 +9321,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 segment=segment,
                 start=start,
                 end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
                 today=date.today(),
             )
         except ValueError as exc:
@@ -8045,9 +9344,53 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             end=request.end,
         )
 
+        sweep_succeeded = False
+
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: run the grid sweep; the live tick streams to the progress file."""
-            return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
+            """Background body: run the grid sweep; the live tick streams to the progress file.
+
+            Captures the run's ``SupervisedGridSummary`` (G5b) and returns a
+            Mapping carrying an honest ``"note"`` (rendered by
+            :func:`~brutex.dashboard.sweep_runner.sweep_finish_note`), so
+            ``_finish_detail`` surfaces the failed / quarantined-prior tuple
+            counts instead of a bare "done". The int exit code (the nightly/cron
+            red contract) is unchanged upstream — only the RENDER is richer.
+
+            Round-12 adversarial-refuter fold (club O): a genuine internal
+            ``cmd_sweep_all`` failure (e.g. the engine's own ``max_combos``/grid
+            construction guards, ADR-0007 condition 3) that captured NO summary
+            surfaces a named ``cmd_sweep_all FAILED (exit N)`` note — never a
+            false "done" — and ``on_success``/``mark_dirty`` (below) only fires
+            on a REAL success (``exit == 0``), the rounds 5-8 law the
+            multi-exchange one-click route's own ``_work`` already carries.
+            """
+            nonlocal sweep_succeeded
+            captured: list[SupervisedGridSummary] = []
+            exit_code = run_sweep_from_request(
+                request,
+                lake_root=lake,
+                results_root=results_root,
+                on_summary=captured.append,
+            )
+            summary = captured[0] if captured else None
+            if exit_code == 0:
+                sweep_succeeded = True
+            elif summary is None:
+                return {"note": f"sweep {request.symbols}: cmd_sweep_all FAILED (exit {exit_code})"}
+            return {
+                "note": sweep_finish_note(
+                    exit_code=exit_code,
+                    tuples_failed=(summary.tuples_failed if summary is not None else None),
+                    tuples_quarantined_prior=(
+                        summary.tuples_quarantined_prior if summary is not None else None
+                    ),
+                )
+            }
+
+        def _on_success() -> None:
+            """Bump the write-generation iff the sweep genuinely succeeded (rounds 5-8 law)."""
+            if sweep_succeeded:
+                _summary_cache.mark_dirty()
 
         # On a SUCCESSFUL sweep, bump the dashboard write-generation (the sweep
         # _work never reports per-bar progress, so the _on_progress mark_dirty
@@ -8080,11 +9423,332 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             _work,
             total=1,
             detail=f"sweep {request.symbols}",
-            on_success=_summary_cache.mark_dirty,
+            on_success=_on_success,
             job_kind=JOB_KIND_SWEEP,
             cross_process_lock=False,
         )
         payload = request.to_dict()
+        payload["started"] = started
+        return JSONResponse(payload)
+
+    def _oneclick_plan_from_query(
+        *,
+        symbols: str | None,
+        intervals: str | None,
+        directions: str | None,
+        k: str | None,
+        sl: str | None,
+        tp: str | None,
+        top: int | None,
+        mode: str | None,
+        segment: str | None,
+        start: str | None,
+        end: str | None,
+        acknowledge_sla_overrun: bool,
+        run_id: str | None,
+    ) -> Any:
+        """Shared plan-resolution body for the one-click institutional routes below.
+
+        A thin route-layer wrapper over
+        :func:`~brutex.dashboard.sweep_runner.resolve_oneclick_sweep_plan` — a
+        bad field raises :class:`ValueError`, mapped to a 400 by the two
+        caller routes (never a deep background crash, Golden Rule #10).
+
+        run_id
+            Round-9 adversarial-refuter finding: the preflight (GET) and
+            launch (POST) routes each independently mint a fresh
+            ``sweep_run_id`` by default (``resolve_oneclick_sweep_plan``'s
+            own ``run_id_factory`` default), so a preflight's displayed id
+            NEVER matches the id the later launch actually uses — contrary
+            to ``OneClickSweepPlan``'s own R43 "one run_id threads
+            everything" documentation, which only actually holds WITHIN one
+            call. Passing the SAME caller-supplied ``run_id`` to both calls
+            (e.g. a future UI mints one client-side at first preflight and
+            reuses it through the confirm→launch step) achieves real
+            continuity; omitting it preserves the prior server-generated
+            behavior byte-for-byte.
+        """
+        if run_id is not None:
+            return resolve_oneclick_sweep_plan(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+                today=date.today(),
+                run_id_factory=lambda: run_id,
+            )
+        return resolve_oneclick_sweep_plan(
+            symbols=symbols,
+            intervals=intervals,
+            directions=directions,
+            k=k,
+            sl=sl,
+            tp=tp,
+            top=top,
+            mode=mode,
+            segment=segment,
+            start=start,
+            end=end,
+            acknowledge_sla_overrun=acknowledge_sla_overrun,
+            today=date.today(),
+        )
+
+    @app.get("/api/v1/sweep/oneclick/preflight")
+    async def api_sweep_oneclick_preflight(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: str | None = Query(default=None),
+        sl: str | None = Query(default=None),
+        tp: str | None = Query(default=None),
+        top: int | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/oneclick/preflight — R4/R20: preflight + LIVE estimate, NEVER launches.
+
+        The one-click institutional sweep button's "on click, BEFORE any
+        compute" step (R20): resolves the (possibly cross-exchange, R2 "blank
+        ⇒ all 3") selection into a :class:`~brutex.dashboard.sweep_runner.OneClickSweepPlan`
+        and returns the composed ``{sweep_run_id, ok, refusals, clamps,
+        estimator}`` verdict — the proceed-dialog's data source. Pure
+        read-only: no lock is taken, no lake write happens, nothing is
+        launched — safe to poll repeatedly.
+
+        run_id
+            Optional caller-supplied id (round-9 adversarial-refuter
+            finding): omitted, this route mints a fresh ``sweep_run_id``
+            server-side EVERY call, so it never matches whatever the later
+            ``POST /oneclick/run`` call mints on its own — a future UI that
+            wants the id shown at preflight time to be THE id the eventual
+            launch uses should mint one client-side and pass the SAME value
+            to both calls.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        try:
+            plan = _oneclick_plan_from_query(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+                run_id=run_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        verdict = oneclick_preflight_for_plan(plan, lake_root=lake, today=date.today())
+        return JSONResponse(verdict)
+
+    @app.post("/api/v1/sweep/oneclick/run")
+    async def api_sweep_oneclick_run(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: str | None = Query(default=None),
+        sl: str | None = Query(default=None),
+        tp: str | None = Query(default=None),
+        top: int | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/sweep/oneclick/run — launch the ONE-CLICK institutional sweep.
+
+        R5's institutional flip (gates ON, top-1000, refuse-whole) fanned out
+        across every exchange group the selection needs (SENSEX/BSE vs
+        NIFTY·BANKNIFTY/NSE, ruling 9), sharing ONE logical ``sweep_run_id``.
+        Re-runs the SAME preflight :func:`api_sweep_oneclick_preflight` computes
+        — a refusal in ANY group refuses the WHOLE logical run (never a
+        partial silent launch): the response is ``{"started": false, ...the
+        verdict}`` (loud, not an HTTP error — R16 layer 2, "a run that starts
+        is provably runnable"). On ``ok`` every group's engine run executes
+        SEQUENTIALLY on the ONE single-flight background job (one lake, one
+        writer); a second click while running is the existing no-op.
+
+        run_id
+            Optional caller-supplied id — see
+            :func:`api_sweep_oneclick_preflight`'s parameter of the same
+            name (round-9 adversarial-refuter finding): pass the SAME value
+            given to that earlier preflight call to make this launch's
+            ``sweep_run_id`` match what the operator was shown before
+            confirming, instead of a fresh server-generated id.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        try:
+            plan = _oneclick_plan_from_query(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+                run_id=run_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        verdict = oneclick_preflight_for_plan(plan, lake_root=lake, today=date.today())
+        if not verdict["ok"]:
+            payload = dict(verdict)
+            payload["started"] = False
+            return JSONResponse(payload)
+
+        results_root = default_results_root(lake)
+        state.sweep_progress_path = sweep_progress_file(results_root)
+        _LOG.info(
+            "sweep.oneclick.run.requested",
+            sweep_run_id=plan.sweep_run_id,
+            groups=[req.exchange for req in plan.requests],
+        )
+
+        any_group_succeeded = False
+        # Cap on each individual per-group failure detail BEFORE it is joined
+        # into the shared finish-detail note (round-7 finding) — the note as
+        # a whole is truncated at pull_jobs._FINISH_DETAIL_MAX (500 chars);
+        # capping each group's own contribution keeps every group's
+        # identity+brief reason visible regardless of how verbose any ONE
+        # group's exception message is.
+        per_group_detail_max = 80
+        # Cap on how many failing groups are NAMED explicitly in the note
+        # (round-8 finding): even with every individual detail capped above,
+        # enough FAILING GROUPS (today structurally at most 2 — NIFTY/
+        # BANKNIFTY→NSE, SENSEX→BSE — but never assume that stays true) could
+        # still push the joined note past the framework's overall length cap,
+        # silently dropping later groups the same way round 7's bug did.
+        # Naming at most this many keeps the joined note comfortably inside
+        # that cap regardless of how many exchange groups ever exist.
+        max_named_failed_groups = 4
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: run every exchange group's engine run, sequentially.
+
+            A round-5 adversarial-refuter review found a bare non-zero
+            exit-code return is SILENTLY discarded by
+            :class:`~brutex.dashboard.pull_jobs.BackgroundPullJob` — the
+            finish detail stays the generic ``"done"`` and ``on_success``
+            still fires, so a genuine per-group ``cmd_sweep_all`` failure
+            inside this multi-exchange fan-out was invisible to the
+            operator (worse than the single-group case: a sibling group's
+            real success could mask it entirely). ``BackgroundPullJob``/
+            ``_finish_detail`` already special-case a ``Mapping`` carrying
+            a non-empty ``"note"`` string (the pipeline's own honesty
+            convention) — reusing that EXISTING contract here, with zero
+            changes to the shared job framework, surfaces a failed group's
+            exit code loudly in the finish detail instead of a false
+            "done".
+
+            A round-6 adversarial-refuter review found two follow-on gaps,
+            both fixed here:
+
+            1. A group that RAISES (rather than returning a non-zero code)
+               used to propagate straight out of this loop, aborting every
+               REMAINING group silently — group order is deterministic
+               (alphabetical by exchange), so a BSE-specific failure would
+               systematically starve the NSE (NIFTY/BANKNIFTY) group every
+               time they were requested together. Each group's call is now
+               individually isolated: an exception is folded into the SAME
+               ``failed`` list/note contract as a non-zero exit code, and
+               the loop always continues to the next group.
+            2. ``on_success`` used to fire unconditionally whenever this
+               function returned without raising — including the new
+               all-groups-failed ``{"note": ...}`` shape, wrongly marking
+               the results cache dirty when NO new data had actually
+               landed. ``on_success`` now only fires when at least one
+               group genuinely succeeded (see ``any_group_succeeded``
+               below) — a partial success still invalidates the cache
+               (real new data DID land for that group), but a total
+               failure does not.
+
+            A round-7 adversarial-refuter review found a third gap: the
+            job framework's finish detail is truncated at
+            :data:`~brutex.dashboard.pull_jobs._FINISH_DETAIL_MAX` (500
+            chars) — an unusually verbose exception message from the
+            alphabetically-FIRST failing group (e.g. a DuckDB error
+            embedding SQL) could push the note past that cap, silently
+            dropping every LATER group's identity/detail from what the
+            operator ever sees (structurally at most 2 groups today, but
+            never assume that stays true). Each per-group detail is now
+            truncated to ``per_group_detail_max`` chars BEFORE joining, so
+            every group's identity+brief reason always survives regardless
+            of how verbose any one exception's message is.
+            """
+            nonlocal any_group_succeeded
+            failed: list[tuple[str, str]] = []
+            for group_request in plan.requests:
+                try:
+                    code = run_sweep_from_request(
+                        group_request, lake_root=lake, results_root=results_root
+                    )
+                except Exception as exc:  # isolate one group's crash from its siblings
+                    detail = f"raised {exc!r}"
+                    failed.append((group_request.exchange, detail[:per_group_detail_max]))
+                    continue
+                if code != 0:
+                    failed.append((group_request.exchange, f"exit {code}"))
+                else:
+                    any_group_succeeded = True
+            if failed:
+                shown = failed[:max_named_failed_groups]
+                summary = ", ".join(f"{exchange} ({detail})" for exchange, detail in shown)
+                omitted = len(failed) - len(shown)
+                if omitted:
+                    summary += f", +{omitted} more"
+                return {
+                    "note": (
+                        f"oneclick sweep {plan.sweep_run_id}: "
+                        f"{len(failed)}/{len(plan.requests)} exchange group(s) FAILED — {summary}"
+                    )
+                }
+            return 0
+
+        def _on_success() -> None:
+            """Bump the write-generation iff at least ONE exchange group succeeded."""
+            if any_group_succeeded:
+                _summary_cache.mark_dirty()
+
+        started = _pull_job.start(
+            _work,
+            total=len(plan.requests),
+            detail=f"oneclick sweep {plan.sweep_run_id}",
+            on_success=_on_success,
+        )
+        payload = dict(verdict)
         payload["started"] = started
         return JSONResponse(payload)
 
@@ -8095,9 +9759,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         direction: str | None = Query(default=None),
         rank_by: str | None = Query(default=None),
         preset: str | None = Query(default=None),
+        gate: str | None = Query(default=None),
         top: int = Query(
             default=SWEEP_LEADERBOARD_DEFAULT_TOP_N, ge=1, le=SWEEP_LEADERBOARD_MAX_TOP_N
         ),
+        min_trades: str | None = Query(default=None),
+        min_pf: str | None = Query(default=None),
+        min_dsr: str | None = Query(default=None),
+        max_abs_dd_pct: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/sweep/leaderboard — the ranked brute-force sweep winners (DEC-DASHBOARD-RESULTS-PAGE-001).
 
@@ -8136,8 +9805,35 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             operator choice must refuse loudly, never silently rank by
             something else). THIN adapter — the ranking logic lives entirely in
             ``brutex.ranking`` (this route only validates + threads the token).
+        gate
+            OPTIONAL gate coordinate to scope the served rows to
+            (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) — one of the payload's
+            ``gate_coordinates`` (``"ungated"``, a ``gate:<hash>`` config
+            tag, or the 0-row ``"gated"`` sentinel). Absent/blank applies the
+            deterministic default resolution (single coordinate → no scoping,
+            byte-identical rows; one gated + ungated → the GATED coordinate —
+            a zero-survivor gated re-run honestly serves the EMPTY set, never
+            the stale ungated rows; >1 known gated config → everything served
+            + labeled with ``mixed_gate_coordinates: true``, never a silent
+            pick). An UNKNOWN token is a clean 400 naming the available
+            coordinates (the ``preset`` precedent). Validation needs the
+            scanned coordinate set, so it runs inside the build — the raised
+            ``ValueError`` maps to the 400 at this route.
         top
             Leaderboard depth (1..500; default 50).
+        min_trades, min_pf, min_dsr, max_abs_dd_pct
+            OPTIONAL serving-side floors (DEC-RESULTS-TRUST-HONESTY-001 ·
+            B2a) — operator CONTROLS over a board that is ALREADY
+            MIN_TRADES=30 pre-gated by construction, not a missing gate.
+            Accepted as raw strings and parsed EAGERLY through the view's
+            fail-loud parsers (junk / non-finite / negative → a clean 400
+            naming the parameter — the ``preset`` refusal law; FastAPI's own
+            type coercion would 422, so the parse is explicit). Absent/blank
+            = inactive = the byte-identical legacy payload (pinned).
+            ``min_dsr`` floors the TUPLE-scoped ``deflated_sharpe`` (labeled
+            so on the page); ``min_cpcv`` is honestly NOT offered — no
+            per-row CPCV value is persisted anywhere this view can read, and
+            fabricating one is refused (Golden Rule #1).
 
         **Store-fault degrade (DEC-SWEEP-RESULTS-DEPTH-001, C3):** a typed
         :class:`~brutex.engine.results_store.ResultsStoreError` escaping the
@@ -8178,23 +9874,69 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         # values; None/blank resolves to None = the byte-identical legacy path.
         try:
             resolved_preset = resolve_preset_param(preset)
+            # B2a serving-side floors — parsed EAGERLY (before any threadpool
+            # hop / cache-key build) through the view's fail-loud parsers.
+            f_min_trades = parse_filter_int("min_trades", min_trades)
+            f_min_pf = parse_filter_float("min_pf", min_pf)
+            f_min_dsr = parse_filter_float("min_dsr", min_dsr)
+            f_max_abs_dd_pct = parse_filter_float("max_abs_dd_pct", max_abs_dd_pct)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # d1 cache-key-injection fix (DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+        # MIGRATION.md #1758): resolve rank_by to its EFFECTIVE column BEFORE
+        # it can enter the L2 cache key. The rank-time behaviour is UNCHANGED
+        # (build_sweep_leaderboard still receives the raw token and applies
+        # the identical allow-list fall-back), but the KEY must never carry
+        # the raw user-controlled string — a hostile rank_by like
+        # `sharpe_ratio|p=|g=ungated` could otherwise forge another request's
+        # key legs, and every unknown spelling would mint its own slot for
+        # the ONE default-ranked payload.
+        resolved_rank_by = resolve_rank_by_param(rank_by)
+        # Empty-filter-leg normalization (DEC-SWEEP-SERVING-GATE-PROVENANCE-001,
+        # round-2 LOW): the L2 key collapses '' and None to the same
+        # instrument/tf/direction slot (`quote((x or '').casefold())`), but
+        # ``build_sweep_leaderboard``'s ``_matches`` treats '' as an ACTIVE
+        # exclude-all filter while None = no filter — so two decode-identical
+        # keys computed DIFFERENT payloads (an order-dependent stale cross-serve
+        # for a hand-crafted client appending a blank ?instrument=/?tf=/?direction=).
+        # Normalize each leg to None-or-value ONCE and use it for BOTH the key
+        # leg AND every build call, so '' behaves as 'no filter' everywhere. The
+        # key bytes for a real (non-empty) value are UNCHANGED (`v or None` keeps
+        # any truthy string), so existing cache slots + goldens are untouched.
+        inst_n = instrument or None
+        tf_n = tf or None
+        dir_n = direction or None
 
         store = _require_store()
         store_path = getattr(store, "path", None)
         if not isinstance(store_path, Path):
             # No lake root wired → honest empty leaderboard (never a 500), mirroring
-            # the /api/v1/movers no-lake-root degrade.
-            empty = build_sweep_leaderboard(
-                Path("/nonexistent-lake"),
-                instrument=instrument,
-                tf=tf,
-                direction=direction,
-                rank_by=rank_by,
-                top_n=top,
-                preset=resolved_preset,
-            )
+            # the /api/v1/movers no-lake-root degrade. An EXPLICIT ?gate= token can
+            # never match the empty coordinate set → the same clean 400 as below.
+            try:
+                empty = build_sweep_leaderboard(
+                    Path("/nonexistent-lake"),
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
+                    rank_by=rank_by,
+                    top_n=top,
+                    preset=resolved_preset,
+                    gate=gate,
+                    min_trades=f_min_trades,
+                    min_pf=f_min_pf,
+                    min_dsr=f_min_dsr,
+                    max_abs_dd_pct=f_max_abs_dd_pct,
+                )
+            except UnknownGateCoordinateError as exc:
+                # An explicit ?gate= token can never match the empty coordinate
+                # set → the SAME sanitised, bounded 400 as the wired-store arm
+                # below (a genuine unexpected ValueError now surfaces as a 500,
+                # not a mislabelled client 400).
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown gate coordinate: {_sanitize_gate_token(exc.coordinate)}",
+                ) from exc
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
 
@@ -8245,29 +9987,59 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # The STABLE (revision-free) filter key. Casefold the filter
             # axes: build_sweep_leaderboard's _matches filters them
             # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
-            # leaderboard and must share ONE cache slot (rank_by stays raw — it
-            # is matched exactly against RANKABLE_COLUMNS, not casefolded; the
-            # RESOLVED preset token rides too — a preset-ranked payload must
-            # never share a slot with the default ordering, and blank/absent
-            # share ONE slot because both resolve to None).
+            # leaderboard and must share ONE cache slot. The |r= leg carries
+            # the RESOLVED rank column (resolve_rank_by_param above), never
+            # the raw query string — every rank_by spelling that resolves to
+            # one column shares ONE slot (the payload echoes the resolved
+            # value, so the shared slot is byte-exact); the RESOLVED preset
+            # token rides too — a preset-ranked payload must never share a
+            # slot with the default ordering, and blank/absent share ONE
+            # slot because both resolve to None.
+            # The |g= leg (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): the gate
+            # scope changes the served ROW SET, so an explicit ?gate= token
+            # (stripped raw — resolution needs the scan) must occupy its OWN
+            # L2 slot; absent/blank share ONE slot (the default resolution is
+            # deterministic per scan revision).
+            # The RESOLVED B2a filter floors ride the key too
+            # (DEC-RESULTS-TRUST-HONESTY-001: parsed values, so "30" and
+            # " 30 " share one slot; absent floors read the stable empty
+            # token = the legacy slot).
+            # Poisoning-safe by CONSTRUCTION (the d1 injection fix,
+            # MIGRATION.md #1758): EVERY user-controlled leg is percent-
+            # encoded (quote, safe='') before it enters the key, so the '|'
+            # and '=' delimiters can never be forged from a query value —
+            # two requests build the same key ONLY when every decoded leg is
+            # identical; a must-400 request can never alias a cached 200.
             lb_key = (
-                f"sweep_leaderboard|i={(instrument or '').casefold()}"
-                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
-                f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+                f"sweep_leaderboard|i={quote((inst_n or '').casefold(), safe='')}"
+                f"|tf={quote((tf_n or '').casefold(), safe='')}"
+                f"|d={quote((dir_n or '').casefold(), safe='')}"
+                f"|r={quote(resolved_rank_by, safe='')}"
+                f"|p={quote(resolved_preset or '', safe='')}"
+                f"|g={quote((gate or '').strip(), safe='')}|n={top}"
                 f"|casc={casc_rev or 'outage'}|comp={comp_rev or 'outage'}"
+                f"|mt={'' if f_min_trades is None else f_min_trades}"
+                f"|mp={'' if f_min_pf is None else f_min_pf!r}"
+                f"|md={'' if f_min_dsr is None else f_min_dsr!r}"
+                f"|xd={'' if f_max_abs_dd_pct is None else f_max_abs_dd_pct!r}"
             )
 
             def _fresh() -> dict[str, Any]:
                 return build_sweep_leaderboard(
                     lake_root,
-                    instrument=instrument,
-                    tf=tf,
-                    direction=direction,
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
                     rank_by=rank_by,
                     top_n=top,
                     preset=resolved_preset,
+                    gate=gate,
                     cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
                     composite=load_composite_index(sweeps_root),
+                    min_trades=f_min_trades,
+                    min_pf=f_min_pf,
+                    min_dsr=f_min_dsr,
+                    max_abs_dd_pct=f_max_abs_dd_pct,
                 ).to_dict()
 
             if rev is None:
@@ -8291,11 +10063,6 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # instance's pull-time adaptive floor (bounded, logged stale
             # serves) instead of paying the full scan per poll.
             gen = revision_generation(rev)
-            scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
-                "sweep_scan",
-                generation=gen,
-                compute=lambda: load_sweep_scan(lake_root),
-            )
             # Level 1b (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, fix round 1):
             # ONE composite-index read per `composite_index_revision` token —
             # the slot's generation rides the ONE `revision_generation` digest
@@ -8308,12 +10075,177 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # (refuter-reproduced; now killed by the route regression). Any
             # aggs write moves a results-depth dir mtime → new token →
             # recompute; a sweeps-only move (store flush) leaves the cached
-            # index untouched.
+            # index untouched. HOISTED above the rollup arm at the
+            # DEC-RESULTS-TOPK-ROLLUP-001 merge-reconcile: the rollup serve
+            # predicate below must consult the ACTIVE composite state.
             composite_index: CompositeIndex = _sweep_leaderboard_cache.get_or_compute(
                 "composite_index",
                 generation=revision_generation(comp_rev or "outage"),
                 compute=lambda: load_composite_index(sweeps_root),
             )
+            # A JOINED non-empty composite index feeds preset ORDERING (the
+            # composite preset's primary axis AND e.g. min_dd_first's
+            # composite tiebreak — see _preset_rank_record), which the
+            # persisted rollup union structurally cannot cover (the joined
+            # score is NOT a persisted ResultRow field; the union axes are
+            # probed over composite_score=None records). The exact
+            # "de-inerting forces a conscious decision" class the rollup
+            # design named — decided at the merge-reconcile: preset-ordered
+            # polls stay LEGACY while the composite index is active.
+            composite_active = composite_index.state == "joined" and bool(composite_index.by_run_id)
+            # ── The rollup serve path (DEC-RESULTS-TOPK-ROLLUP-001) ──
+            # Serve predicate: ONLY the UNFILTERED leaderboard (instrument /
+            # tf / direction all ABSENT — an empty-string param is a
+            # DEGENERATE real filter and stays legacy), and ONLY orderings
+            # the persisted union covers: every rank_by (persisted-field
+            # DESC + run_id-ASC ties) always; a PRESET ordering only while
+            # the composite index is inactive (see composite_active above).
+            # top ≤ MAX_TOP_N=500 ≤ K=1000. The three-outcome ladder
+            # (fresh / stale-serve-with-note / legacy-fallback+rebuild) runs
+            # ONCE per revision generation (the stable level-1 slot below,
+            # generation-keyed per DEC-NAV-CACHES-FLOOR-REKEY-001 — the
+            # branch-era rev-in-key fold is superseded by the generation
+            # bridge); repeat polls are level-2 payload hits.
+            serve: RollupServe | None = None
+            if (
+                instrument is None
+                and tf is None
+                and direction is None
+                # MERGE-RECONCILE (the S2 club fold): the B2a serve floors
+                # (DEC-RESULTS-TRUST-HONESTY-001) are FILTERS under the
+                # UNFILTERED-only serve law — a floored request must take the
+                # legacy full scan (the K-union cannot answer a floored
+                # top-N); build_sweep_leaderboard's superset_only guard
+                # enforces the same invariant structurally.
+                and f_min_trades is None
+                and f_min_pf is None
+                and f_min_dsr is None
+                and f_max_abs_dd_pct is None
+                # #1467 fold seam (DEC-SWEEP-SERVING-GATE-PROVENANCE-001 ×
+                # DEC-RESULTS-TOPK-ROLLUP-001): gate-scoped serves bypass the
+                # rollup — a gate-coexistence lake (one run_id under two gate
+                # coordinates) structurally cannot be one run_id-keyed rollup
+                # store; the legacy scan owns gate serving (the composite-
+                # preset fallback precedent above). A blank ?gate= is the same
+                # degenerate-param class as the filter axes and stays legacy;
+                # the gate-None rollup serve carries the ROW-derived ungated
+                # coordinate (load_sweep_scan_via_rollup — any gated row in
+                # the union forces the legacy fallback there, so a superset
+                # scan is never gate-scoped and the rollup wire stays
+                # byte-identical to the legacy payload, parity-pinned).
+                and gate is None
+                # Train-A refresh fold seam (DEC-REGIME-REJECT-TIER-001 ×
+                # DEC-RESULTS-TOPK-ROLLUP-001): ``regime_robust`` is a
+                # MEMBERSHIP-changing preset (it filters rows by cascade
+                # verdicts before ranking), so it is a FILTER under the
+                # UNFILTERED-only serve law — applying the membership cut
+                # POST-union would silently under-serve (a row below the
+                # K-union cut that belongs in the filtered top-N never
+                # appears). It rides the legacy full scan, exactly the
+                # composite-preset + gate-scoped fallback precedents above;
+                # build_sweep_leaderboard's superset_only guard enforces the
+                # same invariant structurally (defense-in-depth).
+                and resolved_preset != REGIME_ROBUST_PRESET
+                and (resolved_preset is None or not composite_active)
+            ):
+                serve = _sweep_leaderboard_cache.get_or_compute(
+                    "sweep_rollup",
+                    generation=gen,
+                    compute=lambda: load_sweep_scan_via_rollup(
+                        lake_root, rev=rev, log_gate=_rollup_log_gate
+                    ),
+                )
+            if serve is not None and serve.scan is not None:
+                rollup_scan = serve.scan
+                behind = serve.behind_stores
+                conflict = serve.conflict_suspect
+                # The d1 cache-key-injection law (DEC-SWEEP-SERVING-GATE-
+                # PROVENANCE-001, MIGRATION.md #1758) applies HERE too: the
+                # |r= leg carries the RESOLVED rank column and every
+                # user-controlled leg is percent-encoded, so the '|'/'='
+                # delimiters can never be forged from a query value; the |g=
+                # leg mirrors the legacy lb_key (distinct ?gate= tokens can
+                # never alias one rollup slot).
+                rollup_key = (
+                    f"sweep_leaderboard|src=rollup"
+                    f"|r={quote(resolved_rank_by, safe='')}"
+                    f"|p={quote(resolved_preset or '', safe='')}"
+                    f"|g={quote((gate or '').strip(), safe='')}|n={top}"
+                    f"|b={behind}|c={int(conflict)}"
+                    f"|casc={casc_rev or 'outage'}|comp={comp_rev or 'outage'}"
+                )
+
+                def _rollup_payload() -> dict[str, Any]:
+                    # The rollup wire carries the SAME cascade + composite
+                    # decoration as the legacy level-2 build (the #1749 join
+                    # landed on main after the branch cut — a rollup serve
+                    # must never silently drop the verdicts/scores the legacy
+                    # wire carries). The composite index is the cached HOISTED
+                    # level-1b slot; a rollup-served row set never REORDERS on
+                    # the composite (see the predicate above).
+                    payload = build_sweep_leaderboard(
+                        lake_root,
+                        rank_by=rank_by,
+                        top_n=top,
+                        scan=rollup_scan,
+                        preset=resolved_preset,
+                        cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
+                        composite=composite_index,
+                    ).to_dict()
+                    # Honest additive staleness notes (MAJOR-1) — EMIT-ON-
+                    # nonzero/true so a FRESH serve's payload shape is
+                    # byte-identical to the legacy wire (parity-pinned).
+                    if behind > 0:
+                        payload["rollup_behind_stores"] = behind
+                    if conflict:
+                        payload["rollup_conflict_suspect"] = True
+                    return payload
+
+                return _sweep_leaderboard_cache.get_or_compute(
+                    rollup_key,
+                    generation=gen,
+                    compute=_rollup_payload,
+                    # The unfiltered coordinate's last-known pointer (the
+                    # probe-outage arm above serves lb_key).
+                    mru_prefix=lb_key,
+                )
+            # Hook-C freshness witness (the refold composition fix over
+            # DEC-NAV-CACHES-FLOOR-REKEY-001): the level-1 slot below can be
+            # FLOOR-SERVED stale during a running job, and
+            # `rebuild_rollup_from_scan_best_effort` stamps a FRESH glob +
+            # rev sweep — rebuilding from a floored (stale) scan would
+            # mis-stamp the rollup as covering stores its rows never folded
+            # (a later poll would then serve it FRESH). Hook C therefore
+            # fires ONLY when the legacy scan was genuinely COMPUTED in this
+            # request (the branch-era rev-in-key fold made that implicit; the
+            # generation bridge does not).
+            scan_computed = False
+
+            def _legacy_scan() -> SweepScan:
+                nonlocal scan_computed
+                scan_computed = True
+                return load_sweep_scan(lake_root)
+
+            scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
+                "sweep_scan",
+                generation=gen,
+                compute=_legacy_scan,
+            )
+            if (
+                serve is not None
+                and serve.scan is None
+                and scan_computed
+                and _rollup_rebuild_gate.should_emit(("rebuild", rev))
+            ):
+                # Hook C (DEC-RESULTS-TOPK-ROLLUP-001): the fallback poll just
+                # built the full legacy scan anyway — write the rollup FROM it
+                # as a best-effort byproduct (fenced inside; at most once per
+                # revision via the gate), so the NEXT revision serves rollup-
+                # first and the system converges with Hooks A/B as pure
+                # latency optimizations.
+                from brutex.engine.results_rollup import rebuild_rollup_from_scan_best_effort
+
+                rebuild_rollup_from_scan_best_effort(lake_root / SWEEPS_DIRNAME, scan)
             # Level 2: the ranked payload per stable filter key (same token
             # generation; `mru_prefix` records the last-known pointer the
             # probe-outage arm above serves; the cascade join parses ONCE per
@@ -8323,21 +10255,43 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 generation=gen,
                 compute=lambda: build_sweep_leaderboard(
                     lake_root,
-                    instrument=instrument,
-                    tf=tf,
-                    direction=direction,
+                    instrument=inst_n,
+                    tf=tf_n,
+                    direction=dir_n,
                     rank_by=rank_by,
                     top_n=top,
                     scan=scan,
                     preset=resolved_preset,
+                    gate=gate,
                     cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
                     composite=composite_index,
+                    min_trades=f_min_trades,
+                    min_pf=f_min_pf,
+                    min_dsr=f_min_dsr,
+                    max_abs_dd_pct=f_max_abs_dd_pct,
                 ).to_dict(),
                 mru_prefix=lb_key,
             )
 
         try:
             return JSONResponse(await _run_lake(_resolve))
+        except UnknownGateCoordinateError as exc:
+            # An UNKNOWN explicit ?gate= token (DEC-SWEEP-SERVING-GATE-
+            # PROVENANCE-001): the validation runs inside the build (it needs
+            # the scanned coordinate set, so it cannot be eager like preset's)
+            # and raises the TYPED UnknownGateCoordinateError carrying the
+            # offending token — mapped here to a clean 400 whose detail is
+            # SANITISED (control chars stripped) and LENGTH-BOUNDED, never the
+            # raw user string (info-leak / log-spam guard), mirroring the
+            # store_error_payload sibling's no-raw-str discipline. A genuine
+            # unexpected ValueError deep in the build is NO LONGER caught here —
+            # it propagates to the framework's 500, so a real server bug is
+            # never mislabelled a client 400. Nothing is cached for the refused
+            # key (the compute raised).
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown gate coordinate: {_sanitize_gate_token(exc.coordinate)}",
+            ) from exc
         except ResultsStoreError as exc:
             # C3 (DEC-SWEEP-RESULTS-DEPTH-001): a typed store fault escaping the
             # per-store skip net degrades to the honest error payload — 200 with
@@ -8347,12 +10301,140 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # server-side and serves only the stable generic markers.
             return JSONResponse(store_error_payload(exc))
 
+    @app.get("/api/v1/sweep/temporal")
+    async def api_sweep_temporal(
+        run_id: str = Query(min_length=1),
+        horizon: str = Query(min_length=1),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/temporal — one combo's per-period drill (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+
+        The ``/results`` row expander's ONE endpoint: ``quarter``/``month``
+        serve the row's STORED per-period columns (the rank-time finalist fold
+        — ``[n_trades, net_pnl_paisa, wins, max_dd_paisa]`` cells; ``quarter``
+        additionally derives the half-year n/pnl/wins roll-up server-side,
+        half-year max-DD honestly absent); ``day``/``week`` aggregate the
+        #1275 results-depth TRADES sidecars (IST exit-date / ISO-week
+        ``[n, pnl, wins]`` buckets — no DD at that granularity). The dashboard
+        NEVER re-simulates (graft 11): a pre-extension row reads ``status:
+        "absent"`` and missing depth artifacts read ``status: "awaiting"`` —
+        never a 500, never a fabricated bucket.
+
+        Validation is EAGER and disk-free: an unknown ``horizon`` or a
+        non-64-lowercase-hex ``run_id`` is a clean 400 with ZERO disk touches
+        (spy-pinned by test — a hostile run_id never reaches a path build).
+
+        Caching (the ``api_sweep_leaderboard`` two-level precedent, same
+        :class:`MoversSnapshotCache` instance): ``quarter``/``month`` key on
+        the ``sweep_results_revision`` content token (scan + run_id row index
+        computed once per revision — a repeat drill click is O(1)); ``day``/
+        ``week`` key on the ``sweep_runs`` tree token PLUS the served stamp's
+        own ``mtime_ns:size`` stat token (a rebuilt sidecar invalidates).
+        Honest envelope (Golden Rule #10): the FIRST ``day``/``week`` drill
+        per token pays the O(run dirs × stamps) index walk + an O(trades of
+        ONE combo) streamed fold; a probe outage (token ``None``) computes
+        fresh and caches NOTHING (never a stale serve, never a poisoned key).
+        """
+        if horizon not in TEMPORAL_HORIZONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown horizon {horizon!r} — one of: {', '.join(TEMPORAL_HORIZONS)}",
+            )
+        if not is_valid_run_id(run_id):
+            raise HTTPException(
+                status_code=400,
+                detail="run_id must be a 64-character lowercase-hex run identity",
+            )
+        store = _require_store()
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
+            # No lake root wired → the honest absent shape (never a 500),
+            # mirroring the /api/v1/sweep/leaderboard no-lake degrade.
+            return JSONResponse(
+                {
+                    "status": "absent",
+                    "run_id": run_id,
+                    "horizon": horizon,
+                    "detail": "no lake root wired — start the dashboard with a lake",
+                }
+            )
+        lake_root = store_path.parent
+
+        def _resolve() -> dict[str, Any]:
+            """Cache-or-compute the drill payload on a threadpool worker."""
+            if horizon in ("quarter", "month"):
+                rev = sweep_results_revision(lake_root)
+
+                def _fresh_stored() -> dict[str, Any]:
+                    scan = load_sweep_scan(lake_root)
+                    row = next((r for r in scan.rows if r.run_id == run_id), None)
+                    return stored_horizon_payload(row, run_id=run_id, horizon=horizon)
+
+                if rev is None:
+                    return _fresh_stored()
+                scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_scan|rev={rev}",
+                    generation=0,
+                    compute=lambda: load_sweep_scan(lake_root),
+                )
+                row_index = _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_temporal_index|rev={rev}",
+                    generation=0,
+                    compute=lambda: {r.run_id: r for r in scan.rows},
+                )
+                return _sweep_leaderboard_cache.get_or_compute(
+                    f"sweep_temporal|rev={rev}|run={run_id}|h={horizon}",
+                    generation=0,
+                    compute=lambda: stored_horizon_payload(
+                        row_index.get(run_id), run_id=run_id, horizon=horizon
+                    ),
+                )
+            token = sweep_runs_token(lake_root)
+            if token is None:
+                # No freshness signal → compute fresh, cache nothing (the
+                # lake_revision "None = no signal" doctrine).
+                return sidecar_horizon_payload(
+                    build_sidecar_index(lake_root).get(run_id), run_id=run_id, horizon=horizon
+                )
+            index = _sweep_leaderboard_cache.get_or_compute(
+                f"sweep_runs_index|tok={token}",
+                generation=0,
+                compute=lambda: build_sidecar_index(lake_root),
+            )
+            paths = index.get(run_id)
+            if paths is None:
+                return sidecar_horizon_payload(None, run_id=run_id, horizon=horizon)
+            stamp_tok = stamp_stat_token(paths)
+            return _sweep_leaderboard_cache.get_or_compute(
+                f"sweep_temporal|tok={token}|stamp={stamp_tok}|run={run_id}|h={horizon}",
+                generation=0,
+                compute=lambda: sidecar_horizon_payload(paths, run_id=run_id, horizon=horizon),
+            )
+
+        try:
+            return JSONResponse(await _run_lake(_resolve))
+        except ResultsStoreError as exc:
+            # The C3 degrade posture, endpoint-shaped: store_error_payload logs
+            # the full detail server-side; only its stable sanitized marker
+            # reaches the wire (never str(exc), never a 500).
+            degraded = store_error_payload(exc)
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "run_id": run_id,
+                    "horizon": horizon,
+                    "detail": degraded["error"],
+                }
+            )
+
     # ── One-click artifact routes (DEC-OPERATOR-PAGE-REAL-001) ──────────
     # The ONE integration-adapter surface over the sweep-oneclick artifact
     # CONTRACTS (manifest.json / top100.json / events.jsonl / trades pages) —
     # thin closures over the 100%-unit-tested `oneclick_artifacts` +
-    # `oneclick_view` modules, offloaded via `run_in_threadpool` (the app.py
-    # doctrine). Unknown run dirs are HONEST 200 `status:"awaiting"` payloads
+    # `oneclick_view` modules, offloaded via the app's 32-token `_run_lake`
+    # lake limiter (DEC-DASHBOARD-LAKE-IO-LIMITER-001/-002 — every artifact
+    # read lives under the lake root, so a wedged lake volume pins lake
+    # tokens, never the default pool). Unknown run dirs are HONEST 200
+    # `status:"awaiting"` payloads
     # (polls must never error-loop); ONLY a genuinely bad request — missing/
     # unsafe run_id, a junk BRUTEX_ONECLICK_FIXTURE_ROOT — is a 400.
 
@@ -8616,6 +10698,73 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
         return JSONResponse(await _run_lake(_resolve))
 
+    @app.get("/api/v1/oneclick/baseline")
+    async def api_oneclick_baseline(
+        run_id: str | None = Query(default=None),
+        instrument: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/baseline — one run's STORED buy-&-hold series (R27).
+
+        DEC-RESULTS-TRUST-HONESTY-001 (B1, audit BLOCKER 1): the baselines the
+        results-depth pass already computes + stores
+        (``sweep_runs/<run_id>/baseline-<instrument>.json``, filename resolved
+        via the top100.json object root's ``baselines`` map) finally get a
+        serving route. STORED bytes only — a missing/interim/damaged artifact
+        chain reads a loud ``awaiting``/``corrupt`` payload, never a 500 and
+        never a recomputed series; the filename ref is validated as ONE safe
+        path segment before any disk touch (a tampered map cannot traverse).
+        ``instrument`` may be omitted when exactly one baseline is stored.
+        Cached on the run-dir + top100 stat tokens (the sibling-route law).
+        """
+        rid = _oneclick_require_run_id(run_id)
+        wanted = instrument.strip() if instrument is not None and instrument.strip() else None
+
+        def _resolve() -> dict[str, Any]:
+            """Resolve the baseline payload off the event loop (stat-token cached)."""
+            root, fixture_root = _oneclick_roots()
+            fixture_active = fixture_root is not None
+            if root is None:
+                return oneclick_view.build_baseline_payload(
+                    rid,
+                    oneclick_artifacts.BaselineResult(
+                        "awaiting",
+                        wanted,
+                        None,
+                        None,
+                        (),
+                        "no lake configured — awaiting real run artifact",
+                        None,
+                    ),
+                    fixture_root_active=fixture_active,
+                )
+            run_dir = oneclick_artifacts.runs_root(root) / rid
+            # The compute depends on top100.json (the baselines map) AND the
+            # baseline file; the run DIR stat moves on any atomic replace
+            # inside it (os.replace updates the directory mtime), so the pair
+            # (top100 rev, run-dir rev) is a sound invalidation token.
+            top100_rev = oneclick_artifacts.artifact_revision(
+                run_dir / oneclick_artifacts.TOP100_FILENAME
+            )
+            dir_rev = oneclick_artifacts.artifact_revision(run_dir)
+
+            def _fresh() -> dict[str, Any]:
+                return oneclick_view.build_baseline_payload(
+                    rid,
+                    oneclick_artifacts.load_baseline_result(run_dir, wanted),
+                    fixture_root_active=fixture_active,
+                )
+
+            if top100_rev is None or dir_rev is None:
+                return _fresh()
+            return _oneclick_cache.get_or_compute(
+                f"oc_baseline|{rid}|i={wanted or ''}|t100={top100_rev}|dir={dir_rev}"
+                f"|fx={fixture_active}",
+                generation=0,
+                compute=_fresh,
+            )
+
+        return JSONResponse(await _run_lake(_resolve))
+
     @app.get("/api/v1/oneclick/events")
     async def api_oneclick_events(
         run_id: str | None = Query(default=None),
@@ -8681,7 +10830,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     ensure_ascii=False,
                 )
             return oneclick_artifacts.serve_revision_cached(
-                _oneclick_cache,
+                _oneclick_events_cache,
                 _oneclick_outages,
                 coordinate=coordinate,
                 probe=probe,
@@ -8765,7 +10914,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 fixture_root_active=fixture_root is not None,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(
@@ -8901,8 +11050,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         path = resolve_log_file()
         # A bounded read, but still DISK I/O — on a stalled/contended volume a
         # synchronous tail would wedge the event loop with every other request
-        # behind it, so it rides the same threadpool offload as the lake reads
-        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # behind it, so it runs off the loop on a threadpool worker
+        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001). Deliberately on the DEFAULT
+        # AnyIO pool (not the lake limiter) — resolve_log_file() tails the LOCAL
+        # rotating log under ~/.brutex/logs, not lake I/O, and riding _run_lake
+        # would let a lake outage starve the log route; sanctioned in the
+        # threadpool pin allowlist (#1757).
         records = await run_in_threadpool(tail_records, path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 
@@ -9438,7 +11591,8 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
         security_id / interval /
         window dates / status / bars / attempts / last_error / streak / in-pull
-        fetches / deduped net-new bars). READ-ONLY:
+        fetches / deduped net-new bars / streak provenance —
+        DEC-STREAK-PROVENANCE-001). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
         matches the DuckDB-table grid so the /db viewer renders it identically.
@@ -9460,8 +11614,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         columnar scan (O(total rows + delta footers), NOT the O(rows) Python
         record fold) and a repeat click within one stamp is an O(1) cache
         handoff + an O(page) format. A legacy-shape ledger / a persistently
-        malformed delta / no DuckDB conn degrades to the byte-identical cached
-        Python parse (``window_ledger_rows_cached``). The page preserves the
+        malformed delta / no DuckDB conn degrades to the byte-identical
+        stamp-cached Python parse, sliced O(page)
+        (``window_ledger_rows_page`` — DEC-MEMORY-FOOTPRINT-HARDENING-001
+        fix 3: the records family is the ONE resident per-row
+        representation; the degrade never re-materializes the whole-ledger
+        rows projection). The page preserves the
         canonical :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort
         + derived columns byte-for-byte (fast-equals-legacy pinned; ONE
         row-shape source: ``window_ledger.ledger_record_row``).
@@ -9485,6 +11643,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             "bars_net_new",
             "empty_retries",
             "transient_retries",
+            # The per-bump streak lineage (DEC-STREAK-PROVENANCE-001) — a trailing
+            # append, so the positional IST cells (idx 9/10) are untouched and the
+            # column-generic /db grid renders it with ZERO JS change.
+            "streak_provenance",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -9769,7 +11931,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # INTERIM Run-Sweep launch page (DEC-SWEEP-LAUNCH-BUTTON-INTERIM-001):
     # strictly additive registration — /launch + /api/v1/launch/* live in
     # brutex/dashboard/launch_button.py (single-flight detached CLI launch).
-    register_launch_routes(app, lake_root_resolver=store_lake_root_resolver(instrument_store))
+    register_launch_routes(
+        app,
+        lake_root_resolver=store_lake_root_resolver(instrument_store),
+        run_lake=_run_lake,
+    )
 
     return app
 
@@ -9789,6 +11955,44 @@ def _metadata_progress_sync(
     fail a test, not pass CI green) instead of being pragma-hidden.
     """
     job.sync_from_ledger(completed=completed, total=total, bars=None, failed=0, current=current)
+
+
+def _detached_sweep_cancel_root(state: Mapping[str, Any], lake: Path, *, default: Path) -> Path:
+    """Resolve the results root a DETACHED launch-page sweep actually PROBES.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001 review fold: the launch page spawns
+    ``brutex sweep-all --results-root <lake>/sweeps/launch-<stamp>-<card>``
+    (:func:`brutex.dashboard.launch_button.launch` records that path in the
+    launch state), and ``cmd_sweep_all`` builds its cancel probe over ITS OWN
+    ``out_root`` — so a sidecar written at the DEFAULT ``<lake>/sweeps`` root
+    would never be observed by the detached run (a fabricated
+    ``{"cancelling": true}``). This helper returns the state's recorded
+    ``results_root`` iff it is a string path CONFINED under ``<lake>/sweeps``
+    (a hostile / relocated / non-string value falls back to *default* — the
+    route never writes a sidecar outside the lake's sweeps tree), else
+    *default* (a legacy state with no recorded root).
+    """
+    raw = state.get("results_root")
+    if not isinstance(raw, str) or not raw.strip():
+        return default
+    candidate = Path(raw)
+    sweeps = (lake / "sweeps").resolve(strict=False)
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError:
+        # Pathological path resolution (e.g. an ELOOP symlink cycle) — the
+        # recorded root is unusable, fall back to the default (pragma LIFTED,
+        # combined-PR fix round 2 — directly unit-tested, the #1614/#1524
+        # killable-mutant-suppression purge precedent).
+        return default
+    if resolved == sweeps or sweeps in resolved.parents:
+        return candidate
+    _LOG.warning(
+        "sweep_cancel.detached_root_rejected",
+        recorded_root=raw,
+        note="launch-state results_root escapes <lake>/sweeps — using the default root",
+    )
+    return default
 
 
 def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | None] | None:
@@ -9854,6 +12058,38 @@ def _job_lake_root_resolver(instrument_store: Any) -> Callable[[], Path | None]:
         return resolve_lake_root()
 
     return _resolve
+
+
+def _dhan_feed_root_resolver(
+    base: Callable[[], Path | None],
+) -> Callable[[], Path | None]:
+    """Nest a top-root resolver *base* onto the Dhan feed subtree ``<top>/feeds/dhan/``.
+
+    Pure wrapper (O(1), zero I/O): the value of *base* — the top write root — is
+    resolved to ``feed_lake_root(<top>, feed="dhan")``; a ``None`` top root (no
+    resolvable root) propagates ``None`` so the job takes no lock (mirroring
+    :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob._acquire_singleflight`).
+    Split from :func:`_dhan_job_lake_root_resolver` so both arms are directly tested.
+    """
+
+    def _resolve() -> Path | None:
+        root = base()
+        return None if root is None else feed_lake_root(root, feed="dhan")
+
+    return _resolve
+
+
+def _dhan_job_lake_root_resolver(instrument_store: Any) -> Callable[[], Path | None]:
+    """Build the DHAN pull job's single-flight lake-root resolver — the ``feeds/dhan/`` root.
+
+    DEC-DHAN-PULL-SURFACE-001. The Dhan job flocks its OWN write tree
+    (``feed_lake_root(<top>, feed="dhan")`` == ``<top>/feeds/dhan/``), distinct from
+    Groww's top-root flock (:func:`_job_lake_root_resolver`), so a Dhan pull and a
+    Groww pull never contend on one lock (they write DISJOINT trees) while two Dhan
+    pulls serialise. Thin composition of :func:`_dhan_feed_root_resolver` over the
+    Groww job's own top-root resolver.
+    """
+    return _dhan_feed_root_resolver(_job_lake_root_resolver(instrument_store))
 
 
 def _resume_singleflight_probe(
@@ -10241,7 +12477,8 @@ def _fill_default_dates(html: str) -> str:
     # (DEC-UNIVERSE-SELECTION-PRECISE-001); the browser now refuses it. The
     # settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001) still governs what a
     # today-inclusive range actually fetches.
-    max_iso = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date().isoformat()
+    # The ONE canonical IST root (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+    max_iso = datetime.now(tz=_IST_TZ).date().isoformat()
     return (
         html.replace("__BRUTEX_DATE_FROM__", from_iso)
         .replace("__BRUTEX_DATE_TO__", to_iso)

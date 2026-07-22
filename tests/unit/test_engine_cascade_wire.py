@@ -100,6 +100,109 @@ def _spec(**overrides: object) -> cw.CascadeTupleSpec:
     return cw.CascadeTupleSpec(**base)  # type: ignore[arg-type]
 
 
+class TestSpecFillModeManifestLaw:
+    """DEC-FILL-WORST-CASE-ONLY-001: the unconditional manifest token + the
+    precise-era refusal law (worst-case is the ONLY fill model)."""
+
+    def test_spec_dict_carries_the_permanent_worst_case_token(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        assert payload["fill_mode"] == "worst_case"
+        assert cw._spec_from_dict(payload) == _spec()
+
+    def test_absent_key_refuses_as_precise_era(self) -> None:
+        # Fails-before pin: a pre-DEC manifest (no fill_mode key — the old
+        # PRECISE elide) must refuse LOUDLY naming the DEC, never replay.
+        payload = cw._spec_to_dict(_spec())
+        del payload["fill_mode"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_literal_precise_token_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "precise"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"re-run the sweep to produce a worst-case manifest",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_junk_fill_mode_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "worst"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_spec_carries_no_fill_mode_field(self) -> None:
+        # Killed-token pin: the config object carries NO mode — the law is
+        # global, so nothing can thread a per-spec fill choice back in.
+        from dataclasses import fields
+
+        assert "fill_mode" not in {f.name for f in fields(cw.CascadeTupleSpec)}
+
+
+class TestSpecExecGridManifestLaw:
+    """DEC-FILL-EXEC-GRID-1M-001: the unconditional manifest token + the
+    decision-TF-era refusal law (the fill_mode law's twin — the 1-minute
+    execution grid is the ONLY fill grid)."""
+
+    def test_spec_dict_carries_the_permanent_grid_token(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        assert payload["execution_grid"] == "1m_next_bar"
+        assert cw._spec_from_dict(payload) == _spec()
+
+    def test_absent_key_refuses_as_decision_tf_era(self) -> None:
+        # Fails-before pin: a PR-A manifest (no execution_grid key) must
+        # refuse LOUDLY naming the DEC, never replay under the wrong grid.
+        payload = cw._spec_to_dict(_spec())
+        del payload["execution_grid"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"decision-TF-era cascade manifest refused \(DEC-FILL-EXEC-GRID-1M-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_junk_grid_token_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["execution_grid"] = "decision_bar"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"re-run the sweep to produce a 1m-grid manifest",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_fill_mode_refusal_takes_precedence_when_both_laws_fail(self) -> None:
+        # Per-entry check ORDER pin: fill_mode is validated FIRST.
+        payload = cw._spec_to_dict(_spec())
+        del payload["fill_mode"]
+        del payload["execution_grid"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_spec_carries_no_execution_grid_field(self) -> None:
+        # Killed-token pin: the grid is a global law, never a per-spec knob.
+        from dataclasses import fields
+
+        assert "execution_grid" not in {f.name for f in fields(cw.CascadeTupleSpec)}
+
+    def test_candidates_for_spec_runs_the_one_law_deterministically(self) -> None:
+        # tf==1minute fixed point (DEC-FILL-EXEC-GRID-1M-001): the same list
+        # serves as decision AND 1m execution stream throughout this suite.
+        bars = _session_bars()
+        a = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars, exec_bars_1m=bars)
+        b = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars, exec_bars_1m=bars)
+        assert len(a) == 1
+        assert a[0].returns == b[0].returns  # no hidden mode input survives
+
+
 def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
     """Return a ``bars_for`` that serves *bars* for NIFTY/1minute, else empty."""
 
@@ -188,15 +291,37 @@ def _lockbox_intraday_history() -> list[CandleBar]:
     bar (every trade 0-pnl → flat complement equity → an undefined train
     Sharpe). Alternating up/down days with in-day ±6-point ranges give the
     lockbox split REAL in-day trade variance on BOTH sides of the window.
+
+    SECOND repair for DEC-FILL-EXEC-GRID-1M-001 (the 1m execution grid):
+    under the §2.4 same-bar deferral the ±6 shape yields an EXACTLY
+    2-day-periodic per-bar return sequence (each up/down day pair closes
+    (−600, −600, −600) / (−600, −600, −100)), so the 10-day train complement
+    (5 whole periods) and the 12-day full series (6 periods) had IDENTICAL
+    Sharpe — the separation the R2-SR-F1 regression keys on vanished. The
+    two LOCKBOX-WINDOW days (n >= 10) now use a SHALLOW ±3 range so neither
+    ±500-paisa leg can trigger and each window day closes ONE 0-pnl trade —
+    hand-derived under the dual-feed law (SL/TP 500, mask-0 entry on every
+    bar; bars i: o=base+i, up-day high=o+3/low=o−1, down-day
+    high=o+1/low=o−3, 6 bars/day):
+      * day 10 (up): b0 arms → entry fills b1 HIGH = base+4; SL base−1 /
+        TP base+9; b1 defers (§2.4); b2..b5 lows (base+1..base+4) never
+        reach base−1, highs (base+5..base+8) never reach base+9 → the
+        session guard closes at b5's adverse LOW = base+4 → pnl 0;
+      * day 11 (down): entry fills b1 HIGH = base'+2; SL base'−3 / TP
+        base'+7; b2..b5 lows (base'−1..base'+2) / highs (base'+3..base'+6)
+        never touch → end_of_data at b5's adverse LOW = base'+2 → pnl 0.
+    The window days' 12 zero-return bars shift the full series' mean/std off
+    the train complement's, restoring ``sharpe(train) != sharpe(full)``.
     """
     bars: list[CandleBar] = []
     for n, day in enumerate(_FIB_TRADING_DAYS):
         base_px = 10_000 + 25 * n
         base_ts = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_IST)
         up_day = n % 2 == 0
+        depth = 3 if n >= 10 else 6  # shallow lockbox-window days (see above)
         for i in range(6):
             o = base_px + i
-            high, low = (o + 6, o - 1) if up_day else (o + 1, o - 6)
+            high, low = (o + depth, o - 1) if up_day else (o + 1, o - depth)
             bars.append(
                 _bar_at(base_ts + timedelta(minutes=i), str(o), str(high), str(low), str(o))
             )
@@ -216,28 +341,33 @@ def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
 
 
 def _fat_tailed_bars() -> list[CandleBar]:
-    """A 40-bar session with a few extreme spikes → fat-tailed realised trade PnL.
+    """A 40-bar gap-up session with two down-spikes → fat-tailed WORST-CASE PnL.
 
-    The wide intrabar ranges let an SL/TP exit fill at different prices across
-    trades, and the four spike bars (10/24 up, 16/30 down) inject the heavy
-    tails, so a reconstruction over these bars yields a DEFINED, non-zero
-    (excess) kurtosis — the regime where the excess-vs-non-excess distinction
-    is material to the DSR. The pattern is deterministic (no RNG): a fixed
-    ``±`` swing list plus the spike overrides.
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (the one hardcoded adverse-max
+    law): a long ENTERS at the bar HIGH and a triggered TP fills at
+    ``min(level, low)``, so a positive-Sharpe fixture needs the TRIGGER bar's
+    LOW to clear the target — every regular bar GAPS UP (open = prior close
+    + 3.00, low = open − 0.20, close = open + 1.00, high = close + 0.30), so
+    the next bar's low (prior close + 2.80) sits above the TP level (entry
+    high + 2.00 = prior close + 2.30 relative to its own bar) and the win
+    banks exactly +200 paisa. The two down-spike bars (16: −4.00, 30: −6.00)
+    inject the heavy tail: bar 30's dip breaches the entry-relative floor and
+    the trade closes at the adverse ``min(level, low)`` for −330 paisa.
+    Measured on this tree: 13 trades = twelve +200 and one −330 → Sharpe
+    ≈ 1.127 (> the test's SR_0 ≈ 0.207) with a DEFINED, non-zero excess
+    kurtosis ≈ 8.083 — the regime where the excess-vs-non-excess distinction
+    is material to the DSR. Deterministic (no RNG).
     """
-    swings = [1.0, 1.2, 0.8, 1.5, -0.9, -1.1, 1.0, 1.2, 0.8, 1.5]
     seq: list[tuple[str, str, str, str]] = []
     price = 100.0
     for i in range(40):
-        o = price
-        if i in (10, 24):  # fat UPSIDE spikes
-            high, low, c = o + 15.0, o - 0.5, o + 12.0
-        elif i in (16, 30):  # fat DOWNSIDE spikes
-            high, low, c = o + 0.5, o - 15.0, o - 12.0
+        o = price + 3.0
+        if i in (16, 30):  # fat DOWNSIDE spikes (different depths → tail variety)
+            depth = 4.0 if i == 16 else 6.0
+            high, low, c = o + 0.1, o - depth, o - depth + 1.0
         else:
-            delta = swings[i % len(swings)]
-            c = o + delta
-            high, low = max(o, c) + 1.5, min(o, c) - 1.5
+            c = o + 1.0
+            high, low = c + 0.3, o - 0.2
         seq.append((f"{o:.2f}", f"{high:.2f}", f"{low:.2f}", f"{c:.2f}"))
         price = c
 
@@ -260,9 +390,9 @@ def _fat_tailed_bars() -> list[CandleBar]:
 def _fat_tailed_candidate() -> Any:
     """Reconstruct one fat-tailed :class:`CandidateInput` over :func:`_fat_tailed_bars`.
 
-    ``sl=500 / tp=200`` over the spike session produces 15 trades with a
-    defined, non-zero excess kurtosis (≈1.73) — the fixture the
-    DSR-kurtosis-convention regression tests share.
+    ``sl=500 / tp=200`` over the gap-up session produces 13 worst-case trades
+    (twelve +200, one −330) with a defined, non-zero excess kurtosis (≈8.08)
+    — the fixture the DSR-kurtosis-convention regression tests share.
     """
     bars = _fat_tailed_bars()
     bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
@@ -273,6 +403,7 @@ def _fat_tailed_candidate() -> Any:
         bar_bits=bar_bits,
         direction_label="bull",
         tf_minutes=1,
+        exec_bars_1m=bars,  # tf==1m fixed point — same list, both streams
         sl_paisa=500,
         tp_paisa=200,
         start_equity_paisa=10_000_000,
@@ -387,6 +518,70 @@ class TestCascadeConfig:
             cw.cascade_config_from_dict({"seed": 1, "not_a_real_field": 7})
 
 
+class TestResolveMcPermutations:
+    """The MC permutation-budget knob (DEC-REHEARSAL-MC-BUDGET-001, #1817)."""
+
+    def test_env_name_is_the_documented_knob(self) -> None:
+        assert cw.MC_PERMUTATIONS_ENV == "BRUTEX_SWEEP_MC_PERMUTATIONS"
+
+    def test_unset_and_blank_resolve_to_none(self) -> None:
+        assert cw.resolve_mc_permutations({}) is None
+        assert cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: ""}) is None
+        assert cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: "   "}) is None
+
+    def test_default_identity_config_equality(self) -> None:
+        """Env unset ⇒ None override ⇒ the BYTE-IDENTICAL production config.
+
+        The CLI arm mirrors this exactly: ``mc_permutations is None`` threads
+        ``overrides=None`` into :func:`cw.cascade_config_for_sweep`, so the
+        resulting frozen config compares EQUAL to the no-override build and
+        keeps the production ``mc_n_permutations`` default (1000).
+        """
+        sweep_id = "a" * 64
+        resolved = cw.resolve_mc_permutations({})
+        overrides: dict[str, object] | None = (
+            None if resolved is None else {"mc_n_permutations": resolved}
+        )
+        assert cw.cascade_config_for_sweep(
+            sweep_id, overrides=overrides
+        ) == cw.cascade_config_for_sweep(sweep_id)
+        assert cw.cascade_config_for_sweep(sweep_id).mc_n_permutations == 1000
+
+    def test_override_threads_through_overrides_seam(self) -> None:
+        """The resolved value reaches the config via the EXISTING seam and
+        survives the manifest dict round trip (the manual-replay exactness)."""
+        sweep_id = "deadbeef" * 8
+        resolved = cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: " 25 "})
+        assert resolved == 25
+        cfg = cw.cascade_config_for_sweep(sweep_id, overrides={"mc_n_permutations": resolved})
+        assert cfg.mc_n_permutations == 25
+        # The override never perturbs the deterministic per-sweep seed.
+        assert cfg.seed == cw.cascade_config_for_sweep(sweep_id).seed
+        # Manifest storage round trip: the frozen value replays exactly.
+        restored = cw.cascade_config_from_dict(cw.cascade_config_to_dict(cfg))
+        assert restored == cfg
+        assert restored.mc_n_permutations == 25
+
+    def test_floor_is_one(self) -> None:
+        assert cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: "1"}) == 1
+
+    @pytest.mark.parametrize("junk", ["many", "1.5", "0x10", "1_000_junk", "25 permutations"])
+    def test_junk_fails_loud_naming_the_env_var(self, junk: str) -> None:
+        with pytest.raises(ValueError, match="BRUTEX_SWEEP_MC_PERMUTATIONS"):
+            cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: junk})
+
+    @pytest.mark.parametrize("nonpositive", ["0", "-1", "-1000"])
+    def test_nonpositive_fails_loud(self, nonpositive: str) -> None:
+        with pytest.raises(ValueError, match="must be an integer >= 1"):
+            cw.resolve_mc_permutations({cw.MC_PERMUTATIONS_ENV: nonpositive})
+
+    def test_env_none_reads_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(cw.MC_PERMUTATIONS_ENV, "42")
+        assert cw.resolve_mc_permutations() == 42
+        monkeypatch.delenv(cw.MC_PERMUTATIONS_ENV)
+        assert cw.resolve_mc_permutations() is None
+
+
 # ── Pure numeric helpers ──────────────────────────────────────────────────────
 
 
@@ -428,7 +623,7 @@ class TestBuildCandidateInput:
     def test_reconstructs_bull_candidate(self) -> None:
         bars = _session_bars()
         spec = _spec()
-        cand = cw.candidates_for_spec(spec, bars)[0]
+        cand = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)[0]
         assert cand.candidate_id == _rid(1)
         # Per-bar return series is the equal-length pool axis (one per bar).
         assert len(cand.returns) == len(bars)
@@ -441,17 +636,18 @@ class TestBuildCandidateInput:
 
     def test_reconstructs_bear_candidate(self) -> None:
         bars = _session_bars()
-        cand = cw.candidates_for_spec(_spec(direction_label="bear"), bars)[0]
+        cand = cw.candidates_for_spec(_spec(direction_label="bear"), bars, exec_bars_1m=bars)[0]
         assert cand.candidate_id == _rid(1)
         assert cand.mc_n_bars == len(bars)
 
     def test_candidates_for_spec_with_proximity(self) -> None:
         bars = _session_bars()
-        cands = cw.candidates_for_spec(_spec(proximity_bps=(10, 10, 10)), bars)
+        cands = cw.candidates_for_spec(_spec(proximity_bps=(10, 10, 10)), bars, exec_bars_1m=bars)
         assert len(cands) == 1
 
     def test_candidates_for_spec_empty_winners(self) -> None:
-        assert cw.candidates_for_spec(_spec(winners=()), _session_bars()) == []
+        bars = _session_bars()
+        assert cw.candidates_for_spec(_spec(winners=()), bars, exec_bars_1m=bars) == []
 
     def test_candidates_for_spec_uses_the_swept_fib_anchor(self) -> None:
         """A ROLLING_WEEKLY spec re-scores against rolling-weekly Fib levels (MAJOR fix).
@@ -478,7 +674,7 @@ class TestBuildCandidateInput:
             spec = _spec(winners=((_rid(1), mask),), fib_anchor=anchor)
             # The wire reconstructs a real CandidateInput from the spec (smoke: a
             # non-empty candidate is produced for the swept anchor).
-            assert cw.candidates_for_spec(spec, bars)
+            assert cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)
             # The winner's entry signals are the SUPERSET-match of the mask over
             # the reconstructed bar_bits at the spec's anchor — count them via the
             # same builder + predicate the wire uses internally.
@@ -509,6 +705,7 @@ class TestBuildCandidateInput:
             cw.candidates_for_spec(
                 _spec(winners=((_rid(1), mask),), fib_anchor=FibAnchorKind.ROLLING_WEEKLY),
                 bars,
+                exec_bars_1m=bars,
             )
         finally:
             stage1a.build_bar_bits = original  # type: ignore[assignment]
@@ -530,14 +727,14 @@ class TestBuildCandidateInput:
         original = stage1a.build_bar_bits
         stage1a.build_bar_bits = spy  # type: ignore[assignment]
         try:
-            cw.candidates_for_spec(_spec(winners=((_rid(1), mask),)), bars)
+            cw.candidates_for_spec(_spec(winners=((_rid(1), mask),)), bars, exec_bars_1m=bars)
         finally:
             stage1a.build_bar_bits = original  # type: ignore[assignment]
         assert captured == [FibAnchorKind.PREV_DAY]
 
     def test_mc_evaluate_returns_finite_or_nan(self) -> None:
         bars = _session_bars()
-        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars)[0]
+        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars, exec_bars_1m=bars)[0]
         # Many entries → at least one trade closes → a (possibly defined) Sharpe.
         many = cand.mc_evaluate(np.array([0, 1, 2, 3], dtype=np.intp))
         assert isinstance(many, float)
@@ -571,6 +768,7 @@ class TestBuildCandidateInput:
             signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=500,
             take_profit_paisa=200,
         )
@@ -595,9 +793,12 @@ class TestBuildCandidateInput:
         the old ``0.0``, which the DSR would have mis-read as a non-excess
         kurtosis of zero).
         """
-        bars = _session_bars()
+        # A FLAT session (o == h == l == c on every bar): under the one
+        # worst-case law every fill lands at the same price, so the
+        # reconstructed PnL is constant (zero) → kurtosis undefined.
+        flat = [_bar(16 + i, "100.00", "100.00", "100.00", "100.00") for i in range(6)]
+        bars = flat
         bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
-        # Tight identical SL hits → constant per-trade PnL → kurtosis undefined.
         cand = cw.build_candidate_input(
             run_id=_rid(1),
             mask=0,
@@ -605,6 +806,7 @@ class TestBuildCandidateInput:
             bar_bits=bar_bits,
             direction_label="bull",
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             sl_paisa=20,
             tp_paisa=20,
             start_equity_paisa=10_000_000,
@@ -615,6 +817,7 @@ class TestBuildCandidateInput:
             signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=20,
             take_profit_paisa=20,
         )
@@ -682,6 +885,7 @@ class TestLockboxTrainingSplit:
             "bar_bits": bar_bits,
             "direction_label": "bull",
             "tf_minutes": 1,
+            "exec_bars_1m": bars,  # tf==1m fixed point
             "sl_paisa": None,
             "tp_paisa": None,
             "start_equity_paisa": 10_000_000,
@@ -719,6 +923,7 @@ class TestLockboxTrainingSplit:
             mask_to_entry_signals(bar_bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=500,
             take_profit_paisa=500,
         )
@@ -754,13 +959,14 @@ class TestLockboxTrainingSplit:
         from brutex.calendars.nse import IST
 
         bars = _session_bars()
-        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars)[0]
+        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars, exec_bars_1m=bars)[0]
         bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
         trades = simulate_trades(
             bars,
             mask_to_entry_signals(bar_bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=50,
             take_profit_paisa=50,
         )
@@ -788,6 +994,7 @@ class TestLockboxTrainingSplit:
             mask_to_entry_signals(bar_bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=None,
             take_profit_paisa=None,
         )
@@ -896,6 +1103,50 @@ class TestRunCascadeOverSpecs:
         )
         assert report.groups == ()
 
+    def test_skips_pool_with_no_exec_stream_loudly(self) -> None:
+        """DEC-FILL-EXEC-GRID-1M-001: a pool without its 1-MINUTE execution
+        stream cannot re-simulate under the dual-feed law — the pool SKIPS
+        with ONE loud WARN, never a decision-TF-era fallback. A coarse-tf
+        spec makes the two ``bars_for`` keys distinct: the decision key
+        serves bars, the exec key serves none."""
+        decision = _session_bars()
+
+        def loader(instrument: str, tf_label: str) -> list[CandleBar]:
+            if (instrument, tf_label) == ("NIFTY", "5minute"):
+                return decision
+            return []  # NO "1minute" exec stream
+
+        with capture_logs() as logs:
+            report = cw.run_cascade_over_specs(
+                [_spec(tf_label="5minute", tf_minutes=5)],
+                bars_for=loader,
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+            )
+        assert report.groups == ()
+        assert report.n_input == 0
+        warned = [e for e in logs if e["event"] == "cascade_wire.pool_skipped_no_exec_stream"]
+        assert len(warned) == 1
+        assert warned[0]["instrument"] == "NIFTY"
+        assert warned[0]["tf"] == "5minute"
+        assert "1minute" in str(warned[0]["remedy"])
+
+    def test_injected_exec_map_matches_the_derive_when_none_path(self) -> None:
+        """`candidates_for_spec`/`build_candidate_input` accept a prebuilt
+        :class:`ExecGridMap` (the run_cascade_over_specs one-map-per-pool
+        path) and produce the SAME candidate as the derive-when-``None`` arm
+        (the map is a pure function of (decision, exec, tf))."""
+        from brutex.engine.exec_grid import build_exec_grid_map
+
+        bars = _session_bars()
+        spec = _spec(sl_paisa=50, tp_paisa=50)
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
+        derived = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)[0]
+        injected = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, exec_map=exec_map)[0]
+        assert injected.returns == derived.returns
+        assert injected.sharpe_ratio == derived.sharpe_ratio
+        assert injected.total_trades == derived.total_trades
+
 
 # ── ADR-0012 futures roll-schedule carriage (review round-1) ─────────────────
 
@@ -917,9 +1168,13 @@ class TestFuturesRollScheduleCarriage:
             spec: cw.CascadeTupleSpec,
             bars: Sequence[CandleBar],
             *,
+            exec_bars_1m: Sequence[CandleBar],
+            exec_map: object = None,
             lockbox_default_window_days: int,
             lockbox_min_trades: int,
             roll_schedule: tuple[int, ...] | None = None,
+            family_cap: int | None = None,
+            compute_regime_evidence: bool = False,
         ) -> list[Any]:
             calls.append((spec.instrument, roll_schedule))
             return []
@@ -1223,6 +1478,62 @@ def _manifest(specs: tuple[cw.CascadeTupleSpec, ...] | None = None) -> cw.Cascad
         ),
         specs=(_spec(),) if specs is None else specs,
     )
+
+
+class TestManifestSnapshotHashExecCoords:
+    """DEC-FILL-EXEC-GRID-1M-001: the G7 snapshot hash covers the 1m EXEC slices.
+
+    The manifest carries the execution-grid law BY DERIVATION — the hashed
+    coordinate set is the specs' ``(instrument, tf_label)`` pairs UNIONED
+    with ``(instrument, "1minute")`` — so a lake whose 1-minute execution
+    slice healed/changed since the sweep is auto-refused exactly like a
+    decision slice.
+    """
+
+    def test_coords_include_the_1minute_exec_pair(self) -> None:
+        requested: list[tuple[str, str]] = []
+        bars = _session_bars()
+
+        def loader(instrument: str, tf_label: str) -> list[CandleBar]:
+            requested.append((instrument, tf_label))
+            return bars
+
+        manifest = _manifest(specs=(_spec(tf_label="5minute", tf_minutes=5),))
+        digest = cw.manifest_snapshot_hash(manifest, bars_for=loader)
+        assert len(digest) == 64
+        assert sorted(requested) == [("NIFTY", "1minute"), ("NIFTY", "5minute")]
+
+    def test_a_changed_1minute_slice_moves_the_hash(self) -> None:
+        # The widening has teeth: mutating ONLY the exec slice re-keys the
+        # digest (pre-PR-B the 1m slice was invisible to the G7 gate for a
+        # coarse-tf manifest).
+        decision = _session_bars()
+        exec_a = _session_bars()
+        exec_b = _session_bars()[:-1]  # one bar shorter → different content
+
+        def loader_for(exec_bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
+            def loader(_instrument: str, tf_label: str) -> list[CandleBar]:
+                return exec_bars if tf_label == "1minute" else decision
+
+            return loader
+
+        manifest = _manifest(specs=(_spec(tf_label="5minute", tf_minutes=5),))
+        hash_a = cw.manifest_snapshot_hash(manifest, bars_for=loader_for(exec_a))
+        hash_b = cw.manifest_snapshot_hash(manifest, bars_for=loader_for(exec_b))
+        assert hash_a != hash_b
+
+    def test_tf_1minute_pair_collapses_to_one_key(self) -> None:
+        # At tf==1minute the decision and exec coordinates are ONE key — the
+        # loader is consulted once per distinct pair, never doubled.
+        requested: list[tuple[str, str]] = []
+        bars = _session_bars()
+
+        def loader(instrument: str, tf_label: str) -> list[CandleBar]:
+            requested.append((instrument, tf_label))
+            return bars
+
+        cw.manifest_snapshot_hash(_manifest(), bars_for=loader)
+        assert requested == [("NIFTY", "1minute")]
 
 
 class TestManifestSerialisation:
@@ -1739,6 +2050,38 @@ class TestBuildStage2CascadeSpecs:
         assert specs
         assert all(len(spec.winners) == 1 for spec in specs)
 
+    def test_corrupt_store_raises_typed_cascade_error(self, tmp_path: Path) -> None:
+        """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
+
+        A corrupt / old-schema Stage-2 finalist store surfaces as a typed
+        ``CascadeWireError`` naming the UNREADABLE file — never a raw error and
+        never a silent skip (dropping a tuple's finalists would change Stage-2
+        selection invisibly, a false green).
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.sweep_orchestrator import (
+            TUPLE_STORE_CORRUPT_REMEDIATION,
+            iter_sweep_tuples,
+            tuple_store_path,
+        )
+
+        grid = _two_anchor_grid()
+        first = next(iter_sweep_tuples(grid))
+        _seed_tuple_store(tmp_path, first, grid, rows=[_result_row(1, mask=1, sharpe=0.5)])
+        # Corrupt the persisted store parquet (VECTOR: overwrite *.parquet).
+        store_path = tuple_store_path(tmp_path, first, grid)
+        store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+        with pytest.raises(cw.CascadeWireError, match="UNREADABLE") as excinfo:
+            cw.build_stage2_cascade_specs(tmp_path, grid, top_k=None)
+        message = str(excinfo.value)
+        assert str(store_path) in message
+        # Review round 1 MINOR-1: the message carries the ONE shared RUNNABLE
+        # remediation chain (real flags — TestRemediationFlagsRunnable pins them
+        # against the live argparse surface), never the fictional --out-root.
+        assert TUPLE_STORE_CORRUPT_REMEDIATION in message
+        assert "--results-root" in message
+        assert "--out-root" not in message
+
 
 @dataclass(frozen=True)
 class _FakeRefinedCell:
@@ -2089,7 +2432,15 @@ class TestDsrTrialStatsConsumption:
 # ── Spec building from persisted rows ─────────────────────────────────────────
 
 
-def _result_row(seed: int, *, mask: int, sharpe: float) -> ResultRow:
+def _result_row(
+    seed: int,
+    *,
+    mask: int,
+    sharpe: float,
+    max_drawdown_pct: float = 12.5,
+    win_rate: float = 0.625,
+    pareto_member: bool | None = None,
+) -> ResultRow:
     return ResultRow(
         run_id=_rid(seed),
         instrument="NIFTY",
@@ -2109,10 +2460,14 @@ def _result_row(seed: int, *, mask: int, sharpe: float) -> ResultRow:
         sortino_ratio=2.0,
         calmar_ratio=1.25,
         profit_factor=1.8,
-        win_rate=0.625,
-        max_drawdown_pct=12.5,
+        win_rate=win_rate,
+        max_drawdown_pct=max_drawdown_pct,
         avg_entry_price=Decimal("14020.50"),
         avg_exit_price=Decimal("14100.25"),
+        pareto_member=pareto_member,
+        # The store's tag-coherence law (review round 1): pareto_member=True
+        # rows must carry the "frontier" basis token.
+        selection_basis="frontier" if pareto_member is True else None,
     )
 
 
@@ -2158,6 +2513,7 @@ class TestSpecFromStoreRows:
             _result_row(2, mask=2, sharpe=1.5),
             _result_row(3, mask=3, sharpe=1.0),
         ]
+        # Legacy single-key arm (the byte-identity arm): Sharpe top-2 exactly.
         spec = cw.spec_from_store_rows(
             instrument="NIFTY",
             tf_label="1minute",
@@ -2170,9 +2526,29 @@ class TestSpecFromStoreRows:
             start_equity_paisa=10_000_000,
             rows=rows,
             top_k=2,
+            multi_axis=False,
         )
         assert spec is not None
         assert spec.winners == ((_rid(2), 2), (_rid(3), 3))
+        # LANE-W1 union DEFAULT (DEC-RANK-POOL-UNION-ADMIT-001): same top-2
+        # CAP, round-robin membership — Sharpe admits rid(2); the DEFAULT
+        # preset source (uniform non-Sharpe axes on these rows → run_id ASC)
+        # admits rid(1) — emitted in TODAY's Sharpe-desc winners order.
+        union_spec = cw.spec_from_store_rows(
+            instrument="NIFTY",
+            tf_label="1minute",
+            tf_minutes=1,
+            direction_label="bull",
+            sl_paisa=None,
+            tp_paisa=None,
+            prior_n=3,
+            proximity_bps=None,
+            start_equity_paisa=10_000_000,
+            rows=rows,
+            top_k=2,
+        )
+        assert union_spec is not None
+        assert union_spec.winners == ((_rid(2), 2), (_rid(1), 1))
 
     def test_defaults_to_prev_day_fib_anchor(self) -> None:
         spec = cw.spec_from_store_rows(
@@ -2231,6 +2607,79 @@ class TestEndToEnd:
         path = cw.write_report(tmp_path, _manual_report())
         assert path.exists()
         assert path.read_bytes() == cw.serialize_wire_report(_manual_report())
+
+
+class TestCascadeSidecarAtomicWrite:
+    """R2N-08 (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1923).
+
+    The manifest / report writes are atomic (tmp→fsync→os.replace); a crash /
+    ENOSPC mid-write leaves the prior complete copy INTACT (never torn), maps to a
+    typed ``CascadeWireError`` (NOT the lake-wide ``LakeWriteHalt`` escalation), and
+    leaves no orphan ``.brutex-write-*`` temp.
+    """
+
+    def test_manifest_write_atomic_enospc_preserves_prior(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        from brutex.data.errors import LakeWriteHalt
+
+        # Pre-seed a good manifest.
+        good = _manifest()
+        cw.write_manifest(tmp_path, good)
+        prior_bytes = cw.manifest_path(tmp_path).read_bytes()
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        # A DIFFERENT manifest write now fails mid-replace.
+        with pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.write_manifest(tmp_path, _manifest(specs=(_spec(),)))
+        # Typed cascade abort — NOT a lake-wide halt escalation.
+        assert not isinstance(excinfo.value, LakeWriteHalt)
+        assert str(cw.manifest_path(tmp_path)) in str(excinfo.value)
+        # The prior manifest bytes are UNCHANGED (the atomic replace never landed).
+        monkeypatch.undo()
+        assert cw.manifest_path(tmp_path).read_bytes() == prior_bytes
+        # No orphan .brutex-write-* temp left behind.
+        assert list(cw.manifest_path(tmp_path).parent.glob(".brutex-write-*")) == []
+
+    def test_report_write_atomic_enospc_typed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        from brutex.data.errors import LakeWriteHalt
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        with pytest.raises(cw.CascadeWireError, match="cascade report") as excinfo:
+            cw.write_report(tmp_path, _manual_report())
+        assert not isinstance(excinfo.value, LakeWriteHalt)
+        monkeypatch.undo()
+        assert list((tmp_path / cw.CASCADE_DIRNAME).glob(".brutex-write-*")) == []
+
+    def test_kill_mid_write_load_manifest_returns_old(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+
+        good = _manifest()
+        cw.write_manifest(tmp_path, good)
+
+        def _enospc(_src: str, _dst: str) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        with pytest.raises(cw.CascadeWireError):
+            cw.write_manifest(tmp_path, _manifest(specs=(_spec(),)))
+        monkeypatch.undo()
+        # load_manifest still serves the OLD complete cascade.
+        assert cw.load_manifest(tmp_path) == good
 
     def test_auto_path_writes_manifest_and_report(self, tmp_path: Path) -> None:
         bars = _session_bars()
@@ -2392,3 +2841,543 @@ class TestWriteReportAtomic:
         first = path.read_bytes()
         cw.write_report(tmp_path, _manual_report())
         assert path.read_bytes() == first  # deterministic bytes, atomically re-landed
+
+
+# ── DEC-CASCADE-STAT-TIER-WIRE-001: the embargo resolver / the Stage-3 ──
+# search-family carriage / the per-candidate CSCV wiring.
+
+
+class TestResolveCascadeEmbargoBars:
+    """AUTO = one trading day in decision-TF bars (the DEC-STAT-001 floor)."""
+
+    @pytest.mark.parametrize(
+        ("tf_minutes", "expected"),
+        [
+            (1, 375),
+            (2, 188),
+            (3, 125),
+            (5, 75),
+            (15, 25),
+            (25, 15),
+            (375, 1),  # the 1day engine TF (minutes == the 375-min session)
+            (1440, 1),  # a wall-clock-day representation still floors at 1
+        ],
+    )
+    def test_auto_formula_table(self, tf_minutes: int, expected: int) -> None:
+        assert cw.resolve_cascade_embargo_bars(tf_minutes, None) == expected
+
+    def test_auto_reads_the_canonical_daily_constant(self) -> None:
+        # CLAUDE.md §11 COMMON: the session length comes from the ONE
+        # data-layer constant, never a re-typed 375 literal.
+        from brutex.data.timeframes import DAILY_TF_MINUTES
+
+        assert cw.resolve_cascade_embargo_bars(1, None) == DAILY_TF_MINUTES
+
+    @pytest.mark.parametrize("override", [0, 1, 7, 500])
+    def test_override_wins_uniformly(self, override: int) -> None:
+        assert cw.resolve_cascade_embargo_bars(1, override) == override
+        assert cw.resolve_cascade_embargo_bars(375, override) == override
+
+    def test_negative_override_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="wfo_embargo must be >= 0"):
+            cw.resolve_cascade_embargo_bars(1, -1)
+
+    def test_tf_minutes_below_one_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="tf_minutes must be >= 1"):
+            cw.resolve_cascade_embargo_bars(0, None)
+
+
+_FAMILY = ((50, 80), (60, 90), (70, 100))
+
+
+def _family_spec(**overrides: object) -> cw.CascadeTupleSpec:
+    """A spec carrying a valid 3-pair search family (own pair = (50, 80))."""
+    base: dict[str, object] = {
+        "sl_paisa": 50,
+        "tp_paisa": 80,
+        "family_sl_tp": _FAMILY,
+    }
+    base.update(overrides)
+    return _spec(**base)
+
+
+class TestFamilySpecValidation:
+    def test_valid_family_constructs(self) -> None:
+        assert _family_spec().family_sl_tp == _FAMILY
+
+    def test_default_is_none(self) -> None:
+        assert _spec().family_sl_tp is None
+
+    def test_empty_family_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="non-empty or None"):
+            _family_spec(family_sl_tp=())
+
+    def test_family_with_disabled_leg_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="requires concrete sl_paisa/tp_paisa"):
+            _family_spec(sl_paisa=None)
+
+    @pytest.mark.parametrize("pair", [(0, 80), (50, -1), (50,), (50, 80, 90)])
+    def test_malformed_pair_refused(self, pair: tuple[int, ...]) -> None:
+        with pytest.raises(cw.CascadeWireError, match="positive .* 2-tuples"):
+            _family_spec(family_sl_tp=((50, 80), pair))
+
+    def test_duplicate_pairs_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="must be unique"):
+            _family_spec(family_sl_tp=((50, 80), (50, 80)))
+
+    def test_unsorted_family_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="sorted ascending"):
+            _family_spec(family_sl_tp=((60, 90), (50, 80)))
+
+    def test_family_missing_the_own_pair_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="include the spec's own"):
+            _family_spec(family_sl_tp=((60, 90), (70, 100)))
+
+
+class TestFamilyManifestSerialisation:
+    def test_family_less_spec_omits_the_key(self) -> None:
+        # EMIT-ON-PRESENT: a family-less manifest spec serialises
+        # byte-identically to the pre-family era.
+        assert "family_sl_tp" not in cw._spec_to_dict(_spec())
+
+    def test_family_round_trips(self) -> None:
+        spec = _family_spec()
+        payload = cw._spec_to_dict(spec)
+        assert payload["family_sl_tp"] == [[50, 80], [60, 90], [70, 100]]
+        assert cw._spec_from_dict(payload) == spec
+
+    def test_absent_key_parses_to_none(self) -> None:
+        payload = cw._spec_to_dict(_spec(sl_paisa=50, tp_paisa=80))
+        assert "family_sl_tp" not in payload
+        assert cw._spec_from_dict(payload).family_sl_tp is None
+
+    def test_null_key_parses_to_none(self) -> None:
+        payload = cw._spec_to_dict(_spec(sl_paisa=50, tp_paisa=80))
+        payload["family_sl_tp"] = None
+        assert cw._spec_from_dict(payload).family_sl_tp is None
+
+    @pytest.mark.parametrize("bad", [[["x", "y"]], [[1]], "junk", [None]])
+    def test_malformed_family_refused_by_the_existing_law(self, bad: object) -> None:
+        payload = cw._spec_to_dict(_family_spec())
+        payload["family_sl_tp"] = bad
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
+            cw._spec_from_dict(payload)
+
+    def test_family_infinity_json_token_refused_typed(self) -> None:
+        # DEC-CASCADE-STAT-TIER-WIRE-001 refuter round 1 (Refuter A): the
+        # non-standard JSON token ``Infinity`` — which ``json.loads`` accepts
+        # by default — previously leaked a RAW OverflowError out of the parse
+        # (``int(float("inf"))``) instead of the typed CascadeWireError.
+        # Driven through the REAL manifest_from_json path over hand-built
+        # wire bytes carrying the literal token.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest(specs=(_family_spec(),))))
+        payload["specs"][0]["family_sl_tp"] = [[float("inf"), 80]]
+        wire = json.dumps(payload).encode("utf-8")  # allow_nan default emits Infinity
+        assert b"Infinity" in wire
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
+            cw.manifest_from_json(wire)
+
+    def test_sibling_int_field_infinity_refused_typed(self) -> None:
+        # The PRE-EXISTING sibling leak closed in the same stroke: an
+        # ``Infinity`` token in any int-coerced spec field (here sl_paisa)
+        # takes the SAME typed refusal, never a raw OverflowError.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest(specs=(_family_spec(),))))
+        payload["specs"][0]["sl_paisa"] = float("-inf")
+        wire = json.dumps(payload).encode("utf-8")
+        assert b"-Infinity" in wire
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
+            cw.manifest_from_json(wire)
+
+    def test_manifest_with_family_is_byte_stable(self) -> None:
+        manifest = cw.CascadeManifest(
+            version=cw.MANIFEST_VERSION,
+            sweep_id="deadbeef" * 8,
+            cascade_config=cw.cascade_config_for_sweep("deadbeef" * 8),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-06-01"
+            ),
+            specs=(_family_spec(),),
+        )
+        first = cw.manifest_to_json(manifest)
+        second = cw.manifest_to_json(cw.manifest_from_json(first))
+        assert first == second
+        assert cw.manifest_from_json(first).specs[0].family_sl_tp == _FAMILY
+
+
+class TestCascadeConfigNewKeys:
+    def test_new_keys_round_trip(self) -> None:
+        config = cw.cascade_config_for_sweep(
+            "a" * 64, overrides={"wfo_embargo": 7, "candidate_pbo_family_cap": 32}
+        )
+        payload = cw.cascade_config_to_dict(config)
+        assert payload["wfo_embargo"] == 7
+        assert payload["candidate_pbo_family_cap"] == 32
+        assert cw.cascade_config_from_dict(payload) == config
+
+    def test_old_manifest_dict_without_the_keys_rebuilds_with_defaults(self) -> None:
+        # An OLD (pre-DEC-CASCADE-STAT-TIER-WIRE-001) manifest config dict
+        # lacks the appended keys — presence-tolerant for exactly those two.
+        payload = cw.cascade_config_to_dict(cw.cascade_config_for_sweep("a" * 64))
+        del payload["wfo_embargo"]
+        del payload["candidate_pbo_family_cap"]
+        rebuilt = cw.cascade_config_from_dict(payload)
+        assert rebuilt.wfo_embargo is None
+        assert rebuilt.candidate_pbo_family_cap == 256
+
+    def test_unknown_key_still_refused(self) -> None:
+        # The drift-refusal law is NOT loosened by the new tolerance.
+        payload = cw.cascade_config_to_dict(cw.cascade_config_for_sweep("a" * 64))
+        payload["junk_threshold"] = 1
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade_config"):
+            cw.cascade_config_from_dict(payload)
+
+
+class TestBuildCandidateInputFamily:
+    def _candidate_with_family(
+        self, family: tuple[tuple[int, int], ...] | None
+    ) -> tuple[Any, list[CandleBar]]:
+        bars = _session_bars()
+        spec = _spec(sl_paisa=50, tp_paisa=80, family_sl_tp=family)
+        (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)
+        return cand, bars
+
+    def test_family_columns_are_aligned_and_include_the_finalist(self) -> None:
+        family = ((50, 80), (60, 90), (70, 100))
+        cand, bars = self._candidate_with_family(family)
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == len(family)
+        for column in cand.family_returns:
+            assert len(column) == len(bars)
+        # The finalist's own pair (50, 80) is family position 0 — its column
+        # IS the candidate's own return series (reused, never re-simulated).
+        assert cand.family_returns[0] == cand.returns
+
+    def test_sibling_column_matches_an_independent_resim(self) -> None:
+        # The family column for (60, 90) equals an INDEPENDENT re-simulation
+        # with ONLY the legs swapped — same bars / signals / direction / tf.
+        family = ((50, 80), (60, 90))
+        cand, bars = self._candidate_with_family(family)
+        bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+        signals = mask_to_entry_signals(bar_bits, 0)
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            stop_loss_paisa=60,
+            take_profit_paisa=90,
+        )
+        equity = build_equity_curve(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        expected = cw._per_bar_returns(equity.equity_paisa, 10_000_000)
+        assert cand.family_returns is not None
+        assert cand.family_returns[1] == expected
+
+    def test_no_family_builds_none(self) -> None:
+        cand, _ = self._candidate_with_family(None)
+        assert cand.family_returns is None
+
+    def test_single_pair_family_builds_none(self) -> None:
+        # CSCV needs >= 2 columns — a 1-pair family is honestly skipped.
+        cand, _ = self._candidate_with_family(((50, 80),))
+        assert cand.family_returns is None
+
+
+class TestFamilyCap:
+    _WIDE = tuple((10 * i, 10 * i + 5) for i in range(1, 9))  # 8 pairs, own first
+
+    def test_uncapped_by_default(self) -> None:
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        bars = _session_bars()
+        (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == len(self._WIDE)
+
+    def test_cap_truncates_first_n_with_one_loud_warning(self) -> None:
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        bars = _session_bars()
+        with capture_logs() as logs:
+            (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, family_cap=3)
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == 3
+        # Deterministic FIRST-cap truncation of the sorted persisted order.
+        assert cand.family_returns[0] == cand.returns  # own pair kept (first)
+        capped = [e for e in logs if e["event"] == "cascade_wire.family_capped"]
+        assert len(capped) == 1
+        assert capped[0]["dropped"] == len(self._WIDE) - 3
+        assert capped[0]["cap"] == 3
+
+    def test_cap_dropping_the_own_pair_skips_the_family_loudly(self) -> None:
+        # Own pair (80, 85) sorts LAST — a cap of 2 would exclude the
+        # finalist from its own family, so the family is dropped wholesale.
+        spec = _spec(sl_paisa=80, tp_paisa=85, family_sl_tp=self._WIDE)
+        bars = _session_bars()
+        with capture_logs() as logs:
+            (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, family_cap=2)
+        assert cand.family_returns is None
+        dropped = [e for e in logs if e["event"] == "cascade_wire.family_cap_dropped_own_pair"]
+        assert len(dropped) == 1
+        assert dropped[0]["cap"] == 2
+
+    def test_cap_wider_than_the_family_is_inert(self) -> None:
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        bars = _session_bars()
+        (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, family_cap=100)
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == len(self._WIDE)
+
+    def test_cap_equal_to_family_width_is_inert_and_silent(self) -> None:
+        # Boundary law (hostile-review round 1, MINOR-1): the truncation
+        # fires on STRICTLY-wider families only — a cap EXACTLY equal to the
+        # family width neither truncates nor warns (kills the `>` -> `>=`
+        # cap mutant, which would truncate-and-warn at equality).
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        bars = _session_bars()
+        with capture_logs() as logs:
+            (cand,) = cw.candidates_for_spec(
+                spec, bars, exec_bars_1m=bars, family_cap=len(self._WIDE)
+            )
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == len(self._WIDE)
+        assert [e for e in logs if e["event"] == "cascade_wire.family_capped"] == []
+        assert [e for e in logs if e["event"] == "cascade_wire.family_cap_dropped_own_pair"] == []
+
+    def test_cap_below_one_refused_at_the_seam(self) -> None:
+        # Hostile-review round 1 (wire NIT-2): aligned with
+        # run_cascade_over_specs' config-level refusal — a direct caller's
+        # cap 0 refuses loudly instead of degrading every family to the
+        # family=None dropped-own-pair skip.
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        bars = _session_bars()
+        for bad_cap in (0, -1):
+            with pytest.raises(cw.CascadeWireError, match="family_cap must be >= 1 or None"):
+                cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, family_cap=bad_cap)
+
+
+class TestRunCascadeOverSpecsEmbargo:
+    def _spy_run(self, seen: list[dict[str, object]]) -> Callable[..., CascadeReport]:
+        def spy(
+            candidates: Sequence[Any],
+            config: Any,
+            *,
+            trial_stats: Any = None,
+            embargo_bars: int | None = None,
+        ) -> CascadeReport:
+            seen.append({"embargo_bars": embargo_bars, "n": len(candidates)})
+            return CascadeReport(
+                verdicts=(), survivor_ids=(), n_input=0, n_survived=0, stage_survivors={}
+            )
+
+        return spy
+
+    def test_auto_embargo_resolves_per_pool_tf(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.metrics import cascade as cascade_module
+
+        seen: list[dict[str, object]] = []
+        monkeypatch.setattr(cascade_module, "run_stage4_cascade", self._spy_run(seen))
+        cw.run_cascade_over_specs(
+            [_spec()],  # tf 1minute
+            bars_for=lambda _i, _t: _session_bars(),
+            config=cw.cascade_config_for_sweep("a" * 64),
+            sweep_id="a" * 64,
+        )
+        assert [entry["embargo_bars"] for entry in seen] == [375]
+
+    def test_wfo_embargo_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.metrics import cascade as cascade_module
+
+        seen: list[dict[str, object]] = []
+        monkeypatch.setattr(cascade_module, "run_stage4_cascade", self._spy_run(seen))
+        cw.run_cascade_over_specs(
+            [_spec()],
+            bars_for=lambda _i, _t: _session_bars(),
+            config=cw.cascade_config_for_sweep("a" * 64, overrides={"wfo_embargo": 5}),
+            sweep_id="a" * 64,
+        )
+        assert [entry["embargo_bars"] for entry in seen] == [5]
+
+    def test_mixed_tf_minutes_in_one_pool_refused(self) -> None:
+        # tf_label <-> tf_minutes is 1:1 by construction; a manifest carrying
+        # two different tf_minutes under ONE label is corrupt — refused, never
+        # embargoed under an arbitrary pick.
+        with pytest.raises(cw.CascadeWireError, match="disagree on tf_minutes"):
+            cw.run_cascade_over_specs(
+                [_spec(), _spec(tf_minutes=5, winners=((_rid(9), 0),))],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+            )
+
+    def test_family_cap_below_one_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="candidate_pbo_family_cap must be >= 1"):
+            cw.run_cascade_over_specs(
+                [_spec()],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep(
+                    "a" * 64, overrides={"candidate_pbo_family_cap": 0}
+                ),
+                sweep_id="a" * 64,
+            )
+
+    def test_family_cap_threads_from_the_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[int | None] = []
+        real = cw.candidates_for_spec
+
+        def spy(spec: Any, bars: Any, **kwargs: Any) -> list[Any]:
+            seen.append(kwargs.get("family_cap"))
+            return real(spec, bars, **kwargs)
+
+        monkeypatch.setattr(cw, "candidates_for_spec", spy)
+        cw.run_cascade_over_specs(
+            [_spec()],
+            bars_for=lambda _i, _t: _session_bars(),
+            config=cw.cascade_config_for_sweep(
+                "a" * 64, overrides={"candidate_pbo_family_cap": 17}
+            ),
+            sweep_id="a" * 64,
+        )
+        assert seen == [17]
+
+
+class TestNewReportKeysSerialised:
+    def test_report_dict_carries_the_additive_stat_keys(self) -> None:
+        report = CascadeReport(
+            verdicts=(
+                CandidateVerdict(
+                    candidate_id="c1",
+                    passed=True,
+                    rejected_at=None,
+                    detail="survived all Stage-4 filters",
+                    composite_score=0.5,
+                    cpcv_pass_rate=0.75,
+                    candidate_pbo=0.125,
+                ),
+            ),
+            survivor_ids=("c1",),
+            n_input=1,
+            n_survived=1,
+            stage_survivors={"hard_gates": 1},
+            pool_pbo=0.25,
+            pool_rc_pvalue=0.01,
+            pool_spa_pvalue=0.02,
+        )
+        payload = cw._report_to_dict(report)
+        assert payload["pool_rc_pvalue"] == 0.01
+        assert payload["pool_spa_pvalue"] == 0.02
+        verdicts = payload["verdicts"]
+        assert isinstance(verdicts, list)
+        assert verdicts[0]["candidate_pbo"] == 0.125
+
+    def test_skipped_states_serialise_null(self) -> None:
+        report = CascadeReport(
+            verdicts=(
+                CandidateVerdict(
+                    candidate_id="c1", passed=False, rejected_at=FilterStage.HARD_GATES, detail="d"
+                ),
+            ),
+            survivor_ids=(),
+            n_input=1,
+            n_survived=0,
+            stage_survivors={"hard_gates": 0},
+        )
+        payload = cw._report_to_dict(report)
+        assert payload["pool_rc_pvalue"] is None
+        assert payload["pool_spa_pvalue"] is None
+        verdicts = payload["verdicts"]
+        assert isinstance(verdicts, list)
+        assert verdicts[0]["candidate_pbo"] is None
+
+
+class TestSpecUnionAdmission:
+    """LANE-W1 multi-key cascade-pool admission (DEC-RANK-POOL-UNION-ADMIT-001)."""
+
+    def _spec(self, rows: list[ResultRow], **kwargs: object) -> cw.CascadeTupleSpec:
+        spec = cw.spec_from_store_rows(
+            instrument="NIFTY",
+            tf_label="1minute",
+            tf_minutes=1,
+            direction_label="bull",
+            sl_paisa=None,
+            tp_paisa=None,
+            prior_n=3,
+            proximity_bps=None,
+            start_equity_paisa=10_000_000,
+            rows=rows,
+            **kwargs,  # type: ignore[arg-type]
+        )
+        assert spec is not None
+        return spec
+
+    def test_dd_optimal_row_reaches_the_validation_pool(self) -> None:
+        # THE rank-1-forever regression: a DD-optimal low-Sharpe combo —
+        # crowned #1 by the DEFAULT min_dd_first display preset — was absent
+        # from the Sharpe-top-K cascade pool, so it read annotation-only
+        # `not_validated` forever (no DSR/CPCV/WFO/MC evidence). The union
+        # admits it via the DD/preset sources at the SAME total K.
+        rows = [
+            _result_row(i, mask=i, sharpe=float(10 + i), max_drawdown_pct=22.0) for i in range(1, 6)
+        ]
+        dd_optimal = _result_row(99, mask=99, sharpe=0.8, max_drawdown_pct=3.0, win_rate=0.9)
+        rows.append(dd_optimal)
+        legacy = self._spec(rows, top_k=3, multi_axis=False)
+        assert (_rid(99), 99) not in legacy.winners  # the pre-W1 shape
+        union = self._spec(rows, top_k=3)
+        assert (_rid(99), 99) in union.winners  # union-admitted
+        assert len(union.winners) == len(legacy.winners) == 3  # cap unchanged
+
+    def test_persisted_frontier_member_reaches_the_pool(self) -> None:
+        # Item 1's explicit frontier inclusion: a persisted ε-Pareto member
+        # losing on every quota axis still enters the validation pool.
+        rows = [
+            _result_row(i, mask=i, sharpe=float(10 + i), max_drawdown_pct=2.0, win_rate=0.9)
+            for i in range(1, 7)
+        ]
+        frontier = _result_row(
+            50, mask=50, sharpe=0.1, max_drawdown_pct=28.0, win_rate=0.1, pareto_member=True
+        )
+        rows.append(frontier)
+        union = self._spec(rows, top_k=5)
+        assert (_rid(50), 50) in union.winners
+
+    def test_top_k_none_is_union_inert(self) -> None:
+        # top_k=None (the stage3_wire refined-cell path) selects the WHOLE
+        # pool — the union arm never engages; byte-identical either way.
+        rows = [_result_row(1, mask=1, sharpe=0.5), _result_row(2, mask=2, sharpe=1.5)]
+        assert (
+            self._spec(rows, top_k=None).winners
+            == self._spec(rows, top_k=None, multi_axis=False).winners
+            == ((_rid(2), 2), (_rid(1), 1))
+        )
+
+    def test_pool_at_or_below_cap_is_union_inert(self) -> None:
+        rows = [_result_row(1, mask=1, sharpe=0.5), _result_row(2, mask=2, sharpe=1.5)]
+        assert (
+            self._spec(rows, top_k=5).winners == self._spec(rows, top_k=5, multi_axis=False).winners
+        )
+
+
+class TestTrialNUnchangedByPoolWidening:
+    """DSR trial-N regression pin (DEC-RANK-POOL-UNION-ADMIT-001 rail).
+
+    N is SIDECAR-based (`build_leaderboard_trials` aggregates the per-tuple
+    trial-stats sidecars written from the FULL backtested population at the
+    persist seam) — pool/persist widening must NEVER move it: the union
+    evaluates MORE candidates against the SAME N.
+    """
+
+    def test_trial_n_is_identical_across_pool_widths_and_union_arms(self, tmp_path: Path) -> None:
+        grid = _swept_tree(tmp_path)
+        baseline = cw.build_leaderboard_trials(tmp_path, grid)
+        # Build cascade specs at BOTH pool widths and BOTH admission arms —
+        # then re-aggregate: the trials records are bit-identical (the specs
+        # are not even an input to the N computation — pinned structurally
+        # by re-running the aggregation after each spec build).
+        for top_k in (1, 3):
+            cw.build_stage2_cascade_specs(tmp_path, grid, top_k=top_k)
+            assert cw.build_leaderboard_trials(tmp_path, grid) == baseline
+        (record,) = baseline
+        assert record.n_trials > 0  # anti-vacuous: a REAL backtested N

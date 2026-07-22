@@ -1,0 +1,12 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-NOTIFY-RUST-CORE-001; the brutex_feed/fno_math/trading_core R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_notify._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-notify surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is bounded at runtime ONLY by the facade's 16-call burn-in bit-compare per law (brutex/notifications/notify_rust.py — a mismatch ships the oracle + autoreverts), which is a blast-radius bound, not a proof; the doctor stage comparing the baked `__source_digest__` (FRAMING v1, DEC-RUST-SOURCE-DIGEST-TWIN-001) against the source tree is a named later lane.",
+  "crate_version": "0.1.0",
+  "symbols": [
+    "SOURCE_DIGEST",
+    "__version__",
+    "count_or_question",
+    "dedupe_should_drop",
+    "escape_markdown_v2",
+    "truncate_id_12"
+  ]
+}
