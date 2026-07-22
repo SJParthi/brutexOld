@@ -80,9 +80,9 @@ reaching the tail battery is already capital-true, fill-honest, and settle-hones
    smoothing it. §4 extends the law per leg.
 3. **Additive identity.** New run-identity keys are **default-omitted** so every existing spot
    `run_id` stays byte-identical, and anti-aliasing keys are **unconditional**
-   (`brutex/engine/sweep_run.py:782` `canonical_trade_params`; `:797` — no floats, no objects,
-   only ints / strings / None; `:861` `roll_schedule` emitted only for the futures alias with
-   the presence⟺meaning invariant at `:654`; `fill_mode="worst_case"` unconditional per
+   (`brutex/engine/sweep_run.py:719` `canonical_trade_params`; `:734` — no floats, no objects,
+   only ints / strings / None; `:798` `roll_schedule` emitted only for the futures alias with
+   the presence⟺meaning invariant at `:603`; `fill_mode="worst_case"` unconditional per
    `fill_mode.py:32-35`). The seller axes ride this exactly (§9) — **including the fill-honesty
    and sizing axes that SHAPE the accepted trade set** (Golden Rule #4).
 4. **Never a ranking gate without its own DEC.** Every seller analytic lands FIRST as a
@@ -228,7 +228,7 @@ SEPARATE sweep axes (`canonical_trade_params` params, §9) — never new vocabul
 ### §3.2 IV-rank / DTE / structure knobs are PARAMS, not bits
 
 They ride `canonical_trade_params` as default-omitted cell-coordinate axes (the `fib_anchor` /
-`PriceSource` precedent — `price_source_params_fragment` at `sweep_run.py:860`;
+`PriceSource` precedent — `price_source_params_fragment` at `sweep_run.py:797`;
 `DEC-NIFTY-PRICE-SOURCE-AXIS-001`, MIGRATION.md #1681). They are NOT vocabulary bits for two
 hard reasons: (i) **India VIX is barred from the mask by CLAUDE.md §2 Rule 3** (REFERENCE_ONLY,
 never a bit, never in run identity), and any IVR floor derived from VIX or an ATM-IV percentile
@@ -857,7 +857,7 @@ compounded over the `max_adjustments` depth — even a shallow 3-adjustment doct
 fill-policy{2}:
 
 ```
-12 × 2.5×10⁵ × 10³ × 5 × 12 × 2  ≈  4.5 × 10¹¹ cells   — REFUSED.
+12 × 2.5×10⁵ × 10³ × 5 × 12 × 2  ≈  3.6 × 10¹¹ cells   — REFUSED.
 ```
 
 Most cells are redundant or incoherent (`D-INVERT` without `D-ROLL-U`), and the v2 leg-mutating
@@ -901,10 +901,10 @@ u64/u128 mask-enumeration path.
 
 ## §9. Run identity — the additive `canonical_trade_params` keys
 
-Verified precedent: `canonical_trade_params` (`sweep_run.py:782`) is the ONE source of the
+Verified precedent: `canonical_trade_params` (`sweep_run.py:719`) is the ONE source of the
 run-identity params layout — default-omitted when defaulted (`price_source_params_fragment`,
-`:860`), conditionally emitted with presence⟺meaning pinned (`roll_schedule`, `:654,861`),
-unconditional where aliasing is dangerous (`fill_mode`), int/string/None only (`:797`). Run
+`:797`), conditionally emitted with presence⟺meaning pinned (`roll_schedule`, `:603,798`),
+unconditional where aliasing is dangerous (`fill_mode`), int/string/None only (`:734`). Run
 identity is `blake3(strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params ‖
 data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)` (`combo.py:9-10`).
 
@@ -933,7 +933,7 @@ the sweep reports, not what defines it. The REFERENCE_ONLY annotations (the VIX 
 priority-ladder/re-arm semantic revision across commits (the `roll_schedule` self-description
 argument), with `code_commit_hash` carrying the actual code semantics. Presence-coherence
 invariants (`def_invert_steps` ⇒ `def_roll_*` present) live in the config `__post_init__`,
-mirroring the instrument⟺roll_schedule invariant (`sweep_run.py:654`).
+mirroring the instrument⟺roll_schedule invariant (`sweep_run.py:603`).
 
 ---
 

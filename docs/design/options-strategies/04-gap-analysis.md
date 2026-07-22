@@ -375,7 +375,7 @@ the way `OptionsRuleResult` already counts rejects with a fail-loud consistency 
 | Class | Definition (over ALL legs, entry AND exit bars) | What may honestly be claimed |
 |---|---|---|
 | **A — bounded-fill** | P1 ∧ P2 ∧ P3 ∧ P4 ∧ P5 on every leg | The per-leg price bound (§2.2) plausibly holds AT the simulated size for liquid ATM-band near-expiry index legs; residuals remain the §2.3(i) impact counterfactual + the §2.3(iii) instant-spread corner — DISCLOSED, not zero |
-| **B — bounded-price, unbounded-size** | P1 ∧ P2 on every leg, but ≥1 leg fails P3 and/or P4 | The price bound holds for a MARGINAL (small) order only; the run's size claim is NOT supported for this trade |
+| **B — bounded-price, unbounded-size** | P1 ∧ P2 ∧ P5 on every leg AND no lot/cost-regime refusal (i.e. NOT Class C), but ≥1 leg fails P3 and/or P4 | The price bound holds for a MARGINAL (small) order only; the run's size claim is NOT supported for this trade |
 | **C — refused** | ≥1 leg fails P1 or P2 (or P5, or lot/cost-regime refusals) | Nothing — the structure is rejected ATOMICALLY (one unpriceable leg refuses the whole structure; for short legs this is mandatory per §2.3(ii)), counted with the failing leg + reason |
 
 **Class-C atomicity note:** partial structures (price the legs that can be priced) are REJECTED as a

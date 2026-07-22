@@ -41,7 +41,7 @@ podcast claim is *true by construction* — a high win rate is the strategy's
 defining property, not evidence of edge. The entire question is the tail, and
 the tail is exactly where every naive backtest is wrong: SL-at-trigger fills
 are a one-sided subsidy applied to precisely the days that dominate the P&L
-(illustrative gap of 6–25× per losing leg, §4.2; the documented 20-Aug-2021
+(illustrative gap of 6–24× per losing leg, §4.2; the documented 20-Aug-2021
 freak trade filled a real SL ~650 points past trigger, §4.3). The historical
 sample is short (NIFTY weeklies ~7 years, SENSEX weeklies ~3 years) and
 non-stationary (expiry-weekday migrations, 3× lot-size change, new expiry-day
@@ -59,7 +59,7 @@ only after net-new engineering (a short-premium multi-leg trailing walker;
 | Can BruteX fetch the data? | YES (NSE); SENSEX/BSE-FNO **UNVERIFIED**, probe-gated | §3.2 |
 | Can BruteX simulate short premium today? | NO — BUY-only executor, no multi-leg, no trailing, no margin | §3.3 |
 | Honest priceable window | **2024-10-01 → today (right edge moves)** (ETC refusal rows before it) (measured) | §3.4 |
-| Does the naive fill assumption survive scrutiny? | NO — bar-extreme vs at-trigger diverges 6–25× on tail days (illustrative), with a documented real ~650-pt slip (sourced) | §4 |
+| Does the naive fill assumption survive scrutiny? | NO — bar-extreme vs at-trigger diverges 6–24× on tail days (illustrative), with a documented real ~650-pt slip (sourced) | §4 |
 | Does even the repo's worst-case law capture the full tail? | NO — six residual understatements enumerated (halts, spreads, RMS, survivorship) | §4.4 |
 | Do the shipped overfitting gates catch it? | PARTLY — they deflate luck, they cannot manufacture absent tail evidence; stress injection is the honest fix | §8 |
 | External record of the strategy class | 89–93% of individuals lose (SEBI); every famous short-vol vehicle died in 1–2 days | §7 |
@@ -152,8 +152,12 @@ marked); the probe commands are cited inline per row below.
 ### 3.4 Costs and the honest priceable window (measured, file:line)
 
 - Brokerage: Groww flat ₹20/order — `brutex/costs/constants.py:45,661-669`.
-- Options STT (sell-side premium), `brutex/costs/constants.py:57-95`:
-  0.0625% pre-2024-10-01 → 0.10% (2024-10-01→2026-03-31) → 0.15% (from
+- Options STT (sell-side premium), `brutex/costs/constants.py:57-95`: the
+  statutory pre-boundary ladder is 0.05% (2020-01-01→2023-03-31) → 0.0625%
+  (2023-04-01→2024-09-30) (register ch-02 §3.1) — the repo encodes a flat
+  0.0625% across the whole pre-2024-10-01 window (imprecise before 2023-04-01,
+  a conservative over-cost; immaterial here since every pre-boundary trade is
+  cost-refused anyway) → 0.10% (2024-10-01→2026-03-31) → 0.15% (from
   2026-04-01); exercise STT 0.125%/0.15% on intrinsic. (The futures STT ladder
   0.02%/0.05% is a DIFFERENT table — `brutex/costs/futures_costs.py`.)
 - ETC: exactly TWO verified rate rows repo-wide — NSE 0.03503% + BSE 0.03250%,
@@ -584,7 +588,7 @@ Monte-Carlo, `:604-857`):
   on every verdict `:314-328,889-895` and surfaced as `cpcv_pass_pct` —
   DEC-RESULTS-CASCADE-VERDICT-JOIN-001 #1749). A strategy profitable only in
   one contiguous stretch fails most splits that exclude it.
-- **One-regime-wonder** flag (`combo_aggregates.py:253-254,546-611`;
+- **One-regime-wonder** flag (`brutex/engine/combo_aggregates.py:253-254,546-611`;
   `REGIME_WONDER_SHARE = 0.8` at `:89-93`) over calendar YEARS then TREND
   regimes; the VIX complement `vix_band_lo/hi` (= [p10,p90] VIX of winning
   trades, `:185-187`) shows an expiry-seller's "works when VIX between X–Y" on
@@ -604,7 +608,7 @@ events number **0–3 — and can legitimately be ZERO**. Every gate above is a
 isn't in it.** With a tail-free window, a short-premium strategy can pass
 DSR ≥ 0.95, CPCV ≥ 0.5, WFO, Lockbox and all five hard doors with its ruin risk
 fully intact. The repo's own honesty apparatus points the same way (worst-5-days
-is explicitly a *view*, `combo_aggregates.py:95-96`; survivorship disclosures
+is explicitly a *view*, `brutex/engine/combo_aggregates.py:95-96`; survivorship disclosures
 at `options/executor.py:606-617`).
 
 **Recommendation — stress-scenario INJECTION.** The honest fix is synthetic

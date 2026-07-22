@@ -312,7 +312,7 @@ degrades to "day-2 standalone", which UNDERSTATES the trap (B10 honest limit; a 
 option-position model is a named future DEC); (ii) VIX-conditioned sizing (the May run-up was
 a visible warning — VIX-level gates are stampable today, B5); (iii) event-calendar
 conditioning (results date known in advance — same gap as Event 4); (iv) option-leg P&L incl.
-the put wing going ~1,380 Nifty points ITM intraday (PENDING-ON-BOX: 06-Jun-2024-expiry
+the put wing going ~1,380 Nifty points ITM close-to-close (spot-derived from the −5.93% move, UNVERIFIED-EXACT; PENDING-ON-BOX: 06-Jun-2024-expiry
 chain, straddle-multiple recipe §2 — the chain is post-2020 and weekly, so B3/B1 both
 satisfied; the B4 probe still governs).
 

@@ -388,7 +388,7 @@ backfilled (§5.6).
 | Normal day, entry-time | Near-money weekly index options generally | Liquid enough that brokers permit market orders (the only F&O region where Zerodha does) | [EXT-SNIPPET, Zerodha support pages above] — an ordinal fact, not a number |
 | Normal day | **Far-OTM wings**, deep-ITM, long-dated, stock options | Thin enough that major brokers block market orders entirely | [EXT-SNIPPET, Zerodha/Paytm pages above] |
 | Stress day | BANKNIFTY ATM | "when VIX hit 28.91 … BankNifty ATM spreads ballooned to ₹80–150" | **[EXT-SNIPPET-ONLY, UNCONFIRMED — §7 U-Q1]** (same strike.money page; the quoted date is even suspect) |
-| Stress seconds | Index weekly options, forced (SL-M) flow | Achieved fills 6.5×–20× prevailing premium (₹100→₹803.05; ₹35.25→₹750) | [EXT-SNIPPET, §5.2 freak trades — PRINTS, i.e. realized worst-case, not quoted spreads] |
+| Stress seconds | Index weekly options, forced (SL-M) flow | Achieved fills ~8×–21× prevailing premium (₹100→₹803.05; ₹35.25→₹750) | [EXT-SNIPPET, §5.2 freak trades — PRINTS, i.e. realized worst-case, not quoted spreads] |
 | Any regime, from OUR lake | any contract | **Quoted spread: unmeasurable — the lake stores no quotes** (§5.4). The only in-lake proxy is per-bar `high−low` range of *traded* prints, which under-represents the quoted spread precisely on stress/no-print bars | [REPO brutex/data/fno_candle_lake.py:132-141] |
 
 **Honest summary:** the entry-vs-defense asymmetry is firmly evidenced *ordinally*
@@ -436,7 +436,7 @@ executor prices at the option's own bar extremes as "the worst-case adverse anch
 (lot_size → cost_regime → no_data → stale_bar → tick_floor) [REPO executor.py:507-564]. A
 `session_gap` law already exists for positions stranded by a data hole: close retroactively at
 the prior session's last stored bar's adverse extreme, counted via the `exits_session_gap`
-counter [REPO trade_store.py:211] under the session-gap law [REPO trade_sim.py:60-67].
+counter [REPO trade_store.py:210] under the session-gap law [REPO trade_sim.py:60-67].
 
 **What worst-case-per-leg fills DO bound:**
 
@@ -556,7 +556,7 @@ bar range may still understate the book — C-1 residue disclosed); **F-C** = de
 walk-forward engaged); **F-D** = settlement-proxy (official settlement price approximated from the
 spot 1-minute lake); **F-E** = unboundable residue (size/impact beyond per-lot marginal — C-2;
 disclosed, never modeled). Every class-F-B/F-C/F-D fill also reports its class on the trade row (the
-`exits_session_gap`/`mae_granularity` counter precedent [REPO trade_store.py:211 (counter);
+`exits_session_gap`/`mae_granularity` counter precedent [REPO trade_store.py:210 (counter);
 trade_sim.py:60-67 (law); CLAUDE.md §1 #1743 blurb]).
 
 > **Reconciliation.** These F-A…F-E are per-ACTION EXECUTION-REALISM classes; the per-TRIAL
