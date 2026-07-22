@@ -246,6 +246,9 @@ class TestProjectorThreading:
             "bars": [],
             "bar_bits": [],
             "tf_minutes": 5,
+            # The fixture's own (empty) bar stream doubles as the execution
+            # stream (DEC-FILL-EXEC-GRID-1M-001 threading law).
+            "exec_bars_1m": [],
             "sl_paisa": None,
             "tp_paisa": None,
         }

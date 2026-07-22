@@ -330,7 +330,7 @@ def test_build_candidate_input_threads_flags_and_pnls() -> None:
         "winners": ((f"{1:064x}", 0),),
     }
     spec = cw.CascadeTupleSpec(**spec_kwargs)  # type: ignore[arg-type]
-    (cand,) = cw.candidates_for_spec(spec, bars)
+    (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)
 
     flags = cand.extreme_vol_entry_flags
     pnls = cand.trade_pnls_paisa
@@ -370,6 +370,7 @@ def test_build_candidate_input_flags_match_trade_entry_sessions() -> None:
         bar_bits=bar_bits,
         direction_label="bull",
         tf_minutes=1,
+        exec_bars_1m=bars,
         sl_paisa=None,
         tp_paisa=None,
         start_equity_paisa=10_000_000,
@@ -379,6 +380,7 @@ def test_build_candidate_input_flags_match_trade_entry_sessions() -> None:
         mask_to_entry_signals(bar_bits, 0),
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         stop_loss_paisa=None,
         take_profit_paisa=None,
         reference_stamper=None,

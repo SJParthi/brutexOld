@@ -128,7 +128,15 @@ def _run(
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
         return run_persisted_sweep(
-            _BARS, cfg, store=store, dedup=dedup, audit=audit, trial_stats_digest=digest
+            _BARS,
+            cfg,
+            store=store,
+            dedup=dedup,
+            audit=audit,
+            trial_stats_digest=digest,
+            # tf=1minute — the decision stream IS the execution stream
+            # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point: one list, one key).
+            exec_bars_1m=_BARS,
         )
 
 
@@ -280,6 +288,7 @@ class TestCounterWiring:
                     mask,
                     direction=Side.BUY,
                     tf_minutes=1,
+                    exec_bars_1m=_BARS,
                     stop_loss_paisa=None,
                     take_profit_paisa=None,
                     start_equity_paisa=10_000_000,
@@ -299,6 +308,9 @@ class TestCounterWiring:
             bars=_BARS,
             bar_bits=bar_bits,
             tf_minutes=1,
+            # tf=1minute — the decision stream IS the execution stream
+            # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point).
+            exec_bars_1m=_BARS,
             sl_paisa=None,
             tp_paisa=None,
         )

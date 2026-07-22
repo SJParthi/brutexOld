@@ -121,6 +121,9 @@ def _run(
             store=store,
             dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
             audit=audit,
+            # tf=1minute — the decision stream IS the execution stream
+            # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point: one list, one key).
+            exec_bars_1m=bars,
         )
 
 
@@ -227,7 +230,9 @@ class TestDirectSpineSeam:
         monkeypatch.setattr(sweep_run, "cvar_rejects", lambda *_a, **_k: True)
         cfg = _make_config()
         bar_bits = [1] * len(bars)  # bit 0 always fires — mask 1 trades
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1, reference_stamper=None)
+        sim = ResidentTradeSim(
+            bars, bar_bits, tf_minutes=1, exec_bars_1m=bars, reference_stamper=None
+        )
         yielded = list(
             sweep_run._iter_mask_metrics(  # pyright: ignore[reportPrivateUsage]
                 sim,

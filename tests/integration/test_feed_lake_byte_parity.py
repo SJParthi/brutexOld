@@ -323,8 +323,13 @@ class TestEngineGoldenReproducesWithFeedsImported:
 
         store = ResultsStore(path=tmp_path / "s.parquet")
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+        bars = _bars()
         with AuditWriter(path=tmp_path / "s.jsonl") as audit:
-            summary = run_persisted_sweep(_bars(), _config(), store=store, dedup=dedup, audit=audit)
+            # tf=1minute — the decision stream IS the execution stream
+            # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point: one list, one key).
+            summary = run_persisted_sweep(
+                bars, _config(), store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+            )
         assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
 
 

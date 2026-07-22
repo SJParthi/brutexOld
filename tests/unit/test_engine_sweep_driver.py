@@ -1236,6 +1236,7 @@ class TestExitReasonCountersThreading:
             mask_to_entry_signals(bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=50,
         )
         assert trades  # the mask-0 walk trades on this feed
@@ -1252,6 +1253,7 @@ class TestExitReasonCountersThreading:
             trades,
             start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
             tf_minutes=1,
+            exec_bars_1m=bars,
             exit_reason_counts=self._counts,
         )
         assert m.sl_hit_rate == self._counts[STOP_LOSS_REASON_INDEX] / len(trades)
@@ -1266,6 +1268,7 @@ class TestExitReasonCountersThreading:
             trades,
             start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
             tf_minutes=1,
+            exec_bars_1m=bars,
             exit_reason_counts=self._counts,
         )
         from brutex.engine.trade_sim import STOP_LOSS_REASON_INDEX
@@ -1279,6 +1282,7 @@ class TestExitReasonCountersThreading:
             trades,
             start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
             tf_minutes=1,
+            exec_bars_1m=bars,
         )
         assert m.sl_hit_rate is None
 
@@ -1286,7 +1290,9 @@ class TestExitReasonCountersThreading:
         from brutex.strategies.types import Side
 
         bars = _session_bars()
-        m = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, stop_loss_paisa=50)
+        m = evaluate_combo(
+            bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, stop_loss_paisa=50
+        )
         assert m.sl_hit_rate is not None
         assert 0.0 <= m.sl_hit_rate <= 1.0
 
@@ -1308,6 +1314,7 @@ class TestRecencyAnchorThreading:
             mask_to_entry_signals(bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=50,
         )
         assert trades
@@ -1323,6 +1330,7 @@ class TestRecencyAnchorThreading:
             trades,
             start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
             tf_minutes=1,
+            exec_bars_1m=bars,
             **kwargs,  # type: ignore[arg-type]
         )
 
@@ -1367,6 +1375,7 @@ class TestRecencyAnchorThreading:
             0,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=50,
             take_profit_paisa=None,
             start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
@@ -1378,6 +1387,7 @@ class TestRecencyAnchorThreading:
             0,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=50,
             take_profit_paisa=None,
             start_equity_paisa=DEFAULT_START_EQUITY_PAISA,

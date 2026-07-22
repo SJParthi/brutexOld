@@ -1838,12 +1838,12 @@ class TestSimulateMasksWithExitCounts:
 
     def _sim(self) -> ResidentTradeSim:
         bars = _feed()
-        return ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        return ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
 
     def test_kernel_counts_match_the_python_walker(self) -> None:
         bars = _feed()
         bits = build_bar_bits(bars)
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars)
         assert sim.rust_active is True
         masks = [0, 1]
         triples = sim.simulate_masks_with_exit_counts(
@@ -1855,6 +1855,7 @@ class TestSimulateMasksWithExitCounts:
                 mask_to_entry_signals(bits, mask),
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=bars,
                 stop_loss_paisa=200,
                 take_profit_paisa=300,
             )
@@ -1865,8 +1866,8 @@ class TestSimulateMasksWithExitCounts:
 
     def test_python_fallback_arm_emits_identical_triples(self) -> None:
         bars = _feed()
-        wired = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
-        fallback = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        wired = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
+        fallback = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
         fallback._rust = None  # pyright: ignore[reportPrivateUsage] — the forcing seam
         assert wired.simulate_masks_with_exit_counts(
             [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
@@ -1887,7 +1888,7 @@ class TestSimulateMasksWithExitCounts:
         """The wide (u128-resident) kernel accumulates identically."""
         bars = _feed()
         bits = [b | (1 << 100) for b in build_bar_bits(bars)]
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars)
         assert sim.rust_active is True
         mask = (1 << 100) | 1
         with capture_logs() as logs:
@@ -1900,6 +1901,7 @@ class TestSimulateMasksWithExitCounts:
             mask_to_entry_signals(bits, mask),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=200,
             take_profit_paisa=300,
         )
@@ -1911,7 +1913,7 @@ class TestSimulateMasksWithExitCounts:
         oracle — triples identical, one ``wheel_missing_exit_counts`` WARNING
         per instance, silent on repeat."""
         bars = _feed()
-        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
 
         class _StaleKernel:
             """Only the PRE-counter surface — no counted twin."""
@@ -1920,7 +1922,7 @@ class TestSimulateMasksWithExitCounts:
                 raise AssertionError("the stale surface must never be called")
 
         sim._rust = _StaleKernel()  # pyright: ignore[reportPrivateUsage]
-        oracle = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        oracle = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1, exec_bars_1m=bars)
         oracle._rust = None  # pyright: ignore[reportPrivateUsage]
         with capture_logs() as logs:
             got = sim.simulate_masks_with_exit_counts(

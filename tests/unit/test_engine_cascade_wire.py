@@ -3042,7 +3042,7 @@ class TestBuildCandidateInputFamily:
     ) -> tuple[Any, list[CandleBar]]:
         bars = _session_bars()
         spec = _spec(sl_paisa=50, tp_paisa=80, family_sl_tp=family)
-        (cand,) = cw.candidates_for_spec(spec, bars)
+        (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)
         return cand, bars
 
     def test_family_columns_are_aligned_and_include_the_finalist(self) -> None:
@@ -3068,6 +3068,7 @@ class TestBuildCandidateInputFamily:
             signals,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=60,
             take_profit_paisa=90,
         )
@@ -3091,14 +3092,16 @@ class TestFamilyCap:
 
     def test_uncapped_by_default(self) -> None:
         spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
-        (cand,) = cw.candidates_for_spec(spec, _session_bars())
+        bars = _session_bars()
+        (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars)
         assert cand.family_returns is not None
         assert len(cand.family_returns) == len(self._WIDE)
 
     def test_cap_truncates_first_n_with_one_loud_warning(self) -> None:
         spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        bars = _session_bars()
         with capture_logs() as logs:
-            (cand,) = cw.candidates_for_spec(spec, _session_bars(), family_cap=3)
+            (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, family_cap=3)
         assert cand.family_returns is not None
         assert len(cand.family_returns) == 3
         # Deterministic FIRST-cap truncation of the sorted persisted order.
@@ -3112,8 +3115,9 @@ class TestFamilyCap:
         # Own pair (80, 85) sorts LAST — a cap of 2 would exclude the
         # finalist from its own family, so the family is dropped wholesale.
         spec = _spec(sl_paisa=80, tp_paisa=85, family_sl_tp=self._WIDE)
+        bars = _session_bars()
         with capture_logs() as logs:
-            (cand,) = cw.candidates_for_spec(spec, _session_bars(), family_cap=2)
+            (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, family_cap=2)
         assert cand.family_returns is None
         dropped = [e for e in logs if e["event"] == "cascade_wire.family_cap_dropped_own_pair"]
         assert len(dropped) == 1
@@ -3121,7 +3125,8 @@ class TestFamilyCap:
 
     def test_cap_wider_than_the_family_is_inert(self) -> None:
         spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
-        (cand,) = cw.candidates_for_spec(spec, _session_bars(), family_cap=100)
+        bars = _session_bars()
+        (cand,) = cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, family_cap=100)
         assert cand.family_returns is not None
         assert len(cand.family_returns) == len(self._WIDE)
 
@@ -3131,8 +3136,11 @@ class TestFamilyCap:
         # family width neither truncates nor warns (kills the `>` -> `>=`
         # cap mutant, which would truncate-and-warn at equality).
         spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        bars = _session_bars()
         with capture_logs() as logs:
-            (cand,) = cw.candidates_for_spec(spec, _session_bars(), family_cap=len(self._WIDE))
+            (cand,) = cw.candidates_for_spec(
+                spec, bars, exec_bars_1m=bars, family_cap=len(self._WIDE)
+            )
         assert cand.family_returns is not None
         assert len(cand.family_returns) == len(self._WIDE)
         assert [e for e in logs if e["event"] == "cascade_wire.family_capped"] == []
@@ -3144,9 +3152,10 @@ class TestFamilyCap:
         # cap 0 refuses loudly instead of degrading every family to the
         # family=None dropped-own-pair skip.
         spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        bars = _session_bars()
         for bad_cap in (0, -1):
             with pytest.raises(cw.CascadeWireError, match="family_cap must be >= 1 or None"):
-                cw.candidates_for_spec(spec, _session_bars(), family_cap=bad_cap)
+                cw.candidates_for_spec(spec, bars, exec_bars_1m=bars, family_cap=bad_cap)
 
 
 class TestRunCascadeOverSpecsEmbargo:

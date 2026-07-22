@@ -120,17 +120,23 @@ class TestRecencyPassCost:
         trades = _trades(_N)
         anchor = bars[-1].timestamp
 
-        plain = metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        plain = metrics_from_trades(
+            bars, trades, start_equity_paisa=10_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
         with_anchor = metrics_from_trades(
             bars,
             trades,
             start_equity_paisa=10_000_000,
             tf_minutes=1,
+            exec_bars_1m=bars,
             trailing_anchor=anchor,
         )
         # Determinism: repeat calls reproduce each arm bit-for-bit.
         assert (
-            metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1) == plain
+            metrics_from_trades(
+                bars, trades, start_equity_paisa=10_000_000, tf_minutes=1, exec_bars_1m=bars
+            )
+            == plain
         )
         assert (
             metrics_from_trades(
@@ -138,6 +144,7 @@ class TestRecencyPassCost:
                 trades,
                 start_equity_paisa=10_000_000,
                 tf_minutes=1,
+                exec_bars_1m=bars,
                 trailing_anchor=anchor,
             )
             == with_anchor
@@ -174,7 +181,9 @@ class TestRecencyPassCost:
         anchor = bars[-1].timestamp
 
         def _plain() -> None:
-            metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+            metrics_from_trades(
+                bars, trades, start_equity_paisa=10_000_000, tf_minutes=1, exec_bars_1m=bars
+            )
 
         def _with_anchor() -> None:
             metrics_from_trades(
@@ -182,6 +191,7 @@ class TestRecencyPassCost:
                 trades,
                 start_equity_paisa=10_000_000,
                 tf_minutes=1,
+                exec_bars_1m=bars,
                 trailing_anchor=anchor,
             )
 

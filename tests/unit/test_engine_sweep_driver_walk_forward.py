@@ -705,6 +705,7 @@ def test_walk_forward_fold_metrics_keep_recency_none() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=_stream(25),
         train_days=10,
         test_days=5,
         step_days=5,
