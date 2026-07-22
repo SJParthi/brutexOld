@@ -1287,6 +1287,7 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     """
     import polars as pl
 
+    from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
     from brutex.data.price_sanity import (
         validate_frame_price_sanity,
         validate_frame_ts_datetime_range,
@@ -1368,6 +1369,18 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # WINDOW-CUT frame only (a corrupt row outside [start, end) never
         # blanks this read). Raises the quarantining ResampleInputError.
         validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
+        # DEC-DAILY-WINDOW-BADTICK-001: mirror make_lake_read_1m's bad-tick
+        # scaling screen onto the window reader after the price-sanity gate
+        # (DEC-READ-GUARD-PARITY-001 #1811 parity). A clean frame passes
+        # through unchanged (zero-copy); the ONE BRUTEX_BAD_TICK_SCREEN kill
+        # switch flips every screened boundary together, so an OFF lake is
+        # byte-identical.
+        if bad_tick_screen_enabled():
+            frame = screen_frame_bad_ticks(
+                frame,
+                ts_column="ts_utc",
+                source=f"window:{context}",
+            )
         return frame
 
     return _read
