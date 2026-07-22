@@ -4165,8 +4165,10 @@ jobs:
           pip install dist/*.whl
           pip install -e ".[dev,data]"
           # The suites import brutex.engine/metrics chains, so the two
-          # production kernels are needed too (same retry guard).
-          for crate in ./rust/fno-math ./rust/trading-core; do
+          # production kernels are needed too (same retry guard);
+          # brutex-identity joins them because results_store.py hard-imports
+          # its kernel (DEC-RUST-RUNID-STORES-001).
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity; do
             n=0
             until pip install "$crate"; do
               n=$((n + 1))
