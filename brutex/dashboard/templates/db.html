@@ -1617,13 +1617,23 @@ function candleControlsHtml() {
     : cstate.kind === "spot"
     ? spotCascadeHtml()
     : '<span class="lab">Dataset</span><select id="cds">' + dsOpts + '</select>';
+  /* Bucket-START label note (DEC-MOVERS-TIME-SNAP-UX-001): a STATIC literal
+     line for derived multi-minute intraday timeframes so the /db label ↔
+     /movers as-of-cutoff semantics are self-explaining (the operator-reported
+     24360.00-vs-24355.1 confusion). Rendered in the control bar — OUTSIDE
+     #dbgrid — so updateCandleGrid's stepnote-presence patch check (scoped to
+     the grid) is untouched. Static text only, no server data. */
+  const civ = String((curDataset() || {}).interval || "");
+  const bucketNote = ((civ.endsWith("minute") && civ !== "1minute") || civ.endsWith("hour"))
+    ? '<div class="stepnote">intraday bars are labeled by their bucket-START minute (IST) — e.g. a 3minute bar labeled 15:27 covers 15:27–15:29</div>'
+    : "";
   return '<div class="qbar">'
     + '<div class="qrow">' + picker
     + '<span class="lab">From</span><input type="date" id="cstart" min="2020-01-01" value="' + esc(cstate.start) + '">'
     + '<span class="lab">To</span><input type="date" id="cend" min="2020-01-01" value="' + esc(cstate.end) + '"></div>'
     + '<div class="qrow"><span class="lab">Sort</span>'
     + '<select id="cdir"><option value="asc">timestamp asc</option><option value="desc">timestamp desc</option></select></div>'
-    + '</div>';
+    + '</div>' + bucketNote;
 }
 
 /* Per-expiry "listed N · with data M" text (DEC-DB-UX-PACK-001 Feature 6), from

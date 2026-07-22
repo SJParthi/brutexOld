@@ -21,9 +21,15 @@ suite pins the fix in two layers, mirroring
   ``createElement`` (never ``innerHTML`` of server data).
 * **Node-executed golden** — when ``node`` is available (it is on CI), the REAL
   shipped ``bx-movers-time.js`` is executed and its ``defaultTimeOptions`` /
-  ``resolveTime`` / ``minuteToHHMM`` are asserted against the Python-side
+  ``snapTime`` / ``minuteToHHMM`` are asserted against the Python-side
   ``movers_snapshot`` primitives (``session_bar_times`` / ``minute_to_hhmm`` /
   ``is_intraday_interval``) — the single source of truth they mirror.
+
+DEC-MOVERS-TIME-SNAP-UX-001 RECONCILE: ``bxResolveTime`` (whose not-a-slot
+``""`` fallback still reset an explicit pick to Latest on a TF switch) is
+SUPERSEDED + DELETED — the pick now persists as a minute-of-day instant and
+snaps to the new timeframe's containing bucket (``bxSnapTime``); the full snap
+law is pinned by ``test_dashboard_movers_time_snap.py``.
 """
 
 from __future__ import annotations
@@ -50,8 +56,16 @@ class TestSharedTimeModuleWiring:
     def test_static_module_exists_and_exports_the_primitives(self) -> None:
         text = _STATIC_JS.read_text(encoding="utf-8")
         assert "function bxDefaultTimeOptions(" in text
-        assert "function bxResolveTime(" in text
         assert "function bxMinuteToHHMM(" in text
+        # The snap primitives (DEC-MOVERS-TIME-SNAP-UX-001).
+        assert "function bxSnapTime(" in text
+        assert "function bxTimeOptionPairs(" in text
+        assert "function bxCutoffMinute(" in text
+        # bxResolveTime is SUPERSEDED + DELETED (its not-a-slot "" fallback was
+        # the current-main TF-switch reset to Latest; zero consumers remain) —
+        # no definition, no export (the doc header may still NAME it as history).
+        assert "function bxResolveTime(" not in text
+        assert "resolveTime:" not in text
         assert "module.exports = BXMoversTime;" in text
 
     def test_movers_loads_shared_module_before_inline_script(self) -> None:
@@ -69,9 +83,12 @@ class TestSharedTimeModuleWiring:
         assert '<option value="">Latest</option>' in text
         # The pre-fix first-slot pin is GONE (it froze a coarse TF at a partial close).
         assert "state.time = sel.value" not in text
-        # The grid is built from the shared numeric-generated primitive.
-        assert "BXMoversTime.defaultTimeOptions(m)" in text
-        assert "BXMoversTime.resolveTime(state.time, m)" in text
+        # The grid is built from the shared numeric-generated pair primitive and
+        # the retained pick SNAPS via the persistent instant
+        # (DEC-MOVERS-TIME-SNAP-UX-001 — no bxResolveTime Latest fallback).
+        assert "BXMoversTime.timeOptionPairs(m)" in text
+        assert "BXMoversTime.snapTime(state.instant, m)" in text
+        assert "BXMoversTime.resolveTime" not in text
 
     def test_asof_label_uses_latest_time_not_daily_for_intraday_default(self) -> None:
         text = _MOVERS.read_text(encoding="utf-8")
@@ -133,15 +150,17 @@ class TestNodeExecutedGolden:
             minutes = interval_minutes(interval)
             assert self._run_js(f"t.isIntradayMinutes({minutes})") == is_intraday_interval(interval)
 
-    def test_resolve_time_default_blank_persists_valid_drops_invalid(self) -> None:
-        # Default ("") stays Latest on every TF; a valid prior pick persists across
-        # a TF switch; an invalid (off-grid) pick falls back to Latest.
-        assert self._run_js("t.resolveTime('', 3)") == ""
-        assert self._run_js("t.resolveTime('09:15', 5)") == "09:15"  # 09:15 is on every grid
-        assert self._run_js("t.resolveTime('09:20', 5)") == "09:20"  # valid 5-min slot
-        assert self._run_js("t.resolveTime('09:16', 5)") == ""  # not a 5-min slot → Latest
-        assert self._run_js("t.resolveTime('15:27', 1)") == "15:27"  # valid 1-min slot
-        assert self._run_js("t.resolveTime('15:29', 3)") == ""  # not a 3-min slot → Latest
+    def test_snap_time_persists_instant_never_resets(self) -> None:
+        # bxSnapTime SUPERSEDES bxResolveTime (DEC-MOVERS-TIME-SNAP-UX-001):
+        # null (no explicit pick) stays Latest on every TF; an explicit instant
+        # NEVER falls back to Latest — it snaps to the containing bucket's
+        # bucket-FINAL sent value on the new TF.
+        assert self._run_js("t.snapTime(null, 3)") == ""
+        assert self._run_js("t.snapTime(null, 5)") == ""
+        assert self._run_js("t.snapTime(929, 3)") == "15:29"  # 15:29 → last 3-min bucket final
+        assert self._run_js("t.snapTime(556, 5)") == "09:19"  # 09:16 → first 5-min bucket final
+        assert self._run_js("t.snapTime(927, 1)") == "15:27"  # 1-min: the instant itself
+        assert self._run_js("t.snapTime(929, 375)") == ""  # daily: no time choice
 
     def test_teeth_coarse_tf_last_slot_is_not_the_latest_minute(self) -> None:
         # The bug reproduction at the source: a 3-minute grid's last slot is 15:27,

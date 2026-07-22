@@ -251,3 +251,39 @@ def test_hostile_symbol_renders_inert(new_page: NewPageFactory, tmp_path: Path) 
     assert session.page.evaluate("() => window.__bx_xss === undefined") is True
     assert session.page_errors == []
     assert session.dialogs == []
+
+
+def test_verify_chip_green_execution(new_page: NewPageFactory, tmp_path: Path) -> None:
+    """The live /db verify chip reaches its GREEN state in a real browser.
+
+    DEC-MOVERS-DB-PROVENANCE-VERIFY-001 round-2: the chip's full execution —
+    post-paint debounce → the /db read-allowlist pre-check → the K parallel
+    ``/api/v1/db/candles`` probes → the BXVerify comparison → the green paint —
+    runs for real against the fixture lake (the default gainers view's NIFTY
+    22000 daily close equals its 1-minute session close by construction).
+    The hostile lake symbol is a ``;``/``'``/``=`` shape the /db READ allowlist
+    (``db_view._SYMBOL_RE``) rejects — it must be a DISCLOSED "not
+    /db-readable" skip, with ZERO probe issued for it (a guaranteed-400 probe
+    was the round-2 BLOCKER: the console error broke the harness's
+    console-clean law, which this test now rides as its own teeth — any /db
+    probe 400 fails the session teardown).
+    """
+    fixture = build_movers_app(tmp_path)
+    session = new_page(fixture)
+    session.goto("/movers")
+    session.page.wait_for_selector("#rows td.name")
+
+    chip = session.page.locator("#verifyChip")
+    # The chip transitions muted "checking…" → green after the debounce + the
+    # probes settle; to_have_class waits for the transition. The default
+    # gainers view holds the two POSITIVE movers — NIFTY (+10%) and the
+    # hostile index (+5%) — so exactly 1 row is probed and 1 is the disclosed
+    # unreadable skip.
+    expect(chip).to_have_class("pos")
+    expect(chip).to_have_text(re.compile(r"^✓ matches /db \(1 rows"))
+    # The hostile row's skip is DISCLOSED, never silently green-washed.
+    expect(chip).to_have_text(re.compile(r"1 not /db-readable"))
+    # Exactly the one readable row was probed — the hostile row issued NO
+    # request (request_count is a substring ledger over every page request).
+    assert session.request_count("/api/v1/db/candles") == 1
+    assert session.page_errors == []
