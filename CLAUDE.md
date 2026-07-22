@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-21 (DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065,
+_Last updated: 2026-07-22 (DEC-DASHBOARD-DRILL-TF5-DYNK-001, MIGRATION.md
+#2129, branch `claude/dashboard-tf5-dynamic-k` — the `/launch` locked
+dashboard sweep DRILLS DOWN: the 21-timeframe interval lock narrows to the
+TF-5 drill set {1minute, 2minute, 3minute, 5minute, 15minute} and the fixed
+`--k 1,2,3,4,5` lock becomes the dynamic-k Apriori-to-EXTINCTION token
+(`LOCKED_K = sweep_runner.DEFAULT_K` — the launch rides the SAME
+`resolve_sweep_exploration` path as the CLI default; `--max-combos` OMITTED
+on the extinction arm — an explicit cap would TRIM the ladder, the mask·bar
+breaker + min-hits extinction govern depth; one-constant rollback per axis).
+OPERATOR-APPROVED 2026-07-22. LAUNCH-SURFACE ONLY — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; TF-5 is a strict SUBSET so run identity + goldens
+are untouched; the one-click ONECLICK_K stays numeric (the estimator law)
+and the 21-TF lake registry is untouched; the SLA-ack posture is unchanged
+in kind (the stale "expected to PASS" copy corrected honestly). This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #2129.)
+Earlier: 2026-07-21 (DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065,
 branch `claude/rust-runid-stores` — the run-identity-CONSUMPTION + stores
 COMPUTATION plane re-hosted on the NEW `rust/brutex-identity` crate (pyo3 0.29
 abi3-py312; blake3 + parquet-rs only): `engine/snapshot_hash.py` · run-id
@@ -4638,7 +4654,48 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-runid-stores`
+- **Active branch:** `claude/dashboard-tf5-dynamic-k`
+  (**DEC-DASHBOARD-DRILL-TF5-DYNK-001, MIGRATION.md #2129** — the `/launch`
+  locked dashboard sweep DRILLS DOWN (operator-approved 2026-07-22 — "Go
+  ahead with everything"): the 21-timeframe interval lock narrows to the
+  TF-5 drill set {1minute, 2minute, 3minute, 5minute, 15minute}
+  (`_DRILL_TF_MINUTES` → labels resolved through the ONE
+  `LAKE_INTERVAL_LABELS` registry, never re-minted; the lake registry /
+  prebuild / partition vocabulary UNTOUCHED — sweep-side narrowing only;
+  per-instrument bars 608,250 / 304,936 / 202,750 / 121,650 / 40,550,
+  bar-weight ratio 0.616× vs the 21-TF lock) and the fixed `--k 1,2,3,4,5`
+  lock becomes the dynamic-k Apriori-to-EXTINCTION token — `LOCKED_K =
+  sweep_runner.DEFAULT_K`, the ONE sanctioned dashboard-side copy of
+  `cli.EXTINCTION_K_TOKEN` (§11 COMMON, no third copy; the detached CLI
+  child resolves the token + exports `BRUTEX_SWEEP_APRIORI=1` itself), so
+  the launch rides the SAME `resolve_sweep_exploration` path as the CLI
+  default. THE `--max-combos` LAW: OMITTED on the extinction arm — an
+  explicit cap TRIMS the ladder to the contiguous `C(n,k) <= cap` prefix
+  (ruling 9), which at the locked 50.1M would silently re-pin k<=6; the
+  CLI default's guardrails (the Apriori mask·bar breaker + min-hits=30
+  extinction) govern depth; `LOCKED_MAX_COMBOS` stays defined so a
+  numeric-CSV rollback of `LOCKED_K` restores the guard verbatim
+  (one-constant rollback per axis, both arms test-covered).
+  `K6_FOLLOWON_NOTE` retired (k=6+ now runs INSIDE the ladder);
+  `GRID_HONESTY_NOTE` → "5 trade-bearing TFs … x dynamic-k extinction"
+  (the trade-less `1day` left the grid with the cut). SLA-guard posture
+  UNCHANGED IN KIND: the `--acknowledge-sla-overrun` checkbox stays
+  off-by-default; the stale "252-tuple grid expected to PASS" copy is
+  corrected — the k-aware projection at the UNBENCHMARKED 30 s/tuple
+  calibration already refused the prior k<=5 lock (~346 projected days),
+  so ticking the box is the expected drill-run flow. HONEST feasibility:
+  the full 5-TF drill over ALL 3 indices is ≈1.23–2.46 Mac-days (NOT one
+  day); per-index staging ≈10–20 h fits the 1-day bar — the launch cards
+  are per-symbol. CONSCIOUSLY NOT CHANGED (disclosed): the one-click
+  `ONECLICK_K = "1,2,3"` stays numeric (the R20 estimator requires an
+  enumerable k CSV — extinction there is a designed 400); the classic
+  form's defaults; `LOCKED_TOP = 20`. Fails-before proven (8 flipped pins
+  fail at the reverted source); `launch_button.py` 100.00% line+branch
+  (413/68, 135 tests); goldens byte-untouched (`git diff --
+  tests/golden/fixtures/` EMPTY). LAUNCH-SURFACE ONLY — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; run identity untouched; no new routes, no new
+  env vars.)
+  Earlier: `claude/rust-runid-stores`
   (**DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065** — the
   run-identity-CONSUMPTION + stores COMPUTATION plane re-hosted on the NEW
   `rust/brutex-identity` crate (pyo3 0.29 abi3-py312; blake3 + parquet-rs
@@ -14790,7 +14847,19 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-runid-stores`
+- **Active feature branch:** `claude/dashboard-tf5-dynamic-k`
+  (DEC-DASHBOARD-DRILL-TF5-DYNK-001, MIGRATION.md #2129 — the `/launch`
+  locked dashboard sweep drills down to the TF-5 set
+  {1minute,2minute,3minute,5minute,15minute} + the dynamic-k
+  Apriori-to-EXTINCTION token (`LOCKED_K = sweep_runner.DEFAULT_K`;
+  `--max-combos` omitted on the extinction arm — an explicit cap would
+  TRIM the ladder; one-constant rollback per axis); operator-approved
+  2026-07-22; LAUNCH-SURFACE ONLY — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; TF-5 is a strict subset so run identity +
+  goldens are untouched; ONECLICK_K stays numeric (estimator law) and the
+  21-TF lake registry untouched; matches §1's Active branch line — see §1
+  + MIGRATION.md #2129 for the full blurb)
+  Earlier: `claude/rust-runid-stores`
   (DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065 — the
   run-identity-CONSUMPTION + stores COMPUTATION plane on the NEW
   `rust/brutex-identity` crate (pyo3 0.29 abi3-py312; blake3 + parquet-rs

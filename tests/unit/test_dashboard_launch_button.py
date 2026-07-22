@@ -49,7 +49,7 @@ def hermetic_disk(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def lake(tmp_path: Path) -> Path:
-    # M4: the presence precondition covers ALL 21 interval partitions.
+    # M4: the presence precondition covers every LOCKED (TF-5 drill) partition.
     for interval in lb.LOCKED_INTERVALS:
         (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / interval).mkdir(parents=True)
     (tmp_path / "sweeps").mkdir()
@@ -106,7 +106,11 @@ class TestLaunchPage:
         assert "FRESHNESS is verified by the CLI" in body
         # M1: keep-awake is a separate watcher note
         assert "caffeinate -dimsu -w" in body
-        assert "follow-on delta run" in body  # audit delta: k=6 note
+        # DEC-DASHBOARD-DRILL-TF5-DYNK-001: dynamic-k extinction replaces the
+        # fixed k 1-5 lock (the retired k=6 follow-on note may not resurface).
+        assert "dynamic-k Apriori EXTINCTION" in body
+        assert "follow-on delta run with identical flags" not in body
+        assert "TF-5 drill" in body
 
     def test_page_renders_without_store(self, bare_client: TestClient) -> None:
         assert bare_client.get("/launch").status_code == 200

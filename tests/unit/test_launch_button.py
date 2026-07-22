@@ -6,7 +6,7 @@ real ``cli.py`` argparse; the SLA acknowledgment strictly OPT-IN), the
 ``end = today + 1`` exclusive-end correction, the SEPARATE keep-awake
 watcher (review round-2 M1 — the pidfile always holds the real sweep pid),
 the dynamic PR #1264 futures-alias probe (all three arms), the cheap
-preconditions (all 21 interval partitions — M4), the flock + pidfile
+preconditions (every LOCKED TF-5 interval partition — M4), the flock + pidfile
 single-flight with the pre-spawn placeholder + compensation (M2), pid
 liveness probing (waitpid + kill + best-effort cmdline disambiguation, m4),
 the bounded + confined log tail (m2), and the page-state projections. The
@@ -29,8 +29,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from brutex.cli import build_parser
+from brutex.cli import EXTINCTION_K_TOKEN, build_parser
 from brutex.dashboard import launch_button as lb
+from brutex.dashboard.sweep_runner import DEFAULT_K
+from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 
 # ── locked command builder ──────────────────────────────────────────
 
@@ -52,13 +54,38 @@ class TestLockedSweepArgv:
         assert "--start 2020-01-01" in joined
         assert "--end 2026-07-09" in joined
         assert "--directions BUY,SELL" in joined
-        assert "--k 1,2,3,4,5" in joined
-        assert "--k 1,2,3,4,5,6" not in joined  # audit delta: k=6 is the follow-on run
+        assert "--k extinction" in joined  # DEC-DASHBOARD-DRILL-TF5-DYNK-001: dynamic-k
+        assert "--k 1,2,3,4,5" not in joined  # the fixed-k audit lock is RETIRED
         assert "--sl none --tp none" in joined
-        assert "--max-combos 50100000" in joined
+        # Extinction arm: --max-combos OMITTED — an explicit cap would TRIM the
+        # ladder to the C(n, k) <= cap prefix (silently re-pinning k<=6).
+        assert "--max-combos" not in joined
         assert "--top 20" in joined
         assert "--results-root /lake/sweeps/run1" in joined
         assert "--lake-root /lake" in joined
+
+    def test_numeric_k_rollback_restores_max_combos(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The one-constant rollback: a numeric-CSV ``LOCKED_K`` restores the cap.
+
+        DEC-DASHBOARD-DRILL-TF5-DYNK-001's kill lever — setting ``LOCKED_K``
+        back to an explicit k-list automatically re-appends ``--max-combos``
+        at :data:`~brutex.dashboard.launch_button.LOCKED_MAX_COMBOS`.
+        """
+        monkeypatch.setattr(lb, "LOCKED_K", "1,2,3,4,5")
+        argv = lb.locked_sweep_argv(
+            "spot",
+            lake_root=Path("/lake"),
+            results_root=Path("/lake/sweeps/x"),
+            end_day=date(2026, 7, 9),
+        )
+        joined = " ".join(argv)
+        assert "--k 1,2,3,4,5" in joined
+        assert "--max-combos 50100000" in joined
+        # Flag order stays argparse-valid on the legacy arm too.
+        parser = build_parser()
+        ns = parser.parse_args(argv[3:])
+        assert ns.k == "1,2,3,4,5"
+        assert ns.max_combos == 50_100_000
 
     def test_spot_card_locked_flags(self) -> None:
         argv = lb.locked_sweep_argv(
@@ -74,11 +101,12 @@ class TestLockedSweepArgv:
         assert "--exchange NSE" in joined
 
     def test_sla_ack_is_opt_in_never_default(self) -> None:
-        """Coordinator delta: the flag rides ONLY an explicit acknowledgment.
+        """The flag rides ONLY an explicit acknowledgment.
 
-        The audit expects the locked 252-tuple grid to PASS the SLA guard
-        without the ack — the checkbox is the operator's deliberate
-        override, not a default.
+        The checkbox is the operator's deliberate override, never a
+        default — posture unchanged in kind by
+        DEC-DASHBOARD-DRILL-TF5-DYNK-001 (the k-aware guard is EXPECTED to
+        refuse the drill run without the ack; see the SLA_ACK_FLAG note).
         """
         base = lb.locked_sweep_argv(
             "spot",
@@ -115,10 +143,18 @@ class TestLockedSweepArgv:
                 end_day=date(2026, 7, 9),
             )
 
-    def test_all_21_intervals_locked(self) -> None:
-        assert len(lb.LOCKED_INTERVALS) == 21
-        assert lb.LOCKED_INTERVALS[0] == "1minute"
-        assert lb.LOCKED_INTERVALS[-1] == "1day"
+    def test_tf5_drill_intervals_locked(self) -> None:
+        """DEC-DASHBOARD-DRILL-TF5-DYNK-001: the TF-5 drill set, a strict lake subset."""
+        assert lb.LOCKED_INTERVALS == ("1minute", "2minute", "3minute", "5minute", "15minute")
+        # Strict SUBSET of the 21-TF lake registry — labels resolved through
+        # LAKE_INTERVAL_LABELS (never re-minted), registry itself untouched.
+        assert set(lb.LOCKED_INTERVALS) < set(LAKE_INTERVAL_LABELS.values())
+        assert "1day" not in lb.LOCKED_INTERVALS
+
+    def test_locked_k_is_the_extinction_token(self) -> None:
+        """LOCKED_K == sweep_runner.DEFAULT_K == cli.EXTINCTION_K_TOKEN (drift pin)."""
+        assert lb.LOCKED_K == DEFAULT_K
+        assert lb.LOCKED_K == EXTINCTION_K_TOKEN
 
     def test_every_locked_flag_exists_on_real_cli_argparse(self) -> None:
         """The locked command (with AND without ack) parses through main's REAL argparse."""
@@ -134,11 +170,13 @@ class TestLockedSweepArgv:
         assert ns.command == "sweep-all"
         assert ns.symbols == "NIFTY"
         assert ns.end == "2026-07-09"
-        assert ns.max_combos == 50_100_000  # W15EARLY: kept unchanged at k<=5 (per-tuple-per-k)
-        assert ns.k == "1,2,3,4,5"
+        # Extinction arm: cap omitted — argparse default None (the ladder is
+        # never TRIMMED; the mask-bar breaker + min-hits extinction govern).
+        assert ns.max_combos is None
+        assert ns.k == EXTINCTION_K_TOKEN
         assert ns.top == 20
         assert ns.acknowledge_sla_overrun is True
-        assert ns.intervals.count(",") == 20  # 21 timeframes
+        assert ns.intervals.count(",") == 4  # 5 timeframes — the TF-5 drill set
         bare = lb.locked_sweep_argv(
             "spot",
             lake_root=Path("/lake"),
@@ -317,26 +355,26 @@ class TestRunPreconditions:
         checks = lb.run_preconditions(lake, min_free_bytes=1, disk_usage=_fake_usage(10 * 1024**3))
         assert all(c.ok for c in checks), [c for c in checks if not c.ok]
         assert _check(checks, "results_root_writable").detail == str(lake / "sweeps")
-        assert "all 21" in _check(checks, "nifty_interval_partitions").detail
+        assert "all 5" in _check(checks, "nifty_interval_partitions").detail
 
     def test_missing_partitions_named_and_low_disk(self, tmp_path: Path) -> None:
-        """M4: the presence check covers ALL 21 intervals, naming the missing."""
+        """M4: the presence check covers every LOCKED (TF-5) interval, naming the missing."""
         _make_lake(tmp_path, intervals=("1minute", "5minute"))
         checks = lb.run_preconditions(
             tmp_path, min_free_bytes=10 * 1024**3, disk_usage=_fake_usage(1)
         )
         partitions = _check(checks, "nifty_interval_partitions")
         assert partitions.ok is False
-        assert "missing 19/21" in partitions.detail
-        assert "1day" in partitions.detail
-        assert "3hour" in partitions.detail
+        assert "missing 3/5" in partitions.detail
+        assert "2minute" in partitions.detail
+        assert "15minute" in partitions.detail
         assert _check(checks, "disk_free").ok is False
 
     def test_empty_lake_all_partitions_missing(self, tmp_path: Path) -> None:
         checks = lb.run_preconditions(tmp_path, disk_usage=_fake_usage(10**12))
         partitions = _check(checks, "nifty_interval_partitions")
         assert partitions.ok is False
-        assert "missing 21/21" in partitions.detail
+        assert "missing 5/5" in partitions.detail
         # no sweeps dir yet → the writable probe falls back to the lake root
         assert _check(checks, "results_root_writable").detail == str(tmp_path)
 

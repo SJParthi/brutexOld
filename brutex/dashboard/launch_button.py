@@ -16,8 +16,7 @@ The existing dashboard sweep route runs ``run_sweep_from_request`` in-process
 via :func:`~brutex.dashboard.sweep_runner.build_sweep_kwargs`, which pins the
 light-mode dashboard defaults (``allow_missing_slices=True``, guards off) and
 dies with the dashboard process. Tonight's locked run must (a) survive a
-dashboard restart, (b) carry the exact operator-locked flag set including the
-honest ``--max-combos`` guard, and (c) refuse
+dashboard restart, (b) carry the exact operator-locked flag set, and (c) refuse
 loudly on missing lake slices instead of silently skipping them. Launching the
 REAL ``brutex sweep-all`` CLI as a detached process (``start_new_session=True``,
 no ``.wait()``, no owning thread) is therefore a DELIBERATE bypass of the
@@ -29,9 +28,13 @@ Locked command corrections (audit evidence: the prior session's
 * ``--end`` takes a bare date whose session is EXCLUDED on the futures path —
   the locked command therefore passes ``end = today + 1 day``
   (:func:`launch_end_date`) so the final session is never silently dropped.
-* The ``1day`` timeframe on futures is structurally TRADE-less — the page's
-  grid summary says "20 trade-bearing TFs + 1day (no trades by design)",
-  never implying 21 productive timeframes (:data:`GRID_HONESTY_NOTE`).
+* The locked grid is the TF-5 DRILL set — 1m/2m/3m/5m/15m, all
+  trade-bearing (:data:`GRID_HONESTY_NOTE`) — with the dynamic-k
+  Apriori-to-EXTINCTION ladder, per DEC-DASHBOARD-DRILL-TF5-DYNK-001
+  (operator-approved 2026-07-22; supersedes the 21-TF + fixed ``k 1..5``
+  lock of the original audit shape). TF-5 is a strict SUBSET of the 21
+  lake timeframes — the lake registry, prebuild, and run identity are
+  untouched (each (instrument, tf) tuple keeps its exact run_id).
 
 Futures dependency (PR #1264): the ``NSE-NIFTY-FUT`` whole-series alias
 resolves only once PR #1264's alias layer merges. :func:`probe_futures_alias`
@@ -62,12 +65,16 @@ recovery is logged, not silent. The pidfile ALWAYS holds the REAL sweep pid
 SEPARATE detached ``caffeinate -dimsu -w <sweep_pid>`` watcher whose death is
 harmless — it never carries run identity and self-exits when the sweep ends.
 
-SLA guard (coordinator delta): ``--acknowledge-sla-overrun`` is NOT
-unconditional — the audit expects the locked 252-tuple grid to PASS
-DEC-SLA-LAUNCH-GUARD-001 without it. The page carries an off-by-default
-acknowledge checkbox; the POST accepts a strict whitelisted boolean and
-appends the flag ONLY when ticked (the operator's deliberate override,
-never a default).
+SLA guard (posture UNCHANGED IN KIND by DEC-DASHBOARD-DRILL-TF5-DYNK-001):
+``--acknowledge-sla-overrun`` is NOT unconditional — the page carries an
+off-by-default acknowledge checkbox; the POST accepts a strict whitelisted
+boolean and appends the flag ONLY when ticked (the operator's deliberate
+override, never a default). HONEST: the k-aware DEC-SLA-LAUNCH-GUARD-001
+projection at the UNBENCHMARKED 30 s/tuple calibration REFUSES deep-k
+grids — it already refused the prior locked ``k 1..5`` shape and refuses
+the extinction ladder too — so the expected operator flow for the drill
+run is ticking the checkbox (the guard's calibration, not this page, is
+what makes the projection pessimistic; Golden Rule #10).
 
 Honest envelope (Golden Rule #10): pid liveness is a *probe*
 (``waitpid(WNOHANG)`` for our own children — which also reaps the zombie a
@@ -78,7 +85,8 @@ macOS — skipped silently; a probe ERROR never downgrades a live run to
 exited, the safe direction is refusing a duplicate). The log tail is a
 bounded seek-read of the last N KiB, confined under ``<lake_root>/sweeps``
 (a tampered state file cannot read arbitrary files). The lake precondition
-checks PRESENCE of all 21 NIFTY/INDEX interval partitions; TF FRESHNESS is
+checks PRESENCE of every LOCKED NIFTY/INDEX interval partition (the TF-5
+drill set); TF FRESHNESS is
 deliberately NOT re-derived here — the launched CLI's own preflight verifies
 it at launch (a refusal appears in the log tail within seconds). The page
 ASSUMES a SINGLE dashboard process — liveness probing is waitpid/kill-based,
@@ -117,6 +125,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 import structlog
 
 from brutex.calendars.nse import now_ist
+from brutex.dashboard.sweep_runner import DEFAULT_K
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.guarded_read import open_regular_binary, read_regular_text_deadline
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
@@ -131,7 +140,6 @@ __all__ = [
     "DEFAULT_MIN_DISK_FREE_BYTES",
     "FUTURES_DEPENDENCY_NOTE",
     "GRID_HONESTY_NOTE",
-    "K6_FOLLOWON_NOTE",
     "LAUNCH_CARDS",
     "LOCKED_DIRECTIONS",
     "LOCKED_INTERVALS",
@@ -171,21 +179,47 @@ __all__ = [
 #: Locked window start — the data-pull floor (CLAUDE.md §2 Rule 3).
 LOCKED_START: Final[str] = "2020-01-01"
 
-#: All 21 lake timeframes, minute-ascending — imported from the ONE source of
-#: truth (:data:`~brutex.data.timeframes.LAKE_INTERVAL_LABELS`), never re-minted.
+#: The TF-5 DRILL minutes (DEC-DASHBOARD-DRILL-TF5-DYNK-001, operator-approved
+#: 2026-07-22): 1m · 2m · 3m · 5m · 15m — the highest-trade-density subset that
+#: brings the per-index sweep toward the ~1-day MacBook target (per-instrument
+#: bar counts 608,250 / 304,936 / 202,750 / 121,650 / 40,550; bar-weight ratio
+#: 0.616× vs the prior 21-TF lock). Rollback lever = restore the
+#: ``sorted(LAKE_INTERVAL_LABELS)`` comprehension (one constant).
+_DRILL_TF_MINUTES: Final[tuple[int, ...]] = (1, 2, 3, 5, 15)
+
+#: The locked TF-5 drill intervals, minute-ascending — labels resolved through
+#: the ONE source of truth (:data:`~brutex.data.timeframes.LAKE_INTERVAL_LABELS`),
+#: never re-minted; a registry drop of any drill TF fails loudly at import. A
+#: strict SUBSET of the 21 lake timeframes — the lake registry / prebuild /
+#: run identity are untouched (sweep-side narrowing only).
 LOCKED_INTERVALS: Final[tuple[str, ...]] = tuple(
-    LAKE_INTERVAL_LABELS[minutes] for minutes in sorted(LAKE_INTERVAL_LABELS)
+    LAKE_INTERVAL_LABELS[minutes] for minutes in _DRILL_TF_MINUTES
 )
 
 #: Locked directions / combo depths / guards — passed EXPLICITLY even where a
 #: value is the CLI default (dedup-identity hygiene: the launch command is the
 #: complete record of the run shape).
 LOCKED_DIRECTIONS: Final[str] = "BUY,SELL"
-LOCKED_K: Final[str] = "1,2,3,4,5"  # audit delta: k=6 dropped — measured per-tuple
-# timing (W05_stall_table) puts k<=6 at 4.2-13.9 M4-days, outside the launch SLA;
-# k=6 runs as a documented follow-on delta run (identical flags, same --max-combos).
+#: DEC-DASHBOARD-DRILL-TF5-DYNK-001: the locked ``--k`` is the dynamic-k
+#: Apriori-to-EXTINCTION token — imported from
+#: :data:`~brutex.dashboard.sweep_runner.DEFAULT_K` (the ONE sanctioned
+#: dashboard-side copy of ``brutex.cli.EXTINCTION_K_TOKEN``, drift-pinned by
+#: its own suite; §11 COMMON — no third copy), so the launch rides the SAME
+#: ``resolve_sweep_exploration`` path the CLI default uses (per cell the
+#: k-ladder runs k=1,2,3,… until no combo survives min-hits; the detached
+#: CLI exports ``BRUTEX_SWEEP_APRIORI=1`` itself). Supersedes the fixed
+#: ``"1,2,3,4,5"`` audit lock (and its k=6 follow-on note — k=6+ now runs
+#: INSIDE the ladder whenever survivors exist). Rollback lever = set this
+#: back to an explicit numeric CSV (one constant — the legacy arm also
+#: restores the ``--max-combos`` guard, see :func:`locked_sweep_argv`).
+LOCKED_K: Final[str] = DEFAULT_K
 LOCKED_SL: Final[str] = "none"
 LOCKED_TP: Final[str] = "none"
+#: The LEGACY-arm combo cap. On the extinction arm ``--max-combos`` is OMITTED
+#: from the locked argv (see :func:`locked_sweep_argv` — an EXPLICIT cap in
+#: extinction mode TRIMS the ladder to the contiguous ``C(n, k) <= cap``
+#: prefix, silently re-pinning k<=6 at this value); the constant stays defined
+#: so a numeric-CSV rollback of :data:`LOCKED_K` restores the guard verbatim.
 LOCKED_MAX_COMBOS: Final[int] = 50_100_000
 LOCKED_TOP: Final[int] = 20
 
@@ -209,13 +243,13 @@ LOCKED_SWEEP_MEM_BUDGET_BYTES: Final[str] = "1073741824"
 #: (grep-verified), so this is inert-but-harmless until it lands.
 LOCKED_STALL_MASK_BARS_PER_SEC: Final[str] = "20000000"
 
-#: The honest on-page k=6 note (audit delta — kept OUT of tonight's locked grid).
-K6_FOLLOWON_NOTE: Final[str] = "k=6 runs as a documented follow-on delta run"
-
-#: The honest grid summary — the futures ``1day`` TF is structurally
-#: TRADE-less (audit: phase3/W_1264_branch_validation.md), so the page never
-#: implies 21 productive timeframes.
-GRID_HONESTY_NOTE: Final[str] = "20 trade-bearing TFs + 1day (no trades by design)"
+#: The honest grid summary — the TF-5 drill set is ALL trade-bearing (the
+#: structurally trade-less ``1day`` left the locked grid with the 21→5 cut,
+#: DEC-DASHBOARD-DRILL-TF5-DYNK-001). The retired ``K6_FOLLOWON_NOTE`` died
+#: with the fixed k-list: k=6+ now runs INSIDE the extinction ladder.
+GRID_HONESTY_NOTE: Final[str] = (
+    "5 trade-bearing TFs (drill set 1m-2m-3m-5m-15m) x dynamic-k extinction"
+)
 
 #: The honest futures-card note shown while the alias is scope-refused
 #: (DEC-ENGINE-SPOT-ONLY-001 — the pre-flip "PR #1264 not merged yet" note
@@ -238,9 +272,12 @@ DEFAULT_MIN_DISK_FREE_BYTES: Final[int] = 20 * 1024**3
 DEFAULT_LOG_TAIL_BYTES: Final[int] = 16 * 1024
 
 #: The REAL SLA-guard acknowledgment flag (DEC-SLA-LAUNCH-GUARD-001).
-#: OPT-IN ONLY (coordinator delta): the audit expects the locked 252-tuple
-#: grid to PASS the guard WITHOUT it — the page's off-by-default checkbox is
-#: the operator's deliberate override, never a default.
+#: OPT-IN ONLY — the page's off-by-default checkbox is the operator's
+#: deliberate override, never a default (posture UNCHANGED IN KIND by
+#: DEC-DASHBOARD-DRILL-TF5-DYNK-001). HONEST: the k-aware projection at the
+#: UNBENCHMARKED 30 s/tuple calibration refuses deep-k grids — it already
+#: refused the prior fixed ``k 1..5`` lock and refuses the extinction
+#: ladder too — so ticking the checkbox is the expected drill-run flow.
 SLA_ACK_FLAG: Final[str] = "--acknowledge-sla-overrun"
 
 #: How long a pre-spawn "launching" placeholder record counts as a live
@@ -306,10 +343,20 @@ def locked_sweep_argv(
     Every flag exists on main's ``cli.py`` (verified against the real argparse
     definitions). ``--lake-root`` / ``--results-root`` are passed explicitly
     so the detached process never depends on inherited env.
-    :data:`SLA_ACK_FLAG` is appended ONLY when *acknowledge_sla* is True
-    (coordinator delta — the audit expects the locked 252-tuple grid to PASS
-    DEC-SLA-LAUNCH-GUARD-001 without the acknowledgment; the checkbox is the
-    operator's deliberate override, not a default).
+    :data:`SLA_ACK_FLAG` is appended ONLY when *acknowledge_sla* is True (the
+    checkbox is the operator's deliberate override, not a default — and per
+    the :data:`SLA_ACK_FLAG` honesty note the k-aware guard is EXPECTED to
+    refuse the drill run without it).
+
+    ``--max-combos`` law (DEC-DASHBOARD-DRILL-TF5-DYNK-001): on the extinction
+    (dynamic-k) arm the flag is OMITTED — ``cli.resolve_sweep_exploration``
+    TRIMS the extinction ladder to the contiguous ``C(n_unique, k) <= cap``
+    prefix when an EXPLICIT cap is passed, which at the locked 50.1M value
+    would silently re-pin ``k <= 6``; the CLI default's guardrails (the
+    Apriori mask-bar breaker + min-hits extinction) govern depth instead.
+    Rolling :data:`LOCKED_K` back to an explicit numeric CSV automatically
+    RESTORES ``--max-combos`` at :data:`LOCKED_MAX_COMBOS` (one-constant
+    rollback).
 
     Raises
     ------
@@ -345,15 +392,19 @@ def locked_sweep_argv(
         LOCKED_SL,
         "--tp",
         LOCKED_TP,
-        "--max-combos",
-        str(LOCKED_MAX_COMBOS),
-        "--top",
-        str(LOCKED_TOP),
-        "--results-root",
-        str(results_root),
-        "--lake-root",
-        str(lake_root),
     ]
+    if LOCKED_K != DEFAULT_K:  # legacy numeric-CSV rollback arm — see docstring
+        argv.extend(["--max-combos", str(LOCKED_MAX_COMBOS)])
+    argv.extend(
+        [
+            "--top",
+            str(LOCKED_TOP),
+            "--results-root",
+            str(results_root),
+            "--lake-root",
+            str(lake_root),
+        ]
+    )
     if acknowledge_sla:
         argv.append(SLA_ACK_FLAG)
     return argv
@@ -539,12 +590,12 @@ def run_preconditions(
         return checks
     checks.append(PreconditionCheck(name="lake_configured", ok=True, detail=str(lake_root)))
 
-    # Review round-2 M4: the locked 21-TF command (no --allow-missing-slices)
-    # hard-refuses via the CLI's own preflight if ANY interval partition is
-    # missing — so the cheap PRESENCE check must cover all 21, not just
-    # 1minute (21 dir stats; TF FRESHNESS is deliberately NOT re-derived here
-    # — the CLI preflight verifies it at launch, refusal visible in the log
-    # tail within seconds).
+    # Review round-2 M4: the locked command (no --allow-missing-slices)
+    # hard-refuses via the CLI's own preflight if ANY locked interval
+    # partition is missing — so the cheap PRESENCE check must cover every
+    # LOCKED_INTERVALS member (the TF-5 drill set — one dir stat each; TF
+    # FRESHNESS is deliberately NOT re-derived here — the CLI preflight
+    # verifies it at launch, refusal visible in the log tail within seconds).
     nifty_root = lake_root / "bars" / "NSE" / "INDEX" / "NIFTY"
     missing_intervals = [
         interval for interval in LOCKED_INTERVALS if not (nifty_root / interval).is_dir()

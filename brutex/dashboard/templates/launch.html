@@ -112,7 +112,8 @@
     <h2>Preconditions (cheap probes — the launched CLI still enforces its own preflight)</h2>
     <div class="pre-list" id="preList"></div>
     <div id="freshnessNote" class="sub" style="margin-top:8px">
-      Honest caveat: these probes check PRESENCE of all 21 NIFTY interval partitions only.
+      Honest caveat: these probes check PRESENCE of the locked TF-5 drill partitions
+      (1m &middot; 2m &middot; 3m &middot; 5m &middot; 15m) only.
       Timeframe FRESHNESS is verified by the CLI's own preflight at launch — a refusal
       appears in the log tail below within seconds. Preconditions are re-checked at
       launch time (a red check refuses with HTTP 412).
@@ -125,15 +126,20 @@
       <label>
         <input type="checkbox" id="ackSla" />
         Acknowledge projected SLA overrun (appends <code>--acknowledge-sla-overrun</code>) —
-        deliberate operator override, OFF by default. The locked 252-tuple grid is expected
-        to PASS the SLA guard without it; tick only if the launch log shows the guard refusing.
+        deliberate operator override, OFF by default. HONEST: the k-aware SLA projection at
+        its unbenchmarked 30 s/tuple calibration REFUSES the dynamic-k drill grid (it refused
+        the prior fixed k&nbsp;1&ndash;5 lock too) — ticking this box is the expected flow for
+        the operator-approved drill run (DEC-DASHBOARD-DRILL-TF5-DYNK-001).
       </label>
     </div>
     <div id="flash"></div>
     <div class="cards" id="cards"></div>
     <div class="sub" style="margin-top:8px">
-      Locked depth: k 1–5 tonight (audit verdict — k≤6 measured at 4.2–13.9 M4-days,
-      outside the SLA); k=6 runs as a documented follow-on delta run with identical flags.
+      Locked depth: dynamic-k Apriori EXTINCTION (DEC-DASHBOARD-DRILL-TF5-DYNK-001 —
+      per (TF, direction) cell the k-ladder runs k=1,2,3,… until no combo survives
+      min-hits; depth is governed by the CLI default's mask&middot;bar breaker + min-hits
+      extinction, not a fixed k cap — the retired k=6 follow-on delta run now happens
+      INSIDE the ladder whenever survivors exist). Grid: the TF-5 drill set &times; BUY,SELL.
       <br />
       Keep-awake: when <code>caffeinate</code> exists (macOS) a SEPARATE detached
       <code>caffeinate -dimsu -w &lt;sweep-pid&gt;</code> watcher is spawned — the recorded pid
@@ -233,7 +239,7 @@
       card.appendChild(el("h3", null, c.title));
       card.appendChild(el("div", "coords",
         c.symbol + " · " + c.exchange + "/" + c.segment +
-        " · 21 TFs · k≤5 · SL/TP none · top 20 · end " + state.end_day));
+        " · TF-5 drill · dynamic-k extinction · SL/TP none · top 20 · end " + state.end_day));
       card.appendChild(el("div", "gridnote", state.grid_note));
       var shown = c.command_display + (ackChecked() ? " " + c.sla_ack_flag : "");
       var pre = el("pre", null, shown);
