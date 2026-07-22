@@ -941,8 +941,25 @@ class TestSweepOpsRouting:
 
         reset_sweep_ops_rust_for_tests()
 
+    @staticmethod
+    def _memory_off() -> TripwireConfig:
+        """Disable the process-RSS memory watch for this ROUTING unit test.
+
+        These tests assert the sweep-ops *routing* fold (count reconciliation)
+        — NOT the environmental ``memory_budget`` watchdog, which has its own
+        dedicated trip/boundary tests. Under a long, coverage-traced CI shard
+        the process RSS can grow past the 0.85 × RAM budget and fire the
+        SHARED ``memory_budget`` tripwire, flipping the global ``suspect``
+        flag and reddening a routing assertion that has nothing to do with
+        the routing path. Disabling the memory watch here (the same idiom as
+        :meth:`TestCountReconciliation._memory_off`) keeps the routing teeth:
+        a genuine sweep-ops routing tripwire still flips ``suspect`` and
+        appends to the sink.
+        """
+        return _config(rss_budget_fraction=0.0, memory_slope_bytes_per_tuple=0)
+
     def _fire(self) -> tuple[bool, list[str]]:
-        monitor, sink, clock = _monitor(total=90)
+        monitor, sink, clock = _monitor(config=self._memory_off(), total=90)
         _tick(monitor, clock, _snap(enumerated=100, evaluated=150, survivors=200))
         return (monitor.suspect, [event.detail for event in sink.events])
 
@@ -959,7 +976,7 @@ class TestSweepOpsRouting:
     def test_flag_on_clean_counts_fire_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._arm_fake_crate(monkeypatch)
         try:
-            monitor, sink, clock = _monitor(total=100)
+            monitor, sink, clock = _monitor(config=self._memory_off(), total=100)
             _tick(monitor, clock, _snap(evaluated=50, survivors=5, skipped=10))
             assert monitor.suspect is False
             assert sink.events == []
