@@ -15,13 +15,17 @@
 #               probe fails; then verify the pull-critical deps (boto3 / growwapi /
 #               pyotp + the dashboard runtime), one PASS/FAIL line each with the
 #               exact fix.
-#   Step 3/6  — build the fno_math + trading_core PyO3 wheels via maturin when not
-#               importable. They ARE required for the dashboard + pull path
-#               (brutex.indicators.{pivots,fib_levels,ema} import trading_core at
-#               module top; brutex.strategies.combo imports fno_math — the same
-#               reason the Makefile `run` target builds both), so wheels-missing +
-#               cargo-absent is an HONEST hard stop with the rustup one-liner, not
-#               a silent skip.
+#   Step 3/6  — build the REQUIRED PyO3 wheels via maturin when not importable:
+#               fno_math + trading_core (brutex.indicators.* / brutex.strategies
+#               .combo import them at module top) + brutex_identity
+#               (DEC-RUST-RUNID-STORES-001 — module-top import on the CLI/
+#               dashboard boot chain via engine/results_store.py) + brutex_refine
+#               (Stage-3 is Rust-only, DEC-RUST-STAGE3-REFINE-001) +
+#               brutex_pull_state (the pull-state decision plane is Rust-only,
+#               fail-closed). Required-wheels-missing + cargo-absent is an HONEST
+#               hard stop with the rustup one-liner, not a silent skip. The
+#               brutex_feed + brutex_lake wheels build BEST-EFFORT (warn-only —
+#               mirrors scripts/setup/bootstrap.sh Steps 6a/6a3).
 #   Step 4/6  — ZERO-DECISION lake location: a persisted config is reused
 #               silently; else an EXISTING lake is auto-detected (the app
 #               default ~/.brutex/lake, or an environment-pointed path) and
@@ -341,18 +345,48 @@ done
 [ "$dep_failed" -eq 0 ] || failhard "dependency verification failed (see the FAIL lines above)"
 
 # ── Step 3/6 — Rust PyO3 wheels (build only when missing) ────────────────────
-say "Step 3/6 — Rust PyO3 wheels (fno_math + trading_core)"
-# HONEST requirement check: both wheels ARE required for the dashboard + pull
-# path — brutex.indicators.{pivots,fib_levels,ema} import trading_core at module
-# top and brutex.strategies.combo imports fno_math, so the dashboard cannot even
-# import without them (mirrors the Makefile `run` target, which builds both).
-# There is no "wheels not required" skip to offer.
+say "Step 3/6 — Rust PyO3 wheels (required: fno_math + trading_core + brutex_identity + brutex_refine + brutex_pull_state; best-effort: brutex_feed + brutex_lake)"
+# HONEST requirement check — the REQUIRED set mirrors the canonical one in
+# scripts/setup/bootstrap.sh (Steps 5/6/6b/6a2/6c) + the Makefile run-raw:
+#   * fno_math + trading_core — brutex.indicators.{pivots,fib_levels,ema}
+#     import trading_core at module top; brutex.strategies.combo imports
+#     fno_math — the dashboard cannot even import without them;
+#   * brutex_identity — DEC-RUST-RUNID-STORES-001 (MIGRATION.md #2065): a
+#     MODULE-TOP import of brutex/engine/{results_store,snapshot_hash}.py +
+#     brutex/data/window_ledger_store.py, all on the CLI/dashboard boot chain
+#     (cli → engine/__init__ → results_report → results_store), so a fresh
+#     clone crashes with ModuleNotFoundError at boot without it;
+#   * brutex_refine — DEC-RUST-STAGE3-REFINE-001: Stage-3 is Rust-only (the
+#     pycma Python math is deleted; call-time fail-closed, no oracle);
+#   * brutex_pull_state — the pull-state decision plane is Rust-only and
+#     fail-closed (call-time; every dashboard pull surface consumes it).
+# There is no "wheels not required" skip to offer for the REQUIRED set.
+# BEST-EFFORT wheels (a build failure WARNS, never aborts — mirrors
+# bootstrap.sh Steps 6a/6a3): brutex_feed (BRUTEX_FEED_RUST is default-OFF)
+# and brutex_lake (DEC-BRUTEX-LAKE-BOX-WHEEL-001 — warn-only in the box path;
+# absent = the fail-loud LakeRustWavedUnavailableError at USE time; a cold
+# build compiles the pinned polars graph — minutes + ~12 GB of target/).
+# Probe-first (idempotent re-run): every wheel is import-probed BEFORE any
+# maturin build. bash-3.2-safe (plain space-separated strings, no arrays).
+REQUIRED_IMPORTS="fno_math, trading_core, brutex_identity, brutex_refine, brutex_pull_state"
 wheels_missing=""
 "$VPY" -c "import fno_math" >/dev/null 2>&1 || wheels_missing="rust/fno-math"
 "$VPY" -c "import trading_core" >/dev/null 2>&1 \
   || wheels_missing="$wheels_missing rust/trading-core"
-if [ -z "$wheels_missing" ]; then
-  pass "fno_math + trading_core already importable — skipping build"
+"$VPY" -c "import brutex_identity" >/dev/null 2>&1 \
+  || wheels_missing="$wheels_missing rust/brutex-identity"
+"$VPY" -c "import brutex_refine" >/dev/null 2>&1 \
+  || wheels_missing="$wheels_missing rust/brutex-refine"
+"$VPY" -c "import brutex_pull_state" >/dev/null 2>&1 \
+  || wheels_missing="$wheels_missing rust/brutex-pull-state"
+wheels_missing="${wheels_missing# }"
+optional_missing=""
+"$VPY" -c "import brutex_feed" >/dev/null 2>&1 || optional_missing="rust/brutex-feed"
+"$VPY" -c "import brutex_lake" >/dev/null 2>&1 \
+  || optional_missing="$optional_missing rust/brutex-lake"
+optional_missing="${optional_missing# }"
+if [ -z "$wheels_missing" ] && [ -z "$optional_missing" ]; then
+  pass "all Rust wheels already importable — skipping build"
 else
   CARGO_BIN=""
   if command -v cargo >/dev/null 2>&1; then
@@ -360,21 +394,40 @@ else
   elif [ -x "$HOME/.cargo/bin/cargo" ]; then
     CARGO_BIN="$HOME/.cargo/bin/cargo"
   fi
-  if [ -z "$CARGO_BIN" ]; then
-    failhard "wheels missing ($wheels_missing) and cargo NOT found — the dashboard cannot import without them (brutex.indicators.* import trading_core at module top). fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   — then restart the shell (or: source \$HOME/.cargo/env) and re-run ./up.sh"
+  if [ -z "$CARGO_BIN" ] && [ -n "$wheels_missing" ]; then
+    failhard "REQUIRED wheels missing ($wheels_missing) and cargo NOT found — the dashboard cannot import without them (brutex.indicators.* import trading_core and brutex.engine.results_store imports brutex_identity at module top, DEC-RUST-RUNID-STORES-001). fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   — then restart the shell (or: source \$HOME/.cargo/env) and re-run ./up.sh"
   fi
-  [ -x "$VENV/bin/maturin" ] || "$VPY" -m pip install --quiet maturin \
-    || failhard "could not install maturin — fix: check network/proxy, then re-run ./up.sh"
-  for crate in $wheels_missing; do
-    note "building $crate (one-time; uses $CARGO_BIN)"
-    ( cd "$REPO_ROOT/$crate" \
-      && PATH="$HOME/.cargo/bin:$PATH" VIRTUAL_ENV="$VENV" \
-        "$VENV/bin/maturin" develop --release ) \
-      || failhard "maturin develop --release failed for $crate — read the cargo error above, then re-run ./up.sh"
-  done
-  "$VPY" -c "import fno_math, trading_core" >/dev/null 2>&1 \
-    || failhard "wheels built but still not importable — re-run ./up.sh (fallback: make run)"
-  pass "wheels built + importable"
+  if [ -z "$CARGO_BIN" ]; then
+    # Only best-effort wheels are missing — never a hard stop without cargo.
+    printf '  WARN  optional wheels not importable (%s) and cargo NOT found — skipping (best-effort; the affected Rust ops refuse loudly at USE time until built)\n' \
+      "$optional_missing"
+  else
+    [ -x "$VENV/bin/maturin" ] || "$VPY" -m pip install --quiet maturin \
+      || failhard "could not install maturin — fix: check network/proxy, then re-run ./up.sh"
+    for crate in $wheels_missing; do
+      note "building $crate (one-time; REQUIRED; uses $CARGO_BIN)"
+      ( cd "$REPO_ROOT/$crate" \
+        && PATH="$HOME/.cargo/bin:$PATH" VIRTUAL_ENV="$VENV" \
+          "$VENV/bin/maturin" develop --release ) \
+        || failhard "maturin develop --release failed for $crate — read the cargo error above, then re-run ./up.sh"
+    done
+    if [ -n "$wheels_missing" ]; then
+      "$VPY" -c "import $REQUIRED_IMPORTS" >/dev/null 2>&1 \
+        || failhard "required wheels built but still not importable — re-run ./up.sh (fallback: make run)"
+      pass "required wheels built + importable ($REQUIRED_IMPORTS)"
+    fi
+    for crate in $optional_missing; do
+      note "building $crate (one-time; best-effort; uses $CARGO_BIN)"
+      ( cd "$REPO_ROOT/$crate" \
+        && PATH="$HOME/.cargo/bin:$PATH" VIRTUAL_ENV="$VENV" \
+          "$VENV/bin/maturin" develop --release ) \
+        || printf '  WARN  maturin develop --release failed for %s — best-effort wheel (the dashboard still boots; the affected Rust ops refuse loudly at USE time). fix later: cd %s && maturin develop --release\n' \
+          "$crate" "$crate"
+    done
+    if [ -z "$wheels_missing" ]; then
+      pass "required wheels already importable; best-effort builds attempted"
+    fi
+  fi
 fi
 
 # ── Step 4/6 — zero-decision lake + persisted config (recorded ONCE) ─────────
