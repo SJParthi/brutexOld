@@ -579,7 +579,7 @@ trade_sim.py:60-67 (law); CLAUDE.md §1 #1743 blurb]).
 | 9 | **Freak-class bar disclosure** (any fill on a bar whose extreme is a stress print) | n/a (annotation) | fills stand (worst-case is honest — §5.4) but the bar is flagged: `high/prev_close` or `low/prev_close` beyond a premium-appropriate threshold (NOT the spot engine's 4× bad-tick law — option premiums legitimately move >4×; the threshold is a design parameter [UNVERIFIED calibration — §7 U-M2]) | annotation | `freak_class_fill_count`, `freak_class_worst_multiple` |
 
 **Cross-cutting emissions (run-level):** `penalty_paisa_total`, `f_class_b_fill_share`,
-`class_c_fill_share`, the `fill_bar_range_paisa` distribution (the ONLY in-lake spread proxy —
+`f_class_c_fill_share`, the `fill_bar_range_paisa` distribution (the ONLY in-lake spread proxy —
 reported, never presented as a quoted spread), and the standing survivorship disclosure inherited
 verbatim from the executor's honesty note (accepted-set selection bias,
 [REPO executor.py:602-618]) rewritten for sellers: *a seller backtest's UNDEFENDED residue
