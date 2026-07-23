@@ -162,7 +162,11 @@ def _dual_arm(bars: list[CandleBar], **kwargs: Any) -> tuple[list[int], list[int
 
     prior_env = os.environ.get(STAGE1A_RUST_ENV)
     try:
-        os.environ.pop(STAGE1A_RUST_ENV, None)
+        # Explicit "0" (the kill switch), NOT pop-to-unset: under
+        # DEC-RUST-DEFAULT-ON-WAVE-001 an UNSET flag resolves default-ON, so
+        # popping would silently route the "OFF" arm to Rust (a vacuous
+        # Rust-vs-Rust parity). "0" forces the genuine Python oracle.
+        os.environ[STAGE1A_RUST_ENV] = "0"
         off = build_bar_bits(bars, **kwargs)
         trading_core.stage1a_bar_bits_batch = _spy  # type: ignore[attr-defined]
         os.environ[STAGE1A_RUST_ENV] = "1"
@@ -170,9 +174,9 @@ def _dual_arm(bars: list[CandleBar], **kwargs: Any) -> tuple[list[int], list[int
             on = build_bar_bits(bars, **kwargs)
     finally:
         trading_core.stage1a_bar_bits_batch = real  # type: ignore[attr-defined]
-        if prior_env is None:
+        if prior_env is None:  # pragma: no cover — the conftest belt presets the flag, so prior_env is always "0"
             os.environ.pop(STAGE1A_RUST_ENV, None)
-        else:  # pragma: no cover — the suite never runs with the flag preset
+        else:
             os.environ[STAGE1A_RUST_ENV] = prior_env
         reset_self_check_for_tests()
         reset_observability_memo_for_tests()
@@ -325,14 +329,17 @@ def _arm_exception(bars: list[CandleBar], *, flag: bool, **kwargs: Any) -> BaseE
         if flag:
             os.environ[STAGE1A_RUST_ENV] = "1"
         else:
-            os.environ.pop(STAGE1A_RUST_ENV, None)
+            # Explicit "0" (kill switch), NOT pop: an UNSET flag resolves
+            # default-ON under the wave, so popping would run the "OFF" arm
+            # in Rust — a vacuous same-arm exception compare.
+            os.environ[STAGE1A_RUST_ENV] = "0"
         with pytest.raises((ValueError, OverflowError)) as excinfo:
             build_bar_bits(bars, **kwargs)
         return excinfo.value
     finally:
-        if prior_env is None:
+        if prior_env is None:  # pragma: no cover — the conftest belt presets the flag, so prior_env is always "0"
             os.environ.pop(STAGE1A_RUST_ENV, None)
-        else:  # pragma: no cover — the suite never runs with the flag preset
+        else:
             os.environ[STAGE1A_RUST_ENV] = prior_env
 
 

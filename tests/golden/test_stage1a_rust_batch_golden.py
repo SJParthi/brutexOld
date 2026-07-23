@@ -149,7 +149,10 @@ def test_muhurat_boundary_parity_flag_on(
     with capture_logs() as logs:
         on = build_bar_bits(bars)
     _assert_engaged(logs)
-    monkeypatch.delenv(STAGE1A_RUST_ENV)
+    # Explicit "0" (kill switch) — an unset flag resolves default-ON under
+    # DEC-RUST-DEFAULT-ON-WAVE-001, so this second build must be pinned OFF to
+    # be the genuine Python oracle (not a vacuous Rust-vs-Rust compare).
+    monkeypatch.setenv(STAGE1A_RUST_ENV, "0")
     assert on == build_bar_bits(bars)
     # The prior REGULAR session carried through the Muhurat boundary — the
     # prepass drives the REAL _roll_to_new_day, so the anchor is #1616-exact.

@@ -262,6 +262,14 @@ for _wave_flag in (
     "BRUTEX_LAKE_RUST_RAW_INTEGRITY",
     "BRUTEX_LAKE_RUST_INTERIOR_GAP",
     "BRUTEX_LAKE_RUST_PARTIAL_WINDOW",
+    # engine / fno-math / brutex-core leaf seams also flipped default-ON by
+    # DEC-RUST-DEFAULT-ON-WAVE-001 (the audit found these three missing from
+    # the belt — an unset flag now resolves ON, so an OFF-arm parity/golden
+    # that pops/deletes-to-unset would silently route to Rust; the belt pins
+    # them OFF-by-default so the OFF oracle arm stays genuinely exercised).
+    "BRUTEX_SWEEP_RUST_STAGE1A",
+    "BRUTEX_CORE_RUST_MODELS",
+    "BRUTEX_OPTCOST_TAILS_RUST",
 ):
     os.environ.setdefault(_wave_flag, "0")
 del _wave_flag
