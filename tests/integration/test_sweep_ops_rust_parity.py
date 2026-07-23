@@ -341,7 +341,10 @@ class TestGateFragmentBeyondCrateRouting:
             raise AssertionError("flag OFF must never consult the crate")
 
         monkeypatch.setattr(brutex_sweep_ops, "gate_config_fragment", _bomb)
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Explicit "0" (kill switch), NOT delenv-to-unset — under
+        # DEC-RUST-DEFAULT-ON-WAVE-001 an unset flag resolves default-ON, which
+        # would route to the bombed crate. "0" pins the genuine OFF/oracle arm.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         grid = _FragmentGrid(overfit=OverfitGateConfig(dsr_min=0.95), max_sl_hit_rate=0.4)
         assert _gate_config_fragment(grid) == _gate_config_fragment_python(grid)

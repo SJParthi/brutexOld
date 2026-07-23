@@ -287,15 +287,17 @@ del _wave_flag
 os.environ.pop("BRUTEX_SKIP_WHEEL_FRESHNESS", None)
 os.environ.pop("BRUTEX_FILL_MODE", None)
 
-# DEC-ABSTAIN-GATE-STREAM-001 + DEC-META-LABEL-ANNOTATE-001 hermeticity: a
-# host env carrying the DORMANT `BRUTEX_ABSTAIN_GATE_INSIM` knob would trip
-# the sweep-launch refusal across every sweep-all suite, and an ambient
-# `BRUTEX_META_GATE` would flip the Rust meta facade (default ON since
-# DEC-RUST-DEFAULT-ON-WAVE-001) off its default for unrelated tests. POP
-# both (the fill-mode discipline above — the meta suites inject env
-# explicitly on both arms).
+# DEC-ABSTAIN-GATE-STREAM-001 hermeticity: a host env carrying the DORMANT
+# `BRUTEX_ABSTAIN_GATE_INSIM` knob (any set value trips the sweep-launch
+# refusal across every sweep-all suite) must be truly UNSET — POP it, the
+# fill-mode discipline above.
+#
+# `BRUTEX_META_GATE` is deliberately NOT popped: under
+# DEC-RUST-DEFAULT-ON-WAVE-001 an unset flag resolves default-ON, so popping
+# it would UNDO the wave OFF-belt (`setdefault "0"` above) and route the Rust
+# meta facade ON for every unrelated suite. The belt pins it "0"
+# (OFF-by-default) and the meta suites inject env explicitly on both arms.
 os.environ.pop("BRUTEX_ABSTAIN_GATE_INSIM", None)
-os.environ.pop("BRUTEX_META_GATE", None)
 
 
 @pytest.fixture(autouse=True)

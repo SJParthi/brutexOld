@@ -285,7 +285,9 @@ def _build_corpus() -> dict[str, _Case]:
         captured.append((dest, df))
         real_awp(dest, df)
 
-    mp.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+    # Explicit "0" (kill switch), NOT delenv — the wave default is ON, so an
+    # unset OFF arm captures RUST bytes (a vacuous Rust-vs-Rust corpus compare).
+    mp.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")
     mp.setattr(opw, "_atomic_write_parquet", _capturing)
     try:
         cases: dict[str, _Case] = {}
@@ -590,7 +592,7 @@ class TestWholePathWriteParity:
             a2 = w.write(partition_key=_PK, coordinate=_COORD, bars=list(second))
             return a1, a2
 
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # genuine oracle OFF arm
         off_lake = _mkdtemp("pr2-w-off-")
         off_added = _drive(off_lake)
 
@@ -682,7 +684,7 @@ class TestWholePathHealParity:
             pl.concat([df, df.slice(0, 4)]).write_parquet(dest)
             return dest
 
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # genuine oracle OFF arm
         off_lake = _mkdtemp("pr2-h-off-")
         off_dest = _seed(off_lake)
         off_original = off_dest.read_bytes()
@@ -726,7 +728,7 @@ class TestWholePathHealParity:
             added = w.merge_partition_frame(dest, moved)
             return dest, added
 
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # genuine oracle OFF arm
         off_lake = _mkdtemp("pr2-m-off-")
         off_dest, off_added = _drive(off_lake, flag_on=False)
 
@@ -775,7 +777,7 @@ class TestWholePathHealParity:
             second = scan_lake_invariants(lake)
             return report, _tree_state(lake), len(second.findings)
 
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # genuine oracle OFF arm
         off_report, off_tree, off_second = _drive(_mkdtemp("pr2-r3-off-"), flag_on=False)
 
         monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")

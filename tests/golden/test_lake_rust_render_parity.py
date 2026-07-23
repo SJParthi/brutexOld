@@ -165,7 +165,10 @@ def _fresh_process_view() -> Iterator[None]:
 
 
 def _python_bytes(bars: list[CandleBar], monkeypatch: pytest.MonkeyPatch) -> bytes:
-    monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+    # Explicit "0" (kill switch), NOT delenv-to-unset — under
+    # DEC-RUST-DEFAULT-ON-WAVE-001 an unset flag resolves default-ON, which
+    # would make this the RUST arm (a vacuous Rust-vs-Rust byte compare).
+    monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")
     return ParquetWriter._render_bytes(bars)
 
 
@@ -284,7 +287,7 @@ class TestWholePathParity:
             "interval": "1minute",
         }
 
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # genuine oracle OFF arm
         off_lake = tmp_path / "off"
         off_result = ParquetWriter(lake_root=off_lake).write(bars=list(bars), **coords)
 

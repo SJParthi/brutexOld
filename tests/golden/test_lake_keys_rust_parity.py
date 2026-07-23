@@ -327,7 +327,9 @@ class TestFlagOffArm(_FlagArmBase):
 
     @pytest.fixture(autouse=True)
     def _fresh(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-        monkeypatch.delenv(fsr.DATA_RUST_ENV, raising=False)
+        # Explicit "0" (kill switch) — the wave default is ON, so an unset OFF
+        # arm would silently route the "oracle" class through Rust.
+        monkeypatch.setenv(fsr.DATA_RUST_ENV, "0")
         lkr.reset_lake_keys_rust_for_tests()
         yield
         lkr.reset_lake_keys_rust_for_tests()
