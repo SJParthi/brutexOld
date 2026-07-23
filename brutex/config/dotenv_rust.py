@@ -1,4 +1,4 @@
-"""Default-OFF Rust seam for the :mod:`brutex.config.dotenv` LINE-PARSE law.
+"""Default-ON Rust seam (DEC-RUST-DEFAULT-ON-WAVE-001) for the :mod:`brutex.config.dotenv` LINE-PARSE law.
 
 DEC-CONFIG-RUST-LEAVES-001 (MIGRATION.md #1943), milestone 3. ONE routed
 surface — when ``BRUTEX_CORE_RUST_DOTENV`` is ON, ``parse_dotenv``
@@ -59,8 +59,8 @@ from brutex.config.seam_core import BURN_IN_SAMPLES, ConfigRustSeam
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-#: The opt-in env flag (default OFF; Pattern A — only explicit truthy
-#: enables). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit
+#: falsy is the kill switch). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
 DOTENV_RUST_ENV: Final[str] = "BRUTEX_CORE_RUST_DOTENV"
 
 #: The one law token (burn-in budget + reason prefix).
@@ -81,11 +81,14 @@ _SEAM: Final[ConfigRustSeam] = ConfigRustSeam(
     crate_api=_CRATE_API,
     laws=(_LAW_PARSE,),
     redact_values=True,
+    # DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): the
+    # seam default is ON; explicit falsy stays the kill switch.
+    default_on=True,
 )
 
 
 def dotenv_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_CORE_RUST_DOTENV`` (default OFF, junk loud-OFF)."""
+    """Resolve ``BRUTEX_CORE_RUST_DOTENV`` (default ON per DEC-RUST-DEFAULT-ON-WAVE-001, junk loud-OFF)."""
     return _SEAM.enabled()
 
 

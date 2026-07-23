@@ -7,11 +7,12 @@ abstention reason-bitmask gate. This module owns everything about *whether
 and how* an annotation pass may consult them (the ``feed_rust.py`` facade
 template + the lake facades' day-one burn-in posture):
 
-* :func:`meta_gate_enabled` — the default-OFF opt-in flag (Pattern A: ONLY
-  an explicit truthy enables; unset/empty/falsy are OFF; non-empty junk is
-  OFF + one warn).
+* :func:`meta_gate_enabled` — the default-ON flag (per
+  DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23: truthy
+  forces ON; unset/whitespace-empty are ON; falsy is the explicit kill
+  switch; non-empty junk is OFF + one warn).
 * :func:`score_probabilities` / :func:`abstain_reason_masks` — the routed
-  entries: flag OFF (the default) serves the retained Python oracles
+  entries: flag OFF (the explicit kill switch) serves the retained Python oracles
   (:func:`brutex.meta.logistic.score_logistic`,
   :func:`brutex.meta.abstain.abstain_masks_python`) and NEVER imports the
   crate (bomb-crate spy-pinned); flag ON resolves the wheel lazily

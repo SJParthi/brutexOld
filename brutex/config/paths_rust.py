@@ -1,4 +1,4 @@
-"""Default-OFF Rust seam for the :mod:`brutex.config.paths` derivation laws.
+"""Default-ON Rust seam (DEC-RUST-DEFAULT-ON-WAVE-001) for the :mod:`brutex.config.paths` derivation laws.
 
 DEC-CONFIG-RUST-LEAVES-001 (MIGRATION.md #1943), milestone 3. The TWO
 routed surfaces — when ``BRUTEX_CORE_RUST_PATHS`` is ON they delegate to
@@ -71,8 +71,8 @@ from brutex.config.seam_core import BURN_IN_SAMPLES, ConfigRustSeam
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-#: The opt-in env flag (default OFF; Pattern A — only explicit truthy
-#: enables). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit
+#: falsy is the kill switch). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
 PATHS_RUST_ENV: Final[str] = "BRUTEX_CORE_RUST_PATHS"
 
 #: The two law tokens (per-law burn-in budgets + reason prefixes).
@@ -97,11 +97,14 @@ _SEAM: Final[ConfigRustSeam] = ConfigRustSeam(
     env_var=PATHS_RUST_ENV,
     crate_api=_CRATE_API,
     laws=(_LAW_LAKE_ROOT, _LAW_VOLUME_PARENT),
+    # DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): the
+    # seam default is ON; explicit falsy stays the kill switch.
+    default_on=True,
 )
 
 
 def paths_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_CORE_RUST_PATHS`` (default OFF, junk loud-OFF)."""
+    """Resolve ``BRUTEX_CORE_RUST_PATHS`` (default ON per DEC-RUST-DEFAULT-ON-WAVE-001, junk loud-OFF)."""
     return _SEAM.enabled()
 
 

@@ -142,17 +142,19 @@ class TestFlagResolution:
     )
     def test_flag_matrix(self, enabled: Any, env: str, monkeypatch: pytest.MonkeyPatch) -> None:
         with capture_logs() as logs:
-            assert enabled() is False  # unset → OFF, silent
+            # unset → ON, silent (DEC-RUST-DEFAULT-ON-WAVE-001, operator
+            # directive 2026-07-23)
+            assert enabled() is True
         assert logs == []
         monkeypatch.setenv(env, "1")
         assert enabled() is True
         monkeypatch.setenv(env, "0")
         with capture_logs() as logs:
-            assert enabled() is False
+            assert enabled() is False  # the kill switch, silent
         assert logs == []
         monkeypatch.setenv(env, "   ")
         with capture_logs() as logs:
-            assert enabled() is False  # blank → OFF, silent
+            assert enabled() is True  # blank ≡ unset → the default ON, silent
         assert logs == []
 
     def test_junk_is_loud_off_once_per_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:

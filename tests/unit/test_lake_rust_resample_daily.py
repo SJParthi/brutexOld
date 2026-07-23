@@ -146,16 +146,18 @@ class TestFlagParsing:
             assert lrd.lake_rust_resample_daily_enabled() is False
         assert logs == []
 
-    def test_unset_is_the_silent_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unset_is_the_silent_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Default ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23).
         monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
         with capture_logs() as logs:
-            assert lrd.lake_rust_resample_daily_enabled() is False
+            assert lrd.lake_rust_resample_daily_enabled() is True
         assert logs == []
 
-    def test_whitespace_is_the_silent_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_whitespace_is_the_silent_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Whitespace-blank ≡ unset ⇒ the default ON, silently (DEC-RUST-DEFAULT-ON-WAVE-001).
         monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "   ")
         with capture_logs() as logs:
-            assert lrd.lake_rust_resample_daily_enabled() is False
+            assert lrd.lake_rust_resample_daily_enabled() is True
         assert logs == []
 
     def test_junk_is_loud_off_warned_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,12 +172,14 @@ class TestFlagParsing:
     def test_daily_flag_is_independent_of_the_g5_flag(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arming the G5 intraday flag must NOT arm the daily seam and vice
-        # versa — two flags, two flips, two evidence trails.
+        # Killing the G5 intraday flag must NOT kill the daily seam and
+        # vice versa — two flags, two kill switches, two evidence trails
+        # (both default ON under DEC-RUST-DEFAULT-ON-WAVE-001: independence is now proven
+        # via the explicit "0" kill switch on one side at a time).
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
         assert lrd.lake_rust_resample_daily_enabled() is False
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
         monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "1")
         assert lrs.lake_rust_resample_enabled() is False
         assert lrd.lake_rust_resample_daily_enabled() is True

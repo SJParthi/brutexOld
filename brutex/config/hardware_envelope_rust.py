@@ -1,4 +1,7 @@
-"""Default-OFF Rust seam for the hardware-envelope DERIVATION laws (slice T35).
+"""Default-ON Rust seam for the hardware-envelope DERIVATION laws (slice T35).
+
+Default flipped ON by DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+2026-07-23); explicit falsy is the kill switch back to the Python oracle.
 
 DEC-CONFIG-RUST-LEAVES-001 (MIGRATION.md #1943), milestone 2. The FOUR
 routed surfaces are :mod:`brutex.config.hardware_envelope`'s pure
@@ -97,7 +100,9 @@ DELIBERATELY STAYS PYTHON (each with its reason):
 Fail-closed layers, in order (every path returns the PYTHON-law value):
 
 1. the caller-side flag gate in :mod:`brutex.config.hardware_envelope`
-   (:func:`hwenv_rust_enabled` — default OFF; junk values loud-OFF once
+   (:func:`hwenv_rust_enabled` — default ON per
+   DEC-RUST-DEFAULT-ON-WAVE-001; explicit falsy is the kill switch; junk
+   values loud-OFF once
    per process);
 2. the ELIGIBILITY gate (:func:`_eligible_pool` /
    :func:`_eligible_library` / :func:`_eligible_memory` /
@@ -165,8 +170,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; Pattern A — only explicit truthy
-#: enables). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit
+#: falsy is the kill switch). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
 HWENV_RUST_ENV: Final[str] = "BRUTEX_CORE_RUST_HWENV"
 
 #: Engaged calls compared against the Python oracle PER LAW before crate
@@ -239,32 +244,35 @@ _KEY_CHARS: Final[frozenset[str]] = frozenset("abcdefghijklmnopqrstuvwxyz0123456
 
 
 def hwenv_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_CORE_RUST_HWENV`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_CORE_RUST_HWENV`` (default ON, junk loud-OFF).
 
-    Truthy → ``True``; falsy → ``False`` (silent explicit OFF); unset /
-    whitespace-empty → ``False`` (the default); any OTHER non-empty value →
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): truthy →
+    ``True``; falsy → ``False`` (the silent explicit kill switch); unset /
+    whitespace-empty → ``True`` (the default); any OTHER non-empty value →
     ``False`` with one ``hwenv_rust.fallback`` WARN (reason
-    ``flag_unrecognised``) per process. Read per call so spawn workers
+    ``flag_unrecognised``) per process — the junk arm is unchanged. Read per call so spawn workers
     resolve their own inherited environment (the PR-1 posture). The seam
     flag deliberately reads :data:`os.environ` — the callers' injectable
     ``env`` mappings scope their WORKER-COUNT overrides, not the seam.
 
     ABSENT fast path (review r1, MINOR — the money_rust mirror): an UNSET
-    flag — the production default — returns ``False`` off the raw
+    flag — the production default — returns ``True`` off the raw
     ``environ`` probe alone, skipping the strip/lower/set-lookup
-    normalization. Semantically identical (unset → OFF silently IS the
-    tristate law); any SET value takes the full tristate handling
+    normalization; any SET value takes the full tristate handling
     byte-identically.
     """
     raw = os.environ.get(HWENV_RUST_ENV)
     if raw is None:
-        return False
+        return True
     stripped = raw.strip().lower()
     if stripped in _TRUTHY:
         return True
-    if stripped and stripped not in _FALSY:
+    if stripped in _FALSY:
+        return False
+    if stripped:
         _warn_once("flag_unrecognised", value=stripped)
-    return False
+        return False
+    return True
 
 
 def hwenv_rust_disabled() -> bool:

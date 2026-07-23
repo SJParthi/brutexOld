@@ -1,15 +1,18 @@
-"""Default-OFF Rust seam for the nightly chain's pure decision kernels.
+"""Default-ON Rust seam for the nightly chain's pure decision kernels.
 
-DEC-NIGHTLY-RUST-CORE-001. The routed surfaces are the PURE laws of
+DEC-NIGHTLY-RUST-CORE-001; default flipped ON by
+DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23). The routed
+surfaces are the PURE laws of
 :mod:`brutex.nightly.chain` (``first_breaker`` · ``exit_code_for`` ·
 ``audit_reconcile_tripwire``), :mod:`brutex.nightly.report`
 (``_verdict`` · ``summary_lines`` · ``_count_text``) and
 :mod:`brutex.nightly.schedule` (``render_launchd_plist`` · ``parse_at`` ·
 ``pmset_wake_command`` · ``seconds_since_scheduled_fire``) — when
 ``BRUTEX_NIGHTLY_RUST`` is ON each delegates its decision to the
-`rust/brutex-ops` crate through this facade; the flag-OFF default is the
-verbatim retained Python body (the ``*_python`` oracle), byte-identical
-AND crate-untouched (bomb-crate spy-pinned).
+`rust/brutex-ops` crate through this facade; the explicit-falsy kill
+switch runs the verbatim retained Python body (the ``*_python`` oracle),
+byte-identical AND crate-untouched (bomb-crate spy-pinned). The flag is ON
+by default (unset/blank → ON) per DEC-RUST-DEFAULT-ON-WAVE-001.
 
 The :mod:`brutex.data.lake_rust_stats` pattern, with the SAME deliberate
 structural difference: **no version guard.** That guard exists where the
@@ -21,7 +24,8 @@ drift teeth instead.
 
 Fail-closed layers, in order (every path returns the PYTHON value):
 
-1. the caller-side flag gate (:func:`nightly_rust_enabled` — default OFF;
+1. the caller-side flag gate (:func:`nightly_rust_enabled` — default ON
+   per DEC-RUST-DEFAULT-ON-WAVE-001; explicit falsy is the kill switch;
    junk values loud-OFF once per process);
 2. the import/API-surface guard (:func:`_resolve_crate` — absent wheel or
    a foreign install missing a callable latches ``crate_unavailable``);
@@ -72,7 +76,8 @@ _LOG = structlog.get_logger(__name__)
 #: The pair length shared by the summary tuple + the (hour, minute) verdict.
 _PAIR_LEN: Final[int] = 2
 
-#: The opt-in env flag (default OFF; Pattern A — only explicit truthy enables).
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit falsy
+#: is the kill switch; junk fails loud-OFF).
 NIGHTLY_RUST_ENV: Final[str] = "BRUTEX_NIGHTLY_RUST"
 
 #: Engaged calls PER KERNEL bit-compared against the Python oracle before

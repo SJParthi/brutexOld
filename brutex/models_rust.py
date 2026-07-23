@@ -1,4 +1,7 @@
-"""Default-OFF Rust seam for the ``normalise_tick_size`` law (slice T35 PR-2).
+"""Default-ON Rust seam for the ``normalise_tick_size`` law (slice T35 PR-2).
+
+Default flipped ON by DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+2026-07-23); explicit falsy is the kill switch back to the Python oracle.
 
 The ONE routed surface is :func:`brutex.models.normalise_tick_size` — the
 module's single pure FUNCTION law. When ``BRUTEX_CORE_RUST_MODELS`` is ON it
@@ -53,7 +56,9 @@ Fail-closed layers, in order (every path serves the PYTHON-law outcome —
 value or raise — never a new value class):
 
 1. the caller-side flag gate in :mod:`brutex.models`
-   (:func:`models_rust_enabled` — default OFF; junk values loud-OFF once
+   (:func:`models_rust_enabled` — default ON per
+   DEC-RUST-DEFAULT-ON-WAVE-001; explicit falsy is the kill switch; junk
+   values loud-OFF once
    per process);
 2. the ELIGIBILITY gate (:func:`_encode_tick_input` — the gate law below):
    an input whose oracle behavior the crate grammar cannot reproduce
@@ -129,8 +134,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; Pattern A — only explicit truthy
-#: enables). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit
+#: falsy is the kill switch). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
 MODELS_RUST_ENV: Final[str] = "BRUTEX_CORE_RUST_MODELS"
 
 #: Engaged calls outcome-compared against the Python oracle before crate
@@ -201,24 +206,29 @@ _FIXED_POINT_RE: Final[re.Pattern[str]] = re.compile(r"-?\d+(\.\d+)?", re.ASCII)
 
 
 def models_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_CORE_RUST_MODELS`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_CORE_RUST_MODELS`` (default ON, junk loud-OFF).
 
-    Truthy → ``True``; falsy → ``False`` (silent explicit OFF); unset →
-    ``False`` off the raw probe alone (the money-seam absent fast path);
-    any OTHER non-empty value → ``False`` with one ``models_rust.fallback``
-    WARN (reason ``flag_unrecognised``) per process. Read per call so
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): truthy →
+    ``True``; falsy → ``False`` (the silent explicit kill switch); unset →
+    ``True`` off the raw probe alone (the money-seam absent fast path);
+    blank → ``True`` (the default); any OTHER non-empty value → ``False``
+    with one ``models_rust.fallback`` WARN (reason ``flag_unrecognised``)
+    per process — the junk arm is unchanged. Read per call so
     spawn workers resolve their own inherited environment (the PR-1
     posture).
     """
     raw = os.environ.get(MODELS_RUST_ENV)
     if raw is None:
-        return False
+        return True
     stripped = raw.strip().lower()
     if stripped in _TRUTHY:
         return True
-    if stripped and stripped not in _FALSY:
+    if stripped in _FALSY:
+        return False
+    if stripped:
         _warn_once("flag_unrecognised", value=stripped)
-    return False
+        return False
+    return True
 
 
 def models_rust_disabled() -> bool:
