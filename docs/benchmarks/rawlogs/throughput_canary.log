@@ -1,0 +1,8 @@
+
+numpy mask AND: t_per_elem(100K)=0.97ns, t_per_elem(1M)=1.43ns, ratio=1.47×, absolute=701,265,518 ops/s
+..
+dict lookup: t_per_lookup(100K dict)=93ns, t_per_lookup(1M dict)=184ns, ratio=1.97×, absolute=5,436,792 ops/s
+.
+evaluate_atoms: t_per_call(1K)=2494ns, t_per_call(10K)=2614ns, ratio=1.05×, absolute=382,504 ops/s
+..
+5 passed in 11.17s

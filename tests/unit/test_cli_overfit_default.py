@@ -125,3 +125,71 @@ def test_dashboard_runner_rides_the_ruled_institutional_default_on() -> None:
     )
     kwargs = build_sweep_kwargs(request, lake_root=Path("/tmp/lake"))
     assert kwargs["overfit_gate"] is True
+
+
+# ── Pin ports from the superseded PR #1674 (adversarial-refuter round,
+# 2026-07-23): #1674's behavior is delivered on main via
+# DEC-RESULTS-TRUST-HONESTY-001 (the flip) + the STRONGER
+# DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 recorded-config recovery on
+# sweep-verify, but four of its LAW PINS had no main equivalent. Ported
+# here adapted to main's landed laws (test-only; no behavior change). ──
+
+
+def test_nightly_run_parse_shares_the_default_on() -> None:
+    """``nightly run`` (dates_required=False) inherits gate-ON from the ONE
+    shared ``_add_sweep_grid_args`` declaration — the nightly sweep leg then
+    forwards it via ``SWEEP_FORWARDED_KEYS`` (nightly/sweep_binding.py).
+    Ported from PR #1674; previously only sweep-all/sweep-daemon were
+    parse-pinned while the docstring claimed nightly coverage."""
+    args = cli.build_parser().parse_args(["nightly", "run"])
+    assert args.overfit_gate is True
+
+
+def test_sweep_verify_parse_shares_the_default_on() -> None:
+    """``sweep-verify`` parses the shared flag pair with the same gate-ON
+    default. HONEST ENVELOPE (main's ledgered design, not a gap): the verify
+    DISPATCH deliberately does not thread ``args.overfit_gate`` — the tree's
+    RECORDED gate config is recovered instead via
+    ``recorded_overfit_from_audit`` (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+    MIGRATION.md #1851), so the parsed flag is accepted-but-inert on this
+    surface. This pin locks the shared-parser default; the recovery law is
+    pinned by the sweep-verify suites."""
+    args = cli.build_parser().parse_args(
+        ["sweep-verify", "--start", "2024-01-01", "--end", "2024-01-02"]
+    )
+    assert args.overfit_gate is True
+    escaped = cli.build_parser().parse_args(
+        [
+            "sweep-verify",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-02",
+            "--no-overfit-gate",
+        ]
+    )
+    assert escaped.overfit_gate is False
+
+
+def test_conflicting_gate_flags_last_wins_reverse_order() -> None:
+    """argparse LAST-WINS for the conflicting flag pair in the REVERSE order
+    too (``--no-overfit-gate --overfit-gate`` → True). The forward order is
+    pinned by ``test_escape_wins_regardless_of_flag_order`` above; this ports
+    #1674's both-orders matrix — the later spelling wins, never an error
+    (the ``--options-sim``/``--no-options-sim`` idiom)."""
+    with mock.patch.object(cli, "cmd_sweep_all", return_value=0) as sweep_all:
+        rc = cli.main([*_SWEEP_ALL_MIN, "--no-overfit-gate", "--overfit-gate"])
+    assert rc == 0
+    _, kwargs = sweep_all.call_args
+    assert kwargs["overfit_gate"] is True
+
+
+def test_dsr_min_parser_default_is_0_95() -> None:
+    """The ``--dsr-min`` PARSER default stays 0.95 — the CLI-side twin of the
+    library ``OverfitGateConfig.dsr_min`` default (pinned in test_ranking).
+    Ported from PR #1674; no prior test touched ``args.dsr_min``."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_SWEEP_ALL_MIN)
+    assert args.dsr_min == 0.95
+    overridden = parser.parse_args([*_SWEEP_ALL_MIN, "--dsr-min", "0.9"])
+    assert overridden.dsr_min == 0.9
