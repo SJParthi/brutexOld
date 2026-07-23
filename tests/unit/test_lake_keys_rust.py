@@ -182,9 +182,11 @@ def _oracle_recovery(underlying: str, exchange: str) -> tuple[str, ...]:
 
 
 class TestOffArmInertness:
-    def test_public_entries_never_touch_crate_flag_unset(
+    def test_public_entries_never_touch_crate_flag_off(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # OFF via the explicit "0" kill switch (default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
+        monkeypatch.setenv("BRUTEX_DATA_RUST", "0")
         bomb = _BombCrate()
         _install_crate(monkeypatch, bomb)
         assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"

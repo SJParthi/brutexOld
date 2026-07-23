@@ -64,7 +64,8 @@ def _legacy_session(day_df: pl.DataFrame, tf: int, cutoff_min: int | None) -> pl
 
 class TestSessionSeamWiring:
     def test_flag_off_never_touches_the_session_face(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
+        # OFF via the explicit "0" kill switch (default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
 
         def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
             raise AssertionError("session face must not be reached with the flag OFF")

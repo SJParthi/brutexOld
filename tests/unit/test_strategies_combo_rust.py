@@ -120,9 +120,10 @@ def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 class TestFlagResolution:
-    def test_default_unset_is_off_without_warn(self) -> None:
+    def test_default_unset_is_on_without_warn(self) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset ⇒ the Rust path is ON.
         with capture_logs() as logs:
-            assert cr.combo_rust_enabled() is False
+            assert cr.combo_rust_enabled() is True
         assert logs == []
 
     def test_truthy_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,10 +145,10 @@ class TestFlagResolution:
         assert len(warns) == 1
         assert warns[0]["reason"] == "flag_unrecognised"
 
-    def test_blank_whitespace_is_off_without_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_blank_whitespace_is_on_without_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(cr.STRATEGIES_RUST_COMBO_ENV, "   ")
         with capture_logs() as logs:
-            assert cr.combo_rust_enabled() is False
+            assert cr.combo_rust_enabled() is True
         assert logs == []
 
 
@@ -225,6 +226,10 @@ class TestOffArmInertness:
     def test_off_never_imports_crate_and_matches_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): the never-imports pin
+        # rides the explicit "0" kill switch (unset is now default-ON).
+        monkeypatch.setenv(cr.STRATEGIES_RUST_COMBO_ENV, "0")
+
         def _bomb(name: str) -> object:
             raise AssertionError(f"flag-OFF path imported {name!r}")
 
@@ -239,9 +244,13 @@ class TestOffArmInertness:
         )
 
     def test_off_arm_preserves_lazy_single_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The OFF arm hands the UNTOUCHED iterable to the verbatim lazy loop:
-        # a generator is consumed only to the first offender (the historical
-        # inline-loop behaviour, byte- and laziness-identical).
+        # The OFF arm (the explicit "0" kill switch — unset is default-ON
+        # since DEC-RUST-DEFAULT-ON-WAVE-001) hands the UNTOUCHED iterable
+        # to the verbatim lazy loop: a generator is consumed only to the
+        # first offender (the historical inline-loop behaviour, byte- and
+        # laziness-identical).
+        monkeypatch.setenv(cr.STRATEGIES_RUST_COMBO_ENV, "0")
+
         def _bomb(name: str) -> object:
             raise AssertionError("flag-OFF path imported the crate")
 

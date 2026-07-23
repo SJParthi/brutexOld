@@ -632,3 +632,14 @@ def test_shutdown_survives_an_unkillable_child() -> None:
     proc = _FakeProc(wait_timeouts=2)
     rust_front._shutdown(proc)  # pyright: ignore[reportPrivateUsage] — must not raise
     assert proc.calls == ["poll", "terminate", "wait", "kill", "wait"]
+
+
+def test_conftest_belt_pins_the_real_env_name() -> None:
+    """DRIFT PIN: the tests/conftest.py hermeticity belt (`BRUTEX_RUST_FRONT`
+    pinned "off" suite-wide under the AUTO default —
+    DEC-RUST-DEFAULT-ON-WAVE-001) must name EXACTLY `ENV_RUST_FRONT`; a
+    renamed flag without a belt update would silently re-expose every
+    flag-unset `cmd_dashboard` test to the host's brutexd binary."""
+    conftest = Path(__file__).resolve().parents[1] / "conftest.py"
+    source = conftest.read_text(encoding="utf-8")
+    assert f'os.environ.setdefault("{ENV_RUST_FRONT}", "off")' in source

@@ -50,7 +50,9 @@ class TestOffArm:
     def test_off_is_the_python_oracle_crate_untouched(
         self, monkeypatch: pytest.MonkeyPatch, law: str
     ) -> None:
-        monkeypatch.delenv(backup_rust.BACKUP_RUST_ENV, raising=False)
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "0")
         monkeypatch.setitem(sys.modules, "brutex_ops", None)  # the bomb
         public, oracle = RENDERERS[law]
         assert public() == oracle()

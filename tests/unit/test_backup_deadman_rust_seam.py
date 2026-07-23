@@ -143,11 +143,15 @@ SCENARIOS: dict[str, tuple[BackupState | None, DeadmanState, str | None]] = {
 
 
 class TestOffArmIdentity:
-    """Flag OFF: the wrapper serves the oracle byte-identically, crate untouched."""
+    """Kill switch (``"0"``): the wrapper serves the oracle byte-identically, crate untouched.
+
+    Retargeted from the pre-flip unset arm onto the explicit falsy kill
+    switch (DEC-RUST-DEFAULT-ON-WAVE-001) — assertions unchanged.
+    """
 
     @pytest.mark.parametrize("name", sorted(SCENARIOS))
     def test_off_equals_oracle(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-        monkeypatch.delenv(backup_rust.BACKUP_RUST_ENV, raising=False)
+        monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "0")
         monkeypatch.setitem(sys.modules, "brutex_ops", None)  # the bomb: import → ImportError
         state, sidecar, state_error = SCENARIOS[name]
         assert _routed(state, sidecar, state_error) == _oracle(state, sidecar, state_error)

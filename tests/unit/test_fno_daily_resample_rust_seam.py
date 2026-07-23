@@ -61,7 +61,8 @@ _BEFORE = date(2024, 1, 4)  # both sessions complete
 
 class TestFnoDailySeamWiring:
     def test_flag_off_never_touches_the_daily_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        # OFF via the explicit "0" kill switch (default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
 
         def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
             raise AssertionError("daily seam must not be reached with the flag OFF")

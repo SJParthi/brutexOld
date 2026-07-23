@@ -175,6 +175,19 @@ os.environ.setdefault("BRUTEX_ALPHA_GATE", "0")
 # env/runner explicitly and stay armed on both arms.
 os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
 
+# DEC-RUST-DEFAULT-ON-WAVE-001 hermeticity belt: `BRUTEX_RUST_FRONT` now
+# defaults to AUTO (unset => probe for a built `brutexd` binary; found =>
+# the Rust front topology). On a box WITH a locally built brutexd every
+# pre-existing `cmd_dashboard` test running flag-unset would silently flip
+# onto the Rust-front serve path (a host-toolchain flake class — the #1692
+# market-hours-guard philosophy: hermetic against the AMBIENT environment,
+# never the tested law). Pin the suite explicitly OFF (`setdefault` so an
+# explicit outer choice wins); the rust-front suites set the flag / inject
+# probes explicitly and stay armed on every arm (off / auto / on / junk).
+# Pinned literal — drift-pinned equal to `rust_front.ENV_RUST_FRONT` by
+# tests/unit/test_rust_front.py.
+os.environ.setdefault("BRUTEX_RUST_FRONT", "off")
+
 # DEC-BOX-AUTODEPLOY-LANE-001 §12 hermeticity (the env_preflight REGISTRY
 # flags): a HOST env carrying `BRUTEX_SKIP_WHEEL_FRESHNESS` (the CI wheel
 # escape) or a stale `BRUTEX_FILL_MODE` would populate every pre-existing

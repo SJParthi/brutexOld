@@ -69,6 +69,8 @@ class TestFlagOffInertness:
     def test_off_never_imports_crate_and_matches_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # OFF via the explicit "0" kill switch (default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
+        monkeypatch.setenv(dr.LAKE_RUST_INTERIOR_GAP_ENV, "0")
         _bomb_import(monkeypatch, "flag-OFF interior-gap classify")
         verdict = classify_interior_gap(bar_timestamps=[_ts(2021, 3, 1), _ts(2021, 3, 22)])
         assert verdict.verdict == INTERIOR_GAP  # the catching shape still catches

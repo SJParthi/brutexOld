@@ -818,7 +818,18 @@ class TestOffArmInertness:
     def test_off_public_stamp_laws_never_import_crate(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        # Selective bomb: the stamp write path legitimately crosses OTHER
+        # (default-ON) Rust seams — e.g. atomic_io's lake_rust_locks import
+        # of ``brutex_lake`` (DEC-RUST-DEFAULT-ON-WAVE-001) — so only the
+        # OBSERVABILITY crate import is the kill-switch violation here.
+        real_import = importlib.import_module
+
+        def _selective_bomb(name: str) -> types.ModuleType:
+            if name == "brutex_observability":
+                return _bomb_import(name)
+            return real_import(name)
+
+        monkeypatch.setattr(obs.importlib, "import_module", _selective_bomb)
         artifact = tmp_path / "artifact.bin"
         artifact.write_bytes(b"payload")
         write_stage_stamp(artifact, stage="cascade_manifest", run_id="r1")

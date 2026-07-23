@@ -66,6 +66,9 @@ class TestFlagOffInertness:
     def test_off_never_imports_crate_and_matches_golden(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # OFF via the explicit "0" kill switch (default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
+        monkeypatch.setenv(dr.LAKE_RUST_RAW_INTEGRITY_ENV, "0")
+
         def _bomb(name: str) -> object:
             raise AssertionError(f"flag-OFF hash_payload imported {name!r}")
 
