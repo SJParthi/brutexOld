@@ -115,15 +115,17 @@ os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
 
 # DEC-STRATEGIES-RUST-COMBO-001 test hermeticity (the market-hours-guard
 # philosophy — hermetic against the AMBIENT ENVIRONMENT): the combo_rust
-# facade's flag (`BRUTEX_STRATEGIES_RUST_COMBO`, default OFF) is read per call
-# from the REAL ``os.environ``, so a developer/CI runner with the flag
-# exported truthy would RED every OFF-asserting test (the flag-OFF bomb-crate
-# spy + the combo.py OFF-arm byte-identity pins). The suite therefore runs
-# with the flag explicitly OFF (`setdefault` so an explicit outer choice
-# wins). The facade's OWN tests stay fully armed on both arms — the ON-arm
-# tests set the flag EXPLICITLY via ``monkeypatch.setenv`` (which overrides
-# this setdefault) — so this default disables ONLY the ambient env read,
-# never the tested law.
+# facade's flag (`BRUTEX_STRATEGIES_RUST_COMBO`, default ON since
+# DEC-RUST-DEFAULT-ON-WAVE-001) is read per call from the REAL
+# ``os.environ``, so an ambient export — either polarity — would flip
+# unrelated suites' arms. The suite therefore runs with the flag pinned to
+# the explicit "0" kill switch (`setdefault` so an explicit outer choice
+# wins) — the byte-identical oracle arm, wheel-state-independent in every
+# lane. The facade's OWN tests stay fully armed on both arms — the
+# default-is-ON pin uses ``monkeypatch.delenv`` and the ON-arm tests set
+# the flag EXPLICITLY via ``monkeypatch.setenv`` (both override this
+# setdefault) — so this default disables ONLY the ambient env read, never
+# the tested law.
 #
 # WHEEL-FREE DISCIPLINE: this file must stay importable in the wheel-LESS
 # lanes (lake-rust-parity installs only the brutex-lake wheel;
@@ -204,9 +206,10 @@ os.environ.pop("BRUTEX_FILL_MODE", None)
 # DEC-ABSTAIN-GATE-STREAM-001 + DEC-META-LABEL-ANNOTATE-001 hermeticity: a
 # host env carrying the DORMANT `BRUTEX_ABSTAIN_GATE_INSIM` knob would trip
 # the sweep-launch refusal across every sweep-all suite, and an ambient
-# `BRUTEX_META_GATE` would flip the default-OFF Rust meta facade ON for
-# unrelated tests. POP both (the fill-mode discipline above — the meta
-# suites inject env explicitly on both arms).
+# `BRUTEX_META_GATE` would flip the Rust meta facade (default ON since
+# DEC-RUST-DEFAULT-ON-WAVE-001) off its default for unrelated tests. POP
+# both (the fill-mode discipline above — the meta suites inject env
+# explicitly on both arms).
 os.environ.pop("BRUTEX_ABSTAIN_GATE_INSIM", None)
 os.environ.pop("BRUTEX_META_GATE", None)
 
