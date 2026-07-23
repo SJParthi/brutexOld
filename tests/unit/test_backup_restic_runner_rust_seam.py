@@ -55,7 +55,9 @@ LS_OK = '{"time":"2026-01-01T00:00:00Z"}\n{"type":"file","path":"/a"}\n{"type":"
 
 class TestOffArmIdentity:
     def test_off_serves_oracles_crate_untouched(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(backup_rust.BACKUP_RUST_ENV, raising=False)
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "0")
         monkeypatch.setitem(sys.modules, "brutex_ops", None)  # the bomb
         assert parse_backup_summary_snapshot_id(SUMMARY_OK) == "abc123"
         assert parse_snapshots_latest("[]") is None

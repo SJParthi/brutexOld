@@ -1,4 +1,7 @@
-"""Default-OFF Rust seam for the DEC-MONEY-2DP-001 money laws (slice T35).
+"""Default-ON Rust seam for the DEC-MONEY-2DP-001 money laws (slice T35).
+
+Default flipped ON by DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+2026-07-23); explicit falsy is the kill switch back to the Decimal oracle.
 
 DEC-CONFIG-RUST-LEAVES-001 (MIGRATION.md #1943). The FOUR routed surfaces
 are :mod:`brutex.money`'s public functions — when ``BRUTEX_CORE_RUST_MONEY``
@@ -16,7 +19,8 @@ gate and an FFI hop per call — a small slowdown, shipped INERT (a default
 flip needs its own DEC). ``round_money`` additionally snaps EVERY stored
 OHLC value at the lake-write boundary (run-identity / stored-bytes
 critical — the audit-session addendum), which is exactly why the seam is
-burn-in-checked, refuse-poison-gated and default-OFF.
+burn-in-checked, refuse-poison-gated and default-ON
+(DEC-RUST-DEFAULT-ON-WAVE-001).
 
 Flag-OFF cost disclosure (review r1, measured 2026-07-17): the DEFAULT
 (flag-OFF) path pays a per-call env probe — ``os.environ.get`` on a miss
@@ -56,7 +60,9 @@ structural differences, both documented:
 Fail-closed layers, in order (every path returns the PYTHON-law value):
 
 1. the caller-side flag gate in :mod:`brutex.money`
-   (:func:`money_rust_enabled` — default OFF; junk values loud-OFF once
+   (:func:`money_rust_enabled` — default ON per
+   DEC-RUST-DEFAULT-ON-WAVE-001; explicit falsy is the kill switch; junk
+   values loud-OFF once
    per process);
 2. the ELIGIBILITY gate (:func:`_eligible_rupees` /
    :func:`_eligible_paisa` — the gate law below): an input whose oracle
@@ -134,8 +140,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; Pattern A — only explicit truthy
-#: enables). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit
+#: falsy is the kill switch). Canonical ``BRUTEX_<CRATE>_RUST_<SEAM>`` form.
 MONEY_RUST_ENV: Final[str] = "BRUTEX_CORE_RUST_MONEY"
 
 #: Engaged calls bit-compared against the Decimal oracle PER LAW before
@@ -235,29 +241,33 @@ _GROUP_LEN: Final[int] = 3
 
 
 def money_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_CORE_RUST_MONEY`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_CORE_RUST_MONEY`` (default ON, junk loud-OFF).
 
-    Truthy → ``True``; falsy → ``False`` (silent explicit OFF); unset /
-    whitespace-empty → ``False`` (the default); any OTHER non-empty value →
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): truthy →
+    ``True``; falsy → ``False`` (the silent explicit kill switch); unset /
+    whitespace-empty → ``True`` (the default); any OTHER non-empty value →
     ``False`` with one ``money_rust.fallback`` WARN (reason
-    ``flag_unrecognised``) per process. Read per call so spawn workers
-    resolve their own inherited environment (the PR-1 posture).
+    ``flag_unrecognised``) per process — the junk arm is unchanged. Read
+    per call so spawn workers resolve their own inherited environment (the
+    PR-1 posture).
 
     ABSENT fast path (review r1, MINOR): an UNSET flag — the production
-    default — returns ``False`` off the raw ``environ`` probe alone,
-    skipping the strip/lower/set-lookup normalization. Semantically
-    identical (unset → OFF silently IS the tristate law); any SET value
-    takes the full tristate handling byte-identically.
+    default — returns ``True`` off the raw ``environ`` probe alone,
+    skipping the strip/lower/set-lookup normalization; any SET value takes
+    the full tristate handling byte-identically.
     """
     raw = os.environ.get(MONEY_RUST_ENV)
     if raw is None:
-        return False
+        return True
     stripped = raw.strip().lower()
     if stripped in _TRUTHY:
         return True
-    if stripped and stripped not in _FALSY:
+    if stripped in _FALSY:
+        return False
+    if stripped:
         _warn_once("flag_unrecognised", value=stripped)
-    return False
+        return False
+    return True
 
 
 def money_rust_disabled() -> bool:

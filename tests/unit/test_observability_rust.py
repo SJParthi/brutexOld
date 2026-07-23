@@ -335,15 +335,16 @@ class TestFlagResolution:
             assert obs.observability_rust_enabled() is False
         assert logs == []
 
-    def test_unset_defaults_off_silently(self) -> None:
+    def test_unset_defaults_on_silently(self) -> None:
+        # The DEC-RUST-DEFAULT-ON-WAVE-001 default pin: unset ⇒ ON.
         with capture_logs() as logs:
-            assert obs.observability_rust_enabled() is False
+            assert obs.observability_rust_enabled() is True
         assert logs == []
 
-    def test_blank_whitespace_is_off_without_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_blank_whitespace_is_on_without_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(obs.OBSERVABILITY_RUST_ENV, "   ")
         with capture_logs() as logs:
-            assert obs.observability_rust_enabled() is False
+            assert obs.observability_rust_enabled() is True
         assert logs == []
 
     def test_junk_is_loud_off_exactly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -357,7 +358,9 @@ class TestFlagResolution:
         assert warns[0]["value"] == "banana"
 
     def test_flag_is_read_per_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        assert obs.observability_rust_enabled() is False
+        assert (
+            obs.observability_rust_enabled() is True
+        )  # unset default (DEC-RUST-DEFAULT-ON-WAVE-001)
         monkeypatch.setenv(obs.OBSERVABILITY_RUST_ENV, "1")
         assert obs.observability_rust_enabled() is True
         monkeypatch.setenv(obs.OBSERVABILITY_RUST_ENV, "0")
@@ -747,6 +750,16 @@ class TestCrateGuards:
 
 
 class TestOffArmInertness:
+    """The explicit-falsy kill switch (``"0"``) is byte-identical + crate-inert.
+
+    Retargeted from the pre-flip unset arm onto the explicit kill switch
+    (DEC-RUST-DEFAULT-ON-WAVE-001) — the assertions are unchanged.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _kill_switch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(obs.OBSERVABILITY_RUST_ENV, "0")
+
     def test_off_routed_calls_never_import_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
         for case in _LAW_CASES:
@@ -807,7 +820,18 @@ class TestOffArmInertness:
     def test_off_public_stamp_laws_never_import_crate(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        # Selective bomb: the stamp write path legitimately crosses OTHER
+        # (default-ON) Rust seams — e.g. atomic_io's lake_rust_locks import
+        # of ``brutex_lake`` (DEC-RUST-DEFAULT-ON-WAVE-001) — so only the
+        # OBSERVABILITY crate import is the kill-switch violation here.
+        real_import = importlib.import_module
+
+        def _selective_bomb(name: str) -> types.ModuleType:
+            if name == "brutex_observability":
+                return _bomb_import(name)
+            return real_import(name)
+
+        monkeypatch.setattr(obs.importlib, "import_module", _selective_bomb)
         artifact = tmp_path / "artifact.bin"
         artifact.write_bytes(b"payload")
         write_stage_stamp(artifact, stage="cascade_manifest", run_id="r1")

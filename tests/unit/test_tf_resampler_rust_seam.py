@@ -56,9 +56,10 @@ def _install_crate(monkeypatch: pytest.MonkeyPatch, module: object | None) -> No
 
 class TestSeamWiring:
     def test_flag_off_never_touches_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The OFF (default) byte-identity spy-pin: with the flag unset the
-        # public fn must never call the seam — a bomb proves it.
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
+        # The OFF byte-identity spy-pin: with the flag at "0" (the kill
+        # switch — default flipped ON, DEC-RUST-DEFAULT-ON-WAVE-001) the public fn must
+        # never call the seam — a bomb proves it.
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
 
         def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
             raise AssertionError("seam must not be reached with the flag OFF")

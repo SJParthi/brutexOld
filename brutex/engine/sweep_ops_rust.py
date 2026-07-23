@@ -1,8 +1,9 @@
-"""sweep_ops_rust — the default-OFF Rust routing facade for the sweep-ops PURE laws.
+"""sweep_ops_rust — the default-ON Rust routing facade for the sweep-ops PURE laws.
 
-DEC-RUST-SWEEP-OPS-001 (slice 0 facade + slice 1 laws). Routes converted
-sweep run-core/ops PURE laws through the ``rust/brutex-sweep-ops`` crate
-behind the default-OFF ``BRUTEX_SWEEP_OPS_RUST`` flag, with the verbatim
+DEC-RUST-SWEEP-OPS-001 (slice 0 facade + slice 1 laws; default flipped ON
+by DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23). Routes
+converted sweep run-core/ops PURE laws through the ``rust/brutex-sweep-ops``
+crate behind the ``BRUTEX_SWEEP_OPS_RUST`` flag, with the verbatim
 Python law retained as the LIVE parity oracle (the
 ``brutex/data/window_ledger_rust.py`` template — itself the ADR-0020 / PR-1
 ``lake_rust_render`` shape).
@@ -267,10 +268,12 @@ implementation, the ``flight_recorder`` precedent).
 
 ## The fail-closed layers (the window_ledger_rust template, adapted)
 
-* **Flag** — ``BRUTEX_SWEEP_OPS_RUST`` default OFF; truthy → ON, falsy →
-  OFF, any other non-empty value → OFF with ONE loud
-  ``sweep_ops_rust.fallback`` WARN (``flag_unrecognised``). OFF never
-  imports the crate (spy-pinned) — the default path is byte-identical.
+* **Flag** — ``BRUTEX_SWEEP_OPS_RUST`` default ON (per
+  DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23); truthy →
+  ON, falsy → OFF (the explicit kill switch), any other non-empty value →
+  OFF with ONE loud ``sweep_ops_rust.fallback`` WARN
+  (``flag_unrecognised``). Explicit OFF never imports the crate
+  (spy-pinned) — the OFF path is byte-identical.
 * **Import guard / SYMBOL handshake** — an absent wheel latches
   ``crate_unavailable``; a wheel that imports but lacks any
   :data:`_CRATE_API` callable is a pre-slice-1 (or foreign/broken) install
@@ -313,8 +316,8 @@ non-abort build, or a panic surfacing through an out-of-band pyo3 runtime).
 Expected payoff ≈ 0 — conversion is for uniformity, not speed. Every
 slice-1/1b law is nanosecond-scale in Python and the FFI hop is a small
 SLOWDOWN; acceptable because the seams run per launch / per run-dir
-derivation / per progress-snapshot poll (never per mask) and ship
-DEFAULT-OFF. The flag is read per call
+derivation / per progress-snapshot poll (never per mask); DEFAULT-ON per
+DEC-RUST-DEFAULT-ON-WAVE-001. The flag is read per call
 (one ``os.environ`` probe) so spawn workers resolve their own inherited
 environment. ``python_law`` parameters are ZERO-ARG closures (a documented
 deviation from window_ledger_rust's arg-forwarding shape — three laws with
@@ -351,7 +354,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; junk fails loud-OFF).
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; falsy is the
+#: explicit kill switch; junk fails loud-OFF).
 SWEEP_OPS_RUST_ENV: Final[str] = "BRUTEX_SWEEP_OPS_RUST"
 
 #: Engaged calls PER LAW that are bit-compared against the live Python
@@ -634,14 +638,15 @@ _DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
 
 
 def sweep_ops_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_SWEEP_OPS_RUST`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_SWEEP_OPS_RUST`` (default ON, junk loud-OFF).
 
-    Truthy literal → ``True``; falsy literal → ``False``; unset/blank →
-    ``False`` (the default); any OTHER non-empty value → ``False`` with one
-    ``sweep_ops_rust.fallback`` WARN (``flag_unrecognised``) per process.
-    Read per call so spawn workers resolve their own environment (the
-    sibling facades' law, byte-identical vocabulary via the imported
-    :func:`env_flag_tristate`).
+    Truthy literal → ``True``; falsy literal → ``False`` (the explicit kill
+    switch); unset/blank → ``True`` (the default — ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23); any OTHER
+    non-empty value → ``False`` with one ``sweep_ops_rust.fallback`` WARN
+    (``flag_unrecognised``) per process. Read per call so spawn workers
+    resolve their own environment (the sibling facades' law, byte-identical
+    vocabulary via the imported :func:`env_flag_tristate`).
     """
     raw = os.environ.get(SWEEP_OPS_RUST_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -649,7 +654,8 @@ def sweep_ops_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def sweep_ops_rust_disabled() -> bool:

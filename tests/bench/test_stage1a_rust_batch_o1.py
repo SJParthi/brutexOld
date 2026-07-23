@@ -119,7 +119,11 @@ def test_ab_on_vs_off_wall_clock_measured(monkeypatch: pytest.MonkeyPatch) -> No
     reset_self_check_for_tests(remaining=0)
     reset_observability_memo_for_tests()
     try:
-        monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would time the
+        # RUST walk here too — a vacuous Rust-vs-Rust A/B (~1.0x) AND a
+        # Rust-vs-Rust equality. "0" is the kill switch: the genuine Python
+        # walk the "OFF (Python walk)" figure below claims to measure.
+        monkeypatch.setenv(STAGE1A_RUST_ENV, "0")
         build_bar_bits(bars)  # warm
         t0 = time.perf_counter()
         off = build_bar_bits(bars)

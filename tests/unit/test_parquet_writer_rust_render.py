@@ -94,8 +94,10 @@ def _polars_backed_fake_crate() -> types.ModuleType:
 
 
 class TestFlagOff:
-    def test_default_off_never_touches_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+    def test_kill_switch_never_touches_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # OFF is addressed via the explicit "0" kill switch since the
+        # default flipped ON (DEC-RUST-DEFAULT-ON-WAVE-001) — the never-routes teeth survive.
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")
 
         def _must_not_route(**_: object) -> bytes:
             raise AssertionError("flag-OFF must never call render_parquet_bytes")
@@ -108,7 +110,7 @@ class TestFlagOff:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bars = _bars()
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch
         off_bytes = ParquetWriter._render_bytes(bars)
 
         monkeypatch.setitem(sys.modules, "brutex_lake", _polars_backed_fake_crate())
@@ -126,7 +128,7 @@ class TestFlagOnGuards:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bars = _bars()
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch → Python oracle
         expected = ParquetWriter._render_bytes(bars)
 
         monkeypatch.setitem(sys.modules, "brutex_lake", None)  # → ImportError
@@ -143,7 +145,7 @@ class TestFlagOnGuards:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bars = _bars()
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch → Python oracle
         expected = ParquetWriter._render_bytes(bars)
 
         fake = _polars_backed_fake_crate()

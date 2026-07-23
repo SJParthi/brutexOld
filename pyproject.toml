@@ -220,6 +220,12 @@ select = [
 ignore = [
     # Intentional architectural patterns
     "PLR0913", # many args — acceptable in adapter boundaries
+    "PLR0917", # many positional args — the PLR0913 sibling (positional-only
+    #            count); ruff 0.16.0 graduated it from preview to stable, so it
+    #            now fires on the same adapter boundaries + hypothesis @given /
+    #            fixture-factory test helpers the too-many-X family is
+    #            deliberately un-enforced on. Ignored here for parity with
+    #            PLR0913 — the authored lint baseline never opted into it.
     "PLR0911", # too many return statements — common in dispatchers/CLIs
     "PLR0912", # too many branches — common in dispatchers/CLIs
     "PLR0915", # too many statements — common in dispatchers/CLIs

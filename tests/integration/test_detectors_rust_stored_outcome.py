@@ -286,7 +286,10 @@ def test_demotion_stored_outcome_identical_off_vs_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crate_source: str
 ) -> None:
     """Stored parquet bytes + ledger demotions are IDENTICAL OFF vs ON — and FIRED."""
-    # --- OFF arm (the default: flags deleted by the autouse fixture). ---
+    # --- OFF arm (the explicit "0" kill switch on all three flags — the
+    # default flipped ON under DEC-RUST-DEFAULT-ON-WAVE-001). ---
+    for env in _FLAG_ENVS:
+        monkeypatch.setenv(env, "0")
     with capture_logs() as off_logs:
         off_files, off_rows = _run_production_pull(tmp_path / "off_lake")
     assert not any(e["event"] == "detectors_rust.engaged" for e in off_logs)

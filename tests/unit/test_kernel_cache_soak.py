@@ -771,6 +771,12 @@ class TestGridHelpers:
             mem_budget_bytes=1_000_000,
         )
         env["HOME"] = str(home)  # bootstrap_env resolves ~ via Path.home()
+        # DEC-RUST-DEFAULT-ON-WAVE-001 retarget: the dotenv seam is now
+        # default-ON, so a wheel-less child would emit the warn-once
+        # `dotenv_rust.rust_path_disabled` line on stdout and pollute the
+        # exact-stdout assertion below.  Pin the explicit "0" kill switch —
+        # the assertion (pinned arm envs survive dotenv) is unchanged.
+        env["BRUTEX_CORE_RUST_DOTENV"] = "0"
         code = (
             "from brutex.config.dotenv import bootstrap_env\n"
             "import os\n"

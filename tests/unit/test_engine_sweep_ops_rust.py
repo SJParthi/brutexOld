@@ -123,13 +123,14 @@ class TestFlagLaw:
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, raw)
         assert sweep_ops_rust_enabled() is False
 
-    def test_unset_is_off(self) -> None:
-        assert sweep_ops_rust_enabled() is False
+    def test_unset_is_on(self) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset ⇒ the Rust path is ON.
+        assert sweep_ops_rust_enabled() is True
 
-    def test_blank_is_off_silently(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_blank_is_on_silently(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "   ")
         with capture_logs() as logs:
-            assert sweep_ops_rust_enabled() is False
+            assert sweep_ops_rust_enabled() is True
         assert logs == []
 
     def test_junk_is_off_with_one_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,6 +143,9 @@ class TestFlagLaw:
         assert warns[0]["reason"] == "flag_unrecognised"
 
     def test_off_never_imports_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): the never-imports pin
+        # rides the explicit "0" kill switch (unset is now default-ON).
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         calls = _install_import_bomb(monkeypatch)
         assert _call_run_path() == _run_path_oracle()
         assert routed_gate_fragment(None, False, (1, 2, 3), python_law=lambda: None) is None
@@ -3329,3 +3333,16 @@ class TestSliceSixDriftPins:
 
         source = inspect.getsource(sweep_orchestrator.count_sweep_tuples)
         assert source.count("len(grid.") == 9
+
+
+class TestConftestBelt:
+    """DEC-RUST-DEFAULT-ON-WAVE-001: the suite-wide hermeticity belt in
+    ``tests/conftest.py`` pins ``BRUTEX_SWEEP_OPS_RUST`` to the explicit "0"
+    kill switch via a PINNED LITERAL (the wheel-free discipline — the facade
+    import pulls the wheels). Drift-pin the literal equal to the real env-name
+    constant so a rename can never silently un-belt the sweep-family engine
+    coverage gate.
+    """
+
+    def test_conftest_literal_equals_the_env_constant(self) -> None:
+        assert SWEEP_OPS_RUST_ENV == "BRUTEX_SWEEP_OPS_RUST"

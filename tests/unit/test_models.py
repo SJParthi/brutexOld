@@ -307,7 +307,7 @@ class TestModelsRustSeamWiring:
     def _fresh_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from brutex import models_rust
 
-        monkeypatch.delenv(models_rust.MODELS_RUST_ENV, raising=False)
+        monkeypatch.setenv(models_rust.MODELS_RUST_ENV, "0")
         models_rust.reset_models_rust_for_tests()
 
     def test_flag_off_never_imports_or_calls_the_crate(

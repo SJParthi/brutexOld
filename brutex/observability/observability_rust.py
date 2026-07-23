@@ -1,8 +1,9 @@
-"""observability_rust — the default-OFF Rust routing facade for the observability DECISION laws.
+"""observability_rust — the default-ON Rust routing facade for the observability DECISION laws.
 
 DEC-RUST-OBSERVABILITY-001 (MIGRATION.md row coordinator-assigned;
-ADR-0020 lane). Routes the four PURE observability decision laws through the
-``rust/brutex-observability`` crate behind the ONE default-OFF
+ADR-0020 lane); default flipped ON by DEC-RUST-DEFAULT-ON-WAVE-001
+(operator directive 2026-07-23). Routes the four PURE observability decision laws through the
+``rust/brutex-observability`` crate behind the ONE default-ON
 ``BRUTEX_OBSERVABILITY_RUST`` flag, with the verbatim Python law retained as
 the LIVE parity oracle (the ``window_ledger_rust`` template; decide-in-Rust,
 materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
@@ -22,12 +23,13 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
 
 ## The fail-closed layers (in order)
 
-* **Flag** — ``BRUTEX_OBSERVABILITY_RUST`` default OFF; truthy → ON, falsy →
-  OFF, any other non-empty value → OFF with ONE loud
+* **Flag** — ``BRUTEX_OBSERVABILITY_RUST`` default ON
+  (DEC-RUST-DEFAULT-ON-WAVE-001); unset/blank/truthy → ON, falsy → OFF (the
+  kill switch), any other non-empty value → OFF with ONE loud
   ``observability_rust.fallback`` WARN (``flag_unrecognised``). Read PER CALL
   (one ``os.environ`` probe) so spawn workers resolve their own inherited
-  environment. OFF returns the oracle's result DIRECTLY — the crate is never
-  imported, so the default path is byte-identical to pre-facade behaviour
+  environment. Explicit-OFF returns the oracle's result DIRECTLY — the crate is never
+  imported, so the kill-switch path is byte-identical to pre-facade behaviour
   (bomb-crate-spy-pinned), including law A's OK→OK state OBJECT identity.
 * **Import guard / SYMBOL handshake** — an absent wheel latches
   ``crate_unavailable``; a wheel that imports but lacks ANY
@@ -152,7 +154,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; junk fails loud-OFF) — ONE flag for the
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit falsy
+#: = the kill switch; junk fails loud-OFF) — ONE flag for the
 #: whole lane (module docstring).
 OBSERVABILITY_RUST_ENV: Final[str] = "BRUTEX_OBSERVABILITY_RUST"
 
@@ -486,12 +489,14 @@ def _env_flag_tristate(raw: str) -> bool | None:
 
 
 def observability_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_OBSERVABILITY_RUST`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_OBSERVABILITY_RUST`` (default ON, junk loud-OFF).
 
-    Truthy literal → ``True``; falsy literal → ``False``; unset/blank →
-    ``False`` (the default); any OTHER non-empty value → ``False`` with one
-    ``observability_rust.fallback`` WARN (``flag_unrecognised``) per
-    process. Read per call so spawn workers resolve their own environment.
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): truthy
+    literal → ``True``; falsy literal → ``False`` (the kill switch);
+    unset/blank → ``True`` (the default); any OTHER non-empty value →
+    ``False`` with one ``observability_rust.fallback`` WARN
+    (``flag_unrecognised``) per process — the junk arm is unchanged. Read
+    per call so spawn workers resolve their own environment.
     """
     raw = os.environ.get(OBSERVABILITY_RUST_ENV, "")
     verdict = _env_flag_tristate(raw)
@@ -499,7 +504,8 @@ def observability_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_observability_disabled() -> bool:

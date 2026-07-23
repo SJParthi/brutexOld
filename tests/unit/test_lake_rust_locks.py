@@ -89,11 +89,14 @@ def _install_panic_home(monkeypatch: pytest.MonkeyPatch) -> type[BaseException]:
 
 
 class TestFlagMatrix:
-    """``BRUTEX_LAKE_RUST_LOCKS`` — default OFF, truthy ON, junk LOUD-OFF."""
+    """``BRUTEX_LAKE_RUST_LOCKS`` — default ON (DEC-RUST-DEFAULT-ON-WAVE-001),
+    falsy = the kill switch, junk LOUD-OFF."""
 
-    def test_unset_is_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unset_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Default ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+        # 2026-07-23).
         monkeypatch.delenv(lrl.LAKE_RUST_LOCKS_ENV, raising=False)
-        assert lrl.lake_rust_locks_enabled() is False
+        assert lrl.lake_rust_locks_enabled() is True
 
     @pytest.mark.parametrize("raw", ["1", "true", "YES", " on "])
     def test_truthy_is_on(self, monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
@@ -107,10 +110,12 @@ class TestFlagMatrix:
             assert lrl.lake_rust_locks_enabled() is False
         assert logs == []
 
-    def test_blank_is_silently_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_blank_is_silently_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Whitespace-blank ≡ unset ⇒ the default ON, silently
+        # (DEC-RUST-DEFAULT-ON-WAVE-001).
         _enable(monkeypatch, "   ")
         with capture_logs() as logs:
-            assert lrl.lake_rust_locks_enabled() is False
+            assert lrl.lake_rust_locks_enabled() is True
         assert logs == []
 
     def test_junk_is_loud_off_and_warns_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,7 +194,9 @@ class TestRustFlockAttempt:
     """The routed one-shot attempt: identity OFF, per-call degrade ON."""
 
     def test_off_returns_python_attempt_identity(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(lrl.LAKE_RUST_LOCKS_ENV, raising=False)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
 
         def oracle(_fd: int) -> bool:
             return True
@@ -331,7 +338,9 @@ class TestRustFlockRelease:
     """The routed release: python_close OFF, crate ON, best-effort fallback."""
 
     def test_off_calls_python_close(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(lrl.LAKE_RUST_LOCKS_ENV, raising=False)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
         closed: list[int] = []
         lrl.rust_flock_release(11, python_close=closed.append)
         assert closed == [11]
@@ -403,7 +412,9 @@ class TestRustAtomicCommit:
     """The routed commit: oracle OFF, crate ON, fault → oracle over the SAME tmp."""
 
     def test_off_runs_python_commit(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.delenv(lrl.LAKE_RUST_LOCKS_ENV, raising=False)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
         calls: list[tuple[Path, Path, int | None]] = []
         lrl.rust_atomic_commit(
             tmp_path / "t",
@@ -525,8 +536,10 @@ class TestAtomicIoRoutingSeam:
     def test_off_arm_bomb_crate_never_touched(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Flag OFF (default): the crate is never resolved, bytes land via Python."""
-        monkeypatch.delenv(lrl.LAKE_RUST_LOCKS_ENV, raising=False)
+        """Flag OFF (the "0" kill switch): the crate is never resolved, bytes land via Python."""
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
         monkeypatch.setattr(
             lrl,
             "_resolve_crate",
@@ -671,7 +684,9 @@ class TestPartitionLockRoutingSeam:
     def test_off_arm_bomb_crate_never_touched(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.delenv(lrl.LAKE_RUST_LOCKS_ENV, raising=False)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
         monkeypatch.setattr(
             lrl,
             "_resolve_crate",

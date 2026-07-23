@@ -1,7 +1,9 @@
 """Flag-gated Rust DAILY-resample seam — the ADR-0020 Wave-B tail facade.
 
-DEC-LAKE-RUST-RESAMPLE-DAILY-001 (MIGRATION.md #1946). When — and ONLY
-when — ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY`` is set truthy, the two daily
+DEC-LAKE-RUST-RESAMPLE-DAILY-001 (MIGRATION.md #1946); flipped default ON
+by DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215). When
+``BRUTEX_LAKE_RUST_RESAMPLE_DAILY`` is unset/blank/truthy (the explicit
+``0`` value is the OFF kill switch), the two daily
 derives — :func:`brutex.data.spot_daily_resample.resample_1m_to_daily`
 (spot, OI ``None``) and
 :func:`brutex.data.fno_daily_resample.resample_1m_to_fno_daily` (F&O,
@@ -21,10 +23,11 @@ comparator, the IPC handoff) is IMPORTED from the G5 module's public
 aliases, never copied (CLAUDE.md §11 COMMON; the
 ``lake_rust_render.degrade_errors`` precedent).
 
-## The flag — ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY`` (DEFAULT OFF)
+## The flag — ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY`` (DEFAULT ON)
 
 The exact G5 vocabulary via the SHARED :func:`env_flag_tristate`: truthy →
-ON; falsy → OFF; unset/whitespace → OFF; any OTHER value → OFF with one
+ON; falsy ``0`` → OFF kill switch; unset/whitespace → ON (default); any
+OTHER value → OFF with one
 loud ``lake_rust_resample_daily.fallback`` WARN (``flag_unrecognised``) per
 process. Independent of ``BRUTEX_LAKE_RUST_RESAMPLE`` — the daily law is a
 DIFFERENT output surface (the lake's ``1day`` partition, the PDH/PDL
@@ -92,10 +95,10 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.data.lake_rust_resample_daily")
 
-#: The env flag. DEFAULT OFF — the Python daily derive stays the production
-#: path until the parity gates license an operator-directed default flip
-#: behind a future DEC (honesty banner: expected payoff ≈ 0 — uniformity,
-#: not speed).
+#: The env flag. DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator
+#: directive 2026-07-23) — the explicit ``0`` value is the OFF kill switch
+#: that restores the verbatim Python daily derive (honesty banner: expected
+#: payoff ≈ 0 — uniformity, not speed).
 LAKE_RUST_RESAMPLE_DAILY_ENV: Final[str] = "BRUTEX_LAKE_RUST_RESAMPLE_DAILY"
 
 #: The Unix epoch date — ``before`` crosses the FFI as ``(before - _EPOCH).days``.
@@ -137,13 +140,16 @@ _ENGAGED_KEY: Final[str] = "__engaged__"
 
 
 def lake_rust_resample_daily_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY`` (default OFF, junk fails loud-OFF).
+    """Resolve ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY`` (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23; junk fails
+    loud-OFF).
 
     The exact G5 policy via the SHARED tristate: truthy → ``True``; falsy →
-    ``False``; unset/whitespace-empty → ``False``; any OTHER non-empty
-    value → ``False`` with one loud ``lake_rust_resample_daily.fallback``
-    WARN (``flag_unrecognised``) per process. Read per call so parallel
-    workers resolve their own inherited environment.
+    ``False``; unset/whitespace-empty → ``True`` (the default); any OTHER
+    non-empty value → ``False`` with one loud
+    ``lake_rust_resample_daily.fallback`` WARN (``flag_unrecognised``) per
+    process. Read per call so parallel workers resolve their own inherited
+    environment.
     """
     raw = os.environ.get(LAKE_RUST_RESAMPLE_DAILY_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -151,7 +157,8 @@ def lake_rust_resample_daily_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_resample_daily_disabled() -> bool:

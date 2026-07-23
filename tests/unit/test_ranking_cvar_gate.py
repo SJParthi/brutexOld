@@ -199,12 +199,13 @@ class TestCvarRejects:
 
 
 class TestFlagResolution:
-    def test_unset_is_default_off(self) -> None:
-        assert cvar_rust_enabled() is CVAR_RUST_DEFAULT is False
+    def test_unset_is_default_on(self) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset ⇒ the kernel is ON.
+        assert cvar_rust_enabled() is CVAR_RUST_DEFAULT is True
 
-    def test_whitespace_empty_is_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_whitespace_empty_is_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(CVAR_RUST_ENV, "   ")
-        assert cvar_rust_enabled() is False
+        assert cvar_rust_enabled() is CVAR_RUST_DEFAULT
 
     def test_truthy_arms(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(CVAR_RUST_ENV, "1")
@@ -245,10 +246,13 @@ class TestKernelDegrades:
         return _cvar_tail_fold_python(self._PNLS, 500)
 
     def test_flag_off_never_touches_the_kernel(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Bomb-kernel pin: with the flag unset the wheel is NEVER consulted.
+        # Bomb-kernel pin RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): with the
+        # explicit "0" kill switch the wheel is NEVER consulted (unset is
+        # now default-ON).
         def _bomb(*_a: object, **_k: object) -> NoReturn:
             raise AssertionError("kernel touched on the OFF arm")
 
+        monkeypatch.setenv(CVAR_RUST_ENV, "0")
         monkeypatch.setitem(sys.modules, "fno_math", _fake_wheel(_bomb))
         assert cvar_tail_fold(self._PNLS, 500) == self._oracle()
 

@@ -69,6 +69,8 @@ class TestFlagOffInertness:
     def test_off_never_imports_crate_and_matches_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # OFF via the explicit "0" kill switch (default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
+        monkeypatch.setenv(dr.LAKE_RUST_INTERIOR_GAP_ENV, "0")
         _bomb_import(monkeypatch, "flag-OFF interior-gap classify")
         verdict = classify_interior_gap(bar_timestamps=[_ts(2021, 3, 1), _ts(2021, 3, 22)])
         assert verdict.verdict == INTERIOR_GAP  # the catching shape still catches
@@ -91,7 +93,7 @@ class TestFlagOnFakeCrate:
         _flag_on(monkeypatch)
         _install_crate(monkeypatch, fake_detectors_crate())
         routed = classify_interior_gap(**kwargs)  # type: ignore[arg-type]
-        monkeypatch.delenv(dr.LAKE_RUST_INTERIOR_GAP_ENV)
+        monkeypatch.setenv(dr.LAKE_RUST_INTERIOR_GAP_ENV, "0")  # kill switch → Python oracle
         assert routed == classify_interior_gap(**kwargs)  # type: ignore[arg-type]
 
     def test_large_interior_gap_still_flagged(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,7 +182,7 @@ class TestFlagOnFakeCrate:
         _install_crate(monkeypatch, fake_detectors_crate())
         covered = (date(2021, 3, 1), date(2021, 3, 22))
         routed = interior_gap_runs(covered_dates=covered)
-        monkeypatch.delenv(dr.LAKE_RUST_INTERIOR_GAP_ENV)
+        monkeypatch.setenv(dr.LAKE_RUST_INTERIOR_GAP_ENV, "0")  # kill switch → Python oracle
         assert routed == interior_gap_runs(covered_dates=covered)
         assert routed is not None
         assert len(routed) == 1  # the ONE confirmed >tolerance run
@@ -194,7 +196,7 @@ class TestFlagOnFakeCrate:
         _install_crate(monkeypatch, fake_detectors_crate())
         covered = (date(2021, 3, 1), date(2021, 3, 15), date(2021, 3, 16))
         routed = classify_interior_gap_dates(covered_dates=covered)
-        monkeypatch.delenv(dr.LAKE_RUST_INTERIOR_GAP_ENV)
+        monkeypatch.setenv(dr.LAKE_RUST_INTERIOR_GAP_ENV, "0")  # kill switch → Python oracle
         assert routed == classify_interior_gap_dates(covered_dates=covered)
         assert routed.verdict == INTERIOR_GAP
 

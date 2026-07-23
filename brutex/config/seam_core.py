@@ -138,12 +138,14 @@ class ConfigRustSeam:
         crate_api: tuple[str, ...],
         laws: tuple[str, ...],
         redact_values: bool = False,
+        default_on: bool = False,
     ) -> None:
         self.seam = seam
         self.env_var = env_var
         self.crate_api = crate_api
         self.laws = laws
         self.redact_values = redact_values
+        self.default_on = default_on
         self._disabled_reason: str | None = None
         self._burn_in: dict[str, int] = dict.fromkeys(laws, BURN_IN_SAMPLES)
         self._memo: set[str] = set()
@@ -151,24 +153,30 @@ class ConfigRustSeam:
     # ── Flag + latch + reset ────────────────────────────────────────────
 
     def enabled(self) -> bool:
-        """Resolve the seam's env flag (default OFF, junk loud-OFF).
+        """Resolve the seam's env flag (per-seam default, junk loud-OFF).
 
-        Truthy → ``True``; falsy → ``False`` (silent explicit OFF);
-        unset → ``False`` off the raw probe alone (the r1 ABSENT fast
-        path — the production default); any OTHER non-empty value →
-        ``False`` with one ``flag_unrecognised`` WARN per process. Read
-        per call so spawn workers resolve their own inherited environment
-        (the PR-1 posture; caching would break that contract).
+        Truthy → ``True``; falsy → ``False`` (silent explicit OFF — the
+        kill switch); unset → the seam's ``default_on`` off the raw probe
+        alone (the r1 ABSENT fast path); blank → ``default_on``; any OTHER
+        non-empty value → ``False`` with one ``flag_unrecognised`` WARN
+        per process (the junk arm never picks the Rust path). Read per
+        call so spawn workers resolve their own inherited environment
+        (the PR-1 posture; caching would break that contract). The three
+        config seams construct with ``default_on=True`` per
+        DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23).
         """
         raw = os.environ.get(self.env_var)
         if raw is None:
-            return False
+            return self.default_on
         stripped = raw.strip().lower()
         if stripped in _TRUTHY:
             return True
-        if stripped and stripped not in _FALSY:
+        if stripped in _FALSY:
+            return False
+        if stripped:
             self._warn_once("flag_unrecognised", value=repr(stripped))
-        return False
+            return False
+        return self.default_on
 
     def disabled(self) -> bool:
         """``True`` iff a guard/autorevert latched the Rust path OFF."""

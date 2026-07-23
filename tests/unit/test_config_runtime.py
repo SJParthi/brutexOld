@@ -280,6 +280,11 @@ class TestOSErrorPaths:
         def fail_replace(_src: str, _dst: str) -> None:
             raise OSError("simulated atomic-rename failure")
 
+        # Python-arm commit seam (os.replace fault injection/spy): pin via the
+        # "0" kill switch — BRUTEX_LAKE_RUST_LOCKS defaults ON
+        # (DEC-RUST-DEFAULT-ON-WAVE-001); crate-arm twins live in
+        # tests/unit/test_lake_rust_locks.py.
+        monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
         monkeypatch.setattr("brutex.data.atomic_io.os.replace", fail_replace)
         with pytest.raises(RuntimeFileError, match="Failed to write"):
             write_runtime_file(sample_info)

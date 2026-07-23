@@ -100,9 +100,10 @@ class TestFlag:
     def test_neither(self, raw: str) -> None:
         assert env_flag_tristate(raw) is None
 
-    def test_enabled_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_enabled_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The DEC-RUST-DEFAULT-ON-WAVE-001 default pin: unset ⇒ ON.
         monkeypatch.delenv(BACKUP_RUST_ENV, raising=False)
-        assert backup_rust_enabled() is False
+        assert backup_rust_enabled() is True
 
     def test_enabled_truthy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _on(monkeypatch)
@@ -123,10 +124,10 @@ class TestFlag:
         assert len(events) == 1
         assert events[0]["reason"] == "flag_unrecognised"
 
-    def test_enabled_whitespace_empty_is_silent_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_enabled_whitespace_empty_is_silent_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(BACKUP_RUST_ENV, "   ")
         with structlog.testing.capture_logs() as logs:
-            assert backup_rust_enabled() is False
+            assert backup_rust_enabled() is True
         assert logs == []
 
     def test_vocabulary_matches_the_engine_twin(self) -> None:
@@ -143,7 +144,9 @@ class TestOffArm:
     def test_off_serves_oracle_and_never_imports_the_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(BACKUP_RUST_ENV, raising=False)
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(BACKUP_RUST_ENV, "0")
         _install(monkeypatch, None)  # a poisoned entry: ANY import raises ImportError
         assert route_law("law", oracle=lambda: "python", compute=_value_compute("rust")) == "python"
         # The spy: an attempted import would have latched crate_unavailable.
@@ -151,7 +154,7 @@ class TestOffArm:
         assert backup_rust_disabled() is False
 
     def test_off_propagates_the_oracle_backup_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(BACKUP_RUST_ENV, raising=False)
+        monkeypatch.setenv(BACKUP_RUST_ENV, "0")
 
         def _oracle() -> str:
             raise BackupError("decided refusal")

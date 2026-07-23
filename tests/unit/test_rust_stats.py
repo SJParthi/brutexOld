@@ -112,17 +112,17 @@ def test_flag_falsy_values_disable(monkeypatch: pytest.MonkeyPatch, value: str) 
     assert stats_rust_enabled() is False
 
 
-def test_flag_unset_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """DEFAULT-OFF: the flip to ON-by-default is a SEPARATE later ADR (the
-    ADR-0017 precedent); until then an unset flag keeps every caller on the
-    verbatim pure-Python path."""
+def test_flag_unset_is_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEFAULT-ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+    2026-07-23): an unset flag arms the Rust statistics kernels;
+    ``BRUTEX_STATS_RUST=0`` stays the explicit kill switch."""
     monkeypatch.delenv(STATS_RUST_ENV, raising=False)
     with capture_logs() as logs:
-        assert stats_rust_enabled() is False
-    # SILENTLY off: the unset default emits NO fallback event (kills the
+        assert stats_rust_enabled() is True
+    # SILENTLY on: the unset default emits NO fallback event (kills the
     # env-default mutant that fabricates a non-empty raw value).
     assert logs == []
-    assert STATS_RUST_DEFAULT is False
+    assert STATS_RUST_DEFAULT is True
 
 
 @pytest.mark.parametrize("value", ["", "   "])
@@ -183,10 +183,10 @@ def test_flag_engine_unavailable_degrades_to_default(monkeypatch: pytest.MonkeyP
 
 
 def test_flag_env_name_and_default_pinned() -> None:
-    """Literal pins (mutation teeth): the env var name and the default-OFF
-    constant are operator-facing contracts."""
+    """Literal pins (mutation teeth): the env var name and the default-ON
+    constant (DEC-RUST-DEFAULT-ON-WAVE-001) are operator-facing contracts."""
     assert STATS_RUST_ENV == "BRUTEX_STATS_RUST"
-    assert STATS_RUST_DEFAULT is False
+    assert STATS_RUST_DEFAULT is True
 
 
 def test_self_check_budgets_pinned() -> None:

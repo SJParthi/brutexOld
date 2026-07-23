@@ -109,6 +109,9 @@ class TestFlagOffBombSpy:
     def test_off_arm_matches_oracles_and_never_touches_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(nightly_rust.NIGHTLY_RUST_ENV, "0")
         bomb = _BombModule("brutex_ops")
         monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         assert parse_at("01:30") == _parse_at_python("01:30") == (1, 30)
@@ -124,6 +127,9 @@ class TestFlagOffBombSpy:
     def test_off_arm_junk_parse_raises_the_exact_message(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(nightly_rust.NIGHTLY_RUST_ENV, "0")
         bomb = _BombModule("brutex_ops")
         monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         with pytest.raises(ValueError, match=r"--at must be HH:MM \(24h\), got 'noon'"):

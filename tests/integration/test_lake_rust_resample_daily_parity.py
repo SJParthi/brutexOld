@@ -176,7 +176,7 @@ class TestDailyParity:
     @pytest.mark.parametrize("case", sorted(_daily_corpus()))
     def test_spot_daily_on_equals_off(self, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
         df, before = _daily_corpus()[case]
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
         expected = spot_daily_resample.resample_1m_to_daily(df, before=before)
 
         monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "1")
@@ -192,7 +192,7 @@ class TestDailyParity:
     ) -> None:
         base, before = _daily_corpus()[case]
         df = _with_oi(base)
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
         expected = fno_daily_resample.resample_1m_to_fno_daily(df, before=before)
 
         monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "1")
@@ -208,7 +208,7 @@ class TestDailyParity:
         instants = _minutes(_OPEN_UTC, 3)
         df = _frame(instants, oi=[1_000, 1_001, None])  # the LAST bar's OI is null
         before = date(2024, 1, 3)
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
         expected = fno_daily_resample.resample_1m_to_fno_daily(df, before=before)
         assert expected[0].open_interest is None, "the honest-edge law (fixture sanity)"
 
@@ -249,7 +249,7 @@ class TestSessionCutoffParity:
         # Cutoffs: before every close · the first bucket's exact close ·
         # mid-session · aligned + misaligned · whole-day.
         cutoffs = [0, 555 + tf, 555 + tf + 1, 600, 601, 929]
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
         expected = {
             cutoff: fno_resample.resample_session_to_tf(lake_df, tf, cutoff_min=cutoff)
             for cutoff in cutoffs
@@ -273,7 +273,7 @@ class TestSessionCutoffParity:
 class TestBatchFaceParity:
     def test_resample_all_21_tfs_on_equals_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         df = _with_oi(_frame(_minutes(_OPEN_UTC, 375)))
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
         expected = tf_resampler.resample_all_21_tfs(df)
 
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
@@ -418,8 +418,8 @@ class TestWholePrebuildByteParityDailyArm:
         lake_off = tmp_path / "lake-off"
         lake_daily_on = tmp_path / "lake-daily-on"
 
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
         _seed_lake(lake_off)
         _materialize(lake_off)
         off_hashes = _derived_hashes(lake_off)
@@ -448,8 +448,8 @@ class TestWholePrebuildByteParityDailyArm:
         lake_off = tmp_path / "lake-off"
         lake_both_on = tmp_path / "lake-both-on"
 
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
         _seed_lake(lake_off)
         _materialize(lake_off)
         off_hashes = _derived_hashes(lake_off)
@@ -571,7 +571,7 @@ class TestNaiveFrameLocalTzLaw:
         before = date(2024, 1, 4)
         with _forced_local_tz(tz):
             _require_local_utc_offset(offsets)
-            monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+            monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
             off_bars = fno_daily_resample.resample_1m_to_fno_daily(df, before=before)
             oracle_bars = _bars_from_stamped_frame(
                 fno_daily_resample._fno_daily_frame_python(df, before)
@@ -599,7 +599,9 @@ class TestNaiveFrameLocalTzLaw:
         df = _naive(_with_oi(_frame(_minutes(_OPEN_UTC, 40))))
         with _forced_local_tz("Australia/Brisbane"):
             _require_local_utc_offset({timedelta(hours=10)})
-            monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+            # The per-row OFF body via the explicit "0" kill switch (the
+            # default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
+            monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
             # Shape 1 (stamp shift): both arms keep the session, stamped a
             # day apart — per-row midnight-IST Jan 1 vs vectorized Jan 2.
             off_kept = fno_daily_resample.resample_1m_to_fno_daily(df, before=date(2024, 1, 3))

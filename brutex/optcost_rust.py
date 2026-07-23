@@ -37,11 +37,13 @@ CODEQL FIX ROUND, code-scanning alerts 1308 + 1309: the interim
 module-level cyclic-import finding — the ``fno_symbol_rust`` precedent).
 Call sites import this facade, never the reverse.
 
-## The flag — ``BRUTEX_OPTCOST_TAILS_RUST`` (DEFAULT OFF)
+## The flag — ``BRUTEX_OPTCOST_TAILS_RUST`` (DEFAULT ON per
+## DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23)
 
-Resolved per call (Pattern A opt-in, the ``lake_rust_render`` posture): a
+Resolved per call (the ``lake_rust_render`` posture): a
 truthy literal (``1/true/yes/on``) → ON; a falsy literal
-(``0/false/no/off``) → OFF; unset / whitespace-empty → OFF (the default);
+(``0/false/no/off``) → OFF — the explicit kill switch; unset /
+whitespace-empty → ON (the default);
 any OTHER value → OFF with one loud ``optcost_rust.fallback`` WARN (reason
 ``flag_unrecognised``) per process. The truthy/falsy vocabulary is a LOCAL
 twin of :func:`brutex.engine.sweep_lookahead.env_flag_tristate` —
@@ -176,8 +178,9 @@ class RegimeRowLike(Protocol):
 
 _LOG = structlog.get_logger("brutex.optcost_rust")
 
-#: The env flag. DEFAULT OFF — the Python oracle stays the production path;
-#: a default flip needs its own DEC (the lake_rust_render posture).
+#: The env flag. DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator
+#: directive 2026-07-23); a falsy literal is the explicit kill switch back
+#: to the live Python oracle.
 OPTCOST_TAILS_RUST_ENV: Final[str] = "BRUTEX_OPTCOST_TAILS_RUST"
 
 #: Engaged calls byte-compared against the live Python oracle per process
@@ -326,12 +329,15 @@ def env_flag_tristate(raw: str) -> bool | None:
 
 
 def optcost_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_OPTCOST_TAILS_RUST`` (default OFF, junk fails loud-OFF).
+    """Resolve ``BRUTEX_OPTCOST_TAILS_RUST`` (default ON, junk fails loud-OFF).
 
-    Read per call (one ``os.environ`` probe) so workers resolve their own
-    inherited environment — no global flag state. A non-empty unrecognised
-    value logs ONE ``optcost_rust.fallback`` WARN (``flag_unrecognised``)
-    per process — a typo'd opt-in is never silently ignored.
+    Unset/blank → ``True`` (ON by default per DEC-RUST-DEFAULT-ON-WAVE-001,
+    operator directive 2026-07-23); a falsy literal stays the explicit kill
+    switch. Read per call (one ``os.environ`` probe) so workers resolve
+    their own inherited environment — no global flag state. A non-empty
+    unrecognised value logs ONE ``optcost_rust.fallback`` WARN
+    (``flag_unrecognised``) per process and fails SAFE to OFF — a typo'd
+    value is never silently ignored.
     """
     raw = os.environ.get(OPTCOST_TAILS_RUST_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -339,7 +345,8 @@ def optcost_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def optcost_rust_disabled() -> bool:

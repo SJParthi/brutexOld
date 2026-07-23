@@ -122,10 +122,11 @@ def test_flag_falsy_values_disable(monkeypatch: pytest.MonkeyPatch, raw: str) ->
     assert stage1a_rust_enabled() is False
 
 
-def test_flag_unset_falls_to_the_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_flag_unset_falls_to_the_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DEC-RUST-DEFAULT-ON-WAVE-001: the kernel is ON by default.
     monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
-    assert STAGE1A_RUST_DEFAULT is False  # the inert-ship constant
-    assert stage1a_rust_enabled() is False
+    assert STAGE1A_RUST_DEFAULT is True  # the default-ON constant
+    assert stage1a_rust_enabled() is True
 
 
 def test_flag_whitespace_empty_falls_to_the_default_without_warning(
@@ -133,7 +134,7 @@ def test_flag_whitespace_empty_falls_to_the_default_without_warning(
 ) -> None:
     monkeypatch.setenv(STAGE1A_RUST_ENV, "   ")
     with capture_logs() as logs:
-        assert stage1a_rust_enabled() is False
+        assert stage1a_rust_enabled() is STAGE1A_RUST_DEFAULT
     assert not [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
 
 
@@ -401,7 +402,9 @@ def test_post_burn_in_success_never_runs_the_oracle() -> None:
 
 
 def test_flag_off_never_touches_the_rust_arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    # RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): the never-touches-Rust pin
+    # now rides the explicit "0" kill-switch arm (unset is default-ON).
+    monkeypatch.setenv(STAGE1A_RUST_ENV, "0")
     monkeypatch.setattr(
         rust_stage1a,
         "rust_bar_bits_or_none",
@@ -442,7 +445,9 @@ def _arm_error(
     monkeypatch: pytest.MonkeyPatch, bars: list[CandleBar], *, flag: str | None, **kwargs: Any
 ) -> BaseException:
     if flag is None:
-        monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+        monkeypatch.setenv(
+            STAGE1A_RUST_ENV, "0"
+        )  # OFF arm = the Python oracle (default flipped ON)
     else:
         monkeypatch.setenv(STAGE1A_RUST_ENV, flag)
     with pytest.raises((ValueError, OverflowError)) as excinfo:
@@ -625,7 +630,7 @@ def test_muhurat_warn_double_emission_during_burn_in_is_bounded(
         on = build_bar_bits(bars, roll_schedule=schedule)
     warns = [e for e in logs if e.get("event") == "stage1a.muhurat_prev_day_anchor_skip"]
     assert len(warns) == 2  # prepass + burn-in oracle
-    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    monkeypatch.setenv(STAGE1A_RUST_ENV, "0")  # kill switch → Python oracle recompute
     assert on == build_bar_bits(bars, roll_schedule=schedule)
 
 

@@ -1321,7 +1321,7 @@ def seed_enclosed_windows(
     # seed, one error WARNING each — a bad density signal must never mint SUCCESS).
     runs_by_span: dict[
         tuple[str, str, str, str],
-        tuple[tuple[date, date], ...] | None | Exception,
+        tuple[tuple[date, date], ...] | Exception | None,
     ] = {}
     for window_key, span_key in candidates:
         entry = span_index.get(span_key)

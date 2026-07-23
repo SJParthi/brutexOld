@@ -3018,7 +3018,9 @@ class TestRenderShardRustSeamRouting:
     def test_flag_off_is_byte_identical_and_never_touches_the_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Bomb-crate spy: the default OFF arm must never import/touch brutex_lake.
+        """Bomb-crate spy: the kill-switch OFF arm must never import/touch
+        brutex_lake (addressed via the explicit "0" since the default
+        flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
 
         The spy raises the special-method-standard ``AttributeError`` (the
         CodeQL ``__getattr__`` contract) — but a bare AttributeError alone
@@ -3034,6 +3036,9 @@ class TestRenderShardRustSeamRouting:
         """
         import sys
 
+        from brutex.data import lake_rust_stats
+
+        monkeypatch.setenv(lake_rust_stats.LAKE_RUST_STATS_ENV, "0")
         touched: list[str] = []
 
         class _Bomb:

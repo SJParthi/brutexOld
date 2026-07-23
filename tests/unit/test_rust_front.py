@@ -1,13 +1,16 @@
-"""``brutex/dashboard/rust_front.py`` — the default-OFF Rust-front seam.
+"""``brutex/dashboard/rust_front.py`` — the default-AUTO-ON Rust-front seam.
 
 Covers the module 100% line+branch standalone (the self-contained gate the
-PR ships). The thin ``cmd_dashboard`` wiring tests (flag-off identity pin ·
+PR ships). The thin ``cmd_dashboard`` wiring tests (AUTO-default pins ·
 junk-flag ``CliUserError`` · flag-on delegation · launcher-refusal mapping)
 live in ``tests/unit/test_cli_dashboard_rust_front.py`` — the ``test_cli*``
 stem the coverage-gate discovery maps to ``brutex/cli.py``:
 
-* flag law: absent/empty/off → OFF; ``on`` → ON; junk → loud refusal
-  (``RustFrontError``);
+* flag law (DEC-RUST-DEFAULT-ON-WAVE-001): absent → AUTO (probe-then-decide,
+  never fatal); empty/``off`` → OFF; ``on`` → strict ON; junk → loud
+  refusal (``RustFrontError``) — unchanged from the default-OFF era;
+* the AUTO probe (``probe_auto_front``): preconditions hold → ``True``;
+  any ``RustFrontError`` → ONE loud WARNING + ``False``, never a raise;
 * binary lookup ladder (env override → repo target dirs → PATH → refusal);
 * plan validation (loopback-only host law, static-dir presence);
 * the supervised child lifecycle (terminate → wait → kill escalation;
@@ -32,17 +35,40 @@ from brutex.dashboard.rust_front import (
     build_plan,
     default_static_dir,
     locate_brutexd,
+    probe_auto_front,
     resolve_rust_front,
+    resolve_rust_front_mode,
     run_with_rust_front,
 )
+from structlog.testing import capture_logs
 
-# ── resolve_rust_front — the fail-loud flag law ──────────────────────────────
+# ── resolve_rust_front_mode — the fail-loud tri-state flag law ───────────────
 
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        (None, False),
+        (None, "auto"),  # UNSET = AUTO (DEC-RUST-DEFAULT-ON-WAVE-001)
+        ("", "off"),  # set-but-blank is an EXPLICIT off, never AUTO
+        ("   ", "off"),
+        ("off", "off"),
+        ("OFF", "off"),
+        (" Off ", "off"),
+        ("on", "on"),
+        ("ON", "on"),
+        (" On ", "on"),
+    ],
+)
+def test_resolve_mode_states(raw: str | None, expected: str) -> None:
+    """Absent → AUTO; blank/off → OFF; on → ON (case/whitespace-insensitive)."""
+    env: dict[str, str] = {} if raw is None else {ENV_RUST_FRONT: raw}
+    assert resolve_rust_front_mode(env) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, False),  # unset = not EXPLICITLY on (AUTO lives in the mode fn)
         ("", False),
         ("   ", False),
         ("off", False),
@@ -54,24 +80,129 @@ from brutex.dashboard.rust_front import (
     ],
 )
 def test_resolve_flag_states(raw: str | None, expected: bool) -> None:
-    """Absent/blank/off → OFF; on → ON (case/whitespace-insensitive)."""
+    """The bool view reports EXPLICIT-on only (strict-arm compatibility)."""
     env: dict[str, str] = {} if raw is None else {ENV_RUST_FRONT: raw}
     assert resolve_rust_front(env) is expected
 
 
 @pytest.mark.parametrize("junk", ["1", "0", "true", "yes", "enabled", "o n"])
 def test_resolve_junk_refuses_loudly(junk: str) -> None:
-    """Any value outside {'', on, off} refuses — never a silent fallback."""
+    """Any value outside {'', on, off} refuses — never a silent fallback.
+
+    Junk semantics are UNCHANGED by the AUTO default (both views refuse).
+    """
     with pytest.raises(RustFrontError, match="must be 'on' or 'off'"):
         resolve_rust_front({ENV_RUST_FRONT: junk})
+    with pytest.raises(RustFrontError, match="must be 'on' or 'off'"):
+        resolve_rust_front_mode({ENV_RUST_FRONT: junk})
 
 
 def test_resolve_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """The default env source is os.environ (the production path)."""
     monkeypatch.setenv(ENV_RUST_FRONT, "on")
     assert resolve_rust_front() is True
+    assert resolve_rust_front_mode() == "on"
     monkeypatch.delenv(ENV_RUST_FRONT)
-    assert resolve_rust_front() is False
+    assert resolve_rust_front() is False  # not EXPLICITLY on …
+    assert resolve_rust_front_mode() == "auto"  # … but the default is AUTO
+
+
+# ── probe_auto_front — the AUTO arm (DEC-RUST-DEFAULT-ON-WAVE-001) ───────────
+
+
+def test_probe_auto_front_binary_present_is_on(tmp_path: Path) -> None:
+    """Preconditions hold (binary found via the ladder) → True, zero warns."""
+    binary = tmp_path / "brutexd"
+    binary.write_bytes(b"#!fake\n")
+    with capture_logs() as logs:
+        assert (
+            probe_auto_front(host="127.0.0.1", port=9080, env={ENV_BRUTEXD_BIN: str(binary)})
+            is True
+        )
+    assert [e for e in logs if e["event"] == "rust_front.auto_fallback_python"] == []
+
+
+def test_probe_auto_front_binary_absent_warns_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No brutexd anywhere → ONE loud WARNING naming the missing binary + the
+    cargo remediation, and False (the Python-only fallback) — NEVER a raise."""
+
+    def refusing_locate(env: Any = None, *, repo_root: Path | None = None) -> Path:
+        raise RustFrontError(
+            "brutexd binary not found — build it with "
+            "`cargo build --release --manifest-path rust/brutexd/Cargo.toml`"
+        )
+
+    monkeypatch.setattr(rust_front, "locate_brutexd", refusing_locate)
+    with capture_logs() as logs:
+        assert probe_auto_front(host="127.0.0.1", port=9080) is False
+    warns = [e for e in logs if e["event"] == "rust_front.auto_fallback_python"]
+    assert len(warns) == 1  # exactly ONE loud warning
+    assert warns[0]["log_level"] == "warning"
+    assert "binary not found" in warns[0]["reason"]
+    assert "cargo build --release" in warns[0]["remediation"]
+
+
+def test_probe_auto_front_non_loopback_host_falls_back(tmp_path: Path) -> None:
+    """A non-loopback --host under AUTO warns + falls back — never fatal
+    (the explicit-on path keeps its strict refusal, pinned below)."""
+    binary = tmp_path / "brutexd"
+    binary.write_bytes(b"#!fake\n")
+    with capture_logs() as logs:
+        assert (
+            probe_auto_front(host="0.0.0.0", port=9080, env={ENV_BRUTEXD_BIN: str(binary)}) is False
+        )
+    warns = [e for e in logs if e["event"] == "rust_front.auto_fallback_python"]
+    assert len(warns) == 1
+    assert "127.0.0.1-only" in warns[0]["reason"]
+
+
+def test_probe_auto_front_missing_static_dir_falls_back(tmp_path: Path) -> None:
+    """A missing static dir under AUTO warns + falls back — never fatal."""
+    binary = tmp_path / "brutexd"
+    binary.write_bytes(b"#!fake\n")
+    with capture_logs() as logs:
+        assert (
+            probe_auto_front(
+                host="127.0.0.1",
+                port=9080,
+                env={ENV_BRUTEXD_BIN: str(binary)},
+                static_dir=tmp_path / "no-such-dir",
+            )
+            is False
+        )
+    warns = [e for e in logs if e["event"] == "rust_front.auto_fallback_python"]
+    assert len(warns) == 1
+    assert "not a directory" in warns[0]["reason"]
+
+
+def test_probe_auto_front_never_allocates_a_real_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe passes the upstream_port=0 sentinel — no throwaway socket."""
+    binary = tmp_path / "brutexd"
+    binary.write_bytes(b"#!fake\n")
+
+    def bomb() -> int:  # pragma: no cover — must never run
+        raise AssertionError("probe must not allocate a port")
+
+    monkeypatch.setattr(rust_front, "allocate_upstream_port", bomb)
+    assert probe_auto_front(host="127.0.0.1", port=9080, env={ENV_BRUTEXD_BIN: str(binary)}) is True
+
+
+def test_probe_auto_front_propagates_a_genuine_code_bug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only RustFrontError degrades — a non-domain bug still propagates
+    (no blanket except; Golden Rule #1)."""
+
+    def buggy_locate(env: Any = None, *, repo_root: Path | None = None) -> Path:
+        raise ValueError("genuine code bug")
+
+    monkeypatch.setattr(rust_front, "locate_brutexd", buggy_locate)
+    with pytest.raises(ValueError, match="genuine code bug"):
+        probe_auto_front(host="127.0.0.1", port=9080)
 
 
 # ── default_static_dir ───────────────────────────────────────────────────────
@@ -501,3 +632,14 @@ def test_shutdown_survives_an_unkillable_child() -> None:
     proc = _FakeProc(wait_timeouts=2)
     rust_front._shutdown(proc)  # pyright: ignore[reportPrivateUsage] — must not raise
     assert proc.calls == ["poll", "terminate", "wait", "kill", "wait"]
+
+
+def test_conftest_belt_pins_the_real_env_name() -> None:
+    """DRIFT PIN: the tests/conftest.py hermeticity belt (`BRUTEX_RUST_FRONT`
+    pinned "off" suite-wide under the AUTO default —
+    DEC-RUST-DEFAULT-ON-WAVE-001) must name EXACTLY `ENV_RUST_FRONT`; a
+    renamed flag without a belt update would silently re-expose every
+    flag-unset `cmd_dashboard` test to the host's brutexd binary."""
+    conftest = Path(__file__).resolve().parents[1] / "conftest.py"
+    source = conftest.read_text(encoding="utf-8")
+    assert f'os.environ.setdefault("{ENV_RUST_FRONT}", "off")' in source

@@ -68,17 +68,22 @@ def fake_kernel(score: object = None, abstain: object = None) -> SimpleNamespace
 
 
 class TestFlag:
-    def test_default_is_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset ⇒ the meta kernels are ON.
         monkeypatch.delenv(META_GATE_ENV, raising=False)
-        assert meta_gate_enabled() is False
+        assert meta_gate_enabled() is True
 
     @pytest.mark.parametrize("value", ["1", "true", "YES", " on "])
     def test_explicit_truthy_enables(self, value: str) -> None:
         assert meta_gate_enabled(value) is True
 
-    @pytest.mark.parametrize("value", ["", "0", "false", "off", "no"])
-    def test_falsy_and_empty_are_off(self, value: str) -> None:
+    @pytest.mark.parametrize("value", ["0", "false", "off", "no"])
+    def test_falsy_is_off(self, value: str) -> None:
+        # The explicit kill switch keeps killing under the ON default.
         assert meta_gate_enabled(value) is False
+
+    def test_empty_falls_to_the_default_on(self) -> None:
+        assert meta_gate_enabled("") is True
 
     def test_junk_is_off_with_one_warn(self) -> None:
         with structlog.testing.capture_logs() as logs:
@@ -98,7 +103,9 @@ class TestOffArm:
     def test_off_serves_the_oracle_and_never_touches_the_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(META_GATE_ENV, raising=False)
+        # RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): the bomb-spy pin rides
+        # the explicit "0" kill switch (unset is now default-ON).
+        monkeypatch.setenv(META_GATE_ENV, "0")
         monkeypatch.setitem(sys.modules, "brutex_meta", fake_kernel())  # bomb
         assert score_probabilities(FEATURES, 2, WEIGHTS, 0.1) == oracle_probs()
         assert abstain_reason_masks(*ABSTAIN_ARGS) == abstain_masks_python(*ABSTAIN_ARGS)
@@ -106,7 +113,7 @@ class TestOffArm:
     def test_off_arm_propagates_oracle_validation_errors(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(META_GATE_ENV, raising=False)
+        monkeypatch.setenv(META_GATE_ENV, "0")
         with pytest.raises(ValueError, match="n_features"):
             score_probabilities([], 0, [], 0.0)
         with pytest.raises(ValueError, match="column lengths"):

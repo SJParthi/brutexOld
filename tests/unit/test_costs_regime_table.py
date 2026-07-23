@@ -439,3 +439,37 @@ class TestOptcostRustSeamOn:
         unanchored = (RegimeRow(date(2024, 10, 1), 3_503, "test row"),)
         with pytest.raises(ValueError, match="refusing to fabricate a rate"):
             constants.rate_for_date(unanchored, date(2024, 9, 30))
+
+
+# ── DEC-OPTCOST-TAILS-RUST-001 × DEC-RUST-DEFAULT-ON-WAVE-001: the OFF arm ────
+
+
+class TestOptcostRustSeamOff:
+    """`rate_for_date` under the explicit `BRUTEX_OPTCOST_TAILS_RUST=0` kill
+    switch routes the verbatim Python oracle (``_rate_for_date_python``).
+
+    `BRUTEX_OPTCOST_TAILS_RUST` now defaults ON (DEC-RUST-DEFAULT-ON-WAVE-001),
+    so the ``optcost_rust_enabled()``-False fall-through in ``rate_for_date``
+    (``constants.py`` — ``return _rate_for_date_python(...)``) is only reached
+    when the kill switch is pinned; this class covers that arm directly, no
+    wheel required.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _seam_off(self, monkeypatch: pytest.MonkeyPatch):
+        import brutex.optcost_rust as ocr
+
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "0")
+        ocr.reset_optcost_rust_for_tests()
+        yield
+        ocr.reset_optcost_rust_for_tests()
+
+    def test_off_arm_routes_python_oracle(self) -> None:
+        import brutex.optcost_rust as ocr
+
+        assert not ocr.optcost_rust_enabled()
+        assert constants.rate_for_date(
+            constants._STT_OPTIONS_REGIMES, date(2024, 10, 1)
+        ) == constants._rate_for_date_python(
+            constants._STT_OPTIONS_REGIMES, date(2024, 10, 1), charge="cost regime", exchange=""
+        )

@@ -64,9 +64,10 @@ _SAMPLE_PARSED = {"A": "1", "B": "two", "C": "a=b"}
 
 
 class TestFlagAndConstants:
-    def test_env_name_pinned_and_default_off(self) -> None:
+    def test_env_name_pinned_and_default_on(self) -> None:
+        # The DEC-RUST-DEFAULT-ON-WAVE-001 default pin: unset ⇒ ON.
         assert dotenv_rust.DOTENV_RUST_ENV == "BRUTEX_CORE_RUST_DOTENV"
-        assert dotenv_rust.dotenv_rust_enabled() is False
+        assert dotenv_rust.dotenv_rust_enabled() is True
         assert dotenv_rust.dotenv_rust_disabled() is False
 
     def test_flag_delegates_to_the_shared_tristate(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,6 +97,9 @@ class TestFlagOffNeverTouchesCrate:
     def test_off_arm_serves_oracle_and_never_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(dotenv_rust.DOTENV_RUST_ENV, "0")
         monkeypatch.setitem(sys.modules, "brutex_core", _bomb_crate())
 
         def _resolver_bomb() -> types.ModuleType | None:

@@ -175,14 +175,15 @@ class TestFlagMatrix:
         monkeypatch.setenv(_FLAG, value)
         assert compute_rust.metrics_rust_fold_enabled() is False
 
-    def test_unset_falls_to_default_off(self) -> None:
+    def test_unset_falls_to_default_on(self) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset ⇒ the kernel is ON.
         assert _FLAG not in os.environ
-        assert compute_rust.metrics_rust_fold_enabled() is False
-        assert compute_rust.METRICS_RUST_FOLD_DEFAULT is False
+        assert compute_rust.metrics_rust_fold_enabled() is True
+        assert compute_rust.METRICS_RUST_FOLD_DEFAULT is True
 
-    def test_whitespace_empty_falls_to_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_whitespace_empty_falls_to_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "   ")
-        assert compute_rust.metrics_rust_fold_enabled() is False
+        assert compute_rust.metrics_rust_fold_enabled() is compute_rust.METRICS_RUST_FOLD_DEFAULT
 
     def test_junk_is_off_with_one_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "ture")
@@ -543,11 +544,16 @@ class TestBurnIn:
 class TestDispatchChokepoint:
     """`_resolve_folds` — the ONE compute.py branch the seam adds."""
 
-    def test_default_path_never_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Flag unset (the default): the kernel seam is provably untouched."""
+    def test_kill_switch_path_never_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Flag "0" (the explicit kill switch): the kernel seam is provably untouched.
+
+        RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): unset is now default-ON,
+        so the never-routes corpus pin rides the explicit falsy arm.
+        """
+        monkeypatch.setenv(_FLAG, "0")
 
         def _seam_bomb(*_args: object, **_kwargs: object) -> object:
-            raise AssertionError("the default path must never consult the kernel seam")
+            raise AssertionError("the kill-switch path must never consult the kernel seam")
 
         monkeypatch.setattr(compute_rust, "fold_wire_via_kernel", _seam_bomb)
         for name, trades, tb, bench, start, span, dd in _CORPUS:
@@ -658,7 +664,12 @@ class TestDualArmProperty:
         span: float,
         drawdown: tuple[int, float, int, float],
     ) -> None:
-        prior = os.environ.pop(_FLAG, None)
+        prior = os.environ.get(_FLAG)
+        # The OFF baseline = the explicit "0" kill switch → the Python oracle.
+        # The default is flipped ON (DEC-RUST-DEFAULT-ON-WAVE-001), so popping
+        # the env (unset) would resolve ON and make `on == off` a vacuous
+        # Rust==Rust; "0" pins the genuine oracle arm (the sibling-test idiom).
+        os.environ[_FLAG] = "0"
         try:
             off = _pack_metrics(
                 _compute_metrics_impl(
@@ -1053,9 +1064,13 @@ class TestRecencyBurnIn:
 class TestRecencyDispatchChokepoint:
     """`_resolve_recency_folds` — the compute.py recency dispatch arms."""
 
-    def test_default_path_never_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_kill_switch_path_never_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): unset is now
+        # default-ON, so the never-routes pin rides the explicit "0" arm.
+        monkeypatch.setenv(_FLAG, "0")
+
         def _seam_bomb(*_args: object, **_kwargs: object) -> object:
-            raise AssertionError("the default path must never consult the kernel seam")
+            raise AssertionError("the kill-switch path must never consult the kernel seam")
 
         monkeypatch.setattr(compute_rust, "recency_wire_via_kernel", _seam_bomb)
         folds = _resolve_recency_folds(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
@@ -1160,7 +1175,9 @@ class TestRecencyFlagOnParity:
 
         monkeypatch.setattr(fno_math, "metrics_fold_recency", _spy)
         for trades in self._EDGE_STREAMS:
-            monkeypatch.delenv(_FLAG, raising=False)
+            # The oracle leg rides the explicit "0" kill switch (unset is
+            # default-ON since DEC-RUST-DEFAULT-ON-WAVE-001).
+            monkeypatch.setenv(_FLAG, "0")
             expected = _compute_metrics_impl(
                 trades,
                 100,

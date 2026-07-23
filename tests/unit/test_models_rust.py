@@ -116,16 +116,22 @@ class TestFlagParsing:
         monkeypatch.setenv(models_rust.MODELS_RUST_ENV, raw)
         assert models_rust.models_rust_enabled() is True
 
-    @pytest.mark.parametrize("raw", ["0", "false", "NO", " off ", "", "   "])
-    def test_falsy_and_blank_disable_silently(
-        self, monkeypatch: pytest.MonkeyPatch, raw: str
-    ) -> None:
+    @pytest.mark.parametrize("raw", ["0", "false", "NO", " off "])
+    def test_falsy_disables_silently(self, monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
         monkeypatch.setenv(models_rust.MODELS_RUST_ENV, raw)
         assert models_rust.models_rust_enabled() is False
         assert not models_rust._OBSERVABILITY_MEMO  # pyright: ignore[reportPrivateUsage]
 
-    def test_unset_is_off_via_the_absent_fast_path(self) -> None:
-        assert models_rust.models_rust_enabled() is False
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_blank_is_on_silently(self, monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: blank takes the (ON) default.
+        monkeypatch.setenv(models_rust.MODELS_RUST_ENV, raw)
+        assert models_rust.models_rust_enabled() is True
+        assert not models_rust._OBSERVABILITY_MEMO  # pyright: ignore[reportPrivateUsage]
+
+    def test_unset_is_on_via_the_absent_fast_path(self) -> None:
+        # The DEC-RUST-DEFAULT-ON-WAVE-001 default pin: unset ⇒ ON.
+        assert models_rust.models_rust_enabled() is True
 
     def test_junk_warns_once_then_memoised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(models_rust.MODELS_RUST_ENV, "banana")

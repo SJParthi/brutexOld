@@ -1,13 +1,16 @@
-"""Default-OFF Rust seam for the two cross-verify pure-law surfaces.
+"""Default-ON Rust seam for the two cross-verify pure-law surfaces.
 
-DEC-CROSSVERIFY-RUST-CORE (first cut). The routed surfaces are
+DEC-CROSSVERIFY-RUST-CORE (first cut); default flipped ON by
+DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23). The routed
+surfaces are
 :func:`brutex.crossverify.csv_render.render_day_csv` (the pinned CSV byte
 assembly) and :func:`brutex.crossverify.canonical.canonical_identity` +
 :func:`~brutex.crossverify.canonical.s3_key` (the deny-by-default mapper +
 the ONE key law) — when ``BRUTEX_CROSSVERIFY_RUST`` is ON they delegate the
 pure string laws to the ``brutex_ops`` crate (`rust/brutex-ops`) through this
-facade; the flag-OFF default runs the verbatim Python bodies in place,
-byte-identical AND crate-untouched (bomb-crate spy-pinned).
+facade; the explicit-falsy kill switch runs the verbatim Python bodies in
+place, byte-identical AND crate-untouched (bomb-crate spy-pinned). The flag
+is ON by default (unset/blank → ON) per DEC-RUST-DEFAULT-ON-WAVE-001.
 
 The :mod:`brutex.data.lake_rust_stats` pattern (itself the PR-1
 :mod:`brutex.data.lake_rust_render` shape), with TWO deliberate structural
@@ -84,7 +87,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; Pattern A — only explicit truthy enables).
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit falsy
+#: is the kill switch; junk fails loud-OFF).
 CROSSVERIFY_RUST_ENV: Final[str] = "BRUTEX_CROSSVERIFY_RUST"
 
 #: Engaged calls per law bit-compared against the Python oracle before crate
@@ -168,13 +172,15 @@ def env_flag_tristate(raw: str) -> bool | None:
 
 
 def crossverify_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_CROSSVERIFY_RUST`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_CROSSVERIFY_RUST`` (default ON, junk loud-OFF).
 
-    Truthy → ``True``; falsy → ``False`` (silent explicit OFF); unset /
-    whitespace-empty → ``False`` (the default); any OTHER non-empty value →
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): truthy →
+    ``True``; falsy → ``False`` (the silent explicit kill switch); unset /
+    whitespace-empty → ``True`` (the default); any OTHER non-empty value →
     ``False`` with one ``crossverify_rust.fallback`` WARN (reason
-    ``flag_unrecognised``) per process. Read per call so spawned workers
-    resolve their own inherited environment (the sibling-facade posture).
+    ``flag_unrecognised``) per process — the junk arm is unchanged. Read
+    per call so spawned workers resolve their own inherited environment
+    (the sibling-facade posture).
     """
     raw = os.environ.get(CROSSVERIFY_RUST_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -182,7 +188,8 @@ def crossverify_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_seam_disabled() -> bool:

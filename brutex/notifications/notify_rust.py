@@ -1,8 +1,9 @@
-"""notify_rust — the default-OFF Rust routing facade for the notification PURE laws.
+"""notify_rust — the default-ON Rust routing facade for the notification PURE laws.
 
-DEC-NOTIFY-RUST-CORE-001 (MIGRATION.md #1957). Routes the FOUR pure
+DEC-NOTIFY-RUST-CORE-001 (MIGRATION.md #1957); default flipped ON by
+DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23). Routes the FOUR pure
 notification laws through the ``rust/brutex-notify`` crate behind the
-default-OFF ``BRUTEX_NOTIFY_RUST`` flag, with each verbatim Python law
+default-ON ``BRUTEX_NOTIFY_RUST`` flag, with each verbatim Python law
 retained as the LIVE parity oracle (the ``window_ledger_rust`` /
 ``feed_rust`` template):
 
@@ -23,13 +24,14 @@ retained as the LIVE parity oracle (the ``window_ledger_rust`` /
 
 ## The fail-closed layers (the sibling-facade template, adapted)
 
-* **Flag** — ``BRUTEX_NOTIFY_RUST`` default OFF (Pattern A): ONLY an
-  explicit truthy literal enables; unset/blank/falsy are OFF silently; any
-  other non-empty value is OFF with ONE loud ``notify_rust.fallback`` WARN
+* **Flag** — ``BRUTEX_NOTIFY_RUST`` default ON
+  (DEC-RUST-DEFAULT-ON-WAVE-001): unset/blank/truthy are ON; an explicit
+  falsy literal is the OFF kill switch (silent); any other non-empty value
+  is OFF with ONE loud ``notify_rust.fallback`` WARN
   (``flag_unrecognised``). Read per call (no global latch) so spawn workers
-  resolve their own environment. OFF returns the oracle's result directly —
-  the crate is NEVER imported (spy-pinned), so the default path is
-  byte-identical to pre-facade behaviour.
+  resolve their own environment. Explicit-OFF returns the oracle's result
+  directly — the crate is NEVER imported (spy-pinned), so the kill-switch
+  path is byte-identical to pre-facade behaviour.
 * **LEAF discipline** — this module imports ONLY stdlib + structlog. It may
   NOT import ``env_flag_tristate`` from ``brutex.engine.sweep_lookahead``:
   importing anything under ``brutex.engine`` triggers the engine package's
@@ -97,7 +99,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; junk fails loud-OFF).
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit
+#: falsy = the kill switch; junk fails loud-OFF).
 NOTIFY_RUST_ENV: Final[str] = "BRUTEX_NOTIFY_RUST"
 
 #: Engaged calls PER LAW that are bit-compared against the live Python
@@ -157,15 +160,16 @@ _DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
 
 
 def notify_rust_enabled(raw: str | None = None) -> bool:
-    """Resolve ``BRUTEX_NOTIFY_RUST`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_NOTIFY_RUST`` (default ON, junk loud-OFF).
 
-    Pattern A (the ``feed_rust_enabled`` law): ONLY an explicit truthy
-    literal (``1``/``true``/``yes``/``on``, case-insensitive,
-    whitespace-stripped) enables; unset, empty and explicit-falsy are OFF
-    silently; any OTHER non-empty value is OFF with one
-    ``notify_rust.fallback`` WARN (``flag_unrecognised``) per process — an
-    unrecognised value must never silently enable an alternate execution
-    path (fail-safe default). Read per call, no global latch.
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): unset,
+    blank and explicit truthy literals (``1``/``true``/``yes``/``on``,
+    case-insensitive, whitespace-stripped) are ON; an explicit falsy
+    literal is the silent OFF kill switch; any OTHER non-empty value is
+    OFF with one ``notify_rust.fallback`` WARN (``flag_unrecognised``)
+    per process — an unrecognised value must never silently pick an
+    execution path (fail-safe junk arm unchanged). Read per call, no
+    global latch.
 
     Parameters
     ----------
@@ -175,12 +179,14 @@ def notify_rust_enabled(raw: str | None = None) -> bool:
     """
     value = os.environ.get(NOTIFY_RUST_ENV) if raw is None else raw
     if value is None:
-        return False
+        return True
     stripped = value.strip().lower()
     if stripped in _TRUTHY:
         return True
-    if stripped == "" or stripped in _FALSY:
+    if stripped in _FALSY:
         return False
+    if stripped == "":
+        return True
     _warn_once("flag_unrecognised", env=NOTIFY_RUST_ENV, value=value)
     return False
 

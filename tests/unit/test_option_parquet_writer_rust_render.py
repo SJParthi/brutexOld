@@ -196,10 +196,11 @@ class TestFlagOffNeverRoutes:
     def test_flag_off_write_and_heal_never_touch_the_facade(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """R12: flag unset ⇒ the facade's routed entry is NEVER invoked from
+        """R12: flag "0" (the kill switch — the default flipped ON under
+        DEC-RUST-DEFAULT-ON-WAVE-001) ⇒ the facade's routed entry is NEVER invoked from
         any option-writer path, and the stored bytes equal the pre-PR-2
         output (the verbatim legacy union expression rendered inline)."""
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")
 
         def _must_not_route(**_: object) -> bytes:
             raise AssertionError("flag-OFF must never call render_parquet_bytes")
@@ -299,7 +300,7 @@ class TestFlagOnRouting:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bars = [_bar(minute=i) for i in range(5)]
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch → Python oracle
         off_lake = tmp_path / "off"
         assert _write(off_lake, bars) == 5
 
@@ -428,7 +429,7 @@ class TestR4CrateErrorsDegrade:
         off_lake = tmp_path / "off"
         assert _write(off_lake, [_bar(minute=0), _bar(side="PE", minute=0)]) == 2
         _poison_with_dup(_dest(off_lake))
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch → Python oracle
         off_result = _writer(off_lake).heal_partition(
             _dest(off_lake), quarantine_to=tmp_path / "qoff" / "b.parquet"
         )
@@ -531,7 +532,7 @@ class TestR6VersionMismatch:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bars = [_bar(minute=0), _bar(side="PE", minute=0)]
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch → Python oracle
         off_lake = tmp_path / "off"
         assert _write(off_lake, bars) == 2
 
@@ -558,7 +559,7 @@ class TestR7BurnInMismatchShipsOracle:
         off_lake = tmp_path / "off"
         assert _write(off_lake, [_bar(minute=0), _bar(side="PE", minute=0)]) == 2
         _poison_with_dup(_dest(off_lake))
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch → Python oracle
         _writer(off_lake).heal_partition(
             _dest(off_lake), quarantine_to=tmp_path / "qoff" / "b.parquet"
         )

@@ -222,7 +222,9 @@ class TestFlagOffArm:
 
     @pytest.fixture(autouse=True)
     def _fresh(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-        monkeypatch.delenv(fsr.DATA_RUST_ENV, raising=False)
+        # Explicit "0" (kill switch) — the wave default is ON, so an unset OFF
+        # arm would silently route the "oracle" class through Rust.
+        monkeypatch.setenv(fsr.DATA_RUST_ENV, "0")
         fsr.reset_fno_symbol_rust_for_tests()
         yield
         fsr.reset_fno_symbol_rust_for_tests()

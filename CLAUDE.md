@@ -18,7 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-21 (DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065,
+_Last updated: 2026-07-23 (DEC-RUST-DEFAULT-ON-WAVE-001, MIGRATION.md #2215,
+branch `claude/rust-default-on-wave` — the operator RUST-O(1)-EVERYWHERE flip:
+every default-OFF Rust facade seam (~28) ships ENGAGED, the exact inverse of
+the pre-wave Pattern-A default-OFF (unset ⇒ ON · explicit-truthy ⇒ ON ·
+explicit-falsy ⇒ the silent OFF kill switch · junk ⇒ OFF + one loud WARN).
+EVERY safety layer untouched — the 16-call burn-in bit-compare +
+ship-the-ORACLE autorevert, refuse-poison gates, degrade-to-oracle on a
+wheel-absent/stale/poisoned crate, the panic belt, the bomb-spy never-imports
+pins RETARGETED onto the explicit `"0"` kill switch (never deleted).
+`BRUTEX_RUST_FRONT` becomes AUTO (probe for a built `brutexd` → Rust front,
+else one WARN + the verbatim legacy Python topology). RETIRED flags stay
+retired (a SET `BRUTEX_LAKE_RUST_LEDGER_RENDER`/`BRUTEX_LAKE_WAVED_RUST`/
+`BRUTEX_FEED_RUST` still refuses loudly). HERMETICITY: `tests/conftest.py`
+gains suite-wide `os.environ.setdefault(FLAG, "0")` belts (hermetic vs the
+AMBIENT env, never the tested law — seam-own tests arm modes via monkeypatch
+which overrides setdefault); the chaos lanes pin the explicit `"0"` Python arm
+so the `os.replace`/`os.fsync` fault-injection lands in a wheel-bearing lane
+(the Python arm is bit-identical by burn-in; the Rust arm's OSError
+propagation is covered by the lake-locks parity lane). FROZEN GOLDENS pass
+UNMODIFIED (a flip is a default change, never a re-lock — fixtures
+byte-untouched). HONEST ENVELOPE (Golden Rule #10): a default flip is a
+BEHAVIOR change protected by burn-in + autorevert + degrade, NOT a
+byte-guarantee — the ADR-0020 banner "expected payoff ≈ 0 — conversion is for
+uniformity, not speed" holds; the operator directive is the DEC-law sign-off a
+default flip requires. ENGINE result semantics UNCHANGED at the oracle level —
+NIFTY/BANKNIFTY/SENSEX; run identity untouched; no lake/schema/scope/vocab/
+rate change; no new routes. This header carries the pointer, never the story —
+the full record lives in the §1 Active-branch blurb + MIGRATION.md #2215.)
+Earlier: 2026-07-21 (DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065,
 branch `claude/rust-runid-stores` — the run-identity-CONSUMPTION + stores
 COMPUTATION plane re-hosted on the NEW `rust/brutex-identity` crate (pyo3 0.29
 abi3-py312; blake3 + parquet-rs only): `engine/snapshot_hash.py` · run-id
@@ -4638,7 +4666,72 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-runid-stores`
+- **Active branch:** `claude/rust-default-on-wave`
+  (**DEC-RUST-DEFAULT-ON-WAVE-001, MIGRATION.md #2215** — the operator
+  RUST-O(1)-EVERYWHERE flip (verbatim directive: "I clearly told you everywhere
+  as RUST O(1) so default it as ON and convert to rust dude okay?"): THE FLIP
+  LAW applied uniformly to ~28 facade seams — the tristate flag becomes
+  **unset ⇒ ON · explicit-truthy ⇒ ON · explicit-falsy (`0`/`false`/`no`/`off`)
+  ⇒ the silent OFF kill switch · junk ⇒ OFF + ONE loud `*.fallback`/
+  `flag_unrecognised` WARN** — the exact inverse of the pre-wave Pattern-A
+  default-OFF, with EVERY safety layer untouched (per-call read + no global
+  latch; the 16-call burn-in bit-compare + ship-the-ORACLE autorevert; the
+  refuse-poison shape gates; degrade-to-oracle on a wheel-absent/stale/poisoned
+  crate; the panic belt; the bomb-spy never-imports pins RETARGETED onto the
+  explicit `"0"` kill switch, never deleted). SEAMS FLIPPED (facade docstring +
+  enable-function + retargeted OFF-pin tests): `BRUTEX_NOTIFY_RUST` ·
+  `BRUTEX_BACKUP_RUST` · `BRUTEX_CROSSVERIFY_RUST` · `BRUTEX_NIGHTLY_RUST` ·
+  `BRUTEX_OBSERVABILITY_RUST` · `BRUTEX_SWEEP_OPS_RUST` ·
+  `BRUTEX_STRATEGIES_RUST_COMBO` · `BRUTEX_META_GATE` · `BRUTEX_RANK_CVAR_RUST` ·
+  `BRUTEX_DATA_RUST` (fno_symbol + lake_keys) · `BRUTEX_GREEKS_RUST_BATCH` ·
+  `BRUTEX_METRICS_RUST_FOLD` · `BRUTEX_STATS_RUST` · the `BRUTEX_LAKE_RUST_*`
+  family (render · merge · locks · resample · resample_daily · stats-manifest ·
+  window-ledger · the three detector flags) · the `BRUTEX_CORE_RUST_*` seams
+  (paths · dotenv · backup-env · hwenv over the shared `seam_core`; plus
+  `BRUTEX_CORE_RUST_MONEY` + `BRUTEX_CORE_RUST_MODELS`) ·
+  `BRUTEX_OPTCOST_TAILS_RUST` · the engine `BRUTEX_SWEEP_RUST_STAGE1A` seam.
+  `BRUTEX_RUST_FRONT` becomes AUTO (unset =
+  probe for a built `brutexd` binary → Rust front topology if found, else ONE
+  `rust_front.auto_fallback_python` WARN + the verbatim legacy Python topology,
+  never fatal; explicit `on` = the strict-fatal arm; `""`/`off` = OFF no probe;
+  junk = `RustFrontError` exit 1). ALREADY-ON seams left ON
+  (`BRUTEX_RANK_RUST_SELECT` #2059 · `BRUTEX_REFINE_RUST` #2055 · the
+  wheel-REQUIRED `brutex_feed`/`brutex_identity`/`brutex_refine` families).
+  RETIRED flags stay
+  retired (a SET `BRUTEX_LAKE_RUST_LEDGER_RENDER`/`BRUTEX_LAKE_WAVED_RUST`/
+  `BRUTEX_FEED_RUST` still refuses loudly — never re-armed). HERMETICITY:
+  `tests/conftest.py` gains suite-wide `os.environ.setdefault(FLAG, "0")` belts
+  (the #1692 market-hours-guard philosophy — hermetic against the AMBIENT
+  environment, never the tested law; seam-own tests arm modes explicitly via
+  monkeypatch, which overrides setdefault), each drift-pinned to its facade
+  constant; `BRUTEX_RUST_FRONT` pinned `"off"` suite-wide. THE WHEEL-LANE FIX
+  (the wave's central bug class): locally (wheel-less venv) a default-ON lake
+  seam degrades to Python so a Python `os.replace`/`os.fsync` monkeypatch lands
+  and the fault-injection test passes; in a wheel-BEARING lane (parity + chaos)
+  the Rust crate IS built, the commit happens IN RUST, the Python monkeypatch
+  is BYPASSED → the injected ENOSPC/crash never lands → `pytest.raises`
+  reads `DID NOT RAISE` — so every fault-injection chaos row pins the explicit
+  `BRUTEX_LAKE_RUST_LOCKS=0` Python arm (bit-identical by burn-in; the Rust
+  arm's OSError→LakeWriteHalt propagation is covered by the dedicated
+  lake-locks parity lane) and the notify tristate-mirror pin adopts the
+  `pytest.importorskip("brutex.engine.sweep_lookahead")` house pattern (the
+  engine `__init__` chain module-imports the REQUIRED `brutex_identity` wheel
+  per #2065, so it skips gracefully wheel-less while staying live in main CI).
+  FROZEN GOLDENS pass UNMODIFIED (`tests/golden/fixtures/` byte-untouched — a
+  flip is a default change, never a re-lock; a red golden is a STOP-AND-REPORT,
+  none appeared). LOCAL EVIDENCE: 1,709 flipped-facade + retargeted-test
+  assertions pass (52 wheel-less skips, all graceful degrades). HONEST ENVELOPE
+  (Golden Rule #10): a default flip is a BEHAVIOR change (the engaged Rust path
+  now runs by default, protected by the burn-in + autorevert + degrade layers),
+  NOT a byte-guarantee — the ADR-0020 banner "expected payoff ≈ 0 — conversion
+  is for uniformity, not speed" holds; the operator directive is the DEC-law
+  sign-off a default flip requires. ENGINE result semantics UNCHANGED at the
+  oracle level — NIFTY/BANKNIFTY/SENSEX; run identity untouched; no
+  lake/schema/scope/vocab/rate change; no new routes. This header carries the
+  pointer, never the story — the full record lives in MIGRATION.md #2215.
+  **Builds on** the ADR-0020 conversion roadmap (#1891) + every per-seam DEC it
+  flips.)
+  Earlier: `claude/rust-runid-stores`
   (**DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065** — the
   run-identity-CONSUMPTION + stores COMPUTATION plane re-hosted on the NEW
   `rust/brutex-identity` crate (pyo3 0.29 abi3-py312; blake3 + parquet-rs
@@ -14790,7 +14883,19 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-runid-stores`
+- **Active feature branch:** `claude/rust-default-on-wave`
+  (DEC-RUST-DEFAULT-ON-WAVE-001, MIGRATION.md #2215 — the operator
+  RUST-O(1)-EVERYWHERE flip: every default-OFF Rust facade seam (~28) ships
+  ENGAGED (unset ⇒ ON · explicit-truthy ⇒ ON · explicit-falsy ⇒ silent OFF kill
+  switch · junk ⇒ OFF + one loud WARN), every safety layer untouched (burn-in
+  bit-compare + ship-oracle autorevert + refuse-poison + degrade-to-oracle +
+  panic belt + retargeted bomb-spy pins); `BRUTEX_RUST_FRONT` becomes AUTO;
+  retired flags stay retired; conftest gains ambient-hermeticity `setdefault`
+  belts + the chaos lanes pin the `"0"` Python fault-injection arm; frozen
+  goldens byte-untouched; ENGINE result semantics UNCHANGED at the oracle
+  level — NIFTY/BANKNIFTY/SENSEX; run identity untouched; matches §1's Active
+  branch line — see §1 + MIGRATION.md #2215 for the full blurb)
+  Earlier: `claude/rust-runid-stores`
   (DEC-RUST-RUNID-STORES-001, MIGRATION.md #2065 — the
   run-identity-CONSUMPTION + stores COMPUTATION plane on the NEW
   `rust/brutex-identity` crate (pyo3 0.29 abi3-py312; blake3 + parquet-rs

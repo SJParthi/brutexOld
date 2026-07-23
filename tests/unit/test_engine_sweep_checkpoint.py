@@ -537,6 +537,11 @@ def test_atomic_write_cleanup_on_replace_failure(
 
     # The atomic write is now the shared atomic_io core (DEC-ATOMIC-WRITE-CONSOLIDATE-001),
     # so os.replace + the temp prefix live there.
+    # Python-arm commit seam (os.replace fault injection/spy): pin via the
+    # "0" kill switch — BRUTEX_LAKE_RUST_LOCKS defaults ON
+    # (DEC-RUST-DEFAULT-ON-WAVE-001); crate-arm twins live in
+    # tests/unit/test_lake_rust_locks.py.
+    monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
     monkeypatch.setattr("brutex.data.atomic_io.os.replace", _boom)
     with pytest.raises(OSError, match="replace failed"):
         ckpt._atomic_write(dest, b"data")

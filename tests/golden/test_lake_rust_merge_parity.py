@@ -164,7 +164,9 @@ def _twin_run(
                 pl.concat([df, df.slice(0, 1)]).sort("timestamp").write_parquet(results[0].path)
         return results
 
-    monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+    # Explicit "0" (kill switch), NOT delenv-to-unset — the wave default is ON,
+    # so an unset OFF arm would be a vacuous Rust-vs-Rust byte compare.
+    monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")
     off = _drive(tmp_path / "off")
     monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "1")
     lrm.reset_lake_rust_merge_for_tests(remaining=0)

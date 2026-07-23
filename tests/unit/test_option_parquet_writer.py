@@ -274,6 +274,11 @@ class TestAtomicWriteCleanup:
         def _boom(src: object, dst: object) -> None:
             raise OSError("disk full")
 
+        # Python-arm fault injection (the #1912-disclosed os.replace seam):
+        # pin the arm via the "0" kill switch now that BRUTEX_LAKE_RUST_LOCKS
+        # defaults ON (DEC-RUST-DEFAULT-ON-WAVE-001); the crate-arm twins
+        # live in tests/unit/test_lake_rust_locks.py.
+        monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
         monkeypatch.setattr("brutex.data.atomic_io.os.replace", _boom)
         w = _writer(tmp_path)
         with pytest.raises(OSError, match="disk full"):
@@ -1095,6 +1100,11 @@ class TestMergePartitionFrame:
         def _enospc(src: object, dst: object) -> None:
             raise OSError(errno.ENOSPC, "no space left on device")
 
+        # Python-arm fault injection (the #1912-disclosed os.replace seam):
+        # pin the arm via the "0" kill switch now that BRUTEX_LAKE_RUST_LOCKS
+        # defaults ON (DEC-RUST-DEFAULT-ON-WAVE-001); the crate-arm twins
+        # live in tests/unit/test_lake_rust_locks.py.
+        monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
         monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
         with pytest.raises(LakeWriteHalt) as exc_info:
             w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))

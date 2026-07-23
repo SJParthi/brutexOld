@@ -1797,7 +1797,7 @@ def prev_baseline_provenance(
     snapshot_day: date_cls,
     *,
     exchange: str | None,
-    expected_session: date_cls | None | EllipsisType = ...,
+    expected_session: date_cls | EllipsisType | None = ...,
 ) -> tuple[str | None, bool | None, bool]:
     """Judge a resolved baseline's calendar contiguity (pure, side-effect-free).
 

@@ -67,14 +67,15 @@ class TestFlagParsing:
             assert nightly_rust.nightly_rust_enabled() is False
         assert logs == []
 
-    def test_unset_and_whitespace_default_off_silently(
+    def test_unset_and_whitespace_default_on_silently(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The DEC-RUST-DEFAULT-ON-WAVE-001 default pin: unset/blank ⇒ ON.
         with capture_logs() as logs:
-            assert nightly_rust.nightly_rust_enabled() is False
+            assert nightly_rust.nightly_rust_enabled() is True
         monkeypatch.setenv(nightly_rust.NIGHTLY_RUST_ENV, "   ")
         with capture_logs() as more:
-            assert nightly_rust.nightly_rust_enabled() is False
+            assert nightly_rust.nightly_rust_enabled() is True
         assert logs == [] and more == []
 
     def test_junk_fails_loud_off_and_warns_once(self, monkeypatch: pytest.MonkeyPatch) -> None:

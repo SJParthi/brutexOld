@@ -154,10 +154,12 @@ def _run_sequence(lake_root: Path, *, greeks: bool = False) -> list[WriteResult]
 
 
 class TestFlagOff:
-    def test_default_off_never_touches_the_seam(
+    def test_kill_switch_never_touches_the_seam(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+        # OFF is addressed via the explicit "0" kill switch since the
+        # default flipped ON (DEC-RUST-DEFAULT-ON-WAVE-001) — the never-routes teeth survive.
+        monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")
 
         def _must_not_route(*_a: object, **_k: object) -> object:
             raise AssertionError("flag-OFF must never call lake_rust_merge.merge_fold")
@@ -190,7 +192,7 @@ class TestFlagOn:
         """The full write() sequence — fresh, conflict merge, latest-wins
         restate, no-op merge — produces byte-identical partitions and
         field-identical WriteResults ON vs OFF (spot AND Greeks shapes)."""
-        monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+        monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")  # the kill switch → Python fold
         off_results = _run_sequence(tmp_path / "off", greeks=greeks)
 
         monkeypatch.setitem(sys.modules, "brutex_lake", _polars_backed_fake_crate())
@@ -260,7 +262,7 @@ class TestFlagOn:
         import polars as pl
         import polars.exceptions as pl_exc
 
-        monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+        monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")  # the kill switch → Python fold
         off_results = _run_sequence(tmp_path / "off")
 
         fake = types.ModuleType("brutex_lake")
@@ -289,7 +291,7 @@ class TestFlagOn:
         the write completes with the Python fold's exact result."""
         import polars as pl
 
-        monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+        monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")  # the kill switch → Python fold
         off_results = _run_sequence(tmp_path / "off")
 
         fake = types.ModuleType("brutex_lake")

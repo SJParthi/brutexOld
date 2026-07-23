@@ -19,10 +19,11 @@ the split ships bit-identity BY CONSTRUCTION instead of by hope.
 :func:`metrics_rust_fold_enabled` reads the env PER CALL (the
 ``rust_metrics`` per-call-resolution rationale: no module-global flag state;
 parallel workers read their own inherited environment). Resolution: a
-``_TRUTHY`` value is the ONLY way ON; a ``_FALSY`` value is OFF;
-unset/whitespace-empty falls to :data:`METRICS_RUST_FOLD_DEFAULT` (``False``
-— ships INERT; the one-constant default flip is a LATER DEC on the
-DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent); any OTHER value fails
+``_TRUTHY`` value forces ON; a ``_FALSY`` value forces OFF (the kill
+switch);
+unset/whitespace-empty falls to :data:`METRICS_RUST_FOLD_DEFAULT` (``True``
+— ON by default per DEC-RUST-DEFAULT-ON-WAVE-001, operator directive
+2026-07-23; the revert is that one constant); any OTHER value fails
 SAFE to OFF with one warn-once ``flag_unrecognised`` event. OFF keeps the
 caller on the verbatim Python ``_fold_trades`` path — byte-identical by
 construction (the never-routes bomb-kernel spy pins it).
@@ -124,15 +125,17 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.metrics.compute_rust")
 
-#: The opt-in environment flag (Pattern A — only an explicit ``_TRUTHY``
-#: value enables the kernel; everything else is OFF).
+#: The environment flag (truthy forces ON, falsy is the explicit kill
+#: switch; unset falls to the default — ON per
+#: DEC-RUST-DEFAULT-ON-WAVE-001).
 METRICS_RUST_FOLD_ENV: Final[str] = "BRUTEX_METRICS_RUST_FOLD"
 
 #: The ONE default-arm constant: what :func:`metrics_rust_fold_enabled`
-#: returns when the flag is unset or whitespace-empty. ``False`` — the seam
-#: ships INERT; flipping this default is a SEPARATE later DEC (the
-#: DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent).
-METRICS_RUST_FOLD_DEFAULT: Final[bool] = False
+#: returns when the flag is unset or whitespace-empty. ``True`` — ON by
+#: default per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+#: 2026-07-23, the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent); the
+#: revert is this one constant.
+METRICS_RUST_FOLD_DEFAULT: Final[bool] = True
 
 #: Inline flag vocabulary (LEAF discipline — module docstring; the
 #: mirror-pin test asserts byte-equality with ``sweep_lookahead``'s sets,
@@ -219,11 +222,11 @@ def metrics_rust_fold_enabled() -> bool:
     """Resolve the Rust-fold flag over :data:`METRICS_RUST_FOLD_DEFAULT`.
 
     * a ``_TRUTHY`` value (``1`` / ``true`` / ``yes`` / ``on``,
-      case-insensitive, surrounding whitespace ignored) → ``True`` — the
-      ONLY way the kernel arms (Pattern A);
+      case-insensitive, surrounding whitespace ignored) → ``True``;
     * a ``_FALSY`` value (``0`` / ``false`` / ``no`` / ``off``) → ``False``;
     * unset or whitespace-empty → :data:`METRICS_RUST_FOLD_DEFAULT`
-      (``False`` — the one-constant flip lever);
+      (``True`` — ON by default per DEC-RUST-DEFAULT-ON-WAVE-001; the
+      one-constant revert lever);
     * any OTHER value → ``False`` with one warn-once ``flag_unrecognised``
       event — a typo'd opt-in (``ture``, ``0n``) is never silently armed
       NOR silently dropped without a trace.

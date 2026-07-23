@@ -151,8 +151,14 @@ def _outcome(
 
 @pytest.fixture(autouse=True)
 def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Every test starts flag-unset with a fresh latch/burn-in/memo."""
-    monkeypatch.delenv(models_rust.MODELS_RUST_ENV, raising=False)
+    """Every test starts flag-OFF with a fresh latch/burn-in/memo.
+
+    Pinned to the explicit "0" kill switch (NOT delete-to-unset): under
+    DEC-RUST-DEFAULT-ON-WAVE-001 an unset flag resolves default-ON, which
+    would route the bomb-spy OFF arm to the crate handshake. "0" forces the
+    genuine oracle so the flag-OFF-crate-untouched pin stays non-vacuous.
+    """
+    monkeypatch.setenv(models_rust.MODELS_RUST_ENV, "0")
     models_rust.reset_models_rust_for_tests()
     yield
     models_rust.reset_models_rust_for_tests()

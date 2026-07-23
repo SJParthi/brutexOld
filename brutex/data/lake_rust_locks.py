@@ -107,11 +107,14 @@ _ENGAGED_KEY: Final = "__engaged__"
 
 
 def lake_rust_locks_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_LOCKS`` (default OFF, junk fails loud-OFF).
+    """Resolve ``BRUTEX_LAKE_RUST_LOCKS`` (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23; junk fails
+    loud-OFF).
 
-    * a truthy literal (``1/true/yes/on``) → ``True`` (the opt-in);
-    * a falsy literal (``0/false/no/off``) → ``False`` (explicit, silent OFF);
-    * unset / whitespace-empty → ``False`` (the default);
+    * a truthy literal (``1/true/yes/on``) → ``True`` (explicit ON);
+    * a falsy literal (``0/false/no/off``) → ``False`` (explicit, silent
+      OFF — the kill switch);
+    * unset / whitespace-empty → ``True`` (the default);
     * any OTHER non-empty value → ``False`` with one loud
       ``lake_rust_locks.fallback`` WARN (reason ``flag_unrecognised``) per
       process — a typo'd opt-in must be VISIBLE, never silently ignored.
@@ -128,7 +131,8 @@ def lake_rust_locks_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_locks_disabled() -> bool:

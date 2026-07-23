@@ -45,6 +45,24 @@ from brutex.data.parquet_writer import ParquetWriter
 
 pytestmark = pytest.mark.chaos
 
+
+@pytest.fixture(autouse=True)
+def _pin_python_atomic_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the Python atomic-write arm for every chaos row.
+
+    These tests inject faults by monkeypatching ``os.replace`` / ``os.fsync``.
+    The default-ON ``BRUTEX_LAKE_RUST_LOCKS`` seam (DEC-RUST-DEFAULT-ON-WAVE-001)
+    routes the chmod->fsync->replace commit through the ``brutex-lake`` Rust twin,
+    which BYPASSES the Python monkeypatch in a wheel-bearing lane — so the injected
+    ENOSPC / crash never lands and ``pytest.raises(...)`` reads ``DID NOT RAISE``.
+    Pin the explicit ``"0"`` silent kill switch: the Python arm is bit-identical to
+    the Rust arm (16-call burn-in guarantee), so write behaviour is unchanged, and
+    the Rust arm's own OSError->LakeWriteHalt propagation is covered by the
+    dedicated lake-locks parity lane.
+    """
+    monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
+
+
 #: Rounds of randomized crash-point injection (overridable for a soak).
 _ROUNDS = int(os.environ.get("CHAOS_ROUNDS", "40"))
 #: Concurrent writer threads racing one partition.

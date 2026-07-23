@@ -381,11 +381,14 @@ def env_flag_tristate(raw: str) -> bool | None:
 
 
 def lake_rust_render_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_RENDER`` (default OFF, junk fails loud-OFF).
+    """Resolve ``BRUTEX_LAKE_RUST_RENDER`` (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23; junk fails
+    loud-OFF).
 
-    * a :data:`_TRUTHY` value → ``True`` (the opt-in);
-    * a :data:`_FALSY` value → ``False`` (the explicit, silent OFF);
-    * unset / whitespace-empty → ``False`` (the default);
+    * a :data:`_TRUTHY` value → ``True`` (explicit ON);
+    * a :data:`_FALSY` value → ``False`` (the explicit, silent OFF — the
+      kill switch);
+    * unset / whitespace-empty → ``True`` (the default);
     * any OTHER non-empty value → ``False`` with one loud
       ``lake_rust_render.fallback`` WARN (reason ``flag_unrecognised``)
       per process — a typo'd opt-in (``onn``, ``ture``) must be VISIBLE,
@@ -402,7 +405,8 @@ def lake_rust_render_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_render_disabled() -> bool:

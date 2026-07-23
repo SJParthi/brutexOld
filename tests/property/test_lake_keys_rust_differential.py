@@ -236,7 +236,7 @@ class TestRecoveryDifferential:
         for flag_on in (True, False):
             mp = _with_engaged_seam(env)
             if not flag_on:
-                mp.delenv(fsr.DATA_RUST_ENV, raising=False)
+                mp.setenv(fsr.DATA_RUST_ENV, "0")
             lkr.reset_lake_keys_rust_for_tests(remaining=0)
             try:
                 without = spot_recovery_candidates(underlying, exchange)

@@ -78,6 +78,26 @@ pytest.importorskip("lmdb")
 
 pytestmark = pytest.mark.chaos
 
+
+@pytest.fixture(autouse=True)
+def _pin_python_atomic_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the Python atomic-write arm for every chaos row.
+
+    These orchestrator-resilience tests inject faults (ENOSPC, read-only dir)
+    by monkeypatching the global :func:`os.replace` — they assert the run's
+    fail-soft WARN/abort behaviour when the durable commit fails. Under the
+    DEC-RUST-DEFAULT-ON-WAVE-001 default-ON posture the atomic commit routes
+    through the ``brutex-lake`` Rust twin, and in a wheel-BEARING chaos lane
+    the replace happens IN RUST — silently bypassing the Python monkeypatch so
+    the fault never lands. Pin the explicit ``"0"`` silent kill switch: the
+    Python arm is BIT-IDENTICAL to the Rust arm (the burn-in guarantee), so
+    the run behaviour is unchanged and the injected faults reach the site the
+    tests were written for. The Rust arm's own OSError propagation is covered
+    by the lake-locks parity lane.
+    """
+    monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
+
+
 #: D-6 traceability — test name → requirement/gap tokens.
 TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
     "test_r42_kill_before_flush_resume_bit_identical": ("R42", "R7"),

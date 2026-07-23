@@ -137,16 +137,18 @@ class TestFlagParsing:
             assert lrs.lake_rust_resample_enabled() is False
         assert logs == []
 
-    def test_unset_is_the_silent_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unset_is_the_silent_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Default ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23).
         monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
         with capture_logs() as logs:
-            assert lrs.lake_rust_resample_enabled() is False
+            assert lrs.lake_rust_resample_enabled() is True
         assert logs == []
 
-    def test_whitespace_is_the_silent_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_whitespace_is_the_silent_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Whitespace-blank ≡ unset ⇒ the default ON, silently (DEC-RUST-DEFAULT-ON-WAVE-001).
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "   ")
         with capture_logs() as logs:
-            assert lrs.lake_rust_resample_enabled() is False
+            assert lrs.lake_rust_resample_enabled() is True
         assert logs == []
 
     def test_junk_is_loud_off_warned_once(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -115,15 +115,17 @@ os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
 
 # DEC-STRATEGIES-RUST-COMBO-001 test hermeticity (the market-hours-guard
 # philosophy — hermetic against the AMBIENT ENVIRONMENT): the combo_rust
-# facade's flag (`BRUTEX_STRATEGIES_RUST_COMBO`, default OFF) is read per call
-# from the REAL ``os.environ``, so a developer/CI runner with the flag
-# exported truthy would RED every OFF-asserting test (the flag-OFF bomb-crate
-# spy + the combo.py OFF-arm byte-identity pins). The suite therefore runs
-# with the flag explicitly OFF (`setdefault` so an explicit outer choice
-# wins). The facade's OWN tests stay fully armed on both arms — the ON-arm
-# tests set the flag EXPLICITLY via ``monkeypatch.setenv`` (which overrides
-# this setdefault) — so this default disables ONLY the ambient env read,
-# never the tested law.
+# facade's flag (`BRUTEX_STRATEGIES_RUST_COMBO`, default ON since
+# DEC-RUST-DEFAULT-ON-WAVE-001) is read per call from the REAL
+# ``os.environ``, so an ambient export — either polarity — would flip
+# unrelated suites' arms. The suite therefore runs with the flag pinned to
+# the explicit "0" kill switch (`setdefault` so an explicit outer choice
+# wins) — the byte-identical oracle arm, wheel-state-independent in every
+# lane. The facade's OWN tests stay fully armed on both arms — the
+# default-is-ON pin uses ``monkeypatch.delenv`` and the ON-arm tests set
+# the flag EXPLICITLY via ``monkeypatch.setenv`` (both override this
+# setdefault) — so this default disables ONLY the ambient env read, never
+# the tested law.
 #
 # WHEEL-FREE DISCIPLINE: this file must stay importable in the wheel-LESS
 # lanes (lake-rust-parity installs only the brutex-lake wheel;
@@ -175,6 +177,103 @@ os.environ.setdefault("BRUTEX_ALPHA_GATE", "0")
 # env/runner explicitly and stay armed on both arms.
 os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
 
+# DEC-RUST-DEFAULT-ON-WAVE-001 hermeticity belt (the market-hours-guard
+# philosophy — hermetic against the AMBIENT ENVIRONMENT): the sweep-ops
+# facade's flag (`BRUTEX_SWEEP_OPS_RUST`, default ON since the wave) is read
+# per call from the REAL ``os.environ`` and routes 27 pure sweep-ops decision
+# laws across ~22 engine consumer modules (run_layout / sweep_identity /
+# sweep_progress / sweep_audit / ...). Under default-ON the Rust arm runs, so
+# each consumer's verbatim ``_*_python`` OFF-fallback branch (the LIVE parity
+# oracle — nothing deleted) is no longer exercised by the pre-existing engine
+# suites, dropping the `--cov=brutex.engine --cov-fail-under=100` static-list
+# gate below 100% (measured 99.69% — 30 lines across ~19 sweep-family modules).
+# Pin the suite to the explicit "0" kill switch (`setdefault` so an explicit
+# outer choice wins) — the byte-identical oracle arm, wheel-state-independent
+# in every lane; the facade's OWN tests set the flag / delenv EXPLICITLY (both
+# override this setdefault) and stay armed on both arms. Pinned literal (the
+# wheel-free discipline — `brutex.engine.sweep_ops_rust` transitively imports
+# the engine package, which hard-imports the wheels); drift-pinned equal to
+# ``sweep_ops_rust.SWEEP_OPS_RUST_ENV`` by
+# tests/unit/test_engine_sweep_ops_rust.py.
+os.environ.setdefault("BRUTEX_SWEEP_OPS_RUST", "0")
+
+# DEC-RUST-DEFAULT-ON-WAVE-001 hermeticity belt: `BRUTEX_RUST_FRONT` now
+# defaults to AUTO (unset => probe for a built `brutexd` binary; found =>
+# the Rust front topology). On a box WITH a locally built brutexd every
+# pre-existing `cmd_dashboard` test running flag-unset would silently flip
+# onto the Rust-front serve path (a host-toolchain flake class — the #1692
+# market-hours-guard philosophy: hermetic against the AMBIENT environment,
+# never the tested law). Pin the suite explicitly OFF (`setdefault` so an
+# explicit outer choice wins); the rust-front suites set the flag / inject
+# probes explicitly and stay armed on every arm (off / auto / on / junk).
+# Pinned literal — drift-pinned equal to `rust_front.ENV_RUST_FRONT` by
+# tests/unit/test_rust_front.py.
+os.environ.setdefault("BRUTEX_RUST_FRONT", "off")
+
+# DEC-RUST-DEFAULT-ON-WAVE-001 hermeticity belt — the FULL flipped-facade set
+# (the market-hours-guard philosophy — hermetic against the AMBIENT
+# ENVIRONMENT). Every seam below is read per call from the REAL ``os.environ``
+# and, since the wave, defaults to ON: the Rust arm therefore runs by default,
+# so each module's verbatim ``_*_python`` OFF-fallback branch (the LIVE parity
+# oracle — nothing deleted) stops being exercised by the pre-existing suites in
+# any lane where the crate's wheel is installed (build-wheels installs ALL of
+# them in CI). That (a) drops the per-module ``--cov-fail-under=100`` static/
+# discovery gates below 100% on the dead oracle branch, and (b) flips un-pinned
+# tests across the sharded suites onto the Rust arm. Pin every flipped flag to
+# its explicit "0" kill switch (``setdefault`` so an explicit outer choice
+# wins) — the byte-identical oracle arm, wheel-state-independent in every lane,
+# restoring the proven-green pre-wave default-OFF for un-pinned tests. Each
+# facade's OWN tests stay fully armed on both arms: the default-is-ON pin uses
+# ``monkeypatch.delenv`` (verified present in every facade's dedicated test
+# file) and the ON-arm tests set the flag EXPLICITLY via ``monkeypatch.setenv``
+# — both override this setdefault — so this default disables ONLY the ambient
+# env read, never the tested law. Pinned literals (the wheel-free discipline —
+# importing any of these facades transitively hard-imports the engine/data
+# packages + their wheels); each is drift-pinned equal to its module's own
+# ``*_ENV`` constant by that facade's dedicated test.
+for _wave_flag in (
+    # brutex-core config seams (money / paths / dotenv / hwenv / backupenv)
+    "BRUTEX_CORE_RUST_MONEY",
+    "BRUTEX_CORE_RUST_PATHS",
+    "BRUTEX_CORE_RUST_DOTENV",
+    "BRUTEX_CORE_RUST_HWENV",
+    "BRUTEX_CORE_RUST_BACKUPENV",
+    # brutex-ops facades
+    "BRUTEX_BACKUP_RUST",
+    "BRUTEX_CROSSVERIFY_RUST",
+    "BRUTEX_NIGHTLY_RUST",
+    # brutex-data / fno-math leaf seams
+    "BRUTEX_DATA_RUST",
+    "BRUTEX_GREEKS_RUST_BATCH",
+    "BRUTEX_METRICS_RUST_FOLD",
+    "BRUTEX_STATS_RUST",
+    "BRUTEX_RANK_CVAR_RUST",
+    "BRUTEX_META_GATE",
+    "BRUTEX_NOTIFY_RUST",
+    "BRUTEX_OBSERVABILITY_RUST",
+    # brutex-lake family
+    "BRUTEX_LAKE_RUST_RENDER",
+    "BRUTEX_LAKE_RUST_MERGE",
+    "BRUTEX_LAKE_RUST_LOCKS",
+    "BRUTEX_LAKE_RUST_RESAMPLE",
+    "BRUTEX_LAKE_RUST_RESAMPLE_DAILY",
+    "BRUTEX_LAKE_RUST_STATS_MANIFEST",
+    "BRUTEX_LAKE_RUST_WINDOW_LEDGER",
+    "BRUTEX_LAKE_RUST_RAW_INTEGRITY",
+    "BRUTEX_LAKE_RUST_INTERIOR_GAP",
+    "BRUTEX_LAKE_RUST_PARTIAL_WINDOW",
+    # engine / fno-math / brutex-core leaf seams also flipped default-ON by
+    # DEC-RUST-DEFAULT-ON-WAVE-001 (the audit found these three missing from
+    # the belt — an unset flag now resolves ON, so an OFF-arm parity/golden
+    # that pops/deletes-to-unset would silently route to Rust; the belt pins
+    # them OFF-by-default so the OFF oracle arm stays genuinely exercised).
+    "BRUTEX_SWEEP_RUST_STAGE1A",
+    "BRUTEX_CORE_RUST_MODELS",
+    "BRUTEX_OPTCOST_TAILS_RUST",
+):
+    os.environ.setdefault(_wave_flag, "0")
+del _wave_flag
+
 # DEC-BOX-AUTODEPLOY-LANE-001 §12 hermeticity (the env_preflight REGISTRY
 # flags): a HOST env carrying `BRUTEX_SKIP_WHEEL_FRESHNESS` (the CI wheel
 # escape) or a stale `BRUTEX_FILL_MODE` would populate every pre-existing
@@ -188,14 +287,17 @@ os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
 os.environ.pop("BRUTEX_SKIP_WHEEL_FRESHNESS", None)
 os.environ.pop("BRUTEX_FILL_MODE", None)
 
-# DEC-ABSTAIN-GATE-STREAM-001 + DEC-META-LABEL-ANNOTATE-001 hermeticity: a
-# host env carrying the DORMANT `BRUTEX_ABSTAIN_GATE_INSIM` knob would trip
-# the sweep-launch refusal across every sweep-all suite, and an ambient
-# `BRUTEX_META_GATE` would flip the default-OFF Rust meta facade ON for
-# unrelated tests. POP both (the fill-mode discipline above — the meta
-# suites inject env explicitly on both arms).
+# DEC-ABSTAIN-GATE-STREAM-001 hermeticity: a host env carrying the DORMANT
+# `BRUTEX_ABSTAIN_GATE_INSIM` knob (any set value trips the sweep-launch
+# refusal across every sweep-all suite) must be truly UNSET — POP it, the
+# fill-mode discipline above.
+#
+# `BRUTEX_META_GATE` is deliberately NOT popped: under
+# DEC-RUST-DEFAULT-ON-WAVE-001 an unset flag resolves default-ON, so popping
+# it would UNDO the wave OFF-belt (`setdefault "0"` above) and route the Rust
+# meta facade ON for every unrelated suite. The belt pins it "0"
+# (OFF-by-default) and the meta suites inject env explicitly on both arms.
 os.environ.pop("BRUTEX_ABSTAIN_GATE_INSIM", None)
-os.environ.pop("BRUTEX_META_GATE", None)
 
 
 @pytest.fixture(autouse=True)

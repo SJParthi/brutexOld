@@ -1,9 +1,10 @@
-"""combo_rust — the default-OFF Rust routing facade for combo.py's two PURE byte laws.
+"""combo_rust — the default-ON Rust routing facade for combo.py's two PURE byte laws.
 
-DEC-STRATEGIES-RUST-COMBO-001 (T16 PR-1). Routes the TWO pure combo-identity
-laws through the ``rust/brutex-strategies`` crate
+DEC-STRATEGIES-RUST-COMBO-001 (T16 PR-1; default flipped ON by
+DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23). Routes the
+TWO pure combo-identity laws through the ``rust/brutex-strategies`` crate
 (``brutex_strategies.canonical_json`` + ``brutex_strategies.first_unit_separator``)
-behind the default-OFF ``BRUTEX_STRATEGIES_RUST_COMBO`` flag, with the verbatim
+behind the ``BRUTEX_STRATEGIES_RUST_COMBO`` flag, with the verbatim
 Python law retained as the LIVE parity oracle (the ADR-0020 / PR-1
 ``lake_rust_render`` template; the per-law burn-in + injected-``python_law``
 shape of ``brutex/data/window_ledger_rust.py``):
@@ -43,11 +44,13 @@ oracle with the ``"non-exact str"`` marker → ``nonexact_key_refused``.
 
 ## The fail-closed layers (the PR-1 template, adapted)
 
-* **Flag** — ``BRUTEX_STRATEGIES_RUST_COMBO`` default OFF; truthy → ON,
-  falsy → OFF, any other non-empty value → OFF with ONE loud
-  ``combo_rust.fallback`` WARN (``flag_unrecognised``). OFF returns the
-  oracle's result directly — the crate is never imported, so the default
-  path is byte-identical to pre-facade behaviour (bomb-crate spy-pinned).
+* **Flag** — ``BRUTEX_STRATEGIES_RUST_COMBO`` default ON (per
+  DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23); truthy →
+  ON, falsy → OFF (the explicit kill switch), any other non-empty value →
+  OFF with ONE loud ``combo_rust.fallback`` WARN (``flag_unrecognised``).
+  OFF returns the oracle's result directly — the crate is never imported,
+  so the explicit-OFF path is byte-identical to pre-facade behaviour
+  (bomb-crate spy-pinned).
 * **Import guard / SYMBOL handshake** — the laws are polars-free, so the
   PR-1 polars VERSION guard is meaningless here (a DELIBERATE, disclosed
   deviation — the #1914/#1915 precedent): an absent wheel latches
@@ -117,7 +120,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; junk fails loud-OFF).
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; falsy is the
+#: explicit kill switch; junk fails loud-OFF).
 STRATEGIES_RUST_COMBO_ENV: Final[str] = "BRUTEX_STRATEGIES_RUST_COMBO"
 
 #: Engaged calls PER LAW that are bit-compared against the live Python
@@ -215,14 +219,15 @@ def env_flag_tristate(raw: str) -> bool | None:
 
 
 def combo_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_STRATEGIES_RUST_COMBO`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_STRATEGIES_RUST_COMBO`` (default ON, junk loud-OFF).
 
-    Truthy literal → ``True``; falsy literal → ``False``; unset/blank →
-    ``False`` (the default); any OTHER non-empty value → ``False`` with one
-    ``combo_rust.fallback`` WARN (``flag_unrecognised``) per process. Read
-    per call so spawn workers resolve their own environment (the sibling
-    facades' law, byte-identical vocabulary via the local
-    :func:`env_flag_tristate` twin).
+    Truthy literal → ``True``; falsy literal → ``False`` (the explicit kill
+    switch); unset/blank → ``True`` (the default — ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23); any OTHER
+    non-empty value → ``False`` with one ``combo_rust.fallback`` WARN
+    (``flag_unrecognised``) per process. Read per call so spawn workers
+    resolve their own environment (the sibling facades' law, byte-identical
+    vocabulary via the local :func:`env_flag_tristate` twin).
     """
     raw = os.environ.get(STRATEGIES_RUST_COMBO_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -230,7 +235,8 @@ def combo_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_combo_disabled() -> bool:

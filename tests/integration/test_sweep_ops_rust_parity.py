@@ -341,7 +341,10 @@ class TestGateFragmentBeyondCrateRouting:
             raise AssertionError("flag OFF must never consult the crate")
 
         monkeypatch.setattr(brutex_sweep_ops, "gate_config_fragment", _bomb)
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Explicit "0" (kill switch), NOT delenv-to-unset — under
+        # DEC-RUST-DEFAULT-ON-WAVE-001 an unset flag resolves default-ON, which
+        # would route to the bombed crate. "0" pins the genuine OFF/oracle arm.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         grid = _FragmentGrid(overfit=OverfitGateConfig(dsr_min=0.95), max_sl_hit_rate=0.4)
         assert _gate_config_fragment(grid) == _gate_config_fragment_python(grid)
@@ -402,7 +405,10 @@ class TestSliceOneBCrateDriftPins:
 class TestProgressDerivedParity:
     def test_snapshot_to_dict_parity_flag_on_vs_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         snap = _snapshot()
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = snap.to_dict()
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
@@ -475,7 +481,10 @@ class TestSlaGuardParity:
         acknowledge: bool,
         decision: SlaDecision,
     ) -> None:
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = check_sweep_sla(tuple_count, acknowledge=acknowledge, env={})
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
@@ -532,7 +541,10 @@ class TestRankPlanParity:
                 "budget_bytes": 1024,
             },
         ]
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = [plan_rank_memory(**case) for case in cases]  # type: ignore[arg-type]
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
@@ -556,7 +568,10 @@ class TestPreflightParity:
             ("A", "1day"): "fresh",
             ("A", "5minute"): "weird",
         }
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off_missing = preflight_slices(sizes, symbols=symbols, intervals=intervals)
         off_fresh = preflight_derived_freshness(verdicts)
@@ -579,7 +594,10 @@ class TestLivenessParity:
                 progress_verdict({}, now_wall=1100.0),  # legacy → UNKNOWN (pre-tail)
             ]
 
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = verdicts()
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
@@ -739,7 +757,10 @@ class TestAuditChainParity:
         on_log = tmp_path / "on.jsonl"
         _write_chain(on_log)
         assert sweep_ops_rust_disabled() is False
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # the "OFF" arm run Rust too (vacuous Rust-vs-Rust). "0" is the kill
+        # switch — the genuine Python-oracle arm the parity compare needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off_log = tmp_path / "off.jsonl"
         _write_chain(off_log)
@@ -794,7 +815,10 @@ class TestAuditChainParity:
             verify_chain(log)
         assert sweep_ops_rust_disabled() is False
 
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # the "OFF" arm run Rust too (vacuous Rust-vs-Rust). "0" is the kill
+        # switch — the genuine Python-oracle arm the parity compare needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         with pytest.raises(SweepAuditChainCorruption) as off_exc:
             verify_chain(log)
@@ -841,7 +865,10 @@ class TestStampVerdictParity:
 
         on = verdicts()
         assert sweep_ops_rust_disabled() is False
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # the "OFF" arm run Rust too (vacuous Rust-vs-Rust). "0" is the kill
+        # switch — the genuine Python-oracle arm the parity compare needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = verdicts()
         assert on == off
@@ -920,7 +947,10 @@ class TestChainLinkStateParity:
 
         on = maps()
         assert sweep_ops_rust_disabled() is False
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # the "OFF" arm run Rust too (vacuous Rust-vs-Rust). "0" is the kill
+        # switch — the genuine Python-oracle arm the parity compare needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         assert maps() == on
 
@@ -965,7 +995,10 @@ class TestCountViolationsParity:
 
         on = fired_details()
         assert sweep_ops_rust_disabled() is False
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # the "OFF" arm run Rust too (vacuous Rust-vs-Rust). "0" is the kill
+        # switch — the genuine Python-oracle arm the parity compare needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = fired_details()
         assert on == off
@@ -1069,7 +1102,10 @@ class TestExitStatusParity:
     ) -> None:
         on = self._write_lifecycle(tmp_path / "on")
         assert sweep_ops_rust_disabled() is False
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # the "OFF" arm run Rust too (vacuous Rust-vs-Rust). "0" is the kill
+        # switch — the genuine Python-oracle arm the parity compare needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = self._write_lifecycle(tmp_path / "off")
         assert on == off
@@ -1104,7 +1140,10 @@ class TestQuarantineOrdinalParity:
         on = self._quarantine_twice(tmp_path / "on")
         assert on == ["runx-1", "runx-2"]  # monotonic ordinals via the crate fold
         assert sweep_ops_rust_disabled() is False
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # the "OFF" arm run Rust too (vacuous Rust-vs-Rust). "0" is the kill
+        # switch — the genuine Python-oracle arm the parity compare needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         assert self._quarantine_twice(tmp_path / "off") == on
 
@@ -1160,7 +1199,10 @@ class TestCheckpointParity:
         on = self._drive_store(tmp_path / "on.json")
         assert on[:3] == [True, True, False]
         assert sweep_ops_rust_disabled() is False
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # the "OFF" arm run Rust too (vacuous Rust-vs-Rust). "0" is the kill
+        # switch — the genuine Python-oracle arm the parity compare needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = self._drive_store(tmp_path / "off.json")
         # Byte-equal checkpoints + identical outcomes INCLUDING the refusal
@@ -1234,7 +1276,10 @@ class TestDetachProbeParity:
     def test_probe_parity_flag_on_vs_off(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = self._drive(tmp_path / "off")
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
@@ -1344,7 +1389,10 @@ class TestSchedulerParity:
     def test_scheduler_parity_flag_on_vs_off_including_audit_bytes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = self._drive()
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
@@ -1500,7 +1548,10 @@ class TestAprioriJoinParity:
                 for k in (1, 2, 3)
             ]
 
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = _drive()
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
@@ -1527,7 +1578,10 @@ class TestAprioriJoinParity:
                 )
             return str(exc.value)
 
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = _message()
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
@@ -1578,7 +1632,10 @@ class TestRunCoreParity:
             budgets = [per_tuple_diffcheck_budget(k, t) for k, t in ((0, 5), (7, 3), (200, 1))]
             return strides + budgets
 
-        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        # Wave flip: unset resolves default-ON, so a bare delenv would make
+        # this "off" arm run Rust too — a vacuous Rust-vs-Rust compare. "0"
+        # is the kill switch: the genuine Python-oracle arm parity needs.
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "0")
         reset_sweep_ops_rust_for_tests()
         off = _drive()
         monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")

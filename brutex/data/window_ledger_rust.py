@@ -153,10 +153,11 @@ class MergeKeyLaw(Protocol):
 
 
 def window_ledger_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_WINDOW_LEDGER`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_LAKE_RUST_WINDOW_LEDGER`` (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23; junk loud-OFF).
 
     Truthy literal → ``True``; falsy literal → ``False``; unset/blank →
-    ``False`` (the default); any OTHER non-empty value → ``False`` with one
+    ``True`` (the default); any OTHER non-empty value → ``False`` with one
     ``window_ledger_rust.fallback`` WARN (``flag_unrecognised``) per
     process. Read per call so spawn workers resolve their own environment
     (the sibling facade's law, byte-identical vocabulary via the imported
@@ -168,7 +169,8 @@ def window_ledger_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_window_ledger_disabled() -> bool:

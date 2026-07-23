@@ -118,8 +118,16 @@ def _golden_stats() -> lsm.DatasetStats:
 
 
 def _python_body(stats: lsm.DatasetStats) -> str:
-    """The stdlib arm — flag OFF (the module-level env is never set here)."""
-    assert os.environ.get(lrs.LAKE_RUST_STATS_ENV) is None
+    """The stdlib arm — the flag must RESOLVE OFF so ``render_shard`` runs
+    the stdlib body.
+
+    Under the default-ON wave (DEC-RUST-DEFAULT-ON-WAVE-001) an *unset* flag
+    routes to the crate, so the OFF context is "resolves falsy" (the suite
+    belt's explicit ``'0'``, pinned per-test by ``_off_arm_baseline`` below),
+    NOT "``is None``" — the pre-wave assumption. Assert the resolved verdict,
+    not the raw env value.
+    """
+    assert not lrs.lake_rust_stats_enabled()
     return lsm.render_shard(stats)
 
 
@@ -131,12 +139,21 @@ def _rust_arm() -> Generator[None]:
     armed burn-in would cushion a divergence by shipping oracle bytes
     (the ``test_lake_rust_render_parity`` fresh-process-view law).
     """
+    # Save-and-restore the PRIOR value (the ``_off_arm_baseline`` '0'), not a
+    # bare pop-to-unset: under the default-ON wave an unset flag routes to the
+    # crate, so popping would leak ON into a following ``_python_body`` (e.g.
+    # the next hypothesis example in the same test invocation, where the
+    # per-test autouse baseline does not re-run). DEC-RUST-DEFAULT-ON-WAVE-001.
+    prior = os.environ.get(lrs.LAKE_RUST_STATS_ENV)
     os.environ[lrs.LAKE_RUST_STATS_ENV] = "1"
     lrs.reset_lake_rust_stats_for_tests(remaining=0)
     try:
         yield
     finally:
-        os.environ.pop(lrs.LAKE_RUST_STATS_ENV, None)
+        if prior is None:
+            os.environ.pop(lrs.LAKE_RUST_STATS_ENV, None)
+        else:
+            os.environ[lrs.LAKE_RUST_STATS_ENV] = prior
         lrs.reset_lake_rust_stats_for_tests()
 
 
@@ -159,6 +176,21 @@ def _assert_parity(stats: lsm.DatasetStats) -> None:
         hashlib.sha256(rust_body.encode("utf-8")).hexdigest()
         == hashlib.sha256(python_body.encode("utf-8")).hexdigest()
     )
+
+
+@pytest.fixture(autouse=True)
+def _off_arm_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deterministic OFF baseline per test under the default-ON wave.
+
+    The suite-wide conftest belt (DEC-RUST-DEFAULT-ON-WAVE-001) sets
+    ``BRUTEX_LAKE_RUST_STATS_MANIFEST='0'`` so an unset flag no longer means
+    OFF (the wave default is ON). ``_rust_arm`` pops the flag to *unset* on
+    exit, which — under the wave — would leak the ON default into the next
+    test's ``_python_body``. Pin the belt's explicit ``'0'`` before every
+    test so the stdlib arm is deterministic regardless of test order; the
+    ``_rust_arm`` context still sets ``'1'`` explicitly for the crate arm.
+    """
+    monkeypatch.setenv(lrs.LAKE_RUST_STATS_ENV, "0")
 
 
 class TestShardByteParity:
