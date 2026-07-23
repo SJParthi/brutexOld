@@ -445,7 +445,9 @@ def _arm_error(
     monkeypatch: pytest.MonkeyPatch, bars: list[CandleBar], *, flag: str | None, **kwargs: Any
 ) -> BaseException:
     if flag is None:
-        monkeypatch.setenv(STAGE1A_RUST_ENV, "0")  # OFF arm = the Python oracle (default flipped ON)
+        monkeypatch.setenv(
+            STAGE1A_RUST_ENV, "0"
+        )  # OFF arm = the Python oracle (default flipped ON)
     else:
         monkeypatch.setenv(STAGE1A_RUST_ENV, flag)
     with pytest.raises((ValueError, OverflowError)) as excinfo:
