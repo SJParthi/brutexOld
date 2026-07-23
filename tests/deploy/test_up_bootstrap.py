@@ -161,26 +161,102 @@ def test_pull_critical_deps_verified_individually(up_text: str) -> None:
 # --------------------------------------------------------------------------- #
 # Step 3 — Rust wheels: probe-first build, honest hard stop without cargo.
 # --------------------------------------------------------------------------- #
-def test_wheels_built_only_when_missing(up_text: str) -> None:
-    """Both wheels are import-probed BEFORE any maturin build (idempotent re-run)."""
+def _up_wheel_specs(up_text: str) -> dict[str, bool]:
+    """Parse up.sh's ``WHEEL_SPECS`` block → ``{crate_dir: required}``.
+
+    Each spec line is ``<module> <rel-path> <required|optional>``; the whole
+    set is the single-quoted heredoc string assigned to ``WHEEL_SPECS=``. This
+    is the source both up.sh (build loop) and the drift pins read.
+    """
+    block = up_text.split("WHEEL_SPECS='", 1)[1].split("'", 1)[0]
+    specs: dict[str, bool] = {}
+    for line in block.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        _module, rel_path, tier = parts
+        specs[rel_path] = tier == "required"
+    return specs
+
+
+def test_wheels_import_probed_before_any_build(up_text: str) -> None:
+    """Every kernel is import-probed BEFORE any maturin build (idempotent re-run).
+
+    The Step-3 loop probes ``"$VPY" -c "import $module"`` for each spec first,
+    then builds only the missing ones — so a re-run on an all-importable box
+    skips the whole build (``all Rust kernels already importable``).
+    """
     build = up_text.index('"$VENV/bin/maturin" develop --release')
-    assert up_text.index('"$VPY" -c "import fno_math"') < build
-    assert up_text.index('"$VPY" -c "import trading_core"') < build
-    assert "rust/fno-math" in up_text
-    assert "rust/trading-core" in up_text
+    assert up_text.index('"$VPY" -c "import $module"') < build
+    assert "all Rust kernels already importable" in up_text
+    # Every required crate path is present in the spec block, verbatim.
+    for crate in (
+        "rust/fno-math",
+        "rust/trading-core",
+        "rust/brutex-lake",
+        "rust/brutex-identity",
+        "rust/brutex-refine",
+        "rust/brutex-pull-state",
+    ):
+        assert crate in up_text, f"{crate} missing from up.sh WHEEL_SPECS"
     assert "develop --release" in up_text
 
 
-def test_missing_cargo_with_missing_wheels_is_an_honest_hard_stop(up_text: str) -> None:
-    """Wheels-missing + cargo-absent fails LOUDLY with the rustup one-liner.
+def test_up_sh_wheel_set_mirrors_box_update(up_text: str) -> None:
+    """up.sh's WHEEL_SPECS == the canonical ``box_update.WHEEL_SET`` (crate → required).
 
-    The wheels ARE required for the dashboard + pull path
-    (``brutex.indicators.*`` import ``trading_core`` at module top), so a
+    The single source of truth for what the turnkey path builds is
+    ``brutex.nightly.box_update.WHEEL_SET`` (itself Makefile-mirrored, per
+    ``test_wheel_set_is_the_makefile_mirror``). This anti-drift pin makes up.sh
+    move with it FOREVER — the exact class of bug that crashed a stale box with
+    ``ModuleNotFoundError: No module named 'brutex_identity'`` (up.sh built only
+    fno_math + trading_core while ``brutex.engine.results_store`` hard-imports
+    ``brutex_identity``, DEC-RUST-RUNID-STORES-001) can never recur silently.
+    """
+    from brutex.nightly.box_update import WHEEL_SET
+
+    up_specs = _up_wheel_specs(up_text)
+    canonical = {spec.crate_dir: spec.required for spec in WHEEL_SET}
+    assert up_specs == canonical, (
+        "up.sh WHEEL_SPECS drifted from the canonical box_update.WHEEL_SET — "
+        f"up.sh has {up_specs}, WHEEL_SET has {canonical}. Update up.sh Step 3 "
+        "(and the Makefile `run` target) so all three move together."
+    )
+
+
+def test_required_wheel_build_is_a_hard_stop_optional_degrades(up_text: str) -> None:
+    """A REQUIRED wheel build failure hard-stops; the OPTIONAL one degrades.
+
+    A required-crate build failure must call ``failhard`` (the box cannot boot
+    without it); brutex_feed's must ``degrade`` (BRUTEX_FEED_RUST is default-OFF,
+    the feed falls back to the Python oracle and the boot continues).
+    """
+    step3 = up_text.split('say "Step 3/6', 1)[1].split('say "Step 4/6', 1)[0]
+    # The required loop hard-stops on a maturin failure.
+    assert "for spec in $missing_required" in step3
+    assert 'failhard "maturin develop --release failed for $crate' in step3
+    # The optional loop degrades (never failhard).
+    assert "for spec in $missing_optional" in step3
+    assert 'degrade "optional kernel $crate failed to build' in step3
+    # Every required kernel is import-smoked after the build (no half-built boot).
+    assert "smoke_failed" in step3
+    assert "required wheels built but still not importable" in step3
+
+
+def test_missing_cargo_with_missing_wheels_is_an_honest_hard_stop(up_text: str) -> None:
+    """Required-wheels-missing + cargo-absent fails LOUDLY with the rustup one-liner.
+
+    The required wheels ARE needed for the dashboard + pull path
+    (``brutex.engine.results_store`` imports ``brutex_identity`` and
+    ``brutex.indicators.*`` import ``trading_core`` at module top), so a
     "clean skip" would be an illusion — the script must say so and stop.
     """
     assert "sh.rustup.rs" in up_text
     assert "cargo NOT found" in up_text
     assert "the dashboard cannot import without them" in up_text
+    # The hard stop is gated on a REQUIRED wheel being missing (a box with only
+    # the optional brutex_feed missing + no cargo still boots — degraded).
+    assert '[ -n "$missing_required" ] && [ -z "$CARGO_BIN" ]' in up_text
 
 
 # --------------------------------------------------------------------------- #
