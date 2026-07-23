@@ -114,12 +114,13 @@ class TestFlagParsing:
         monkeypatch.setenv(money_rust.MONEY_RUST_ENV, raw)
         assert money_rust.money_rust_enabled() is False
 
-    def test_unset_and_whitespace_default_off_silently(
+    def test_unset_and_whitespace_default_on_silently(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        assert money_rust.money_rust_enabled() is False
+        # The DEC-RUST-DEFAULT-ON-WAVE-001 default pin: unset/blank ⇒ ON.
+        assert money_rust.money_rust_enabled() is True
         monkeypatch.setenv(money_rust.MONEY_RUST_ENV, "   ")
-        assert money_rust.money_rust_enabled() is False
+        assert money_rust.money_rust_enabled() is True
 
     def test_junk_fails_loud_off_and_warns_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(money_rust.MONEY_RUST_ENV, "onn")
@@ -228,8 +229,10 @@ class TestFlagOffNeverTouchesCrate:
     def test_off_arm_is_byte_identical_and_crate_untouched(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Flag unset + a bomb crate installed + the resolver itself
-        # booby-trapped: the OFF arm must never even resolve.
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001) + a bomb crate installed + the
+        # resolver itself booby-trapped: the OFF arm must never even resolve.
+        monkeypatch.setenv(money_rust.MONEY_RUST_ENV, "0")
         monkeypatch.setitem(sys.modules, "brutex_core", _bomb_crate())
 
         def _resolver_bomb() -> types.ModuleType | None:
