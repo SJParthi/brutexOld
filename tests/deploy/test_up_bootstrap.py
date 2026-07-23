@@ -182,6 +182,24 @@ def _up_wheel_specs(up_text: str) -> dict[str, tuple[str, bool]]:
     return specs
 
 
+def _up_wheel_specs_ordered(up_text: str) -> list[tuple[str, str, bool]]:
+    """Parse ``WHEEL_SPECS`` → ordered ``[(module, rel-path, required), …]``.
+
+    The file-order sibling of :func:`_up_wheel_specs`; the drift pin uses it to
+    assert up.sh's build ORDER against ``box_update.WHEEL_SET`` so a re-ordered
+    (but same-membership) WHEEL_SPECS is caught too.
+    """
+    block = up_text.split("WHEEL_SPECS='", 1)[1].split("'", 1)[0]
+    ordered: list[tuple[str, str, bool]] = []
+    for line in block.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        module, rel_path, tier = parts
+        ordered.append((module, rel_path, tier == "required"))
+    return ordered
+
+
 def test_wheels_import_probed_before_any_build(up_text: str) -> None:
     """Every kernel is import-probed BEFORE any maturin build (idempotent re-run).
 
@@ -226,7 +244,18 @@ def test_up_sh_wheel_set_mirrors_box_update(up_text: str) -> None:
         "(import-module, required); a mismatch is a crate add/remove, a wrong "
         "required/optional tier, OR a module-name typo (which would otherwise "
         "only surface at runtime via the import-smoke failhard). Update up.sh "
-        "Step 3 (and the Makefile `run` target) so all three move together."
+        "Step 3 (and the Makefile `run-raw` target) so all three move together."
+    )
+    # Stricter: also pin ORDER — up.sh's WHEEL_SPECS lists the same crates in
+    # the same sequence as box_update.WHEEL_SET, so the "byte-for-byte /
+    # WHEEL_SET order" claim in up.sh's header is enforced, not merely asserted.
+    up_order = _up_wheel_specs_ordered(up_text)
+    canonical_order = [(spec.name, spec.crate_dir, spec.required) for spec in WHEEL_SET]
+    assert up_order == canonical_order, (
+        "up.sh WHEEL_SPECS ORDER drifted from box_update.WHEEL_SET — "
+        f"up.sh order {up_order}, WHEEL_SET order {canonical_order}. Each entry "
+        "is (import-module, rel-path, required); reorder up.sh Step 3's "
+        "WHEEL_SPECS lines to match WHEEL_SET so the byte-for-byte claim holds."
     )
 
 

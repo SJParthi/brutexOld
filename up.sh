@@ -22,8 +22,8 @@
 #               + pull path (brutex.engine.results_store imports brutex_identity;
 #               brutex.indicators.{pivots,fib_levels,ema} import trading_core at
 #               module top; brutex.strategies.combo imports fno_math — the same
-#               reason the Makefile `run` target + box_update.WHEEL_SET build the
-#               whole set), so a required-wheel-missing + cargo-absent state is an
+#               reason the Makefile `run-raw` target + box_update.WHEEL_SET build
+#               the whole set), so a required-wheel-missing + cargo-absent state is an
 #               HONEST hard stop with the rustup one-liner, not a silent skip.
 #               This MIRRORS brutex/nightly/box_update.py WHEEL_SET byte-for-byte
 #               (drift-pinned in tests/deploy/test_up_bootstrap.py).
@@ -357,10 +357,11 @@ say "Step 3/6 — Rust PyO3 wheels (the canonical WHEEL_SET)"
 # pull-state plane imports brutex_pull_state. So a REQUIRED-wheel-missing +
 # cargo-absent state is an HONEST hard stop with the rustup one-liner, not a
 # silent skip. This set MIRRORS the canonical WHEEL_SET
-# (brutex/nightly/box_update.py) + the Makefile `run` target byte-for-byte —
-# drift-pinned by tests/deploy/test_up_bootstrap.py so it can never go stale
-# again. brutex_feed is the ONE OPTIONAL kernel (BRUTEX_FEED_RUST default-OFF;
-# a build failure degrades to the Python oracle, the boot continues).
+# (brutex/nightly/box_update.py) + the Makefile `run-raw` target byte-for-byte
+# (module + rel-path + tier + ORDER) — drift-pinned by
+# tests/deploy/test_up_bootstrap.py so it can never go stale again. brutex_feed
+# is the ONE OPTIONAL kernel (BRUTEX_FEED_RUST default-OFF; a build failure
+# degrades to the Python oracle, the boot continues).
 #
 # One spec per line: `<module> <rel-path> <required|optional>` (WHEEL_SET order).
 WHEEL_SPECS='fno_math rust/fno-math required
@@ -402,6 +403,12 @@ else
   fi
   if [ -n "$missing_required" ] && [ -z "$CARGO_BIN" ]; then
     failhard "required wheels missing ($missing_required) and cargo NOT found — the dashboard cannot import without them (brutex.engine.results_store imports brutex_identity, brutex.indicators.* import trading_core at module top). fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   — then restart the shell (or: source \$HOME/.cargo/env) and re-run ./up.sh"
+  fi
+  # Optional kernel missing + cargo absent: no build can run, so say so ONCE
+  # (the cargo-present path degrades inside the optional loop below; this closes
+  # the one branch where an unbuilt optional wheel would otherwise be silent).
+  if [ -z "$CARGO_BIN" ] && [ -n "$missing_optional" ]; then
+    degrade "optional Rust kernel(s) not built ($missing_optional) — cargo NOT found; BRUTEX_FEED_RUST is default-OFF so the feed degrades to its Python oracle and the boot continues. To build it: install rust (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh), then re-run ./up.sh"
   fi
   if [ -n "$CARGO_BIN" ]; then
     [ -x "$VENV/bin/maturin" ] || "$VPY" -m pip install --quiet maturin \
