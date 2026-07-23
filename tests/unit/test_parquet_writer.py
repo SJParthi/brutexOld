@@ -436,6 +436,11 @@ class TestWriterErrors:
         def _fail_replace(src: str, dst: str) -> None:
             raise OSError("simulated replace failure")
 
+        # Python-arm fault injection (the #1912-disclosed os.replace seam):
+        # pin the arm via the "0" kill switch now that BRUTEX_LAKE_RUST_LOCKS
+        # defaults ON (DEC-RUST-DEFAULT-ON-WAVE-001); the crate-arm twins
+        # live in tests/unit/test_lake_rust_locks.py.
+        monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
         monkeypatch.setattr("brutex.data.atomic_io.os.replace", _fail_replace)
         writer = ParquetWriter(lake_root=tmp_path)
         with pytest.raises(OSError, match="simulated"):

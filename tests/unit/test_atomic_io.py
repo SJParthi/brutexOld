@@ -178,6 +178,12 @@ def test_atomic_write_simple_propagates_raw_enospc_not_halt(
     def _enospc(_src: str, _dst: str) -> None:
         raise OSError(errno.ENOSPC, "No space left on device")
 
+    # This is the PYTHON-ARM fault injection (the #1912-disclosed
+    # os.replace-monkeypatch seam) — pin the arm via the explicit "0" kill
+    # switch now that BRUTEX_LAKE_RUST_LOCKS defaults ON
+    # (DEC-RUST-DEFAULT-ON-WAVE-001); the ON-arm twin lives in
+    # tests/unit/test_lake_rust_locks.py.
+    monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
     monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
     with pytest.raises(OSError) as exc_info:
         atomic_write_simple(dest=tmp_path / "x", write_to=lambda tmp: tmp.write_bytes(b"d"))

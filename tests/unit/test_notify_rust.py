@@ -187,7 +187,13 @@ class TestTristateMirrorPin:
         # import sweep_alerts at module level — an outright cycle) — so its
         # inline vocabulary is mirror-PINNED instead (the feed_rust shape;
         # the engine import happens ONLY inside this test body).
-        from brutex.engine import sweep_lookahead
+        #
+        # importorskip (the test_backup_rust.py house pattern): the engine
+        # __init__ chain now imports the REQUIRED `brutex_identity` wheel at
+        # module scope (DEC-RUST-RUNID-STORES-001) — in a wheel-less parity
+        # lane that raises ModuleNotFoundError, so this pin skips gracefully
+        # there while staying live in main CI (where every wheel is built).
+        sweep_lookahead = pytest.importorskip("brutex.engine.sweep_lookahead")
 
         assert nr._TRUTHY == sweep_lookahead._TRUTHY  # pyright: ignore[reportPrivateUsage]
         assert nr._FALSY == sweep_lookahead._FALSY  # pyright: ignore[reportPrivateUsage]

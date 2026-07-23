@@ -208,6 +208,11 @@ class TestLoadSaveState:
         def _raise(src: object, dst: object) -> None:
             raise OSError(28, "No space left on device")
 
+        # Python-arm commit seam (os.replace fault injection/spy): pin via the
+        # "0" kill switch — BRUTEX_LAKE_RUST_LOCKS defaults ON
+        # (DEC-RUST-DEFAULT-ON-WAVE-001); crate-arm twins live in
+        # tests/unit/test_lake_rust_locks.py.
+        monkeypatch.setenv("BRUTEX_LAKE_RUST_LOCKS", "0")
         monkeypatch.setattr("brutex.data.atomic_io.os.replace", _raise)
         target = tmp_path / "state.json"
         with pytest.raises(OSError, match="No space left"):
