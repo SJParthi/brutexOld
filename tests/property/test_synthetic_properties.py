@@ -17,6 +17,7 @@ range)`` inputs (DEC-SYNTHETIC-ADAPTER-001):
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import sys
 from datetime import UTC, date, timedelta
@@ -143,10 +144,23 @@ def test_determinism_holds_across_a_fresh_process() -> None:
             end=date(2021, 1, 5),
         )
     )
+    # The fresh `python -c` subprocess runs with UNCONFIGURED structlog, so any
+    # warn-once event lands on STDOUT (the default PrintLogger sink) and would
+    # pollute the captured hash. The config-core money/models seams default ON
+    # (DEC-RUST-DEFAULT-ON-WAVE-001) and, on a wheel-less lane, emit a one-shot
+    # `*.rust_path_disabled` degrade-to-oracle warning. Pin them to the explicit
+    # silent kill switch: ON degrades BIT-IDENTICAL to the Python oracle, so the
+    # determinism guarantee is unchanged — the subprocess just stays warn-free.
+    subprocess_env = {
+        **os.environ,
+        "BRUTEX_CORE_RUST_MONEY": "0",
+        "BRUTEX_CORE_RUST_MODELS": "0",
+    }
     completed = subprocess.run(
         [sys.executable, "-c", _SUBPROCESS_SRC],
         capture_output=True,
         text=True,
         check=True,
+        env=subprocess_env,
     )
     assert completed.stdout.strip() == in_process
