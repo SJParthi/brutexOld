@@ -905,8 +905,11 @@ class TestRealWheelByteIdentityAB:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _real_wheel()
-        # OFF arm (the default): the verbatim oracle bytes.
-        monkeypatch.delenv(nr.NOTIFY_RUST_ENV, raising=False)
+        # OFF arm: the verbatim oracle bytes. Wave flip: unset resolves
+        # default-ON, so a bare delenv would run the crate here too — a
+        # vacuous Rust-vs-Rust compare with the real wheel present. "0" is the
+        # kill switch that pins the genuine Python-oracle baseline.
+        monkeypatch.setenv(nr.NOTIFY_RUST_ENV, "0")
         nr.reset_notify_rust_for_tests()
         off_tuples = _drive_builders(SweepAlerter(notifier=_CapturingNotifier()))
         # ON arm with the REAL wheel, burn-in ACTIVE (each engaged call is
