@@ -599,7 +599,9 @@ class TestNaiveFrameLocalTzLaw:
         df = _naive(_with_oi(_frame(_minutes(_OPEN_UTC, 40))))
         with _forced_local_tz("Australia/Brisbane"):
             _require_local_utc_offset({timedelta(hours=10)})
-            monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+            # The per-row OFF body via the explicit "0" kill switch (the
+            # default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001).
+            monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
             # Shape 1 (stamp shift): both arms keep the session, stamped a
             # day apart — per-row midnight-IST Jan 1 vs vectorized Jan 2.
             off_kept = fno_daily_resample.resample_1m_to_fno_daily(df, before=date(2024, 1, 3))

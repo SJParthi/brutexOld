@@ -129,6 +129,9 @@ class TestFlagOffBombSpy:
     def test_off_arm_matches_oracles_and_never_touches_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(nightly_rust.NIGHTLY_RUST_ENV, "0")
         bomb = _BombModule("brutex_ops")
         monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         assert first_breaker(_GREEN_RUN) is first_breaker_python(_GREEN_RUN) is None
@@ -145,6 +148,9 @@ class TestFlagOffBombSpy:
         assert bomb.touched == []
 
     def test_off_arm_torn_stream_matches_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(nightly_rust.NIGHTLY_RUST_ENV, "0")
         bomb = _BombModule("brutex_ops")
         monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         seamed = audit_reconcile_tripwire(

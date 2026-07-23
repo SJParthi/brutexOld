@@ -155,6 +155,9 @@ class TestFlagOffBombSpy:
     def test_off_arm_matches_oracle_and_never_touches_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(nightly_rust.NIGHTLY_RUST_ENV, "0")
         bomb = _BombModule("brutex_ops")
         monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         for report in (_FULL_OK, _REFUSED_BLOCKED, _SKIPPED_BACKUP_WET, _SKIPPED_BACKUP_DRY):
