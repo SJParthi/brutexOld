@@ -139,7 +139,9 @@ def _run_both_arms(
     the_parts = parts if parts is not None else _parts()
     spots = spot_by_ts if spot_by_ts is not None else {_BAR_TS: _SPOT}
 
-    monkeypatch.delenv(GREEKS_RUST_BATCH_ENV, raising=False)
+    # OFF arm via the explicit "0" kill switch (the default flipped ON —
+    # DEC-RUST-DEFAULT-ON-WAVE-001).
+    monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "0")
     reset_rust_batch_for_tests()
     with capture_logs() as off_logs:
         bars_off, stats_off = enrich_option_bars(
@@ -176,14 +178,15 @@ def _run_both_arms(
 
 
 class TestFlagResolution:
-    """The default-OFF tristate law + warn-once + per-call resolution."""
+    """The default-ON tristate law + warn-once + per-call resolution
+    (default ON per DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23)."""
 
-    def test_unset_and_blank_default_off_silently(self) -> None:
-        assert GREEKS_RUST_BATCH_DEFAULT is False
+    def test_unset_and_blank_default_on_silently(self) -> None:
+        assert GREEKS_RUST_BATCH_DEFAULT is True
         with capture_logs() as logs:
-            assert greeks_rust_batch_enabled({}) is False
-            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: ""}) is False
-            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "   "}) is False
+            assert greeks_rust_batch_enabled({}) is True
+            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: ""}) is True
+            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "   "}) is True
         assert logs == []
 
     @pytest.mark.parametrize("raw", ["1", "true", "YES", " on "])
@@ -195,9 +198,11 @@ class TestFlagResolution:
         assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: raw}) is False
 
     def test_junk_falls_to_default_with_exactly_one_warn(self) -> None:
+        # The junk arm keeps its falls-to-the-DEFAULT law — the default is
+        # now ON (DEC-RUST-DEFAULT-ON-WAVE-001), the warn-once stays.
         with capture_logs() as logs:
-            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is False
-            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is False
+            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is True
+            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is True
         warns = [e for e in logs if e["event"] == "greeks_enrich.rust_batch_flag_unrecognised"]
         assert len(warns) == 1
         assert warns[0]["value"] == repr("maybe?")
@@ -236,8 +241,11 @@ class TestFlagResolution:
     def test_off_arm_emits_zero_batch_events_and_never_dispatches(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The default arm's log stream carries NO rust_batch event and the
-        wrapper is never consulted (the bomb-spy zero-delta pin)."""
+        """The kill-switch arm's log stream carries NO rust_batch event and
+        the wrapper is never consulted (the bomb-spy zero-delta pin;
+        addressed via the explicit "0" since the default flipped ON —
+        DEC-RUST-DEFAULT-ON-WAVE-001)."""
+        monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "0")
 
         def _bomb(*_a: object, **_k: object) -> object:
             raise AssertionError("OFF arm must never dispatch")

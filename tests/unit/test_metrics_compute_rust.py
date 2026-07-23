@@ -175,14 +175,15 @@ class TestFlagMatrix:
         monkeypatch.setenv(_FLAG, value)
         assert compute_rust.metrics_rust_fold_enabled() is False
 
-    def test_unset_falls_to_default_off(self) -> None:
+    def test_unset_falls_to_default_on(self) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset ⇒ the kernel is ON.
         assert _FLAG not in os.environ
-        assert compute_rust.metrics_rust_fold_enabled() is False
-        assert compute_rust.METRICS_RUST_FOLD_DEFAULT is False
+        assert compute_rust.metrics_rust_fold_enabled() is True
+        assert compute_rust.METRICS_RUST_FOLD_DEFAULT is True
 
-    def test_whitespace_empty_falls_to_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_whitespace_empty_falls_to_default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "   ")
-        assert compute_rust.metrics_rust_fold_enabled() is False
+        assert compute_rust.metrics_rust_fold_enabled() is compute_rust.METRICS_RUST_FOLD_DEFAULT
 
     def test_junk_is_off_with_one_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "ture")
