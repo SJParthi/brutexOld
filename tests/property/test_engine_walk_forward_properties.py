@@ -227,6 +227,7 @@ def test_no_lookahead_counterfactual(n_days: int, bpd: int, train: int, test: in
         0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=train,
         test_days=test,
         step_days=step,
@@ -235,11 +236,13 @@ def test_no_lookahead_counterfactual(n_days: int, bpd: int, train: int, test: in
     cut = baseline.schedule.folds[0].test_end_bar
     if cut >= len(bars):
         return  # only one fold spanning the whole stream; nothing "after" to perturb
+    perturbed_bars = _perturb_tail(bars, cut)
     perturbed = evaluate_combo_walk_forward(
-        _perturb_tail(bars, cut),
+        perturbed_bars,
         0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=perturbed_bars,
         train_days=train,
         test_days=test,
         step_days=step,

@@ -10,21 +10,23 @@ iteration order, and the real-Parquet disk round-trip through
 ``load_results_tree`` (missing root raises; empty tree yields {}).
 
 DEC-SWEEP-STREAMING-RANK-002 (#1294) replaced the accumulate-then-two-pass-sort
-core with a bounded per-key top-K heap; ``_group_survivors_reference`` below is
-a VERBATIM copy of the pre-#1294 implementation and the golden-equality suite
+core with a bounded per-key top-K heap, and DEC-RUST-STAGE3-REFINE-001 moved
+that heap into the ``brutex_refine`` Rust wheel (``SelectSession``);
+``_group_survivors_reference`` below is a VERBATIM copy of the pre-#1294
+pure-Python implementation and the golden-equality suite
 (:class:`TestGoldenEqualityVsReference`) pins byte-identical output (``repr``
 string equality — key order AND per-board row order AND every row field) over
 adversarial fixtures: equal-Sharpe tie clusters larger than K, duplicate
 run_ids (full ties AND differing Sharpe), fewer-than-K / exactly-K / K+1,
-multiple leaderboards, extreme-finite Sharpe, and seeded random permutations.
+multiple leaderboards, extreme-finite Sharpe, and seeded random permutations —
+the cross-language differential oracle for the wheel-backed selection.
 ``NaN`` Sharpe is OUT of the domain — ``ResultRow`` rejects non-finite metrics
-at construction (pinned here), so neither implementation ever sees one.
-
-Per-file convention: the private ``_HeapEntry`` comparator is unit-tested
-directly, so the file silences ``reportPrivateUsage`` at the top.
+at construction (pinned here), so neither implementation ever sees one. The
+comparator tie-break laws the retired private ``_HeapEntry`` unit tests
+pinned (Sharpe desc → run_id asc → insertion order; signed-zero equality) are
+now pinned twice: crate-side in ``rust/brutex-refine/src/select.rs``'s unit
+matrix, and end-to-end here through the public API.
 """
-
-# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -33,14 +35,16 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from brutex.engine.refine_rust import REFINE_RUST_ENV, RefineRustUnavailableError
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
 from brutex.engine.stage3_select import (
     DEFAULT_STAGE3_TOP_K,
     LeaderboardKey,
-    _HeapEntry,
     group_survivors,
     select_stage3_survivors,
 )
+
+pytest.importorskip("brutex_refine")  # the Stage-3 Rust wheel — built in the CI unit job
 
 
 def _rid(seed: int) -> str:
@@ -75,6 +79,11 @@ def _row(**overrides: object) -> ResultRow:
         "avg_exit_price": Decimal("14100.25"),
     }
     base.update(overrides)
+    # The store's tag-coherence law (review round 1): a pareto_member=True
+    # row must carry the "frontier" basis token (production stamps both
+    # from the ONE frontier set — the helper mirrors it).
+    if base.get("pareto_member") is True and "selection_basis" not in base:
+        base["selection_basis"] = "frontier"
     return ResultRow(**base)  # type: ignore[arg-type]
 
 
@@ -125,9 +134,20 @@ class TestGroupSurvivors:
 
     def test_trims_each_leaderboard_to_top_k(self) -> None:
         rows = [_row(run_id=_rid(i), sharpe_ratio=float(i)) for i in range(1, 6)]
-        boards = group_survivors(rows, top_k=2)
+        # Legacy single-key arm: the Sharpe top-2 exactly (the byte-identity
+        # arm the golden-equality suite pins).
+        boards = group_survivors(rows, top_k=2, multi_axis=False)
         (board,) = boards.values()
         assert [r.sharpe_ratio for r in board] == [5.0, 4.0]
+        # LANE-W1 union default (DEC-RANK-POOL-UNION-ADMIT-001): the SAME
+        # top-2 CAP, membership by round-robin — source 1 (Sharpe) admits
+        # 5.0, source 2 (the DEFAULT preset; every non-Sharpe axis is uniform
+        # on these rows so its order falls to run_id ASC) admits rid(1) —
+        # emitted in TODAY's Sharpe-desc discipline.
+        union_boards = group_survivors(rows, top_k=2)
+        (union_board,) = union_boards.values()
+        assert [r.sharpe_ratio for r in union_board] == [5.0, 1.0]
+        assert len(union_board) == 2  # the cap NEVER grows
 
     def test_smaller_leaderboard_yields_all_rows(self) -> None:
         boards = group_survivors([_row()], top_k=DEFAULT_STAGE3_TOP_K)
@@ -184,11 +204,17 @@ class TestSelectStage3Survivors:
                 [_row(run_id=_rid(4), instrument="BANKNIFTY", sharpe_ratio=9.9)],
             ),
         )
-        boards = select_stage3_survivors(tmp_path, top_k=2)
+        boards = select_stage3_survivors(tmp_path, top_k=2, multi_axis=False)
         nifty = boards[LeaderboardKey("NIFTY", "5m", "A")]
         assert [r.run_id for r in nifty] == [_rid(2), _rid(3)]  # top-2, Sharpe desc
         bank = boards[LeaderboardKey("BANKNIFTY", "5m", "A")]
         assert [r.run_id for r in bank] == [_rid(4)]
+        # The union DEFAULT threads through the disk composition too (LANE
+        # W1): same cap, round-robin membership (Sharpe best rid(2) + the
+        # preset source's run_id-ASC best rid(1) — uniform non-Sharpe axes).
+        union_boards = select_stage3_survivors(tmp_path, top_k=2)
+        union_nifty = union_boards[LeaderboardKey("NIFTY", "5m", "A")]
+        assert [r.run_id for r in union_nifty] == [_rid(2), _rid(1)]
 
     def test_existing_empty_tree_yields_empty_dict(self, tmp_path: Path) -> None:
         assert select_stage3_survivors(tmp_path) == {}
@@ -245,108 +271,65 @@ def _assert_byte_identical(
     assert repr(new) == repr(ref)  # the serialized byte pin
 
 
-class TestHeapEntryOrdering:
-    """The bounded-heap comparator: ``<`` means "ranks strictly worse than"."""
+class TestTieBreakLawsViaPublicApi:
+    """The comparator laws through the PUBLIC selection (the retired private
+    ``_HeapEntry`` pins, re-expressed end-to-end; the crate's unit matrix in
+    ``rust/brutex-refine/src/select.rs`` pins the same laws Rust-side)."""
 
-    @staticmethod
-    def _entry(sharpe: float, run_id: str, seq: int) -> _HeapEntry:
-        return _HeapEntry(sharpe=sharpe, run_id=run_id, seq=seq, row=_row())
-
-    def test_smaller_sharpe_is_worse(self) -> None:
-        assert self._entry(1.0, _rid(1), 0) < self._entry(2.0, _rid(1), 0)
-        assert not self._entry(2.0, _rid(1), 0) < self._entry(1.0, _rid(1), 0)
-
-    def test_equal_sharpe_larger_run_id_is_worse(self) -> None:
-        # run_id ASC is preferred, so among equal-lowest-Sharpe entries the
-        # LARGEST run_id sits at the min-heap root and is evicted first.
-        assert self._entry(1.0, _rid(9), 0) < self._entry(1.0, _rid(1), 0)
-        assert not self._entry(1.0, _rid(1), 0) < self._entry(1.0, _rid(9), 0)
-
-    def test_full_tie_later_insertion_is_worse(self) -> None:
-        # Duplicate (sharpe, run_id): the old stable sort kept EARLIER
-        # insertions first — so the LATER seq must rank worse (evicted first).
-        assert self._entry(1.0, _rid(1), 5) < self._entry(1.0, _rid(1), 2)
-        assert not self._entry(1.0, _rid(1), 2) < self._entry(1.0, _rid(1), 5)
-
-    def test_signed_zero_sharpe_compares_equal(self) -> None:
-        # -0.0 != 0.0 is False, so the comparator falls through to run_id —
-        # exactly like sorted(), which also treats them as equal keys.
-        assert self._entry(-0.0, _rid(9), 0) < self._entry(0.0, _rid(1), 0)
-
-    # ── Ordering-protocol completeness (CodeQL py/incomplete-ordering) ──
-    # functools.total_ordering derives __le__/__gt__/__ge__ from __lt__ +
-    # the dataclass __eq__ (the sweep_parallel._Outcome discipline). The
-    # total-order identities (a<=b ≡ not b<a; a>b ≡ b<a) hold ONLY because
-    # unique seq makes the order strict + total — pinned per key tier below.
-    #
-    # Discipline: every operator is OBSERVED into a plain bool by
-    # _relations() and the whole truth-table asserted at once. Chaining
-    # operator ASSERTS on one pair (assert a == b; assert a <= b; …) is
-    # statically provable under standard total-order semantics — CodeQL
-    # py/redundant-comparison — yet EARNING those semantics at runtime is
-    # the very property under test, so the table must be observed as data,
-    # never implied by an earlier assert on the same operands.
-
-    # _relations() truth-tables — (==, !=, <, <=, >, >=) for (left, right).
-    _EQUAL = (True, False, False, True, False, True)
-    _WORSE = (False, True, True, True, False, False)  # left strictly worse
-    _BETTER = (False, True, False, False, True, True)  # left strictly better
-
-    @staticmethod
-    def _relations(
-        left: _HeapEntry, right: _HeapEntry
-    ) -> tuple[bool, bool, bool, bool, bool, bool]:
-        """Observe all six rich comparisons of ``(left, right)`` as data."""
-        return (
-            left == right,
-            left != right,
-            left < right,
-            left <= right,
-            left > right,
-            left >= right,
-        )
-
-    def _ordered_pairs(self) -> list[tuple[_HeapEntry, _HeapEntry]]:
-        """(worse, better) pairs exercising EVERY tie-break tier of the key."""
-        return [
-            (self._entry(1.0, _rid(1), 0), self._entry(2.0, _rid(1), 0)),  # sharpe
-            (self._entry(1.0, _rid(9), 0), self._entry(1.0, _rid(1), 0)),  # run_id
-            (self._entry(1.0, _rid(1), 5), self._entry(1.0, _rid(1), 2)),  # seq
+    def test_signed_zero_sharpe_compares_equal_falls_to_run_id(self) -> None:
+        # -0.0 == 0.0 (IEEE), so the run_id tie-break decides — and ResultRow
+        # canonicalises -0.0 to +0.0 anyway (pinned by the extreme-value
+        # golden suite below); the law holds either way.
+        rows = [
+            _row(run_id=_rid(9), sharpe_ratio=-0.0),
+            _row(run_id=_rid(1), sharpe_ratio=0.0),
         ]
+        boards = group_survivors(rows, top_k=1)
+        (board,) = boards.values()
+        assert [r.run_id for r in board] == [_rid(1)]  # run_id asc wins
 
-    def test_reflexivity_on_field_equal_twins(self) -> None:
-        # Distinct objects, identical fields: == is dataclass field equality,
-        # so every operator must read equal-not-ordered — in BOTH operand
-        # orders (reflexivity of ==/<=/>=, irreflexivity of </>).
-        a = self._entry(1.0, _rid(1), 3)
-        twin = self._entry(1.0, _rid(1), 3)
-        assert self._relations(a, twin) == self._EQUAL
-        assert self._relations(twin, a) == self._EQUAL
+    def test_equal_sharpe_largest_run_id_evicted_first(self) -> None:
+        rows = [
+            _row(run_id=_rid(5), sharpe_ratio=1.0),
+            _row(run_id=_rid(2), sharpe_ratio=1.0),
+            _row(run_id=_rid(1), sharpe_ratio=1.0),
+        ]
+        boards = group_survivors(rows, top_k=2)
+        (board,) = boards.values()
+        assert [r.run_id for r in board] == [_rid(1), _rid(2)]  # rid(5) evicted
 
-    def test_derived_operators_agree_with_lt_on_every_tier(self) -> None:
-        # For each strictly-ordered pair, EVERY derived operator must agree
-        # with the total-order identities: a>b ≡ b<a, a<=b ≡ not b<a,
-        # a>=b ≡ not a<b. The two observed rows jointly pin antisymmetry
-        # (< holds in exactly ONE direction) and strict-pair inequality.
-        for worse, better in self._ordered_pairs():
-            assert self._relations(worse, better) == self._WORSE
-            assert self._relations(better, worse) == self._BETTER
+    def test_full_tie_earlier_insertion_kept(self) -> None:
+        rows = [
+            _row(run_id=_rid(1), sharpe_ratio=1.0, net_pnl_paisa=100),
+            _row(run_id=_rid(1), sharpe_ratio=1.0, net_pnl_paisa=101),
+        ]
+        boards = group_survivors(rows, top_k=1)
+        (board,) = boards.values()
+        assert [r.net_pnl_paisa for r in board] == [100]  # the earlier twin
 
-    def test_incomparability_coincides_with_equality_via_unique_seq(self) -> None:
-        # not(a<b) and not(b<a) ⇒ a == b — true on the production domain
-        # ONLY because seq is unique per input row: any two distinct entries
-        # differ somewhere in the (sharpe, run_id, seq) key, so the sole
-        # incomparable case is the field-equal twin. Observed as one vector
-        # so equality is ASSERTED alongside the two strict directions, never
-        # statically implied by them.
-        a = self._entry(1.0, _rid(1), 3)
-        twin = self._entry(1.0, _rid(1), 3)
-        assert (a < twin, twin < a, a == twin) == (False, False, True)
-        # Differing ONLY in seq (a full (sharpe, run_id) tie): totality —
-        # exactly one strict direction holds (the LATER insertion is worse,
-        # the stable-sort tie rule) and the pair is never equal.
-        b = self._entry(1.0, _rid(1), 4)
-        assert (a < b, b < a, a == b, a != b) == (False, True, False, True)
+    def test_disabled_rust_runtime_refuses_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # DEC-RUST-STAGE3-REFINE-001: the LEGACY Sharpe-only Python selection
+        # math is DELETED (the wheel's SelectSession is the one legacy arm) —
+        # a falsy flag is a loud typed refusal on that arm, never a silent
+        # fallback. Reconciled at the 2026-07-20 wave-2b rank-pareto fold
+        # (MIGRATION.md #2061): the DEFAULT union arm (`multi_axis=True`) is
+        # ruled Rust-OPTIONAL pure orchestration and legitimately serves
+        # without the wheel — the refusal law binds the `multi_axis=False`
+        # legacy arm, pinned here; the union-serves twin follows.
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        with pytest.raises(RefineRustUnavailableError, match="NO fallback"):
+            group_survivors([_row()], top_k=1, multi_axis=False)
+
+    def test_disabled_rust_runtime_union_arm_still_serves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The #2061 Rust-optional half of the reconciliation above: the union
+        # DEFAULT arm is pure-Python orchestration (`_AxisEntry` bounded
+        # heaps) and must keep serving under a falsy refine flag.
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        boards = group_survivors([_row()], top_k=1)
+        (board,) = boards.values()
+        assert len(board) == 1
 
 
 class TestGoldenEqualityVsReference:
@@ -355,8 +338,12 @@ class TestGoldenEqualityVsReference:
     K = 3
 
     def _check(self, rows: list[ResultRow], *, top_k: int) -> None:
+        # LANE W1 (DEC-RANK-POOL-UNION-ADMIT-001): this suite pins the LEGACY
+        # single-key arm (`multi_axis=False`) byte-identical to the
+        # pre-#1294 reference — the "axes disabled ⇒ byte-identical" law.
+        # The union DEFAULT's own laws live in TestMultiAxisUnion below.
         _assert_byte_identical(
-            group_survivors(rows, top_k=top_k),
+            group_survivors(rows, top_k=top_k, multi_axis=False),
             _group_survivors_reference(rows, top_k=top_k),
         )
 
@@ -443,7 +430,113 @@ class TestGoldenEqualityVsReference:
             self._check(rows, top_k=4)
 
     def test_lazy_iterable_consumed_in_one_pass(self) -> None:
-        # The streaming contract: a one-shot generator is sufficient input.
+        # The streaming contract: a one-shot generator is sufficient input —
+        # on BOTH arms (the union arm also streams rows exactly once).
         rows = [_row(run_id=_rid(i), sharpe_ratio=float(i)) for i in range(1, 6)]
-        boards = group_survivors(iter(rows), top_k=2)
+        boards = group_survivors(iter(rows), top_k=2, multi_axis=False)
         _assert_byte_identical(boards, _group_survivors_reference(rows, top_k=2))
+        union_from_iter = group_survivors(iter(rows), top_k=2)
+        _assert_byte_identical(union_from_iter, group_survivors(rows, top_k=2))
+
+
+class TestMultiAxisUnion:
+    """The LANE-W1 union-admission arm (DEC-RANK-POOL-UNION-ADMIT-001)."""
+
+    def test_dd_optimal_row_outside_sharpe_topk_is_admitted(self) -> None:
+        # THE rank-1-forever regression (winning-completeness item 3): a
+        # DD-optimal / high-win-rate row whose Sharpe sits BELOW the top-K
+        # cut previously never reached the Stage-3 pool (annotation-only
+        # not_validated forever). Under the union it is admitted via the
+        # DD/preset/win-rate sources — at the SAME total cap.
+        rows = [
+            _row(
+                run_id=_rid(i),
+                sharpe_ratio=float(10 + i),
+                max_drawdown_pct=20.0,
+                win_rate=0.5,
+            )
+            for i in range(1, 6)  # five high-Sharpe, high-DD rows
+        ]
+        dd_optimal = _row(
+            run_id=_rid(99),
+            sharpe_ratio=0.8,  # dead last on Sharpe
+            max_drawdown_pct=3.0,  # best DD by far
+            win_rate=0.9,  # best win rate
+        )
+        rows.append(dd_optimal)
+        legacy = group_survivors(rows, top_k=3, multi_axis=False)
+        (legacy_board,) = legacy.values()
+        assert dd_optimal not in legacy_board  # the pre-W1 shape: never admitted
+        union = group_survivors(rows, top_k=3)
+        (union_board,) = union.values()
+        assert dd_optimal in union_board  # admitted via the DD/preset sources
+        assert len(union_board) == 3  # the cap NEVER grows
+
+    def test_frontier_source_admits_persisted_pareto_member(self) -> None:
+        # Item 1's "Stage-3 heap needs explicit frontier inclusion": a
+        # persisted ε-Pareto member that loses on EVERY quota axis is still
+        # admitted via the frontier source (pareto_member is the persisted
+        # column — the sweep's union stamped it).
+        rows = [
+            _row(
+                run_id=_rid(i),
+                sharpe_ratio=float(10 + i),
+                max_drawdown_pct=1.0 + i / 10.0,
+                win_rate=0.9,
+            )
+            for i in range(1, 7)
+        ]
+        frontier_row = _row(
+            run_id=_rid(50),
+            sharpe_ratio=0.1,  # worst on every axis...
+            max_drawdown_pct=25.0,
+            win_rate=0.1,
+            pareto_member=True,  # ...but a persisted frontier member
+        )
+        rows.append(frontier_row)
+        union = group_survivors(rows, top_k=5)
+        (board,) = union.values()
+        assert frontier_row in board
+        # An untagged store (pareto_member None — pre-W1 rows) simply has no
+        # frontier source; nothing crashes, the other sources decide.
+        legacy_rows = [r for r in rows if r.pareto_member is None]
+        boards = group_survivors(legacy_rows, top_k=5)
+        assert sum(len(b) for b in boards.values()) == 5
+
+    def test_bounded_union_matches_pure_oracle(self) -> None:
+        # The bounded 5-heap streaming arm == the pure sort-based
+        # pool_union.union_select_rows oracle, per board (the same shared
+        # round-robin law over the same total orders — membership AND order).
+        from brutex.engine.pool_union import union_select_rows
+
+        rng = random.Random(20260718)
+        rows = [
+            _row(
+                run_id=_rid(rng.randrange(1, 60)),
+                instrument=rng.choice(("NIFTY", "BANKNIFTY")),
+                sharpe_ratio=float(rng.randrange(7)),
+                max_drawdown_pct=float(rng.randrange(1, 30)),
+                win_rate=rng.randrange(1, 100) / 100.0,
+                net_pnl_paisa=i,
+                pareto_member=rng.choice((None, True, False)),
+            )
+            for i in range(80)
+        ]
+        boards = group_survivors(rows, top_k=6)
+        for key, board in boards.items():
+            pool = [
+                r
+                for r in rows
+                if (r.instrument, r.tf, r.mode) == (key.instrument, key.tf, key.mode)
+            ]
+            assert board == union_select_rows(pool, cap=6)
+
+    def test_small_board_union_is_byte_identical_to_legacy(self) -> None:
+        # A board with <= top_k rows admits EVERYTHING under either arm —
+        # the union default is byte-identical there (the common production
+        # shape until pools exceed the cap).
+        rows = [_row(run_id=_rid(i), sharpe_ratio=float(i)) for i in range(1, 5)]
+        _assert_byte_identical(
+            group_survivors(rows, top_k=10),
+            group_survivors(rows, top_k=10, multi_axis=False),
+        )

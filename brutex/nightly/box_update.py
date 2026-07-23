@@ -273,11 +273,19 @@ class WheelSpec:
 
 #: The CANONICAL box wheel set — MIRRORED from the Makefile ``run-raw``
 #: target's build list (Makefile run-raw: fno-math, trading-core, brutex-lake,
-#: brutex-feed, brutex-pull-state — the pull-state decision plane is Rust-only
-#: + fail-closed), drift-pinned by a test that PARSES the Makefile's
-#: ``cd rust/<crate> && … maturin develop`` lines and asserts set equality
-#: (§10 test 16).  Runtime behavior stays a deterministic constant (the lane
-#: must run mid-update on a possibly-broken tree); CI catches drift.
+#: brutex-identity — the HARD-import run-identity/stores kernel, joined at the
+#: DEC-RUST-RUNID-STORES-001 (MIGRATION.md #2065; the #1644 fold) merge-forward
+#: reconcile — brutex-feed, brutex-refine, brutex-pull-state — the pull-state
+#: decision plane is Rust-only + fail-closed), drift-pinned by a test that
+#: PARSES the
+#: Makefile's ``cd rust/<crate> && … maturin develop`` lines and asserts set
+#: equality (§10 test 16).  Runtime behavior stays a deterministic constant
+#: (the lane must run mid-update on a possibly-broken tree); CI catches drift.
+#:
+#: brutex-refine is REQUIRED (DEC-RUST-STAGE3-REFINE-001 — the DEFAULT-ON
+#: Stage-3 optimizer core has NO Python fallback, so a box whose wheel went
+#: stale would refuse every stage-3 sweep; the run-raw step aborts on failure
+#: for the same reason).
 #:
 #: brutex-lake joined REQUIRED when DEC-RUST-LAKE-WAVED-001 (W-6a,
 #: MIGRATION.md #1954) made the ``brutex_lake`` wheel the ONE production arm
@@ -300,7 +308,9 @@ WHEEL_SET: Final[tuple[WheelSpec, ...]] = (
     WheelSpec("fno_math", "rust/fno-math", required=True),
     WheelSpec("trading_core", "rust/trading-core", required=True),
     WheelSpec("brutex_lake", "rust/brutex-lake", required=True),
+    WheelSpec("brutex_identity", "rust/brutex-identity", required=True),
     WheelSpec("brutex_feed", "rust/brutex-feed", required=False),
+    WheelSpec("brutex_refine", "rust/brutex-refine", required=True),
     WheelSpec("brutex_pull_state", "rust/brutex-pull-state", required=True),
 )
 
@@ -953,7 +963,7 @@ def _smoke(ctx: _Ctx, imports: str = "import trading_core, fno_math") -> int:
 
 
 def _required_specs() -> tuple[WheelSpec, ...]:
-    """Return the required-wheel subset of ``WHEEL_SET``."""
+    """The REQUIRED subset of ``WHEEL_SET`` (the §4.6 repair-probe candidates)."""
     return tuple(s for s in WHEEL_SET if s.required)
 
 

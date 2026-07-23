@@ -76,6 +76,7 @@ def extended_day_trades_payload() -> dict[str, Any]:
         signals,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         stop_loss_paisa=100_000,
         take_profit_paisa=100_000,
     )

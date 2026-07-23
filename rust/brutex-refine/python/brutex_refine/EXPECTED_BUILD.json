@@ -1,0 +1,12 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-RUST-STAGE3-REFINE-001; the brutex_feed/fno_math R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_refine._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-refine surface or version change. The `brutex doctor` stage that reads it is the named follow-up `DEC-REFINE-RUST-DOCTOR-STAGE-001`. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is caught by the refinement-run identity instead — the `optimizer_build` token folds the baked source digest, so a drifted rebuild mints NEW refinement identities rather than reusing old ones.",
+  "crate_version": "0.1.0",
+  "symbols": [
+    "RefineSession",
+    "SOURCE_DIGEST",
+    "SelectSession",
+    "grid_denormalize",
+    "grid_normalize",
+    "grid_validate"
+  ]
+}

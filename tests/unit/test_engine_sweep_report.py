@@ -48,6 +48,8 @@ def _bars() -> list[CandleBar]:
 
 
 class TestSweepReport:
+    # tf == 1minute FIXED POINT (DEC-FILL-EXEC-GRID-1M-001 design §6): the
+    # decision stream IS the execution stream — exec_bars_1m=bars everywhere.
     def test_empty_bars_raises(self) -> None:
         with pytest.raises(ValueError, match="bars must be non-empty"):
             sweep_report(
@@ -58,17 +60,20 @@ class TestSweepReport:
                 direction=Side.BUY,
                 condition_bits=[0, 1, 2],
                 k=2,
+                exec_bars_1m=[],
             )
 
     def test_header_reports_context(self) -> None:
+        bars = _bars()
         report = sweep_report(
-            _bars(),
+            bars,
             instrument="NIFTY",
             tf_label="1m",
             tf_minutes=1,
             direction=Side.BUY,
             condition_bits=[0, 1, 2],
             k=2,
+            exec_bars_1m=bars,
         )
         # Self-describing header: instrument/TF/direction, the combo space (C(3,2)=3),
         # the bar count, and how many cleared the gates (0 on this tiny window).
@@ -80,14 +85,18 @@ class TestSweepReport:
     def test_no_survivors_renders_empty_message(self) -> None:
         # 4 synthetic bars never clear the 30-trade gate → the honest empty line,
         # not an error.
+        # Coarse-tf plumbing shape (brief: legal input) — the decision list
+        # itself doubles as the exec stream; only the empty-board line is pinned.
+        bars = _bars()
         report = sweep_report(
-            _bars(),
+            bars,
             instrument="BANKNIFTY",
             tf_label="5m",
             tf_minutes=5,
             direction=Side.SELL,
             condition_bits=[10, 20, 30],
             k=1,
+            exec_bars_1m=bars,
         )
         assert "(no combos cleared the gates)" in report
 
@@ -101,6 +110,7 @@ class TestSweepReport:
                 direction=Side.BUY,
                 condition_bits=[0, 1],
                 k=3,
+                exec_bars_1m=_bars(),
             )
 
     def test_over_cap_raises(self) -> None:
@@ -114,6 +124,7 @@ class TestSweepReport:
                 direction=Side.BUY,
                 condition_bits=list(range(52)),
                 k=2,
+                exec_bars_1m=_bars(),
                 max_combos=10,
             )
 
@@ -165,6 +176,13 @@ def _rc(
         "skewness": 0.0,
         "kurtosis": 0.0,
         "returns_std_dev": 0.0,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate consistent with the
+        # counts above (losing 20 / total 50); the Kelly pair defaults
+        # None (undefined) — override per test where the value matters.
+        "loss_rate": 0.4,
+        "kelly_fraction": None,
+        "log_growth_at_half_kelly": None,
     }
     return RankedCombo(mask=mask, metrics=ResultMetrics(**base), composite_score=score)
 
@@ -212,14 +230,16 @@ class TestSortRanked:
 
 class TestSweepReportSort:
     def test_header_shows_sort_key(self) -> None:
+        bars = _bars()
         report = sweep_report(
-            _bars(),
+            bars,
             instrument="NIFTY",
             tf_label="1m",
             tf_minutes=1,
             direction=Side.BUY,
             condition_bits=[0, 1, 2],
             k=2,
+            exec_bars_1m=bars,
             sort_by="pnl",
         )
         assert "sort=pnl" in report
@@ -234,6 +254,7 @@ class TestSweepReportSort:
                 direction=Side.BUY,
                 condition_bits=[0, 1, 2],
                 k=2,
+                exec_bars_1m=_bars(),
                 sort_by="bogus",
             )
 
@@ -295,6 +316,7 @@ class TestOosSection:
             [],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_multiday_bars(),
             stop_loss_paisa=None,
             take_profit_paisa=None,
             start_equity_paisa=10_000_000,
@@ -309,6 +331,7 @@ class TestOosSection:
             [_rc(mask=0)],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_bars(),
             stop_loss_paisa=None,
             take_profit_paisa=None,
             start_equity_paisa=10_000_000,
@@ -323,6 +346,7 @@ class TestOosSection:
             [_rc(mask=0)],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_multiday_bars(),
             stop_loss_paisa=None,
             take_profit_paisa=None,
             start_equity_paisa=10_000_000,
@@ -335,27 +359,31 @@ class TestOosSection:
 
 class TestSweepReportOos:
     def test_validate_oos_appends_section(self) -> None:
+        bars = _bars()
         report = sweep_report(
-            _bars(),
+            bars,
             instrument="NIFTY",
             tf_label="1m",
             tf_minutes=1,
             direction=Side.BUY,
             condition_bits=[0, 1, 2],
             k=2,
+            exec_bars_1m=bars,
             validate_oos=True,
         )
         assert "Out-of-sample" in report
 
     def test_validate_oos_top_n_none(self) -> None:
+        bars = _bars()
         report = sweep_report(
-            _bars(),
+            bars,
             instrument="NIFTY",
             tf_label="1m",
             tf_minutes=1,
             direction=Side.BUY,
             condition_bits=[0, 1, 2],
             k=2,
+            exec_bars_1m=bars,
             validate_oos=True,
             top_n=None,
         )
@@ -382,29 +410,39 @@ class TestFilterOosHeld:
             return _oos(held=(mask == 1), gates=(mask == 1), sharpe=True, dd=True)
 
         monkeypatch.setattr("brutex.engine.sweep_report.validate_out_of_sample", fake_validate)
-        kept = filter_oos_held(_multiday_bars(), [_rc(mask=1), _rc(mask=2)], **self._params())
+        kept = filter_oos_held(
+            _multiday_bars(),
+            [_rc(mask=1), _rc(mask=2)],
+            exec_bars_1m=_multiday_bars(),
+            **self._params(),
+        )
         assert [rc.mask for rc in kept] == [1]
 
     def test_empty_ranked_is_empty(self) -> None:
-        assert filter_oos_held(_multiday_bars(), [], **self._params()) == []
+        assert (
+            filter_oos_held(_multiday_bars(), [], exec_bars_1m=_multiday_bars(), **self._params())
+            == []
+        )
 
     def test_short_window_propagates_value_error(self) -> None:
         # One IST day → validate_out_of_sample can't split → ValueError propagates.
         with pytest.raises(ValueError, match="distinct trading days"):
-            filter_oos_held(_bars(), [_rc(mask=0)], **self._params())
+            filter_oos_held(_bars(), [_rc(mask=0)], exec_bars_1m=_bars(), **self._params())
 
 
 class TestSweepReportOosOnly:
     def test_oos_only_header_note(self) -> None:
         # Synthetic board has no gate survivors → filter over [] → "0/0 held".
+        bars = _multiday_bars()
         report = sweep_report(
-            _multiday_bars(),
+            bars,
             instrument="NIFTY",
             tf_label="1m",
             tf_minutes=1,
             direction=Side.BUY,
             condition_bits=[0, 1, 2],
             k=2,
+            exec_bars_1m=bars,
             oos_only=True,
         )
         assert "oos-only=0/0 held" in report

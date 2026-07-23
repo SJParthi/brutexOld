@@ -350,7 +350,11 @@ def test_main_dispatch_sweep_all_threads_grid_defaults() -> None:
     assert kwargs["intervals"] == "1minute,5minute,15minute"
     assert kwargs["start"] == "2024-01-01"
     assert kwargs["end"] == "2024-01-02"
-    assert kwargs["top"] == 20
+    # LANE W1 (DEC-RANK-QUOTA-PERSIST-1000-001): the persist default is the
+    # ONE minted constant — 1000, no longer the fast-operator 20.
+    from brutex.ranking.multi_select import DEFAULT_PERSIST_TOP_K
+
+    assert kwargs["top"] == DEFAULT_PERSIST_TOP_K == 1000
     assert kwargs["mode"] == "A"
     assert kwargs["options_sim"] is True
     assert kwargs["stage3_enable"] is False

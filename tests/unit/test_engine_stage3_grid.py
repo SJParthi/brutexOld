@@ -1,6 +1,7 @@
 """Unit tests for the Stage-3 Mode-A grid bijection (`brutex.engine.stage3_grid`).
 
-DEC-STAGE3-GRID-001 (ADR-0007 §5 slice 3, condition 3) — 100% line+branch of
+DEC-STAGE3-GRID-001 (ADR-0007 §5 slice 3, condition 3; math re-hosted on the
+``brutex_refine`` wheel by DEC-RUST-STAGE3-REFINE-001) — 100% line+branch of
 the [0,1] ↔ int-paisa mapping: the locked Mode-A axis constants pinned against
 `TRACK1_BACKTEST_SPEC.md:243-245` (SL [5,200]/5-tick/40 steps, TP
 [10,500]/10-tick/50 steps, 2,000 cells), every :class:`GridAxis` validation
@@ -26,6 +27,8 @@ from brutex.engine.stage3_grid import (
     normalize_sl_tp,
 )
 from brutex.strategies.combo import canonicalise_params
+
+pytest.importorskip("brutex_refine")  # the Stage-3 Rust wheel — built in the CI unit job
 
 
 def _grid_points(axis: GridAxis) -> list[int]:
@@ -198,3 +201,97 @@ class TestSlTpPair:
         canonical = canonicalise_params({"sl_paisa": sl_paisa, "tp_paisa": tp_paisa})
         assert canonical == f'{{"sl_paisa":{sl_paisa},"tp_paisa":{tp_paisa}}}'
         assert "." not in canonical
+
+
+class TestRustRuntimeRefusal:
+    """DEC-RUST-STAGE3-REFINE-001: the math is wheel-hosted, no fallback."""
+
+    def test_denormalize_refuses_loudly_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.refine_rust import REFINE_RUST_ENV, RefineRustUnavailableError
+
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        with pytest.raises(RefineRustUnavailableError, match="NO fallback"):
+            MODE_A_SL_AXIS.denormalize(0.5)
+
+    def test_normalize_refuses_loudly_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.engine.refine_rust import REFINE_RUST_ENV, RefineRustUnavailableError
+
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        with pytest.raises(RefineRustUnavailableError, match="NO fallback"):
+            MODE_A_SL_AXIS.normalize(105)
+
+    def test_axis_construction_is_wheel_free(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Validation is pure Python (the dashboard-boots-wheel-free law): a
+        # disabled runtime still constructs + validates axes and still
+        # REJECTS junk axes — only the bijection MATH needs the wheel.
+        from brutex.engine.refine_rust import REFINE_RUST_ENV
+
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        axis = GridAxis(name="t", lo_paisa=5, hi_paisa=45, tick_paisa=10)
+        assert axis.steps == 5
+        with pytest.raises(Stage3GridError, match="lo_paisa must be > 0"):
+            GridAxis(name="t", lo_paisa=0, hi_paisa=45, tick_paisa=5)
+
+    def test_crate_validation_twin_matches_python_messages(self) -> None:
+        # The crate re-validates axes per call with the SAME rules + message
+        # text (grid_validate is the callable drift pin): every Python
+        # __post_init__ refusal reproduces byte-identically through the wheel.
+        import brutex_refine
+
+        assert brutex_refine.grid_validate("t", 5, 45, 10) == 5
+        for lo, hi, tick, fragment in [
+            (0, 100, 5, "lo_paisa must be > 0"),
+            (5, 100, 0, "tick_paisa must be > 0"),
+            (100, 100, 5, "hi_paisa must be > lo_paisa"),
+            (5, 201, 5, "not a whole"),
+        ]:
+            with pytest.raises(ValueError, match=fragment) as rust_exc:
+                brutex_refine.grid_validate("t", lo, hi, tick)
+            with pytest.raises(Stage3GridError, match=fragment) as py_exc:
+                GridAxis(name="t", lo_paisa=lo, hi_paisa=hi, tick_paisa=tick)
+            assert str(rust_exc.value) == str(py_exc.value)  # byte-identical text
+
+
+class TestSweepGridConfigStage3FailFast:
+    """The orchestrator's stage3 axis validation under the wheel-hosted math."""
+
+    def _grid_kwargs(self) -> dict[str, object]:
+        from brutex.engine.sweep_orchestrator import Timeframe
+        from brutex.strategies.types import Side
+
+        return {
+            "instruments": ["NIFTY"],
+            "timeframes": [Timeframe("1minute", 1)],
+            "directions": [Side.BUY],
+            "k_values": [1],
+            "condition_bits": [1],
+            "stop_losses": [50],
+            "take_profits": [100],
+            "proximities": [None],
+            "mode": "A",
+            "data_snapshot_hash": "ab" * 32,
+            "indicator_version": "trading-core-0.0.0",
+            "code_commit_sha": "c" * 40,
+            "stage3_enable": True,
+        }
+
+    def test_enabled_grid_validates_axes_through_the_wheel(self) -> None:
+        from brutex.engine.sweep_orchestrator import SweepGridConfig
+
+        grid = SweepGridConfig(**self._grid_kwargs())  # type: ignore[arg-type]
+        assert grid.stage3_enable is True
+
+    def test_enabled_grid_without_runtime_is_a_clean_config_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-RUST-STAGE3-REFINE-001: a stage3-enabled grid on a flag-off /
+        # wheel-less box fails fast at CONSTRUCTION as the same clean
+        # ValueError the CLI already surfaces — never a raw facade traceback.
+        from brutex.engine.refine_rust import REFINE_RUST_ENV
+        from brutex.engine.sweep_orchestrator import SweepGridConfig
+
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        with pytest.raises(ValueError, match="Stage-3 Rust runtime"):
+            SweepGridConfig(**self._grid_kwargs())  # type: ignore[arg-type]

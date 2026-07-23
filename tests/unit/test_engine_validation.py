@@ -90,6 +90,13 @@ def _m(**overrides: Any) -> ResultMetrics:
         "skewness": 0.0,
         "kurtosis": 0.0,
         "returns_std_dev": 0.0,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate consistent with the
+        # counts above (losing 20 / total 50); the Kelly pair defaults
+        # None (undefined) — override per test where the value matters.
+        "loss_rate": 0.4,
+        "kelly_fraction": None,
+        "log_growth_at_half_kelly": None,
     }
     base.update(overrides)
     return ResultMetrics(**base)
@@ -125,13 +132,19 @@ class TestDaySplit:
 
 
 class TestValidateOOS:
+    # tf == 1minute FIXED POINT (DEC-FILL-EXEC-GRID-1M-001 design §6): the
+    # decision stream IS the execution stream — every call passes
+    # exec_bars_1m=bars; the OOS split cuts BOTH streams at the ONE boundary
+    # via exec_window_slice inside the validator.
     def test_empty_bars_raises(self) -> None:
         with pytest.raises(ValueError, match="bars must be non-empty"):
-            validate_out_of_sample([], 0, direction=Side.BUY, tf_minutes=1)
+            validate_out_of_sample([], 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])
 
     def test_runs_split_and_wires_held_up(self) -> None:
         bars = _multiday(4, bars_per_day=5)
-        result = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1)
+        result = validate_out_of_sample(
+            bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         assert isinstance(result, OOSValidation)
         assert isinstance(result.train_metrics, ResultMetrics)
         assert isinstance(result.test_metrics, ResultMetrics)
@@ -142,7 +155,9 @@ class TestValidateOOS:
 
     def test_no_trade_combo_does_not_hold_up(self) -> None:
         bars = _multiday(4, bars_per_day=5)
-        result = validate_out_of_sample(bars, _IMPOSSIBLE_MASK, direction=Side.BUY, tf_minutes=1)
+        result = validate_out_of_sample(
+            bars, _IMPOSSIBLE_MASK, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         # The self-contradictory mask never fires → 0 test trades → fails the gates.
         assert result.test_metrics.total_trades == 0
         assert result.gates_held is False
@@ -151,8 +166,12 @@ class TestValidateOOS:
     def test_deterministic(self) -> None:
         # Same inputs → bit-identical result (idempotence, Golden Rule #7).
         bars = _multiday(3, bars_per_day=5)
-        a = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1, train_frac=0.6)
-        b = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1, train_frac=0.6)
+        a = validate_out_of_sample(
+            bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, train_frac=0.6
+        )
+        b = validate_out_of_sample(
+            bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, train_frac=0.6
+        )
         assert a == b
 
     def test_no_policy_seam_and_worst_case_is_the_only_law(self) -> None:
@@ -167,8 +186,8 @@ class TestValidateOOS:
         assert "policy" not in params
         assert "fill_mode" not in params
         bars = _multiday(4, bars_per_day=5)
-        a = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1)
-        b = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1)
+        a = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
+        b = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         assert a == b  # the one law is deterministic — no hidden mode input
 
 

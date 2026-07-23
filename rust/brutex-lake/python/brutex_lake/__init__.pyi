@@ -16,7 +16,6 @@ __all__ = [
     "merge_decision_from_ipc",
     "pinned_polars_version",
     "raw_integrity_blake2b_hex",
-    "render_ledger_parquet_from_ipc",
     "render_parquet_defaults_from_ipc",
     "render_parquet_from_ipc",
     "render_stats_shard_json",
@@ -177,17 +176,4 @@ def classify_partial_window_verdict(
     """The partial-window truncation decision tree over day ordinals (SLICE
     T24 PR-1) — ``(reason, last_bar, expected, gap_sessions)`` or ``None``
     (no truncation verdict). ``RuntimeError`` on a caught panic.
-    """
-
-def render_ledger_parquet_from_ipc(ipc_bytes: bytes) -> bytes:
-    """Render the 16-column window-ledger frame (Arrow IPC bytes) to parquet bytes.
-
-    ADR-0020 G10 CONVERT (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001). The
-    ROW-EQUIVALENCE standard's render — never byte-identical to the pyarrow
-    oracle (the #1917 measured-infeasible verdict); the facade's burn-in
-    compares rows, and the reader-parity gates are the contract. A 0-row
-    frame is valid (an empty ledger save — zero row groups). Raises
-    ``ValueError`` on an empty/undecodable payload or a polars render
-    error; ``RuntimeError`` if the render panicked (caught at the FFI
-    boundary — a panic never crosses raw).
     """

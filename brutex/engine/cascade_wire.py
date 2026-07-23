@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
@@ -105,6 +106,13 @@ from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
 from brutex.data.guarded_read import read_regular_bytes
 from brutex.data.sidecar_read import read_sidecar_bytes
+from brutex.engine.exec_grid import (
+    EXEC_INTERVAL_LABEL,
+    EXECUTION_GRID_1M_NEXT_BAR,
+    ExecGridMap,
+    build_exec_grid_map,
+)
+from brutex.engine.pool_union import union_select_rows
 from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
@@ -139,6 +147,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
         CascadeConfig,
         CascadeReport,
     )
+    from brutex.metrics.types import ClosedTrade
 
 _LOG = structlog.get_logger("brutex.engine.cascade_wire")
 
@@ -154,7 +163,11 @@ MANIFEST_VERSION: Final[int] = 1
 #: per-group ``pool_pbo`` key was added without a bump — purely additive, no
 #: reader rejects unknown keys, and a pre-sidecar report (key ABSENT) stays
 #: distinguishable from a measured skip (key ``null``) — the same precedent as
-#: the manifest's additive ``stage3`` block (see ``manifest_from_json``).
+#: the manifest's additive ``stage3`` block (see ``manifest_from_json``). The
+#: per-group ``pool_rc_pvalue``/``pool_spa_pvalue`` keys and the per-verdict
+#: ``candidate_pbo`` key (DEC-CASCADE-STAT-TIER-WIRE-001) ride the SAME
+#: additive-at-1 precedent: raw full-precision floats or ``null``; a
+#: pre-change report simply lacks the keys (readers None-fill).
 REPORT_VERSION: Final[int] = 1
 
 #: 64-char lowercase-hex BLAKE3 run-identity length (mirrors COMBO_HASH_HEX_LEN).
@@ -167,6 +180,13 @@ _MASK_BITS_MAX: Final[int] = (1 << TOTAL_CONDITIONS) - 1
 _SEED_MODULUS: Final[int] = 2**31
 #: The three proximity tolerances ``(pivot, pdh_pdl, fib)`` carried per tuple.
 _PROXIMITY_LEN: Final[int] = 3
+#: A family coordinate is a ``(sl_paisa, tp_paisa)`` PAIR
+#: (DEC-CASCADE-STAT-TIER-WIRE-001).
+_FAMILY_PAIR_LEN: Final[int] = 2
+#: Minimum family width for the per-candidate CSCV columns — CSCV needs >= 2
+#: strategies to rank (mirrors ``cascade._MIN_POOL_FOR_PBO``); a 1-pair
+#: family builds no columns (the check is honestly skipped).
+_MIN_FAMILY_COLUMNS: Final[int] = 2
 
 
 class CascadeWireError(BruteXError):
@@ -216,12 +236,28 @@ class CascadeTupleSpec:
         re-scores a non-default survivor against ITS OWN source's bits (52-53 /
         0-5). Additive fields (default ``(HLC3, CLOSE)``) — DEFAULT-OMITTED from
         the manifest so a pre-axis manifest round-trips byte-compatibly.
+    family_sl_tp
+        The tuple's Stage-3 search FAMILY (DEC-CASCADE-STAT-TIER-WIRE-001):
+        the unique ``(sl_paisa, tp_paisa)`` configurations the winners' mask
+        was actually TRIED at during the Stage-3 refinement — sorted
+        ascending (the deterministic persisted order), the spec's OWN
+        ``(sl_paisa, tp_paisa)`` pair included. Drives the per-candidate
+        CSCV/PBO check at filter #5 (:func:`candidates_for_spec` re-simulates
+        one return column per pair). ``None`` (the default) = family
+        unavailable — a pure Stage-2 grid spec, a pre-family manifest, or a
+        refined cell whose winner masks carry DIFFERING families the
+        spec-level field cannot express (skipped LOUDLY at the spec build) —
+        the per-candidate PBO is then honestly skipped. Additive +
+        EMIT-ON-PRESENT in the manifest so a family-less manifest round-trips
+        byte-compatibly.
 
     Raises
     ------
     CascadeWireError
-        On an empty label, a non-positive knob, a malformed run_id, or an
-        out-of-range mask.
+        On an empty label, a non-positive knob, a malformed run_id, an
+        out-of-range mask, or a malformed ``family_sl_tp`` (empty /
+        non-positive legs / duplicate pairs / unsorted / missing the spec's
+        own pair / present while a leg is ``None``).
     """
 
     instrument: str
@@ -237,6 +273,7 @@ class CascadeTupleSpec:
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
     vwap_source: PriceSource = PriceSource.HLC3
     ema_source: PriceSource = PriceSource.CLOSE
+    family_sl_tp: tuple[tuple[int, int], ...] | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label", "direction_label"):
@@ -274,6 +311,33 @@ class CascadeTupleSpec:
             if not 0 <= mask <= _MASK_BITS_MAX:
                 raise CascadeWireError(
                     f"CascadeTupleSpec winner mask {mask} out of range [0, {_MASK_BITS_MAX}]"
+                )
+        if self.family_sl_tp is not None:
+            if not self.family_sl_tp:
+                raise CascadeWireError("CascadeTupleSpec.family_sl_tp must be non-empty or None")
+            if self.sl_paisa is None or self.tp_paisa is None:
+                raise CascadeWireError(
+                    "CascadeTupleSpec.family_sl_tp requires concrete sl_paisa/tp_paisa — "
+                    "the spec's own pair must be a family member (a disabled leg has no "
+                    "family coordinate)"
+                )
+            for pair in self.family_sl_tp:
+                if len(pair) != _FAMILY_PAIR_LEN or pair[0] <= 0 or pair[1] <= 0:
+                    raise CascadeWireError(
+                        f"CascadeTupleSpec.family_sl_tp pairs must be positive "
+                        f"(sl_paisa, tp_paisa) 2-tuples, got {pair!r}"
+                    )
+            if len(set(self.family_sl_tp)) != len(self.family_sl_tp):
+                raise CascadeWireError("CascadeTupleSpec.family_sl_tp pairs must be unique")
+            if list(self.family_sl_tp) != sorted(self.family_sl_tp):
+                raise CascadeWireError(
+                    "CascadeTupleSpec.family_sl_tp must be sorted ascending "
+                    "(the deterministic persisted order)"
+                )
+            if (self.sl_paisa, self.tp_paisa) not in self.family_sl_tp:
+                raise CascadeWireError(
+                    "CascadeTupleSpec.family_sl_tp must include the spec's own "
+                    f"(sl_paisa, tp_paisa) pair ({self.sl_paisa}, {self.tp_paisa})"
                 )
 
 
@@ -527,6 +591,62 @@ class CascadeWireReport:
 
 # ── Cascade config (deterministic seed from the sweep id) ─────────────────────
 
+#: Env var overriding the Stage-4 Monte-Carlo permutation budget
+#: (``CascadeConfig.mc_n_permutations``) — DEC-REHEARSAL-MC-BUDGET-001,
+#: MIGRATION.md #1817. Unset/blank keeps the production default (1000)
+#: BYTE-IDENTICAL; an integer ``>= 1`` bounds filter #9's worst-case cost
+#: (each permutation re-runs a full pure-Python trade simulation, so an
+#: expensive seed draw can dominate a small CI rehearsal's wall clock —
+#: the R38 rehearsal fixture sets a small budget the way it already bounds
+#: diffcheck via ``BRUTEX_SWEEP_DIFFCHECK_K``). Junk / ``< 1`` RAISES
+#: (the fail-loud house env idiom — ``resolve_diffcheck_k`` precedent).
+MC_PERMUTATIONS_ENV: Final[str] = "BRUTEX_SWEEP_MC_PERMUTATIONS"
+
+
+def resolve_mc_permutations(env: Mapping[str, str] | None = None) -> int | None:
+    """Resolve the optional MC permutation-budget override (fail-loud).
+
+    DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817): reads
+    :data:`MC_PERMUTATIONS_ENV`. Unset / blank ⇒ ``None`` — the caller passes
+    NO override and :class:`~brutex.metrics.cascade.CascadeConfig` keeps its
+    production ``mc_n_permutations`` default (1000) byte-identical (pinned).
+    A non-blank value must parse as an integer ``>= 1`` (a zero/negative
+    budget would silently disable the Monte-Carlo permutation filter — an
+    explicit disable is NOT offered); anything else RAISES ``ValueError``
+    naming the env var, so a typo'd knob is a clean pre-sweep user-config
+    error, never a mid-run surprise (``cmd_sweep_all`` resolves it EAGERLY
+    beside the diffcheck/stall knobs). The resolved value is threaded through
+    the EXISTING :func:`cascade_config_for_sweep` ``overrides=`` seam, so it
+    lands in the manifest-stored cascade config and the MANUAL replay stays
+    exact (pinned by test).
+
+    Parameters
+    ----------
+    env
+        Environment mapping; defaults to ``os.environ`` (injectable).
+
+    Returns
+    -------
+    int | None
+        The override budget, or ``None`` when the env var is unset/blank.
+
+    Raises
+    ------
+    ValueError
+        If the value is not an integer ``>= 1``.
+    """
+    src: Mapping[str, str] = os.environ if env is None else env
+    raw = src.get(MC_PERMUTATIONS_ENV, "")
+    if raw.strip() == "":
+        return None
+    try:
+        n = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"{MC_PERMUTATIONS_ENV}={raw!r} must be an integer >= 1") from exc
+    if n < 1:
+        raise ValueError(f"{MC_PERMUTATIONS_ENV}={raw!r} must be an integer >= 1")
+    return n
+
 
 def cascade_config_for_sweep(
     sweep_id: str, *, overrides: dict[str, object] | None = None
@@ -569,6 +689,56 @@ def cascade_config_for_sweep(
     return CascadeConfig(**kwargs)  # type: ignore[arg-type]
 
 
+def resolve_cascade_embargo_bars(tf_minutes: int, override: int | None) -> int:
+    """Resolve the Stage-4 embargo in decision-TF bars for one (instrument, tf) pool.
+
+    DEC-CASCADE-STAT-TIER-WIRE-001, applying the DEC-STAT-001 embargo law
+    (``docs/MIGRATION.md`` entry #123 —
+    ``max(label horizon, 1 trading day)``): the cascade's candidate series are
+    per-BAR equity returns, so the label span is ONE bar and the formula
+    floors at ONE TRADING DAY expressed in decision-TF bars —
+    ``ceil(DAILY_TF_MINUTES / tf_minutes)`` over the 375-minute NSE regular
+    session (:data:`brutex.data.timeframes.DAILY_TF_MINUTES`, never a
+    re-typed literal). The ``1day`` engine timeframe carries
+    ``minutes == 375`` (``trading_minutes_for_lake_interval``), so the
+    formula is uniform across all 21 TFs (``ceil(375/375) == 1``) — no
+    special case. Examples: 1minute → 375, 2minute → 188, 5minute → 75,
+    375minute/1day → 1.
+
+    Parameters
+    ----------
+    tf_minutes
+        The pool's decision timeframe in trading minutes (``>= 1`` — the
+        :class:`CascadeTupleSpec` invariant).
+    override
+        :attr:`~brutex.metrics.cascade.CascadeConfig.wfo_embargo` — ``None``
+        = AUTO (the formula above); an explicit ``int >= 0`` wins uniformly.
+
+    Returns
+    -------
+    int
+        The resolved embargo in bars (``>= 0``).
+
+    Raises
+    ------
+    CascadeWireError
+        On a negative *override* or a ``tf_minutes < 1``.
+    """
+    from brutex.data.timeframes import DAILY_TF_MINUTES
+
+    if override is not None:
+        if override < 0:
+            raise CascadeWireError(
+                f"CascadeConfig.wfo_embargo must be >= 0 or None (AUTO), got {override}"
+            )
+        return override
+    if tf_minutes < 1:
+        raise CascadeWireError(
+            f"resolve_cascade_embargo_bars: tf_minutes must be >= 1, got {tf_minutes}"
+        )
+    return (DAILY_TF_MINUTES + tf_minutes - 1) // tf_minutes
+
+
 def cascade_config_to_dict(config: CascadeConfig) -> dict[str, object]:
     """Return *config*'s fields as a JSON-serialisable dict (manifest storage).
 
@@ -592,7 +762,21 @@ def cascade_config_to_dict(config: CascadeConfig) -> dict[str, object]:
 
 
 def cascade_config_from_dict(data: dict[str, object]) -> CascadeConfig:
-    """Rebuild a :class:`CascadeConfig` from :func:`cascade_config_to_dict` output."""
+    """Rebuild a :class:`CascadeConfig` from :func:`cascade_config_to_dict` output.
+
+    Presence-tolerant for the NEW appended-with-default keys ONLY
+    (``wfo_embargo`` / ``candidate_pbo_family_cap``,
+    DEC-CASCADE-STAT-TIER-WIRE-001): an OLD manifest dict WITHOUT them
+    rebuilds with the dataclass defaults (they are ordinary defaulted
+    fields — no special-casing needed). Every OTHER drift keeps the
+    existing refusal law — an unknown key / missing required field is a
+    ``TypeError`` inside ``CascadeConfig(**data)`` → :class:`CascadeWireError`.
+    The forward-compat asymmetry is DELIBERATE (hostile-review round 1): the
+    CONFIG parse is STRICT — a NEW manifest's unknown config key read by OLD
+    code refuses loudly (the established strict-config precedent) — while
+    the spec's ``family_sl_tp`` is presence-tolerant ADDITIVE
+    (EMIT-ON-PRESENT at MANIFEST_VERSION 1; see ``manifest_from_json``).
+    """
     from brutex.metrics.cascade import CascadeConfig
 
     try:
@@ -654,6 +838,8 @@ def _max_drawdown_return_units(returns: Sequence[float]) -> float:
 def _make_mc_evaluate(
     *,
     bars: Sequence[CandleBar],
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap,
     side: object,
     tf_minutes: int,
     sl_paisa: int | None,
@@ -683,6 +869,12 @@ def _make_mc_evaluate(
             signals,
             direction=side,  # type: ignore[arg-type]
             tf_minutes=tf_minutes,
+            # The dual-feed law (DEC-FILL-EXEC-GRID-1M-001): the relocated
+            # signals fill on the SAME 1-minute execution stream through the
+            # SAME precomputed map — the map is signal-independent, so one
+            # build serves every permutation.
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
             # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
@@ -716,11 +908,14 @@ def build_candidate_input(
     bar_bits: Sequence[int],
     direction_label: str,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     sl_paisa: int | None,
     tp_paisa: int | None,
     start_equity_paisa: int,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+    family_sl_tp: tuple[tuple[int, int], ...] | None = None,
     compute_regime_evidence: bool = False,
 ) -> CandidateInput:
     """Re-simulate one winning *mask* over *bars* into a cascade :class:`CandidateInput`.
@@ -741,6 +936,12 @@ def build_candidate_input(
         The slice's bars + the pre-built Stage-1A matrix (built once per slice).
     direction_label
         ``"bull"`` / ``"bear"``.
+    exec_bars_1m, exec_map
+        The slice's 1-minute EXECUTION stream (+ optional precomputed
+        :class:`~brutex.engine.exec_grid.ExecGridMap`; derived once here when
+        ``None``) every fill resolves on — DEC-FILL-EXEC-GRID-1M-001,
+        REQUIRED so the re-simulation reproduces the persisted finalist's
+        dual-feed law (never a decision-TF-era fill).
     tf_minutes, sl_paisa, tp_paisa, start_equity_paisa
         The tuple's trade-sim knobs (must match what produced the finalist).
     lockbox_default_window_days, lockbox_min_trades
@@ -750,6 +951,22 @@ def build_candidate_input(
         config, so both sides share the same window; a hard-coded default
         here would re-introduce a train/holdout mismatch for any non-default
         config). Defaults are the lockbox module's own public constants.
+    family_sl_tp
+        The candidate's Stage-3 search family
+        (DEC-CASCADE-STAT-TIER-WIRE-001; already cap-truncated by
+        :func:`candidates_for_spec`): with ``>= 2`` pairs, each pair is
+        re-simulated through the SAME simulation path the finalist uses —
+        identical bars / entry signals / direction / tf, ONLY the SL/TP legs
+        swapped — into one :func:`_per_bar_returns` column per pair (the
+        candidate's own pair reuses its already-computed series, never a
+        second sim), feeding the per-candidate CSCV/PBO check at filter #5.
+        The production caller guarantees the candidate's own
+        ``(sl_paisa, tp_paisa)`` is a family member (the
+        :class:`CascadeTupleSpec` invariant). ``None`` or fewer than 2 pairs
+        → ``family_returns=None`` (the check is honestly skipped). HONEST
+        cost: O(len(family) × bars) extra sim work per candidate — the same
+        cost class as the finalist re-sim, multiplied by the family width
+        (bounded by ``CascadeConfig.candidate_pbo_family_cap``).
     compute_regime_evidence
         Default ``False`` — the filter #11 evidence (per-trade ERA labels +
         session-lens TREND tokens, DEC-REGIME-FRAGILITY-GATE-001) is NOT
@@ -786,39 +1003,83 @@ def build_candidate_input(
 
     side = Side.BUY if direction_label == "bull" else Side.SELL
     entry_signals = mask_to_entry_signals(bar_bits, mask)
-    trades = simulate_trades(
-        bars,
-        entry_signals,
-        direction=side,
-        tf_minutes=tf_minutes,
-        stop_loss_paisa=sl_paisa,
-        take_profit_paisa=tp_paisa,
-        # The candidate re-simulation reproduces the persisted finalist under
-        # the ONE hardcoded worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001).
-        # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
-        # candidate re-simulation's trades are a DISCARDED stream — every
-        # observable output is the CandidateInput SCALARS + returns tuples
-        # built below (no trade object, and no VIX field, survives the
-        # conversion), so the report bytes are provably identical stamped vs
-        # unstamped and a per-candidate stamp would be pure wasted work. The
-        # stream is EXPLICITLY unstamped via this literal (one of the FIVE
-        # enumerated sanctioned literal-None seam bindings, AST-pinned with
-        # exact counts by tests/unit/test_vix_stamper_binding_pin.py — never
-        # a silent omission); the old reference_stamper seam through the
-        # cascade chain was DELETED with the two manual-replay
-        # vix_stamper_for_manifest builds it existed to feed (each paid a
-        # full window-bounded VIX lake read per replay/click for zero
-        # output — the same dead-build class the round-2 review removed at
-        # the options-sim sites). REVERT LEVER: add a VIX surface to
-        # CandidateInput/the cascade report FIRST, then re-thread the seam.
-        reference_stamper=None,
-    )
+    if exec_map is None:
+        # Derived ONCE per candidate when the pool loop did not thread its
+        # memoised map (mask-independent — design §1.5).
+        exec_map = build_exec_grid_map(bars, exec_bars_1m, tf_minutes=tf_minutes)
+
+    def _trades_for_legs(leg_sl: int | None, leg_tp: int | None) -> list[ClosedTrade]:
+        """The ONE re-simulation law: this mask's trades for one (sl, tp) pair.
+
+        Shared by the finalist's own re-simulation AND the family columns
+        (DEC-CASCADE-STAT-TIER-WIRE-001) — ONE ``simulate_trades`` call site,
+        so the two can never drift and the VIX AST pin's exact literal count
+        (``tests/unit/test_vix_stamper_binding_pin.py``) is unchanged.
+        Reproduces the persisted finalist under the ONE hardcoded worst-case
+        fill law on the 1m execution grid (DEC-FILL-WORST-CASE-ONLY-001 +
+        DEC-FILL-EXEC-GRID-1M-001) — the same dual feed (``exec_bars_1m`` +
+        the mask-independent ``exec_map``) the persistence spine threaded.
+
+        HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
+        re-simulation's trades are a DISCARDED stream — every observable
+        output is the CandidateInput SCALARS + returns tuples built by the
+        caller (no trade object, and no VIX field, survives the conversion),
+        so the report bytes are provably identical stamped vs unstamped and a
+        per-candidate stamp would be pure wasted work. The stream is
+        EXPLICITLY unstamped via this literal (one of the FIVE enumerated
+        sanctioned literal-None seam bindings, AST-pinned with exact counts —
+        never a silent omission); the old reference_stamper seam through the
+        cascade chain was DELETED with the two manual-replay
+        vix_stamper_for_manifest builds it existed to feed (each paid a full
+        window-bounded VIX lake read per replay/click for zero output — the
+        same dead-build class the round-2 review removed at the options-sim
+        sites). REVERT LEVER: add a VIX surface to CandidateInput/the cascade
+        report FIRST, then re-thread the seam.
+        """
+        return simulate_trades(
+            bars,
+            entry_signals,
+            direction=side,
+            tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
+            stop_loss_paisa=leg_sl,
+            take_profit_paisa=leg_tp,
+            reference_stamper=None,
+        )
+
+    trades = _trades_for_legs(sl_paisa, tp_paisa)
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
-    metrics = compute_metrics(trades, equity, total_bars=len(bars))
+    # total_bars = the EXECUTION-stream count (design §7.2 hard obligation):
+    # holding_bars is a 1-MINUTE count post-PR-B, so time_in_market_pct's
+    # denominator must be the 1m bar count or the ratio silently clamps > 1.
+    metrics = compute_metrics(trades, equity, total_bars=len(exec_bars_1m))
 
     per_bar = _per_bar_returns(equity.equity_paisa, start_equity_paisa)
+
+    def _family_column(fam_sl: int, fam_tp: int) -> tuple[float, ...]:
+        """One family pair's aligned per-bar return column (legs swapped only)."""
+        fam_equity = build_equity_curve(
+            bars,
+            _trades_for_legs(fam_sl, fam_tp),
+            start_equity_paisa=start_equity_paisa,
+            tf_minutes=tf_minutes,
+        )
+        return _per_bar_returns(fam_equity.equity_paisa, start_equity_paisa)
+
+    # Per-candidate CSCV family columns (DEC-CASCADE-STAT-TIER-WIRE-001): one
+    # aligned per-bar return series per family (sl, tp) pair; the candidate's
+    # own pair reuses the just-computed series (identical by construction —
+    # same law, same inputs), every other pair is a real re-simulation with
+    # ONLY the legs swapped. Fewer than 2 pairs → honest None (skip).
+    family_returns: tuple[tuple[float, ...], ...] | None = None
+    if family_sl_tp is not None and len(family_sl_tp) >= _MIN_FAMILY_COLUMNS:
+        family_returns = tuple(
+            per_bar if (fam_sl, fam_tp) == (sl_paisa, tp_paisa) else _family_column(fam_sl, fam_tp)
+            for fam_sl, fam_tp in family_sl_tp
+        )
     day_ordinals = tuple(bar.timestamp.astimezone(IST).date().toordinal() for bar in bars)
     n_entries = sum(1 for signal in entry_signals if signal)
 
@@ -977,12 +1238,15 @@ def build_candidate_input(
         mc_n_entries=n_entries,
         mc_evaluate=_make_mc_evaluate(
             bars=bars,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             side=side,
             tf_minutes=tf_minutes,
             sl_paisa=sl_paisa,
             tp_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
         ),
+        family_returns=family_returns,
     )
 
 
@@ -990,9 +1254,12 @@ def candidates_for_spec(
     spec: CascadeTupleSpec,
     bars: Sequence[CandleBar],
     *,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
     roll_schedule: tuple[int, ...] | None = None,
+    family_cap: int | None = None,
     compute_regime_evidence: bool = False,
 ) -> list[CandidateInput]:
     """Re-build every winner of *spec* into a :class:`CandidateInput` over *bars*.
@@ -1007,12 +1274,31 @@ def candidates_for_spec(
     MANUAL replay (``CascadeManifest.roll_schedules``), so a futures winner
     is re-scored under the SAME per-contract hard resets the sweep ranked it
     with (DEC-STAGE1A-ROLL-RESET-001 D11 — review round-1).
+
+    ``family_cap`` (DEC-CASCADE-STAT-TIER-WIRE-001) bounds the per-candidate
+    CSCV family width: a ``spec.family_sl_tp`` wider than the cap is
+    truncated to the FIRST ``family_cap`` pairs in the deterministic (sorted)
+    persisted order with ONE loud ``cascade_wire.family_capped`` WARNING per
+    spec — never silently. If the truncation would drop the spec's OWN
+    ``(sl_paisa, tp_paisa)`` pair, the family is DROPPED wholesale instead
+    (``cascade_wire.family_cap_dropped_own_pair`` — CSCV over a family that
+    excludes the candidate says nothing about it; the per-candidate PBO is
+    then honestly skipped). ``None`` (the default) applies no cap — direct
+    callers; the production wire always threads
+    ``CascadeConfig.candidate_pbo_family_cap``. A ``family_cap < 1`` is
+    REFUSED (:class:`CascadeWireError`) — aligned with
+    :func:`run_cascade_over_specs`'s config-level refusal, so a direct
+    caller's cap-0 can never quietly degrade every family to ``None``
+    (hostile-review round 1).
+
     ``compute_regime_evidence`` gates the filter #11 evidence computation
     (DEC-REGIME-FRAGILITY-GATE-001; threaded from
     ``CascadeConfig.regime_fragility`` by :func:`run_cascade_over_specs` —
     default ``False`` leaves ``trade_trend_tokens``/``trade_era_labels``
     ``None`` and builds no session lens).
     """
+    if family_cap is not None and family_cap < 1:
+        raise CascadeWireError(f"family_cap must be >= 1 or None, got {family_cap}")
     from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
     from brutex.vocabulary import ProximityParams
 
@@ -1035,6 +1321,42 @@ def candidates_for_spec(
         roll_schedule=roll_schedule,
         apply_1day_mask=apply_1day_mask_for(spec.instrument, spec.tf_label),
     )
+    family = spec.family_sl_tp
+    if family is not None and family_cap is not None and len(family) > family_cap:
+        truncated = family[:family_cap]
+        dropped = len(family) - len(truncated)
+        if (spec.sl_paisa, spec.tp_paisa) not in truncated:
+            # The cap would exclude the finalists' own pair — CSCV over a
+            # family that excludes the candidate says nothing about it, so
+            # the per-candidate PBO is honestly SKIPPED for this spec.
+            _LOG.warning(
+                "cascade_wire.family_cap_dropped_own_pair",
+                instrument=spec.instrument,
+                tf=spec.tf_label,
+                direction=spec.direction_label,
+                sl_paisa=spec.sl_paisa,
+                tp_paisa=spec.tp_paisa,
+                family_size=len(family),
+                cap=family_cap,
+            )
+            family = None
+        else:
+            _LOG.warning(
+                "cascade_wire.family_capped",
+                instrument=spec.instrument,
+                tf=spec.tf_label,
+                direction=spec.direction_label,
+                sl_paisa=spec.sl_paisa,
+                tp_paisa=spec.tp_paisa,
+                family_size=len(family),
+                cap=family_cap,
+                dropped=dropped,
+            )
+            family = truncated
+    if exec_map is None:
+        # ONE map per spec pool (mask-independent — design §1.5); the pooled
+        # caller threads its memoised map so this derives at most once.
+        exec_map = build_exec_grid_map(bars, exec_bars_1m, tf_minutes=spec.tf_minutes)
     return [
         build_candidate_input(
             run_id=run_id,
@@ -1043,11 +1365,14 @@ def candidates_for_spec(
             bar_bits=bar_bits,
             direction_label=spec.direction_label,
             tf_minutes=spec.tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             sl_paisa=spec.sl_paisa,
             tp_paisa=spec.tp_paisa,
             start_equity_paisa=spec.start_equity_paisa,
             lockbox_default_window_days=lockbox_default_window_days,
             lockbox_min_trades=lockbox_min_trades,
+            family_sl_tp=family,
             compute_regime_evidence=compute_regime_evidence,
         )
         for run_id, mask in spec.winners
@@ -1106,6 +1431,16 @@ def run_cascade_over_specs(
     """
     from brutex.metrics.cascade import DsrTrialStats, run_stage4_cascade
 
+    # DEC-CASCADE-STAT-TIER-WIRE-001: CascadeConfig is a frozen no-__post_init__
+    # dataclass, so the family cap is validated HERE at the ONE production
+    # consumption point (the wfo_embargo override is validated inside
+    # resolve_cascade_embargo_bars per pool).
+    if config.candidate_pbo_family_cap < 1:
+        raise CascadeWireError(
+            f"CascadeConfig.candidate_pbo_family_cap must be >= 1, "
+            f"got {config.candidate_pbo_family_cap}"
+        )
+
     # The frozen per-leaderboard deflation inputs (DEC-TRIAL-STATS-CONSUME-001,
     # ADR-0008 condition 6): a group's record must be PRESENT, COMPLETE and
     # deflatable to be used; anything less falls back to pool-N LOUDLY — a
@@ -1151,6 +1486,23 @@ def run_cascade_over_specs(
         bars = bars_for(instrument, tf_label)
         if not bars:
             continue
+        # The pool's 1-minute EXECUTION stream (DEC-FILL-EXEC-GRID-1M-001):
+        # the SAME bars_for contract under the "1minute" label — at
+        # tf=1minute the two calls are one key, so one object serves both.
+        exec_bars = bars_for(instrument, EXEC_INTERVAL_LABEL)
+        if not exec_bars:
+            # A pool without its exec stream cannot re-simulate under the
+            # dual-feed law — skip LOUDLY, never a decision-TF-era fallback
+            # (the G7 snapshot gate refuses a drifted lake before this; a
+            # missing 1m slice here is a partial/hand-built bars_for).
+            _LOG.warning(
+                "cascade_wire.pool_skipped_no_exec_stream",
+                instrument=instrument,
+                tf=tf_label,
+                n_specs=len(grouped[(instrument, tf_label)]),
+                remedy="load the instrument's 1-minute slice (interval '1minute')",
+            )
+            continue
         roll_schedule = None if roll_schedules is None else roll_schedules.get(instrument)
         if roll_schedule is not None and not is_futures_series_symbol(instrument):
             # The POSITIVE direction of the presence ⟺ alias invariant
@@ -1184,12 +1536,33 @@ def run_cascade_over_specs(
                 remedy="re-run `brutex sweep-all` to record roll_schedules in the manifest",
             )
             continue
+        group_specs = grouped[(instrument, tf_label)]
+        # DEC-CASCADE-STAT-TIER-WIRE-001: ONE resolved embargo per pool. The
+        # group's tf_minutes must be unambiguous (tf_label <-> tf_minutes is
+        # 1:1 by construction; a disagreeing manifest is corrupt — refuse
+        # loudly rather than embargo one pool under two different clocks).
+        group_tf_minutes = {spec.tf_minutes for spec in group_specs}
+        if len(group_tf_minutes) != 1:
+            raise CascadeWireError(
+                f"specs for pool ({instrument!r}, {tf_label!r}) disagree on tf_minutes "
+                f"{sorted(group_tf_minutes)} — the manifest is corrupt; re-run "
+                "`brutex sweep-all` to mint a fresh one"
+            )
+        embargo_bars = resolve_cascade_embargo_bars(
+            next(iter(group_tf_minutes)), config.wfo_embargo
+        )
+        # DEC-FILL-EXEC-GRID-1M-001: ONE map per pool (mask/SL/TP-independent —
+        # design §1.5): every spec in the group shares (instrument, tf_label),
+        # hence tf_minutes.
+        pool_exec_map = build_exec_grid_map(bars, exec_bars, tf_minutes=group_specs[0].tf_minutes)
         candidates: list[CandidateInput] = []
-        for spec in grouped[(instrument, tf_label)]:
+        for spec in group_specs:
             candidates.extend(
                 candidates_for_spec(
                     spec,
                     bars,
+                    exec_bars_1m=exec_bars,
+                    exec_map=pool_exec_map,
                     # The ONE config drives BOTH sides of the train/holdout
                     # split (R2-SR-F1 review A1): the wire's training-reference
                     # complement AND filter #8's gate window — a non-default
@@ -1198,6 +1571,9 @@ def run_cascade_over_specs(
                     lockbox_min_trades=config.lockbox_min_trades,
                     # ADR-0012: the pool's OWN roll schedule (None = spot path).
                     roll_schedule=roll_schedule,
+                    # DEC-CASCADE-STAT-TIER-WIRE-001: the ONE config's family
+                    # cap bounds the per-candidate CSCV re-sim width.
+                    family_cap=config.candidate_pbo_family_cap,
                     # DEC-REGIME-FRAGILITY-GATE-001: compute the filter #11
                     # evidence exactly when the gate that consumes it is ON —
                     # the default-OFF path stays byte- AND log-identical.
@@ -1207,7 +1583,12 @@ def run_cascade_over_specs(
         if not candidates:
             continue
         report = run_stage4_cascade(
-            candidates, config, trial_stats=_trial_stats_for(instrument, tf_label)
+            candidates,
+            config,
+            trial_stats=_trial_stats_for(instrument, tf_label),
+            # The pool's resolved DEC-STAT-001 embargo (AUTO = one trading
+            # day in decision-TF bars; config.wfo_embargo overrides).
+            embargo_bars=embargo_bars,
         )
         groups.append((instrument, tf_label, report))
 
@@ -1242,7 +1623,10 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
     per-verdict ``dsr_corrected`` key (DEC-RESULTS-TRUST-HONESTY-001, audit
     BLOCKER 5 — the cascade's OWN filter-#2 DSR, kept on pass AND reject)
     rides the SAME additive precedent: a pre-change report lacks the key and
-    loads ``None``, never a fabricated 0.
+    loads ``None``, never a fabricated 0. The report-level
+    ``pool_rc_pvalue``/``pool_spa_pvalue`` and the per-verdict
+    ``candidate_pbo`` keys (DEC-CASCADE-STAT-TIER-WIRE-001) ride the SAME
+    precedent again — raw full-precision floats or ``null``.
     The per-verdict ``extreme_vol_status`` / ``extreme_vol_stats`` keys
     (DEC-REGIME-MUST-SURVIVE-STRATUM-001) are EMIT-ON-PRESENT: written ONLY
     when the default-OFF filter #10 actually evaluated the candidate
@@ -1256,6 +1640,8 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
         "dsr_n_trials": report.dsr_n_trials,
         "dsr_trial_variance": report.dsr_trial_variance,
         "pool_pbo": report.pool_pbo,
+        "pool_rc_pvalue": report.pool_rc_pvalue,
+        "pool_spa_pvalue": report.pool_spa_pvalue,
         "survivor_ids": list(report.survivor_ids),
         "stage_survivors": dict(report.stage_survivors),
         "verdicts": [_verdict_to_dict(verdict) for verdict in report.verdicts],
@@ -1273,6 +1659,7 @@ def _verdict_to_dict(verdict: CandidateVerdict) -> dict[str, object]:
         "provisional": verdict.provisional,
         "cpcv_pass_rate": verdict.cpcv_pass_rate,
         "dsr_corrected": verdict.dsr_corrected,
+        "candidate_pbo": verdict.candidate_pbo,
     }
     if verdict.extreme_vol_status is not None:
         out["extreme_vol_status"] = verdict.extreme_vol_status
@@ -1557,12 +1944,23 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         # twin) — the reader REFUSES a manifest without it (precise-era) so a
         # manual replay can never re-score precise-priced winners.
         "fill_mode": FillMode.WORST_CASE.value,
+        # DEC-FILL-EXEC-GRID-1M-001: the manifest carries the law BY
+        # DERIVATION, never payload (design §4.2/Q2) — the execution_grid key
+        # is the ONE schema addition; the reader REFUSES a manifest without
+        # it (decision-TF-era) so a manual replay can never re-score winners
+        # under the retired decision-TF fill grid.
+        "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
         # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via the ONE
         # COMMON fragment (CLAUDE.md §11): the price-source keys are written only
         # when non-default, so a baseline manifest is byte-identical to a pre-axis one
         # (modulo the unconditional fill_mode key above — the two laws compose).
         **price_source_params_fragment(spec.vwap_source, spec.ema_source),
     }
+    # EMIT-ON-PRESENT (DEC-CASCADE-STAT-TIER-WIRE-001): the Stage-3 search
+    # family is written only when recorded, so a family-less spec (a pure
+    # grid winner / pre-family era) serialises byte-identically to before.
+    if spec.family_sl_tp is not None:
+        payload["family_sl_tp"] = [[sl, tp] for sl, tp in spec.family_sl_tp]
     return payload
 
 
@@ -1570,7 +1968,13 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
     """Rebuild a :class:`CascadeTupleSpec` from :func:`_spec_to_dict` output."""
     # The manifest is JSON (typed ``dict[str, object]``); cast to ``Any`` so the
     # scalar coercions below read cleanly. Every malformed value is caught by the
-    # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
+    # ``(KeyError, TypeError, ValueError, OverflowError)`` guard and re-raised as
+    # a CascadeWireError. OverflowError joined the guard at the
+    # DEC-CASCADE-STAT-TIER-WIRE-001 refuter round 1: ``json.loads`` accepts the
+    # non-standard ``Infinity``/``-Infinity`` tokens by default and
+    # ``int(float("inf"))`` raises OverflowError (``NaN`` raises ValueError —
+    # already caught), so a hand-corrupted manifest previously leaked a raw
+    # OverflowError from every int-coerced field instead of the typed refusal.
     raw = cast(dict[str, Any], data)
     if raw.get("fill_mode") is None or str(raw["fill_mode"]) != FillMode.WORST_CASE.value:
         # DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is
@@ -1584,6 +1988,24 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
             "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): "
             f"fill_mode={raw.get('fill_mode')!r} — worst_case is the only fill "
             "model; re-run the sweep to produce a worst-case manifest"
+        )
+    if (
+        raw.get("execution_grid") is None
+        or str(raw["execution_grid"]) != EXECUTION_GRID_1M_NEXT_BAR
+    ):
+        # DEC-FILL-EXEC-GRID-1M-001 legacy-artifact refusal (the fill_mode
+        # law's twin): the 1-minute execution grid is the ONLY fill grid and
+        # every post-DEC manifest carries the unconditional
+        # "execution_grid": "1m_next_bar" key. An ABSENT key identifies a
+        # decision-TF-era manifest whose winners were ranked under fills
+        # resolved on the DECISION bar — re-scoring them here would silently
+        # launder decision-TF-priced results as 1m-grid results. Refuse
+        # LOUDLY; the remediation is a fresh sweep.
+        raise CascadeWireError(
+            "decision-TF-era cascade manifest refused (DEC-FILL-EXEC-GRID-1M-001): "
+            f"execution_grid={raw.get('execution_grid')!r} — the 1-minute "
+            "execution grid is the only fill grid; re-run the sweep to produce "
+            "a 1m-grid manifest"
         )
     try:
         proximity = raw["proximity_bps"]
@@ -1621,8 +2043,17 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
                 if raw.get("ema_source") is None
                 else PriceSource(str(raw["ema_source"]))
             ),
+            # Absent on pre-DEC-CASCADE-STAT-TIER-WIRE-001 manifests (additive
+            # parse): None = family unavailable → per-candidate PBO skipped.
+            # A malformed value falls into the existing refusal guard below;
+            # CascadeTupleSpec.__post_init__ enforces the family shape law.
+            family_sl_tp=(
+                None
+                if raw.get("family_sl_tp") is None
+                else tuple((int(sl), int(tp)) for sl, tp in raw["family_sl_tp"])
+            ),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
 
 
@@ -1911,12 +2342,33 @@ def spec_from_store_rows(
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     vwap_source: PriceSource = PriceSource.HLC3,
     ema_source: PriceSource = PriceSource.CLOSE,
+    family_sl_tp: tuple[tuple[int, int], ...] | None = None,
+    multi_axis: bool = True,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
-    Selects the top-``top_k`` *rows* by Sharpe (ties broken by ``run_id`` ascending
-    — deterministic, matching :meth:`ResultsStore.top_k`) as the tuple's cascade
-    winners. Returns ``None`` when *rows* is empty (nothing to cascade).
+    Selects the tuple's cascade winners from *rows*. LANE W1
+    (DEC-RANK-POOL-UNION-ADMIT-001): under ``multi_axis=True`` (the default)
+    the ``top_k`` pool is the interleaved round-robin UNION of the five
+    :data:`~brutex.engine.pool_union.POOL_UNION_SOURCE_ORDER` admission
+    sources (Sharpe · the DEFAULT preset law · DD asc · win-rate desc · the
+    persisted ε-Pareto frontier — frontier inclusion GUARANTEED only under
+    the ``top_k >= non-empty sources`` precondition, which the production
+    ``DEFAULT_PERSIST_TOP_K=1_000`` always satisfies; below it the tail
+    sources are starved + WARNED once, the
+    :mod:`~brutex.engine.pool_union` module docstring, review round 1) at
+    the SAME total ``top_k`` budget —
+    killing the rank-1-forever-``not_validated`` shape — with the winners
+    still emitted in TODAY's order (Sharpe descending, ties ``run_id``
+    ascending, matching :meth:`ResultsStore.top_k`; a pool with
+    ≤ ``top_k`` rows is byte-identical either way). ``multi_axis=False``
+    (or ``top_k=None`` — the whole pool) is the legacy single-key law.
+    Returns ``None`` when *rows* is empty (nothing to cascade).
+    ``family_sl_tp`` (DEC-CASCADE-STAT-TIER-WIRE-001) is carried verbatim onto
+    the spec — the Stage-3 build path
+    (:func:`brutex.engine.stage3_wire.cascade_specs_for_refined_cells`)
+    supplies each refined cell's per-mask search family; the default ``None``
+    keeps every other caller byte-identical.
 
     Parameters
     ----------
@@ -1944,9 +2396,13 @@ def spec_from_store_rows(
     """
     if not rows:
         return None
-    ordered = sorted(rows, key=lambda row: row.run_id)
-    ordered.sort(key=lambda row: row.sharpe_ratio, reverse=True)
-    selected = ordered if top_k is None else ordered[:top_k]
+    if multi_axis and top_k is not None:
+        # LANE W1 union admission (the ONE shared law — pool_union).
+        selected: Sequence[ResultRow] = union_select_rows(rows, cap=top_k)
+    else:
+        ordered = sorted(rows, key=lambda row: row.run_id)
+        ordered.sort(key=lambda row: row.sharpe_ratio, reverse=True)
+        selected = ordered if top_k is None else ordered[:top_k]
     winners = tuple((row.run_id, row.mask_bits) for row in selected)
     return CascadeTupleSpec(
         instrument=instrument,
@@ -1962,6 +2418,7 @@ def spec_from_store_rows(
         fib_anchor=fib_anchor,
         vwap_source=vwap_source,
         ema_source=ema_source,
+        family_sl_tp=family_sl_tp,
     )
 
 
@@ -2164,7 +2621,15 @@ def manifest_snapshot_hash(
     """
     from brutex.engine.snapshot_hash import data_snapshot_hash
 
-    pairs = sorted({(spec.instrument, spec.tf_label) for spec in manifest.specs})
+    # The exec coordinates derive as instruments × "1minute" (design §4.2/Q2,
+    # DEC-FILL-EXEC-GRID-1M-001): the manifest carries the law BY DERIVATION,
+    # never payload — so the G7 gate auto-refuses a lake whose 1-minute
+    # EXECUTION slice healed/changed since the sweep, exactly like a decision
+    # slice (at tf=1minute the pair collapses to one key).
+    pairs = sorted(
+        {(spec.instrument, spec.tf_label) for spec in manifest.specs}
+        | {(spec.instrument, EXEC_INTERVAL_LABEL) for spec in manifest.specs}
+    )
     slices = {(instrument, tf): list(bars_for(instrument, tf)) for instrument, tf in pairs}
     ctx = manifest.bars_context
     return data_snapshot_hash(
@@ -2775,7 +3240,13 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
 
     ctx = manifest.bars_context
     catalog = catalog_path if catalog_path is not None else lake_root / "catalog.duckdb"
-    coords = {(spec.instrument, spec.tf_label) for spec in manifest.specs}
+    # Decision coordinates PLUS the derived exec coordinates — instruments ×
+    # "1minute" (design §4.2/Q2, DEC-FILL-EXEC-GRID-1M-001): the replay loads
+    # the 1-minute EXECUTION stream through the SAME guarded loader so the
+    # cascade re-simulates under the dual-feed law (at tf=1minute one key).
+    coords = {(spec.instrument, spec.tf_label) for spec in manifest.specs} | {
+        (spec.instrument, EXEC_INTERVAL_LABEL) for spec in manifest.specs
+    }
     # ADR-0012 replay-consistency gate (review round-2 findings 1/4/9): resolve
     # the futures alias ONCE over the manifest's window, REFUSE loudly when the
     # re-derived schedule drifted from the manifest's FROZEN one, and pass the
@@ -2856,6 +3327,7 @@ __all__ = [
     "CASCADE_REPORT_STAGE",
     "MANIFEST_FILENAME",
     "MANIFEST_VERSION",
+    "MC_PERMUTATIONS_ENV",
     "REPORT_FILENAME",
     "REPORT_VERSION",
     "BarsContext",
@@ -2883,6 +3355,8 @@ __all__ = [
     "manifest_to_json",
     "report_group_count",
     "report_path",
+    "resolve_cascade_embargo_bars",
+    "resolve_mc_permutations",
     "run_and_write_from_manifest",
     "run_and_write_from_specs",
     "run_cascade_over_specs",

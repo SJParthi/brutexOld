@@ -7,9 +7,12 @@ the citation-grounded NSE/BSE/SEBI table in
 Spot-checks per regime transition.
 """
 
+# Whitebox pins on the private Python oracles (DEC-OPTCOST-TAILS-RUST-001):
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from brutex.options.expiry_calendar import (
@@ -274,3 +277,67 @@ class TestPreHistoryRejected:
     def test_monthly_before_2020_raises(self, instrument: OptionsUnderlying) -> None:
         with pytest.raises(ValueError, match="before recorded history"):
             get_monthly_dow(instrument, date(2019, 12, 31))
+
+
+# ── DEC-OPTCOST-TAILS-RUST-001: the flag-ON seam (ON == OFF, refusal bytes) ──
+
+
+class TestOptcostRustSeamOn:
+    """The dow-lookup / next-weekly / next-monthly walks under
+    `BRUTEX_OPTCOST_TAILS_RUST=1` match the Python oracle across every
+    regime transition (±1 day), the BANKNIFTY NO_WEEKLY edge and the
+    Dec→Jan monthly-dow rollover; the pre-history ValueError keeps its
+    exact message bytes."""
+
+    @pytest.fixture(autouse=True)
+    def _seam_on(self, monkeypatch: pytest.MonkeyPatch):
+        import brutex.optcost_rust as ocr
+
+        pytest.importorskip("fno_math")
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "1")
+        ocr.reset_optcost_rust_for_tests()  # burn-in armed — oracle runs beside
+        yield
+        ocr.reset_optcost_rust_for_tests()
+
+    def test_every_regime_transition_matches_the_oracle(self) -> None:
+        import brutex.optcost_rust as ocr
+        from brutex.options.expiry_calendar import (
+            _MONTHLY_BY_UNDERLYING,
+            _WEEKLY_BY_UNDERLYING,
+            _next_monthly_expiry_python,
+            _next_weekly_expiry_python,
+        )
+
+        for instrument in OptionsUnderlying:
+            boundaries = [
+                d for d, _ in _WEEKLY_BY_UNDERLYING[instrument] + _MONTHLY_BY_UNDERLYING[instrument]
+            ]
+            for boundary in boundaries:
+                for delta in (-1, 0, 1):
+                    on = boundary + timedelta(days=delta)
+                    if on < date(2020, 1, 1):
+                        continue
+                    assert next_weekly_expiry(instrument, on) == _next_weekly_expiry_python(
+                        instrument, on
+                    )
+                    assert next_monthly_expiry(instrument, on) == _next_monthly_expiry_python(
+                        instrument, on
+                    )
+        assert not ocr.optcost_rust_disabled()
+
+    def test_banknifty_no_weekly_edge_and_dec_jan_rollover(self) -> None:
+        # SEBI killed the BANKNIFTY weekly EOD 2024-11-13
+        assert next_weekly_expiry(OptionsUnderlying.BANKNIFTY, date(2024, 11, 14)) is None
+        assert next_weekly_expiry(OptionsUnderlying.BANKNIFTY, date(2024, 11, 13)) is not None
+        # Dec-2024 (last Wednesday) → Jan-2025 (last Thursday) re-evaluation
+        assert next_monthly_expiry(OptionsUnderlying.BANKNIFTY, date(2024, 12, 28)) == date(
+            2025, 1, 30
+        )
+
+    def test_prehistory_refusal_bytes_match_the_oracle(self) -> None:
+        on = date(2019, 12, 31)
+        with pytest.raises(ValueError) as seam_exc:
+            get_weekly_dow(OptionsUnderlying.NIFTY, on)
+        assert str(seam_exc.value) == (
+            f"on_date {on} is before recorded history start (2020-01-01)"
+        )

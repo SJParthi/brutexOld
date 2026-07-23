@@ -128,6 +128,7 @@ def test_b2_gate_on_vs_off_whole_sweep_ratio(tmp_path: Path) -> None:
                 store=store,
                 dedup=dedup,
                 audit=audit,
+                exec_bars_1m=bars,
             )
 
     off_t = _best_of(3, lambda: _sweep("off", None))

@@ -173,3 +173,89 @@ def test_pbo_rejects_inf_cell() -> None:
     ]
     with pytest.raises(ValueError, match=r"non-finite entry at \[1\]\[2\]"):
         pbo_probability(matrix, n_splits=2)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# DEC-METRICS-RUST-STATS-002 — the Rust dispatch arms (flag ON / custom
+# evaluator refusal / fallthrough / flag-OFF bomb-kernel pin).
+# ═════════════════════════════════════════════════════════════════════════
+
+import struct  # noqa: E402  (appended PR-2 section)
+
+import fno_math  # noqa: E402
+from brutex.metrics import rust_stats  # noqa: E402
+from structlog.testing import capture_logs  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stats_seam() -> None:
+    """Fresh burn-in budgets, latches and log memo per test."""
+    rust_stats.reset_self_check_for_tests()
+    rust_stats.reset_observability_memo_for_tests()
+
+
+def _bits(value: float) -> bytes:
+    return struct.pack("<d", value)
+
+
+def _matrix() -> list[list[float]]:
+    return [[float((i * j + 3) % 11 - 5) * 0.01 for j in range(1, 6)] for i in range(64)]
+
+
+def test_flag_on_engages_bit_equal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = pbo_probability(_matrix(), n_splits=8)
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    with capture_logs() as logs:
+        on = pbo_probability(_matrix(), n_splits=8)
+    assert any(e["event"] == "rust_stats.engaged" and e["fn"] == "pbo" for e in logs), (
+        "the ON arm must engage the Rust kernel (anti-vacuous-pass law)"
+    )
+    assert _bits(on.pbo) == _bits(off.pbo)
+    assert on.n_combinations == off.n_combinations == 70
+    assert len(on.logits) == len(off.logits)
+    for got, want in zip(on.logits, off.logits, strict=True):
+        assert _bits(got) == _bits(want)
+
+
+def test_flag_on_custom_evaluator_refuses_to_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom evaluator is not transcribed — the seam refuses and the
+    Python loop serves, identical to OFF."""
+
+    def evaluator(total: float, total_sq: float, count: int) -> float:
+        return total / count  # plain mean, not Sharpe
+
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = pbo_probability(_matrix(), n_splits=4, evaluator=evaluator)
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    with capture_logs() as logs:
+        on = pbo_probability(_matrix(), n_splits=4, evaluator=evaluator)
+    reasons = [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"]
+    assert reasons == ["custom_evaluator"]
+    assert _bits(on.pbo) == _bits(off.pbo)
+    for got, want in zip(on.logits, off.logits, strict=True):
+        assert _bits(got) == _bits(want)
+
+
+def test_flag_on_latched_kernel_falls_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    rust_stats.disable_kernel("pbo", "self_check_mismatch")
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = pbo_probability(_matrix(), n_splits=4)
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    on = pbo_probability(_matrix(), n_splits=4)
+    assert _bits(on.pbo) == _bits(off.pbo)
+
+
+def test_flag_off_never_touches_the_kernel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bomb-kernel spy: flag OFF is byte-identical AND crate-untouched."""
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+
+    def _bomb(*args: object) -> tuple[int, list[float]]:
+        raise AssertionError("flag-OFF must never call the Rust kernel")
+
+    monkeypatch.setattr(fno_math, "stats_pbo_cscv", _bomb)
+    result = pbo_probability(_matrix(), n_splits=4)
+    assert 0.0 <= result.pbo <= 1.0

@@ -5,18 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BruteX — Pre-Open Report</title>
 <style>
-  :root {
-    --bg:#0A0D11; --surface:#131722; --surface-2:#1A1F2C; --surface-3:#232938;
-    --border:#1E222D; --border-strong:#2B313F;
-    --text:#E5E8EC; --text-bright:#FFFFFF; --muted:#787B86;
-    --green:#26D9B0; --green-bright:#4FFFD0; --red:#FF5C5C;
-    --yellow:#FFB74D; --blue:#5B8DEF; --purple:#9D7BFF;
-    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
-    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
-    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
-    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
-  }
+  /* Page-specific skin ONLY (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch B+C):
+     tokens + components come from the SHARED design system — bx-theme.css
+     (the canonical header + token set) and bx-design.css (.bx-card / .bx-btn
+     / .bx-chip / .bx-segment / .bx-note / the honesty channel), linked below
+     AFTER this block so the shared rules win the cascade. The former
+     page-local :root token fork + the forked header/pill/button skins are
+     DELETED — this block carries only what is genuinely /reports-specific. */
   * { box-sizing:border-box; }
   html, body { margin:0; background:var(--bg); height:100%; }
   body {
@@ -27,33 +22,11 @@
       radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
       var(--bg);
   }
-  @keyframes fadeInDown { from{opacity:0;transform:translateY(-20px);} to{opacity:1;transform:translateY(0);} }
-  @keyframes fadeInUp { from{opacity:0;transform:translateY(16px);} to{opacity:1;transform:translateY(0);} }
-  header {
-    display:flex; align-items:center; gap:14px; padding:16px 24px;
-    border-bottom:1px solid var(--border); animation:fadeInDown .5s ease both;
-    /* DASH-UX D3: sticky, frosted header (matches /db D2) so the nav stays put
-       while the symbol grid scrolls (DEC-DASHBOARD-REPORTS-UX-001). */
-    position:sticky; top:0; z-index:6;
-    background:rgba(10,13,17,.82);
-    -webkit-backdrop-filter:blur(11px); backdrop-filter:blur(11px);
-  }
-  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
-    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .sub { color:var(--muted); font-size:12px; }
-  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
-  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
-  nav { margin-left:18px; display:flex; gap:14px; font-size:13px; }
-  nav a { color:var(--blue); text-decoration:none; }
-  nav a:hover { color:var(--green); }
-  .topnav a:hover { color:var(--text-bright); }
-  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
-  .wrap { flex:1; padding:24px; animation:fadeInUp .5s ease both; max-width:1100px; }
-  .card {
-    background:var(--surface); border:1px solid var(--border); border-radius:14px;
-    padding:20px 22px; margin-bottom:18px;
-  }
+  /* The sticky, frosted header (DASH-UX D3 / DEC-DASHBOARD-REPORTS-UX-001) now
+     comes from the CANONICAL bx-theme.css `header` rule — the page-local fork
+     is deleted (the shared sheet carries position:sticky + the blur backdrop). */
+  .wrap { flex:1; padding:24px; max-width:1100px; }
+  .card { margin-bottom:18px; }
   h1 { font-size:17px; margin:0 0 12px; color:var(--text-bright);
     display:flex; align-items:center; gap:10px;
     padding-bottom:10px; border-bottom:1px solid var(--border); }
@@ -69,58 +42,61 @@
   }
   input[type=number] { min-width:120px; }
   input:disabled { opacity:.45; cursor:not-allowed; }
-  .modes { display:flex; gap:10px; }
-  .mode {
-    display:inline-flex; align-items:center; gap:7px; background:var(--surface-2);
-    border:1px solid var(--border-strong); border-radius:10px; padding:9px 14px;
-    font-size:13px; cursor:pointer; user-select:none; transition:.14s;
-    text-transform:none; letter-spacing:0;
-  }
-  .mode.on { border-color:var(--green); color:var(--green-bright);
-    background:linear-gradient(180deg, rgba(38,217,176,.12), transparent); }
+  /* Category/Basis ride the shared .bx-segment segmented control; the .mode
+     label keeps only the resets the global uppercase `label` rule needs, and
+     the page's existing `.on` state maps onto the elevation+contrast active
+     look (never a per-item hue — status colour stays reserved for status). */
+  .mode { display:inline-flex; flex-direction:row; align-items:center; gap:7px;
+    text-transform:none; letter-spacing:0; cursor:pointer; user-select:none; }
+  .bx-segment-item.on { color:var(--text-bright); background:var(--surface-3); box-shadow:var(--elev-1); }
   .mode input { position:absolute; opacity:0; pointer-events:none; }
-  button {
-    background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
-    border-radius:10px; padding:11px 18px; font-size:13px; cursor:pointer; transition:.16s;
-  }
-  button:hover { border-color:var(--blue); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
   select#idxpick {
     background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
-    border-radius:10px; padding:11px 14px; font-size:13px; cursor:pointer; transition:.16s; }
+    border-radius:var(--r-md); padding:8px 14px; font-size:13px; cursor:pointer; transition:.16s; }
   select#idxpick:hover { border-color:var(--blue); }
-  button.go { border-color:var(--green); color:var(--green-bright); font-weight:700;
-    background:linear-gradient(180deg, rgba(38,217,176,.10), transparent); }
-  button:disabled { opacity:.45; cursor:not-allowed; }
+  /* One-shot download "kick" — honest busy feedback while the browser starts
+     the .zip download: transform-only, removed on animationend (an event,
+     never a timer — no fake progress bar, no un-revertible disabled state),
+     silenced by the reduced-motion block below. */
+  @keyframes dlKick { 0% { transform:scale(1); } 40% { transform:scale(.95); } 100% { transform:scale(1); } }
+  .go.kick { animation:dlKick .45s var(--ease); }
   .syms { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; max-height:280px; overflow:auto; }
-  .chip {
-    display:inline-flex; align-items:center; gap:7px; background:var(--surface-2);
-    border:1px solid var(--border-strong); border-radius:999px; padding:6px 12px;
-    font-size:12px; cursor:pointer; user-select:none; transition:.14s;
-  }
+  /* Symbol multi-select chips ride the shared .bx-chip pill; page-local bits:
+     the pointer affordance, the selected `.on` state, and the OPT/SPOT +
+     exchange badges at the --fs-0 legibility floor (the 9-10px sizes are gone). */
+  .chip { cursor:pointer; user-select:none; gap:7px; font-weight:600; font-size:var(--fs-1); }
   .chip.on { border-color:var(--green); color:var(--green-bright);
     background:linear-gradient(180deg, rgba(38,217,176,.12), transparent); }
-  .chip .x { font-size:10px; color:var(--muted); }
+  .chip .x { font-size:var(--fs-0); color:var(--muted); }
   /* OPT vs SPOT badge (DEC-OPTIONS-ELIGIBLE-GUARD-001) — tag whether a report
      symbol also has a listed option chain (green OPT) or is spot-only (amber
      SPOT), mirroring the /universe explorer's OPT/REF chips. */
-  .chip .b { font-size:9px; font-weight:700; padding:1px 6px; border-radius:999px; }
-  .chip .b.opt  { color:var(--green);  background:rgba(38,217,176,.14); }
-  .chip .b.spot { color:var(--yellow); background:rgba(255,183,77,.14); }
+  .chip .b { font-size:var(--fs-0); font-weight:700; padding:1px 6px; border-radius:var(--r-pill); }
+  .chip .b.opt  { color:var(--green);  background:var(--ok-bg); }
+  .chip .b.spot { color:var(--yellow); background:var(--warn-bg); }
   .toolbar { display:flex; gap:10px; align-items:center; margin-top:6px; }
   .count { font-size:12px; color:var(--muted); margin-left:auto; }
   .cols { display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; }
-  .col { font-size:11px; color:var(--muted); background:var(--surface-3);
-    border:1px solid var(--border); border-radius:6px; padding:3px 9px; font-family:ui-monospace,monospace; }
+  .col { font-family:var(--font-num); }
   .note { font-size:12px; color:var(--muted); margin-top:14px; line-height:1.5; }
-  .basisnote { font-size:12px; color:var(--yellow); margin-top:8px; line-height:1.5; }
+  /* The 1day-basis freshness caveat rides the HONESTY channel (muted gold —
+     disclosed truth, distinct from warn-amber AND error-red); text unchanged. */
+  .basisnote { font-size:var(--fs-1); color:var(--honest); margin-top:8px; line-height:1.5; }
   .basisnote:empty { display:none; }
   .note b { color:var(--text); }
-  #msg { font-size:13px; color:var(--yellow); margin-top:12px; min-height:18px; }
+  /* #msg splits into distinct INFO vs ERROR presentation on the shared
+     .bx-note card: info = the muted base note; error = the token-based red
+     arm. The message TEXTS are byte-unchanged — only the class varies by the
+     existing code path that sets it (DEC-DASHBOARD-VISUAL-OVERHAUL-001). */
+  #msg { margin-top:12px; }
+  #msg:empty { display:none; }
+  #msg.err { border-left-color:var(--red); color:var(--red-text); background:var(--bad-bg); }
   .empty { color:var(--muted); font-size:13px; padding:14px 0; }
 
   /* ── DASH-UX D3 (DEC-DASHBOARD-REPORTS-UX-001): additive presentational polish ── */
-  /* Chip hover lift (mouse only; keyboard focus uses the a11y ring below). */
-  .chip:hover { border-color:var(--blue); transform:translateY(-1px); }
+  /* Chip hover accent (the lift itself comes from the shared .bx-chip:hover). */
+  .chip:hover { border-color:var(--blue); }
   /* Animated count-up "pop" when the selected count changes. */
   @keyframes countPop { 0% { transform:scale(1); } 40% { transform:scale(1.18); color:var(--green-bright); } 100% { transform:scale(1); } }
   .count.pop { animation:countPop .32s ease; display:inline-block; }
@@ -155,7 +131,9 @@
     header { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
     nav { margin-left: 0; }
     .wrap { padding: 14px; }
-    .card { padding: 16px 14px; }
+    /* .card.bx-card: the double class outweighs the later-linked .bx-card
+       padding so the phone keeps the tightened card (same value as before). */
+    .card.bx-card { padding: 16px 14px; }
     .row { gap: 10px; }
     .row > label, .row input[type=date], .row input[type=number] { width: 100%; min-width: 0; }
     .syms { max-height: 220px; }
@@ -163,6 +141,7 @@
 </style>
 <link rel="stylesheet" href="/static/bx-datepicker.css">
 <link rel="stylesheet" href="/static/bx-theme.css">
+<link rel="stylesheet" href="/static/bx-design.css">
 <script defer src="/static/bx-datepicker.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
@@ -188,8 +167,8 @@
     </nav>
   </header>
 
-  <div class="wrap">
-    <div class="card">
+  <div class="wrap bx-enter">
+    <div class="card bx-card">
       <h1>📑 Pre-Open snapshot → Excel (.zip of yearly .xlsx)</h1>
       <p class="lede">
         Pick a date range and the symbols, then download a clean Excel your friend can open and sort.
@@ -205,37 +184,37 @@
         absolute mover (gainer OR loser) whose <b>|%CHNG| ≥ the minimum</b>; days with no qualifier are skipped.
       </p>
       <div class="cols">
-        <span class="col">DATE</span><span class="col">SYMBOL</span><span class="col">PREV. CLOSE</span>
-        <span class="col">IEP</span><span class="col">CHNG</span><span class="col">%CHNG</span>
+        <span class="col bx-chip bx-chip--sm muted">DATE</span><span class="col bx-chip bx-chip--sm muted">SYMBOL</span><span class="col bx-chip bx-chip--sm muted" title="PREV. CLOSE = the prior day's official 1-day close (minute basis: the prior day's last 1-minute close)">PREV. CLOSE</span>
+        <span class="col bx-chip bx-chip--sm muted" title="IEP = the 09:15 opening price (minute basis: the 09:15 1-minute open)">IEP</span><span class="col bx-chip bx-chip--sm muted" title="CHNG / %CHNG computed from PREV. CLOSE and IEP">CHNG</span><span class="col bx-chip bx-chip--sm muted" title="CHNG / %CHNG computed from PREV. CLOSE and IEP">%CHNG</span>
       </div>
 
       <div class="row" style="margin-top:18px;">
-        <label>From<input type="date" id="from" value="__BRUTEX_DATE_FROM__" /></label>
-        <label>To<input type="date" id="to" value="__BRUTEX_DATE_TO__" /></label>
+        <label>From<input type="date" id="from" value="__BRUTEX_DATE_FROM__" title="Report window start — numbers are lake-derived and match NSE: PREV. CLOSE = the prior day's official 1-day close, IEP = the 09:15 opening price, CHNG / %CHNG computed from them" /></label>
+        <label>To<input type="date" id="to" value="__BRUTEX_DATE_TO__" title="Report window end — only symbols already pulled into the lake (with both 1-minute and 1-day data) can feed the export" /></label>
         <label>Category
-          <div class="modes" id="modes">
-            <label class="mode on" id="mode-all">
+          <div class="modes bx-segment" id="modes">
+            <label class="mode bx-segment-item on" id="mode-all" title="Every selected symbol, every day (the “Minimum % change” box is ignored), sorted gainers→losers within each day">
               <input type="radio" name="mode" value="all" checked /> 📋 All symbols
             </label>
-            <label class="mode" id="mode-top">
+            <label class="mode bx-segment-item" id="mode-top" title="Per day, the single biggest absolute mover (gainer OR loser) whose |%CHNG| ≥ the minimum; days with no qualifier are skipped">
               <input type="radio" name="mode" value="topmover" /> 📈 Top mover
             </label>
           </div>
         </label>
         <label>Basis
-          <div class="modes" id="bases">
-            <label class="mode on" id="basis-day">
+          <div class="modes bx-segment" id="bases">
+            <label class="mode bx-segment-item on" id="basis-day" title="PREV. CLOSE + IEP from the 1-day bar — the default. Each basis stays on one price scale; the back end never mixes them">
               <input type="radio" name="basis" value="day" checked /> 📅 1-day
             </label>
-            <label class="mode" id="basis-min">
+            <label class="mode bx-segment-item" id="basis-min" title="IEP = the 09:15 1-minute open; PREV. CLOSE = the prior day's last 1-minute close. Each basis stays on one price scale; the back end never mixes them">
               <input type="radio" name="basis" value="minute" /> ⏱ minute
             </label>
           </div>
         </label>
         <label>Minimum % change
-          <input type="number" id="minpct" step="0.01" min="0" placeholder="0" disabled />
+          <input type="number" id="minpct" step="0.01" min="0" placeholder="0" disabled title="Only meaningful for 📈 Top mover — disabled under 📋 All symbols (the back end ignores it there anyway)" />
         </label>
-        <button class="go" id="download">⬇ Download .zip</button>
+        <button class="go bx-btn bx-btn-primary" id="download" title="Downloads a .zip with one .xlsx per year, each holding one sheet per month — gainer rows are shaded green, losers red">⬇ Download .zip</button>
       </div>
       <!-- 1day-basis freshness note (DEC-STALENESS-CACHE-TRUTH-001): the 1day
            partitions are written only by the pipeline prebuild, so the day basis
@@ -244,9 +223,9 @@
       <div class="basisnote" id="basisnote"></div>
 
       <div class="toolbar">
-        <button id="all">Select all</button>
-        <button id="none">Clear</button>
-        <button id="fno" title="Select ONLY the F&amp;O (option-pullable) symbols — the option-chain universe (DEC-FNO-ONLY-FILTER-001)">⚡ F&amp;O only</button>
+        <button id="all" class="bx-btn">Select all</button>
+        <button id="none" class="bx-btn">Clear</button>
+        <button id="fno" class="bx-btn" title="Select ONLY the F&amp;O (option-pullable) symbols — the option-chain universe (DEC-FNO-ONLY-FILTER-001)">⚡ F&amp;O only</button>
         <select id="idxpick" title="Add an index's F&amp;O-eligible constituent stocks to the selection in one go — instead of clicking each stock (fetched from NSE on your machine; membership rebalances)">
           <option value="">➕ add an index's stocks…</option>
           <option value="NIFTY">NIFTY 50</option>
@@ -260,7 +239,7 @@
       </div>
       <div class="syms" id="syms"></div>
 
-      <div id="msg"></div>
+      <div id="msg" aria-live="polite"></div>
       <p class="note">
         <b>Note:</b> only symbols already pulled into the lake (with both 1-minute and 1-day data) appear above —
         pull more on the <a href="/coverage" style="color:var(--blue);">Coverage</a> / Database page to widen the report.
@@ -279,6 +258,15 @@ const countEl = document.getElementById("count");
 const msgEl = document.getElementById("msg");
 let selected = new Set();
 let allSymbols = [];
+
+/* Batch B+C (DEC-DASHBOARD-VISUAL-OVERHAUL-001): #msg splits into distinct
+   INFO vs ERROR presentation. The message TEXTS are byte-unchanged — only the
+   class (the shared .bx-note skin + the token-based .err arm) varies by the
+   existing code path that sets it. textContent-only (never innerHTML). */
+function setMsg(text, kind) {
+  msgEl.textContent = text;
+  msgEl.className = text ? ("bx-note" + (kind === "err" ? " err" : "")) : "";
+}
 
 /* DASH-UX D3 (DEC-DASHBOARD-REPORTS-UX-001): the count gets a brief "pop" each
    time it changes so selecting/clearing feels alive. The animation class is
@@ -340,7 +328,7 @@ function renderChips() {
   symsEl.innerHTML = "";
   for (const s of allSymbols) {
     const chip = document.createElement("span");
-    chip.className = "chip" + (selected.has(s.symbol) ? " on" : "");
+    chip.className = "chip bx-chip" + (selected.has(s.symbol) ? " on" : "");
     /* Server-derived fields (symbol / exchange) are rendered via createElement +
        textContent, NEVER string-concatenated into innerHTML — the repo XSS law
        (DEC-RESULTS-SURFACE-HONESTY-001; a hostile lake directory name must
@@ -407,7 +395,7 @@ document.getElementById("idxpick").onchange = async (e) => {
   const idx = e.target.value;
   e.target.value = "";   // reset so the same index can be re-picked later
   if (!idx) return;
-  msgEl.textContent = `Fetching ${idx} constituents…`;
+  setMsg(`Fetching ${idx} constituents…`, "info");
   try {
     const r = await fetch("/api/v1/universe/index-constituents?symbol=" + encodeURIComponent(idx));
     const j = await r.json();
@@ -417,10 +405,11 @@ document.getElementById("idxpick").onchange = async (e) => {
       if (have.has(m) && !selected.has(m)) { selected.add(m); added++; }
     }
     renderChips(); refreshCount();
-    msgEl.textContent = j.note
-      || `Added ${added} of ${idx}'s constituent stock(s) held in the lake — verify; membership rebalances.`;
+    setMsg(j.note
+      || `Added ${added} of ${idx}'s constituent stock(s) held in the lake — verify; membership rebalances.`,
+      "info");
   } catch (err) {
-    msgEl.textContent = "could not fetch constituents — try again, or check the server logs";
+    setMsg("could not fetch constituents — try again, or check the server logs", "err");
   }
 };
 /* ── Category toggle (DEC-REPORTS-EXCEL-CATEGORIES-001) ──
@@ -480,20 +469,26 @@ for (const r of document.querySelectorAll('input[name="basis"]')) {
   r.onchange = syncBasisUI;
 }
 syncBasisUI();
-document.getElementById("download").onclick = () => {
+const dlBtn = document.getElementById("download");
+/* Honest busy feedback (Batch B+C): a one-shot CSS "kick" on the button while
+   the browser starts the download — removed on animationend (an event, never
+   a timer), so the button can never wedge disabled and nothing fakes progress. */
+dlBtn.addEventListener("animationend", () => dlBtn.classList.remove("kick"));
+dlBtn.onclick = () => {
   const from = document.getElementById("from").value;
   const to = document.getElementById("to").value;
-  msgEl.textContent = "";
-  if (!from || !to) { msgEl.textContent = "Pick both a From and a To date."; return; }
-  if (from > to) { msgEl.textContent = "'From' must be on or before 'To'."; return; }
-  if (selected.size === 0) { msgEl.textContent = "Select at least one symbol."; return; }
+  setMsg("", "info");
+  if (!from || !to) { setMsg("Pick both a From and a To date.", "err"); return; }
+  if (from > to) { setMsg("'From' must be on or before 'To'.", "err"); return; }
+  if (selected.size === 0) { setMsg("Select at least one symbol.", "err"); return; }
   const mode = currentMode();
   const minPct = (minpctEl.value || "0").trim() || "0";
   if (mode === "topmover" && Number(minPct) < 0) {
-    msgEl.textContent = "Minimum % change cannot be negative."; return;
+    setMsg("Minimum % change cannot be negative.", "err"); return;
   }
   const params = new URLSearchParams({ from, to, mode, min_pct: minPct, basis: currentBasis() });
   if (selected.size !== allSymbols.length) params.set("symbols", [...selected].join(","));
+  dlBtn.classList.add("kick");
   window.location = "/api/v1/reports/preopen.zip?" + params.toString();
 };
 loadSymbols();

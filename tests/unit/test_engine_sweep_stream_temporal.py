@@ -8,6 +8,8 @@ ordering through the SAME :func:`apply_temporal_gate` core the batch rank uses.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from brutex.engine.sweep_stream import SurvivorColumns, rank_survivor_columns
 from brutex.metrics.compute import ResultMetrics
@@ -200,3 +202,116 @@ class TestBoundedTemporalGate:
         )
         assert result.finalists == ()
         assert stats.abstained is True  # the batch path's answer, now shared
+
+
+class TestBoundedTemporalDoorSixParity:
+    """Batch ≡ bounded under (temporal ACTIVE + Door-6 ACTIVE) — W2 R2.
+
+    The bounded arm records its gate bits WITH the ``max_sl_hit_rate`` ceiling
+    at append time (``SurvivorColumns(max_sl_hit_rate=…)``); pre-R2 the batch
+    temporal arm judged bare ``passes_gates`` — divergent verdicts AND
+    divergent temporal-kill counters under both-active configs. These cases
+    pin the two arms bit-identical through the SAME shared verdict body.
+    """
+
+    _CEILING = 0.5
+
+    def _entries(self) -> list[tuple[int, ResultMetrics, TemporalTriple]]:
+        """Mixed pool: under/over-ceiling × steady/lucky triples + absent rate."""
+        return [
+            (1 << 0, _metrics(0, sl_hit_rate=0.2), _STEADY),
+            # Over the ceiling with a STEADY triple: pre-R2 the batch arm KEPT
+            # this row (temporal passes it) while the bounded arm dropped it —
+            # THE divergence this class exists to kill.
+            (1 << 1, _metrics(1, sl_hit_rate=0.8), _STEADY),
+            # Over the ceiling with the LUCKY triple: pre-R2 the batch arm
+            # counted it as a TEMPORAL kill; the bounded arm as a DOOR kill —
+            # the stats diverged too.
+            (1 << 2, _metrics(2, sl_hit_rate=0.8), _LUCKY),
+            # Unmeasured rate (fail-closed under an active ceiling, both arms).
+            (1 << 3, _metrics(3, sl_hit_rate=None), _STEADY),
+            (1 << 4, _metrics(4, sl_hit_rate=0.4), _STEADY),
+            # A genuine temporal kill that PASSES Door 6 (exercises the gate).
+            (1 << 5, _metrics(5, sl_hit_rate=0.1), _LUCKY),
+        ]
+
+    def _rank_both(
+        self, entries: list[tuple[int, ResultMetrics, TemporalTriple]]
+    ) -> tuple[Any, Any, TemporalGateStats, TemporalGateStats]:
+        from brutex.ranking import rank_combos
+
+        batch_stats = TemporalGateStats()
+        batch = rank_combos(
+            [(mask, metrics) for mask, metrics, _ in entries],
+            temporal=TemporalGateInput(
+                cfg=TemporalRobustnessConfig(),
+                n_judged_years=7,
+                triples=[triple for _, _, triple in entries],
+                stats=batch_stats,
+            ),
+            max_sl_hit_rate=self._CEILING,
+        )
+        bounded_stats = TemporalGateStats()
+        columns = SurvivorColumns(
+            with_overfit=False, with_temporal=True, max_sl_hit_rate=self._CEILING
+        )
+        for mask, metrics, triple in entries:
+            columns.append(mask, metrics, temporal=triple)
+        bounded = rank_survivor_columns(
+            columns, overfit=None, top_k=10, temporal=_bundle(stats=bounded_stats)
+        )
+        return batch, bounded, batch_stats, bounded_stats
+
+    def test_batch_equals_bounded_under_both_active_gates(self) -> None:
+        """(d) Same candidates → same finalist masks, composites, n_ranked AND
+        the same recorded temporal counters on both arms."""
+        batch, bounded, batch_stats, bounded_stats = self._rank_both(self._entries())
+        # Verdict parity: the over-ceiling + unmeasured rows die on BOTH arms;
+        # the lucky under-ceiling row is the one genuine temporal kill.
+        assert [finalist.mask for finalist in bounded.finalists] == [combo.mask for combo in batch]
+        assert sorted(combo.mask for combo in batch) == [1 << 0, 1 << 4]
+        assert bounded.n_ranked == len(batch)
+        for finalist, combo in zip(bounded.finalists, batch, strict=True):
+            assert finalist.composite_score == combo.composite_score
+            assert finalist.deflated_sharpe == combo.deflated_sharpe
+        # Counter parity: Door-6 rejects are DOOR kills on both arms — exactly
+        # one temporal kill (the lucky under-ceiling row) is recorded on each.
+        assert batch_stats.killed == bounded_stats.killed == 1
+        assert batch_stats.evaluated is bounded_stats.evaluated is True
+        assert batch_stats.abstained is bounded_stats.abstained is False
+        assert batch_stats.observed_kills == bounded_stats.observed_kills == 0
+
+    def test_observe_mode_parity_counts_only_true_temporal_kills(self) -> None:
+        """Observe mode: neither arm filters temporally, both count the SAME
+        would-be kills — Door-6 rejects are still real drops on both arms and
+        never inflate the observed counter."""
+        from brutex.ranking import rank_combos
+
+        entries = self._entries()
+        batch_stats = TemporalGateStats()
+        batch = rank_combos(
+            [(mask, metrics) for mask, metrics, _ in entries],
+            temporal=TemporalGateInput(
+                cfg=TemporalRobustnessConfig(mode=MODE_OBSERVE),
+                n_judged_years=7,
+                triples=[triple for _, _, triple in entries],
+                stats=batch_stats,
+            ),
+            max_sl_hit_rate=self._CEILING,
+        )
+        bounded_stats = TemporalGateStats()
+        columns = SurvivorColumns(
+            with_overfit=False, with_temporal=True, max_sl_hit_rate=self._CEILING
+        )
+        for mask, metrics, triple in entries:
+            columns.append(mask, metrics, temporal=triple)
+        bounded = rank_survivor_columns(
+            columns,
+            overfit=None,
+            top_k=10,
+            temporal=_bundle(mode=MODE_OBSERVE, stats=bounded_stats),
+        )
+        assert [finalist.mask for finalist in bounded.finalists] == [combo.mask for combo in batch]
+        assert sorted(combo.mask for combo in batch) == [1 << 0, 1 << 4, 1 << 5]
+        assert batch_stats.observed_kills == bounded_stats.observed_kills == 1
+        assert batch_stats.killed == bounded_stats.killed == 0

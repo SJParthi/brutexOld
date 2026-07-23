@@ -28,9 +28,12 @@ engage:
   ``sorted(...)[:k]``, hence BIT-IDENTICAL to the batch sort-then-slice.
 
 Honest envelope (Golden Rule #10): retained memory is **O(kept) columnar**, NOT
-O(1) — the payload arithmetic is 80.25 B/kept without overfit columns
-(16 mask + 8 sharpe + 7×8 terms + 2 bits) and 104.5 B/kept with them
-(+8 trades + 2×8 skew/kurt + 2 bits), and :meth:`SurvivorColumns.owned_nbytes`
+O(1) — the payload arithmetic is 120.25 B/kept without overfit columns
+(16 mask + 8 sharpe + 7×8 terms + 2 bits + the LANE-W1 40 B of selection-axis
+columns: 3×8 int net_pnl/losing/expectancy + 2×8 float win_rate/dd —
+DEC-RANK-QUOTA-PERSIST-1000-001, the parallel-heap twin's inputs) and
+144.5 B/kept with the overfit columns (+8 trades + 2×8 skew/kurt + 2 bits),
+and :meth:`SurvivorColumns.owned_nbytes`
 reports the EXACT logical payload (``array`` over-allocation slack + CPython
 object headers are excluded — the bench gate pins the per-entry slope on this
 figure, so the ~10× reduction vs the ≈1 KB/kept batch path is a payload-level
@@ -44,8 +47,9 @@ from __future__ import annotations
 
 import heapq
 from array import array
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 from brutex.ranking import (
     N_COMPOSITE_TERMS,
@@ -57,12 +61,22 @@ from brutex.ranking import (
     overfit_gate_positions,
     passes_gates,
 )
+from brutex.ranking.multi_select import SelectionInputs, UnionSelection
 from brutex.ranking.temporal import TemporalGateInput, TemporalTriple, apply_temporal_gate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from brutex.metrics.compute import ResultMetrics
+
+#: The injectable union-selection binding (the burn-in-checked
+#: :func:`brutex.engine.rust_rank_select.union_selection` in production;
+#: ``None`` keeps the legacy composite-only top-K byte-identical). Classic
+#: ``TypeAlias`` (not a PEP 695 ``type`` statement) because this alias is
+#: exported via ``__all__`` and CodeQL's Python extractor does not recognize
+#: a ``type`` statement as a definition (explicit-export alert on the export
+#: list — the ``ingest_common.SpotStepGroup`` precedent).
+UnionSelectionFn: TypeAlias = Callable[..., UnionSelection]  # noqa: UP040
 
 _U64_MASK: Final[int] = (1 << 64) - 1
 
@@ -107,15 +121,28 @@ class SurvivorColumns:
         DEC-SWEEP-TEMPORAL-ROBUSTNESS-001). MUST match the tuple's
         ``temporal`` config — :func:`rank_survivor_columns` refuses a
         mismatch loudly in BOTH directions.
+    max_sl_hit_rate
+        The tuple's opt-in Door-6 SL-hit-rate ceiling
+        (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — the
+        ``SweepRunConfig.max_sl_hit_rate`` knob), threaded into the SAME
+        :func:`~brutex.ranking.passes_gates` call that records the gate bit at
+        append time, so bounded gate verdicts are bit-identical to batch under
+        an active ceiling. ``None`` (the default) is byte-identical to the
+        pre-knob columns.
     """
 
     __slots__ = (
+        "_dd_pct",
+        "_expectancy",
         "_gate_bits",
         "_kurt",
         "_kurt_none",
+        "_losing",
         "_mask_hi",
         "_mask_lo",
+        "_max_sl_hit_rate",
         "_n",
+        "_net_pnl",
         "_sharpe",
         "_sharpe_none",
         "_skew",
@@ -125,13 +152,21 @@ class SurvivorColumns:
         "_t_sumpos",
         "_terms",
         "_trades",
+        "_win_rate",
         "_with_overfit",
         "_with_temporal",
     )
 
-    def __init__(self, *, with_overfit: bool, with_temporal: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        with_overfit: bool,
+        with_temporal: bool = False,
+        max_sl_hit_rate: float | None = None,
+    ) -> None:
         self._with_overfit = with_overfit
         self._with_temporal = with_temporal
+        self._max_sl_hit_rate = max_sl_hit_rate
         self._n = 0
         self._mask_hi = array("Q")
         self._mask_lo = array("Q")
@@ -153,6 +188,14 @@ class SurvivorColumns:
         self._t_prof = array("b")
         self._t_maxpos = array("q")
         self._t_sumpos = array("q")
+        # LANE-W1 selection-axis columns (DEC-RANK-QUOTA-PERSIST-1000-001 —
+        # the sweep_stream parallel-heap twin's inputs): always retained
+        # (+40 B/kept — 3×i64 + 2×f64), all non-null on ResultMetrics.
+        self._net_pnl = array("q")
+        self._win_rate = array("d")
+        self._dd_pct = array("d")
+        self._losing = array("q")
+        self._expectancy = array("q")
 
     @property
     def n_kept(self) -> int:
@@ -168,6 +211,11 @@ class SurvivorColumns:
     def with_temporal(self) -> bool:
         """Whether the temporal-gate triple columns are being retained."""
         return self._with_temporal
+
+    @property
+    def max_sl_hit_rate(self) -> float | None:
+        """The Door-6 SL-hit-rate ceiling the recorded gate bits were judged under."""
+        return self._max_sl_hit_rate
 
     @staticmethod
     def _append_optional(
@@ -227,7 +275,9 @@ class SurvivorColumns:
         index = self._n
         self._mask_hi.append(mask >> 64)
         self._mask_lo.append(mask & _U64_MASK)
-        _append_bit(self._gate_bits, index, passes_gates(metrics))
+        _append_bit(
+            self._gate_bits, index, passes_gates(metrics, max_sl_hit_rate=self._max_sl_hit_rate)
+        )
         self._append_optional(self._sharpe, self._sharpe_none, index, metrics.sharpe_ratio)
         for column, value in zip(self._terms, composite_term_inputs(metrics), strict=True):
             column.append(value)
@@ -239,6 +289,11 @@ class SurvivorColumns:
             self._t_prof.append(temporal.profitable_judged_years)
             self._t_maxpos.append(temporal.max_pos_year_pnl_paisa)
             self._t_sumpos.append(temporal.sum_pos_year_pnl_paisa)
+        self._net_pnl.append(metrics.net_pnl_paisa)
+        self._win_rate.append(metrics.win_rate)
+        self._dd_pct.append(metrics.max_drawdown_pct)
+        self._losing.append(metrics.losing_trades)
+        self._expectancy.append(metrics.expectancy_paisa)
         self._n = index + 1
 
     def mask_at(self, index: int) -> int:
@@ -297,6 +352,26 @@ class SurvivorColumns:
             sum_pos_year_pnl_paisa=self._t_sumpos[index],
         )
 
+    def net_pnl_at(self, index: int) -> int:
+        """``net_pnl_paisa`` at *index* (selection-axis column) — O(1)."""
+        return self._net_pnl[index]
+
+    def win_rate_at(self, index: int) -> float:
+        """``win_rate`` at *index* (selection-axis column) — O(1)."""
+        return self._win_rate[index]
+
+    def dd_pct_at(self, index: int) -> float:
+        """``max_drawdown_pct`` at *index* (selection-axis column) — O(1)."""
+        return self._dd_pct[index]
+
+    def losing_at(self, index: int) -> int:
+        """``losing_trades`` at *index* (selection-axis column) — O(1)."""
+        return self._losing[index]
+
+    def expectancy_at(self, index: int) -> int:
+        """``expectancy_paisa`` at *index* (selection-axis column) — O(1)."""
+        return self._expectancy[index]
+
     def owned_nbytes(self) -> int:
         """EXACT logical payload bytes of every owned column — the watermark figure.
 
@@ -321,6 +396,11 @@ class SurvivorColumns:
             self._t_prof,
             self._t_maxpos,
             self._t_sumpos,
+            self._net_pnl,
+            self._win_rate,
+            self._dd_pct,
+            self._losing,
+            self._expectancy,
         )
         payload = sum(len(column) * column.itemsize for column in arrays)
         bits = (
@@ -339,11 +419,17 @@ class BoundedFinalist:
     The bounded twin of a :class:`~brutex.ranking.RankedCombo` MINUS the full
     ``metrics`` (which the runner recomputes O(top_k) via the same sim path —
     the established finalist re-simulation precedent, spec V16).
+
+    The LANE-W1 selection-provenance fields (DEC-RANK-PARETO-PERSIST-001 /
+    DEC-RANK-QUOTA-PERSIST-1000-001) are ADDITIVE + defaulted ``None`` — the
+    legacy composite-only path (no ``union_selection_fn``) never stamps them.
     """
 
     mask: int
     composite_score: float
     deflated_sharpe: float | None
+    selection_basis: str | None = None
+    pareto_member: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,16 +439,28 @@ class BoundedRankResult:
     Attributes
     ----------
     finalists
-        The top-K survivors in the EXACT batch order (composite descending,
-        mask ascending tie-break) — ``== rank_combos(pairs)[:top_k]`` projected
-        to ``(mask, composite, dsr)``, bit-for-bit.
+        The selected survivors in the EXACT batch persist order: the composite
+        top-K prefix (composite descending, mask ascending tie-break —
+        ``== rank_combos(pairs)[:top_k]`` projected to
+        ``(mask, composite, dsr)``, bit-for-bit) followed — union path only —
+        by the union-only extras in the same ``(-composite, mask)`` order.
     n_ranked
         The post-gate post-overfit survivor count BEFORE top-K truncation (the
         tuple's ``ranked`` tally — batch's ``len(rank_combos(pairs))``).
+    truncated
+        Union path: gate-passing ranked survivors NOT selected by any basis
+        (the ``gated_pass_truncated`` counter's numerator). Legacy path: 0
+        (additive default — the legacy tally lives with the caller).
+    frontier_dropped
+        Union path: frontier members dropped by the
+        :data:`~brutex.ranking.multi_select.PARETO_FRONTIER_CAP` bound.
+        Legacy path: 0.
     """
 
     finalists: tuple[BoundedFinalist, ...]
     n_ranked: int
+    truncated: int = 0
+    frontier_dropped: int = 0
 
 
 def rank_survivor_columns(
@@ -371,6 +469,7 @@ def rank_survivor_columns(
     overfit: OverfitGateConfig | None,
     top_k: int,
     temporal: TemporalGateInput | None = None,
+    union_selection_fn: UnionSelectionFn | None = None,
 ) -> BoundedRankResult:
     """Rank the columnar survivors and select the top-K — bit-identical to batch.
 
@@ -414,6 +513,18 @@ def rank_survivor_columns(
         BOTH directions (a mismatch means the triple columns were never
         retained — or were retained and would be silently ignored — refused
         loudly, never degraded).
+    union_selection_fn
+        LANE-W1 (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001):
+        the injectable union-selection binding (production =
+        :func:`brutex.engine.rust_rank_select.union_selection`). ``None`` (the
+        default) keeps the legacy composite-only top-K byte-identical. When
+        set, the bounded arm builds the survivors' composite-ordered
+        :class:`~brutex.ranking.multi_select.SelectionInputs` and delegates to
+        the SAME composer the batch arm calls — bounded == batch row sets +
+        tags BY CONSTRUCTION (one law, CLAUDE.md §11 COMMON), at a DISCLOSED
+        transient rank-time cost: one O(survivors · log survivors) composite
+        argsort + one O(survivors) 7-column materialisation (~56 B/survivor
+        transient — retained sweep-time memory is unchanged).
 
     Raises
     ------
@@ -491,6 +602,16 @@ def rank_survivor_columns(
     composites = composite_scores(term_columns, dsr_contrib)
     masks = [columns.mask_at(position) for position in positions]
     ensure_unique_survivor_masks(masks)
+    if union_selection_fn is not None:
+        return _union_rank(
+            columns,
+            positions=positions,
+            masks=masks,
+            composites=composites,
+            dsr_by_survivor=dsr_by_survivor,
+            top_k=top_k,
+            union_selection_fn=union_selection_fn,
+        )
     selected = heapq.nsmallest(
         top_k,
         range(len(positions)),
@@ -507,9 +628,67 @@ def rank_survivor_columns(
     return BoundedRankResult(finalists=finalists, n_ranked=len(positions))
 
 
+def _union_rank(
+    columns: SurvivorColumns,
+    *,
+    positions: list[int],
+    masks: list[int],
+    composites: list[float],
+    dsr_by_survivor: list[float] | None,
+    top_k: int,
+    union_selection_fn: UnionSelectionFn,
+) -> BoundedRankResult:
+    """The LANE-W1 union arm of :func:`rank_survivor_columns`.
+
+    Sorts the survivors into the batch composite order ``(-composite, mask)``
+    (a full argsort — O(survivors · log survivors) transient, disclosed in the
+    caller's docstring), materialises the composite-ordered
+    :class:`~brutex.ranking.multi_select.SelectionInputs` from the retained
+    axis columns, and delegates to the injected union composer — so the
+    bounded arm's persisted row SET, ORDER and TAGS are the batch arm's by
+    construction (the same pure composer over the same columns).
+    """
+    composite_order = sorted(
+        range(len(positions)), key=lambda survivor: (-composites[survivor], masks[survivor])
+    )
+    inputs = SelectionInputs(
+        masks=tuple(masks[survivor] for survivor in composite_order),
+        composites=tuple(composites[survivor] for survivor in composite_order),
+        net_pnl_paisa=tuple(
+            columns.net_pnl_at(positions[survivor]) for survivor in composite_order
+        ),
+        win_rate=tuple(columns.win_rate_at(positions[survivor]) for survivor in composite_order),
+        max_dd_pct=tuple(columns.dd_pct_at(positions[survivor]) for survivor in composite_order),
+        losing_trades=tuple(columns.losing_at(positions[survivor]) for survivor in composite_order),
+        expectancy_paisa=tuple(
+            columns.expectancy_at(positions[survivor]) for survivor in composite_order
+        ),
+    )
+    selection = union_selection_fn(inputs, top_k=top_k)
+    finalists = tuple(
+        BoundedFinalist(
+            mask=masks[composite_order[pool_index]],
+            composite_score=composites[composite_order[pool_index]],
+            deflated_sharpe=(
+                None if dsr_by_survivor is None else dsr_by_survivor[composite_order[pool_index]]
+            ),
+            selection_basis=selection.basis_by_index[pool_index],
+            pareto_member=pool_index in selection.frontier,
+        )
+        for pool_index in selection.order
+    )
+    return BoundedRankResult(
+        finalists=finalists,
+        n_ranked=len(positions),
+        truncated=selection.truncated,
+        frontier_dropped=selection.frontier_dropped,
+    )
+
+
 __all__ = [
     "BoundedFinalist",
     "BoundedRankResult",
     "SurvivorColumns",
+    "UnionSelectionFn",
     "rank_survivor_columns",
 ]

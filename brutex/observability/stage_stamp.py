@@ -46,6 +46,7 @@ from typing import Final
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.guarded_read import open_regular_binary, read_regular_text
+from brutex.engine.sweep_ops_rust import routed_stamp_verdict, sweep_ops_rust_enabled
 from brutex.models import BruteXError
 from brutex.observability import observability_rust
 from brutex.observability.flight_recorder import FlightRecorder
@@ -427,12 +428,7 @@ def validate_stage_stamp(
     # test_r42_always_recomputes_hash spy monkeypatches it by name).
     recomputed = content_hash_of(artifact)
     stamped_snapshot = stamp.extra.get(SNAPSHOT_EXTRA_KEY)
-    # The mismatch matrix routes through the default-OFF observability_rust
-    # facade (law D2) with `_stamp_verdict_python` as the live oracle
-    # (DEC-RUST-OBSERVABILITY-001; branch-free here). `StampVerdict(token)`
-    # is an Enum VALUE-call — it returns the member SINGLETON, so consumers'
-    # `verdict is StampVerdict.OK` identity checks hold bit-for-bit.
-    token = observability_rust.routed_stamp_verdict(
+    verdict_args = (
         recomputed,
         stamp.content_hash,
         stamp.stage,
@@ -441,8 +437,25 @@ def validate_stage_stamp(
         expected_run_id,
         stamped_snapshot,
         expected_snapshot_hash,
-        python_law=_stamp_verdict_python,
     )
+
+    # The mismatch matrix routes through BOTH default-OFF facades, NESTED so
+    # each lane's flag engages independently: the sweep-ops facade
+    # (DEC-RUST-SWEEP-OPS-001) wraps the observability facade
+    # (DEC-RUST-OBSERVABILITY-001 law D2) as its oracle, with
+    # `_stamp_verdict_python` the innermost LIVE oracle. Flag-OFF for both
+    # collapses to `_stamp_verdict_python`. `StampVerdict(token)` is an Enum
+    # VALUE-call — it returns the member SINGLETON, so consumers'
+    # `verdict is StampVerdict.OK` identity checks hold bit-for-bit.
+    def _obs_law() -> str:
+        return observability_rust.routed_stamp_verdict(
+            *verdict_args, python_law=_stamp_verdict_python
+        )
+
+    if sweep_ops_rust_enabled():
+        token = routed_stamp_verdict(*verdict_args, python_law=_obs_law)
+    else:
+        token = _obs_law()
     return (StampVerdict(token), stamp)
 
 

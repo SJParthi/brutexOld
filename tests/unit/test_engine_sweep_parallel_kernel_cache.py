@@ -818,8 +818,8 @@ class TestRunTupleInWorkerKernelCache:
         mod._worker_init(_worker_ctx_on(tmp_path, grid))
         tuples = list(iter_sweep_tuples(grid))
         with capture_logs() as logs:
-            first = mod._run_tuple_in_worker(0, tuples[0], _BARS)
-            second = mod._run_tuple_in_worker(1, tuples[1], _BARS)
+            first = mod._run_tuple_in_worker(0, tuples[0], _BARS, _BARS)
+            second = mod._run_tuple_in_worker(1, tuples[1], _BARS, _BARS)
         cache = mod._WORKER_KERNEL_CACHE
         assert cache is not None
         # One key (one instrument × tf × proximity × anchor) → ONE build, one hit.
@@ -850,7 +850,7 @@ class TestRunTupleInWorkerKernelCache:
     def test_off_results_carry_default_none_telemetry(self, tmp_path: Path) -> None:
         grid = _grid()
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
-        result = mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS)
+        result = mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS, _BARS)
         assert result.worker_pid is None
         assert result.kernel_builds is None
         assert result.kernel_hits is None
@@ -867,7 +867,7 @@ class TestRunTupleInWorkerKernelCache:
         grid = _grid()
         mod._worker_init(_worker_ctx_on(tmp_path, grid))
         with capture_logs() as logs:
-            result = mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS)
+            result = mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS, _BARS)
         assert result.failed_error is not None
         assert result.worker_pid == os.getpid()
         assert result.kernel_builds == 1  # the kernel HAD been built before the failure
@@ -890,10 +890,10 @@ class TestRunTupleInWorkerKernelCache:
         spot = [t for t in tuples if t.instrument == "NIFTY"]
         fut = [t for t in tuples if t.instrument == "NSE-NIFTY-FUT"]
         with capture_logs() as logs:
-            assert mod._run_tuple_in_worker(0, spot[0], _BARS).summary is not None
-            assert mod._run_tuple_in_worker(1, fut[0], _BARS).summary is not None
-            assert mod._run_tuple_in_worker(2, spot[1], _BARS).summary is not None
-            assert mod._run_tuple_in_worker(3, fut[1], _BARS).summary is not None
+            assert mod._run_tuple_in_worker(0, spot[0], _BARS, _BARS).summary is not None
+            assert mod._run_tuple_in_worker(1, fut[0], _BARS, _BARS).summary is not None
+            assert mod._run_tuple_in_worker(2, spot[1], _BARS, _BARS).summary is not None
+            assert mod._run_tuple_in_worker(3, fut[1], _BARS, _BARS).summary is not None
         cache = mod._WORKER_KERNEL_CACHE
         assert cache is not None
         assert cache.builds == 2  # one kernel per INSTRUMENT (schedule in the key)
@@ -941,7 +941,7 @@ class TestRunTupleInWorkerKernelCache:
 
         mod._WORKER_KERNEL_CACHE = _StubCache()  # type: ignore[assignment]
         with pytest.raises(ValueError, match="must match this tuple's schedule"):
-            mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS)
+            mod._run_tuple_in_worker(0, next(iter_sweep_tuples(grid)), _BARS, _BARS)
 
     def test_capacity_one_thrash_is_correct_and_bounded(self, tmp_path: Path) -> None:
         """T2/T6 in-process arm: capacity 1 under 2 keys thrashes (more builds),
@@ -952,7 +952,7 @@ class TestRunTupleInWorkerKernelCache:
         # Interleave the two instruments so every access misses under LRU-1.
         order = [tuples[0], tuples[1], tuples[0], tuples[1]]
         for i, t in enumerate(order):
-            assert mod._run_tuple_in_worker(i, t, _BARS).summary is not None
+            assert mod._run_tuple_in_worker(i, t, _BARS, _BARS).summary is not None
         cache = mod._WORKER_KERNEL_CACHE
         assert cache is not None
         assert cache.builds == 4  # 100% miss on the cycle — the LRU pathology
@@ -975,7 +975,7 @@ class TestRunTupleInWorkerKernelCache:
         mod._worker_init(_worker_ctx_on(tmp_path, grid))
         tuples = list(iter_sweep_tuples(grid))
         copy1 = list(_BARS)
-        first = mod._run_tuple_in_worker(0, tuples[0], copy1)
+        first = mod._run_tuple_in_worker(0, tuples[0], copy1, copy1)
         assert first.summary is not None
         stale_cache = mod._WORKER_KERNEL_CACHE
         assert stale_cache is not None
@@ -983,7 +983,7 @@ class TestRunTupleInWorkerKernelCache:
         # A value-DIFFERENT copy for the SAME (instrument, tf) key.
         mutated = [_bar(0, 0, 999.0, 999.5), *copy1[1:]]
         with capture_logs() as logs:
-            second = mod._run_tuple_in_worker(1, tuples[1], list(mutated))
+            second = mod._run_tuple_in_worker(1, tuples[1], list(mutated), list(mutated))
         assert second.summary is not None
         # The degrade disabled the cache + memo for the rest of the worker...
         assert mod._WORKER_KERNEL_CACHE is None
@@ -998,7 +998,7 @@ class TestRunTupleInWorkerKernelCache:
         # Byte-proof: the mismatching tuple's result equals a fresh legacy
         # (no-cache) reference computed on the SAME mutated bars.
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "ref"))
-        reference = mod._run_tuple_in_worker(1, tuples[1], list(mutated))
+        reference = mod._run_tuple_in_worker(1, tuples[1], list(mutated), list(mutated))
         assert reference.summary == second.summary
 
     def test_evicted_key_revisit_never_serves_a_stale_kernel(self, tmp_path: Path) -> None:
@@ -1020,9 +1020,15 @@ class TestRunTupleInWorkerKernelCache:
         for t in tuples:
             by_inst.setdefault(t.instrument, []).append(t)
         copy1 = list(_BARS)
-        assert mod._run_tuple_in_worker(0, by_inst["NIFTY"][0], copy1).summary is not None
-        assert mod._run_tuple_in_worker(1, by_inst["BANKNIFTY"][0], list(_BARS)).summary is not None
-        assert mod._run_tuple_in_worker(2, by_inst["SENSEX"][0], list(_BARS)).summary is not None
+        assert mod._run_tuple_in_worker(0, by_inst["NIFTY"][0], copy1, copy1).summary is not None
+        assert (
+            mod._run_tuple_in_worker(1, by_inst["BANKNIFTY"][0], list(_BARS), list(_BARS)).summary
+            is not None
+        )
+        assert (
+            mod._run_tuple_in_worker(2, by_inst["SENSEX"][0], list(_BARS), list(_BARS)).summary
+            is not None
+        )
         memo = mod._WORKER_BARS_MEMO
         assert memo is not None
         assert ("NIFTY", "1minute") not in memo  # evicted — the A-1 precondition
@@ -1032,7 +1038,7 @@ class TestRunTupleInWorkerKernelCache:
         # The revisit ships value-DIFFERENT bars for the evicted NIFTY key.
         mutated = [_bar(0, 0, 999.0, 999.5), *copy1[1:]]
         with capture_logs() as logs:
-            revisit = mod._run_tuple_in_worker(3, by_inst["NIFTY"][1], list(mutated))
+            revisit = mod._run_tuple_in_worker(3, by_inst["NIFTY"][1], list(mutated), list(mutated))
         assert revisit.summary is not None
         # The whole mechanism disabled; the stale kernel's counters FROZEN
         # (pre-fix a HIT registered here — hits read 1) and no telemetry.
@@ -1046,7 +1052,7 @@ class TestRunTupleInWorkerKernelCache:
         # Byte-proof: equals a fresh legacy (no-cache) reference on the SAME
         # mutated bars — the tuple computed on what the parent shipped.
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "ref"))
-        reference = mod._run_tuple_in_worker(3, by_inst["NIFTY"][1], list(mutated))
+        reference = mod._run_tuple_in_worker(3, by_inst["NIFTY"][1], list(mutated), list(mutated))
         assert reference.summary == revisit.summary
 
     def test_middle_bar_divergence_disables_never_substitutes(self, tmp_path: Path) -> None:
@@ -1059,19 +1065,19 @@ class TestRunTupleInWorkerKernelCache:
         mod._worker_init(_worker_ctx_on(tmp_path, grid))
         tuples = list(iter_sweep_tuples(grid))
         copy1 = list(_BARS)
-        assert mod._run_tuple_in_worker(0, tuples[0], copy1).summary is not None
+        assert mod._run_tuple_in_worker(0, tuples[0], copy1, copy1).summary is not None
         mid = len(copy1) // 2
         shipped = [*copy1[:mid], _bar(*divmod(mid, 60), 250.0, 249.0), *copy1[mid + 1 :]]
         assert shipped[0] == copy1[0] and shipped[-1] == copy1[-1] and len(shipped) == len(copy1)
         with capture_logs() as logs:
-            second = mod._run_tuple_in_worker(1, tuples[1], list(shipped))
+            second = mod._run_tuple_in_worker(1, tuples[1], list(shipped), list(shipped))
         assert second.summary is not None
         assert mod._WORKER_KERNEL_CACHE is None
         warned = [e for e in logs if e.get("event") == "sweep_parallel.worker_bars_memo_mismatch"]
         assert len(warned) == 1
         assert warned[0]["reason"] == "resident_value_mismatch"
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "ref"))
-        reference = mod._run_tuple_in_worker(1, tuples[1], list(shipped))
+        reference = mod._run_tuple_in_worker(1, tuples[1], list(shipped), list(shipped))
         assert reference.summary == second.summary
 
     def test_probe_blind_interior_mutation_substitutes_self_consistently(
@@ -1089,11 +1095,11 @@ class TestRunTupleInWorkerKernelCache:
         mod._worker_init(_worker_ctx_on(tmp_path, grid))
         tuples = list(iter_sweep_tuples(grid))
         copy1 = list(_BARS)
-        assert mod._run_tuple_in_worker(0, tuples[0], copy1).summary is not None
+        assert mod._run_tuple_in_worker(0, tuples[0], copy1, copy1).summary is not None
         # Index 1 is neither first, mid nor last — probe-blind by design.
         shipped = [copy1[0], _bar(0, 1, 999.0, 999.5), *copy1[2:]]
         with capture_logs() as logs:
-            second = mod._run_tuple_in_worker(1, tuples[1], list(shipped))
+            second = mod._run_tuple_in_worker(1, tuples[1], list(shipped), list(shipped))
         assert second.summary is not None
         cache = mod._WORKER_KERNEL_CACHE
         assert cache is not None  # still enabled — the probe cannot see index 1
@@ -1103,7 +1109,7 @@ class TestRunTupleInWorkerKernelCache:
         ] == []
         # Self-consistency proof: equals a legacy reference on the RESIDENT bars.
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "ref"))
-        reference = mod._run_tuple_in_worker(1, tuples[1], list(copy1))
+        reference = mod._run_tuple_in_worker(1, tuples[1], list(copy1), list(copy1))
         assert reference.summary == second.summary
 
     def test_bars_interned_across_same_key_dispatches(self, tmp_path: Path) -> None:
@@ -1115,8 +1121,8 @@ class TestRunTupleInWorkerKernelCache:
         tuples = list(iter_sweep_tuples(grid))
         first_bars = list(_BARS)
         fresh_copy = list(_BARS)
-        mod._run_tuple_in_worker(0, tuples[0], first_bars)
-        mod._run_tuple_in_worker(1, tuples[1], fresh_copy)
+        mod._run_tuple_in_worker(0, tuples[0], first_bars, first_bars)
+        mod._run_tuple_in_worker(1, tuples[1], fresh_copy, fresh_copy)
         memo = mod._WORKER_BARS_MEMO
         assert memo is not None
         assert memo[("NIFTY", "1minute")] is first_bars  # the FIRST copy stays resident
@@ -1177,8 +1183,8 @@ class TestRunTupleInWorkerKernelCache:
         tuples = list(iter_sweep_tuples(grid))
         first_bars = list(_BARS)
         fresh_copy = list(_BARS)  # a value-identical "fresh pickled copy"
-        assert mod._run_tuple_in_worker(0, tuples[0], first_bars).summary is not None
-        assert mod._run_tuple_in_worker(1, tuples[1], fresh_copy).summary is not None
+        assert mod._run_tuple_in_worker(0, tuples[0], first_bars, first_bars).summary is not None
+        assert mod._run_tuple_in_worker(1, tuples[1], fresh_copy, fresh_copy).summary is not None
         assert (real_cache.builds, real_cache.hits) == (1, 1)  # the kernel WAS reused
         # The first dispatch registered + consumed its own copy...
         assert sim_bars[0] is first_bars
@@ -1226,13 +1232,13 @@ class TestWorkerQuarantineWithKernelCache:
             mod._worker_init(ctx)
             # Dispatch tuples[0] CLEAN first — on the ON arm this WARMS the
             # cache (build) for the shared (instrument, tf) key.
-            first = mod._run_tuple_in_worker(0, tuples[0], list(_BARS))
+            first = mod._run_tuple_in_worker(0, tuples[0], list(_BARS), list(_BARS))
             # Pre-corrupt tuples[1]'s store, then dispatch it: the worker's G1
             # quarantine + in-frame retry runs against the WARM cache.
             store = tuple_store_path(root, tuples[1], grid)
             store.parent.mkdir(parents=True, exist_ok=True)
             store.write_bytes(b"garbage - not parquet")
-            second = mod._run_tuple_in_worker(1, tuples[1], list(_BARS))
+            second = mod._run_tuple_in_worker(1, tuples[1], list(_BARS), list(_BARS))
             results[arm] = [first, second]
         for arm in ("off", "on"):
             first, second = results[arm]
@@ -1389,7 +1395,12 @@ class _StampedResultPool:
         self._results = dict(results)
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
         fut: Future[mod.TupleWorkResult] = Future()
         fut.set_result(self._results[index])

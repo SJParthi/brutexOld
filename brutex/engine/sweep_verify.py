@@ -16,7 +16,9 @@ into three tiers; this slice ships the two bars-free tiers:
   :func:`recorded_context_from_audit`, never from memory — review condition
   2a). Re-derives every expected store path and every row's 9-field
   ``run_id``, checks mask membership/labels, and applies the killer cheap
-  check: ``rows > top_k`` under one digest is the #650 inflation signature —
+  check: ``rows > union_persist_bound(top_k)`` under one digest is the #650
+  inflation signature (LANE W1: a legitimate store holds the composite top-K
+  prefix PLUS the persist union's quota/frontier extras) —
   post-#654 the digest path always rewrites the FULL population, so an
   oversized store cannot occur legitimately. This detects the pre-#646
   inflation #654's envelope called "undetectable by the sweep" — without bars.
@@ -60,7 +62,20 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.data.guarded_read import read_parquet_schema_regular, read_regular_bytes
-from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
+from brutex.engine.results_store import (
+    EXIT_QUALITY_FIELDS,
+    GROWTH_FIELDS,
+    RECENCY_FIELDS,
+    SELECTION_FIELDS,
+    VIX_FIELDS,
+    ResultsStore,
+    ResultsStoreError,
+)
+from brutex.engine.sweep_ops_rust import (
+    routed_recount_verdict,
+    sweep_ops_rust_enabled,
+)
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -84,6 +99,8 @@ from brutex.engine.tuple_complete import (
 from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
 from brutex.ranking import OverfitGateConfig
+from brutex.ranking.multi_select import union_persist_bound
+from brutex.ranking.temporal import TemporalRobustnessConfig
 from brutex.strategies.types import PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
@@ -500,17 +517,28 @@ def _schedules_from_entries(
 
 
 def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path) -> None:
-    """Refuse a scoped generation whose recorded fill mode is not worst-case.
+    """Refuse a scoped generation whose recorded fill law is not the current one.
 
-    DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is the
-    ONLY fill model and every post-DEC ``SWEEP_START``/``SWEEP_LAUNCH`` line's
+    Enforces the TWO distinct fill-law refusals that together identify a
+    verifiable tree; either arm refuses LOUDLY, and the remediation for both
+    is a fresh sweep:
+
+    DEC-FILL-WORST-CASE-ONLY-001 (the fill-MODE arm): worst-case is the ONLY
+    fill model and every post-DEC ``SWEEP_START``/``SWEEP_LAUNCH`` line's
     ``params`` carries the UNCONDITIONAL ``"fill_mode": "worst_case"`` key
     (``canonical_trade_params`` emits it always). A context entry with NO key
     is a precise-era line (the retired elide law recorded PRECISE by key
     absence), and a literal ``"precise"`` token is the retired mode spelled
     out — either way the generation's stores hold fills the deleted mode
     produced, and verifying them as worst-case would launder precise-priced
-    results. Refuse LOUDLY; the remediation is a fresh worst-case sweep.
+    results.
+
+    DEC-FILL-EXEC-GRID-1M-001 (the fill-GRID twin): the 1-minute execution
+    grid is the ONLY fill grid and every post-DEC line's ``params`` ALSO
+    carries the UNCONDITIONAL ``"execution_grid": "1m_next_bar"`` key. An
+    absent key (or any other token) is a decision-TF-era line whose stores
+    hold fills resolved on the DECISION bar, and verifying them as 1m-grid
+    results would launder pre-grid prices.
 
     GENERATION-SCOPED: *entries* are the ONE generation's context entries
     :func:`recorded_audit_facts` already selects — never the whole audit file.
@@ -518,9 +546,12 @@ def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path)
     Raises
     ------
     SweepVerifyError
-        If any scoped entry lacks the key or records anything other than
-        ``"worst_case"`` (a junk token refuses identically — tampered or
-        legacy, the tree is not verifiable under the one fill law).
+        If any scoped entry lacks the ``"fill_mode"`` key or records anything
+        other than ``"worst_case"`` (the DEC-FILL-WORST-CASE-ONLY-001 arm), OR
+        lacks the ``"execution_grid"`` key or records anything other than
+        ``"1m_next_bar"`` (the DEC-FILL-EXEC-GRID-1M-001 arm). A junk token
+        refuses identically on either arm — tampered or legacy, the tree is
+        not verifiable under the current fill laws.
     """
     expected = FillMode.WORST_CASE.value
     for entry in entries:
@@ -533,6 +564,23 @@ def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path)
                 f"worst_case is the only fill model; this generation's stores "
                 f"were priced under the deleted mode machinery and cannot be "
                 f"verified. Re-run the sweep to produce a worst-case tree"
+            )
+        # DEC-FILL-EXEC-GRID-1M-001 (the fill_mode law's twin): every
+        # post-DEC context line's params ALSO carries the unconditional
+        # "execution_grid": "1m_next_bar" key. An absent key (or any other
+        # token) identifies a decision-TF-era generation whose stores hold
+        # fills resolved on the DECISION bar — verifying them as 1m-grid
+        # results would launder pre-grid prices. Refuse LOUDLY; the
+        # remediation is a fresh sweep.
+        raw_grid = params.get("execution_grid") if isinstance(params, dict) else None
+        if raw_grid is None or str(raw_grid) != EXECUTION_GRID_1M_NEXT_BAR:
+            raise SweepVerifyError(
+                f"decision-TF-era sweep tree refused (DEC-FILL-EXEC-GRID-1M-001): "
+                f"{audit_path} (seq {entry.seq}) records "
+                f"execution_grid={raw_grid!r} — the 1-minute execution grid is "
+                f"the only fill grid; this generation's stores were priced on "
+                f"the retired decision-TF grid and cannot be verified. Re-run "
+                f"the sweep to produce a 1m-grid tree"
             )
 
 
@@ -580,11 +628,14 @@ def recorded_audit_facts(
     schedules disagreeing is real corruption (the resume gate refuses a
     schedule-only drift at launch), not any sanctioned cadence.
 
-    The scoped generation is additionally REQUIRED to record the one fill
-    law (DEC-FILL-WORST-CASE-ONLY-001): every context entry's ``params`` must
-    carry ``"fill_mode": "worst_case"`` — a precise-era generation (absent
-    key, the retired elide law, or a literal ``"precise"`` token) REFUSES
-    loudly via :func:`_require_worst_case_entries` before any tier runs.
+    The scoped generation is additionally REQUIRED to record BOTH current
+    fill laws (each a distinct enforced refusal): every context entry's
+    ``params`` must carry ``"fill_mode": "worst_case"``
+    (DEC-FILL-WORST-CASE-ONLY-001) AND ``"execution_grid": "1m_next_bar"``
+    (DEC-FILL-EXEC-GRID-1M-001). A precise-era generation (absent/``"precise"``
+    ``fill_mode``) or a decision-TF-era generation (absent/other
+    ``execution_grid``) REFUSES loudly via
+    :func:`_require_worst_case_entries` before any tier runs.
 
     Returns ``(None, {}, ())`` when the audit file is absent, and
     ``(None, {}, other_generations)`` when the explicit flags match no
@@ -597,7 +648,8 @@ def recorded_audit_facts(
         If the audit log is unreadable/corrupt, a context-bearing payload is
         malformed, the SCOPED generation's schedules disagree, or the scoped
         generation is a refused precise-era tree
-        (DEC-FILL-WORST-CASE-ONLY-001).
+        (DEC-FILL-WORST-CASE-ONLY-001) or decision-TF-era tree
+        (DEC-FILL-EXEC-GRID-1M-001).
     """
     if not audit_path.exists():
         return None, {}, ()
@@ -1251,13 +1303,22 @@ def _verify_store_rows(
     except ResultsStoreError as exc:
         add("store_unreadable", "corrupt", str(exc))
         return
-    if is_grid_tuple and grid.top_k is not None and len(rows) > grid.top_k:
-        add(
-            "rows_exceed_top_k",
-            "corrupt",
-            f"{len(rows)} rows > top_k={grid.top_k} — the #650 subset-re-rank "
-            f"inflation signature (impossible legitimately, pre- AND post-#654)",
-        )
+    if is_grid_tuple and grid.top_k is not None:
+        # LANE W1 (review round 1 gate re-run): a legitimate store holds the
+        # composite top-K prefix PLUS the persist union's quota/frontier
+        # extras, so the #650 inflation signature is rows beyond the ONE
+        # union_persist_bound law — a bare `rows > top_k` would false-flag
+        # every legitimate union store as corrupt.
+        bound = union_persist_bound(grid.top_k)
+        if len(rows) > bound:
+            add(
+                "rows_exceed_top_k",
+                "corrupt",
+                f"{len(rows)} rows > the union persist bound {bound} at "
+                f"top_k={grid.top_k} (top_k + quota/frontier extras, "
+                f"DEC-RANK-QUOTA-PERSIST-1000-001) — the #650 subset-re-rank "
+                f"inflation signature (impossible legitimately, pre- AND post-#654)",
+            )
     try:
         cfg = tuple_.to_run_config(grid, roll_schedule=roll_schedule)
     except ValueError as exc:
@@ -1496,9 +1557,11 @@ class RecordedStage3Audit:
         its cell stores hold preloaded foreign-knob rows and are honestly
         non-reproducible; condition B4: cells inconclusive, never compared).
     optimizer_versions
-        The sorted unique ``(pycma, numpy)`` pairs from ``STAGE_3_REFINE_START``
-        lines — the refined-row identity folds them, so a drift changes
-        trajectories without changing the context triple (condition B3).
+        The sorted unique ``(optimizer_version, optimizer_build)`` pairs
+        from ``STAGE_3_REFINE_START`` lines (DEC-RUST-STAGE3-REFINE-001: the
+        brutex-refine crate version tag + its baked source digest) — the
+        refined-row identity folds them, so a drift changes trajectories
+        without changing the context triple (condition B3).
     """
 
     knobs: RecordedStage3Knobs | None
@@ -1535,7 +1598,9 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
         for entry in iter_entries(audit_path):
             if entry.action == "STAGE_3_REFINE_START":
                 payload = entry.payload
-                versions.add((str(payload.get("pycma_version")), str(payload.get("numpy_version"))))
+                versions.add(
+                    (str(payload.get("optimizer_version")), str(payload.get("optimizer_build")))
+                )
                 continue
             if entry.action != "STAGE_3_PASS_START":
                 continue
@@ -1574,6 +1639,125 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
 #: The per-tuple ``SWEEP_START`` lines deliberately do NOT carry the mode key,
 #: so they are NOT in this family.
 _MODE_START_ACTIONS: Final[frozenset[str]] = frozenset({"GRID_SWEEP_START", "SUPERVISOR_START"})
+
+
+# ── Temporal-gate recount support (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) ────────
+
+#: The exact key set ``sweep_run`` emits on every configured ``SWEEP_START``
+#: ``temporal_gate`` payload (the provenance-without-re-key channel) — the
+#: recount reader's fail-closed contract: a payload missing any key is a
+#: malformed tree, not a verifiable one (the Stage-3 knobs discipline).
+_TEMPORAL_GATE_KEYS: Final[tuple[str, ...]] = (
+    "mode",
+    "min_profitable_years_fraction",
+    "max_single_year_pnl_share",
+    "min_edge_year_sessions",
+    "min_judged_years",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedTemporalAudit:
+    """The tree's recorded temporal-gate history (``recorded_temporal_from_audit``).
+
+    ``config`` is the ONE recorded
+    :class:`~brutex.ranking.temporal.TemporalRobustnessConfig` when every
+    ``SWEEP_START`` line agrees (``None`` for a temporal-less tree — absent
+    audit, no ``SWEEP_START`` lines, or every line lacking the
+    ``temporal_gate`` key); ``consistent`` is ``False`` when the history is
+    MIXED (the ledgered resume envelope: the completion sentinel excludes the
+    gate config, so a resumed grid can mix gate regimes per tuple), in which
+    case ``config`` is ``None`` — one shadow config cannot reproduce a
+    mixed-regime tree, so the recount must degrade to INCONCLUSIVE, never
+    condemn.
+    """
+
+    config: TemporalRobustnessConfig | None
+    consistent: bool
+
+
+def recorded_temporal_from_audit(audit_path: Path) -> RecordedTemporalAudit:
+    """Read the tree's recorded temporal-gate config from its audit log.
+
+    The Tier-3 recount seam (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, the
+    condition-B1 twin of :func:`recorded_stage3_from_audit`): the launcher
+    threads ``SweepGridConfig.temporal`` (the shipped CLI default is
+    ``observe``) and BOTH modes capture the four emit-on-present period-stats
+    columns at the finalist re-sim — so a shadow re-sweep that does NOT run
+    the tree's RECORDED temporal regime byte-diverges on the columns (and, in
+    ``gate`` mode, on WHICH rows persist) and false-condemns every good store
+    as verdict-grade ``recount_divergence`` corruption (the VIX-stamper
+    round-2 BLOCKER class one config over). The gate config never enters run
+    identity, so the tree's own hash-chained ``SWEEP_START``
+    ``temporal_gate`` payloads are the ONE recorded channel — never the
+    verify-time environment (``$BRUTEX_TEMPORAL`` must not be consulted: an
+    operator verifying under a different env than the launch would otherwise
+    re-introduce the false divergence this reader kills).
+
+    Returns the no-history record (``config=None, consistent=True``) when the
+    file is absent. Streams the chain via
+    :func:`brutex.orchestrator.audit.iter_entries` — O(1) peak memory in
+    chain length (DEC-AUDIT-READERS-STREAM-001). HONEST residual: an
+    audit-less recount (rotated chain + explicit ``--data-snapshot-hash`` /
+    ``--indicator-version`` / ``--code-commit-sha`` overrides) has no
+    recorded channel and recounts temporal-less — over a temporal-recorded
+    tree that still byte-diverges (the Stage-3 audit-less-knobs residual's
+    exact shape).
+
+    Raises
+    ------
+    SweepVerifyError
+        If the audit log is unreadable (an :class:`AuditError` at the
+        ``iter_entries`` call or mid-iteration), a ``temporal_gate`` payload
+        is not a mapping / is missing a key, or its values do not form a
+        valid :class:`~brutex.ranking.temporal.TemporalRobustnessConfig`
+        (a malformed tree is not a verifiable tree).
+    """
+    if not audit_path.exists():
+        return RecordedTemporalAudit(config=None, consistent=True)
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    seen: set[TemporalRobustnessConfig | None] = set()
+    try:
+        # The try spans the ITERATION (streaming AuditError raises mid-loop).
+        for entry in iter_entries(audit_path):
+            if entry.action != "SWEEP_START":
+                continue
+            raw = entry.payload.get("temporal_gate")
+            if raw is None:
+                seen.add(None)
+                continue
+            if not isinstance(raw, Mapping):
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) is not a mapping"
+                )
+            missing = [key for key in _TEMPORAL_GATE_KEYS if key not in raw]
+            if missing:
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) missing {missing}"
+                )
+            try:
+                seen.add(
+                    TemporalRobustnessConfig(
+                        min_profitable_years_fraction=float(raw["min_profitable_years_fraction"]),
+                        max_single_year_pnl_share=float(raw["max_single_year_pnl_share"]),
+                        min_edge_year_sessions=int(raw["min_edge_year_sessions"]),
+                        min_judged_years=int(raw["min_judged_years"]),
+                        mode=str(raw["mode"]),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) is not a valid gate config: {exc}"
+                ) from exc
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+    if len(seen) > 1:
+        return RecordedTemporalAudit(config=None, consistent=False)
+    return RecordedTemporalAudit(config=next(iter(seen), None), consistent=True)
 
 
 def recorded_apriori_from_audit(results_root: Path) -> bool | None:
@@ -1814,38 +1998,65 @@ def recorded_overfit_from_audit(results_root: Path) -> OverfitGateConfig | None:
     return _overfit_from_recorded_leg(winner_leg, audit_path=winner_path)
 
 
+#: Every appended-last NULLABLE optional store column a pre-VIX-generation
+#: file necessarily predates: the VIX trio itself plus every LATER optional
+#: family (growth / exit-quality / recency — DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+#: / DEC-METRICS-KELLY-GROWTH-001 / DEC-METRICS-TRAILING-WINDOW-001, which
+#: landed strictly AFTER the trio, so a store missing the trio also misses
+#: them). Built from the ONE public per-family column source in
+#: ``results_store`` (CLAUDE.md §2 Rule 11 COMMON) — a family column added
+#: there widens the attribution nulling + the schema-migration strip here
+#: automatically.
+_APPENDED_NULLABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS + SELECTION_FIELDS
+)
+
+
 def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
     """Attribute a store-pair diff to the VIX trio — and name the SHAPE, or abstain.
 
     The attribution test behind the ``recount_vix_divergence`` finding family
-    (DEC-VIX-STAMP-WIRE-001): both stores must LOAD cleanly, hold the SAME
-    ``run_id`` set, agree on EVERY non-VIX field of every row, and either
-    disagree on at least one ``vix_mean``/``vix_min``/``vix_max`` value OR
-    differ ONLY in the trio columns' very EXISTENCE (the schema-generation
-    shape below). Anything less provable returns ``None`` — an unreadable
-    Parquet, a run_id-set drift, a non-VIX field difference, or fully-EQUAL
-    rows over IDENTICAL schemas (the byte diff then has an unknown non-row
-    cause) all fall back to the caller's normal corrupt/inconclusive ladder.
-    Honest attribution only, never a guess (Golden Rule #1).
+    (DEC-VIX-STAMP-WIRE-001, widened by the appended nullable families of
+    DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001 /
+    DEC-METRICS-TRAILING-WINDOW-001): both stores must LOAD cleanly, hold
+    the SAME ``run_id`` set, agree on EVERY field of every row OUTSIDE the
+    appended nullable columns (:data:`_APPENDED_NULLABLE_FIELDS`), and every
+    appended-nullable difference must itself be attributable — a VIX trio
+    difference under the trio laws below, or a LATER-family
+    (growth / exit-quality / recency) difference whose ORIGINAL side is
+    ``None`` (the sanctioned pre-extension None→value backfill; those
+    metrics are deterministic and INSIDE the run-identity envelope, so a
+    recorded non-``None`` value the recount cannot reproduce is NEVER
+    attributable here — it abstains to the corrupt ladder). Anything less
+    provable returns ``None`` — an unreadable Parquet, a run_id-set drift,
+    a non-nullable field difference, or fully-EQUAL rows over IDENTICAL
+    schemas (the byte diff then has an unknown non-row cause) all fall back
+    to the caller's normal corrupt/inconclusive ladder. Honest attribution
+    only, never a guess (Golden Rule #1).
 
-    A confirmed VIX-only diff is one of THREE cheaply-distinguishable shapes
+    A confirmed diff is one of THREE cheaply-distinguishable shapes
     (two row-level + one schema-level) — the round-4 panel caught the old
     single "the lake moved" wording claiming a cause it had not established
     for the first shape, and the round-5 panel caught the schema shape
     silently abstaining onto the generic ladder:
 
-    * ``"backfill"`` (row shape) — every differing trio field is ``None`` on
-      the ORIGINAL side (a VIX lake that has since GAINED coverage, or a
-      part-null store): nothing recorded was contradicted, and a plain redo
-      appends the trio as the sanctioned directional None→value backfill —
-      no quarantine needed.
+    * ``"backfill"`` (row shape) — every differing nullable field (trio
+      and/or later-family) is ``None`` on the ORIGINAL side (a VIX lake
+      that has since GAINED coverage, a part-null store, or a
+      pre-extension store whose recount computes the later-family
+      metrics): nothing recorded was contradicted, and a plain redo
+      appends the values as the sanctioned directional None→value
+      backfill — no quarantine needed.
     * ``"backfill"`` (schema shape) — every row fully EQUAL (both sides an
       all-``None`` trio) but the ORIGINAL file predates the trio COLUMNS
       themselves: a pre-VIX-generation store loads ``None`` per
       ``_row_from_record``'s optional read, while the recount's reflush
-      writes the current schema WITH the three all-null columns appended, so
-      such a tree can NEVER be byte-identical. Attributed iff the ONLY
-      schema difference is the missing trio
+      writes the current schema WITH the appended-last all-null nullable
+      columns (the trio + every LATER optional family a strictly-older
+      store also necessarily predates — growth / exit-quality / recency),
+      so such a tree can NEVER be byte-identical. Attributed iff the ONLY
+      schema difference is exactly those missing appended nullable columns,
+      the whole trio among them
       (:func:`_is_pre_vix_schema_migration`) — same family, same remedy.
     * ``"moved"`` — some recorded trio VALUE disagrees with the recount's
       (value-vs-value, or a recorded value the recount can no longer
@@ -1859,51 +2070,70 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
         return None  # unreadable/corrupt bytes are never VIX-attributable
     if set(original_rows) != set(scratch_rows):
         return None
-    vix_differs = False
+    nullable_differs = False
     recorded_value_differs = False
-    # Null the trio from the ONE public column source (results_store.VIX_FIELDS,
-    # CLAUDE.md §2 Rule 11 COMMON) — a fourth trio field added there is nulled
-    # here automatically, never a silently-desynced mirrored literal.
-    # dict[str, Any]: the trio fields are typed non-None on ResultRow's
+    # Null the appended nullable columns from the ONE public per-family
+    # column source (results_store.VIX_FIELDS + the later families,
+    # CLAUDE.md §2 Rule 11 COMMON) — a field added there is nulled here
+    # automatically, never a silently-desynced mirrored literal.
+    # dict[str, Any]: the nullable fields are typed non-None on ResultRow's
     # replace() signature, so a dict[str, None] splat fails strict mypy even
-    # though None is the valid null for every nullable trio column.
-    vix_nulled: dict[str, Any] = dict.fromkeys(VIX_FIELDS)
+    # though None is the valid null for every nullable column.
+    nulled: dict[str, Any] = dict.fromkeys(_APPENDED_NULLABLE_FIELDS)
     for run_id, ours in original_rows.items():
         theirs = scratch_rows[run_id]
         if ours == theirs:
             continue
-        if replace(ours, **vix_nulled) != replace(theirs, **vix_nulled):
-            return None  # a non-VIX field differs — not VIX-attributable
-        vix_differs = True
+        if replace(ours, **nulled) != replace(theirs, **nulled):
+            return None  # a non-nullable field differs — not attributable
+        nullable_differs = True
         for name in VIX_FIELDS:
             mine = getattr(ours, name)
             if mine != getattr(theirs, name) and mine is not None:
                 recorded_value_differs = True
-    if not vix_differs:
+        for name in (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS):
+            mine = getattr(ours, name)
+            if mine != getattr(theirs, name) and mine is not None:
+                # A later-family metric is deterministic + INSIDE the
+                # run-identity envelope: a recorded value the recount cannot
+                # reproduce is a genuine divergence, never backfill/moved.
+                return None
+    if not nullable_differs:
         # Rows fully EQUAL yet the caller saw a byte diff: the ONE provable
         # cause is the schema-generation migration (a pre-VIX-columns store
-        # vs the current writer's appended all-null trio — the round-5 panel
-        # shape); anything else honestly abstains to the normal ladder.
+        # vs the current writer's appended all-null nullable columns — the
+        # round-5 panel shape); anything else honestly abstains to the
+        # normal ladder.
         return "backfill" if _is_pre_vix_schema_migration(original, scratch) else None
     return "moved" if recorded_value_differs else "backfill"
 
 
 def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
-    """``True`` iff *original*'s Parquet schema is exactly *scratch*'s minus the VIX trio.
+    """``True`` iff *original*'s schema is exactly *scratch*'s minus the appended nullable columns.
 
     The schema test behind :func:`_stores_differ_only_in_vix`'s third shape
     (round-5 panel): a store written BEFORE the trio columns landed loads an
     all-``None`` trio, so its rows compare fully EQUAL to an unstamped
     recount's — yet the recount's reflush writes the CURRENT schema with the
-    three all-null trio columns and the bytes differ. That diff is
-    attributable iff the ONLY schema difference is the missing trio: the
-    scratch must carry all three columns, the original none, and stripping
-    the trio from the scratch schema must reproduce the original schema
-    EXACTLY (names AND dtypes, order-sensitively). Anything less provable —
-    partial trio presence, any other column/dtype drift, an unreadable
-    footer — returns ``False`` and the caller abstains to the normal ladder.
-    Honest attribution only, never a guess (Golden Rule #1). O(columns) —
-    two Parquet footer reads, no row data.
+    appended-last all-null nullable columns (the trio + the strictly-later
+    growth / exit-quality / recency families — and, post-LANE-W1, the two
+    ``SELECTION_FIELDS`` provenance columns (DEC-RANK-PARETO-PERSIST-001 /
+    DEC-RANK-QUOTA-PERSIST-1000-001), which join the SAME appended nullable
+    set: selection landed after VIX, so the genuine pre-VIX generation
+    carries neither — such a store also predates them all) and the bytes
+    differ. That diff is attributable iff the ONLY schema
+    difference is exactly those missing columns: the scratch must carry
+    EVERY always-appended nullable column (the trio + the later families +
+    the selection pair — a current-writer reflush always writes them all),
+    the original NONE of the appended nullable columns (a
+    partial presence of ANY of them is not the pre-VIX generation), and
+    stripping the appended nullable columns from the scratch schema must
+    reproduce the original schema EXACTLY (names AND dtypes,
+    order-sensitively). Anything less provable — partial presence, any
+    other column/dtype drift, an unreadable footer — returns ``False`` and
+    the caller abstains to the normal ladder. Honest attribution only,
+    never a guess (Golden Rule #1). O(columns) — two Parquet footer reads,
+    no row data.
     """
     import polars as pl  # deferred exactly like ResultsStore.load (the data extra)
 
@@ -1919,12 +2149,17 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     except (pl.exceptions.PolarsError, OSError):
         return False  # an unreadable footer is never VIX-attributable
     original_names = {name for name, _ in original_schema}
-    if any(name in original_names for name in VIX_FIELDS):
-        return False  # partial/total trio presence — not the pre-VIX generation
+    if any(name in original_names for name in _APPENDED_NULLABLE_FIELDS):
+        return False  # partial nullable-column presence — not the pre-VIX generation
     scratch_names = {name for name, _ in scratch_schema}
-    if any(name not in scratch_names for name in VIX_FIELDS):
-        return False  # the recount side lacks the trio — not this migration
-    stripped = [entry for entry in scratch_schema if entry[0] not in VIX_FIELDS]
+    if any(name not in scratch_names for name in _APPENDED_NULLABLE_FIELDS):
+        # The recount side lacks an ALWAYS-appended nullable column (the trio
+        # or a later family, the LANE-W1 selection pair included) — a
+        # current-writer reflush always writes them all, so this is not the
+        # migration shape (the member's #2059/#2060 tooth, generalized at the
+        # wave-2b fold from its selection-pair special case).
+        return False
+    stripped = [entry for entry in scratch_schema if entry[0] not in _APPENDED_NULLABLE_FIELDS]
     return stripped == original_schema
 
 
@@ -2066,6 +2301,35 @@ def _sidecar_diff_is_the_mode_census_residue(original_sidecar: Path, scratch_sid
     except TrialStatsError:
         return False  # an unreadable/invalid sidecar is never mode-attributable
     return _census_fields_only_differ(ours, theirs)
+
+
+def _recount_verdict_python(
+    vix_attributable: bool,
+    is_grid_tuple: bool,
+    context_match: bool,
+    cell_evidence: bool,
+    grid_corrupt_leaderboard: bool,
+) -> str:
+    """The pure recount post-byte-diff classification tail — the retained oracle.
+
+    The verbatim :func:`compare_recount` ladder over pre-computed flags (the
+    routed twin is the crate's ``recount_verdict`` — DEC-RUST-SWEEP-OPS-001
+    slice 5): a VIX-attributable divergence outranks everything; a GRID
+    tuple splits corrupt/inconclusive on the context match; a CELL is
+    collateral under a corrupt same-leaderboard grid (B5), verdict-grade
+    only under full context AND full cell evidence (B2), else inconclusive
+    (B1). The finding codes, severities, detail BYTES and the
+    ``grid_corrupt_leaderboards`` side effect stay with the caller.
+    """
+    if vix_attributable:
+        return "vix_divergence"
+    if is_grid_tuple:
+        return "grid_corrupt" if context_match else "grid_inconclusive"
+    if grid_corrupt_leaderboard:
+        return "cell_dependent"
+    if context_match and cell_evidence:
+        return "cell_corrupt"
+    return "cell_inconclusive"
 
 
 def compare_recount(
@@ -2404,7 +2668,28 @@ def compare_recount(
             # field, and re-pairs its OWN store's actual bytes; anything less
             # provable stays on the normal ladder.
             vix_shape = _artifact_vix_shape(original, scratch)
-            if vix_shape is not None:
+            # The pure classification tail may route through the sweep-ops
+            # crate (DEC-RUST-SWEEP-OPS-001 slice 5); the finding
+            # codes/details, the corrupt-leaderboard side effect and the
+            # run-identity seams stay Python, keyed off the token.
+            verdict_args = (
+                vix_shape is not None,
+                is_grid_tuple,
+                context_match,
+                cell_evidence,
+                leaderboard in grid_corrupt_leaderboards,
+            )
+            if sweep_ops_rust_enabled():
+
+                def _verdict_oracle(
+                    args: tuple[bool, bool, bool, bool, bool] = verdict_args,
+                ) -> str:
+                    return _recount_verdict_python(*args)
+
+                verdict = routed_recount_verdict(*verdict_args, python_law=_verdict_oracle)
+            else:
+                verdict = _recount_verdict_python(*verdict_args)
+            if verdict == "vix_divergence":
                 # Two honestly-distinguished variants (round-4 panel): the
                 # old single detail definitively claimed "the lake moved",
                 # which is FALSE for the reachable backfill shape (a
@@ -2423,15 +2708,15 @@ def compare_recount(
                     )
                 else:
                     cause_and_remedy = (
-                        "The original rows carry NO trio values — a store "
-                        "written before the VIX columns landed, or a VIX lake "
-                        "that has since GAINED coverage; nothing recorded was "
-                        "contradicted. VIX is deliberately OUTSIDE the recorded "
-                        "context and the run identity (CLAUDE.md §2 Rule 3), so "
-                        "this is NOT evidence of corruption and never "
-                        "heal-grade. Remedy: a plain redo appends the trio as "
-                        "the sanctioned directional None→value backfill — no "
-                        "quarantine needed"
+                        "The original rows carry NO values on the diverging "
+                        "nullable columns — a store written before those "
+                        "columns landed, or (for the trio) a VIX lake that "
+                        "has since GAINED coverage; nothing recorded was "
+                        "contradicted. Every diverging value lands as the "
+                        "sanctioned directional None→value backfill, so this "
+                        "is NOT evidence of corruption and never heal-grade. "
+                        "Remedy: a plain redo appends the missing values as "
+                        "that backfill — no quarantine needed"
                     )
                 findings.append(
                     VerifyFinding(
@@ -2443,10 +2728,13 @@ def compare_recount(
                         ),
                         severity="warn",
                         detail=(
-                            "ONLY the REFERENCE-ONLY vix_mean/vix_min/vix_max trio "
-                            "diverges (the pairing sidecar/sentinel re-pair that "
-                            "store's hash) — every run_id and every non-VIX column "
-                            f"reproduced exactly. {cause_and_remedy}"
+                            "ONLY appended nullable columns diverge (the "
+                            "REFERENCE-ONLY vix_mean/vix_min/vix_max trio and/or "
+                            "the nullable growth/exit-quality/recency metrics as "
+                            "an original-side-None backfill; the pairing "
+                            "sidecar/sentinel re-pair that store's hash) — every "
+                            "run_id and every other column reproduced exactly. "
+                            f"{cause_and_remedy}"
                         ),
                     )
                 )
@@ -2481,41 +2769,40 @@ def compare_recount(
                     )
                 )
                 continue
-            if is_grid_tuple:
-                if context_match:
-                    grid_corrupt_leaderboards.add(leaderboard)
-                    findings.append(
-                        VerifyFinding(
-                            path=rel,
-                            code="recount_divergence",
-                            severity="corrupt",
-                            detail=(
-                                "bytes diverge from the shadow re-sweep under a "
-                                "FULLY MATCHED recorded context — verdict-grade "
-                                "corruption (the only state heal-grade evidence "
-                                "may ever come from)"
-                            ),
-                        )
+            if verdict == "grid_corrupt":
+                grid_corrupt_leaderboards.add(leaderboard)
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_divergence",
+                        severity="corrupt",
+                        detail=(
+                            "bytes diverge from the shadow re-sweep under a "
+                            "FULLY MATCHED recorded context — verdict-grade "
+                            "corruption (the only state heal-grade evidence "
+                            "may ever come from)"
+                        ),
                     )
-                else:
-                    findings.append(
-                        VerifyFinding(
-                            path=rel,
-                            code="recount_divergence_inconclusive",
-                            severity="warn",
-                            detail=(
-                                "bytes diverge BUT the recorded context does not "
-                                "match the current environment — NOT evidence of "
-                                "corruption (changed code/indicators/lake change "
-                                "results legitimately; ADR-0008 drift channels)"
-                            ),
-                        )
+                )
+            elif verdict == "grid_inconclusive":
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_divergence_inconclusive",
+                        severity="warn",
+                        detail=(
+                            "bytes diverge BUT the recorded context does not "
+                            "match the current environment — NOT evidence of "
+                            "corruption (changed code/indicators/lake change "
+                            "results legitimately; ADR-0008 drift channels)"
+                        ),
                     )
+                )
             # Stage-3 cell stores (DEC-STAGE3-RECOUNT-001): a DISTINCT code
             # family — the heal consumes ONLY `recount_divergence` (its C1
             # gate raises on non-grid paths), so cell findings must never
             # alias the grid code (condition B2).
-            elif leaderboard in grid_corrupt_leaderboards:
+            elif verdict == "cell_dependent":
                 # Condition B5: scratch cells derive from scratch GRID stores,
                 # so cell divergence under grid corruption in the same
                 # leaderboard is collateral, not independent evidence.
@@ -2532,7 +2819,7 @@ def compare_recount(
                         ),
                     )
                 )
-            elif context_match and cell_evidence:
+            elif verdict == "cell_corrupt":
                 findings.append(
                     VerifyFinding(
                         path=rel,
@@ -2610,6 +2897,7 @@ __all__ = [
     "RecordedContext",
     "RecordedStage3Audit",
     "RecordedStage3Knobs",
+    "RecordedTemporalAudit",
     "SweepVerifyError",
     "TreeVerifyReport",
     "VerifyFinding",
@@ -2620,6 +2908,7 @@ __all__ = [
     "recorded_overfit_from_audit",
     "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
+    "recorded_temporal_from_audit",
     "stale_roll_schedule_refusal",
     "verify_identity",
     "verify_structural",

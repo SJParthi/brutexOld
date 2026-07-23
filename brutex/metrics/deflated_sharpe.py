@@ -4,8 +4,18 @@ Stage-4 statistical-validity metrics for ``TRACK1_BACKTEST_SPEC.md``
 line 582 (``deflated_sharpe_ratio`` — "Bailey & LdP 2014"). These are
 **pure functions**: no I/O, no global mutable state, fully deterministic
 (closed-form — no bootstrap, so no seed is required), and dependency-light
-(standard library only, matching the deliberate no-``polars``/no-``numpy``
-design of :mod:`brutex.metrics.types`).
+(standard library + the stdlib-and-structlog-only
+:mod:`brutex.metrics.rust_stats` seam, matching the deliberate
+no-``polars``/no-``numpy`` design of :mod:`brutex.metrics.types`).
+
+**Rust seam (DEC-METRICS-RUST-STATS-002):** behind the default-OFF
+``BRUTEX_STATS_RUST`` flag the two computation TAILS (:func:`_psr_tail` +
+:func:`_expected_max_tail`) are served by the ``fno_math`` kernels
+(``stats_psr`` / ``stats_expected_max_sharpe``) through the per-function
+burn-in + autorevert machinery of :mod:`brutex.metrics.rust_stats`; every
+validation raise stays HERE (byte-pinned messages), the tails are RETAINED
+FOREVER as the parity oracles, and flag-OFF is byte-identical by
+construction.
 
 **Precision rule (DEC-MONEY-2DP-001, money-only):** every value here is a
 statistical metric (a probability or a Sharpe ratio) and is therefore kept
@@ -55,6 +65,11 @@ import math
 from dataclasses import dataclass
 from statistics import NormalDist
 from typing import Final
+
+# The slice-6 Rust-statistics seam (DEC-METRICS-RUST-STATS-002). Imports only
+# stdlib + structlog at module scope (its engine-flag import is lazy — no
+# import-time cycle; the cpcv.py precedent).
+from brutex.metrics import rust_stats
 
 __all__ = [
     "GAUSSIAN_KURTOSIS",
@@ -192,6 +207,39 @@ def probabilistic_sharpe_ratio(
             f"got {radicand} for observed_sharpe={observed_sharpe}, "
             f"skew={skew}, kurtosis={kurtosis}"
         )
+    if rust_stats.stats_rust_enabled():
+        # The flag-gated Rust PSR kernel (DEC-METRICS-RUST-STATS-002).
+        # ``None`` — latched / wheel-absent / kernel error / refused result /
+        # an argument failing the exact-type+exactness domain gates — falls
+        # through to the retained-forever Python tail, so wheel state can
+        # never change results or error behaviour (the rust_stats envelope).
+        result = rust_stats.psr_via_kernel(
+            observed_sharpe,
+            benchmark_sharpe,
+            sample_length,
+            skew,
+            kurtosis,
+            oracle=lambda: _psr_tail(observed_sharpe, benchmark_sharpe, sample_length, radicand),
+        )
+        if result is not None:
+            return result
+    return _psr_tail(observed_sharpe, benchmark_sharpe, sample_length, radicand)
+
+
+def _psr_tail(
+    observed_sharpe: float,
+    benchmark_sharpe: float,
+    sample_length: int,
+    radicand: float,
+) -> float:
+    """The pure-Python PSR tail — the retained-forever parity oracle.
+
+    Moved VERBATIM from :func:`probabilistic_sharpe_ratio`
+    (DEC-METRICS-RUST-STATS-002; zero arithmetic change): the z-score over
+    the pre-validated radicand, then the standard-Normal CDF. Serves every
+    call when ``BRUTEX_STATS_RUST`` is OFF (the default), every fallback
+    when it is ON, and the burn-in self-check compares — never deleted.
+    """
     z = (observed_sharpe - benchmark_sharpe) * math.sqrt(sample_length - 1) / math.sqrt(radicand)
     return _STD_NORMAL.cdf(z)
 
@@ -247,6 +295,32 @@ def expected_max_sharpe_ratio(n_trials: int, trial_sharpe_variance: float) -> fl
     if n_trials == 1:
         # E[max] of a single zero-mean draw is its mean = 0 (no deflation).
         return 0.0
+    if rust_stats.stats_rust_enabled():
+        # The flag-gated Rust SR_0 kernel (DEC-METRICS-RUST-STATS-002).
+        # A kernel ValueError from the AS241 raise domain refuses to the
+        # oracle, which raises the identical StatisticsError (the documented
+        # astronomical-``n_trials`` arm) — exception parity by construction.
+        result = rust_stats.expected_max_sharpe_via_kernel(
+            n_trials,
+            trial_sharpe_variance,
+            oracle=lambda: _expected_max_tail(n_trials, trial_sharpe_variance),
+        )
+        if result is not None:
+            return result
+    return _expected_max_tail(n_trials, trial_sharpe_variance)
+
+
+def _expected_max_tail(n_trials: int, trial_sharpe_variance: float) -> float:
+    """The pure-Python ``SR_0`` tail — the retained-forever parity oracle.
+
+    Moved VERBATIM from :func:`expected_max_sharpe_ratio`
+    (DEC-METRICS-RUST-STATS-002; zero arithmetic change): the two AS241
+    standard-Normal quantiles + the Gumbel combination over pre-validated
+    inputs (``n_trials >= 2`` — the ``== 1`` limit returns earlier). Serves
+    every call when ``BRUTEX_STATS_RUST`` is OFF (the default), every
+    fallback when it is ON, and the burn-in self-check compares — never
+    deleted.
+    """
     std = math.sqrt(trial_sharpe_variance)
     quantile_main = _STD_NORMAL.inv_cdf(1.0 - 1.0 / n_trials)
     quantile_tail = _STD_NORMAL.inv_cdf(1.0 - 1.0 / (n_trials * math.e))

@@ -129,6 +129,8 @@ def test_deterministic(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
@@ -138,6 +140,8 @@ def test_deterministic(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
@@ -179,6 +183,8 @@ def test_no_lookahead_future_mutation(
             entry,
             direction=direction,
             tf_minutes=1,
+            # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+            exec_bars_1m=feed,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
             exit_signals=exit_,
@@ -209,6 +215,8 @@ def test_trades_never_overlap(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
@@ -282,6 +290,8 @@ def test_p03_per_trade_pnl_sums_to_balance_delta(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
@@ -327,6 +337,8 @@ def test_p04_gross_minus_costs_equals_net(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
@@ -407,6 +419,8 @@ def test_p09_forced_exit_no_trade_survives_1520(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
@@ -486,6 +500,8 @@ def test_entry_fill_never_crosses_a_session_boundary(
         entry,
         direction=direction,
         tf_minutes=1,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         exit_signals=exit_,
@@ -535,6 +551,8 @@ def test_session_boundary_close_is_truncation_equivalent(
             entries,
             direction=direction,
             tf_minutes=1,
+            # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+            exec_bars_1m=feed,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
             exit_signals=exits,

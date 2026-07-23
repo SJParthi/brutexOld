@@ -9,6 +9,7 @@ minimum-train defaulting, every validation guard, and the three
 from __future__ import annotations
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 from brutex.metrics.wfo import (
     WFOPassRates,
@@ -175,3 +176,101 @@ class TestValidation:
     def test_pass_rate_rejects_bad_series(self) -> None:
         with pytest.raises(ValueError, match="non-empty"):
             wfo_pass_rate([], WFOScheme.ROLLING, **_WIN)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# DEC-METRICS-RUST-STATS-002 — the Rust dispatch arms (flag ON / NaN
+# threshold refusal / fallthrough / flag-OFF bomb-kernel pin).
+# ═════════════════════════════════════════════════════════════════════════
+
+import struct  # noqa: E402  (appended PR-2 section)
+
+import fno_math  # noqa: E402
+from brutex.metrics import rust_stats  # noqa: E402
+from brutex.metrics.wfo import _walk_pass_count  # noqa: E402  # pyright: ignore[reportPrivateUsage]
+from structlog.testing import capture_logs  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stats_seam() -> None:
+    """Fresh burn-in budgets, latches and log memo per test."""
+    rust_stats.reset_self_check_for_tests()
+    rust_stats.reset_observability_memo_for_tests()
+
+
+def _bits(value: float) -> bytes:
+    return struct.pack("<d", value)
+
+
+def _series() -> npt.NDArray[np.float64]:
+    return np.array([0.01 * ((i * 13 % 17) - 8) for i in range(200)], dtype=np.float64)
+
+
+def test_flag_on_engages_bit_equal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = wfo_pass_rate(_series(), WFOScheme.ROLLING, train_size=50, test_size=20, step=10)
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    with capture_logs() as logs:
+        on = wfo_pass_rate(_series(), WFOScheme.ROLLING, train_size=50, test_size=20, step=10)
+    assert any(e["event"] == "rust_stats.engaged" and e["fn"] == "wfo" for e in logs), (
+        "the ON arm must engage the Rust kernel (anti-vacuous-pass law)"
+    )
+    assert _bits(on) == _bits(off)
+
+
+def test_flag_on_all_three_schemes_bit_equal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = wfo_pass_rates(_series(), train_size=60, test_size=25, step=15, embargo=3)
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    on = wfo_pass_rates(_series(), train_size=60, test_size=25, step=15, embargo=3)
+    for field in ("rolling", "anchored", "expanding"):
+        assert _bits(getattr(on, field)) == _bits(getattr(off, field)), field
+
+
+def test_flag_on_nan_threshold_refuses_to_the_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN min_sharpe refuses (the exact-type threshold law) — the oracle's
+    ``> NaN`` all-non-pass semantics own the call on BOTH arms."""
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = wfo_pass_rate(
+        _series(), WFOScheme.ROLLING, train_size=50, test_size=20, step=10, min_sharpe=float("nan")
+    )
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    with capture_logs() as logs:
+        on = wfo_pass_rate(
+            _series(),
+            WFOScheme.ROLLING,
+            train_size=50,
+            test_size=20,
+            step=10,
+            min_sharpe=float("nan"),
+        )
+    reasons = [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"]
+    assert reasons == ["arg_inexact"]
+    assert _bits(on) == _bits(off) and off == 0.0
+
+
+def test_flag_on_latched_kernel_falls_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    rust_stats.disable_kernel("wfo", "self_check_mismatch")
+    on = wfo_pass_rate(_series(), WFOScheme.ANCHORED, train_size=50, test_size=20, step=10)
+    import numpy as np
+
+    arr = np.asarray(_series(), dtype=np.float64)
+    walks = walk_forward_splits(
+        int(arr.size), WFOScheme.ANCHORED, train_size=50, test_size=20, step=10
+    )
+    assert _bits(on) == _bits(_walk_pass_count(arr, walks, 0.0) / len(walks))
+
+
+def test_flag_off_never_touches_the_kernel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bomb-kernel spy: flag OFF is byte-identical AND crate-untouched."""
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+
+    def _bomb(*args: object) -> int:
+        raise AssertionError("flag-OFF must never call the Rust kernel")
+
+    monkeypatch.setattr(fno_math, "stats_wfo_pass_count", _bomb)
+    rate = wfo_pass_rate(_series(), WFOScheme.EXPANDING, train_size=50, test_size=20, step=10)
+    assert 0.0 <= rate <= 1.0

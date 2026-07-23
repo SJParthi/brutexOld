@@ -110,6 +110,10 @@
   .cascbadge.pass { color:var(--green); border-color:var(--green-dim); }
   .cascbadge.prov { color:var(--yellow); border-color:var(--yellow); }
   .cascbadge.fail { color:var(--red); border-color:var(--red); }
+  /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier badge (green S+/S, neutral A). */
+  .tierbadge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
+    font-weight:700; border:1px solid var(--border); color:var(--muted); white-space:nowrap; }
+  .tierbadge.good { color:var(--green); border-color:var(--green-dim); }
   .erabanner { display:none; margin:12px 24px 0; padding:10px 14px; border:1px solid var(--yellow);
     border-radius:var(--r-md); background:rgba(255,183,77,.09); color:var(--yellow);
     font-size:13px; line-height:1.6; }
@@ -200,6 +204,14 @@
     <div class="ctl">
       <label for="fDirection">Direction</label>
       <select id="fDirection"><option value="">All</option></select>
+    </div>
+    <!-- Gate coordinate scope (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
+         hidden while only ONE coordinate exists; shown when the tree holds
+         several (and FORCED relevant when mixed_gate_coordinates — >1 known
+         gated config — where the server refuses a silent default pick). -->
+    <div class="ctl" id="gateCtl" hidden>
+      <label for="fGate">Gate</label>
+      <select id="fGate"><option value="">Default</option></select>
     </div>
     <div class="ctl">
       <label for="fRankBy">Rank by</label>
@@ -343,6 +355,8 @@ const fMinTrades = document.getElementById("fMinTrades");
 const fMinPf = document.getElementById("fMinPf");
 const fMinDsr = document.getElementById("fMinDsr");
 const fMaxDd = document.getElementById("fMaxDd");
+const fGate = document.getElementById("fGate");
+const gateCtl = document.getElementById("gateCtl");
 
 let ROWS = [];               // the current leaderboard rows (already ranked server-side)
 let sortKey = "rank";        // active client-side sort column
@@ -479,6 +493,18 @@ function benchCell(r) {
    main's landed DEC-RESULTS-CASCADE-VERDICT-JOIN-001 badge (above, server-built
    status text) is the ONE cascade badge; the marker keys still feed
    cascadeDsrCell ("DSR @ search N") — the datum the join does not carry. */
+/* DEC-RANKING-SPLUS-TIER-001: the joined S+/S/A tier badge. The cell shows
+   the raw label TOKEN (r.tier — data, not prose); an explicitly-judged
+   null-label row shows the SERVER-built tier_status_text ("not tiered …" —
+   no tier prose is ever composed here); the title carries the full server
+   text. An unjoined row reads "—" (EMIT-ON-PRESENT — absence is honest). */
+function tierBadge(r) {
+  const txt = r.tier_status_text;
+  if (txt == null) return "—";
+  const cls = r.tier === "S+" || r.tier === "S" ? "tierbadge good" : "tierbadge";
+  const label = r.tier == null ? String(txt) : String(r.tier);
+  return '<span class="' + cls + '" title="' + esc(String(txt)) + '">' + esc(label) + "</span>";
+}
 
 /* The sortable columns: key → (header label, cell renderer). The server already
    ranked by the chosen metric; client-side sort re-orders the fetched page only. */
@@ -493,6 +519,11 @@ const COLS = [
   ["instrument", "Instrument", (r) => '<span class="sym">' + esc(r.instrument) + "</span>"],
   ["tf", "TF", (r) => esc(r.tf)],
   ["direction", "Dir", (r) => esc(r.direction)],
+  /* Gate-scoped-dedup provenance coordinate (DEC-SWEEP-SERVING-GATE-
+     PROVENANCE-001): the row's own store coordinate — "ungated" or a
+     gate:<hash> config tag. A LABEL (the snapshot_era pattern), NOT the
+     statutory 5-door gate re-check. */
+  ["gate_coordinate", "Gate", (r) => esc(r.gate_coordinate == null ? "ungated" : r.gate_coordinate)],
   ["net_pnl_rupees", "Net P&L", (r) =>
     '<span class="pnl ' + (Number(r.net_pnl_rupees) >= 0 ? "pos" : "neg") + '">' + esc(r.net_pnl) + "</span>"],
   ["sharpe_ratio", "Sharpe", (r) => metric(r.sharpe_ratio)],
@@ -523,6 +554,10 @@ const COLS = [
      unjoined (EMIT-ON-PRESENT keys — absence is honest, never 0). The ONE
      Cascade badge (club S2 fold — 1459's duplicate marker badge dropped). */
   ["cascade_status", "Cascade", (r) => cascadeBadge(r)],
+  /* DEC-RANKING-SPLUS-TIER-001: the S+/S/A tier joined from the newest
+     run's top100 artifact — sorts by the raw label token (tier); "—" when
+     unjoined (EMIT-ON-PRESENT keys — absence is honest, never a tier). */
+  ["tier", "Tier", (r) => tierBadge(r)],
   ["cpcv_pass_pct", "CPCV %", (r) => metric(r.cpcv_pass_pct)],
   ["composite_score", "Composite", (r) => metric(r.composite_score)],
   ["drill", "", (r) =>
@@ -673,6 +708,29 @@ function fillSelect(el, values) {
   for (const v of values || []) html += '<option value="' + esc(v) + '">' + esc(v) + "</option>";
   el.innerHTML = html;
   if (cur && (values || []).includes(cur)) el.value = cur;
+}
+
+/* Gate-coordinate dropdown (DEC-SWEEP-SERVING-GATE-PROVENANCE-001): built
+   with createElement/textContent ONLY — the coordinates are server-derived
+   strings, never trusted into innerHTML (CodeQL XSS). Hidden while the tree
+   holds a single coordinate (nothing to pick); shown when several exist, and
+   the "mixed" tree (>1 known gated config — the server refuses a silent
+   default pick and serves everything labeled) FORCES it visible. */
+function fillGateSelect(coords, mixed) {
+  const cur = fGate.value;
+  fGate.textContent = "";
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = mixed ? "All (mixed gates)" : "Default";
+  fGate.appendChild(def);
+  for (const c of coords) {
+    const opt = document.createElement("option");
+    opt.value = String(c);
+    opt.textContent = String(c);
+    fGate.appendChild(opt);
+  }
+  if (cur && coords.includes(cur)) fGate.value = cur;
+  gateCtl.hidden = coords.length <= 1;
 }
 
 function sortRows() {
@@ -852,6 +910,7 @@ async function load() {
   if (fInstrument.value) params.set("instrument", fInstrument.value);
   if (fTf.value) params.set("tf", fTf.value);
   if (fDirection.value) params.set("direction", fDirection.value);
+  if (fGate.value) params.set("gate", fGate.value);
   if (fRankBy.value) params.set("rank_by", fRankBy.value);
   let top = parseInt(fTop.value, 10);
   if (!isFinite(top) || top < 1) top = 50;
@@ -894,6 +953,7 @@ async function load() {
     fillSelect(fInstrument, board.instruments);
     fillSelect(fTf, board.timeframes);
     fillSelect(fDirection, board.directions);
+    fillGateSelect(board.gate_coordinates || [], !!board.mixed_gate_coordinates);
     /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: keep the cascade meta for the
        badge fallback law + the header line. Absent key (no report / legacy
        payload) ⇒ null ⇒ every badge reads "—" — never a fabricated state. */
@@ -929,7 +989,16 @@ async function load() {
         + (board.skipped ? " · " + num(board.skipped) + " skipped (unreadable)" : "")
         + (board.run_id_conflicts
           ? " · " + num(board.run_id_conflicts)
-            + " run-id conflict(s) — duplicate run_ids with different metrics (first-wins, logged)"
+            + " run-id conflict(s) — duplicate run_ids with different metrics"
+            + " within one gate coordinate (first-wins, logged)"
+          : "")
+        + ((board.gate_coordinates || []).length > 1
+          ? " · gate: " + (board.gate_coordinate == null
+            ? "all (" + num((board.gate_coordinates || []).length) + " coordinates, mixed)"
+            : esc(board.gate_coordinate))
+          : "")
+        + ((board.gate_reasons || []).length
+          ? " · gated run persisted no survivors — " + esc((board.gate_reasons || []).join("; "))
           : "")
         + cascNote
         + tempoChips
@@ -945,7 +1014,7 @@ async function load() {
   }
 }
 
-[fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });
+[fInstrument, fTf, fDirection, fGate, fRankBy].forEach((el) => { el.onchange = load; });
 /* ~200 ms trailing debounce for the Top-N NUMBER input + the four B2a floor
    inputs (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the
    movers.html #topn precedent; DEC-RESULTS-TRUST-HONESTY-001 floors join the

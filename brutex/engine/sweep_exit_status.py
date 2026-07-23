@@ -43,6 +43,10 @@ import structlog
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.guarded_read import read_regular_text
 from brutex.engine.run_layout import run_dir
+from brutex.engine.sweep_ops_rust import (
+    routed_exit_status_resolution,
+    sweep_ops_rust_enabled,
+)
 
 __all__ = [
     "EXIT_STATUS_FILENAME",
@@ -89,6 +93,34 @@ def _finite_float(value: object) -> float | None:
     if not math.isfinite(value):
         return None
     return float(value)
+
+
+def _resolution_python(
+    state_value: str,
+    prior_started: float | None,
+    now: float,
+    suspect: bool | None,
+    prior_suspect: bool | None,
+) -> tuple[float, float | None, bool]:
+    """The verbatim wall-clock + suspect resolution — ``(started, ended, suspect)``.
+
+    The LIVE parity oracle for the DEC-RUST-SWEEP-OPS-001 routed law
+    (``routed_exit_status_resolution``): :func:`write_exit_status`'s decision
+    block over the already-extracted primitives (*prior_started* = the prior
+    artifact's finite ``wall_started_utc`` or ``None``; *prior_suspect* = the
+    prior artifact's coerced ``suspect`` flag, or ``None`` when no prior
+    artifact was readable). The prior READ, the doc build and the atomic
+    write stay with the caller — only the decision lives here.
+    """
+    started = prior_started if prior_started is not None else now
+    ended: float | None = None if state_value == RunState.RUNNING.value else now
+    if state_value == RunState.SUSPECT_COMPLETE.value:
+        resolved_suspect = True
+    elif suspect is not None:
+        resolved_suspect = suspect
+    else:
+        resolved_suspect = prior_suspect if prior_suspect is not None else False
+    return (started, ended, resolved_suspect)
 
 
 def write_exit_status(
@@ -163,16 +195,19 @@ def write_exit_status(
     # never-launder belt) can no longer reset the start to the suspect-latch
     # instant and truncate a SUSPECT run's reported duration (hostile-review
     # round 3, #1712). ``ended`` alone distinguishes RUNNING (None) from a
-    # terminal state (now).
+    # terminal state (now). The decision routes through the default-OFF
+    # DEC-RUST-SWEEP-OPS-001 seam with :func:`_resolution_python` as the LIVE
+    # oracle (flag OFF = the verbatim Python law; floats cross the FFI as f64
+    # bit-exactly, so the rendered json.dumps bytes are identical either arm).
     prior_started = _finite_float(prior.get("wall_started_utc")) if prior else None
-    started = prior_started if prior_started is not None else now
-    ended: float | None = None if resolved_state is RunState.RUNNING else now
-    if resolved_state is RunState.SUSPECT_COMPLETE:
-        resolved_suspect = True
-    elif suspect is not None:
-        resolved_suspect = suspect
+    prior_suspect = bool(prior.get("suspect", False)) if prior else None
+    resolution_args = (resolved_state.value, prior_started, now, suspect, prior_suspect)
+    if sweep_ops_rust_enabled():
+        started, ended, resolved_suspect = routed_exit_status_resolution(
+            *resolution_args, python_law=lambda: _resolution_python(*resolution_args)
+        )
     else:
-        resolved_suspect = bool(prior.get("suspect", False)) if prior else False
+        started, ended, resolved_suspect = _resolution_python(*resolution_args)
     doc: dict[str, Any] = {
         "run_id": run_id,
         "state": resolved_state.value,

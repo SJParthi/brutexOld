@@ -19,6 +19,8 @@
 #   build    build system
 #   ci       CI configuration
 #   revert   reverts a previous commit
+#   club     merge-vehicle / clubbing commit (the repo's established
+#            integration-vehicle convention; DEC-CONVENTIONAL-COMMIT-CLUB-TYPE-001)
 #
 # Format: <type>(<optional-scope>): <description>
 #   example: feat(adapter): add Groww instrument snapshot pull
@@ -56,7 +58,7 @@
 
 set -euo pipefail
 
-REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_/-]+(,[a-z0-9_/-]+)*\))?!?: .+'
+REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert|club)(\([a-z0-9_/-]+(,[a-z0-9_/-]+)*\))?!?: .+'
 
 print_help() {
     cat >&2 <<'EOF'
@@ -65,7 +67,7 @@ Required format:
   <type>(<optional-scope>): <description>
 
 Allowed types: feat, fix, docs, style, refactor, perf, test, chore,
-               build, ci, revert
+               build, ci, revert, club
 
 Examples:
   feat(adapter): add Groww instrument snapshot pull

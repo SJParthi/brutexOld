@@ -12,7 +12,7 @@ params)"* into a **reproducible, idempotent, audited** leaderboard on disk. It
          --mask_run_id (combo_hash)--> run-identity          (Golden Rule #4)
          --ComboDedup.seen--> skip already-evaluated         (Bloom→exact, O(1))
          --count_supermasks--> Stage-1B min-hits prefilter   (combo_mask)
-         --ResidentTradeSim.simulate_masks_with_exit_indices--> (trades, exit_idx)
+         --ResidentTradeSim.simulate_masks_with_exit_counts--> (trades, exit_idx, counts)
                                                              (rust_trade_sim, CHUNKED)
          --metrics_from_trades--> (mask, ResultMetrics)      (sweep_driver tail)
          --rank_combos--> RankedCombo leaderboard            (ranking)
@@ -85,6 +85,7 @@ memory in bounded mode is O(kept), NOT O(1).
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -104,6 +105,11 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
+from brutex.engine.exec_grid import (
+    EXECUTION_GRID_1M_NEXT_BAR,
+    ExecGridMap,
+    build_exec_grid_map,
+)
 from brutex.engine.period_stats import (
     encode_judged_years,
     encode_period_stats,
@@ -111,6 +117,7 @@ from brutex.engine.period_stats import (
 )
 from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreGateConflictError
+from brutex.engine.rust_rank_select import union_selection
 from brutex.engine.rust_trade_sim import PriceColumns, ResidentTradeSim
 from brutex.engine.session_lens import ist_trade_date
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
@@ -153,7 +160,16 @@ from brutex.execution.fill_mode import FillMode
 from brutex.metrics.compute import ResultMetrics
 from brutex.models import BruteXError
 from brutex.money import round_money
-from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
+from brutex.ranking import (
+    GATE_CVAR_TAIL,
+    MIN_TRADES,
+    CvarGateConfig,
+    OverfitGateConfig,
+    RankedCombo,
+    cvar_rejects,
+    rank_combos,
+)
+from brutex.ranking.multi_select import SelectionInputs
 from brutex.ranking.temporal import (
     TemporalGateInput,
     TemporalGateStats,
@@ -643,6 +659,38 @@ class SweepRunConfig:
     #: run_ids stay byte-identical.
     roll_schedule: tuple[int, ...] | None = None
     temporal: TemporalRobustnessConfig | None = None
+    #: Opt-in Door-6 SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    #: Stage B — the ``SweepGridConfig.max_sl_hit_rate`` knob, threaded here by
+    #: ``to_run_config``): a gate-time SELECTION knob, so it is folded into the
+    #: store-address identity by ``_gate_config_fragment``
+    #: (active-only — ``None``, the default, leaves every digest AND every gate
+    #: verdict byte-identical) and is NEVER part of ``canonical_trade_params``
+    #: (simulation is unchanged). Appended LAST (defaulted-last law).
+    max_sl_hit_rate: float | None = None
+    #: Opt-in CVaR tail-risk rejection gate (DEC-RANK-CVAR-TAIL-GATE-001) —
+    #: DEFAULT-OFF (``None`` = the pre-gate sweep, byte-identical). When set,
+    #: each kept mask's per-trade P&L list is judged at the ONE eval spine
+    #: (:func:`_iter_mask_metrics`) — the only point the trades exist — and a
+    #: fat-tail mask is dropped BEFORE metrics/ranking (counted on
+    #: :attr:`SweepRunSummary.cvar_rejected` + one ``sweep.cvar_gate`` INFO
+    #: per tuple). DISCLOSED interaction: a rejected mask is thereby EXCLUDED
+    #: from the overfit gate's trial pool ``N`` and the trial-stats sidecar
+    #: population (both become post-CVaR when both gates are active) — an
+    #: activation-time consideration recorded in the DEC. The active config
+    #: re-keys the store address via the shared identity fragment
+    #: (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 law); ``None`` is elided.
+    #: Appended LAST (defaulted-last law).
+    cvar_gate: CvarGateConfig | None = None
+    #: Gate-scoped-dedup provenance carrier (DEC-SWEEP-SERVING-GATE-
+    #: PROVENANCE-001): the producing grid's canonical gate+selection token
+    #: (:func:`brutex.engine.sweep_orchestrator.grid_gate_provenance` — set by
+    #: ``SweepTuple.to_run_config``, the ONE production seam), stamped onto
+    #: every persisted finalist row so the ``/results`` read side can scope
+    #: coordinates. ``None`` (the default — every ungated grid and every
+    #: legacy direct caller) is byte-identical to the pre-carrier config: no
+    #: row token, no store column. NEVER an input to the run identity
+    #: (:func:`_canonical_params` does not read it).
+    gate_provenance: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -701,6 +749,17 @@ class SweepRunConfig:
             raise ValueError(f"SweepRunConfig.top_k must be >= 1 or None, got {self.top_k}")
         if self.min_hits < 0:
             raise ValueError(f"SweepRunConfig.min_hits must be >= 0, got {self.min_hits}")
+        # The SAME range law SweepGridConfig enforces (CLAUDE.md §11 COMMON —
+        # one validation contract on both config layers, so a direct
+        # run_persisted_sweep caller cannot smuggle a junk ceiling past the
+        # grid's check).
+        if self.max_sl_hit_rate is not None and (
+            not math.isfinite(self.max_sl_hit_rate) or not 0.0 < self.max_sl_hit_rate <= 1.0
+        ):
+            raise ValueError(
+                f"SweepRunConfig.max_sl_hit_rate must be a finite fraction in "
+                f"(0.0, 1.0] or None, got {self.max_sl_hit_rate}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,8 +785,12 @@ class SweepRunSummary:
         ``cfg.overfit`` is set, the Stage-3 multiple-testing overfit gate too (the
         leaderboard size before ``top_k`` truncation).
     persisted
-        Ranked finalists appended to the store (``ranked`` truncated to
-        ``cfg.top_k``).
+        Finalists appended to the store — the LANE-W1 persist UNION
+        (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001): the
+        composite top-``cfg.top_k`` prefix PLUS the union-only extras the
+        per-axis quotas + the ε-Pareto frontier admit (so
+        ``persisted >= min(ranked, top_k)``; at ``top_k=None`` the union adds
+        tags, never rows — ``persisted == ranked``).
     store_content_hash
         The :class:`~brutex.engine.results_store.FlushResult` content hash — the
         sweep's reproducible content address.
@@ -750,6 +813,12 @@ class SweepRunSummary:
     trial_n_finite: int = 0
     trial_sum_sharpe: float = 0.0
     trial_sum_sharpe_sq: float = 0.0
+    #: Masks the opt-in CVaR tail gate rejected at the eval spine
+    #: (DEC-RANK-CVAR-TAIL-GATE-001); always 0 when ``cfg.cvar_gate`` is
+    #: ``None`` (the default). NOT folded into the supervisor/parallel grid
+    #: tallies (the per-tuple ``sweep.cvar_gate`` INFO carries it) — a named
+    #: activation-time follow-up.
+    cvar_rejected: int = 0
     #: ``True`` iff this run wrote/overwrote the tuple's trial-stats sidecar.
     #: With a digest supplied this is every non-short-circuited run: the
     #: sentinel-authoritative redo BYPASSES dedup probes, so the population is
@@ -777,6 +846,13 @@ class SweepRunSummary:
     temporal_abstained: bool = False
     #: How many calendar years the tuple's window JUDGED (the P1 denominator).
     temporal_judged_years: int = 0
+    #: LANE-W1 (DEC-RANK-QUOTA-PERSIST-1000-001): gate-passing RANKED combos
+    #: NOT selected by ANY persist basis (``ranked - persisted``) — the
+    #: "gated-pass-but-truncated" honesty counter (0 at ``top_k=None``).
+    gated_pass_truncated: int = 0
+    #: LANE-W1 (DEC-RANK-PARETO-PERSIST-001): ε-Pareto frontier members
+    #: dropped by the ``PARETO_FRONTIER_CAP`` bound (every drop also warned).
+    frontier_dropped: int = 0
 
 
 def canonical_trade_params(
@@ -870,6 +946,16 @@ def canonical_trade_params(
     # verify/recount law is now "fill_mode key MUST be present and MUST read
     # 'worst_case' — anything else is a refused legacy artifact".
     params["fill_mode"] = FillMode.WORST_CASE.value
+    # DEC-FILL-EXEC-GRID-1M-001 (design §4.2): the 1-minute execution grid is
+    # the ONLY fill grid, and its key is emitted UNCONDITIONALLY beside the
+    # fill_mode key with the same anti-aliasing rationale — without it a
+    # tf=1minute run under the PR-B law would ALIAS its PR-A-era identity
+    # (same bars, same params, same snapshot) while the trades DIFFER (the
+    # §2.4 same-bar deferral changes results even in the degenerate case).
+    # The verify/recount law is the fill_mode law's twin: "execution_grid MUST
+    # be present and MUST read '1m_next_bar' — anything else is a refused
+    # decision-TF-era artifact".
+    params["execution_grid"] = EXECUTION_GRID_1M_NEXT_BAR
     return params
 
 
@@ -1053,10 +1139,15 @@ def ranked_combo_to_result_row(
     tf_minutes: int,
     sl_paisa: int | None,
     tp_paisa: int | None,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
     temporal: TemporalRobustnessConfig | None = None,
     temporal_judged_years: Sequence[int] | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
+    selection_basis: str | None = None,
+    pareto_member: bool | None = None,
+    gate_provenance: str | None = None,
 ) -> ResultRow:
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
@@ -1086,8 +1177,11 @@ def ranked_combo_to_result_row(
     * **Representative price anchors from REAL OHLC (Golden Rule #1).**
       ``ResultMetrics`` carries no per-trade fill prices, so the finalist's
       trades are re-simulated here and ``avg_entry_price`` / ``avg_exit_price``
-      are the mean of the real ``open`` (at each trade's entry bar) / ``close``
-      (at each trade's exit bar), snapped to the 2dp tick grid via
+      are the mean of the real ``open`` (at each trade's entry 1m bar) /
+      ``close`` (at each trade's exit 1m bar) — read over the EXECUTION
+      stream (DEC-FILL-EXEC-GRID-1M-001 §Q1: the fills resolve on 1m bars,
+      so the anchors read the bars that actually filled; open/close anchor
+      semantics KEPT), snapped to the 2dp tick grid via
       :func:`brutex.money.round_money`. These are HONEST anchors drawn from real
       bars, never fabricated. Threading the exact fill price through
       :class:`~brutex.metrics.types.ClosedTrade` is a tracked follow-up. A
@@ -1155,6 +1249,23 @@ def ranked_combo_to_result_row(
         The equity base anchoring the per-period dd walk (the
         ``build_equity_curve`` law; the dd values are invariant to the
         constant offset — threaded for basis-law fidelity).
+    selection_basis, pareto_member
+        The LANE-W1 selection-provenance stamps (DEC-RANK-PARETO-PERSIST-001 /
+        DEC-RANK-QUOTA-PERSIST-1000-001) computed ONCE per ranked pool by the
+        union composer at the persist seam; ``None`` (the defaults — every
+        pre-W1 caller) keeps the row untagged. REFERENCE ONLY: never rankable,
+        never in the run identity (:data:`brutex.engine.results_store.SELECTION_FIELDS`
+        is excluded from ``_RANKABLE_FIELDS`` and validated at construction).
+    gate_provenance
+        Optional gate-scoped-dedup provenance token
+        (DEC-SWEEP-SERVING-GATE-PROVENANCE-001) stamped verbatim onto the
+        row's nullable ``gate_provenance`` carrier — the producing grid's
+        canonical gate+selection identity string
+        (:func:`brutex.engine.sweep_orchestrator.grid_gate_provenance`,
+        threaded here via ``SweepRunConfig.gate_provenance``). ``None`` (the
+        default — every ungated grid and every legacy caller) is
+        byte-identical to before: no row token, no store column. NEVER an
+        input to the run identity and NOT the statutory 5-door gate re-check.
 
     Returns
     -------
@@ -1169,6 +1280,8 @@ def ranked_combo_to_result_row(
         mask_to_entry_signals(bar_bits, rc.mask),
         direction=side,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
         reference_stamper=reference_stamper,
@@ -1178,7 +1291,9 @@ def ranked_combo_to_result_row(
         # comprehension is silently LAST-wins on a duplicated bar timestamp, so
         # a poisoned-era duplicate would swap the REAL entry/exit price anchor
         # for the re-stated one. The COMMON gate keeps the first bar + WARNs.
-        ts_to_bar = bars_by_ts_first(bars, source=f"sweep_run:{instrument}/{tf}/{direction}")
+        ts_to_bar = bars_by_ts_first(
+            exec_bars_1m, source=f"sweep_run:{instrument}/{tf}/{direction}"
+        )
         entries = [ts_to_bar[t.entry_ts].open for t in trades]
         exits = [ts_to_bar[t.exit_ts].close for t in trades]
         avg_entry = round_money(sum(entries, Decimal("0")) / len(entries))
@@ -1245,6 +1360,45 @@ def ranked_combo_to_result_row(
         stats_by_quarter_json=quarter_json,
         stats_by_month_json=month_json,
         temporal_judged_years_json=judged_json,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate is total on ResultMetrics;
+        # the Kelly pair rides the SAME _metric_or_zero None → 0.0 coercion
+        # the rankable profit_factor column has always ridden (the mirrored
+        # precedent — design-pack ruling), so a row written by current code
+        # always carries concrete floats and a stored None can only mean a
+        # pre-extension file (the Ruling-5 read boundary).
+        loss_rate=m.loss_rate,
+        kelly_fraction=_metric_or_zero(m.kelly_fraction),
+        log_growth_at_half_kelly=_metric_or_zero(m.log_growth_at_half_kelly),
+        # sl_hit_rate (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is a
+        # PLAIN pass-through — deliberately NO _metric_or_zero coercion: a
+        # None here means the metrics were computed WITHOUT the exit-reason
+        # counters ("reasons unavailable"), and coercing it to 0.0 would
+        # fabricate a perfect-looking SL record (Golden Rule #1). The sweep
+        # spine always threads the counters, so every sweep-persisted row's
+        # column is concrete (test-pinned); None reaches disk only from a
+        # counter-less legacy caller — the same honest-unknown a
+        # pre-extension store reads back.
+        sl_hit_rate=m.sl_hit_rate,
+        # The recency family (DEC-METRICS-TRAILING-WINDOW-001 Stage C) is a
+        # PLAIN pass-through — NO _metric_or_zero coercion: None means the
+        # GLOBAL trailing anchor was absent (a legacy caller), or — for the
+        # trailing trio — the 24-month window honestly held zero trades;
+        # coercing either to 0.0 would fabricate a measured recency figure
+        # (Golden Rule #1). The sweep spine always threads the anchor, so a
+        # sweep-persisted row's decay composite is concrete (test-pinned)
+        # while its trailing trio is concrete exactly when the window held
+        # trades. The exact int trailing net rides the row's nullable
+        # Float64 lane (exact below 2**53 paisa).
+        trailing_sharpe_ratio=m.trailing_sharpe_ratio,
+        trailing_profit_factor=m.trailing_profit_factor,
+        trailing_net_pnl_paisa=(
+            None if m.trailing_net_pnl_paisa is None else float(m.trailing_net_pnl_paisa)
+        ),
+        decay_weighted_net_paisa=m.decay_weighted_net_paisa,
+        pareto_member=pareto_member,
+        selection_basis=selection_basis,
+        gate_provenance=gate_provenance,
     )
 
 
@@ -1329,6 +1483,8 @@ def _build_trade_sim(
     cfg: SweepRunConfig,
     direction_label: str,
     *,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None,
     reference_stamper: TradeReferenceStamper | None,
     kernel_columns: PriceColumns | None = None,
 ) -> ResidentTradeSim:
@@ -1359,18 +1515,21 @@ def _build_trade_sim(
     EXPLICIT stamping decision for the trades this sim will emit — the
     one-kwarg revert lever the coordinator ruling demands.
 
-    ``kernel_columns`` (the W2 rider of DEC-STAGE1A-RUST-BATCH-001) threads a
+    ``kernel_columns`` (the W2 rider of DEC-STAGE1A-RUST-BATCH-001, rebased
+    onto the 1m EXECUTION stream by DEC-FILL-EXEC-GRID-1M-001) threads a
     :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel`'s once-per-window
-    :class:`~brutex.engine.rust_trade_sim.PriceColumns` into the sim so a
-    kernel-reusing tuple skips the per-tuple 4×-Decimal-snap derivation;
-    ``None`` (the default — every kernel-less caller) derives locally,
-    byte-identical.
+    EXECUTION-stream :class:`~brutex.engine.rust_trade_sim.PriceColumns` into
+    the sim so a kernel-reusing tuple skips the per-tuple 4×-Decimal-snap
+    derivation over the (much longer) 1m stream; ``None`` (the default —
+    every kernel-less caller) derives locally, byte-identical.
     """
     try:
         sim = ResidentTradeSim(
             bars,
             bar_bits,
             tf_minutes=cfg.tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             reference_stamper=reference_stamper,
             precomputed_columns=kernel_columns,
         )
@@ -1405,6 +1564,8 @@ def _reattribute_chunk_failure(
     batch_exc: Exception,
     run_id_of: Callable[[int], str],
     *,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None,
     reference_stamper: TradeReferenceStamper | None,
 ) -> NoReturn:
     """A batched trade-sim chunk raised — attribute the culprit mask, then fail LOUD.
@@ -1452,6 +1613,8 @@ def _reattribute_chunk_failure(
                 mask,
                 direction=cfg.direction,
                 tf_minutes=cfg.tf_minutes,
+                exec_bars_1m=exec_bars_1m,
+                exec_map=exec_map,
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
@@ -1481,18 +1644,24 @@ def _iter_mask_metrics(
     run_id_of: Callable[[int], str],
     *,
     temporal_sink: Callable[[int, Sequence[Any], Sequence[int] | None], None] | None = None,
+    cvar_gate: CvarGateConfig | None = None,
+    on_cvar_reject: Callable[[int], None] | None = None,
 ) -> Iterator[tuple[int, ResultMetrics]]:
     """Yield ``(mask, metrics)`` for *masks* in order — THE one chunked eval spine.
 
     The factored Phase-C body (DEC-SWEEP-STREAMING-RANK-001, CLAUDE.md §11
     COMMON): chunked
-    :meth:`~brutex.engine.rust_trade_sim.ResidentTradeSim.simulate_masks_with_exit_indices`
-    batches — each mask's ``(trades, exit_indices)`` pair, the certified exit
-    indices threaded into the per-mask
+    :meth:`~brutex.engine.rust_trade_sim.ResidentTradeSim.simulate_masks_with_exit_counts`
+    batches — each mask's ``(trades, exit_indices, exit_counts)`` triple, the
+    certified exit indices threaded into the per-mask
     :func:`~brutex.engine.sweep_driver.metrics_from_trades` tail so its
     kernel arm skips the per-mask ``exit_ts``→index dict build
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001; a ``None`` stream demotes to the
-    dict, results byte-identical) — shared VERBATIM by the batch rank
+    dict, results byte-identical) and the exit-reason counters threaded so
+    the metrics carry a concrete ``sl_hit_rate``
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — the sweep spine ALWAYS
+    supplies them, so every persisted row's column is concrete) — shared
+    VERBATIM by the batch rank
     accumulation, the bounded columnar accumulation, AND the bounded
     finalists' O(top_k) metrics recompute — one spine, so the three
     consumers can never drift (the recomputed finalist metrics are
@@ -1513,30 +1682,38 @@ def _iter_mask_metrics(
     :func:`_combo_error` tuple-skip fingerprint as a metrics-tail failure.
     """
     chunk_size = _trade_sim_chunk_masks(len(bars))
+    # The GLOBAL recency anchor (DEC-METRICS-TRAILING-WINDOW-001) — hoisted +
+    # empty-guarded (refuter round 1): an EMPTY bars sequence must keep the
+    # PRE-recency failure shape (the metrics tail's own empty-bars
+    # ValueError, ridden into _combo_error), never a new ``bars[-1]``
+    # IndexError from the anchor read.
+    trailing_anchor = bars[-1].timestamp if bars else None
     for chunk_start in range(0, len(masks), chunk_size):
         chunk = masks[chunk_start : chunk_start + chunk_size]
         try:
-            chunk_pairs = sim.simulate_masks_with_exit_indices(
+            chunk_triples = sim.simulate_masks_with_exit_counts(
                 chunk,
                 direction=cfg.direction,
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
             )
             # Batch-contract guard: the batch call must RETURN exactly one
-            # (trades, exit_indices) pair per mask (both arms do, by
-            # construction). A wrong-length return (a PyO3 marshalling bug,
-            # a kernel bug) raises HERE — inside the chunk try — so it rides
-            # the SAME re-attribution → SweepComboError tuple-skip ladder as
-            # a chunk that RAISES (the oracle passes every mask, so it fails
-            # LOUD naming the chunk), instead of escaping run_persisted_sweep
-            # as a bare error the grid drivers (#904) would turn into a
-            # grid-wide abort. The `strict=True` zip below is then a
-            # structurally-unreachable second belt.
-            if len(chunk_pairs) != len(chunk):
+            # (trades, exit_indices, exit_counts) triple per mask (both arms
+            # do, by construction). A wrong-length return (a PyO3 marshalling
+            # bug, a kernel bug) raises HERE — inside the chunk try — so it
+            # rides the SAME re-attribution → SweepComboError tuple-skip
+            # ladder as a chunk that RAISES (the oracle passes every mask, so
+            # it fails LOUD naming the chunk), instead of escaping
+            # run_persisted_sweep as a bare error the grid drivers (#904)
+            # would turn into a grid-wide abort. The `strict=True` zip below
+            # is then a structurally-unreachable second belt. The kernel arm's
+            # own sum(exit_counts)==len(trades) validation raises inside this
+            # SAME try, riding the identical ladder.
+            if len(chunk_triples) != len(chunk):
                 raise ValueError(
-                    f"simulate_masks_with_exit_indices returned {len(chunk_pairs)} "
-                    f"trade/exit-index pairs for a chunk of {len(chunk)} masks — "
-                    f"batch-contract violation"
+                    f"simulate_masks_with_exit_counts returned {len(chunk_triples)} "
+                    f"trade/exit-index/exit-count triples for a chunk of {len(chunk)} "
+                    f"masks — batch-contract violation"
                 )
         except MemoryError:
             raise
@@ -1551,16 +1728,47 @@ def _iter_mask_metrics(
                 direction_label,
                 exc,
                 run_id_of,
+                # The sim's OWN exec stream + map ride into the oracle replay
+                # (DEC-FILL-EXEC-GRID-1M-001): the replay walks the EXACT
+                # dual feed the failed batch walked.
+                exec_bars_1m=sim.exec_bars,
+                exec_map=sim.exec_map,
                 reference_stamper=sim.reference_stamper,
             )
-        for mask, (trades, exit_indices) in zip(chunk, chunk_pairs, strict=True):
+        for mask, (trades, exit_indices, exit_counts) in zip(chunk, chunk_triples, strict=True):
+            if cvar_gate is not None:
+                # DEC-RANK-CVAR-TAIL-GATE-001: the CVaR tail gate judges the
+                # mask's per-trade P&L list HERE — the one point the trades
+                # exist — and a fat-tail mask is dropped before the metrics
+                # tail (never yielded, so it reaches neither ranking nor the
+                # overfit trial pool — the disclosed post-CVaR-N interaction).
+                # An empty trade list ABSTAINS inside cvar_rejects. A raise is
+                # a per-combo fault (the metrics-tail error contract);
+                # MemoryError re-raises BARE (OOM = GLOBAL stop).
+                try:
+                    rejected = cvar_rejects([t.pnl_paisa for t in trades], cvar_gate)
+                except MemoryError:
+                    raise
+                except Exception as exc:
+                    raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+                if rejected:
+                    if on_cvar_reject is not None:
+                        on_cvar_reject(mask)
+                    continue
             try:
                 metrics = metrics_from_trades(
                     bars,
                     trades,
                     start_equity_paisa=cfg.start_equity_paisa,
                     tf_minutes=cfg.tf_minutes,
+                    exec_bars_1m=sim.exec_bars,
+                    exec_map=sim.exec_map,
                     exit_indices=exit_indices,
+                    exit_reason_counts=exit_counts,
+                    # The loaded bar range's END instant — one value per launch
+                    # (every mask shares the tuple's full bars), NEVER a
+                    # per-combo max exit_ts. Hoisted above the loop.
+                    trailing_anchor=trailing_anchor,
                 )
                 if temporal_sink is not None:
                     temporal_sink(mask, trades, exit_indices)
@@ -1569,6 +1777,25 @@ def _iter_mask_metrics(
             except Exception as exc:
                 raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
             yield mask, metrics
+
+
+def _selection_inputs_from_ranked(ranked: Sequence[RankedCombo]) -> SelectionInputs:
+    """Project a composite-ordered leaderboard into the union composer's columns.
+
+    The BATCH arm's :class:`~brutex.ranking.multi_select.SelectionInputs`
+    builder (LANE W1): ``rank_combos`` already returns the pool in the
+    ``(-composite, mask)`` order the composer's prefix/over-cap laws demand,
+    so the projection is a mechanical column pull — O(ranked).
+    """
+    return SelectionInputs(
+        masks=tuple(rc.mask for rc in ranked),
+        composites=tuple(rc.composite_score for rc in ranked),
+        net_pnl_paisa=tuple(rc.metrics.net_pnl_paisa for rc in ranked),
+        win_rate=tuple(rc.metrics.win_rate for rc in ranked),
+        max_dd_pct=tuple(rc.metrics.max_drawdown_pct for rc in ranked),
+        losing_trades=tuple(rc.metrics.losing_trades for rc in ranked),
+        expectancy_paisa=tuple(rc.metrics.expectancy_paisa for rc in ranked),
+    )
 
 
 def _rebuild_bounded_finalists(
@@ -1636,6 +1863,8 @@ def run_persisted_sweep(
     store: ResultsStore,
     dedup: DedupSink,
     audit: AuditSink,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     kernel: ResidentSweepKernel | None = None,
     trial_stats_digest: str | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
@@ -1678,7 +1907,13 @@ def run_persisted_sweep(
        byte-identical to the pre-wiring per-mask
        :func:`~brutex.engine.sweep_driver.metrics_for_mask` loop (which remains
        the per-mask oracle for chunk-failure re-attribution). Rank them
-       (:func:`brutex.ranking.rank_combos`), take the top ``cfg.top_k``.
+       (:func:`brutex.ranking.rank_combos`), then compute the LANE-W1 persist
+       UNION (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001)
+       via the ONE burn-in-checked composer binding
+       (:func:`brutex.engine.rust_rank_select.union_selection`): the composite
+       top-``cfg.top_k`` prefix PLUS the per-axis reserved-quota + ε-Pareto
+       frontier extras, every finalist tagged ``selection_basis`` +
+       ``pareto_member``.
        Under the rank-memory budget plan (DEC-SWEEP-STREAMING-RANK-001 part 2
        — resolved BEFORE step 3, after the sentinel check) the BOUNDED arm
        instead folds each kept mask into
@@ -1806,6 +2041,23 @@ def run_persisted_sweep(
     """
     if not bars:
         raise ValueError("run_persisted_sweep: bars must be non-empty")
+    if not exec_bars_1m:
+        # DEC-FILL-EXEC-GRID-1M-001 (design §3.3): a decision slice without
+        # its 1-minute execution stream is not "partial coverage" — it is an
+        # unrunnable coordinate. Refuse LOUDLY, never a silent single-feed
+        # degrade (the launch preflight refuses earlier with the remedy;
+        # this is the spine-level belt).
+        raise ValueError(
+            f"run_persisted_sweep: exec_bars_1m must be non-empty — the 1-minute "
+            f"execution stream for {cfg.instrument!r} is REQUIRED "
+            f"(DEC-FILL-EXEC-GRID-1M-001); pull/prebuild the 1minute slice"
+        )
+    if exec_map is None:
+        # ONE map per tuple (mask-independent; the launcher threads its
+        # preload-scoped per-coordinate memo instead — design §1.5). Derived
+        # BEFORE the look-ahead guard wraps `bars` (the map build is a
+        # sequential O(N) two-pointer pass, not a strategy read).
+        exec_map = build_exec_grid_map(bars, exec_bars_1m, tf_minutes=cfg.tf_minutes)
     # Opt-in runtime look-ahead barrier (DEC-SWEEP-LOOKAHEAD-GUARD-001): the
     # env flag is resolved ONCE here at setup — never inside any per-bar loop.
     # OFF (the default) returns the SAME `bars` object (identity), so the hot
@@ -1941,6 +2193,14 @@ def run_persisted_sweep(
             raise ValueError(
                 f"run_persisted_sweep: kernel has {kernel.n_bars} bars but {len(bars)} "
                 f"bars were supplied — the kernel must be built from this tuple's bars"
+            )
+        # DEC-FILL-EXEC-GRID-1M-001 twin of the n_bars guard: a kernel built
+        # with a DIFFERENT execution stream would hand misaligned 1m columns.
+        if kernel.exec_bars_1m is not None and len(kernel.exec_bars_1m) != len(exec_bars_1m):
+            raise ValueError(
+                f"run_persisted_sweep: kernel holds {len(kernel.exec_bars_1m)} execution "
+                f"bars but {len(exec_bars_1m)} were supplied — the kernel must be built "
+                f"from this tuple's 1-minute execution stream"
             )
         # R-1 (DEC-NIFTY-FIB-AXIS-001): the pre-built ``bar_bits`` matrix is
         # anchor-SPECIFIC, so a kernel built for a different Fib anchor would make
@@ -2224,10 +2484,21 @@ def run_persisted_sweep(
     # columnar payload (~80-105 B/kept) instead of O(kept) rich objects — under
     # an EXACT owned-bytes watermark that degrades gracefully to a
     # SweepMemoryBudgetError tuple-skip if even the columns outgrow the budget.
+    # DEC-RANK-CVAR-TAIL-GATE-001: per-tuple tally of eval-spine CVaR
+    # rejections (always 0 when cfg.cvar_gate is None — the callback is then
+    # never invoked, byte-identical to the pre-gate loop).
+    cvar_rejected = 0
+
+    def _count_cvar_reject(_mask: int) -> None:
+        nonlocal cvar_rejected
+        cvar_rejected += 1
+
     pairs: list[tuple[int, ResultMetrics]] = []
     columns = (
         SurvivorColumns(
-            with_overfit=cfg.overfit is not None, with_temporal=cfg.temporal is not None
+            with_overfit=cfg.overfit is not None,
+            with_temporal=cfg.temporal is not None,
+            max_sl_hit_rate=cfg.max_sl_hit_rate,
         )
         if plan.bounded
         else None
@@ -2263,11 +2534,17 @@ def run_persisted_sweep(
             bar_bits,
             cfg,
             direction_label,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             reference_stamper=None,
             # The W2 rider (DEC-STAGE1A-RUST-BATCH-001): a kernel-reusing
             # tuple hands its once-per-window columns; the kernel=None arm
             # derives locally (byte-identical).
-            kernel_columns=kernel.kernel_columns if kernel is not None else None,
+            # The W2 rider rebased onto the EXECUTION stream
+            # (DEC-FILL-EXEC-GRID-1M-001): a kernel built WITH the exec
+            # stream hands its once-per-window 1m columns; a kernel without
+            # one (or kernel=None) derives locally, byte-identical.
+            kernel_columns=kernel.exec_columns if kernel is not None else None,
         )
         for mask, metrics in _iter_mask_metrics(
             sim,
@@ -2278,6 +2555,8 @@ def run_persisted_sweep(
             direction_label,
             run_id_of,
             temporal_sink=None if temporal_runtime is None else temporal_runtime.sink,
+            cvar_gate=cfg.cvar_gate,
+            on_cvar_reject=_count_cvar_reject,
         ):
             if columns is None:
                 pairs.append((mask, metrics))
@@ -2300,31 +2579,54 @@ def run_persisted_sweep(
                         n_kept=columns.n_kept,
                     )
                 )
+    # ── LANE-W1 persist UNION (DEC-RANK-PARETO-PERSIST-001 /
+    # DEC-RANK-QUOTA-PERSIST-1000-001): both arms resolve the SAME
+    # (finalists, per-finalist tags, truncated, frontier_dropped) via the ONE
+    # shared composer — batch through `_selection_inputs_from_ranked` +
+    # `union_selection`, bounded through `rank_survivor_columns`'
+    # `union_selection_fn` seam (which delegates to the SAME binding), so the
+    # two arms' persisted row sets + tags are identical BY CONSTRUCTION.
+    finalist_tags: list[tuple[str | None, bool | None]]
     if columns is None:
         ranked = rank_combos(
             pairs,
             overfit=cfg.overfit,
             temporal=None if temporal_runtime is None else temporal_runtime.gate_input(),
+            max_sl_hit_rate=cfg.max_sl_hit_rate,
         )
-        finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
+        selection = union_selection(_selection_inputs_from_ranked(ranked), top_k=cfg.top_k)
+        finalists = [ranked[index] for index in selection.order]
+        finalist_tags = [
+            (selection.basis_by_index[index], index in selection.frontier)
+            for index in selection.order
+        ]
+        gated_pass_truncated = selection.truncated
+        frontier_dropped = selection.frontier_dropped
         n_ranked = len(ranked)
         backtested = len(pairs)
         sidecar_sharpes = [metrics.sharpe_ratio for _, metrics in pairs]
     else:
         # Bounded rank: the SAME shared ranking internals over the columns
-        # (bit-identical to `rank_combos(pairs)[:top_k]` — property-pinned),
-        # then the finalists' full metrics recomputed O(top_k) via the SAME
-        # eval spine (the V16 re-simulation precedent; NO temporal_sink there
-        # — the finalists' triples already gated them).
+        # (bit-identical to `rank_combos(pairs)` — property-pinned), the union
+        # via the SAME injected composer binding, then the finalists' full
+        # metrics recomputed O(selected) via the SAME eval spine (the V16
+        # re-simulation precedent; NO temporal_sink there — the finalists'
+        # triples already gated them).
         selected = rank_survivor_columns(
             columns,
             overfit=cfg.overfit,
             top_k=plan.require_bounded_top_k(),
             temporal=None if temporal_runtime is None else temporal_runtime.columns_gate_input(),
+            union_selection_fn=union_selection,
         )
         finalists = _rebuild_bounded_finalists(
             selected, sim, bars, bar_bits, cfg, direction_label, run_id_of
         )
+        finalist_tags = [
+            (finalist.selection_basis, finalist.pareto_member) for finalist in selected.finalists
+        ]
+        gated_pass_truncated = selected.truncated
+        frontier_dropped = selected.frontier_dropped
         n_ranked = selected.n_ranked
         backtested = columns.n_kept
         sidecar_sharpes = columns.sharpe_values()
@@ -2342,7 +2644,7 @@ def run_persisted_sweep(
         )
 
     persisted = 0
-    for rc in finalists:
+    for rc, (selection_basis, pareto_member) in zip(finalists, finalist_tags, strict=True):
         row = ranked_combo_to_result_row(
             rc,
             run_id=run_id_of(rc.mask),
@@ -2355,6 +2657,8 @@ def run_persisted_sweep(
             tf_minutes=cfg.tf_minutes,
             sl_paisa=cfg.sl_paisa,
             tp_paisa=cfg.tp_paisa,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the finalist
             # re-simulation feeds the persisted row, so the run's stamper
             # lands here.
@@ -2362,6 +2666,14 @@ def run_persisted_sweep(
             temporal=cfg.temporal,
             temporal_judged_years=None if temporal_runtime is None else temporal_runtime.judged,
             start_equity_paisa=cfg.start_equity_paisa,
+            # The LANE-W1 provenance stamps — computed ONCE per pool above,
+            # BEFORE the single append per run_id (the results_store
+            # run-identity conflict law).
+            selection_basis=selection_basis,
+            pareto_member=pareto_member,
+            # The gate-provenance carrier (DEC-SWEEP-SERVING-GATE-
+            # PROVENANCE-001): threaded from the grid via to_run_config.
+            gate_provenance=cfg.gate_provenance,
         )
         try:
             store.append(row)
@@ -2447,6 +2759,10 @@ def run_persisted_sweep(
         "trial_sidecar_written": sidecar_written,
         # Additive sentinel tally (DEC-MARK-MANY-SENTINEL-001) — chain-safe.
         "sentinel_written": sentinel_written,
+        # Additive LANE-W1 selection tallies (DEC-RANK-PARETO-PERSIST-001 /
+        # DEC-RANK-QUOTA-PERSIST-1000-001) — chain-safe.
+        "gated_pass_truncated": gated_pass_truncated,
+        "frontier_dropped": frontier_dropped,
     }
     if temporal_runtime is not None:
         # Temporal counters (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — emitted ONLY
@@ -2475,6 +2791,21 @@ def run_persisted_sweep(
     )
     audit.append(action=_ACTION_COMPLETE, subject=subject, payload=tallies)
     _LOG.info("sweep_run.complete", subject=subject, **tallies)
+    if cfg.cvar_gate is not None:
+        # EMIT-ON-ACTIVE (DEC-RANK-CVAR-TAIL-GATE-001): one INFO per tuple
+        # naming the gate's config + rejection tally under the stable
+        # ``cvar_tail`` wire token. A default (gate-off) sweep emits NOTHING —
+        # zero log delta on the byte-identical default arm. Deliberately NOT
+        # folded into the audit ``tallies`` payload (the frozen per-tuple
+        # audit contract stays byte-untouched).
+        _LOG.info(
+            "sweep.cvar_gate",
+            subject=subject,
+            reason=GATE_CVAR_TAIL,
+            rejected=cvar_rejected,
+            alpha_bps=cfg.cvar_gate.alpha_bps,
+            threshold_paisa=cfg.cvar_gate.threshold_paisa,
+        )
 
     return SweepRunSummary(
         enumerated=enumerated,
@@ -2499,6 +2830,9 @@ def run_persisted_sweep(
             False if temporal_runtime is None else temporal_runtime.stats.abstained
         ),
         temporal_judged_years=0 if temporal_runtime is None else temporal_runtime.n_judged,
+        cvar_rejected=cvar_rejected,
+        gated_pass_truncated=gated_pass_truncated,
+        frontier_dropped=frontier_dropped,
     )
 
 

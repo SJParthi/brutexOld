@@ -62,7 +62,7 @@ import tempfile
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Final, cast
 
 if TYPE_CHECKING:
@@ -73,6 +73,7 @@ from brutex import __version__
 from brutex.config.hardware_envelope import apply_polars_thread_bound
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import RuntimeFileError, read_runtime_file, runtime_file_path
+from brutex.ranking.multi_select import DEFAULT_PERSIST_TOP_K
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
 
 # ────────────────────────────────────────────────────────────────────────
@@ -634,11 +635,15 @@ def _add_sweep_grid_args(
     parser.add_argument(
         "--top",
         type=int,
-        default=20,
+        default=DEFAULT_PERSIST_TOP_K,
         help=(
-            "Persist the top-N composite-ranked combos per tuple (default 20 for fast "
-            "operator runs; the spec's Stage-4 filter #1 production sizing is 1000 — "
-            "TRACK1_BACKTEST_SPEC.md, DEC-SPEC-TOPK-RECONCILE-001)"
+            "Persist the top-N composite-ranked combos per tuple (default "
+            f"{DEFAULT_PERSIST_TOP_K} — the spec's Stage-4 filter #1 production sizing, "
+            "finally MINTED as the one common constant "
+            "brutex.ranking.multi_select.DEFAULT_PERSIST_TOP_K per "
+            "DEC-RANK-QUOTA-PERSIST-1000-001; supersedes the fast-operator-run 20 of "
+            "DEC-SPEC-TOPK-RECONCILE-001 — the per-axis quota + ε-Pareto frontier union "
+            "persists BEYOND this composite prefix, tagged selection_basis)"
         ),
     )
     parser.add_argument(
@@ -855,6 +860,29 @@ def _add_sweep_grid_args(
         choices=("groww", "zerodha"),
         dest="options_broker",
         help="Brokerage rate card for the auto options-sim (default groww)",
+    )
+    parser.add_argument(
+        "--no-futures-sim",
+        action="store_false",
+        dest="futures_sim",
+        help=(
+            "Disable the automatic post-sweep futures-sim "
+            "(`DEC-OPTIONS-EXEC-FEEDBACK-001` — the --no-options-sim mirror). "
+            "By default each INDEX winner is re-priced on its front-month "
+            "futures contract and the verdict persists into top100.json."
+        ),
+    )
+    parser.add_argument(
+        "--top100-preset",
+        default=None,
+        dest="top100_preset",
+        help=(
+            "Ranking preset for the run-end top-100 artifact (default "
+            "min_dd_first; `DEC-OPTIONS-EXEC-FEEDBACK-001` adds "
+            "net_after_cost — options-execution net after the full cost "
+            "stack, unpriced entries last). An unknown token refuses "
+            "pre-sweep, never after a multi-day run."
+        ),
     )
 
 
@@ -1417,6 +1445,70 @@ def build_parser() -> argparse.ArgumentParser:
             "Dhan dataset (only with --feed dhan; default rolling-options): "
             "'rolling-options' = re-enrich the ROLLING-ATM option bars (ATM±N per bar, "
             "NOT per-contract) with Greeks. 'spot' has NO Greeks (index spot)"
+        ),
+    )
+
+    # ── meta-annotate (DEC-META-LABEL-ANNOTATE-001) — P(win) sidecars ──
+    meta = sub.add_parser(
+        "meta-annotate",
+        help=(
+            "Annotate a sweep run's results-depth finalists with out-of-fold "
+            "meta-label P(win) + the abstention-gate replay (.meta.json "
+            "sidecars; annotation-only — nothing gated or re-ranked)"
+        ),
+    )
+    meta.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    meta.add_argument(
+        "--run-id",
+        required=True,
+        help="The sweep run id (the sweep_runs/<run_id> directory name)",
+    )
+    meta.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        help="Sweeps results tree (default <lake-root>/sweeps)",
+    )
+    meta.add_argument(
+        "--lens-exchange",
+        default="NSE",
+        help="Exchange for the trend/event lens daily-bar reads (default NSE)",
+    )
+    meta.add_argument(
+        "--lens-segment",
+        default="INDEX",
+        help="Segment for the lens daily-bar reads (default INDEX)",
+    )
+    meta.add_argument(
+        "--lens-start",
+        default="2020-01-01",
+        help="Lens daily-bar window start YYYY-MM-DD (default 2020-01-01)",
+    )
+    meta.add_argument(
+        "--lens-end",
+        default=None,
+        help="Lens daily-bar window end YYYY-MM-DD (default: today UTC)",
+    )
+    meta.add_argument(
+        "--no-lens",
+        action="store_true",
+        help=(
+            "Skip the lake daily-bar lens reads entirely (every regime "
+            "annotates 'unknown', no event flags — honest + counted)"
+        ),
+    )
+    meta.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Enumerate stems + validate stamps only; write nothing. Invalid "
+            "stamps are named SKIPPED on stderr but the exit stays 0 by "
+            "design (a dry-run reports, it never gates)"
         ),
     )
 
@@ -6743,6 +6835,187 @@ def cmd_enrich_greeks(
     return EXIT_INTERNAL_ERROR
 
 
+#: The single-filesystem-NAME byte limit (POSIX NAME_MAX / common FS name
+#: cap) an operator ``--run-id`` must fit — an engine grid-identity digest
+#: is 16-64 chars, so no legitimate id can ever reach this bound; a longer
+#: value would otherwise surface as an uncaught ``OSError`` (ENAMETOOLONG)
+#: from the ``run_dir.is_dir()`` probe (fix-round-4 J polish).
+_RUN_ID_MAX_BYTES = 255
+
+
+def _run_id_escapes(run_id: str) -> bool:
+    """True when an operator ``--run-id`` could escape ``sweep_runs/``.
+
+    :func:`brutex.engine.trade_store.sweep_run_dir` joins *run_id* verbatim
+    with NO containment check — its other callers pass engine grid-identity
+    digests, so the shared seam deliberately stays unchanged (refuter
+    round-3 I3-1) and the ONE operator-input caller
+    (:func:`cmd_meta_annotate`) refuses any value that is not a single
+    plain directory name: an absolute path (POSIX root or Windows
+    drive/UNC — ``PureWindowsPath`` probed for completeness), any path
+    separator (``/`` or ``\\`` — covering ``os.sep``/``os.altsep`` on
+    every platform), or a ``..`` component.
+    """
+    if Path(run_id).is_absolute() or PureWindowsPath(run_id).is_absolute():
+        return True
+    if "/" in run_id or "\\" in run_id:
+        return True
+    # Separators are refused above, so the residual ``..`` component shape
+    # is the bare value — PureWindowsPath.parts covers both flavors anyway.
+    return ".." in PureWindowsPath(run_id).parts
+
+
+def cmd_meta_annotate(
+    lake_root: Path | None,
+    *,
+    run_id: str,
+    results_root: Path | None,
+    lens_exchange: str,
+    lens_segment: str,
+    lens_start: str,
+    lens_end: str | None,
+    no_lens: bool,
+    dry_run: bool,
+) -> int:
+    """Annotate one sweep run's finalists with P(win) + the abstention replay.
+
+    DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001 — the thin CLI
+    shim over the 100%-tested :func:`brutex.meta.annotate.annotate_run` (the
+    ``cmd_enrich_greeks`` template). ANNOTATION-ONLY: writes the
+    ``<stem>.meta.json`` fourth sidecar + the run-level
+    ``meta_annotation.json`` summary; ``top100.json`` and every other
+    existing artifact stay byte-untouched. ``--dry-run`` enumerates +
+    validates stamps only (zero writes, zero fits) and exits
+    :data:`EXIT_OK` BY DESIGN even when a stamp fails validation — the
+    invalid stem is still NAMED on stderr as ``SKIPPED (stamp_invalid)``,
+    but a dry-run validates and reports, it never gates (only a WET run's
+    skips flip the exit code). Exit: :data:`EXIT_OK`
+    iff every discovered stem annotated (or dry-run);
+    :data:`EXIT_INTERNAL_ERROR` when any WET-run stem was skipped (the
+    summary names each reason); :data:`EXIT_USER_ERROR` on a bad lake
+    root / an empty-or-whitespace, overlong or path-escaping ``--run-id`` /
+    unknown run id / malformed lens
+    dates. RUN-ID CONTAINMENT (refuter round-3 I3-1 + the fix-round-4 J
+    polish): the operator
+    ``--run-id`` is refused BEFORE any path join when it is
+    empty/whitespace-only (``sweep_run_dir``'s own guard would otherwise
+    raise a raw ``TradeStoreError``), longer than
+    :data:`_RUN_ID_MAX_BYTES` = 255 bytes (the filesystem NAME limit —
+    ``run_dir.is_dir()`` would otherwise raise an uncaught ENAMETOOLONG
+    ``OSError``; an engine grid-identity digest is 16-64 chars, so no
+    legitimate id can ever reach the bound), absolute,
+    carries a path separator (``/`` or ``\\``) or has a ``..`` component
+    (:func:`_run_id_escapes`) — so the run-summary write can never land
+    outside ``sweep_runs/``; the shared
+    :func:`~brutex.engine.trade_store.sweep_run_dir` seam itself is
+    deliberately UNCHANGED (its other callers pass engine grid-identity
+    digests — the operator-trust boundary lives at this ONE
+    operator-input caller).
+
+    The trend/event lens loads each instrument's derived-1day bars through
+    the SAME best-effort :func:`_depth_reference_loader` shim the run-end
+    results-depth pass binds (a failed load degrades to an empty lens —
+    every regime ``"unknown"``, counted, never a crash); ``--no-lens``
+    skips the lake reads entirely. DISCLOSED write surface (annotation
+    scope note, DEC-META-LABEL-ANNOTATE-001): that shim runs a catalog
+    RECONCILE (``reconcile_catalog_from_lake``) before each per-instrument
+    read, which may write catalog registration METADATA for
+    on-disk-but-unregistered partitions — the one write outside the pass's
+    own sidecars; ``--no-lens`` (or ``--dry-run``) avoids it entirely.
+    """
+    from brutex.engine.trade_store import sweep_run_dir
+    from brutex.meta.annotate import annotate_run
+
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="meta-annotate")
+    results = results_root if results_root is not None else resolved / "sweeps"
+    if not run_id.strip():
+        # Sibling of the containment check (fix-round-4 J polish): an empty
+        # --run-id would otherwise surface as sweep_run_dir's own raw
+        # TradeStoreError traceback instead of a clean user error.
+        print(
+            f"[brutex] meta-annotate: invalid --run-id {run_id!r} — a run id "
+            "must be a non-empty sweep_runs/<run_id> directory name",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if len(run_id.encode("utf-8")) > _RUN_ID_MAX_BYTES:
+        # An overlong name would otherwise surface as an uncaught OSError
+        # (ENAMETOOLONG) from the run_dir.is_dir() probe; a grid-identity
+        # digest is 16-64 chars, so this can never refuse a legitimate id.
+        print(
+            f"[brutex] meta-annotate: invalid --run-id — {len(run_id.encode('utf-8'))} "
+            f"bytes exceeds the {_RUN_ID_MAX_BYTES}-byte filesystem name limit "
+            "(an engine grid-identity digest is 16-64 chars)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if _run_id_escapes(run_id):
+        print(
+            f"[brutex] meta-annotate: invalid --run-id {run_id!r} — a run id "
+            "is a single sweep_runs/<run_id> directory name (never absolute, "
+            "no path separators, no '..' components)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    run_dir = sweep_run_dir(results, run_id)
+    if not run_dir.is_dir():
+        print(
+            f"[brutex] meta-annotate: no run directory at {run_dir} — "
+            "pass the sweep's run id (the sweep_runs/<run_id> dir name)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    lens_end_value = lens_end if lens_end is not None else datetime.now(tz=UTC).date().isoformat()
+    for flag, value in (("--lens-start", lens_start), ("--lens-end", lens_end_value)):
+        try:
+            _parse_dt(value)
+        except CliUserError as exc:
+            # _parse_dt is the SHARED date parser whose message names its
+            # dominant callers' --start/--end flags; re-label with the flag
+            # the operator actually typed (refuter round-3 I3-2) — the
+            # helper's own message stays untouched for its other callers.
+            print(
+                f"[brutex] meta-annotate: {str(exc).replace('--start/--end', flag)}",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+    daily_bars_for = None
+    if not no_lens and not dry_run:
+        daily_bars_for = _depth_reference_loader(
+            slices={},
+            lake_root=resolved,
+            catalog_path=resolved / "catalog.duckdb",
+            exchange=lens_exchange,
+            segment=lens_segment,
+            start=lens_start,
+            end=lens_end_value,
+            interval="1day",
+        )
+    report = annotate_run(
+        results,
+        run_id,
+        daily_bars_for=daily_bars_for,
+        dry_run=dry_run,
+    )
+    mode = "dry-run — " if report.dry_run else ""
+    print(
+        f"[brutex] meta-annotate {mode}run={report.run_id} "
+        f"stems={report.stems_total} annotated={report.stems_annotated} "
+        f"skipped={report.stems_skipped} combos={report.combos_annotated} "
+        f"trades={report.trades_annotated}"
+    )
+    for outcome in report.outcomes:
+        if not outcome.annotated and outcome.reason not in (None, "dry_run"):
+            print(
+                f"[brutex] meta-annotate SKIPPED {outcome.stem_rel} ({outcome.reason})",
+                file=sys.stderr,
+            )
+    if report.ok:
+        return EXIT_OK
+    return EXIT_INTERNAL_ERROR
+
+
 # ────────────────────────────────────────────────────────────────────────
 # nightly (DEC-SWEEP-NIGHTLY-AUTOMATION-001) — thin, fully-covered shims
 # over the 100%-tested brutex.nightly modules (the cmd_enrich_greeks template).
@@ -7998,6 +8271,7 @@ def cmd_sweep(
         resolve_futures_series,
     )
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
     from brutex.engine.stage1a import apply_1day_mask_for
     from brutex.engine.sweep_report import sweep_report
 
@@ -8081,6 +8355,26 @@ def cmd_sweep(
                     reconcile=False,  # cmd_sweep's no-reconcile law, preserved
                     resolution=resolution,
                 )
+                # The 1-minute EXECUTION stream (DEC-FILL-EXEC-GRID-1M-001 design
+                # §1.2 D1): every fill resolves on the 1m grid, so the report
+                # loads the SAME window at "1minute" too — at interval=1minute
+                # the decision slice IS the exec slice (one load, one object).
+                exec_bars = (
+                    bars
+                    if interval == EXEC_INTERVAL_LABEL
+                    else load_sweep_slice(
+                        cat=cat,
+                        lake_root=resolved_lake,
+                        exchange=exchange,
+                        segment=segment,
+                        symbol=symbol,
+                        interval=EXEC_INTERVAL_LABEL,
+                        start=start_dt,
+                        end=end_dt,
+                        reconcile=False,  # cmd_sweep's no-reconcile law, preserved
+                        resolution=resolution,
+                    )
+                )
         except FuturesSeriesError as exc:
             print(f"[brutex] sweep error: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
@@ -8088,6 +8382,16 @@ def cmd_sweep(
             print(
                 f"[brutex] no bars for {symbol} {interval} {start}→{end} "
                 f"under {exchange}/{segment} (lake={resolved_lake})",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+        if not exec_bars:
+            # The dual-feed law refuses LOUDLY — never a decision-TF-era report
+            # (DEC-FILL-EXEC-GRID-1M-001 §3.3: the exec slice is not waivable).
+            print(
+                f"[brutex] no 1-minute EXECUTION bars for {symbol} {start}→{end} under "
+                f"{exchange}/{segment} (lake={resolved_lake}) — every fill resolves on the "
+                f"1m grid (DEC-FILL-EXEC-GRID-1M-001); pull the symbol's 1-minute slice first",
                 file=sys.stderr,
             )
             return EXIT_USER_ERROR
@@ -8113,6 +8417,7 @@ def cmd_sweep(
                 direction=side,
                 condition_bits=condition_bits,
                 k=k,
+                exec_bars_1m=exec_bars,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
                 top_n=top,
@@ -8428,6 +8733,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     options_sim: bool = True,
     options_expiry: str = "weekly",
     options_broker: str = "groww",
+    futures_sim: bool = True,
+    top100_preset: str | None = None,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
     stage3_fevals: int | None = None,
@@ -8456,6 +8763,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.data.catalog import Catalog
     from brutex.data.errors import CatalogError
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL, ExecGridMap, build_exec_grid_map
     from brutex.engine.sweep_apriori import (
         SWEEP_APRIORI_ENV,
         apriori_enabled,
@@ -8710,6 +9018,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # clean user-config error at launch, never a mid-run traceback (the same
     # law as the cache knobs above; the stall policy's `workers` arg is
     # validation-only, deliberately never used to lower the bound).
+    from brutex.engine.cascade_wire import resolve_mc_permutations
     from brutex.engine.sweep_diffcheck import resolve_diffcheck_k
     from brutex.engine.sweep_run_core import sweep_run_core
     from brutex.engine.sweep_singleflight import lake_read_guard
@@ -8719,6 +9028,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     try:
         tripwire_config = TripwireConfig.from_env()
         diffcheck_k = resolve_diffcheck_k()
+        # DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817): the optional
+        # Stage-4 Monte-Carlo permutation budget override — resolved EAGERLY
+        # like the sibling knobs (junk = a clean pre-sweep user-config error);
+        # None (env unset) threads NO override, so the production
+        # CascadeConfig default (1000) is byte-identical.
+        mc_permutations = resolve_mc_permutations()
         stall_policy = resolve_stall_policy(per_tuple_estimate_s=None, workers=1)
     except ValueError as exc:
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
@@ -8751,6 +9066,30 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # DEC-ALPHA-BUYHOLD-METRIC-001: resolve the DEFAULT-OFF alpha rejection
+    # gate EAGERLY too — a junk BRUTEX_ALPHA_GATE is a clean pre-sweep
+    # user-config error, never a failure discovered AFTER an already-completed
+    # multi-day sweep (the depth pass re-resolves the same switch at its own
+    # entry; this eager pass only front-loads the failure — the
+    # resume_store_guard_enabled precedent).
+    from brutex.engine.alpha_metric import resolve_alpha_gate_enabled
+
+    try:
+        resolve_alpha_gate_enabled()
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # `DEC-OPTIONS-EXEC-FEEDBACK-001` — eager-validate the top-100 preset
+    # token pre-sweep (the results-depth kill-switch precedent): a typo'd
+    # --top100-preset is a clean user-config error NOW, never a
+    # silently-degraded ranking discovered after a multi-day run.
+    try:
+        resolved_top100_preset = _resolve_top100_preset(top100_preset)
+    except CliUserError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model. A set
     # BRUTEX_FILL_MODE — ANY value, even the literal "worst_case" — is a
     # stale launch config from the deleted mode machinery and REFUSES loudly
@@ -8760,6 +9099,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     try:
         require_fill_mode_env_unset()
     except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # DEC-ABSTAIN-GATE-STREAM-001: the in-sim abstention gate is DESIGNED but
+    # DORMANT (annotation-only) — a set BRUTEX_ABSTAIN_GATE_INSIM refuses
+    # loudly pre-sweep, awaiting the operator gate-flip ruling (the
+    # BRUTEX_FILL_MODE set-knob-refuses precedent above).
+    from brutex.meta.abstain import AbstainGateInSimRefusedError, require_abstain_gate_insim_unset
+
+    try:
+        require_abstain_gate_insim_unset()
+    except AbstainGateInSimRefusedError as exc:
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
@@ -8882,6 +9233,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 corrupt_partitions.extend(reconcile_result.unreadable)
                 empty_partitions.extend(reconcile_result.empty_partitions)
 
+            # DEC-FILL-EXEC-GRID-1M-001 (design §1.2 D1): the preload loads every
+            # swept symbol's interval_list ∪ {"1minute"} into the SAME slices
+            # mapping — the 1-minute EXECUTION stream rides the identical G10
+            # read-guard span / catalog reconcile / read-boundary guards, and
+            # data_snapshot_hash folds it mechanically (any single 1m bar
+            # difference re-keys the grid). At tf=1minute the key is identical,
+            # so no double load and no double fold.
+            preload_intervals = list(dict.fromkeys([*interval_list, EXEC_INTERVAL_LABEL]))
             slices: dict[tuple[str, str], list[Any]] = {}
             # RES-5 (secondary fail-safe): the PRIMARY concurrent-sweep exclusion is
             # the sweep single-flight flock taken below (held for the WHOLE sweep).
@@ -8914,7 +9273,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 return EXIT_USER_ERROR
             with lake_read_guard(resolved_lake), _catalog_ctx as cat:
                 for symbol in symbol_list:
-                    for interval in interval_list:
+                    for interval in preload_intervals:
                         slices[(symbol, interval)] = load_sweep_slice(
                             cat=cat,
                             lake_root=resolved_lake,
@@ -9097,6 +9456,29 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 "measured, Golden Rule #10).",
                 file=sys.stderr,
             )
+
+        # The EXEC-slice preflight (DEC-FILL-EXEC-GRID-1M-001 design §3.3): every
+        # symbol with ANY swept decision bars needs its 1-minute EXECUTION slice —
+        # a coordinate without one cannot fill under the dual-feed law, and
+        # --allow-missing-slices does NOT waive it (that flag opts into skipping
+        # DECISION coverage, never into a decision-TF-era fill). A symbol with
+        # ZERO decision bars everywhere has no swept coordinate — nothing to fill.
+        missing_exec = sorted(
+            symbol
+            for symbol in symbol_list
+            if not slices.get((symbol, EXEC_INTERVAL_LABEL))
+            and any(slices.get((symbol, interval)) for interval in interval_list)
+        )
+        if missing_exec:
+            print(
+                f"[brutex] REFUSED: {len(missing_exec)} swept symbol(s) have ZERO 1-minute "
+                f"EXECUTION bars: {', '.join(missing_exec)} — every fill resolves on the 1m "
+                f"grid (DEC-FILL-EXEC-GRID-1M-001) and --allow-missing-slices does not waive "
+                f"the exec slice. Remedy: pull the symbol's 1-minute data first "
+                f"(the pipeline pull fetches 1minute for every symbol).",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
 
         # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
         # timeframe that drifted from a fresh 1-minute re-derivation (a 1m backfill after
@@ -9396,6 +9778,27 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         def _bars_for(symbol: str, interval: str) -> list[Any]:
             return slices.get((symbol, interval), [])
 
+        # The once-per-coordinate ExecGridMap memo (DEC-FILL-EXEC-GRID-1M-001
+        # design §1.5): OWNED here beside the _bars_for memo — the signal→next-1m
+        # mapping is mask-independent, built ONCE per (symbol, tf) over the
+        # preloaded slices and reused by every tuple the sequential driver runs
+        # (parallel workers rebuild per tuple across the spawn boundary; same law,
+        # same bytes). tf minutes via the SAME trading-minutes vocabulary the
+        # Timeframe carries (the 1day wall-clock conversion lives in the builder).
+        _exec_maps: dict[tuple[str, str], ExecGridMap] = {}
+
+        def _exec_map_for(symbol: str, tf_label: str) -> ExecGridMap:
+            key = (symbol, tf_label)
+            mapped = _exec_maps.get(key)
+            if mapped is None:
+                mapped = build_exec_grid_map(
+                    slices.get((symbol, tf_label), []),
+                    slices.get((symbol, EXEC_INTERVAL_LABEL), []),
+                    tf_minutes=trading_minutes_for_lake_interval(tf_label),
+                )
+                _exec_maps[key] = mapped
+            return mapped
+
         def _on_tuple(t: SweepTuple, summary: SweepRunSummary) -> None:
             print(
                 f"[brutex]   {t.instrument} {t.tf.label} {t.direction.value} k={t.k} "
@@ -9636,17 +10039,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     # re-launch compares recorded == fresh instead of refusing.
                     # Spot launches append nothing — their audit stays
                     # byte-identical.
+                    from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
                     from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
 
                     for fut_instrument in sorted(roll_schedule_by_instrument):
-                        # DEC-FILL-WORST-CASE-ONLY-001: the launch context line
-                        # records the one fill law ALWAYS AND EXPLICITLY —
-                        # matching canonical_trade_params' unconditional emit —
-                        # so sweep-verify's precise-era refusal can judge any
-                        # generation from its own audit lines.
+                        # DEC-FILL-WORST-CASE-ONLY-001 + DEC-FILL-EXEC-GRID-1M-001:
+                        # the launch context line records BOTH permanent law
+                        # tokens ALWAYS AND EXPLICITLY — matching
+                        # canonical_trade_params' unconditional emit — so
+                        # sweep-verify's precise-era AND decision-TF-era refusals
+                        # can judge any generation from its own audit lines.
                         launch_params: dict[str, object] = {
                             "roll_schedule": list(roll_schedule_by_instrument[fut_instrument]),
                             "fill_mode": FillMode.WORST_CASE.value,
+                            "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
                         }
                         ingest_audit.append(
                             action=SWEEP_LAUNCH_ACTION,
@@ -9659,6 +10065,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                                 "params": launch_params,
                             },
                         )
+                # ── /results rollup Hook A (DEC-RESULTS-TOPK-ROLLUP-001) ──
+                # ONE launch-scoped merge hook shared by the grid drivers (per
+                # completed tuple) + the Stage-3 pass (once per pass). Internally
+                # FENCED at BLOCKER-1 strength: any merge failure latches merging
+                # OFF for this launch + stamps conflict_suspect and NEVER raises
+                # into the grid; the run-end Hook B below restores exactness.
+                from brutex.engine.results_rollup import RollupMergeHook
+
+                rollup_hook = RollupMergeHook(sweeps_root=out_root, grid=grid)
                 dedup = plan_launch_dedup(grid, digest_path=True)
                 guards = SweepGuards(
                     audit=sup_audit,
@@ -9719,6 +10134,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         on_quarantine=core.record_worker_quarantine,
                         roll_schedule_by_instrument=roll_schedule_by_instrument,
                         reference_stamper=reference_stamper,
+                        rollup_hook=rollup_hook.merge_tuple,
                     )
                     # Fold reconcile (#1445 G3 exact-count law ⇄ the
                     # DEC-JOB-COOPERATIVE-CANCEL-001 file bridge): the parallel
@@ -9747,6 +10163,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         store_quarantine=core.store_quarantine,
                         roll_schedule_by_instrument=roll_schedule_by_instrument,
                         reference_stamper=reference_stamper,
+                        rollup_hook=rollup_hook.merge_tuple,
+                        exec_map_for=_exec_map_for,
                     )
                 core.grid_done(result)
                 # ── COOPERATIVE cancel verdict (DEC-JOB-COOPERATIVE-CANCEL-001) ──
@@ -9805,6 +10223,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         # read); resolved lazily by the pass so a stage3-disabled
                         # grid pays nothing extra.
                         stamper_for=lambda: reference_stamper,
+                        # Hook A, stage-3 arm (DEC-RESULTS-TOPK-ROLLUP-001): one
+                        # fenced rollup merge per pass over the flushed cell stores.
+                        rollup_paths_hook=rollup_hook.merge_paths,
                     )
                 )
             # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
@@ -9872,21 +10293,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 core.set_exit_code(EXIT_SWEEP_CANCELLED)
                 return EXIT_SWEEP_CANCELLED
 
-            # Automatic options-sim on the winners (DEC-OPTIONS-EXECUTOR-001), zero-touch +
-            # non-fatal: skips cleanly when there is no rolling-option lake or a replay fails.
-            if options_sim:
-                _maybe_run_options_sim_on_winners(
-                    out_root=out_root,
-                    lake_root=resolved_lake,
-                    catalog_path=catalog,
-                    exchange=exchange,
-                    segment=segment,
-                    start=start,
-                    end=end,
-                    expiry=options_expiry,
-                    broker=options_broker,
-                    top=top,
-                )
+            # Automatic options + futures exec-sims on the winners
+            # (DEC-OPTIONS-EXECUTOR-001 + `DEC-OPTIONS-EXEC-FEEDBACK-001`),
+            # zero-touch + non-fatal: skips cleanly when a lake leg is absent or a
+            # replay fails; the per-run_id verdict maps thread IN-MEMORY into the
+            # results-depth adapter below (no disk re-read — the #1749 law).
+            exec_sims = _maybe_run_exec_sims_on_winners(
+                out_root=out_root,
+                lake_root=resolved_lake,
+                catalog_path=catalog,
+                exchange=exchange,
+                segment=segment,
+                start=start,
+                end=end,
+                expiry=options_expiry,
+                broker=options_broker,
+                top=top,
+                options_sim=options_sim,
+                futures_sim=futures_sim,
+            )
 
             # ── COOPERATIVE cancel probe: options-sim → cascade boundary (fix round 4) ──
             if _tail_cancelled("cascade"):
@@ -9968,6 +10393,27 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
                     )
                     sweep_id = grid_identity(grid)
+                    # Train-b refresh fold (main@cbc2f581b): BOTH default-OFF
+                    # knobs share the ONE overrides seam — each rides the
+                    # manifest-stored cascade config ONLY when set, so the
+                    # MANUAL `brutex cascade` replay stays exact.
+                    # DEC-REHEARSAL-MC-BUDGET-001: the optional MC permutation
+                    # budget; None = no override = the byte-identical
+                    # production config.
+                    # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001: the
+                    # default-OFF single-event knob — None forwards no
+                    # override. Precisely: run identity + the CascadeReport
+                    # are byte-identical at defaults; the manifest
+                    # `cascade_config` block gains an additive
+                    # `"single_event_max_best_day_pct": null` field
+                    # (backward-compatible load; auto==manual golden green).
+                    cascade_overrides: dict[str, object] = {}
+                    if mc_permutations is not None:
+                        cascade_overrides["mc_n_permutations"] = mc_permutations
+                    if single_event_max_best_day_pct is not None:
+                        cascade_overrides["single_event_max_best_day_pct"] = (
+                            single_event_max_best_day_pct
+                        )
                     cascade_report = run_and_write_from_specs(
                         out_root,
                         sweep_id=sweep_id,
@@ -9976,22 +10422,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         bars_context=BarsContext(
                             exchange=exchange, segment=segment, start=start, end=end
                         ),
-                        # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001: the default-OFF
-                        # single-event knob rides the cascade config ONLY when set —
-                        # None forwards no override. Precisely: run identity + the
-                        # CascadeReport are byte-identical at defaults; the manifest
-                        # `cascade_config` block gains an additive
-                        # `"single_event_max_best_day_pct": null` field
-                        # (backward-compatible load; auto==manual golden green).
                         cascade_config=cascade_config_for_sweep(
                             sweep_id,
-                            overrides=(
-                                None
-                                if single_event_max_best_day_pct is None
-                                else {
-                                    "single_event_max_best_day_pct": single_event_max_best_day_pct
-                                }
-                            ),
+                            overrides=cascade_overrides or None,
                         ),
                         stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                         leaderboard_trials=leaderboard_trials,
@@ -10071,6 +10504,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     )(_RESULTS_DEPTH_VIX_SYMBOL),
                     margin_entry_date=_parse_dt(start).date(),
                     cascade_report=cascade_report,
+                    options_exec=exec_sims.options,
+                    futures_exec=exec_sims.futures,
+                    top100_preset=resolved_top100_preset,
                     # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1925, review round 1 M2 +
                     # round 2 M1): the RUN-SCOPED FAILED allowance ONLY (a
                     # SweepComboError-failed tuple wrote no store THIS run —
@@ -10110,6 +10546,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             import structlog
 
             deliver_summary_safe(on_summary, result, log=structlog.get_logger("brutex.sweep"))
+            # ── /results rollup Hook B (DEC-RESULTS-TOPK-ROLLUP-001) ──
+            # ONE full legacy-loader reconcile at run end — the exactness anchor:
+            # clears conflict_suspect, restores total_rows_exact + the legacy
+            # first-wins row content, and folds anything Hook A missed (a latched
+            # fence, Stage-3 cells, a pre-rollup history). O(stores × rows) ONCE
+            # per run (logged, never hidden). Fenced like the results-depth
+            # adapter above — a rollup failure NEVER fails the sweep.
+            _run_results_rollup_reconcile(out_root=out_root)
             # Orphan-sidecar sweep at NORMAL run end (fix round 4): a cancel request
             # arriving AFTER the last between-pass probe is unobservable by this run
             # (cooperative — a running pass is never interrupted); previously it
@@ -11127,46 +11571,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         )
     elif max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
-    # Temporal-robustness parity for the Tier-3 shadow re-sweep
-    # (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 × DEC-SWEEP-OVERFIT-RECOUNT-
-    # RECOVERY-001, the reconcile-round-2 fix — MIGRATION.md #1851): the
-    # launcher resolves `--temporal-mode` > $BRUTEX_TEMPORAL > the shipped
-    # OBSERVE default and threads it as `grid.temporal`, which stamps the
-    # four optional per-period stats columns onto every persisted finalist
-    # row carrying trades. The temporal config is IDENTITY-EXEMPT (never in
-    # `_tuple_digest`), so a temporal-blind verify grid planned the SAME
-    # store addresses yet its shadow re-sweep rendered rows WITHOUT the
-    # columns — every default-launched tree whose finalists held trades read
-    # a recount_divergence FALSE-CORRUPT under a fully matched context (the
-    # residual the #1851 grid_mismatch recovery unmasked; executing pins:
-    # the 3 recount tests in tests/integration/test_cli_sweep_all_vix_stamp.py
-    # + test_sweep_all_futures_launch.py::
-    # test_sweep_verify_recount_round_trips_a_futures_tree — all 4 FAIL
-    # without this block). Resolve here EXACTLY as the launcher's default arm
-    # does — ENV-ONLY: sweep-verify takes NO --temporal-mode flag, so the
-    # only way to match a non-default launch is exporting the SAME
-    # $BRUTEX_TEMPORAL at verify time; junk $BRUTEX_TEMPORAL fails loud
-    # pre-plan. HONEST residual (SYMMETRIC, both directions): temporal mode
-    # is not yet recorded on the START payload, so ANY tree launched under a
-    # NON-default mode recounted under a mismatched env byte-diverges —
-    # including the off-launched case: a legitimately `--temporal-mode off`
-    # tree that previously verified clean now reads a LOUD rc-3 false-corrupt
-    # recount_divergence when recounted under the default OBSERVE env
-    # (narrow, loud, never a false-clean; remediation today =
-    # BRUTEX_TEMPORAL=off at verify). Recording+recovery à la the
-    # gate_config channel is the IMMEDIATE next item —
-    # DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001 (MIGRATION.md #1851
-    # reconcile-round-2 note; the defer is coordinator-accepted on the
-    # identity-exemption risk argument: temporal never enters
-    # `_tuple_digest`, so a wrong resolution mis-COLUMNS a shadow row —
-    # never mis-ADDRESSES the tree).
-    try:
-        temporal_config = resolve_temporal_config(None, None, None)
-    except CliUserError as exc:
-        print(f"[brutex] {exc}", file=sys.stderr)
-        return EXIT_USER_ERROR
-    if temporal_config is not None:
-        grid_kwargs["temporal"] = temporal_config
     try:
         grid = SweepGridConfig(**grid_kwargs)
     except ValueError as exc:
@@ -11333,9 +11737,17 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 roll_schedule_by_instrument = dict.fromkeys(
                     recount_futures, resolution.roll_schedule
                 )
+            # The SAME interval union the launch preloaded
+            # (DEC-FILL-EXEC-GRID-1M-001 D1): the recorded snapshot folds the
+            # 1-minute EXECUTION slice, so the recount must reload it or the
+            # Tier-2 hash compare false-fails on every non-1minute grid — and
+            # the shadow re-sweep needs the exec stream to re-fill under the
+            # same dual-feed law.
+            from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
+
             with Catalog.open(catalog) as cat:
                 for symbol in symbol_list:
-                    for interval in interval_list:
+                    for interval in dict.fromkeys([*interval_list, EXEC_INTERVAL_LABEL]):
                         slices[(symbol, interval)] = load_sweep_slice(
                             cat=cat,
                             lake_root=resolved_lake,
@@ -11414,6 +11826,36 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     f"{list(derived_schedule or ())!r} only, which cannot be verified "
                     "against the schedule the tree's rows were minted under"
                 )
+        # The shadow re-sweep must run the SAME temporal-gate regime the tree
+        # RECORDED (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 — the condition-B1
+        # Stage-3-knobs twin + the VIX-stamper round-2 BLOCKER class one
+        # config over): the launcher ships with the `observe` default, and
+        # BOTH modes capture the four emit-on-present period-stats columns at
+        # the finalist re-sim — so a temporal-less shadow re-sweep over an
+        # observed tree byte-diverges on the columns (and a gate-mode tree
+        # additionally on WHICH rows persist) and false-condemns every good
+        # store as verdict-grade CORRUPT. The gate config never enters run
+        # identity, so the recorded channel is the tree's OWN hash-chained
+        # SWEEP_START `temporal_gate` payloads — NEVER the verify-time
+        # $BRUTEX_TEMPORAL environment (a verify under a different env than
+        # the launch must still round-trip). A MIXED history (the resume can
+        # mix gate regimes per tuple — the ledgered honest envelope) is a
+        # context MISMATCH: one shadow config cannot reproduce the tree, so
+        # divergence degrades to INCONCLUSIVE, never heal-grade.
+        from brutex.engine.sweep_verify import recorded_temporal_from_audit
+
+        try:
+            temporal_audit = recorded_temporal_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        except SweepVerifyError as exc:
+            print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if not temporal_audit.consistent:
+            mismatches.append(
+                "temporal_gate: the audit records MIXED temporal-gate configs across "
+                "SWEEP_START entries (a resumed grid can mix gate regimes per tuple — "
+                "DEC-SWEEP-TEMPORAL-ROBUSTNESS-001), so ONE shadow config cannot "
+                "reproduce the tree's per-tuple capture"
+            )
         context_match = not mismatches
         if mismatches:
             print(
@@ -11571,7 +12013,19 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # (the per-mode union loop is deleted with the mode vocabulary; a
             # precise-era generation was already refused by
             # recorded_audit_facts before any tier ran).
-            mode_grid = grid
+            # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: fold the RECORDED temporal
+            # regime into the recount grid (identity-safe — temporal never
+            # enters _tuple_digest, so plan_expected_stores addresses are
+            # unchanged either way); the stage3 recount grid below inherits
+            # it via replace(mode_grid, ...), so refined CELL stores capture
+            # the period-stats columns exactly like the launcher's pass did.
+            # A None config (temporal-less or mixed-history tree) recounts
+            # byte-identically to the pre-temporal law.
+            mode_grid = (
+                _dataclasses.replace(grid, temporal=temporal_audit.config)
+                if temporal_audit.config is not None
+                else grid
+            )
             scratch = scratch_base
             stage3_grid = (
                 _dataclasses.replace(mode_grid, **stage3_kwargs)
@@ -12141,7 +12595,7 @@ class _LakeOptionBarSource:
         )
 
 
-def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, operator-verified
+def _replay_spot_trades_for_row(  # pragma: no cover — engine + lake I/O, operator-verified
     row: Any,
     *,
     lake_root: Path,
@@ -12150,14 +12604,17 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     segment: str,
     start: str,
     end: str,
-    expiry_kind: Any,
-) -> list[Any]:
-    """Re-derive the winning combo's spot round-trips → ``SpotSignal`` inputs.
+) -> tuple[list[Any], dict[datetime, Any]]:
+    """Re-derive the winning combo's spot round-trips (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
 
-    Replays ``row.mask_bits`` over the spot lake for ``(row.instrument, row.tf)``
-    via the SAME Stage-1A matrix → mask projection → trade-sim path the sweep
-    used, then lifts each closed trade into a :class:`SpotSignal` (the entry
-    bar's OPEN is the spot at entry; the expiry is resolved per the calendar).
+    The TRADES half of the former ``_replay_spot_signals_for_row`` — split out
+    so ONE replay per winner feeds BOTH exec sims (options via the
+    ``SpotSignal`` conversion wrapper below, futures via its own
+    ``signals_from_spot_trades`` over the ``SpotTrade`` protocol). Replays
+    ``row.mask_bits`` over the spot lake for ``(row.instrument, row.tf)`` via
+    the SAME Stage-1A matrix → mask projection → trade-sim path the sweep
+    used. Returns ``(trades, open_by_ts)`` — the closed round-trips + the
+    keep-first entry-bar-open map the options conversion prices spot from.
     """
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
@@ -12166,9 +12623,6 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     from brutex.engine.trade_sim import simulate_trades
     from brutex.feed.resampler import INTERVAL_SECONDS
     from brutex.feed.series_load import load_sweep_slice
-    from brutex.options.executor import signals_from_spot_trades
-    from brutex.options.lot_size_history import OptionsUnderlying
-    from brutex.options.strike_rules import TradeDirection
     from brutex.strategies.types import Side
 
     interval = row.tf
@@ -12178,13 +12632,8 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     tf_minutes = trading_minutes_for_lake_interval(interval)
     is_bull = row.direction.lower() in ("bull", "buy", "long")
     side = Side.BUY if is_bull else Side.SELL
-    direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
-    # A futures winner row (instrument == the ADR-0012 series alias) raises
-    # ValueError HERE — caught + honestly SKIPPED by the caller's existing
-    # per-row net (futures→options translation is the ADR-0012 PR-6 named
-    # follow-up, DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), so the loader below only
-    # ever sees spot rows on this path today.
-    underlying = OptionsUnderlying(row.instrument)
+
+    from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
 
     with Catalog.open(catalog_path) as cat:
         bars = load_sweep_slice(
@@ -12197,9 +12646,26 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
             start=_parse_dt(start),
             end=_parse_dt(end),
         )
+        # The 1-minute EXECUTION stream (DEC-FILL-EXEC-GRID-1M-001): the
+        # replay's fills resolve on the 1m grid exactly like the sweep that
+        # minted the winner — at interval=1minute one load serves both.
+        exec_bars = (
+            bars
+            if interval == EXEC_INTERVAL_LABEL
+            else load_sweep_slice(
+                cat=cat,
+                lake_root=lake_root,
+                exchange=exchange,
+                segment=segment,
+                symbol=row.instrument,
+                interval=EXEC_INTERVAL_LABEL,
+                start=_parse_dt(start),
+                end=_parse_dt(end),
+            )
+        )
 
-    if not bars:
-        return []
+    if not bars or not exec_bars:
+        return [], {}
     # HONEST-LIMITS (DEC-NIFTY-PRICE-SOURCE-AXIS-001 / DEC-NIFTY-FIB-AXIS-001): the
     # bar_bits here are rebuilt at the BASELINE fib_anchor (prev-day) + price source
     # (HLC3, CLOSE) because a persisted ResultRow carries neither the fib_anchor nor
@@ -12211,10 +12677,14 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     # docs/price_source_sweep_axis.md ("options-translation replay is baseline-only").
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
-    # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
-    # replayed trades exist ONLY to become SpotSignals — the very next call,
+    # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review; wording
+    # updated at the `DEC-OPTIONS-EXEC-FEEDBACK-001` split): these replayed
+    # trades exist ONLY to become exec-sim signals — the options conversion,
     # signals_from_spot_trades, reads entry_ts/exit_ts/direction and NOTHING
-    # else (SpotSignal carries no VIX field; _render_options_leaderboard
+    # else, and the futures twin passes the (honestly-None) VIX stamps
+    # through into its COUNTED n_vix_missing disclosure — a stamper build
+    # here would still be a full VIX lake read for stamps no surface renders
+    # (SpotSignal carries no VIX field; _render_options_leaderboard
     # renders no VIX column), so a stamp here is DISCARDED at conversion and
     # can never reach any output. The Stage-B bind at this site was
     # provably-dead work costing a full window-bounded VIX lake read per
@@ -12231,6 +12701,9 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         entry_signals,
         direction=side,
         tf_minutes=tf_minutes,
+        # DEC-FILL-EXEC-GRID-1M-001: fills resolve on the 1-minute execution
+        # stream (the map derives once inside — one replay, one build).
+        exec_bars_1m=exec_bars,
         # DEC-FILL-WORST-CASE-ONLY-001: the replay simulates under the ONE
         # hardcoded worst-case fill law — the same law the winners were
         # swept under by construction. NOTE the honest pre-existing
@@ -12249,6 +12722,32 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
             bars, source=f"options_sim_spot:{row.instrument}/{row.tf}"
         ).items()
     }
+    return trades, open_by_ts
+
+
+def _options_signals_from_trades(
+    row: Any,
+    trades: Sequence[Any],
+    open_by_ts: Mapping[datetime, Any],
+    *,
+    expiry_kind: Any,
+) -> list[Any]:
+    """Lift replayed spot round-trips into options ``SpotSignal`` inputs — PURE.
+
+    The CONVERSION half of the former ``_replay_spot_signals_for_row``
+    (`DEC-OPTIONS-EXEC-FEEDBACK-001` split): no lake I/O, directly
+    unit-testable. A futures-series / non-index winner row raises
+    ``ValueError`` at the ``OptionsUnderlying`` construction — caught +
+    honestly SKIPPED by the callers' existing per-row nets (futures→options
+    translation is the ADR-0012 PR-6 named follow-up).
+    """
+    from brutex.options.executor import signals_from_spot_trades
+    from brutex.options.lot_size_history import OptionsUnderlying
+    from brutex.options.strike_rules import TradeDirection
+
+    underlying = OptionsUnderlying(row.instrument)
+    is_bull = row.direction.lower() in ("bull", "buy", "long")
+    direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
     return signals_from_spot_trades(
         trades,
         instrument=underlying,
@@ -12256,6 +12755,41 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         spot_open_at=lambda ts: open_by_ts[ts],
         expiry_kind=expiry_kind,
     )
+
+
+def _replay_spot_signals_for_row(  # pragma: no cover — thin composition of the two split halves
+    row: Any,
+    *,
+    lake_root: Path,
+    catalog_path: Path,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    expiry_kind: Any,
+) -> list[Any]:
+    """Re-derive the winning combo's spot round-trips → ``SpotSignal`` inputs.
+
+    The pre-split face, kept byte-compatible for the manual
+    ``brutex options-sim`` path: ONE trades replay
+    (:func:`_replay_spot_trades_for_row`) composed with the pure options
+    conversion (:func:`_options_signals_from_trades`). The early
+    ``OptionsUnderlying`` probe preserves the pre-split contract that a
+    non-spot row fails BEFORE any lake I/O.
+    """
+    from brutex.options.lot_size_history import OptionsUnderlying
+
+    OptionsUnderlying(row.instrument)  # fail-fast BEFORE the lake replay (pre-split contract)
+    trades, open_by_ts = _replay_spot_trades_for_row(
+        row,
+        lake_root=lake_root,
+        catalog_path=catalog_path,
+        exchange=exchange,
+        segment=segment,
+        start=start,
+        end=end,
+    )
+    return _options_signals_from_trades(row, trades, open_by_ts, expiry_kind=expiry_kind)
 
 
 def _render_options_leaderboard(row: Any, results: tuple[Any, ...]) -> str:
@@ -12299,6 +12833,33 @@ def _render_options_leaderboard(row: Any, results: tuple[Any, ...]) -> str:
     return "\n".join(lines)
 
 
+def _options_sim_from_signals(  # pragma: no cover — composes lake source + tested executor
+    signals: Sequence[Any],
+    *,
+    lake_root: Path,
+    broker: str,
+    audit_path: Path,
+) -> tuple[Any, ...]:
+    """Price already-replayed ``SpotSignal`` inputs into per-rule results + audit.
+
+    The EXECUTE half of the former ``_options_sim_for_row``
+    (`DEC-OPTIONS-EXEC-FEEDBACK-001` split) — shared by the manual
+    ``brutex options-sim`` path and the automatic winners hook, whose ONE
+    replay per winner feeds both exec sims.
+    """
+    from brutex.options.executor import execute_options_sim
+    from brutex.orchestrator.audit import AuditWriter
+
+    source = _LakeOptionBarSource(lake_root=lake_root)
+    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+        return execute_options_sim(
+            signals,
+            source=source,
+            broker=broker,  # type: ignore[arg-type]
+            audit=audit,
+        )
+
+
 def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + tested executor
     row: Any,
     *,
@@ -12313,8 +12874,7 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
     audit_path: Path,
 ) -> tuple[Any, ...]:
     """Replay a winning spot run into priced per-rule options results + audit."""
-    from brutex.options.executor import ExpiryKind, execute_options_sim
-    from brutex.orchestrator.audit import AuditWriter
+    from brutex.options.executor import ExpiryKind
 
     expiry_kind = ExpiryKind.MONTHLY if expiry.lower() == "monthly" else ExpiryKind.WEEKLY
     signals = _replay_spot_signals_for_row(
@@ -12327,14 +12887,9 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
         end=end,
         expiry_kind=expiry_kind,
     )
-    source = _LakeOptionBarSource(lake_root=lake_root)
-    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
-        return execute_options_sim(
-            signals,
-            source=source,
-            broker=broker,  # type: ignore[arg-type]
-            audit=audit,
-        )
+    return _options_sim_from_signals(
+        signals, lake_root=lake_root, broker=broker, audit_path=audit_path
+    )
 
 
 def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + tested executor
@@ -12431,7 +12986,56 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
     return EXIT_OK
 
 
-def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over real-lake I/O
+@dataclass(frozen=True)
+class ExecSimResults:
+    """The winners hook's per-run_id verdict maps (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+
+    ``options`` / ``futures`` map ``run_id`` → the per-entry ``options_exec``
+    / ``futures_exec`` object (priced, deferred, or the NAMED ``not_priced``).
+    ``None`` means that sim never ran AT ALL (flag off / lake leg absent /
+    results tree unreadable) — the depth adapter then threads NO provider and
+    the key stays ABSENT from every top100 entry (byte-identical artifacts).
+    IN-MEMORY within the same ``cmd_sweep_all`` invocation over the same
+    ``out_root`` stores — the cascade's #1749 no-disk-re-read staleness law.
+    """
+
+    options: dict[str, dict[str, object]] | None
+    futures: dict[str, dict[str, object]] | None
+
+
+def _futures_sim_for_row(  # pragma: no cover — composes real-lake resolver/source + tested executor
+    row: Any,
+    signals: Sequence[Any],
+    *,
+    out_root: Path,
+    resolver: Any,
+    source: Any,
+) -> Any:
+    """Run + audit the futures translation sim for one INDEX winner row."""
+    from brutex.futures.executor import execute_futures_sim
+    from brutex.options.strike_rules import TradeDirection
+    from brutex.orchestrator.audit import AuditWriter
+
+    is_bull = row.direction.lower() in ("bull", "buy", "long")
+    direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
+    # A DISTINCT audit stem from write_translation_sidecar's
+    # `futures-exec-<id>.jsonl` (that path is the R42 content-hash-stamped
+    # sidecar, not a hash-chained audit log — two artifacts, two files).
+    audit_path = out_root / "audit" / f"futures-sim-{row.run_id[:12]}.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+        return execute_futures_sim(
+            signals,
+            instrument=row.instrument,
+            direction=direction,
+            run_id=row.run_id,
+            resolver=resolver,
+            source=source,
+            audit=audit,
+        )
+
+
+def _maybe_run_exec_sims_on_winners(  # pragma: no cover — auto-hook over real-lake I/O
     *,
     out_root: Path,
     lake_root: Path,
@@ -12443,35 +13047,101 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
     expiry: str,
     broker: str,
     top: int,
-) -> None:
-    """Automatic post-sweep options-sim on the top winners (zero-touch).
+    options_sim: bool,
+    futures_sim: bool,
+) -> ExecSimResults:
+    """Automatic post-sweep options + futures exec-sims on the top winners.
 
-    Runs after a sweep persists its winners. Best-effort + non-fatal: when the
-    rolling-option lake is absent (spot-only setup) or a replay raises, it logs
-    and returns without failing the sweep.
+    The renamed/extended ``_maybe_run_options_sim_on_winners``
+    (`DEC-OPTIONS-EXEC-FEEDBACK-001`): ONE spot replay per winner
+    (:func:`_replay_spot_trades_for_row`) feeds BOTH the options sim
+    (unchanged stdout leaderboard + per-rule audit) and the finally-wired
+    futures executor (leaderboard + the R42 translation sidecar), and the
+    verdicts now PERSIST — returned as in-memory per-run_id maps the
+    results-depth adapter threads into ``build_top100``. Best-effort +
+    non-fatal: an absent lake leg or a failed replay logs + degrades to the
+    NAMED verdict, never fails the sweep. HONEST set-mismatch envelope: only
+    the ``store.top_k(top)`` replayed set is priced — a top100 entry outside
+    it reads ``not_priced/not_in_replay_set`` (the ``--top`` knob bounds the
+    run-end replay cost; deliberately not auto-widened to 100).
     """
-    if not (lake_root / "options").exists():
+    from brutex.futures.executor import ExecutionKind, route_execution
+    from brutex.futures.executor import signals_from_spot_trades as futures_signals
+    from brutex.futures.leaderboard import (
+        futures_annotation,
+        futures_exec_not_priced,
+        futures_exec_verdict,
+        render_futures_leaderboard,
+        write_translation_sidecar,
+    )
+    from brutex.options.exec_verdict import options_exec_not_priced, options_exec_verdict
+    from brutex.options.executor import ExpiryKind
+    from brutex.options.strike_rules import TradeDirection
+
+    options_enabled = options_sim
+    if options_enabled and not (lake_root / "options").exists():
         print("[brutex] options-sim: skipped (no rolling-option lake at <lake>/options)")
-        return
+        options_enabled = False
+    futures_enabled = futures_sim
+    if futures_enabled:
+        # The futures leg needs SOME contract source — the registry calendar
+        # or discoverable FNO bar partitions; with neither, every trade would
+        # read no_contract, so the sim honestly never runs (key ABSENT).
+        has_registry = (lake_root / "registry.duckdb").exists()
+        has_fno_dirs = any((lake_root / "bars").glob("*/FNO"))
+        if not has_registry and not has_fno_dirs:
+            print(
+                "[brutex] futures-sim: skipped (no registry.duckdb and no "
+                "bars/<exch>/FNO contract partitions in the lake)"
+            )
+            futures_enabled = False
+    if not options_enabled and not futures_enabled:
+        return ExecSimResults(options=None, futures=None)
+
     from brutex.engine.results_report import load_results_tree
     from brutex.engine.results_store import ResultsStoreError
 
     try:
         store = load_results_tree(out_root)
     except ResultsStoreError as exc:
-        print(f"[brutex] options-sim: skipped ({exc})")
-        return
+        print(f"[brutex] exec-sims: skipped ({exc})")
+        return ExecSimResults(options=None, futures=None)
     winners = store.top_k(top, by="net_pnl_paisa")
-    print(f"[brutex] options-sim: pricing options for top {len(winners)} winner(s)…")
+    legs = " + ".join(
+        leg for leg, on in (("options", options_enabled), ("futures", futures_enabled)) if on
+    )
+    print(f"[brutex] exec-sims: pricing {legs} for top {len(winners)} winner(s)…")
+
+    options_map: dict[str, dict[str, object]] | None = {} if options_enabled else None
+    futures_map: dict[str, dict[str, object]] | None = {} if futures_enabled else None
+    expiry_kind = ExpiryKind.MONTHLY if expiry.lower() == "monthly" else ExpiryKind.WEEKLY
+    futures_resolver: Any = None
+    futures_source: Any = None
+    if futures_enabled:
+        from brutex.futures.contract_resolver import RegistryFrontMonthResolver
+        from brutex.futures.lake_source import LakeFuturesBarSource
+
+        futures_resolver = RegistryFrontMonthResolver(lake_root)
+        futures_source = LakeFuturesBarSource(lake_root)
+
     # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
     # Stage-B build at this hook was a SECOND full VIX lake read per
     # sweep-all --options-sim launch (the launch stamper was already built,
     # and it even ran for ZERO winners) whose stamps were then discarded at
-    # the SpotSignal conversion — see _replay_spot_signals_for_row.
+    # the SpotSignal conversion; the futures leg passes the honest None
+    # stamps through into its COUNTED n_vix_missing disclosure — see
+    # _replay_spot_trades_for_row.
     for row in winners:
-        audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
+        kind = route_execution(row.instrument)
+        if futures_map is not None and kind is not ExecutionKind.INDEX_FUTURES:
+            # Structural totality (DEC-ENGINE-SPOT-ONLY-001): the engine
+            # sweeps EXACTLY the 3 spot indexes, so every producible winner
+            # routes INDEX_FUTURES — these deferred/unsupported arms are
+            # forensic-only honesty, never fabricated legs.
+            futures_map[row.run_id] = futures_annotation(None, kind=kind)
+        wants_futures = futures_map is not None and kind is ExecutionKind.INDEX_FUTURES
         try:
-            results = _options_sim_for_row(
+            trades, open_by_ts = _replay_spot_trades_for_row(
                 row,
                 lake_root=lake_root,
                 catalog_path=catalog_path,
@@ -12479,14 +13149,66 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
                 segment=segment,
                 start=start,
                 end=end,
-                expiry=expiry,
-                broker=broker,
-                audit_path=audit_path,
             )
         except (ValueError, KeyError, OSError) as exc:
-            print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")
+            print(f"[brutex] exec-sims: {row.run_id[:12]}… replay skipped ({exc})")
+            if options_map is not None:
+                options_map[row.run_id] = options_exec_not_priced("replay_failed")
+            if wants_futures and futures_map is not None:
+                futures_map[row.run_id] = futures_exec_not_priced("replay_failed")
             continue
-        print(_render_options_leaderboard(row, results))
+
+        if options_map is not None:
+            audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
+            try:
+                signals = _options_signals_from_trades(
+                    row, trades, open_by_ts, expiry_kind=expiry_kind
+                )
+                if not signals:
+                    options_map[row.run_id] = options_exec_not_priced("no_signals")
+                else:
+                    results = _options_sim_from_signals(
+                        signals, lake_root=lake_root, broker=broker, audit_path=audit_path
+                    )
+                    print(_render_options_leaderboard(row, results))
+                    options_map[row.run_id] = options_exec_verdict(
+                        results,
+                        expiry_kind=expiry_kind.value,
+                        broker=broker,
+                        replay_start=start,
+                        replay_end=end,
+                    )
+            except (ValueError, KeyError, OSError) as exc:
+                print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")
+                options_map[row.run_id] = options_exec_not_priced("replay_failed")
+
+        if wants_futures and futures_map is not None:
+            try:
+                is_bull = row.direction.lower() in ("bull", "buy", "long")
+                fut_signals = futures_signals(
+                    trades,
+                    instrument=row.instrument,
+                    direction=TradeDirection.BULL if is_bull else TradeDirection.BEAR,
+                )
+                if not fut_signals:
+                    futures_map[row.run_id] = futures_exec_not_priced("no_signals")
+                else:
+                    result = _futures_sim_for_row(
+                        row,
+                        fut_signals,
+                        out_root=out_root,
+                        resolver=futures_resolver,
+                        source=futures_source,
+                    )
+                    print(render_futures_leaderboard(row, result))
+                    write_translation_sidecar(result, out_root=out_root, run_id=row.run_id)
+                    futures_map[row.run_id] = futures_exec_verdict(
+                        result, replay_start=start, replay_end=end
+                    )
+            except (ValueError, KeyError, OSError) as exc:
+                print(f"[brutex] futures-sim: {row.run_id[:12]}… skipped ({exc})")
+                futures_map[row.run_id] = futures_exec_not_priced("replay_failed")
+    return ExecSimResults(options=options_map, futures=futures_map)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -12704,6 +13426,28 @@ def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _ma
     return _load
 
 
+def _resolve_top100_preset(token: str | None) -> str:
+    """Resolve the ``--top100-preset`` token (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+
+    ``None`` / blank → the default preset (the writer's pre-change behavior,
+    byte-identical). A known token passes through stripped; an unknown token
+    raises :class:`CliUserError` naming every valid value — eager-validated
+    PRE-sweep by ``cmd_sweep_all`` (a typo must refuse loudly NOW, never
+    silently degrade the ranking after a multi-day run — the
+    ``resolve_preset_param`` /results law, CLI-shaped).
+    """
+    from brutex.engine.top100_artifact import DEFAULT_TOP100_PRESET, TOP100_PRESETS
+
+    if token is None or not token.strip():
+        return DEFAULT_TOP100_PRESET
+    stripped = token.strip()
+    if stripped in TOP100_PRESETS:
+        return stripped
+    raise CliUserError(
+        f"unknown --top100-preset {stripped!r}; valid presets: {', '.join(TOP100_PRESETS)}"
+    )
+
+
 def _depth_quarantined_labels(out_root: Path, sweep_id: str) -> frozenset[str]:
     """The quarantined-prior tuple IDENTITY set for the results-depth pass.
 
@@ -12735,6 +13479,10 @@ def _run_results_depth_adapter(
     quarantined_labels: frozenset[str] | None = None,
     pass_runner: Callable[..., Any] | None = None,
     cascade_report: Any | None = None,
+    options_exec: Mapping[str, Mapping[str, object]] | None = None,
+    futures_exec: Mapping[str, Mapping[str, object]] | None = None,
+    top100_preset: str | None = None,
+    fill_sensitivity: bool = True,
 ) -> bool:
     """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
 
@@ -12783,6 +13531,17 @@ def _run_results_depth_adapter(
     production-unreachable belt (our own serialization feeds it) that logs
     ``cli.results_depth.cascade_join_failed`` and threads ``None`` — the pass
     still runs, the sweep never fails.
+
+    ``options_exec`` / ``futures_exec`` (`DEC-OPTIONS-EXEC-FEEDBACK-001`) are
+    the winners hook's IN-MEMORY per-run_id verdict maps — flattened HERE
+    into the TOTAL provider closures ``build_top100`` consumes (a run_id
+    absent from a wired map reads the NAMED ``not_priced/not_in_replay_set``,
+    never a wrong join); ``None`` (that sim never ran) threads NO provider —
+    the entry key stays ABSENT, artifact bytes byte-identical.
+    ``top100_preset`` threads the writer's ranking preset (``None`` = the
+    default, byte-identical); ``fill_sensitivity`` (default ``True`` — the
+    production wiring of DEC-FILL-EXEC-GRID-1M-001's annotation half) turns
+    on the pass-internal open-anchored reference re-sim per ranked entry.
     """
     import structlog
 
@@ -12793,6 +13552,34 @@ def _run_results_depth_adapter(
     from brutex.ranking.phrases import reason_payload
 
     runner = run_results_depth_pass if pass_runner is None else pass_runner
+
+    options_exec_provider: Callable[[Any], Mapping[str, object]] | None = None
+    if options_exec is not None:
+        from brutex.options.exec_verdict import options_exec_not_priced
+
+        options_verdicts = dict(options_exec)
+
+        def _options_provider(candidate: Any) -> Mapping[str, object]:
+            verdict = options_verdicts.get(candidate.row.run_id)
+            if verdict is not None:
+                return verdict
+            return options_exec_not_priced("not_in_replay_set")
+
+        options_exec_provider = _options_provider
+
+    futures_exec_provider: Callable[[Any], Mapping[str, object]] | None = None
+    if futures_exec is not None:
+        from brutex.futures.leaderboard import futures_exec_not_priced
+
+        futures_verdicts = dict(futures_exec)
+
+        def _futures_provider(candidate: Any) -> Mapping[str, object]:
+            verdict = futures_verdicts.get(candidate.row.run_id)
+            if verdict is not None:
+                return verdict
+            return futures_exec_not_priced("not_in_replay_set")
+
+        futures_exec_provider = _futures_provider
 
     cascade_join = None
     if cascade_report is not None:
@@ -12829,9 +13616,13 @@ def _run_results_depth_adapter(
             minute_bars_for=minute_bars_for,
             daily_bars_for=daily_bars_for,
             vix_bars=vix_bars,
+            preset_name=_resolve_top100_preset(top100_preset),
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
             cascade_join=cascade_join,
+            options_exec_provider=options_exec_provider,
+            futures_exec_provider=futures_exec_provider,
+            fill_sensitivity=fill_sensitivity,
             expected_missing=expected_missing,
             quarantined_labels=quarantined_labels,
         )
@@ -12886,6 +13677,61 @@ def _run_results_depth_adapter(
         )
     _print_resilience_lines(out_root=out_root, grid=grid, report=report)
     return True
+
+
+def _run_results_rollup_reconcile(
+    *,
+    out_root: Path,
+    rebuild: Callable[[Path], bool] | None = None,
+) -> bool:
+    """The fenced run-end ``/results`` rollup reconcile (DEC-RESULTS-TOPK-ROLLUP-001, Hook B).
+
+    ONE full fold through the legacy loader
+    (:func:`brutex.engine.results_rollup.rebuild_rollup` →
+    ``load_sweep_scan_tree`` verbatim) + a rollup write — the exactness
+    anchor after a launch's incremental Hook-A merges (restores
+    ``total_rows_exact`` / ``run_id_conflicts`` / the legacy first-wins row
+    content and clears ``conflict_suspect``, including after a latched
+    BLOCKER-1 fence).
+
+    The fence mirrors ``_run_results_depth_adapter``: a failure prints LOUD
+    on stderr + logs ``cli.results_rollup.failed`` and NEVER changes the
+    sweep's exit path (the rollup is a display artifact — /results falls
+    back to the byte-identical legacy scan + the serve-side Hook-C rebuild);
+    ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` always re-raise
+    raw. Returns ``True`` iff a rollup was written (``False`` covers both
+    the fenced failure and the honest zero-store skip).
+
+    ``rebuild`` is an injection seam for tests; ``None`` runs the real
+    :func:`brutex.engine.results_rollup.rebuild_rollup`.
+    """
+    import structlog
+
+    from brutex.engine.results_rollup import rebuild_rollup
+
+    runner = rebuild_rollup if rebuild is None else rebuild
+    try:
+        written = runner(out_root)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        print(
+            f"[brutex] WARNING: /results rollup reconcile FAILED "
+            f"({type(exc).__name__}: {exc}) — the sweep itself SUCCEEDED; /results serves "
+            "the legacy scan and rebuilds the rollup on its next poll (Hook C).",
+            file=sys.stderr,
+        )
+        structlog.get_logger("brutex.cli").error(
+            "cli.results_rollup.failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    print(
+        f"[brutex] results-rollup — "
+        f"{'reconciled (topk.parquet + stamp refreshed)' if written else 'skipped (no stores)'}"
+    )
+    return written
 
 
 # ════ END P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001) ════
@@ -13066,6 +13912,18 @@ def _dispatch(argv: list[str] | None) -> int:
             end=args.end,
             dry_run=args.dry_run,
         )
+    if args.command == "meta-annotate":
+        return cmd_meta_annotate(
+            args.lake_root,
+            run_id=args.run_id,
+            results_root=args.results_root,
+            lens_exchange=args.lens_exchange,
+            lens_segment=args.lens_segment,
+            lens_start=args.lens_start,
+            lens_end=args.lens_end,
+            no_lens=args.no_lens,
+            dry_run=args.dry_run,
+        )
     if args.command == "doctor":
         if args.live:
             return cmd_doctor_live(args)
@@ -13143,6 +14001,8 @@ def _dispatch(argv: list[str] | None) -> int:
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
+            futures_sim=args.futures_sim,
+            top100_preset=args.top100_preset,
             stage3_enable=args.stage3_enable,
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,
@@ -13203,6 +14063,8 @@ def _dispatch(argv: list[str] | None) -> int:
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
+            futures_sim=args.futures_sim,
+            top100_preset=args.top100_preset,
             stage3_enable=args.stage3_enable,
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,

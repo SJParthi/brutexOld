@@ -344,3 +344,129 @@ class TestWorkerAwareBudgetScaleGuards:
         )
         assert parallel_plan.bounded is True
         assert parallel_plan.bounded_top_k == 1000
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1b routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the `plan_rank_memory` decision table.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    value-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives) — plans compare as frozen dataclasses, refusal
+    message bytes included.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_every_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_mem_budget import BoundedRankMode, plan_rank_memory
+
+        cases: list[dict[str, object]] = [
+            # batch (within budget)
+            {
+                "n_masks": 1000,
+                "top_k": 5,
+                "digest_path": True,
+                "mode": BoundedRankMode.AUTO,
+                "budget_bytes": 8 * 1024**2,
+            },
+            # bounded (auto, past budget, eligible)
+            {
+                "n_masks": 10_000_000,
+                "top_k": 5,
+                "digest_path": True,
+                "mode": BoundedRankMode.AUTO,
+                "budget_bytes": 1024,
+            },
+            # refuse_no_top_k
+            {
+                "n_masks": 10_000_000,
+                "top_k": None,
+                "digest_path": True,
+                "mode": BoundedRankMode.AUTO,
+                "budget_bytes": 1024,
+            },
+            # refuse_no_digest
+            {
+                "n_masks": 10_000_000,
+                "top_k": 5,
+                "digest_path": False,
+                "mode": BoundedRankMode.AUTO,
+                "budget_bytes": 1024,
+            },
+            # refuse_off
+            {
+                "n_masks": 10_000_000,
+                "top_k": 5,
+                "digest_path": True,
+                "mode": BoundedRankMode.OFF,
+                "budget_bytes": 1024,
+            },
+            # mode on → bounded regardless of budget
+            {
+                "n_masks": 10_000_000,
+                "top_k": 5,
+                "digest_path": True,
+                "mode": BoundedRankMode.ON,
+                "budget_bytes": 1024,
+            },
+        ]
+        off = [plan_rank_memory(**case) for case in cases]  # type: ignore[arg-type]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = [plan_rank_memory(**case) for case in cases]  # type: ignore[arg-type]
+            assert on == off
+        finally:
+            self._reset_facade()
+
+    def test_flag_on_mode_on_config_raises_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.engine.sweep_mem_budget import BoundedRankMode, plan_rank_memory
+
+        self._arm_fake_crate(monkeypatch)
+        try:
+            with pytest.raises(ValueError, match="LEGACY no-digest"):
+                plan_rank_memory(
+                    n_masks=10,
+                    top_k=5,
+                    digest_path=False,
+                    mode=BoundedRankMode.ON,
+                    budget_bytes=1024,
+                )
+            with pytest.raises(ValueError, match="requires a finite top_k"):
+                plan_rank_memory(
+                    n_masks=10,
+                    top_k=None,
+                    digest_path=True,
+                    mode=BoundedRankMode.ON,
+                    budget_bytes=1024,
+                )
+        finally:
+            self._reset_facade()

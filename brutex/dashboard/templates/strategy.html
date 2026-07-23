@@ -18,18 +18,9 @@
      Retry (F-M4). Every value arrives from the artifact contracts — loud
      "awaiting real run artifact" states, never invented figures. -->
 <style>
-  :root {
-    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
-    --border: #1E222D; --border-strong: #2B313F;
-    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
-    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
-    --red: #FF5C5C;
-    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
-    --r-sm:8px; --r-md:10px; --r-pill:999px;
-    --ctl-h:38px; --gutter:clamp(16px,3vw,24px);
-    --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1);
-  }
+  /* Design tokens come from the ONE shared bx-theme.css/bx-design.css :root
+     (DEC-DASHBOARD-VISUAL-OVERHAUL-001 — the page-local duplicated :root
+     token block is DELETED; this sheet only consumes var(--…) tokens). */
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); height: 100%; }
   body {
@@ -51,7 +42,7 @@
   .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
   .topnav a { color:var(--blue); text-decoration:none; }
   .topnav a:hover { color:var(--text-bright); }
-  .ticker { padding:8px 24px; border-bottom:1px solid var(--border); font-size:12px;
+  .ticker { padding:8px 24px; border-bottom:1px solid var(--border); font-size:var(--fs-1);
     color:var(--muted); font-variant-numeric:tabular-nums; }
   .mode-btn { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
     padding:6px 12px; font:inherit; font-size:12px; font-weight:700; color:var(--text);
@@ -106,7 +97,7 @@
       <a href="/reports">Reports</a>
     </nav>
     <a href="/screener" style="color:var(--yellow); font-size:13px; text-decoration:none;">🏆 Winners</a>
-    <button id="bxModeToggle" class="mode-btn" type="button" title="Beginner = plain English · Pro = technical (R33 toggle — one shared mechanism)">Pro ✓</button>
+    <button id="bxModeToggle" class="bx-btn" type="button" title="Beginner = plain English · Pro = technical (R33 toggle — one shared mechanism)">Pro ✓</button>
   </header>
 
   <!-- R36 "always visible" ticker strip (shared component — bx-oneclick.js) -->
@@ -123,7 +114,9 @@
       instrument <span id="stInstr" data-explain="instrument">—</span> · TF <span id="stTf">—</span> ·
       direction <span id="stDir">—</span> · SL/TP arm <span id="stArm">—</span> ·
       mask <code id="stMask">—</code> · family <span id="stFamily">—</span> ·
-      cascade <span id="stCascade" data-explain="cascade_status">—</span></div>
+      cascade <span id="stCascade" data-explain="cascade_status">—</span> ·
+      tier <span id="stTier" data-explain="tier">—</span>
+      <span class="tier-gross-note">(tier on gross signal P&amp;L; worst-case-fill re-sim deferred)</span></div>
   </section>
 
   <section aria-label="Candle chart">
@@ -133,6 +126,14 @@
     <div class="chart-host" id="stChartHost">
       <div class="note">no candles loaded yet — awaiting run + stored 1-minute data</div>
     </div>
+    <!-- Marker legend (Batch B+C): EVERY marker the chart draws is explained
+         here — and ONLY what it actually draws (the axis-grid/last-price/
+         hover-title chrome is NOT rendered by the shared bx-strategy-panel.js;
+         its pure BXChart builders stay additive for a later wiring PR). -->
+    <div class="note" id="stChartLegend">legend: triangle = trade marker — green = entry, amber = exit;
+      the triangle points WITH the trade direction (long entry points up, short entry points down) and its tip
+      sits at the matched candle. A trade outside the loaded window DROPS its arrow with the loud note below —
+      never a snapped wrong-candle arrow.</div>
     <div class="warnnote" id="stArrowNote" hidden></div>
   </section>
 
@@ -155,19 +156,19 @@
          ocTradesSource → stTradesSource. v29 owns #ocTradesSource for its
          rank-1 trades tab and bx-oneclick writes it unconditionally — the
          st* id frees this badge from that latent cross-page stomp. -->
-    <h3>📜 List of trades <span class="oc-source-badge" id="stTradesSource">source: none</span></h3>
+    <h3>📜 List of trades <span class="bx-chip bx-chip--sm muted oc-source-badge" id="stTradesSource">source: none</span></h3>
     <div class="note" id="stTradesNote">awaiting real run artifact — trades appear once the run's results-depth sidecars land</div>
     <div id="stTradesError"></div>
-    <div class="tablewrap">
-      <table>
-        <thead><tr><th>Dir</th><th>Entry ts</th><th>Entry px</th><th>Exit ts</th><th>Exit px</th><th>Lots</th><th>Exit reason</th><th>P&amp;L</th><th>Costs</th><th>MAE</th><th>MFE</th><th>VIX in</th><th>VIX out</th><th>Chart</th></tr></thead>
+    <div class="bx-tablewrap">
+      <table class="bx-table bx-table--dense bx-table--zebra">
+        <thead><tr><th>Dir</th><th>Entry ts</th><th class="num">Entry px</th><th>Exit ts</th><th class="num">Exit px</th><th class="num">Lots</th><th>Exit reason</th><th class="num">P&amp;L</th><th class="num">Costs</th><th class="num">MAE</th><th class="num">MFE</th><th class="num">VIX in</th><th class="num">VIX out</th><th>Chart</th></tr></thead>
         <tbody id="stTradesBody"></tbody>
       </table>
     </div>
     <div class="pager">
-      <button id="stPrev" type="button">← prev page</button>
+      <button id="stPrev" class="bx-btn" type="button">← prev page</button>
       <span id="stPage">page 1</span>
-      <button id="stNext" type="button">next page →</button>
+      <button id="stNext" class="bx-btn" type="button">next page →</button>
     </div>
   </section>
 
@@ -183,6 +184,7 @@
       <div class="story-cell"><div class="k">Consistency — Sharpe</div><div class="v" id="stSharpe" data-explain="sharpe">—</div></div>
       <div class="story-cell"><div class="k">Real-or-Fluke — DSR</div><div class="v" id="stDsr" data-explain="dsr">—</div></div>
       <div class="story-cell"><div class="k">CPCV pass %</div><div class="v" id="stCpcv" data-explain="cpcv_pass_pct">—</div></div>
+      <div class="story-cell"><div class="k">Alpha vs buy &amp; hold %</div><div class="v" id="stAlpha" data-explain="alpha_pct">—</div></div>
       <div class="story-cell"><div class="k">Win rate</div><div class="v" id="stWinRate" data-explain="win_rate">—</div></div>
       <div class="story-cell"><div class="k">Profit factor</div><div class="v" id="stPf" data-explain="profit_factor">—</div></div>
       <div class="story-cell"><div class="k">Trades</div><div class="v" id="stTrades" data-explain="trades">—</div></div>

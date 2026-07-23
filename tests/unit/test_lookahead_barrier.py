@@ -18,7 +18,7 @@ runtime dep for its one material-action log line.
 from __future__ import annotations
 
 import pytest
-from brutex.feed.errors import LookAheadError
+from brutex.feed.errors import FeedError, LookAheadError
 from brutex.feed.lookahead import (
     LookAheadBarrier,
     LookAheadReport,
@@ -240,3 +240,68 @@ def test_verify_with_record_false_barrier_reports_zero_checks() -> None:
     assert report.indices_checked == 0  # nothing retained in O(1) mode
     assert report.max_index_touched is None
     assert report.final_cursor == 2
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Refuse-poison — out-of-vocabulary verdict codes
+# (DEC-FEED-RUST-MATERIALIZE-002: both dispatches are exhaustive over the
+# pinned verdict vocabulary; a code outside it models a poisoned/stale
+# wheel and must REFUSE loudly — never quietly pass a cursor move or
+# permit a read, so P-06 is never weakened.)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _PoisonVerdictCore:
+    """Stub core emitting an OUT-OF-VOCABULARY verdict code.
+
+    Structurally satisfies the ``_BarrierCoreLike`` typing seam (the
+    module's own Protocol) so it can stand in for the compiled
+    ``BarrierCore`` on a constructed barrier — the honest injection
+    point for a state the REAL wheel can never emit (its verdicts are
+    the pinned u8 0-2 / 0-3).
+    """
+
+    current_index = -1
+    records = False
+
+    def touched(self) -> list[int]:
+        return []
+
+    def max_touched(self) -> int | None:
+        return None
+
+    def advance_to(self, index: int) -> int:
+        return 99  # outside the pinned _ADVANCE_* vocabulary
+
+    def access(self, index: int) -> int:
+        return 99  # outside the pinned _ACCESS_* vocabulary
+
+    def reset(self) -> None:
+        return None
+
+
+def test_advance_out_of_vocabulary_verdict_refuses_loudly() -> None:
+    barrier = LookAheadBarrier()
+    barrier._core = _PoisonVerdictCore()  # the _BarrierCoreLike seam
+    with pytest.raises(FeedError, match="out-of-vocabulary") as excinfo:
+        barrier.advance_to(0)
+    # Loud + typed: names the operation, the raw code and the DEC.
+    assert "advance_to" in str(excinfo.value)
+    assert "99" in str(excinfo.value)
+    assert "DEC-FEED-RUST-MATERIALIZE-002" in str(excinfo.value)
+    # Not laundered into the negative/backwards ValueError arms.
+    assert not isinstance(excinfo.value, ValueError)
+
+
+def test_access_out_of_vocabulary_verdict_refuses_loudly() -> None:
+    barrier = LookAheadBarrier()
+    barrier._core = _PoisonVerdictCore()  # the _BarrierCoreLike seam
+    with pytest.raises(FeedError, match="out-of-vocabulary") as excinfo:
+        barrier.access(0)
+    # The read REFUSES (raises) — P-06 is never weakened by a poisoned
+    # wheel; the message names the operation, the raw code and the DEC.
+    assert "access" in str(excinfo.value)
+    assert "99" in str(excinfo.value)
+    assert "DEC-FEED-RUST-MATERIALIZE-002" in str(excinfo.value)
+    # Not laundered into the in-vocabulary LookAheadError arms.
+    assert not isinstance(excinfo.value, LookAheadError)

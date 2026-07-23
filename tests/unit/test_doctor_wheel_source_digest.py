@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 from brutex.doctor import (
+    check_brutex_identity_wheel_source_digest,
     check_fno_math_wheel_source_digest,
     check_wheel_source_digest,
     main,
@@ -63,6 +64,7 @@ def _skip_if_local_wheels_stale() -> None:
     for module_name, crate in (
         ("trading_core._trading_core", "rust/trading-core"),
         ("fno_math._fno_math", "rust/fno-math"),
+        ("brutex_identity._brutex_identity", "rust/brutex-identity"),
     ):
         try:
             compiled = importlib.import_module(module_name)
@@ -136,6 +138,16 @@ class TestLiveWheels:
         assert result.status == "PASS"
         assert "fno_math" in result.detail
         assert crate_source_digest(REPO_ROOT / "rust" / "fno-math") in result.detail
+
+    def test_brutex_identity_live_pass_via_default_crate_root(self) -> None:
+        # DEC-RUST-RUNID-STORES-001 (independent refuter round 2): the third
+        # hard-imported wheel joins BOTH doctor drift nets.
+        _skip_if_local_wheels_stale()
+        result = check_brutex_identity_wheel_source_digest(env={})
+        assert result.name == "wheel_source_digest_brutex_identity"
+        assert result.status == "PASS"
+        assert "brutex_identity" in result.detail
+        assert crate_source_digest(REPO_ROOT / "rust" / "brutex-identity") in result.detail
 
     def test_installed_stamp_matches_twin_recompute_directly(self) -> None:
         _skip_if_local_wheels_stale()
@@ -338,6 +350,38 @@ class TestFnoMathTwinBinding:
         assert result.status == "SKIP"
 
 
+class TestBrutexIdentityTwinBinding:
+    """The brutex_identity wrapper rides the SAME common helper (COMMON rule;
+    DEC-RUST-RUNID-STORES-001 independent refuter round 2 — the third
+    hard-imported wheel gains BOTH doctor drift nets)."""
+
+    def test_env_override_skips(self) -> None:
+        result = check_brutex_identity_wheel_source_digest(env={"BRUTEX_SKIP_WHEEL_FRESHNESS": "1"})
+        assert result.name == "wheel_source_digest_brutex_identity"
+        assert result.status == "SKIP"
+
+    def test_warn_when_not_importable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "brutex_identity._brutex_identity", None)
+        result = check_brutex_identity_wheel_source_digest(env={})
+        assert result.status == "WARN"
+        assert "brutex_identity wheel not importable" in result.detail
+        assert "rust/brutex-identity" in result.detail
+
+    def test_warn_on_mismatch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = _mini_crate(tmp_path)
+        stale = "f" * 64
+        _fake_compiled(monkeypatch, "brutex_identity", "_brutex_identity", __source_digest__=stale)
+        result = check_brutex_identity_wheel_source_digest(crate_root=root, env={})
+        assert result.status == "WARN"
+        assert stale in result.detail
+        assert crate_source_digest(root) in result.detail
+
+    def test_default_env_is_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_SKIP_WHEEL_FRESHNESS", "1")
+        result = check_brutex_identity_wheel_source_digest()
+        assert result.status == "SKIP"
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Aggregation — run_doctor / main
 # ────────────────────────────────────────────────────────────────────────
@@ -386,7 +430,9 @@ class TestSourceDigestAggregation:
             lake_root=tmp_path / "no_lake",
             wheel_source_crate_root=tmp_path / "absent-a",
             fno_math_wheel_source_crate_root=tmp_path / "absent-b",
+            brutex_identity_wheel_source_crate_root=tmp_path / "absent-c",
         )
         statuses = {c.name: c.status for c in report.checks}
         assert statuses["wheel_source_digest"] == "SKIP"
         assert statuses["wheel_source_digest_fno_math"] == "SKIP"
+        assert statuses["wheel_source_digest_brutex_identity"] == "SKIP"

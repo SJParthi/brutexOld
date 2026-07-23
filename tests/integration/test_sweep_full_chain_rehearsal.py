@@ -43,17 +43,47 @@ plus DEBUG-render overhead, not chain feasibility (its stated purpose); pinned,
 it measures the actual chain on the SAME workload every commit, and a REAL
 chain regression on that workload still fails at 300 s (teeth proven by
 ``test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds``).
+
+Rehearsal-scoped budgets (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1817):
+run identity folds ``code_commit_sha``, so the Stage-3 CMA-ES seed and the
+Stage-4 cascade seed re-roll PER COMMIT — on an expensive draw, candidates
+survive into cascade filter #9 (``monte_carlo_permutation_test``,
+``mc_n_permutations=1000`` in production) where each permutation re-runs a
+full pure-Python trade simulation, and — because this test drives
+``cli.cmd_sweep_all`` DIRECTLY, bypassing the ``main()``-dispatch log-volume
+guard (DEC-SWEEP-LOG-VOLUME-GUARD-001) — every simulated trade emitted two
+structlog DEBUG events on an UNCONFIGURED logger. Together those made the
+300 s wall-clock ceiling below commit-seed-dependent (main itself failed it
+at 452.6 s — actions run 29249947445). The ``_rehearsal_env`` bound fixes
+both at the fixture: ``BRUTEX_SWEEP_MC_PERMUTATIONS=100`` (the SAME idiom as
+the ``BRUTEX_SWEEP_DIFFCHECK_K=8`` budget above — the smallest budget whose
+p-value floor ``1/101`` still admits a PASS at the production
+``mc_alpha=0.01``, so filter #9 keeps teeth in both directions while the
+worst-case draw is bounded 10×) + a scoped INFO logging bound (the dispatch
+guard's posture, ``reset_configuration``-fenced so no other test is
+affected). The production default 1000 is UNTOUCHED. The runtime ceiling law
+is the folded TWO-TIER of commit b12257e (the test-file half of PR #1522's
+1711bf99, applied verbatim by a sibling session — merge-reconciled here):
+the STRICT 300 s tier stays fully armed where the process is NOT
+coverage-traced (exactly the dedicated ``sweep-rehearsal`` CI job), and an
+actively-traced process asserts the documented 3x instrumentation allowance
+(900 s). The two layers are COMPLEMENTARY, never redundant: this budget
+bounds the WORKLOAD at root cause (first pass ~3-4 s on a worst draw); the
+two-tier ceiling is the defensive allowance for the coverage TRACER the
+unit job's whole-package ``--cov=brutex --cov-branch`` adds on top — an
+allowance for instrumentation, never an excuse for workload.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import time
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -65,6 +95,7 @@ from brutex.calendars.nse import get_session
 from brutex.data.models import CandleBar
 from brutex.engine.sweep_audit import verify_chain
 from brutex.observability.flight_recorder import iter_run_records
+from brutex.observability.logging import configure_logging, reset_configuration
 from brutex.observability.progress_beat import (
     register_progress_beat,
     unregister_progress_beat,
@@ -75,7 +106,7 @@ pytest.importorskip("polars")
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 pytest.importorskip("lmdb")
-pytest.importorskip("cma")
+pytest.importorskip("brutex_refine")
 
 #: D-6 traceability — test name → requirement/gap tokens (R38 rehearsal file).
 TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
@@ -154,7 +185,88 @@ _CI_K_SAMPLES = 8
 #: cafebabe/deadc0de/baddcafe/feedc0de/d15ea5e0/ba5eba11/5ca1ab1e/ca11ab1e/
 #: b01dface/f005ba11/0ddba11d/deadfa11/fee1dead x5 + 10 repeated-hex-word
 #: constants (transcript in the club-O PR body).
-_PINNED_CODE_COMMIT_SHA: Final[str] = "feedfacefeedfacefeedfacefeedfacefeedface"
+#:
+#: RE-MEASURED at the 2026-07-19 DEC-RUST-STAGE3-REFINE-001 (#1960)
+#: merge-forward: the stage-3 optimizer itself changed (pycma DELETED — the
+#: pure-Rust brutex-refine CMA-ES, a NEW deterministic trajectory + the
+#: 32→64-bit seed widening, both greenfield-sanctioned), so the pycma-tuned
+#: ``"feedface"*5`` pin drew a DSR-KILLED pool under the Rust trajectory
+#: (measured: pool 5 at the old shape, variance ~4.2 at fevals=8 — the
+#: Rust sampler's cells straddle the fixture's benign-SL band differently).
+#: The sha was re-searched per the house pattern (fixture UNTOUCHED this
+#: time — the club-O bars stand): ``"deadbeef"*5`` (the ORIGINAL #1798
+#: constant, restored) draws a 6-candidate pool (3 min-hits survivors + 3
+#: unique Rust-refined cells; variance 0.842 measured) with FIVE candidates
+#: through the DSR gate and the ENTIRE statistical cascade exercised —
+#: walk-forward, CPCV, PBO, SPA/reality-check, Romano-Wolf, lockbox AND the
+#: 1000-permutation Monte-Carlo leg (which genuinely KILLS one: 5 → 4 — a
+#: real MC filter event). Alternates measured law-passing under the Rust
+#: trajectory: abad1dea (DSR 3/7) + cafebabe (DSR 4/7); rejected only for
+#: weaker event coverage (no MC kill). At stage3_fevals=4 the pool COUNT is
+#: machine-stable BY CONSTRUCTION: 4 asks < λ0(=6) is a truncated FIRST
+#: generation — the sampled cells depend only on the in-crate PRNG seed +
+#: x0 + sigma0 (no tell feedback), and the crate's trajectory goldens are
+#: platform-reproduced (#1960), so the pycma-era cross-runner bimodality
+#: class does not apply to the CELL SET (Sharpe VALUES still flow through
+#: Python/libm — the law pin below stays the fleet-wide assertion).
+#: Measured first pass 129.0 s uninstrumented on the 4-vCPU sandbox
+#: (MC runs on 5 candidates — heavier than club-O's MC-on-1 ~20 s shape;
+#: ~2.3x margin to the 300 s strict budget, ~7x to the 900 s coverage
+#: allowance; Golden Rule #10).
+_PINNED_CODE_COMMIT_SHA: Final[str] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+
+#: Rehearsal-sized Stage-4 Monte-Carlo permutation budget
+#: (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1817 — the diffcheck-K idiom):
+#: the SMALLEST budget at which filter #9 keeps teeth in BOTH directions at
+#: the production ``mc_alpha = 0.01`` — the permutation p-value law is
+#: ``(1 + n_beaten) / (n_permutations + 1)``, so 100 permutations put the
+#: floor at ``1/101 < 0.01`` (a genuinely superior candidate can still PASS;
+#: any smaller budget makes the filter a constant-reject) while bounding an
+#: expensive commit-seed draw's worst case at a 10× cut vs the production
+#: ``CascadeConfig.mc_n_permutations = 1000`` (which stays untouched).
+_CI_MC_PERMUTATIONS = 100
+
+
+@contextlib.contextmanager
+def _rehearsal_env() -> Generator[None]:
+    """Bound one rehearsal chain run: CI budgets + the INFO log-volume guard.
+
+    DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817). Three scoped bounds,
+    all restored on exit so no other test in the process is affected:
+
+    * ``BRUTEX_SWEEP_DIFFCHECK_K=8`` — the pre-existing R45 diffcheck budget;
+    * ``BRUTEX_SWEEP_MC_PERMUTATIONS=100`` — the Stage-4 MC permutation
+      budget (resolved fail-loud by ``cmd_sweep_all`` through the
+      ``cascade_config_for_sweep(overrides=…)`` seam; see
+      ``_CI_MC_PERMUTATIONS`` for the both-directions-teeth floor);
+    * a scoped ``configure_logging(level="INFO")`` — this fixture calls
+      ``cli.cmd_sweep_all`` DIRECTLY, bypassing the ``main()``-dispatch
+      log-volume guard (DEC-SWEEP-LOG-VOLUME-GUARD-001), so without it every
+      simulated trade streams two DEBUG events through an unconfigured
+      structlog (~65-70 % of a worst-draw pass's wall clock was renderer
+      cost). ``reset_configuration`` runs BEFORE (clearing any first-use
+      logger cache so the bound genuinely bites) and AFTER (restoring the
+      unconfigured default for later tests — the ``_clean_logging_state``
+      idiom of ``test_cli_sweep_log_level``).
+    """
+    env_budgets = {
+        "BRUTEX_SWEEP_DIFFCHECK_K": str(_CI_K_SAMPLES),
+        "BRUTEX_SWEEP_MC_PERMUTATIONS": str(_CI_MC_PERMUTATIONS),
+    }
+    backups = {name: os.environ.get(name) for name in env_budgets}
+    os.environ.update(env_budgets)
+    reset_configuration()
+    configure_logging(level="INFO", json_renderer=False)
+    try:
+        yield
+    finally:
+        reset_configuration()
+        for name, backup in backups.items():
+            if backup is None:
+                del os.environ[name]
+            else:  # pragma: no cover — env pre-set only outside the suite
+                os.environ[name] = backup
 
 
 def _trading_days(start: date, n: int) -> list[date]:
@@ -276,8 +388,12 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
     old 2/8 breadth minted ~22 unique refined (sl, tp) cells whose Sharpe
     dispersion alone held the DSR trial variance >= 2.5 over N=27 — the
     deflation benchmark sqrt(V)*E[max-z] sat above every candidate. 1/4
-    yields a 9-candidate pool (variance 0.788 measured) while stage-3 still
-    genuinely refines (cells_written > 0 — the sibling test's teeth).
+    yields a bounded pool while stage-3 still genuinely refines
+    (cells_written > 0 — the sibling test's teeth). Under pycma that read a
+    9-candidate pool (variance 0.788); under the Rust brutex-refine
+    trajectory (#1960 merge-forward re-measure, sha re-pinned to
+    ``"deadbeef"*5``) it reads a 6-candidate pool (variance 0.842) — see
+    the ``_PINNED_CODE_COMMIT_SHA`` re-measure note.
     """
     from brutex import cli
 
@@ -410,15 +526,8 @@ def _log_volume_guard() -> Iterator[None]:
 @pytest.fixture(scope="module")
 def rehearsal(tmp_path_factory: pytest.TempPathFactory) -> _Rehearsal:
     """Run the full chain (first pass + resume pass) exactly ONCE per module."""
-    env_backup = os.environ.get("BRUTEX_SWEEP_DIFFCHECK_K")
-    os.environ["BRUTEX_SWEEP_DIFFCHECK_K"] = str(_CI_K_SAMPLES)
-    try:
+    with _rehearsal_env():
         state = _Rehearsal(tmp_path_factory.mktemp("rehearsal"))
-    finally:
-        if env_backup is None:
-            del os.environ["BRUTEX_SWEEP_DIFFCHECK_K"]
-        else:  # pragma: no cover — env pre-set only outside the suite
-            os.environ["BRUTEX_SWEEP_DIFFCHECK_K"] = env_backup
     print(f"\nrehearsal.first_pass.seconds={state.seconds_first:.2f}")
     print(f"rehearsal.resume_pass.seconds={state.seconds_second:.2f}")
     return state
@@ -489,7 +598,10 @@ def test_r38_rehearsal_runtime_is_ci_feasible(rehearsal: _Rehearsal) -> None:
     uninstrumented (the dedicated rehearsal job); the documented 3x
     instrumentation allowance where coverage.py is actively tracing (the
     unit job's whole-package branch tracing). The 300.0 strict budget itself
-    is UNCHANGED (never weakened).
+    is UNCHANGED (never weakened). Complementary to — never a substitute
+    for — the DEC-REHEARSAL-MC-BUDGET-001 root-cause budget
+    (``_rehearsal_env``: MC=100 + the INFO logging bound), which bounds the
+    workload itself; this ceiling is the defensive tracer-allowance layer.
     """
     ceiling = _RUNTIME_CEILING_COVERAGE_S if _coverage_instrumented() else _RUNTIME_CEILING_S
     assert rehearsal.seconds_first < ceiling, (
@@ -568,6 +680,23 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     # the pool is NOT DSR-killed and every leg receives + processes >= 1
     # candidate — which BOTH measured shapes satisfy while a DSR-KILLED
     # fast path (the #1798 rot) still fails loud.
+    #
+    # RUST STAGE-3 RE-MEASURE (2026-07-19, the DEC-RUST-STAGE3-REFINE-001
+    # #1960 merge-forward — the optimizer ITSELF changed: pycma deleted, the
+    # pure-Rust brutex-refine CMA-ES + the 64-bit seed widening, both
+    # greenfield-sanctioned): the pycma-tuned "feedface"*5 pin drew a
+    # DSR-killed pool under the Rust trajectory, so the sha was re-searched
+    # per the house pattern (fixture + breadth UNTOUCHED) and re-pinned to
+    # "deadbeef"*5 — see the _PINNED_CODE_COMMIT_SHA re-measure note. The
+    # measured Rust-era shape on this pin: pool 6 (3 min-hits survivors + 3
+    # unique refined cells; trial variance 0.842), DSR passes 5, every mid
+    # leg keeps 5, lockbox keeps 5, and the 1000-permutation MC leg
+    # genuinely KILLS one (5 → 4 — a real MC filter event). At fevals=4 the
+    # CELL SET is a truncated pre-tell first generation of the in-crate
+    # PRNG, so the pool COUNT (6) is machine-stable by construction (the
+    # pycma bimodality root — BLAS/SIMD-sensitive numpy trajectories — is
+    # gone from stage-3); Sharpe VALUES still flow through Python/libm, so
+    # the LAW-pin posture below stays.
     surv = report["groups"][0]["report"]["stage_survivors"]
     _msg = "the pinned seed's full-cascade coverage broke — re-derive consciously (#1798)"
     assert set(surv) == {
@@ -581,9 +710,17 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
         "lockbox",
         "monte_carlo",
     }, _msg
-    # The pool SIZE is trajectory-count-stable (3 min-hits survivors + 6
-    # unique refined cells — 9 in every measured env, both attractors).
-    assert surv["hard_gates"] == 9, _msg
+    # The pool SIZE is trajectory-count-stable (3 min-hits survivors + 4
+    # unique Rust-refined cells — a pre-tell first-generation cell set,
+    # machine-stable by construction; see the re-measure note above).
+    # EXEC-GRID RE-MEASURE (2026-07-22): re-measured 3x deterministic
+    # (7/7/7) on the exec-grid folded tree — DEC-FILL-EXEC-GRID-1M-001
+    # re-keys run identity, so the pinned-sha stage-3 seed draw re-shapes
+    # the candidate pool (the fevals=4 first generation now lands 4
+    # DISTINCT quantized cells, was 3; measured cells_written=4 +
+    # cascade n_input=7); conscious re-pin per
+    # DEC-R38-REHEARSAL-DETERMINISM-001 — never a blind bump.
+    assert surv["hard_gates"] == 7, _msg
     dsr = surv["deflated_sharpe"]
     assert 1 <= dsr <= surv["hard_gates"], _msg  # NOT DSR-killed — the legs run
     for leg in ("walk_forward", "cpcv", "pbo", "reality_check_spa", "romano_wolf"):
@@ -594,6 +731,11 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     assert 0 <= surv["monte_carlo"] <= surv["lockbox"], _msg
     manifest = json.loads((rehearsal.results_root / "cascade" / "manifest.json").read_text())
     assert manifest["sweep_id"] == rehearsal.run_id
+    # DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817): the env-resolved MC
+    # budget travelled the cascade_config_for_sweep(overrides=…) seam into the
+    # MANIFEST-STORED config — the manual `brutex cascade` replay reads only
+    # this frozen value, so the replay stays exact under the override.
+    assert manifest["cascade_config"]["mc_n_permutations"] == _CI_MC_PERMUTATIONS
 
 
 def test_r28_manifest_contract_shape_and_funnel(rehearsal: _Rehearsal) -> None:
@@ -849,15 +991,8 @@ class _Adversarial:
 
 @pytest.fixture(scope="module")
 def adversarial(tmp_path_factory: pytest.TempPathFactory) -> _Adversarial:
-    env_backup = os.environ.get("BRUTEX_SWEEP_DIFFCHECK_K")
-    os.environ["BRUTEX_SWEEP_DIFFCHECK_K"] = str(_CI_K_SAMPLES)
-    try:
+    with _rehearsal_env():
         state = _Adversarial(tmp_path_factory.mktemp("adversarial"))
-    finally:
-        if env_backup is None:
-            del os.environ["BRUTEX_SWEEP_DIFFCHECK_K"]
-        else:  # pragma: no cover — env pre-set only outside the suite
-            os.environ["BRUTEX_SWEEP_DIFFCHECK_K"] = env_backup
     print(f"\nrehearsal.adversarial.seconds={state.seconds:.2f}")
     return state
 

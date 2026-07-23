@@ -64,6 +64,7 @@ def test_evaluate_combo_walk_forward_scores_every_fold() -> None:
         required_mask=0,  # enter every bar
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -98,6 +99,7 @@ def test_schedule_passes_lookahead_barrier() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -116,6 +118,7 @@ def test_run_hash_changes_with_schedule_but_is_otherwise_stable() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -125,6 +128,7 @@ def test_run_hash_changes_with_schedule_but_is_otherwise_stable() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -139,6 +143,7 @@ def test_run_hash_changes_with_schedule_but_is_otherwise_stable() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=12,
         test_days=5,
         step_days=5,
@@ -154,6 +159,7 @@ def test_no_trade_mask_holds_up_false_but_well_formed() -> None:
         required_mask=_IMPOSSIBLE_MASK,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -174,6 +180,7 @@ def test_walk_forward_sweep_matches_single_combo() -> None:
         masks,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -185,6 +192,7 @@ def test_walk_forward_sweep_matches_single_combo() -> None:
             required_mask=mask,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             train_days=10,
             test_days=5,
             step_days=5,
@@ -203,6 +211,7 @@ def test_too_few_days_raises() -> None:
             required_mask=0,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             train_days=10,
             test_days=5,
             step_days=5,
@@ -211,6 +220,8 @@ def test_too_few_days_raises() -> None:
 
 def test_empty_bars_raise() -> None:
     with pytest.raises(ValueError, match="non-empty"):
-        evaluate_combo_walk_forward([], required_mask=0, direction=Side.BUY, tf_minutes=1)
+        evaluate_combo_walk_forward(
+            [], required_mask=0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=[]
+        )
     with pytest.raises(ValueError, match="non-empty"):
-        walk_forward_sweep([], [0], direction=Side.BUY, tf_minutes=1)
+        walk_forward_sweep([], [0], direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])

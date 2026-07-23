@@ -54,6 +54,25 @@ def make_result_metrics(**overrides: Any) -> ResultMetrics:
         "skewness": 0.0,
         "kurtosis": 0.0,
         "returns_std_dev": 0.0,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate consistent with the
+        # counts above (losing 20 / total 50); the Kelly pair defaults
+        # None (undefined) — override per test where the value matters.
+        "loss_rate": 0.4,
+        "kelly_fraction": None,
+        "log_growth_at_half_kelly": None,
+        # Exit quality (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): a
+        # concrete SL-exit share consistent with the counts above (10 SL
+        # exits of 50 trades — a subset of the 20 losers); passes the
+        # default-inactive max_sl_hit_rate door. Override per test.
+        "sl_hit_rate": 0.2,
+        # Recency (DEC-METRICS-TRAILING-WINDOW-001): defaults None — the
+        # honest anchor-less legacy arm. Override per test where the
+        # trailing/decay values matter.
+        "trailing_sharpe_ratio": None,
+        "trailing_profit_factor": None,
+        "trailing_net_pnl_paisa": None,
+        "decay_weighted_net_paisa": None,
     }
     base.update(overrides)
     return ResultMetrics(**base)

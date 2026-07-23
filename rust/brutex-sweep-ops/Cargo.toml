@@ -1,0 +1,73 @@
+# brutex-sweep-ops — the sweep run-core/ops conversion crate (Rust).
+#
+# DEC-RUST-SWEEP-OPS-001: the STANDALONE crate hosting the sweep run-core/ops
+# remainder as it converts Python → Rust slice by slice behind the default-OFF
+# `BRUTEX_SWEEP_OPS_RUST` facade (`brutex/engine/sweep_ops_rust.py`), with the
+# verbatim Python implementations RETAINED as the live parity oracles until the
+# final slice's default flip (its own DEC).
+#
+# Layout law (slice 0): `src/lib.rs` is a pure module manifest — ONE `pub mod`
+# per planned conversion slice, each slice a SEPARATE .rs file — so later slice
+# workers touch ONLY their own module file (+ a small registration block in
+# `src/python.rs`) and lib.rs never becomes a merge-collision hub.
+#
+# CARVED OUT of this crate's scope entirely (in-flight PR ownership; their
+# Python APIs are frozen boundaries this crate calls BACK into via the facade):
+# sweep_parallel · sweep_cache · sweep_run · sweep_supervisor.
+#
+# Pure-Rust-first (rlib, dependency-free core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature (turned
+# on by maturin for the wheel build) — the brutex-feed / trading-core shape.
+#
+# Standalone crate — deliberately NOT in any Cargo workspace (the sibling
+# rust/fno-math + rust/trading-core + rust/brutex-feed + rust/brutex-lake are
+# standalone too; CI cargo jobs target crate dirs explicitly).
+
+[package]
+name = "brutex-sweep-ops"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Sweep run-core/ops conversion crate for BruteX (DEC-RUST-SWEEP-OPS-001)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published (mirrors fno-math / trading-core / brutex-feed).
+publish = false
+
+[lib]
+name = "brutex_sweep_ops"
+path = "src/lib.rs"
+# cdylib so `import brutex_sweep_ops._brutex_sweep_ops` finds the maturin-built
+# extension; rlib so `cargo test` links the pure-Rust core with no libpython.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust core needs NO Python. The PyO3 module is opt-in: `cargo test`
+# (default features) builds + links zero Python symbols. maturin turns
+# `python` on for the wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Slice 2 (audit_chain): the official BLAKE3 crate — the SAME algorithm the
+# Python side's pure-pip `blake3` package implements (sweep_audit's chain) and
+# the SAME crate rust/fno-math already pins for `blake3_hash` (version floor
+# mirrored — a skew between the two crates would be an algorithm-identical
+# but lockstep-hygiene divergence, so keep them aligned). NOT a new hash law:
+# the chain's byte layout stays defined by brutex/engine/sweep_audit.py and
+# is burn-in + cross-language-golden pinned.
+blake3 = "1.5"
+
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true # Finance code — an overflow must never be silent.

@@ -669,3 +669,140 @@ class TestCascadeJoinWriterToWire:
         assert payload["status"] == "corrupt", payload["detail"]
         assert payload["row_count"] == 0
         assert "schema_version" in payload["detail"]
+
+
+# ---------------------------------------------------------------------------
+# DEC-ALPHA-BUYHOLD-METRIC-001 — the alpha triple writer → reader → route.
+# ---------------------------------------------------------------------------
+from brutex.engine.alpha_metric import AlphaBaseline  # noqa: E402
+
+
+def _alpha_engine_artifact() -> engine_top100.Top100Artifact:
+    """A REAL alpha-carrying artifact from the engine's own builder.
+
+    Hand-derivable: net +₹100 on ₹10,000 equity = +1%; B&H ₹20,000.00 →
+    ₹20,400.00 = +2% → alpha −1.0 for every fixture candidate.
+    """
+    candidates = [make_candidate(n, fingerprint=f"fp{n:02d}" + "0" * 62) for n in (1, 2)]
+    families = TwinFamilies(
+        family_by_run_id={run_id_of(n): run_id_of(n) for n in (1, 2)},
+        members_by_family={run_id_of(n): (run_id_of(n),) for n in (1, 2)},
+    )
+    return build_top100(
+        candidates,
+        run_id=_GRID_RUN_ID,
+        preset="min_dd_first",
+        families=families,
+        counts=PoolCounts(stores=1, excluded_no_aggs=0, zero_trade_excluded=0, parity_excluded=0),
+        data_snapshot_hashes=["a" * 64],
+        baselines={"NIFTY": "baseline-NIFTY.json"},
+        alpha_baselines={"NIFTY": AlphaBaseline(2_000_000, 2_040_000)},
+        start_equity_paisa=1_000_000,
+    )
+
+
+class TestAlphaWriterReaderRouteChain:
+    """Writer bytes → load_top100 → /api/v1/oneclick/top100 wire, alpha intact."""
+
+    def test_alpha_triple_survives_the_reader_boundary(self, tmp_path: Path) -> None:
+        artifact = _alpha_engine_artifact()
+        _write_engine_artifact(tmp_path / "lake", artifact)
+        run_dir = (tmp_path / "lake" / "sweep_runs") / _GRID_RUN_ID
+        result = oc.load_top100(run_dir)
+        assert result.status == "ok", result.detail
+        for row in result.rows:
+            metrics = row["metrics"]
+            assert metrics["alpha_pct"] == -1.0
+            assert metrics["strategy_return_pct"] == 1.0
+            assert metrics["bh_return_pct"] == 2.0
+
+    def test_alpha_reaches_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from brutex.dashboard.app import DashboardState, build_app
+        from fastapi.testclient import TestClient
+
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _alpha_engine_artifact())
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        for row in payload["rows"]:
+            assert row["metrics"]["alpha_pct"] == -1.0
+
+    def test_pre_alpha_artifact_serves_no_alpha_keys_on_the_wire(self, tmp_path: Path) -> None:
+        """A default (no alpha inputs) artifact carries NO alpha keys — the
+        client renders the honest '—', never a fabricated 0 (the #1631 law)."""
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from brutex.dashboard.app import DashboardState, build_app
+        from fastapi.testclient import TestClient
+
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _engine_artifact())
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok"
+        for row in payload["rows"]:
+            assert "alpha_pct" not in row["metrics"]
+
+
+class TestTierWriterToWire:
+    """DEC-RANKING-SPLUS-TIER-001: the tier object writer → reader → wire chain."""
+
+    _client = staticmethod(TestEngineWriterThroughRoutes._client)
+
+    def test_tier_flows_writer_to_reader_stamped_with_server_text(self, tmp_path: Path) -> None:
+        artifact = _engine_artifact()
+        run_dir = tmp_path / "sweep_runs"
+        write_top100(run_dir, artifact)
+        result = oc.load_top100(run_dir / _GRID_RUN_ID)
+        assert result.status == "ok", result.detail
+        for row in result.rows:
+            tier = row["tier"]
+            # The wp5 fixture rows classify at "A" (the golden's audit);
+            # the bridge stamped the ONE server-built display text.
+            assert tier["label"] == "A"
+            assert isinstance(tier["blocked_next"], list) and tier["blocked_next"]
+            assert tier["status_text"].startswith("A — blocked from S: ")
+
+    def test_tier_reaches_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _engine_artifact())
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        for row in payload["rows"]:
+            assert row["tier"]["label"] == "A"
+            assert isinstance(row["tier"]["status_text"], str)
+
+    def test_pre_tier_artifact_serves_no_tier_keys(self, tmp_path: Path) -> None:
+        """Back-compat end-to-end: a PRE-tier artifact serves with NO tier
+        keys (the clients render '—'), never corrupt.
+
+        Fold re-derivation (train-b 2026-07-21, PR #1578 reconcile): the
+        woven #1959 reader law hard-gates ``schema_version == 2``, so the
+        frozen v1 fixture as-is now reads a NAMED ``corrupt`` on the wire
+        (pinned by ``TestCascadeJoinWriterToWire``'s ``reads_corrupt`` twin).
+        The member claim under test is TIER-key absence tolerance, not the
+        version gate — the COPY is re-stamped to v2 (the L1
+        ``schema_version`` re-derivation class), everything else verbatim.
+        """
+        import shutil
+
+        fixtures = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
+        run_id = "grid" + "0" * 60
+        lake = tmp_path / "lake"
+        (lake / "sweep_runs").mkdir(parents=True)
+        run_dir = lake / "sweep_runs" / run_id
+        shutil.copytree(fixtures / "top100_pre_cascade_v1" / run_id, run_dir)
+        artifact_path = run_dir / "top100.json"
+        payload_doc = json.loads(artifact_path.read_text(encoding="utf-8"))
+        payload_doc["schema_version"] = 2
+        artifact_path.write_text(json.dumps(payload_doc), encoding="utf-8")
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={run_id}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        assert all("tier" not in row for row in payload["rows"])

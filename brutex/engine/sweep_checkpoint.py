@@ -49,6 +49,11 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.guarded_read import read_regular_text_deadline
+from brutex.engine.sweep_ops_rust import (
+    routed_checkpoint_adoption_verdict,
+    routed_checkpoint_record_decision,
+    sweep_ops_rust_enabled,
+)
 from brutex.models import BruteXError
 
 _LOG = structlog.get_logger("brutex.engine.sweep_checkpoint")
@@ -70,6 +75,44 @@ MAX_CHECKPOINT_BYTES: Final[int] = 1 << 20
 
 class SweepCheckpointError(BruteXError):
     """Raised on a malformed checkpoint payload or a checkpoint I/O failure."""
+
+
+def _record_decision_python(completed_index: int, last_index: int, total_combos: int) -> str:
+    """The verbatim monotonic-advance decision — the ``record`` guard order.
+
+    The LIVE parity oracle for the DEC-RUST-SWEEP-OPS-001 routed law
+    (``routed_checkpoint_record_decision``): the guard ORDER is frozen
+    (below-zero → beyond-total → the never-rewind ``noop`` → ``advance``);
+    the refusal MESSAGE bytes, the in-memory high-water mutation and the
+    atomic save stay with :meth:`SweepCheckpointStore.record`.
+    """
+    if completed_index < 0:
+        return "reject_below_zero"
+    if completed_index >= total_combos:
+        return "reject_beyond_total"
+    if completed_index <= last_index:
+        return "noop"
+    return "advance"
+
+
+def _adoption_verdict_python(
+    store_sweep_id: str, store_total: int, cp_sweep_id: str, cp_total: int
+) -> str:
+    """The verbatim load-tail adoption verdict — foreign vs tamper vs adopt.
+
+    The LIVE parity oracle for the DEC-RUST-SWEEP-OPS-001 routed law
+    (``routed_checkpoint_adoption_verdict``): a FOREIGN ``sweep_id`` is
+    another sweep's valid state (ignored upstream, never quarantined); a
+    same-id checkpoint with a diverging ``total_combos`` is
+    corruption/tampering by construction (the loud refusal). The refusal
+    MESSAGE bytes + the adoption side effect stay with
+    :meth:`SweepCheckpointStore.load`.
+    """
+    if cp_sweep_id != store_sweep_id:
+        return "foreign"
+    if cp_total != store_total:
+        return "total_mismatch"
+    return "adopt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,10 +366,26 @@ class SweepCheckpointStore:
             # corruption, same contract as malformed JSON (refuter-confirmed).
             raise SweepCheckpointError(f"Malformed checkpoint JSON at {self._path}: {exc}") from exc
         checkpoint = SweepCheckpoint.from_dict(data)
-        if checkpoint.sweep_id != self._sweep_id:
+        # The adoption VERDICT routes through the default-OFF
+        # DEC-RUST-SWEEP-OPS-001 seam (:func:`_adoption_verdict_python` is the
+        # LIVE oracle; flag OFF = the verbatim Python decision). Message bytes
+        # + the adoption side effect stay HERE.
+        verdict_args = (
+            self._sweep_id,
+            self._total_combos,
+            checkpoint.sweep_id,
+            checkpoint.total_combos,
+        )
+        if sweep_ops_rust_enabled():
+            verdict = routed_checkpoint_adoption_verdict(
+                *verdict_args, python_law=lambda: _adoption_verdict_python(*verdict_args)
+            )
+        else:
+            verdict = _adoption_verdict_python(*verdict_args)
+        if verdict == "foreign":
             # A checkpoint from a different sweep — never resume from it.
             return None
-        if checkpoint.total_combos != self._total_combos:
+        if verdict == "total_mismatch":
             # Same sweep_id but a DIFFERENT total: the id is derived from the
             # same inputs as the total (grid identity / backfill plan), so this
             # is corruption or tampering — refuse LOUDLY rather than adopting
@@ -461,16 +520,28 @@ class SweepCheckpointStore:
             If ``completed_index`` is outside ``[0, total_combos)``, or the
             atomic write fails.
         """
-        if completed_index < 0:
+        # The advance DECISION routes through the default-OFF
+        # DEC-RUST-SWEEP-OPS-001 seam (:func:`_record_decision_python` is the
+        # LIVE oracle; flag OFF = the verbatim Python guards). Message bytes,
+        # the high-water mutation and the atomic save stay HERE — the
+        # never-rewind ordering law is untouched.
+        decision_args = (completed_index, self._last_index, self._total_combos)
+        if sweep_ops_rust_enabled():
+            decision = routed_checkpoint_record_decision(
+                *decision_args, python_law=lambda: _record_decision_python(*decision_args)
+            )
+        else:
+            decision = _record_decision_python(*decision_args)
+        if decision == "reject_below_zero":
             raise SweepCheckpointError(
                 f"record: completed_index must be >= 0, got {completed_index}"
             )
-        if completed_index >= self._total_combos:
+        if decision == "reject_beyond_total":
             raise SweepCheckpointError(
                 f"record: completed_index ({completed_index}) must be "
                 f"< total_combos ({self._total_combos})"
             )
-        if completed_index <= self._last_index:
+        if decision == "noop":
             return False
         self._last_index = completed_index
         self.save(self._build_checkpoint())

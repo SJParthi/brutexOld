@@ -63,3 +63,66 @@ def test_mirror_reads_os_environ_by_default(monkeypatch) -> None:  # type: ignor
     """With ``env=None`` the resolver reads ``os.environ`` (the production path)."""
     monkeypatch.setenv(MIRROR_ROOT_ENV, "/mnt/env")
     assert mirror_run_dir(_RUN_ID) == Path("/mnt/env") / _RUN_ID
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1 routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the three run-layout join sites.
+
+    Wheel-free: a behavior-correct FAKE crate is injected by patching the
+    facade's ``importlib`` binding (deterministic whether or not the real
+    ``brutex_sweep_ops`` wheel is installed). Flag ON must be value-identical
+    to the flag-OFF Python law (the routed law's burn-in enforces it too).
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_run_dir_flag_on_matches_python_law(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert run_dir(Path("/lake/sweeps"), _RUN_ID) == (
+                Path("/lake/sweeps") / RUN_DIR_SUBDIR / _RUN_ID
+            )
+        finally:
+            self._reset_facade()
+
+    def test_mirror_override_flag_on_matches_python_law(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert mirror_run_dir(_RUN_ID, env={MIRROR_ROOT_ENV: "/mnt/mirror"}) == (
+                Path("/mnt/mirror") / _RUN_ID
+            )
+        finally:
+            self._reset_facade()
+
+    def test_mirror_home_flag_on_matches_python_law(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert mirror_run_dir(_RUN_ID, env={}) == (Path.home() / ".brutex" / "runs" / _RUN_ID)
+        finally:
+            self._reset_facade()

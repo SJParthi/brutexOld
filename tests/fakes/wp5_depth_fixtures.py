@@ -103,6 +103,13 @@ def make_agg(run_id: str, *, fingerprint: str, **overrides: Any) -> ComboAggrega
         "exits_forced_1520": 5,
         "exits_end_of_data": 0,
         "exits_session_gap": 0,
+        # DEC-FILL-EXEC-GRID-1M-001: the five 1m-execution-grid counters
+        # (AGG_COLUMNS 50 → 55), zero on this fixture's synthetic pool.
+        "exits_deferred": 0,
+        "signals_dropped_collision": 0,
+        "fill_slid_minutes": 0,
+        "exit_fill_slid_minutes": 0,
+        "forced_fill_slid_minutes": 0,
         "max_consecutive_losses": 3,
         "max_consecutive_wins": 6,
         "composite_score": 1.25,

@@ -123,6 +123,7 @@ def _wire_candidate(*, compute_regime_evidence: bool = True) -> tuple[object, li
         bar_bits=bar_bits,
         direction_label="bull",
         tf_minutes=1,
+        exec_bars_1m=bars,
         sl_paisa=None,
         tp_paisa=None,
         start_equity_paisa=10_000_000,
@@ -144,6 +145,7 @@ def _resimulated_trades(bars: list[CandleBar]) -> list[object]:
             mask_to_entry_signals(bar_bits, 0),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=None,
             take_profit_paisa=None,
             reference_stamper=None,
@@ -238,15 +240,17 @@ def _threading_spec() -> cw.CascadeTupleSpec:
 
 
 def test_candidates_for_spec_default_threads_no_evidence() -> None:
-    cands = cw.candidates_for_spec(_threading_spec(), _multi_day_bars())
+    bars = _multi_day_bars()
+    cands = cw.candidates_for_spec(_threading_spec(), bars, exec_bars_1m=bars)
     assert len(cands) == 1
     assert cands[0].trade_trend_tokens is None
     assert cands[0].trade_era_labels is None
 
 
 def test_candidates_for_spec_explicit_flag_threads_evidence() -> None:
+    bars = _multi_day_bars()
     cands = cw.candidates_for_spec(
-        _threading_spec(), _multi_day_bars(), compute_regime_evidence=True
+        _threading_spec(), bars, exec_bars_1m=bars, compute_regime_evidence=True
     )
     assert len(cands) == 1
     assert cands[0].trade_trend_tokens is not None

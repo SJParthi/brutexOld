@@ -18,9 +18,11 @@ no assumptions, no hallucination (CLAUDE.md Rule #1 / Rule #10). `source .venv/b
 3. **Integration suite:** `python -m pytest tests/integration -q 2>&1 | tail -8`.
 4. **Property suite:** `python -m pytest tests/property -q 2>&1 | tail -8`.
 5. **Lint / format:** `ruff check brutex tests` · `ruff format --check brutex`.
-6. **Types:** `pyright <touched modules>`; `mypy --strict brutex 2>&1 | tail -5`. NOTE: a single
-   `cma` import-stub error in `brutex/engine/stage3_refine.py` is the KNOWN optional-dep env gap
-   (a Limitation, NOT a regression) — report it as such, never as a failure.
+6. **Types:** `pyright <touched modules>`; `mypy --strict brutex 2>&1 | tail -5`. NOTE: a
+   `brutex_refine` import-not-found error in `brutex/engine/refine_rust.py` means the Stage-3
+   Rust wheel is not built in this env (DEC-RUST-STAGE3-REFINE-001 — build with
+   `maturin develop --release` inside rust/brutex-refine); report it as a Limitation of the
+   env, never as a code regression.
 7. **Rust kernels (if cargo available):** `cd rust/trading-core && cargo test --quiet`;
    `cd rust/fno-math && cargo test --quiet`. If network/cargo unavailable → mark **Unknown**.
 

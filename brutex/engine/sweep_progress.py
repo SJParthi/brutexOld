@@ -46,6 +46,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade. The
+# five snapshot derived-metric properties gate on `sweep_ops_rust_enabled()`
+# FIRST so the flag-OFF default path is byte-identical; the verbatim Python
+# property bodies live ONCE below as the `_*_python` module-level laws (the
+# live oracles) consumed by BOTH the OFF branches and the oracle closure.
+# The lock/state machine stays Python (threading is not a law).
+from brutex.engine.sweep_ops_rust import routed_progress_derived, sweep_ops_rust_enabled
+
 #: The five lifecycle states a sweep moves through.
 STATE_IDLE: Final[str] = "idle"
 STATE_RUNNING: Final[str] = "running"
@@ -103,15 +111,16 @@ class SweepProgressSnapshot:
     @property
     def percent(self) -> float:
         """Completion percentage in ``[0, 100]`` — ``0.0`` when nothing enumerated."""
-        if self.enumerated <= 0:
-            return 0.0
-        return min(100.0, round(self.evaluated / self.enumerated * 100.0, 1))
+        if sweep_ops_rust_enabled():
+            return _routed_derived(self)[0]
+        return _percent_python(self.enumerated, self.evaluated)
 
     @property
     def elapsed_seconds(self) -> float:
         """Seconds between :meth:`SweepProgress.start` and the last mutation."""
-        elapsed = self.updated_at - self.started_at
-        return elapsed if elapsed > 0.0 else 0.0
+        if sweep_ops_rust_enabled():
+            return _routed_derived(self)[1]
+        return _elapsed_python(self.started_at, self.updated_at)
 
     @property
     def combos_per_sec(self) -> float:
@@ -120,10 +129,9 @@ class SweepProgressSnapshot:
         ``0.0`` until at least one combo has been evaluated over a positive
         elapsed span (avoids a divide-by-zero on the very first snapshot).
         """
-        elapsed = self.elapsed_seconds
-        if elapsed <= 0.0 or self.evaluated <= 0:
-            return 0.0
-        return self.evaluated / elapsed
+        if sweep_ops_rust_enabled():
+            return _routed_derived(self)[2]
+        return _rate_python(self.evaluated, self.started_at, self.updated_at)
 
     @property
     def eta_seconds(self) -> float | None:
@@ -134,20 +142,16 @@ class SweepProgressSnapshot:
         Honest envelope: this is an extrapolation from the *current* rate, not
         a guarantee (see the module docstring).
         """
-        rate = self.combos_per_sec
-        if rate <= 0.0 or self.enumerated <= 0:
-            return None
-        remaining = self.enumerated - self.evaluated
-        if remaining <= 0:
-            return 0.0
-        return remaining / rate
+        if sweep_ops_rust_enabled():
+            return _routed_derived(self)[3]
+        return _eta_python(self.enumerated, self.evaluated, self.started_at, self.updated_at)
 
     @property
     def survivor_rate(self) -> float:
         """Survivors as a fraction of evaluated combos — ``0.0`` when none evaluated."""
-        if self.evaluated <= 0:
-            return 0.0
-        return self.survivors / self.evaluated
+        if sweep_ops_rust_enabled():
+            return _routed_derived(self)[4]
+        return _survivor_rate_python(self.survivors, self.evaluated)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for an SSE / polling progress route."""
@@ -168,6 +172,83 @@ class SweepProgressSnapshot:
             "started_at": self.started_at,
             "updated_at": self.updated_at,
         }
+
+
+# ── DEC-RUST-SWEEP-OPS-001 (slice 1b): the verbatim derived-metric laws ──
+# Each `_*_python` body is the pre-conversion property body moved verbatim
+# (the live parity oracle, retained until the final slice's default flip);
+# the helpers call EACH OTHER — never the routed properties — so the oracle
+# closure can never re-enter the routed path.
+
+
+def _percent_python(enumerated: int, evaluated: int) -> float:
+    """The verbatim ``percent`` law — the live parity oracle."""
+    if enumerated <= 0:
+        return 0.0
+    return min(100.0, round(evaluated / enumerated * 100.0, 1))
+
+
+def _elapsed_python(started_at: float, updated_at: float) -> float:
+    """The verbatim ``elapsed_seconds`` law — the live parity oracle."""
+    elapsed = updated_at - started_at
+    return elapsed if elapsed > 0.0 else 0.0
+
+
+def _rate_python(evaluated: int, started_at: float, updated_at: float) -> float:
+    """The verbatim ``combos_per_sec`` law — the live parity oracle."""
+    elapsed = _elapsed_python(started_at, updated_at)
+    if elapsed <= 0.0 or evaluated <= 0:
+        return 0.0
+    return evaluated / elapsed
+
+
+def _eta_python(
+    enumerated: int, evaluated: int, started_at: float, updated_at: float
+) -> float | None:
+    """The verbatim ``eta_seconds`` law — the live parity oracle."""
+    rate = _rate_python(evaluated, started_at, updated_at)
+    if rate <= 0.0 or enumerated <= 0:
+        return None
+    remaining = enumerated - evaluated
+    if remaining <= 0:
+        return 0.0
+    return remaining / rate
+
+
+def _survivor_rate_python(survivors: int, evaluated: int) -> float:
+    """The verbatim ``survivor_rate`` law — the live parity oracle."""
+    if evaluated <= 0:
+        return 0.0
+    return survivors / evaluated
+
+
+def _derived_python(
+    snapshot: SweepProgressSnapshot,
+) -> tuple[float, float, float, float | None, float]:
+    """The full five-metric oracle tuple the routed law burn-in compares."""
+    return (
+        _percent_python(snapshot.enumerated, snapshot.evaluated),
+        _elapsed_python(snapshot.started_at, snapshot.updated_at),
+        _rate_python(snapshot.evaluated, snapshot.started_at, snapshot.updated_at),
+        _eta_python(
+            snapshot.enumerated, snapshot.evaluated, snapshot.started_at, snapshot.updated_at
+        ),
+        _survivor_rate_python(snapshot.survivors, snapshot.evaluated),
+    )
+
+
+def _routed_derived(
+    snapshot: SweepProgressSnapshot,
+) -> tuple[float, float, float, float | None, float]:
+    """Route the derived-metrics cluster through the sweep-ops facade (flag-ON)."""
+    return routed_progress_derived(
+        snapshot.enumerated,
+        snapshot.evaluated,
+        snapshot.survivors,
+        snapshot.started_at,
+        snapshot.updated_at,
+        python_law=lambda: _derived_python(snapshot),
+    )
 
 
 def _monotonic() -> float:

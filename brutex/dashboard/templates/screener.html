@@ -122,6 +122,15 @@
       <select id="scDir"><option value="">All</option></select></div>
     <div class="ctl"><label for="scInstrument">Instrument</label>
       <select id="scInstrument"><option value="">All</option></select></div>
+    <div class="ctl"><label for="scTierSel">Tier</label>
+      <select id="scTierSel"><option value="">All</option></select></div>
+    <!-- `DEC-OPTIONS-EXEC-FEEDBACK-001` executability selection: rows
+         without the additive options_exec object never match an active
+         filter (absent-key law — bx-screener.js bxFilterRow). -->
+    <div class="ctl"><label for="scExec">Executability</label>
+      <select id="scExec"><option value="">All</option>
+        <option value="priced">Options-priced</option>
+        <option value="positive">Net &gt; 0 after costs</option></select></div>
     <div class="ctl"><label for="scMinWin">Min win %</label>
       <input id="scMinWin" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scMinPf">Min PF</label>
@@ -144,10 +153,13 @@
        deliberately DIFFERS from /results (Rank-by metric, descending);
        loadRows fills the live preset via textContent — no sort is changed. -->
   <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
+  <!-- Legend (design-system depth law): every marker/suffix THIS page renders,
+       explained in one static muted line — honesty surfaces stay verbatim. -->
+  <div class="count" id="scLegend">legend: "—" = value absent from the run artifact (never fabricated) · "not stamped" = the run carries no VIX band (honest NULL, R31) · "×" joins a strategy's conditions · "▲/▼" = the active sort</div>
 
   <div id="scPanel"></div>
-  <div class="tablewrap">
-    <table id="scTable">
+  <div class="tablewrap bx-tablewrap">
+    <table id="scTable" class="bx-table">
       <thead><tr id="scHead"></tr></thead>
       <tbody id="scRows"></tbody>
     </table>
@@ -159,9 +171,11 @@
 
   <div id="bxTip" hidden></div>
 
-<!-- The page wiring moved VERBATIM into the shared
+<!-- The page wiring was ported into the shared
      /static/bx-screener-panel.js (DEC-OPERATOR-PAGE-CONSOLIDATE-001):
-     it self-mounts on the data-bx-autopanel="screener" attribute above
+     the top100 load now rides the getTop100 promise memo (+ BXUI
+     skeleton/errorCard and a loadGen stale-response guard); it
+     self-mounts on the data-bx-autopanel="screener" attribute above
      (?run_id= wins, else the latest discovered run). -->
 </body>
 </html>

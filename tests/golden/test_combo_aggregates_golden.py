@@ -109,8 +109,18 @@ _LENS = SessionLens(
 #: stop): TP −20 (entry 10_010, fill @low 9_990) · SL −45 (entry 10_005,
 #: fill @low 9_960) · forced −20 (entry 10_020, fill @low 10_000) →
 #: net −85, all three losers.
-_GOLDEN_AGG_CANONICAL_SHA256 = "fb98012e7fc6f2808525c778b642bd03620b3333a5345f18278fb9b244f0ed8e"
-_GOLDEN_AGGS_PARQUET_SHA256 = "3aecc6b3f006281ef81dc148bfdb4c2c702c465466f12780fb69f2b05c200b68"
+#: RE-LOCKED for DEC-FILL-EXEC-GRID-1M-001 — SCHEMA-ADDITIVE ONLY: the
+#: aggregate vocabulary gained the five 1m-grid counters
+#: (``exits_deferred`` · ``signals_dropped_collision`` ·
+#: ``fill_slid_minutes`` · ``exit_fill_slid_minutes`` ·
+#: ``forced_fill_slid_minutes``; AGG_COLUMNS 50 → 55), each MEASURED 0 on
+#: BOTH fixture combos (no trade exits on its own entry bar, no collision,
+#: no slid fill event on any executed trade), so the canonical digest moves
+#: by the five new zero-valued keys and the parquet digest by the five new
+#: INT64 columns alone; every trade value (−20 TP / −45 SL / −20 forced,
+#: net −85) verified verbatim by the hand-verified spot-values test.
+_GOLDEN_AGG_CANONICAL_SHA256 = "8aaa25bc156bcec1eff55406272503958e583fa5fe39f2c0770fe0c676d00c50"
+_GOLDEN_AGGS_PARQUET_SHA256 = "16a1d53928a81ae481f9c4a35af92cca82f319f61522da84c1020bd5ff004dd3"
 
 
 def _row(run_id: str, mask: int, pnls: list[int]) -> ResultRow:
@@ -154,6 +164,8 @@ def _fixture() -> list[tuple[ComboAggregate, ComboCapture]]:
         tp_paisa=50,
         minute_index=index,
         stamper=stamper,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=_BARS,
     )
     capture_zero = capture_combo(
         row_zero,
@@ -164,6 +176,8 @@ def _fixture() -> list[tuple[ComboAggregate, ComboCapture]]:
         tp_paisa=50,
         minute_index=index,
         stamper=stamper,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=_BARS,
     )
     agg_trades = aggregate_combo(
         capture_trades,

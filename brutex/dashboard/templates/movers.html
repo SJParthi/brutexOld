@@ -5,91 +5,115 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BruteX — Movers</title>
 <style>
-  :root {
-    --bg:#0A0D11; --surface:#131722; --surface-2:#1A1F2C; --surface-3:#232938;
-    --border:#1E222D; --border-strong:#2B313F;
-    --text:#E5E8EC; --text-bright:#FFFFFF; --muted:#787B86;
-    --green:#26D9B0; --green-bright:#4FFFD0; --red:#FF5C5C;
-    --yellow:#FFB74D; --blue:#5B8DEF; --purple:#9D7BFF;
-    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
-    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
-    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
-    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
-  }
+  /* Page-specific skin ONLY (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch B+C):
+     tokens + components come from the SHARED design system — bx-theme.css
+     (header + canonical token set) and bx-design.css (.bx-chip / .bx-tab /
+     .bx-table --dense --zebra + .num / .bx-skel / honesty channel), linked
+     below AFTER this block so the shared rules win the cascade. The former
+     page-local :root token fork + the forked .pill/.tab/table/header skins
+     are DELETED — this block carries only what is genuinely movers-specific. */
   * { box-sizing:border-box; }
   html, body { margin:0; background:var(--bg); height:100%; }
   body { font-family:-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
     color:var(--text); min-height:100vh; display:flex; flex-direction:column;
     background:radial-gradient(ellipse at top, rgba(91,141,239,0.06), transparent 50%),
       radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%), var(--bg); }
-  header { display:flex; align-items:center; gap:14px; padding:16px 24px; border-bottom:1px solid var(--border);
-    position:sticky; top:0; z-index:6; background:rgba(10,13,17,.82); backdrop-filter:blur(11px); }
-  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
-    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .sub { color:var(--muted); font-size:12px; }
-  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
-  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
-  .topnav a:hover { color:var(--text-bright); }
-  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
-  nav { margin-left:18px; display:flex; gap:14px; font-size:13px; }
-  nav a { color:var(--blue); text-decoration:none; } nav a:hover { color:var(--green); }
   .wrap { flex:1; padding:20px 24px; max-width:1340px; width:100%; }
-  .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:16px 18px; }
   .card > h1 { font-size:17px; margin:0 0 14px; color:var(--text-bright);
     display:flex; align-items:center; gap:10px;
     padding-bottom:10px; border-bottom:1px solid var(--border); }
   .card > h1::before { content:""; flex:0 0 auto; width:3px; height:18px; border-radius:2px;
     background:linear-gradient(180deg,var(--blue),var(--purple)); }
-  .tabs { display:flex; gap:8px; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:12px; }
-  .tab { padding:8px 16px; border-radius:9px; font-size:14px; font-weight:600; cursor:pointer;
-    color:var(--muted); background:transparent; border:1px solid transparent; user-select:none; }
-  .tab.on { color:var(--green-bright); background:rgba(38,217,176,.10); border-color:var(--green); }
+  .tabs { margin-bottom:12px; }
   .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
-  .pill { padding:6px 12px; border-radius:999px; font-size:12.5px; cursor:pointer; user-select:none;
-    color:var(--muted); background:var(--surface-2); border:1px solid var(--border-strong); }
-  .pill.on { color:var(--yellow); border-color:var(--yellow); background:rgba(255,183,77,.10); }
+  /* Sub-filter pills re-seat on the shared .bx-chip base; the selected state
+     reads by ELEVATION + CONTRAST (the segmented-control law), never a hue. */
+  #pills { display:inline-flex; gap:var(--chip-gap); flex-wrap:wrap; }
+  .pill { cursor:pointer; user-select:none; }
+  .pill.on { color:var(--text-bright); background:var(--surface-3);
+    border-color:var(--border-strong); box-shadow:var(--elev-1); }
   .spacer { margin-left:auto; }
   select, input[type=date], input[type=number] { background:var(--surface-2); color:var(--text);
-    border:1px solid var(--border-strong); border-radius:9px; padding:7px 10px; font-size:12.5px; }
+    border:1px solid var(--border-strong); border-radius:var(--r-sm); padding:7px 10px; font-size:var(--fs-1); }
   input[type=number]{ width:64px; }
-  label.ctl { display:inline-flex; flex-direction:column; gap:3px; font-size:10px; color:var(--muted);
+  label.ctl { display:inline-flex; flex-direction:column; gap:3px; font-size:var(--fs-0); color:var(--muted);
     text-transform:uppercase; letter-spacing:.4px; }
-  button.go { background:linear-gradient(180deg, rgba(38,217,176,.12), transparent); border:1px solid var(--green);
-    color:var(--green-bright); border-radius:9px; padding:8px 14px; font-size:13px; font-weight:700; cursor:pointer; align-self:flex-end; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  /* tabular-nums: fixed-width digits so every numeric column aligns precisely
-     (the dashboard convention, e.g. /coverage + /universe) — a markets screen. */
-  th, td { text-align:right; padding:10px 12px; border-bottom:1px solid var(--border);
-    white-space:nowrap; font-variant-numeric:tabular-nums; }
-  th:first-child, td:first-child { text-align:left; }
-  thead th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
-    position:sticky; top:64px; background:var(--surface); cursor:pointer; user-select:none; }
-  thead th:hover { color:var(--text-bright); }
-  thead th.sorted { color:var(--blue); }
+  /* Dense broker grid: page-specific CELL semantics over the shared .bx-table
+     (directional money keeps td.pos/td.neg cell colour — never a chip). */
+  .bx-table th, .bx-table td { white-space:nowrap; }
   td.name { color:var(--text-bright); font-weight:600; }
   td.pos { color:var(--green); } td.neg { color:var(--red); }
   td.muted { color:var(--muted); }
-  tbody tr:hover { background:var(--surface-2); }
+  /* Honesty markers (" *" / " †" / " ~") ride the CELL TEXT verbatim (the
+     pinned marker law); the carrying cell gains a muted-gold dotted underline
+     + cursor:help so the footnote is visible on a dense grid, and its title=
+     carries the explanation (the design-system --honest disclosed-truth channel). */
+  td.hmark { text-decoration:underline dotted var(--honest); text-underline-offset:3px; cursor:help; }
   /* Row drill-down affordance (DEC-MOVERS-DRILL-DOWN-001): only rows stamped with a
      real payload symbol are links; SAMPLE/empty rows carry no data-symbol → default cursor. */
   tbody tr[data-symbol] { cursor:pointer; }
   .controls-row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
-  #asof { margin-left:auto; font-size:12px; color:var(--muted); align-self:center; }
-  .note { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; } .note b { color:var(--text); }
+  /* As-of / staleness / gated-status provenance line — textContent-only writes;
+     the #asofDot live-dot SIBLING is class-flipped from the REAL fetch outcome
+     (the pinned $("asof").textContent writes never touch the dot node). */
+  #asofDot { margin-left:auto; align-self:center; flex:0 0 auto; }
+  #asof { font-size:var(--fs-1); color:var(--muted); align-self:center; }
+  .note { font-size:var(--fs-1); color:var(--muted); margin-top:12px; line-height:1.5; } .note b { color:var(--text); }
+  /* .bx-skel loading shimmer on the note while a fetch is in flight (the
+     literal "Loading…" terminal string is banned by the design system;
+     every terminal path removes the class before its textContent write). */
+  #noteText.bx-skel { display:inline-block; min-width:220px; height:12px;
+    vertical-align:middle; border-radius:4px; }
+  /* Source-provenance line + live verify chip (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). */
+  .srclink { color:var(--blue); text-decoration:none; } .srclink:hover { color:var(--green); }
+  #verifyChip.pos { color:var(--green); }
+  #verifyChip.neg { color:var(--red); font-weight:700; }
+  #verifyChip.muted { color:var(--muted); }
   /* Per-underlying PCR panel (DEC-MOVERS-OPTIONS-PCR-001) — Options tab only. */
   #pcrPanel { margin-bottom:12px; }
   #pcrRows .name { color:var(--text-bright); font-weight:600; }
   #pcrRows .muted { color:var(--muted); }
-  .preview-badge { font-size:10px; font-weight:700; color:var(--yellow); border:1px solid var(--yellow);
-    border-radius:999px; padding:2px 8px; background:rgba(255,183,77,.10); }
+  /* Header chips row + ⓘ explainer + expiry tabs + buildup pills
+     (DEC-MOVERS-HEADER-CHIPS-001) — kept in the page's OWN style block. */
+  .chiprow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  /* The .chiprow/.seg display rules here are AUTHOR-origin, so they beat the
+     UA stylesheet's non-important `[hidden]{display:none}` regardless of
+     specificity — leaving `el.hidden = true` INERT on these containers
+     (round-1 refuter: the seg tabs rendered clickable on the Spot tab; the
+     stale chips row stayed painted on a gated refresh). Re-assert hidden with
+     a HIGHER-specificity author rule per element (id+attr 1-1-0 beats class
+     0-1-0) — the #pullribbon[hidden] precedent in expired_options.html. */
+  #chips[hidden], #expiryTabs[hidden], #trackTabs[hidden] { display:none; }
+  .chip { display:inline-flex; align-items:center; gap:7px; padding:6px 12px; border-radius:999px;
+    font-size:12.5px; color:var(--muted); background:var(--surface-2); border:1px solid var(--border-strong); }
+  .chip .lbl { font-size:10px; text-transform:uppercase; letter-spacing:.4px; }
+  .chip b { color:var(--text-bright); font-variant-numeric:tabular-nums; }
+  .chip.amber { color:var(--yellow); border-color:var(--yellow); background:rgba(255,183,77,.10); }
+  .chip.amber b { color:var(--yellow); }
+  .chip.click { cursor:pointer; user-select:none; }
+  .seg { display:inline-flex; border:1px solid var(--border-strong); border-radius:9px; overflow:hidden; }
+  .segbtn { padding:7px 12px; font-size:12.5px; cursor:pointer; user-select:none;
+    color:var(--muted); background:var(--surface-2); border-right:1px solid var(--border-strong); }
+  .segbtn:last-child { border-right:none; }
+  .segbtn.on { color:var(--yellow); background:rgba(255,183,77,.10); }
+  details.explain summary { cursor:pointer; user-select:none; color:var(--blue); }
+  details.explain div { margin-top:8px; }
+  .bupill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11.5px;
+    font-weight:600; border:1px solid var(--border-strong); color:var(--muted); }
+  .bupill.bu-long { color:var(--green); border-color:var(--green); background:rgba(38,217,176,.10); }
+  .bupill.bu-short { color:var(--red); border-color:var(--red); background:rgba(255,92,92,.10); }
+  .bupill.bu-cover { color:var(--green); }
+  .bupill.bu-unwind { color:var(--red); }
+  /* PREVIEW · sample badge — the honesty (muted-gold) channel at the --fs-0
+     legibility floor (the old sub-legible 10px amber badge is banned).
+     Class name KEPT — the browser-truth suite locates `.preview-badge`. */
+  .preview-badge { font-size:var(--fs-0); font-weight:700; color:var(--honest); border:1px solid var(--honest-bd);
+    border-radius:var(--r-pill); padding:2px 8px; background:var(--honest-bg); }
   .empty { color:var(--muted); text-align:center; padding:24px 0; }
-  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline:2px solid var(--blue); outline-offset:2px; border-radius:8px; }
-  @media (prefers-reduced-motion: reduce){ *{ animation:none!important; transition:none!important; } }
 </style>
 <link rel="stylesheet" href="/static/bx-datepicker.css">
 <link rel="stylesheet" href="/static/bx-theme.css">
+<link rel="stylesheet" href="/static/bx-design.css">
 <script defer src="/static/bx-datepicker.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
@@ -116,12 +140,14 @@
   </header>
 
   <div class="wrap">
-    <div class="card">
+    <div class="card bx-card">
       <h1>📊 Markets Movers</h1>
-      <div class="tabs" id="tabs">
-        <div class="tab on" data-asset="spot">📈 Spot</div>
-        <div class="tab" data-asset="futures">🔮 Futures</div>
-        <div class="tab" data-asset="options">🎯 Options</div>
+      <!-- Asset tabs re-seated on the shared .bx-tabbar/.bx-tab rail (labels +
+           data-asset hooks byte-unchanged — the inline JS reads them). -->
+      <div class="tabs bx-tabbar" id="tabs">
+        <div class="tab bx-tab on" data-asset="spot">📈 Spot</div>
+        <div class="tab bx-tab" data-asset="futures">🔮 Futures</div>
+        <div class="tab bx-tab" data-asset="options">🎯 Options</div>
       </div>
 
       <div class="bar">
@@ -132,6 +158,13 @@
              on all three tabs. Default "All" is NOT sent, so the payload stays byte-identical;
              Indices/Stocks filter the SAME cached candidate set server-side at rank time. -->
         <select id="uclass" title="Underlying class"><option>All</option><option>Indices</option><option>Stocks</option></select>
+        <!-- Broker-screen-style expiry-tier / cadence-track TABS (DEC-MOVERS-HEADER-CHIPS-001):
+             the visible control; the two <select>s below STAY IN THE DOM permanently
+             hidden — every read site ($("expiry").value / $("track").value in load(),
+             refreshProvenance(), renderChips()) is untouched and the tabs WRITE them,
+             so the ?expiry=/?track= query semantics are byte-identical. -->
+        <span class="seg" id="trackTabs" hidden></span>
+        <span class="seg" id="expiryTabs" hidden></span>
         <select id="track" title="Expiry cadence (Options)" style="display:none;"></select>
         <select id="expiry" title="Expiry" style="display:none;"></select>
       </div>
@@ -176,9 +209,69 @@
              (byte-identical to today); a positive value drops thin contracts from the
              Top Volume ranking. Applied server-side at rank time, so it never re-scans. -->
         <label class="ctl">Min vol<input type="number" id="minvol" min="0" step="1" value="0" title="Minimum cumulative session volume (Top Volume ranking)" /></label>
-        <button class="go" id="refresh">↻ Refresh</button>
-        <span id="asof"></span>
+        <button class="bx-btn bx-btn-primary" id="refresh">↻ Refresh</button>
+        <!-- Truthful snapshot dot (design-system .bx-live-dot): neutral grey
+             until a fetch resolves; class-flipped from the REAL outcome only
+             (ok = live payload, warn = gated, down = server error / offline).
+             A SIBLING of #asof — the pinned $("asof").textContent writes stay
+             byte-identical and can never wipe the dot node. -->
+        <span class="bx-live-dot" id="asofDot" aria-hidden="true"></span><span id="asof"></span>
       </div>
+
+      <!-- Header chips row + click-to-reveal detail + collapsible ⓘ explainer
+           (DEC-MOVERS-HEADER-CHIPS-001): readable LABELED chips replace the
+           dense stats micro-text line; every payload-derived value is built by
+           renderChips()/renderMissingOi() via createElement/textContent ONLY —
+           never innerHTML (DEC-DASHBOARD-XSS-HARDENING-001). The <details>
+           explainer is STATIC template prose (no payload data), default
+           COLLAPSED (no `open` attribute), per-tab body toggled by
+           syncExplain(). -->
+      <div class="chiprow" id="chips" hidden></div>
+      <div class="note" id="chipDetail" hidden></div>
+      <details class="note explain" id="explain">
+        <summary>ⓘ What am I looking at?</summary>
+        <div id="explainSpot">
+          Each row is one index/stock at the selected date, timeframe and as-of
+          time. <b>LTP</b> is the last traded price at (or before) the as-of
+          instant; <b>Change / Change %</b> compare it to the previous NSE
+          session's close; <b>Volume</b> and <b>Value (₹ crore)</b> sum the
+          session's trading up to the as-of cutoff. A trailing " *" on a change
+          cell means the baseline is not the immediately-preceding session (a
+          gap in the stored data — the nearest prior session was used).
+        </div>
+        <div id="explainFutures" hidden>
+          Each row is one futures contract of the selected expiry tier (Near =
+          the closest unexpired month, Next = the second, Far = the third).
+          <b>Premium</b> is the contract price minus the underlying spot.
+          <b>OI</b> (open interest) is read at the as-of instant and
+          <b>OI Chg %</b> compares it to the prior day's OI. The <b>Buildup</b>
+          pill combines price and OI direction: price up + OI up reads Long
+          Buildup, price down + OI up Short Buildup, price up + OI down Short
+          Covering, price down + OI down Long Unwinding — "—" when either input
+          is missing or flat. Volume/Value sum the session up to the as-of
+          cutoff; " *" marks a change computed against a non-adjacent prior
+          session.
+        </div>
+        <div id="explainOptions" hidden>
+          Each row is one option contract at the tier expiry on the chosen
+          cadence track (All/Monthly/Weekly). <b>OI</b> (open interest) is read
+          at the as-of instant; <b>Volume</b> sums the session up to the as-of
+          cutoff; <b>Change %</b> is vs the contract's previous close and the
+          OI-change columns are vs its prior day. The <b>Put/Call Ratio</b>
+          chips divide the summed put-side OI (or volume) by the call side
+          across every chain shown — a ratio of sums; click a ratio chip for
+          the per-underlying detail. <b>Coverage</b> counts contracts actually
+          read out of the contracts discovered for the tier; "missing OI"
+          counts read contracts whose stored OI cell is empty (click the amber
+          badge to see which). The
+          all-exchanges view folds both listings of an underlying into one row
+          (the population the table and the chips rank) — pick an exchange for
+          a per-listing view. The <b>Buildup</b> pill
+          reads price vs OI direction as on Futures. " *" marks a change
+          computed against a non-adjacent prior session; " ~" marks a strike
+          grid estimated from stored data only.
+        </div>
+      </details>
 
       <!-- Per-underlying Put-Call Ratio panel (DEC-MOVERS-OPTIONS-PCR-001):
            Options tab only, hidden by default; rendered by renderPcr() with
@@ -187,18 +280,34 @@
            each leg's LAST open_interest at the as-of instant; Vol PCR is the
            session-to-cutoff flow ratio — the SAME reads the table rows use, so
            panel and table can never disagree. "~" marks non-full coverage.
-           Honest limit (design edge 20): the all-exchanges view folds an
-           underlying listed on both NSE and BSE into ONE row — the same
-           population the table ranks; pick an exchange for a per-listing PCR. -->
+           Since DEC-MOVERS-HEADER-CHIPS-001 the panel opens via the Put/Call
+           Ratio chips (pcrDetailOpen) and its semantics prose lives in the
+           ⓘ explainer above. -->
       <div class="note" id="pcrPanel" hidden>
-        <b>PCR (put/call) — tier expiry · OI at the as-of instant · volume session-to-cutoff · all-exchanges view folds both listings of an underlying into one row (the population the table ranks)</b>
+        <b>PCR detail — per-underlying Put/Call Ratios at the tier expiry</b>
         <div id="pcrRows"></div>
       </div>
 
-      <table>
-        <thead><tr id="head"></tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
+      <!-- Shared dense broker grid (.bx-table --dense --zebra + .num cells)
+           inside the .bx-tablewrap scroller: the thead sticks at top:0 INSIDE
+           the wrap (kills the old top:64px magic number) and wide option
+           column sets scroll on x inside the wrap — never the page body. -->
+      <div class="bx-tablewrap bx-tablewrap--vh">
+        <table class="bx-table bx-table--dense bx-table--zebra bx-thead-sticky">
+          <thead><tr id="head"></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <!-- Data-source provenance line + live verify chip
+           (DEC-MOVERS-DB-PROVENANCE-VERIFY-001): a STATIC skeleton — runtime
+           writes ONLY .textContent / .hidden / .className and the srcLink href
+           ATTRIBUTE (never markup; DEC-DASHBOARD-XSS-HARDENING-001). The line
+           names exactly what was read (logical lake table · scope · interval ·
+           date · as-of · read mode — spot surfaces the EXISTING stored_reads /
+           resampled_reads #1145 provenance), deep-links to /db pre-filtered to
+           the top visible row, and the chip reports the post-paint /db
+           cross-check of the visible top-K rows' displayed cells. -->
+      <p class="note" id="src" hidden><b>Source:</b> <span id="srcText"></span><span id="srcLinkWrap" hidden> · <a id="srcLink" class="srclink"></a></span> · <span id="verifyChip" class="muted"></span></p>
       <p class="note" id="note"><b>Note:</b> <span id="noteText"></span></p>
     </div>
   </div>
@@ -208,10 +317,23 @@
      below parses — the pinned ROUND_HALF_UP display law
      (preopen_report._round2 / the #1154 half-up cells). -->
 <script src="/static/bx-format.js"></script>
+<!-- The PURE header-chip derivations (DEC-MOVERS-HEADER-CHIPS-001): the PCR
+     ratio-of-sums aggregate + coverage/expiry chip wording + the buildup
+     quadrant. Loaded SYNCHRONOUSLY AFTER bx-format.js (order-pinned):
+     BXMoversChips resolves the ONE shared bxFixed2, so chip ratios render
+     with the SAME half-up rounder as every 2dp cell — never a
+     re-implementation. -->
+<script src="/static/bx-movers-chips.js"></script>
 <!-- The shared as-of TIME default/persist primitives (DEC-MOVERS-ASOF-LATEST-DEFAULT-001).
      Loaded SYNCHRONOUSLY (like bx-format.js) so BXMoversTime is defined before the inline
      script below runs fillTimes() — a deferred script would execute AFTER this inline block. -->
 <script src="/static/bx-movers-time.js"></script>
+<!-- The PURE /movers ↔ /db live-verify comparison primitives
+     (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). Loaded SYNCHRONOUSLY AFTER
+     bx-format.js (order-pinned): BXVerify resolves the ONE shared bxFixed2 —
+     the comparison rides the SAME rounder the cells render with, never a
+     re-implementation that could false-mismatch. -->
+<script src="/static/bx-verify.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -239,7 +361,10 @@ const ASSETS = {
   },
   futures: {
     cats: [["price_gainers","Price Gainers"],["price_losers","Price Losers"],["premium","Premium"],["discount","Discount"],["volume","Top Volume"],["value","Top Value"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"]],
-    cols: [["Name","name","str"],["LTP","ltp","money"],["Spot","spot","money"],["Premium","premium","money"],["Change %","pct_change","num"],["Value (Cr)","value_cr","num"],["OI","oi","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+    /* "Buildup" (DEC-MOVERS-HEADER-CHIPS-001): a CLIENT-derived pill (price
+       direction × OI direction) — no payload field; the header click is a
+       stable no-op sort (numify(undefined) → null on every row). */
+    cols: [["Name","name","str"],["LTP","ltp","money"],["Spot","spot","money"],["Premium","premium","money"],["Change %","pct_change","num"],["Buildup","buildup","buildup"],["Value (Cr)","value_cr","num"],["OI","oi","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
   },
   options: {
     cats: [["highest_oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price_gainers","Price Gainers"],["price_losers","Price Losers"]],
@@ -247,7 +372,7 @@ const ASSETS = {
        session bar; DEC-GREEKS-ENGINE-PR3B-001 over the Phase-2b store) — full-precision
        floats in the payload, 4dp DISPLAY-only ("num4"); null (legacy pre-Greeks
        partition / stamped-NA bar) renders "—", never a fabricated Greek. */
-    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Value (Cr)","value_cr","num"],["Volume","volume","int"]],
+    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["Buildup","buildup","buildup"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Value (Cr)","value_cr","num"],["Volume","volume","int"]],
   },
 };
 /* Lake interval label → bar minutes for ALL 21 Track-1 timeframes — mirrors
@@ -259,7 +384,15 @@ const TF_MIN = {
   "14minute":14,"15minute":15,"30minute":30,"1hour":60,"2hour":120,"3hour":180,
   "4hour":240,"1day":375,
 };
-const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", sort:{idx:null,dir:1} };
+/* state.instant (DEC-MOVERS-TIME-SNAP-UX-001): the ONE persistent explicit
+   as-of INSTANT as a minute-of-day int (null = Latest / no explicit pick).
+   Written ONLY by the #time onchange handler (an explicit user pick) — a TF
+   switch, the daily branch, an asset-tab switch, and the echo-adopt block
+   NEVER write it, so the pick survives every TF walk (incl. through 1day)
+   and re-snaps to the containing bucket of the new timeframe. state.time
+   stays the per-request SENT value, now DERIVED from the instant by
+   fillTimes() via BXMoversTime.snapTime. */
+const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", instant:null, sort:{idx:null,dir:1} };
 let rowsData = [];
 /* Prebuild-gate auto-recovery timer (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2):
    while the pull pipeline gates the movers (payload `gated: true`), re-poll
@@ -285,6 +418,24 @@ let lastPayload = null;
    baseline-contiguity legend on a cached pill switch WITHOUT a refetch
    (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 legend-desync fix). */
 let baseNote = "";
+/* Header-chip UI toggles (DEC-MOVERS-HEADER-CHIPS-001): session-scoped —
+   whether the per-underlying PCR detail panel / the missing-OI reveal are
+   open. Written ONLY by the chip click handlers; the load()/showPcr()
+   re-renders HONOR them, so a refresh never silently re-collapses a panel
+   the operator opened. */
+let pcrDetailOpen = false;
+let missingOiOpen = false;
+/* Load-supersede guard (DEC-MOVERS-HEADER-CHIPS-001 round 2 — the gbPollGen
+   re-entrancy precedent): every load() takes a fresh generation and re-checks
+   it after EVERY await, so a STALLED response for a superseded coordinate can
+   never repaint a newer paint. The executed S1 repro without it: a stalled
+   expiry=Next response landing after a fast Far paint rendered next-tier rows
+   under the Far selection with the Expiry chip cross-labeled
+   "25-Jul-2024 (far tier)" — renderChips() reads the LIVE select for the tier
+   word while the rows came from the stale payload. Stale 5xx/preview arms are
+   dropped by the same check (a superseded failure must not clobber a newer
+   success either). */
+let loadGen = 0;
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): "params|bodyText"
    signature of the last fully-rendered NON-gated payload. A repeat fetch that
    round-trips to the byte-identical body for the SAME coordinate (repeat
@@ -295,6 +446,25 @@ let baseNote = "";
    loads so recovery always repaints, and the skip is additionally gated behind
    `state.sort.idx === null` so a client-sorted view is never involved. */
 let lastRenderSig = null;
+/* The CURRENT sorted view (DEC-MOVERS-DB-PROVENANCE-VERIFY-001): renderRows()
+   sorts a LOCAL copy (rowsData stays server-ordered), so the provenance link +
+   the verify pass stash that sorted copy here — "top-K visible rows" means the
+   rows the operator actually SEES, manual column sort included. */
+let visibleData = [];
+/* Live-verify single-flight discipline: a generation counter (a newer render
+   supersedes an in-flight pass — its late results are discarded), the shared
+   AbortController for the pass's K probes, and a trailing debounce so a sort-
+   click burst coalesces into ONE pass. */
+let verifyGen = 0;
+let verifyTimer = null;
+let verifyAbort = null;
+/* True while the LAST scheduleVerify() paused on a hidden tab — the
+   visibilitychange listener re-schedules exactly then, so the chip never
+   shows a stale "paused (hidden tab)" on a visible tab (refuter S5). */
+let verifyHiddenPaused = false;
+const VERIFY_TOP_K = 5;
+const VERIFY_TIMEOUT_MS = 10000;
+const VERIFY_DEBOUNCE_MS = 150;
 
 /* Clearly-labelled SAMPLE rows so the page shows the layout standalone (no backend). NOT real data. */
 const SAMPLE = {
@@ -315,23 +485,37 @@ const SAMPLE = {
 };
 
 /* Auto-fill the as-of TIME dropdown for the chosen timeframe
-   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): a "Latest" default ("" ⇒ the backend
-   whole-day cut ⇒ the latest traded minute, IDENTICAL across every timeframe)
-   + the intraday grid, PRESERVING a retained explicit pick across TF switches
-   only when it is still a valid slot. NO first-slot pin (the pre-fix bug that
-   froze a coarse TF at a partial-bucket close). Grid strings come from
-   BXMoversTime.defaultTimeOptions — numeric-generated "HH:MM" + one static
-   literal, so the innerHTML stays XSS-safe (DEC-DASHBOARD-XSS-HARDENING-001). */
+   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 + DEC-MOVERS-TIME-SNAP-UX-001): a
+   "Latest" default ("" ⇒ the backend whole-day cut ⇒ the latest traded
+   minute, IDENTICAL across every timeframe) + the intraday grid, PERSISTING
+   an explicit pick across TF switches by SNAPPING the retained instant to
+   the new timeframe's CONTAINING bucket (1min@15:29 → 3min selects the
+   completed 15:27-labeled bucket; round-trips exactly). THE MAPPING LAW
+   (bx-movers-time.js): each option's label = bucket-START HH:MM (the /db row
+   label) and value = bucket-FINAL HH:MM (min(start+m−1, 15:29), the SENT
+   ?time= cutoff) — the backend's inclusive-≤ raw-1m cut then serves the
+   COMPLETED /db-equal bar when the lake holds the bucket in full; a pick
+   whose bucket-final lies beyond the day's last stored minute serves
+   exactly the data stored so far instead (undetectable here — latest_time
+   is echoed only on Latest requests; named follow-up
+   DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001). NO first-slot pin and NO
+   Latest fallback on a non-slot pick (the two pre-fix reset bugs). Grid
+   strings come from BXMoversTime.timeOptionPairs — numeric-generated "HH:MM"
+   + one static literal, so the innerHTML stays XSS-safe
+   (DEC-DASHBOARD-XSS-HARDENING-001). */
 function fillTimes() {
   const m = TF_MIN[$("interval").value] || 375, sel = $("time");
+  // NOTE: state.instant is deliberately NOT touched anywhere in here — the
+  // explicit pick survives the daily branch too (a 1min→1day→1min round-trip
+  // re-snaps to the original instant; DEC-MOVERS-TIME-SNAP-UX-001).
   if (m >= 375) { sel.innerHTML = '<option value="">(daily)</option>'; sel.disabled = true; state.time=""; return; }
   sel.disabled = false;
   let opts = '<option value="">Latest</option>';
-  for (const hhmm of BXMoversTime.defaultTimeOptions(m)) opts += `<option>${hhmm}</option>`;
+  for (const p of BXMoversTime.timeOptionPairs(m)) opts += `<option value="${p.value}">${p.label}</option>`;
   sel.innerHTML = opts;
-  const resolved = BXMoversTime.resolveTime(state.time, m);   // "" (Latest) or a retained valid pick
-  sel.value = resolved;
-  state.time = resolved;   // NOT the selected first slot — the resolved default/retained pick
+  const snapped = BXMoversTime.snapTime(state.instant, m);   // "" (Latest) or the bucket-FINAL sent value
+  sel.value = snapped;
+  state.time = snapped;   // the DERIVED sent value — never the first slot, never a Latest reset
 }
 /* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 + the hostile-review
    legend-desync fix): recompute the " *" legend from the CURRENT rowsData every time
@@ -342,6 +526,9 @@ function fillTimes() {
    NO legend / a stale legend). textContent only — never innerHTML for server strings
    (DEC-DASHBOARD-XSS-HARDENING-001). */
 function refreshBaselineLegend(note) {
+  /* Terminal write — drop the pending .bx-skel shimmer before the note lands
+     (both real-payload load() paths + the cached pill switch route here). */
+  $("noteText").classList.remove("bx-skel");
   const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
   /* Muhurat legend (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the EMIT-ON-TRUE keys
      arrive only when the baseline is the legitimate Diwali Muhurat close — a real
@@ -362,24 +549,87 @@ function applyCategory() {
   else { load(); }
 }
 function renderPills() {
-  $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
+  /* Pills ride the shared .bx-chip base (design system); the `.on` selected
+     state reads by elevation + contrast via the page rule. Static config
+     labels only — no payload string reaches this innerHTML write. */
+  $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill bx-chip ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
   /* Pill clicks are DELEGATED — one listener on #pills, attached once at init
      (onPillsClick), surviving this innerHTML swap by construction — so this
      function only rebuilds markup on asset switches; it wires no handlers and
      never recurses into itself (DEC-DASHBOARD-JS-PERF-001). */
-  /* Expiry applies to futures/options only — hidden for spot. */
+  /* Expiry applies to futures/options only — hidden for spot. Since
+     DEC-MOVERS-HEADER-CHIPS-001 the VISIBLE control is the #expiryTabs /
+     #trackTabs segmented buttons; the <select>s keep their inline
+     display:none permanently (never unhidden) but stay populated — every
+     value read/write site is unchanged (the tabs write them). */
   const derivAsset = (state.asset==="futures" || state.asset==="options");
-  $("expiry").style.display = derivAsset ? "" : "none";
-  if (derivAsset && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option>${e}</option>`).join("");
+  $("expiryTabs").hidden = !derivAsset;
+  /* Expiry-tier tooltips (static literals only — XSS-safe by construction):
+     each serial tier names its meaning so a dense toolbar stays inspectable. */
+  const TIER_TIP = { Near:"front (nearest unexpired) expiry", Next:"2nd serial expiry", Far:"3rd serial expiry" };
+  if (derivAsset && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option title="${TIER_TIP[e]}">${e}</option>`).join("");
   /* Options-only: the All/Monthly/Weekly cadence the Near/Next/Far tier ranks within. */
-  $("track").style.display = (state.asset==="options") ? "" : "none";
-  if (state.asset==="options" && !$("track").innerHTML) $("track").innerHTML = ["All","Monthly","Weekly"].map(e=>`<option>${e}</option>`).join("");
+  const TRACK_TIP = { All:"all expiries", Monthly:"monthly expiries only", Weekly:"weekly expiries only" };
+  $("trackTabs").hidden = (state.asset!=="options");
+  if (state.asset==="options" && !$("track").innerHTML) $("track").innerHTML = ["All","Monthly","Weekly"].map(e=>`<option title="${TRACK_TIP[e]}">${e}</option>`).join("");
+  syncSegTabs();
+  syncExplain();
+}
+/* ── Expiry-tier / cadence-track tabs + the per-tab ⓘ explainer body
+   (DEC-MOVERS-HEADER-CHIPS-001) ── */
+/* Static tab labels per container — the EXACT select option tokens, so a tab
+   click writes a value normalize_options_selectors / normalize_futures_tier
+   already accept (query semantics byte-identical). */
+const SEG_TABS = { trackTabs: ["All","Monthly","Weekly"], expiryTabs: ["Near","Next","Far"] };
+const SEG_SELECT = { trackTabs: "track", expiryTabs: "expiry" };
+function initSegTabs() {
+  /* Build the static-label buttons ONCE (createElement — no innerHTML) and
+     attach ONE delegated click listener per container (the onPillsClick
+     precedent): a click writes the retained hidden <select>, moves the .on
+     class in place, and loads. */
+  Object.keys(SEG_TABS).forEach((boxId) => {
+    const box = $(boxId);
+    SEG_TABS[boxId].forEach((label) => {
+      const btn = document.createElement("span");
+      btn.className = "segbtn";
+      btn.dataset.val = label;
+      btn.textContent = label;
+      box.appendChild(btn);
+    });
+    box.addEventListener("click", (e) => {
+      const btn = e.target.closest(".segbtn");
+      if (!btn) return;
+      $(SEG_SELECT[boxId]).value = btn.dataset.val;
+      syncSegTabs();
+      load();
+    });
+  });
+}
+function syncSegTabs() {
+  /* Mirror each hidden select's CURRENT value onto its tab row (an unpopulated
+     select reads "" → the first tab shows as active — the same default the
+     query fallback `|| "Near"` / `|| "All"` sends). */
+  Object.keys(SEG_TABS).forEach((boxId) => {
+    const want = $(SEG_SELECT[boxId]).value || SEG_TABS[boxId][0];
+    $(boxId).querySelectorAll(".segbtn").forEach((btn) => {
+      btn.classList.toggle("on", btn.dataset.val === want);
+    });
+  });
+}
+function syncExplain() {
+  /* The ⓘ explainer body (static template prose) tracks the active tab. */
+  $("explainSpot").hidden = state.asset !== "spot";
+  $("explainFutures").hidden = state.asset !== "futures";
+  $("explainOptions").hidden = state.asset !== "options";
 }
 function renderHead() {
   const cols = ASSETS[state.asset].cols;
+  /* Headers ride the shared .bx-th-sort affordance (cursor/hover/.sorted
+     accent); non-first columns take .num so header + numeric cell alignment
+     agree. Static config labels only — no payload string in this write. */
   $("head").innerHTML = cols.map(([label],i) => {
     const arrow = state.sort.idx===i ? (state.sort.dir>0?" ▲":" ▼") : "";
-    return `<th data-i="${i}" class="${state.sort.idx===i?'sorted':''}">${label}${arrow}</th>`;
+    return `<th data-i="${i}" class="bx-th-sort${i?' num':''} ${state.sort.idx===i?'sorted':''}">${label}${arrow}</th>`;
   }).join("");
   /* th sort clicks are DELEGATED — one listener on the #head row, attached once
      at init (onHeadClick), surviving this innerHTML rebuild by construction —
@@ -409,6 +659,11 @@ function fmtElapsed(s){
   if (m > 0) return `${m}m ${String(sec).padStart(2,"0")}s`;
   return `${sec}s`;
 }
+/* Truthful snapshot dot (design-system .bx-live-dot): a class flip driven ONLY
+   by the REAL fetch outcome — live-ok on a served payload, live-warn while the
+   prebuild gate holds, live-down on a server error / offline preview. Neutral
+   grey until the first outcome lands; never timer-driven, never fabricated. */
+function setAsofDot(s) { const d = $("asofDot"); if (d) d.className = "bx-live-dot" + (s ? " " + s : ""); }
 /* PCR panel (DEC-MOVERS-OPTIONS-PCR-001): per-underlying put/call ratios over
    the SAME candidate set the rankings use. Ratios arrive as full-precision
    strings or null (zero call-side denominator — never Infinity, never
@@ -461,11 +716,135 @@ function renderPcr(rows) {
    full-render path and the skip-render-when-unchanged fast path (load() hides
    the panel unconditionally at its top, so the fast path must re-render it or a
    repeat identical fetch would blank the panel). Non-options assets, gated
-   payloads (no `pcr` key), and empty arrays leave the panel hidden. */
+   payloads (no `pcr` key), and empty arrays leave the panel hidden. Since
+   DEC-MOVERS-HEADER-CHIPS-001 the unhide is GATED on pcrDetailOpen — the
+   panel is the click-to-open DETAIL behind the Put/Call Ratio chips. */
 function showPcr(j) {
   if (state.asset === "options" && !j.gated && Array.isArray(j.pcr) && j.pcr.length) {
-    renderPcr(j.pcr); $("pcrPanel").hidden = false;
+    renderPcr(j.pcr); $("pcrPanel").hidden = !pcrDetailOpen;
   }
+}
+/* ── Header chips (DEC-MOVERS-HEADER-CHIPS-001) ──────────────────────────
+   Readable LABELED chips over the SAME payload the table renders — the pure
+   derivations live in bx-movers-chips.js (node-golden'd). XSS-safe BY
+   CONSTRUCTION: every payload-derived value reaches the DOM via
+   createElement / textContent / the title DOM property ONLY — these
+   functions never touch innerHTML (DEC-DASHBOARD-XSS-HARDENING-001).
+   HONESTY: the Put/Call Ratio chips show the RATIO OF SUMS across every
+   chain on screen (an OI-weighted aggregate — stated in the title; the
+   per-underlying truth is the PCR detail panel, one click away); the
+   Coverage badge goes AMBER when legs are unread or OI cells are missing,
+   and clicking it NAMES the missing-OI legs (the additive emit-on-nonempty
+   `oi_missing_symbols` key, server-capped at 50 with the true count in the
+   pre-existing `oi_missing_legs`; never-read legs are counted, not named —
+   disclosed in the reveal's tail line). */
+function makeChip(label, value, opts) {
+  const o = opts || {};
+  const el = document.createElement("span");
+  el.className = "chip" + (o.amber ? " amber" : "") + (o.onClick ? " click" : "");
+  if (o.id) el.id = o.id;
+  const lbl = document.createElement("span");
+  lbl.className = "lbl";
+  lbl.textContent = label;
+  el.appendChild(lbl);
+  const val = document.createElement("b");
+  val.textContent = value;
+  el.appendChild(val);
+  if (o.title) el.title = o.title;
+  if (o.onClick) el.addEventListener("click", o.onClick);
+  return el;
+}
+function grpInt(n) { return typeof n === "number" && isFinite(n) ? n.toLocaleString("en-IN") : "—"; }
+function renderMissingOi(j) {
+  /* The click-to-reveal list: WHICH legs are missing OI — one line per pcr
+     row carrying oi_missing_symbols (+K more when the server cap trimmed
+     names), plus one honest tail line for the UNREAD shortfall (counted in
+     the coverage total, structurally un-nameable — an unread leg produced no
+     PcrLeg). textContent-built throughout. */
+  const box = $("chipDetail");
+  box.textContent = "";
+  let unread = 0;
+  (Array.isArray(j.pcr) ? j.pcr : []).forEach((r) => {
+    if (typeof r.legs_read === "number" && typeof r.legs_total === "number"
+        && r.legs_read < r.legs_total) unread += r.legs_total - r.legs_read;
+    const syms = Array.isArray(r.oi_missing_symbols) ? r.oi_missing_symbols : [];
+    if (!syms.length) return;
+    const line = document.createElement("div");
+    const name = document.createElement("b");
+    name.textContent = String(r.display_underlying == null ? r.underlying : r.display_underlying);
+    line.appendChild(name);
+    const more = (typeof r.oi_missing_legs === "number" ? r.oi_missing_legs : syms.length) - syms.length;
+    line.appendChild(document.createTextNode(
+      " (" + String(r.expiry == null ? "" : r.expiry) + ") missing OI: "
+      + syms.map(String).join(", ")
+      + (more > 0 ? " … (+" + more + " more not listed)" : "")));
+    box.appendChild(line);
+  });
+  if (unread > 0) {
+    const tail = document.createElement("div");
+    tail.className = "muted";
+    tail.textContent = unread
+      + " leg(s) unread (no session bar / read error) — counted in the total, not named.";
+    box.appendChild(tail);
+  }
+  if (!box.firstChild) {
+    const none = document.createElement("div");
+    none.textContent = "no missing-OI legs in this snapshot.";
+    box.appendChild(none);
+  }
+  box.hidden = false;
+}
+function renderChips(j) {
+  const box = $("chips");
+  box.textContent = "";
+  syncExplain();
+  const skipSuffix = (typeof j.skipped_count === "number" && j.skipped_count > 0)
+    ? " · " + grpInt(j.skipped_count) + " skipped" : "";
+  const agg = state.asset === "options" ? BXMoversChips.bxPcrAggregate(j.pcr) : null;
+  if (agg) {
+    const tier = ($("expiry").value || "Near").toLowerCase();
+    const chains = " across " + agg.chains + " chain(s)";
+    const togglePcr = () => {
+      pcrDetailOpen = !pcrDetailOpen;
+      if (Array.isArray(j.pcr) && j.pcr.length) $("pcrPanel").hidden = !pcrDetailOpen;
+    };
+    box.appendChild(makeChip("Put/Call Ratio (OI)", agg.oi ? agg.oi.text : "—", {
+      id: "chipPcrOi",
+      title: "P " + grpInt(agg.putOi) + " / C " + grpInt(agg.callOi)
+        + " · ratio of sums" + chains + " — click for per-underlying detail",
+      onClick: togglePcr,
+    }));
+    box.appendChild(makeChip("Put/Call Ratio (Vol)", agg.vol ? agg.vol.text : "—", {
+      id: "chipPcrVol",
+      title: "P " + grpInt(agg.putVolume) + " / C " + grpInt(agg.callVolume)
+        + " · ratio of sums" + chains + " — click for per-underlying detail",
+      onClick: togglePcr,
+    }));
+    box.appendChild(makeChip("Expiry", BXMoversChips.bxExpiryChipText(j.pcr, tier), { id: "chipExpiry" }));
+    const cov = BXMoversChips.bxCoverageChip(agg);
+    const covOpts = { id: "chipCoverage", amber: cov.amber };
+    if (cov.amber) {
+      covOpts.title = "click to see which legs are missing OI";
+      covOpts.onClick = () => {
+        missingOiOpen = !missingOiOpen;
+        if (missingOiOpen) renderMissingOi(j);
+        else { $("chipDetail").hidden = true; $("chipDetail").textContent = ""; }
+      };
+    }
+    box.appendChild(makeChip("Coverage", cov.text, covOpts));
+    if (missingOiOpen && cov.amber) renderMissingOi(j);
+    else missingOiOpen = false;
+  } else if (state.asset === "futures") {
+    box.appendChild(makeChip("Expiry", (j.expiry_tier || "near") + " tier", { id: "chipExpiry" }));
+    box.appendChild(makeChip("Contracts", grpInt(j.instrument_count) + skipSuffix, { id: "chipCount" }));
+  } else if (state.asset === "options") {
+    /* Options with NO pcr rows (empty tier / no lake) — honest counts only. */
+    box.appendChild(makeChip("Expiry", ($("expiry").value || "Near").toLowerCase() + " tier", { id: "chipExpiry" }));
+    box.appendChild(makeChip("Contracts", grpInt(j.instrument_count) + skipSuffix, { id: "chipCount" }));
+  } else {
+    box.appendChild(makeChip("Instruments", grpInt(j.instrument_count) + skipSuffix, { id: "chipCount" }));
+  }
+  box.hidden = false;
 }
 function renderRows() {
   const cols = ASSETS[state.asset].cols;
@@ -479,8 +858,11 @@ function renderRows() {
       return (x - y) * d;
     });
   }
+  /* Stash the SORTED view for the provenance link + the verify pass — rowsData
+     itself stays server-ordered (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). */
+  visibleData = data;
   const tb = $("rows");
-  if (!data.length) { tb.innerHTML = `<tr><td colspan="${cols.length}" class="empty">📭 no movers in this snapshot</td></tr>`; return; }
+  if (!data.length) { tb.innerHTML = `<tr><td colspan="${cols.length}" class="empty">📭 no movers in this snapshot</td></tr>`; refreshProvenance(); scheduleVerify(); return; }
   tb.innerHTML = data.map(row => {
     /* Row drill-down coordinate stamp (DEC-MOVERS-DRILL-DOWN-001): only a row
        carrying a REAL payload `symbol` becomes a link — the offline SAMPLE
@@ -500,8 +882,27 @@ function renderRows() {
         + ' aria-label="open ' + esc(row.symbol) + ' in the database candle viewer"'
       : "";
     return "<tr" + link + ">" + cols.map(([,field,type],i) => {
+    /* Buildup pill (DEC-MOVERS-HEADER-CHIPS-001): price direction × OI
+       direction, derived CLIENT-side from the row's EXISTING fields (options:
+       the raw oi_chg int; futures: oi_chg_pct — sign-faithful, computed only
+       off a real positive prior OI). A missing/flat input reads an honest "—"
+       (never a guessed quadrant); a strictly-false OI-baseline contiguity
+       appends the SAME " *" the OI cells carry. Labels/classes are static
+       literals from bxBuildup; the value rides the same esc() as every cell. */
+    if (type === "buildup") {
+      const b = BXMoversChips.bxBuildup(
+        numify(row.pct_change),
+        state.asset === "options"
+          ? (typeof row.oi_chg === "number" ? row.oi_chg : null)
+          : numify(row.oi_chg_pct));
+      let bv = b ? b.label : "—";
+      if (b && row.oi_baseline_contiguous === false) bv += " *";
+      return `<td><span class="bupill ${b ? b.cls : "muted"}">${esc(bv)}</span></td>`;
+    }
     let v = row[field]; if (v===undefined||v===null) v = "—";
-    let cls = i===0 ? "name" : "";
+    /* Non-first cells take the shared .bx-table .num discipline (right-aligned
+       tabular-nums monospace) — the broker numeric-grid law. */
+    let cls = i===0 ? "name" : "num";
     /* Numeric cells get display formatting: money → ₹ + Indian grouping @ 2dp,
        num → 2dp via the SHARED half-up bxFixed2 (DEC-STORED-DATA-VALIDATION-001
        — the IEEE toFixed rounder diverged from the pinned ROUND_HALF_UP display
@@ -515,7 +916,7 @@ function renderRows() {
       else if (type === "num4") v = v.toFixed(4);  /* Greeks (iv/delta) — display-only 4dp, payload stays full precision */
     }
     if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct") {
-      const n = numify(v); if (n!==null && n!==0) cls = n>0 ? "pos" : "neg";
+      const n = numify(v); if (n!==null && n!==0) cls = (n>0 ? "pos" : "neg") + " num";
       if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + bxFixed2(n) + "%";
     }
     /* Moneyness chip (DEC-FNO-MONEYNESS-001): the cell reads "ITM -1" / "OTM +10" /
@@ -526,8 +927,8 @@ function renderRows() {
        " ~" flags the possibly-overestimated ATM±N step; a registry-confident row
        shows no marker. Appended AFTER the tint check (startsWith is unaffected). */
     if (field==="moneyness" && typeof v === "string") {
-      if (v.startsWith("ITM")) cls = "pos"; else if (v.startsWith("OTM")) cls = "neg";
-      else if (v==="?"||v==="—") cls = "muted";
+      if (v.startsWith("ITM")) cls = "pos num"; else if (v.startsWith("OTM")) cls = "neg num";
+      else if (v==="?"||v==="—") cls = "muted num";
       if (row.strike_step_confidence === "observed" && v!=="?" && v!=="—") v += " ~";
     }
     /* Baseline-contiguity HONESTY MARKER (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001),
@@ -544,9 +945,287 @@ function renderRows() {
        distinctly from the " *" possible-lake-hole marker; pre-esc like " *". */
     if ((field==="change"||field==="pct_change") && row.prev_close_muhurat === true && v!=="—" && v!=="?") v += " †";
     if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_muhurat === true && v!=="—" && v!=="?") v += " †";
-    return `<td class="${cls}">${esc(v)}</td>`;
+    /* DEPTH title= (design system, TradingView-inspection law): built ONLY
+       from values ALREADY in this served row — never a new fetch, never a
+       computed fiction, never a repeat of the visible text.
+       (a) the exact full-precision payload number behind a formatted cell;
+       (b) the honesty-marker explanations (" *" / " †" / " ~" — the marker
+           TEXT itself stays byte-verbatim in the cell per the pinned law;
+           the cell also gains .hmark, the muted-gold footnote affordance);
+       (c) the price×OI four-quadrant buildup read on the OI Chg % cell
+           (derived from this row's own pct_change × oi sign — the
+           design-system buildup vocabulary, data-driven, no new backend).
+       esc()'d into a double-quoted attribute — the SAME sanctioned
+       innerHTML+esc path every cell already rides. */
+    let tip = "";
+    const raw = row[field];
+    if (typeof raw === "number" && String(raw) !== String(v)) tip = "exact: " + String(raw);
+    if (typeof v === "string") {
+      if (v.endsWith(" *")) { tip += (tip ? " · " : "") + "* baseline is not the immediately-preceding REGULAR NSE session (nearest-prior shown — possible lake hole)"; cls += " hmark"; }
+      if (v.endsWith(" †")) { tip += (tip ? " · " : "") + "† baseline is the Diwali Muhurat session close (a real NSE session the lake legitimately carries)"; cls += " hmark"; }
+      if (v.endsWith(" ~")) { tip += (tip ? " · " : "") + "~ strike grid from the sparse lake-observed ladder only (ATM±N step may be overestimated)"; cls += " hmark"; }
+    }
+    if (field === "oi_chg_pct") {
+      const p = numify(row.pct_change), o = numify(raw);
+      if (p !== null && o !== null && p !== 0 && o !== 0) {
+        const kind = p > 0 ? (o > 0 ? "long buildup (price ↑ · OI ↑)" : "short covering (price ↑ · OI ↓)")
+                           : (o > 0 ? "short buildup (price ↓ · OI ↑)" : "long unwinding (price ↓ · OI ↓)");
+        tip += (tip ? " · " : "") + kind;
+      }
+    }
+    const tattr = tip ? ' title="' + esc(tip) + '"' : "";
+    return `<td class="${cls}"${tattr}>${esc(v)}</td>`;
   }).join("") + "</tr>";
   }).join("");
+  /* Post-paint (DEC-MOVERS-DB-PROVENANCE-VERIFY-001): refresh the source line
+     for the freshly-painted view, then schedule the debounced /db verify pass
+     — never blocking the paint. */
+  refreshProvenance(); scheduleVerify();
+}
+
+/* ── Data-source provenance + live /db verify (DEC-MOVERS-DB-PROVENANCE-VERIFY-001) ──
+   The operator demand: the data source must be VISIBLE, IDENTIFIED, and
+   READABLE on the page, with a real-time proven guarantee. The source line
+   names exactly what was read; the link opens /db pre-filtered to the top
+   visible row; the chip re-fetches the corresponding /db 1-minute rows after
+   each render and cross-checks the DISPLAYED cells. All writes are
+   textContent / .hidden / .className / the href ATTRIBUTE — never innerHTML
+   (DEC-DASHBOARD-XSS-HARDENING-001). */
+function asofWords(j) {
+  /* The SAME as-of derivation the #asof label uses (DEC-MOVERS-ASOF-LATEST-DEFAULT-001). */
+  const isDaily = (TF_MIN[j.interval] || 375) >= 375;
+  return j.time ? `@ ${j.time}`
+       : isDaily ? "(daily)"
+       : (j.latest_time ? `latest (${j.latest_time})` : "latest");
+}
+function refreshProvenance() {
+  const j = lastPayload;
+  const src = $("src");
+  if (!j) { src.hidden = true; return; }
+  const exch = $("exchange").value || "NSE";
+  const when = ` · ${j.interval||""} · ${j.date||""} · ${asofWords(j)}`;
+  let text;
+  if (state.asset === "spot") {
+    const seg = visibleData.length && visibleData[0].segment ? "/" + visibleData[0].segment : "";
+    /* Read-mode honesty: the EXISTING #1145 stored-first provenance counts —
+       how many contributing instruments were served from the prebuilt STORED
+       interval partitions vs the on-the-fly derived-from-1m resample. */
+    text = `spot candles lake (bars/${exch}${seg})${when}`
+      + ` · reads: ${j.stored_reads ?? 0} stored-TF / ${j.resampled_reads ?? 0} derived-from-1m`;
+  } else {
+    /* The F&O read mode is a documented CONSTANT (DEC-FNO-TF-DERIVE-OI-001):
+       the session readers are 1-minute-native with the stored Greeks overlay —
+       the display timeframe only reshapes buckets, never the read. */
+    const tier = ($("expiry").value || "Near").toLowerCase();
+    const kind = state.asset === "options"
+      ? `options · ${tier} tier · ${($("track").value || "All").toLowerCase()} track`
+      : `futures · ${tier} tier`;
+    text = `F&O candles lake (bars/*/FNO) · ${kind}`
+      + ` · read: 1-minute-native session + stored Greeks overlay · display${when}`;
+  }
+  $("srcText").textContent = text;
+  /* Click-through: /db pre-filtered to the TOP row of the CURRENT sorted view
+     (coherent with the verify chip). F&O pins interval=1minute — the partition
+     the F&O tabs actually read (always stored for a pulled contract). */
+  const top = visibleData.length ? visibleData[0] : null;
+  if (top && top.symbol && j.date) {
+    const q = new URLSearchParams();
+    if (state.asset === "spot") {
+      q.set("candles", "spot");
+      q.set("exchange", top.exchange || "");
+      q.set("segment", top.segment || "");
+      q.set("symbol", top.symbol);
+      q.set("interval", j.interval || "1minute");
+    } else {
+      q.set("candles", "fno");
+      q.set("exchange", top.exchange || "");
+      q.set("segment", "FNO");
+      q.set("symbol", top.symbol);
+      q.set("interval", "1minute");
+    }
+    q.set("date", j.date);
+    $("srcLink").href = "/db?" + q.toString();
+    $("srcLink").textContent = `open ${top.symbol} in /db →`;
+    $("srcLinkWrap").hidden = false;
+  } else {
+    $("srcLinkWrap").hidden = true;
+    $("srcLink").removeAttribute("href");
+    $("srcLink").textContent = "";
+  }
+  src.hidden = false;
+}
+function setVerifyChip(cls, text) {
+  const chip = $("verifyChip");
+  chip.className = cls;
+  chip.textContent = text;
+}
+/* Schedule ONE verify pass for the current view: bump the generation (a newer
+   render supersedes an in-flight pass), abort the in-flight probes, debounce
+   150 ms. Preview/gated/error views (lastPayload null), a hidden tab, and an
+   empty view schedule NOTHING (zero requests). A hidden-tab pause remembers
+   itself (verifyHiddenPaused) so the visibilitychange listener can re-schedule
+   on return — the chip never shows a stale "paused (hidden tab)" on a VISIBLE
+   tab (round-2 refuter S5). */
+function scheduleVerify() {
+  verifyGen += 1;
+  verifyHiddenPaused = false;
+  if (verifyAbort) { verifyAbort.abort(); verifyAbort = null; }
+  clearTimeout(verifyTimer);
+  if (!lastPayload) { setVerifyChip("muted", ""); return; }  /* #src is hidden too */
+  if (document.hidden) { verifyHiddenPaused = true; setVerifyChip("muted", "verify: paused (hidden tab)"); return; }
+  if (!visibleData.length) { setVerifyChip("muted", "verify: n/a (no rows)"); return; }
+  setVerifyChip("muted", `verify: checking top ${Math.min(VERIFY_TOP_K, visibleData.length)} vs /db…`);
+  const gen = verifyGen;
+  /* Capture the ASSET at SCHEDULE time (round-2 refuter S2): the asset-tab
+     click mutates state.asset while a debounce timer / an in-flight pass armed
+     by the PREVIOUS tab's render is still pending — a fire-time read would
+     probe spot rows as segment=FNO (a guaranteed empty page → a false LOUD
+     red) and run the F&O-excluded %CHNG check in reverse. The captured asset
+     is the one consistent with THIS pass's lastPayload + visibleData (the
+     still-painted table), so its verdict stays truthful for what is on screen. */
+  const asset = state.asset;
+  verifyTimer = setTimeout(() => { runVerify(gen, asset); }, VERIFY_DEBOUNCE_MS);
+}
+/* Cancel any pending/in-flight verify pass WITHOUT scheduling a new one — the
+   asset-tab switch handler calls this BEFORE mutating state (belt on top of
+   the schedule-time asset capture above): the superseded pass must not paint
+   an interim verdict for the outgoing tab while the incoming tab's fetch is
+   still resolving (possibly seconds on a busy backend). The new tab's own
+   render re-schedules via renderRows() → scheduleVerify(). */
+function cancelVerify() {
+  verifyGen += 1;
+  verifyHiddenPaused = false;
+  if (verifyAbort) { verifyAbort.abort(); verifyAbort = null; }
+  clearTimeout(verifyTimer);
+  setVerifyChip("muted", "verify: pending…");
+}
+/* The verify pass: K = min(5, visible rows) PARALLEL probes of the EXISTING
+   /api/v1/db/candles API (one desc day-page of the 1-minute base per row —
+   there is NO batch API, so the honest bound is K requests, each ≤ 500 rows),
+   under ONE AbortController + ONE 10 s timeout armed through the body reads.
+   Cross-checks the DISPLAYED LTP (all tabs) + %CHNG (spot) of the visible
+   top-K rows via the pure BXVerify primitives riding the ONE shared bxFixed2.
+   F&O verifies LTP only (the %CHNG baseline law is not proven byte-equal
+   there — named follow-up DEC-MOVERS-VERIFY-FNO-PCT-001); a non-contiguous
+   " *" baseline row skips its % (the two sides' hole-walks are not proven
+   identical). */
+async function runVerify(gen, asset) {
+  const j = lastPayload;
+  if (gen !== verifyGen || !j || !visibleData.length) return;
+  const isSpot = asset === "spot";
+  const candidates = visibleData.slice(0, VERIFY_TOP_K).filter(r => r && r.symbol);
+  if (!candidates.length) { setVerifyChip("muted", "verify: n/a (no verifiable cells)"); return; }
+  /* /db read-allowlist pre-check (round-2 refuter fold): the lake WRITE
+     allowlist is broader than the /db READ allowlist (db_view._SYMBOL_RE), so
+     a lake-legal symbol carrying ";" / "'" / "=" would 400 on EVERY probe —
+     a burned request per render + a console error. Such a row is a DISCLOSED
+     skip, never a request that is guaranteed to fail. */
+  const rows = candidates.filter(r =>
+    BXVerify.bxDbProbeOk(r.exchange || "", isSpot ? (r.segment || "") : "FNO", r.symbol));
+  const unreadable = candidates.length - rows.length;
+  if (!rows.length) { setVerifyChip("muted", `verify: n/a (${unreadable} row(s) not /db-readable)`); return; }
+  /* The as-of ANCHOR for the /db desc-page cut (round-2 refuter S3): an
+     explicit pick uses its own minute; the spot Latest mode anchors at the
+     payload's OWN latest_time echo (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 — the
+     exact minute the snapshot's whole-day cut ended at), so a live pull
+     appending newer 1-minute bars between the movers read and this probe can
+     no longer flip the chip red on a matching view. F&O Latest + the daily TF
+     stay un-anchored (rows[0]): latest_time is a SPOT-derived echo, NOT the
+     F&O read's anchor (an F&O lake ahead of the spot lake would false-red),
+     and a daily payload carries none — the residual live-pull race there is
+     disclosed in the red copy below. */
+  const anchor = isSpot ? (j.time || j.latest_time || null) : (j.time || null);
+  const ctl = new AbortController();
+  verifyAbort = ctl;
+  const killer = setTimeout(() => ctl.abort(), VERIFY_TIMEOUT_MS);
+  const probes = rows.map(r => {
+    const q = new URLSearchParams({
+      exchange: r.exchange || "",
+      segment: isSpot ? (r.segment || "") : "FNO",
+      symbol: r.symbol,
+      interval: "1minute",
+      start: j.date, end: j.date, desc: "true", limit: "500",
+    });
+    return fetch("/api/v1/db/candles?" + q.toString(), { signal: ctl.signal })
+      .then(async (resp) => {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      });
+  });
+  let settled;
+  try { settled = await Promise.allSettled(probes); }
+  finally { clearTimeout(killer); if (verifyAbort === ctl) verifyAbort = null; }
+  if (gen !== verifyGen) return;  /* superseded by a newer render — discard */
+  const mismatches = [], missing = [], noCut = [];
+  let checked = 0, skipped = 0, unavailable = 0, unavailReason = "";
+  settled.forEach((res, i) => {
+    const row = rows[i];
+    if (res.status !== "fulfilled") {
+      unavailable += 1;
+      if (!unavailReason) {
+        const e = res.reason;
+        unavailReason = (e && e.name === "AbortError") ? "timeout"
+          : (e && /^HTTP \d+$/.test(e.message || "")) ? e.message : "network";
+      }
+      return;
+    }
+    const body = res.value || {};
+    const cols = body.columns || [];
+    const tsIdx = cols.indexOf("timestamp");
+    const closeIdx = cols.indexOf("close");
+    const pctIdx = cols.indexOf("change_pct");
+    const dbRows = Array.isArray(body.rows) ? body.rows : [];
+    const target = (tsIdx >= 0 && closeIdx >= 0)
+      ? BXVerify.bxCutRow(dbRows, tsIdx, anchor) : null;
+    /* Honest wording split (round-2 refuter S4): an EMPTY /db day-page is
+       "no rows for the date"; a non-empty page with no row at/before the
+       anchor is a DIFFERENT truth ("/db has rows, none at/before the cut")
+       — both red, each naming what /db actually holds. */
+    if (!target) { (dbRows.length ? noCut : missing).push(row.symbol); return; }
+    const out = BXVerify.bxVerifyRow({
+      sym: row.symbol,
+      ltpStr: row.ltp,
+      pctStr: row.pct_change,
+      checkPct: isSpot && row.prev_close_contiguous !== false,
+      dbClose: target[closeIdx],
+      dbChangePct: pctIdx >= 0 ? target[pctIdx] : null,
+    });
+    mismatches.push(...out.mismatches); checked += out.checked; skipped += out.skipped;
+  });
+  /* Precedence: mismatch > missing-rows/no-cut > unavailable > all-skipped >
+     green. A probe failure with zero found mismatches is an honest "verify
+     unavailable" — never a fake green (Golden Rule #1). */
+  if (mismatches.length) {
+    const m = mismatches[0];
+    let text = `✗ /db MISMATCH — ${m.sym} ${m.cell} shown ${m.shown} · /db ${m.db}`;
+    if (mismatches.length > 1) text += ` (+${mismatches.length - 1} more)`;
+    if ((j.interval || "") !== "1minute") {
+      /* An actionable red: on a non-1minute display TF the likeliest cause is a
+         stale stored partition vs the 1-minute base (the #1342 class). */
+      text += " — displayed TF may be stale vs the 1-minute base (re-run pull/prebuild)";
+    }
+    if (!anchor) {
+      /* Un-anchored cut = rows[0] (F&O Latest / daily TF): the residual race —
+         a live pull appending bars between the movers read and this probe —
+         is disclosed, never presented as a certain data fault. */
+      text += " — or a live pull advanced /db past this snapshot (↻ refresh)";
+    }
+    setVerifyChip("neg", text);
+  } else if (missing.length) {
+    setVerifyChip("neg", `✗ ${missing[0]}: no /db 1-minute rows for ${j.date || ""}`
+      + (missing.length > 1 ? ` (+${missing.length - 1} more)` : ""));
+  } else if (noCut.length) {
+    setVerifyChip("neg", `✗ ${noCut[0]}: /db has 1-minute rows for ${j.date || ""} but none at/before ${anchor}`
+      + (noCut.length > 1 ? ` (+${noCut.length - 1} more)` : ""));
+  } else if (unavailable) {
+    setVerifyChip("muted", `verify unavailable (${unavailReason || "network"})`);
+  } else if (!checked) {
+    setVerifyChip("muted", "verify: n/a (no verifiable cells)");
+  } else {
+    setVerifyChip("pos", `✓ matches /db (${rows.length} rows · spot LTP+%CHNG / F&O LTP only · 1m base)`
+      + (skipped ? ` · ${skipped} skipped` : "")
+      + (unreadable ? ` · ${unreadable} not /db-readable` : ""));
+  }
 }
 function syncControls() {
   ["date","interval","time","exchange"].forEach(id => {
@@ -571,12 +1250,27 @@ async function load() {
      so it is set via textContent on a dedicated span — the static "<b>Note:</b>"
      label stays in the DOM — never innerHTML (DEC-DASHBOARD-XSS-HARDENING-001).
      A reflected `?asset=<img …>` renders as inert text, not a live tag. */
-  $("noteText").textContent = "Loading…";
+  /* Pending state = the shared .bx-skel shimmer (the literal "Loading…"
+     terminal string is banned by the design system); EVERY terminal path —
+     refreshBaselineLegend (success + unchanged-skip + pill switch), the gated
+     branch, the 5xx branch and the offline catch — removes the class before
+     its own textContent write, so a skeleton always resolves to real copy. */
+  $("noteText").classList.add("bx-skel");
+  $("noteText").textContent = "";
   /* Unconditional PCR-panel invalidation (DEC-MOVERS-OPTIONS-PCR-001): the ONE
      move covering asset switches, gated payloads, preview/catch fallbacks, and
      absent-key payloads — the panel only reappears via showPcr() on a
      successful options payload carrying rows. */
   $("pcrPanel").hidden = true; $("pcrRows").textContent = "";
+  /* Header-chips invalidation (DEC-MOVERS-HEADER-CHIPS-001): the SAME
+     one-move law — the chips row + the missing-OI reveal reappear ONLY via
+     renderChips() on a successful payload (gated / preview / error paths
+     stay chip-less). */
+  $("chips").hidden = true; $("chipDetail").hidden = true; $("chipDetail").textContent = "";
+  /* Supersede: this call is now the ONLY one allowed to paint (loadGen law
+     above); every resume point below re-checks `gen === loadGen` and ABANDONS
+     silently when a newer load() has started. */
+  const gen = ++loadGen;
   syncControls();
   const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"100" });
   if ($("date").value) p.set("date", $("date").value);
@@ -592,6 +1286,7 @@ async function load() {
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
     const r = await fetch("/api/v1/movers?"+p.toString());
+    if (gen !== loadGen) return;  /* superseded while in flight — never repaint (S1). */
     if (!r.ok) {
       /* A 5xx on a RUNNING dashboard is a genuine SERVER fault (today's one
          realistically-reachable producer: the PCR fold's lake-corruption 500,
@@ -608,12 +1303,15 @@ async function load() {
       if (r.status >= 500) {
         let detail = "";
         try { detail = String(JSON.parse(await r.text()).detail || ""); } catch { detail = ""; }
+        if (gen !== loadGen) return;  /* superseded while reading the body — drop the stale error shell. */
         lastPayload = null;   /* a pill switch must re-fetch, never re-render the error shell. */
         lastRenderSig = null; /* a recovered fetch must always repaint over the error shell. */
         wasGated = false; lastGatedKey = null;
         rowsData = [];
         renderHead(); renderRows();
+        setAsofDot("live-down");
         $("asof").textContent = `server error · HTTP ${r.status}`;
+        $("noteText").classList.remove("bx-skel");
         $("noteText").textContent = detail || `the server answered HTTP ${r.status} — check the dashboard log (movers.pcr_corruption / the stack trace) for the fault.`;
         return;
       }
@@ -623,6 +1321,7 @@ async function load() {
        client-side (DEC-DASHBOARD-JS-PERF-001 — the backend echoes no generation
        field; that echo is a reported follow-up, NOT added here). */
     const bodyText = await r.text();
+    if (gen !== loadGen) return;  /* superseded while reading the body — never repaint (S1). */
     const j = JSON.parse(bodyText);
     if (j.gated) {
       /* Prebuild gate (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2 + the phase-aware
@@ -662,7 +1361,9 @@ async function load() {
           ? ` — movers warm ${j.warm_segment ? j.warm_segment + " " : ""}${j.warm_done}/${j.warm_total}` : "";
         gatedStatus = `final stage: ${j.phase}${warm} — running ${fmtElapsed(j.elapsed_s)} (auto-refreshes)`;
       }
+      setAsofDot("live-warn");
       $("asof").textContent = gatedStatus;
+      $("noteText").classList.remove("bx-skel");
       $("noteText").textContent = j.note || "pull pipeline running — movers gated until the prebuild finishes.";
       clearTimeout(gateTimer);
       gateTimer = setTimeout(load, GATE_RETRY_MS);
@@ -670,19 +1371,35 @@ async function load() {
     }
     clearTimeout(gateTimer);
     wasGated = false; lastGatedKey = null;
+    setAsofDot("live-ok");
     /* Skip-render-when-unchanged (skipUnchangedRender guard): byte-identical body
        for the byte-identical coordinate — the DOM (and rowsData/lastPayload)
-       already show exactly this snapshot; restore the note (set to "Loading…"
-       above) and stop. Guarded to the no-client-sort state so a manually sorted
+       already show exactly this snapshot; restore the note (put in the pending
+       .bx-skel state above) and stop. Guarded to the no-client-sort state so a manually sorted
        view never takes this path (DEC-DASHBOARD-JS-PERF-001). */
     const sig = p.toString() + "|" + bodyText;
     if (state.sort.idx === null && sig === lastRenderSig) {
       /* rowsData is unchanged (the DOM already shows this snapshot) — restore the
-         note THROUGH the legend helper so the " *" legend survives the "Loading…"
-         overwrite too (the same desync class as the pill switch). */
+         note THROUGH the legend helper so the " *" legend survives the
+         pending-skeleton overwrite too (the same desync class as the pill switch). */
       baseNote = j.note || "";
       refreshBaselineLegend(baseNote);
       showPcr(j);  /* load() hid the panel above — an identical repeat must restore it. */
+      renderChips(j);  /* the chips row was hidden above too — restore it (same law). */
+      refreshProvenance();
+      /* Re-PROVE, never re-ASSERT (round-3 refuter fold): an identical MOVERS
+         payload says nothing about the /db SIDE, so the verify pass re-runs on
+         this path too. The prior "the chip already reports exactly this
+         snapshot" rationale was wrong twice over: (1) a transient probe
+         failure ("verify unavailable" — timeout/network) wedged for the whole
+         session because every ↻ Refresh took this path and re-probed nothing;
+         (2) a green chip went STALE-GREEN over /db content that drifted
+         underneath (a heal/quarantine/manual partition edit touches no window
+         ledger, so the movers bytes stay identical) — a false green on the
+         guarantee surface (Golden Rule #1). Bounded: K ≤ 5 debounced probes
+         per EXPLICIT user re-load only — nothing on this page polls when idle
+         (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). */
+      scheduleVerify();
       return;
     }
     lastRenderSig = sig;
@@ -690,18 +1407,55 @@ async function load() {
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
     showPcr(j);
-    /* Honest as-of label (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): an intraday DEFAULT
-       (blank time) reads "latest (HH:MM)" from the additive latest_time echo — NOT
-       the wrong "(daily)" it used to print — while the CUT stays whole-day; an
-       explicit pick shows its minute; a daily TF reads "(daily)". */
-    const isDaily = (TF_MIN[j.interval] || 375) >= 375;
-    const asofTime = j.time ? j.time
+    renderChips(j);
+    /* Honest as-of label (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 +
+       DEC-MOVERS-TIME-SNAP-UX-001): an intraday DEFAULT (blank time) reads
+       "latest (HH:MM)" from the additive latest_time echo — NOT the wrong
+       "(daily)" it used to print — while the CUT stays whole-day; an explicit
+       multi-minute pick shows its BUCKET SPAN ("15:27–15:29" — the /db label
+       to the sent bucket-final cutoff, making the containing-bucket snap
+       visible); 1minute keeps the plain minute; a daily TF reads "(daily)".
+       A Latest cut over a day whose stored data ends MID-SESSION (the day
+       is incomplete in the DB — pull may still be running / truncated day)
+       carries a STORED-DATA note (item 4, reworded to the operator's FINAL
+       stored-data-only spec — the "forming bar" concept is CUT; the rule is
+       "show exactly what's stored" and the label speaks only about the
+       stored data): "data through HH:MM — day incomplete in DB", plus
+       "; completed <tf> bar would close HH:MM" only when the latest stored
+       minute additionally falls MID-bucket (derived 100% client-side from
+       the existing latest_time echo via BXMoversTime.storedCutInfo; a
+       malformed/absent echo abstains to the plain label, never a wrong
+       claim; a finalized day — latest 15:29 — never shows it on any TF).
+       HONEST LIMIT: the stored-data disclosure covers the LATEST cut only —
+       an EXPLICIT pick whose bucket-final lies beyond the day's last stored
+       minute also serves exactly the data stored so far under its
+       completed-span label, but is UNDETECTABLE client-side today because
+       the backend echoes latest_time only when no time was sent (app.py
+       `time is None` gate, pinned by
+       test_explicit_time_leaves_latest_time_none); echoing it on explicit
+       picks + extending this note is the named follow-up
+       DEC-MOVERS-EXPLICIT-PICK-LATEST-ECHO-001. textContent only. */
+    const asofM = TF_MIN[j.interval] || 375;
+    const isDaily = asofM >= 375;
+    const pickedMin = j.time ? BXMoversTime.cutoffMinute(j.time) : null;
+    const asofTime = j.time ? ((!isDaily && asofM > 1 && pickedMin !== null)
+                       ? `${BXMoversTime.minuteToHHMM(BXMoversTime.bucketStart(pickedMin, asofM))}–${j.time}`
+                       : j.time)
                    : isDaily ? "(daily)"
                    : (j.latest_time ? `latest (${j.latest_time})` : "latest");
-    $("asof").textContent = `as-of ${(j.date||"")} ${asofTime} · ${j.interval||""}`;
-    /* Adopt an EXPLICIT echoed as-of so subsequent TF switches reuse the identical
-       minute — reflected via .value / .textContent (never innerHTML of server data),
-       injecting an off-grid minute as a selectable option (XSS-safe). */
+    const cutInfo = (!j.time && !isDaily && j.latest_time)
+      ? BXMoversTime.storedCutInfo(j.latest_time, asofM) : null;
+    const storedNote = (cutInfo && cutInfo.dayIncomplete)
+      ? ` · data through ${j.latest_time} — day incomplete in DB${cutInfo.midBucket ? `; completed ${j.interval||""} bar would close ${cutInfo.closesAt}` : ""}`
+      : "";
+    $("asof").textContent = `as-of ${(j.date||"")} ${asofTime} · ${j.interval||""}${storedNote}`;
+    /* Defensive adopt of an EXPLICIT echoed as-of — reflected via .value /
+       .textContent (never innerHTML of server data), injecting an off-grid
+       minute as a selectable option (XSS-safe). A no-op BY CONSTRUCTION since
+       DEC-MOVERS-TIME-SNAP-UX-001: the server echoes the raw sent value
+       (movers_snapshot `"time": time`), so j.time === state.time always. It
+       must NEVER write state.instant — only an explicit user pick does — so a
+       hypothetical divergent echo can never forward-drift the instant. */
     if (j.time && state.time !== j.time) {
       state.time = j.time;
       const tsel = $("time");
@@ -722,12 +1476,15 @@ async function load() {
     baseNote = j.note || "";
     refreshBaselineLegend(baseNote);
   } catch (e) {
+    if (gen !== loadGen) return;  /* a superseded failure must not clobber a newer paint. */
     lastPayload = null;  /* preview/failed: a pill switch falls back to a real fetch. */
     lastRenderSig = null;  /* a recovered fetch must always repaint over the preview. */
     wasGated = false; lastGatedKey = null;
     rowsData = SAMPLE[state.asset] || SAMPLE.spot;
     renderHead(); renderRows();
+    setAsofDot("live-down");
     $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
+    $("noteText").classList.remove("bx-skel");
     $("noteText").textContent = "preview of the layout with sample rows — run the dashboard for real movers data (click any column to sort).";
   }
 }
@@ -802,11 +1559,18 @@ $("rows").addEventListener("keydown", (e) => {
 });
 $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
   $("tabs").querySelectorAll(".tab").forEach(x=>x.classList.remove("on")); t.classList.add("on");
+  /* Supersede any pending/in-flight verify pass BEFORE mutating state.asset
+     (round-2 refuter S2 — the tab-switch false-red race); the new tab's own
+     render re-schedules. */
+  cancelVerify();
   state.asset = t.dataset.asset; state.category = ASSETS[state.asset].cats[0][0]; state.sort = {idx:null,dir:1};
   renderPills(); load();
 });
 $("interval").onchange = () => { fillTimes(); load(); };
-$("time").onchange = () => { state.time = $("time").value; load(); };
+/* The ONLY writer of state.instant (DEC-MOVERS-TIME-SNAP-UX-001): an explicit
+   user pick. The picked option's value is the bucket-FINAL sent cutoff — its
+   minute IS the new persistent instant; "" (explicit Latest) → null. */
+$("time").onchange = () => { state.time = $("time").value; state.instant = BXMoversTime.cutoffMinute($("time").value); load(); };
 /* ~200 ms trailing debounce for the two NUMBER inputs (DEC-DASHBOARD-JS-PERF-001):
    a spinner run fires a discrete `change` per click — debouncedLoad coalesces the
    burst into ONE fetch. The selects + date keep the immediate load (a single
@@ -817,12 +1581,17 @@ function debouncedLoad() { clearTimeout(debounceTimer); debounceTimer = setTimeo
 ["exchange","uclass","expiry","track","date"].forEach(id => $(id).onchange = load);
 ["topn","minvol"].forEach(id => $(id).onchange = debouncedLoad);
 $("refresh").onclick = load;
-fillTimes(); renderPills(); load();
+initSegTabs(); fillTimes(); renderPills(); load();
 /* Immediate catch-up on tab return while GATED (DEC-DASHBOARD-POLL-HYGIENE-001):
    the gated auto-retry pauses fetches while hidden, so re-poll NOW on becoming
    visible; clear the pending hidden-armed retry first so it cannot double-fire. */
 document.addEventListener("visibilitychange", function () {
   if (!document.hidden && wasGated) { clearTimeout(gateTimer); load(); }
+  /* Verify-pause catch-up (round-2 refuter S5): a render that landed while the
+     tab was hidden paused the verify pass ("paused (hidden tab)") — re-run it
+     NOW on return so a visible tab never wears a stale paused chip. The gated
+     branch above needs nothing: its load() re-renders and re-schedules. */
+  else if (!document.hidden && verifyHiddenPaused) scheduleVerify();
 });
 </script>
 </body>

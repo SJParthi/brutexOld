@@ -1,30 +1,35 @@
-"""THE master dual-arm parity gate for DEC-FEED-RUST-CORE-001.
+"""THE master parity gate for the feed-materialization conversion
+(DEC-FEED-RUST-MATERIALIZE-002 over DEC-FEED-RUST-CORE-001).
 
-Hypothesis-generated canonical bar tables — hostile floats (exact
-``prev * 4.0`` boundary products, ±1ulp neighbours, negatives, ``0.0``,
-``-0.0``, subnormals, NaN, ±inf, ``>= 1e16``, ``<= 1e-7``, the shortest-repr
-hard-case corpus), timestamps straddling IST midnight, multi-session,
-backwards dates, µs-carrying instants, pre-1970 + ``>= 9999-12-31`` degrade
-lanes, OI-null mixes, and null-price/volume/timestamp degrade variants —
-driven through the REAL :func:`brutex.feed.replay.arrow_table_to_bars` with
-``BRUTEX_FEED_RUST`` OFF then ON, asserting:
+The production Python oracle loop was DELETED — the strict Rust kernel is
+the only decision path — so this module retains the deleted loop VERBATIM
+as a **frozen in-test reference** (the ``tf_resampler`` frozen-oracle
+idiom: the pre-conversion math preserved inside the test as the permanent
+differential partner). Hypothesis-generated canonical bar tables — hostile
+floats (exact ``prev * 4.0`` boundary products, ±1ulp neighbours,
+negatives, ``0.0``, ``-0.0``, subnormals, NaN, ±inf, ``>= 1e16``,
+``<= 1e-7``, the shortest-repr hard-case corpus), timestamps straddling
+IST midnight, multi-session, backwards dates, µs-carrying instants — are
+driven through the REAL :func:`brutex.feed.replay.arrow_table_to_bars`
+AND the frozen oracle, asserting:
 
-* bar-count + per-bar 7-field **``str()``-level** equality (``str(Decimal)``
-  per price — plain ``==`` is numeric-insensitive and would hide a
-  trailing-zero re-key of the ``bxsnap2`` digest);
-* exception parity (type AND ``str(exc)`` AND ``__cause__`` type) via dual
-  capture;
-* ``capture_logs`` event-list equality (order + full dicts) over every
-  non-fallback event (the ON arm's own ``feed_rust.fallback`` degrade
-  markers are the ONE sanctioned difference);
-* the ``BRUTEX_BAD_TICK_SCREEN=off`` × flag-ON arm (spikes kept, no ts ever
-  crossing the FFI) under the same laws.
+* bar-count + per-bar 7-field **``str()``-level** equality
+  (``str(Decimal)`` per price — plain ``==`` is numeric-insensitive and
+  would hide a trailing-zero re-key of the ``bxsnap2`` digest);
+* exception parity (type AND ``str(exc)`` AND ``__cause__`` type) via
+  dual capture;
+* ``capture_logs`` event-list equality (order + full dicts);
+* the ``BRUTEX_BAD_TICK_SCREEN=off`` arm (spikes kept, ts never
+  consulted) under the same laws — INCLUDING the out-of-envelope
+  timestamps (pre-1970 / ``>= 9999-12-31``) that the screen-ON unified
+  path now refuses loudly (that refusal is pinned by the seam
+  integration suite, not here — this gate's domain is the SERVED plane).
 
-Skips loudly when pyarrow or the wheel is absent — without the kernel every
-ON arm would degrade to the oracle and the gate would be vacuous. The CI
-property job is `.[dev]`-only (no pyarrow), so this module's real CI
-execution home is the unit-test job, whose [dev,data,ui] env + wheel install
-runs tests/property inside the whole-package coverage pass.
+Skips loudly when pyarrow or the wheel is absent — without the kernel the
+unified path refuses everything and the gate would be vacuous. The CI
+property job now installs the brutex_feed wheel (the T17 wheel-required
+posture); the gate ALSO runs in the unit-test job's whole-package
+coverage pass.
 """
 
 from __future__ import annotations
@@ -34,31 +39,27 @@ import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
-from brutex.data.bad_tick import BAD_TICK_ENABLED_ENV
+from brutex.calendars.nse import IST
+from brutex.data.bad_tick import BAD_TICK_ENABLED_ENV, BadTickScreen, bad_tick_screen_enabled
+from brutex.data.models import CandleBar
 from brutex.feed.replay import arrow_table_to_bars
-from brutex.feed_rust import (
-    FEED_RUST_ENV,
-    FEED_RUST_FALLBACK_EVENT,
-    FEED_RUST_FLAG_EVENT,
-    reset_for_tests,
-)
+from brutex.feed_rust import FEED_RUST_ENV, MATERIALIZE_RUST_ENV
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
-# Module-level guards (the property job installs `.[dev]` ONLY — no [data]
-# extra, so pyarrow must importorskip exactly like the sibling polars guards;
-# the dual-arm gate's REAL CI execution home is the unit-test job, whose
-# [dev,data,ui] env + wheel install runs tests/property in the coverage pass).
+# Module-level guards: the parity tables need pyarrow ([data] extra) and the
+# unified path needs the REQUIRED wheel.
 pa = pytest.importorskip(
     "pyarrow", reason="pyarrow not installed — the parity tables need the [data] extra"
 )
 pytest.importorskip(
     "brutex_feed",
-    reason="brutex_feed wheel not installed — the dual-arm parity gate needs the kernel",
+    reason="brutex_feed wheel not installed — the wheel-required path needs the kernel",
 )
 
 _SOURCE = "NSE/INDEX/NSE-NIFTY/1minute"
@@ -71,10 +72,12 @@ _BASE = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
 _IST_MIDNIGHT_MINUS = datetime(2024, 1, 2, 18, 29, 59, 999999, tzinfo=UTC)
 _IST_MIDNIGHT = datetime(2024, 1, 2, 18, 30, 0, tzinfo=UTC)
 
-#: Interesting instants: in-session minutes, midnight straddles, other
-#: sessions (multi-session + backwards orderings arise from list sampling),
-#: µs-carrying, and the two DEGRADE lanes (pre-1970; >= 9999-12-31).
-_TS_POOL: list[datetime] = [
+#: In-ENVELOPE instants (every ts inside ``[epoch 0, 9999-12-31T00:00:00Z)``
+#: where the kernel's fixed +05:30 civil-date law is provable): in-session
+#: minutes, midnight straddles, other sessions (multi-session + backwards
+#: orderings arise from list sampling), µs-carrying, epoch-adjacent and
+#: far-future boundary neighbours.
+_TS_ENVELOPE_POOL: list[datetime] = [
     _BASE,
     _BASE + timedelta(minutes=1),
     _BASE + timedelta(minutes=2, microseconds=123456),
@@ -82,6 +85,15 @@ _TS_POOL: list[datetime] = [
     _IST_MIDNIGHT,
     _BASE + timedelta(days=1),
     _BASE - timedelta(days=3),
+    datetime(1970, 1, 1, 0, 0, 0, tzinfo=UTC),  # epoch — the inclusive floor
+    datetime(9999, 12, 30, 23, 59, 59, tzinfo=UTC),  # just inside the ceiling
+]
+
+#: OUT-of-envelope instants: with the screen ON the unified path REFUSES
+#: these loudly (seam-suite pinned); with the screen OFF the ts is never
+#: consulted and parity must hold — so they join ONLY the screen-killed
+#: strategy here.
+_TS_OUT_OF_ENVELOPE: list[datetime] = [
     datetime(1969, 12, 31, 23, 59, 59, tzinfo=UTC),
     datetime(9999, 12, 31, 0, 0, tzinfo=UTC),
 ]
@@ -120,21 +132,15 @@ _price = st.one_of(
     st.sampled_from(_PRICE_POOL),
     st.floats(min_value=0.01, max_value=1_000_000.0, allow_nan=False, allow_infinity=False),
 )
-_maybe_null_price = st.one_of(_price, st.just(None))
 _volume = st.one_of(st.sampled_from([10, 0, -5]), st.integers(min_value=0, max_value=10**9))
-_maybe_null_volume = st.one_of(_volume, st.just(None))
 _oi = st.one_of(st.none(), st.integers(min_value=-2, max_value=100))
-_ts = st.sampled_from(_TS_POOL)
-_maybe_null_ts = st.one_of(_ts, st.just(None))
+_ts_envelope = st.sampled_from(_TS_ENVELOPE_POOL)
+_ts_any = st.sampled_from(_TS_ENVELOPE_POOL + _TS_OUT_OF_ENVELOPE)
 
-_row = st.tuples(_ts, _price, _price, _price, _price, _volume, _oi)
-_rows = st.lists(_row, min_size=0, max_size=10)
-
-#: Degrade-lane rows: nullable timestamp / prices / volume.
-_hostile_row = st.tuples(
-    _maybe_null_ts, _maybe_null_price, _price, _price, _maybe_null_price, _maybe_null_volume, _oi
-)
-_hostile_rows = st.lists(_hostile_row, min_size=1, max_size=6)
+_row_envelope = st.tuples(_ts_envelope, _price, _price, _price, _price, _volume, _oi)
+_rows_envelope = st.lists(_row_envelope, min_size=0, max_size=10)
+_row_any = st.tuples(_ts_any, _price, _price, _price, _price, _volume, _oi)
+_rows_any = st.lists(_row_any, min_size=0, max_size=10)
 
 
 def _table(rows: list[tuple[Any, ...]]) -> Any:
@@ -149,6 +155,103 @@ def _table(rows: list[tuple[Any, ...]]) -> Any:
             "open_interest": pa.array([r[6] for r in rows], type=pa.int64()),
         }
     )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# The FROZEN Python oracle — the deleted production loop, VERBATIM.
+# ────────────────────────────────────────────────────────────────────────
+# Transcribed byte-for-byte (modulo the local helper names) from the
+# pre-T17 `brutex/feed/replay.py` retained-oracle path: the per-field
+# finiteness→positivity refusal order, the BadTickScreen consult, and the
+# `Decimal(str(price))` / wrapped-constructor materialization expressions.
+# DO NOT "improve" this code — it is the frozen differential partner; any
+# behavioral edit here voids the gate.
+
+
+def _frozen_nonfinite_error(origin: str, ts: Any, price_name: str, price: float) -> ValueError:
+    return ValueError(
+        f"corrupt stored bar{origin} at timestamp {ts!r}: "
+        f"{price_name}={price} is a non-finite price (the vendor parse "
+        f"rejects inf/NaN — a stored non-finite price is planted/corrupt "
+        f"data) — refusing to serve corrupt data to the engine "
+        f"(DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001)"
+    )
+
+
+def _frozen_positivity_error(origin: str, ts: Any, price_name: str, price: float) -> ValueError:
+    return ValueError(
+        f"corrupt stored bar{origin} at timestamp {ts!r}: "
+        f"{price_name}={price} is a non-positive price (a traded Indian "
+        f"price is never <= 0) — refusing to serve corrupt data to the "
+        f"engine (DEC-STORED-DATA-VALIDATION-001)"
+    )
+
+
+def _frozen_build_bar(
+    origin: str,
+    ts: Any,
+    o: float,
+    h: float,
+    lo: float,
+    c: float,
+    v: int,
+    oi: int | None,
+) -> CandleBar:
+    try:
+        return CandleBar(
+            timestamp=ts,
+            open=Decimal(str(o)),
+            high=Decimal(str(h)),
+            low=Decimal(str(lo)),
+            close=Decimal(str(c)),
+            volume=int(v),
+            open_interest=int(oi) if oi is not None else None,
+        )
+    except (ValueError, ArithmeticError) as exc:
+        raise ValueError(
+            f"corrupt stored bar{origin} at timestamp {ts!r}: {exc} — "
+            f"refusing to serve corrupt data to the engine "
+            f"(DEC-STORED-DATA-VALIDATION-001)"
+        ) from exc
+
+
+def frozen_oracle_bars(table: Any, *, source: str | None = None) -> list[CandleBar]:
+    """The deleted production oracle loop, preserved verbatim in-test."""
+    if table.num_rows == 0:
+        return []
+
+    timestamps: list[Any] = table.column("timestamp").to_pylist()
+    opens: list[float] = table.column("open").to_pylist()
+    highs: list[float] = table.column("high").to_pylist()
+    lows: list[float] = table.column("low").to_pylist()
+    closes: list[float] = table.column("close").to_pylist()
+    volumes: list[int] = table.column("volume").to_pylist()
+    open_interests: list[int | None] = table.column("open_interest").to_pylist()
+
+    screen_on = bad_tick_screen_enabled()
+    screen = BadTickScreen(source=source) if screen_on else None
+
+    origin = f" in {source}" if source is not None else ""
+    bars: list[CandleBar] = []
+    for ts, o, h, lo, c, v, oi in zip(
+        timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
+    ):
+        for price_name, price in (("open", o), ("high", h), ("low", lo), ("close", c)):
+            if not math.isfinite(price):
+                raise _frozen_nonfinite_error(origin, ts, price_name, price)
+            if price <= 0:
+                raise _frozen_positivity_error(origin, ts, price_name, price)
+        if screen is not None and not screen.keep(ist_date=ts.astimezone(IST).date(), close=c):
+            continue
+        bars.append(_frozen_build_bar(origin, ts, o, h, lo, c, v, oi))
+    if screen is not None:
+        screen.finish()
+    return bars
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Dual-capture harness
+# ────────────────────────────────────────────────────────────────────────
 
 
 @contextmanager
@@ -170,31 +273,34 @@ def _env(name: str, value: str | None) -> Generator[None]:
 
 
 def _observe(
-    table: Any, flag: str | None, screen: str | None
+    fn: Any, table: Any, screen: str | None
 ) -> tuple[list[Any] | None, Exception | None, list[Any]]:
-    """One arm: bars-or-exception + the non-fallback log record sequence."""
-    reset_for_tests()
-    with _env(FEED_RUST_ENV, flag), _env(BAD_TICK_ENABLED_ENV, screen), capture_logs() as logs:
+    """One arm: bars-or-exception + the full log record sequence."""
+    with (
+        _env(MATERIALIZE_RUST_ENV, None),
+        _env(FEED_RUST_ENV, None),
+        _env(BAD_TICK_ENABLED_ENV, screen),
+        capture_logs() as logs,
+    ):
         bars: list[Any] | None = None
         exc: Exception | None = None
         try:
-            bars = arrow_table_to_bars(table, source=_SOURCE)
+            bars = fn(table, source=_SOURCE)
         except Exception as caught:  # dual-capture: parity is asserted on the pair
             exc = caught
-    filtered = [
-        rec for rec in logs if rec["event"] not in {FEED_RUST_FALLBACK_EVENT, FEED_RUST_FLAG_EVENT}
-    ]
-    return bars, exc, filtered
+    return bars, exc, list(logs)
 
 
-def _assert_arms_identical(table: Any, *, screen: str | None) -> None:
-    off_bars, off_exc, off_logs = _observe(table, None, screen)
-    on_bars, on_exc, on_logs = _observe(table, "1", screen)
-    if off_exc is None:
-        assert on_exc is None, f"ON arm raised where OFF served: {on_exc!r}"
-        assert off_bars is not None and on_bars is not None
-        assert len(off_bars) == len(on_bars)
-        for a, b in zip(off_bars, on_bars, strict=True):
+def _assert_unified_matches_frozen(table: Any, *, screen: str | None) -> None:
+    ref_bars, ref_exc, ref_logs = _observe(frozen_oracle_bars, table, screen)
+    got_bars, got_exc, got_logs = _observe(arrow_table_to_bars, table, screen)
+    if ref_exc is None:
+        assert got_exc is None, (
+            f"the unified path raised where the frozen oracle served: {got_exc!r}"
+        )
+        assert ref_bars is not None and got_bars is not None
+        assert len(ref_bars) == len(got_bars)
+        for a, b in zip(ref_bars, got_bars, strict=True):
             assert a.timestamp.isoformat() == b.timestamp.isoformat()
             assert str(a.open) == str(b.open)
             assert str(a.high) == str(b.high)
@@ -203,30 +309,24 @@ def _assert_arms_identical(table: Any, *, screen: str | None) -> None:
             assert repr(a.volume) == repr(b.volume)
             assert repr(a.open_interest) == repr(b.open_interest)
     else:
-        assert on_exc is not None, "OFF arm raised where ON served"
-        assert type(on_exc) is type(off_exc)
-        assert str(on_exc) == str(off_exc)
-        assert type(on_exc.__cause__) is type(off_exc.__cause__)
-    assert off_logs == on_logs
+        assert got_exc is not None, "the frozen oracle raised where the unified path served"
+        assert type(got_exc) is type(ref_exc)
+        assert str(got_exc) == str(ref_exc)
+        assert type(got_exc.__cause__) is type(ref_exc.__cause__)
+    assert ref_logs == got_logs
 
 
 @settings(deadline=None)
-@given(rows=_rows)
-def test_dual_arm_parity_screen_default(rows: list[tuple[Any, ...]]) -> None:
-    """OFF ≡ ON over hostile-but-non-null tables (screen at its default ON)."""
-    _assert_arms_identical(_table(rows), screen=None)
+@given(rows=_rows_envelope)
+def test_unified_equals_frozen_oracle_screen_default(rows: list[tuple[Any, ...]]) -> None:
+    """Unified ≡ frozen oracle over hostile in-envelope tables (screen ON)."""
+    _assert_unified_matches_frozen(_table(rows), screen=None)
 
 
 @settings(deadline=None)
-@given(rows=_rows)
-def test_dual_arm_parity_screen_killed(rows: list[tuple[Any, ...]]) -> None:
-    """OFF ≡ ON with ``BRUTEX_BAD_TICK_SCREEN=off`` (spikes kept, ts_us=[])."""
-    _assert_arms_identical(_table(rows), screen="off")
-
-
-@settings(deadline=None)
-@given(rows=_hostile_rows)
-def test_dual_arm_parity_null_degrade_lanes(rows: list[tuple[Any, ...]]) -> None:
-    """Null ts/price/volume variants: the ON arm degrades and stays identical
-    (including the oracle's own TypeError/AttributeError escapes)."""
-    _assert_arms_identical(_table(rows), screen=None)
+@given(rows=_rows_any)
+def test_unified_equals_frozen_oracle_screen_killed(rows: list[tuple[Any, ...]]) -> None:
+    """Unified ≡ frozen oracle with ``BRUTEX_BAD_TICK_SCREEN=off`` — spikes
+    kept, ts NEVER consulted, so even out-of-envelope timestamps must serve
+    identically (the screen-ON refusal on those is the seam suite's pin)."""
+    _assert_unified_matches_frozen(_table(rows), screen="off")

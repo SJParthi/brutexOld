@@ -10,10 +10,13 @@ flat bytes-per-entry slope** — into a measured, deterministic invariant:
   regression that starts retaining O(kept²) or per-entry object state fails
   loudly).
 
-Ceilings derive from the documented arithmetic: 80 B/entry array payload +
-2 packed bits without the overfit columns; 104 B + 4 bits with them. The pin
-is deliberately a hair above (81 / 106) to absorb only the sub-byte bit-set
-rounding at tiny sizes — NOT a tolerance for growth.
+Ceilings derive from the documented arithmetic (re-derived for the LANE-W1
+selection-axis columns, DEC-RANK-QUOTA-PERSIST-1000-001 — +40 B/entry:
+3×i64 net_pnl/losing/expectancy + 2×f64 win_rate/dd, always retained):
+120 B/entry array payload + 2 packed bits without the overfit columns;
+144 B + 4 bits with them. The pin is deliberately a hair above (121 / 146)
+to absorb only the sub-byte bit-set rounding at tiny sizes — NOT a
+tolerance for growth.
 
 HONEST scope (Golden Rule #10): this measures the columns' logical payload,
 not process RSS (``array`` growth slack + CPython object headers are excluded
@@ -31,8 +34,8 @@ from tests.fakes.metrics_fixtures import make_result_metrics
 _SIZES = (1_000, 8_000, 64_000)
 
 #: Payload ceilings (bytes/entry): the documented arithmetic + bit-set rounding.
-_CEILING_BASE = 81.0
-_CEILING_OVERFIT = 106.0
+_CEILING_BASE = 121.0
+_CEILING_OVERFIT = 146.0
 
 
 def _bytes_per_entry(n: int, *, with_overfit: bool) -> float:
@@ -64,6 +67,8 @@ def test_owned_nbytes_is_exact_not_estimated() -> None:
     metrics = make_result_metrics()
     for index in range(n):
         columns.append(index, metrics)
-    arrays = 13 * 8 * n  # 2 mask limbs + sharpe + 7 terms + trades + skew + kurt
+    # 2 mask limbs + sharpe + 7 terms + trades + skew + kurt + the 5 LANE-W1
+    # selection-axis columns (net_pnl/win_rate/dd_pct/losing/expectancy).
+    arrays = 18 * 8 * n
     bit_sets = 4 * (n // 8)  # gate + sharpe/skew/kurt None bits (n divisible by 8)
     assert columns.owned_nbytes() == arrays + bit_sets

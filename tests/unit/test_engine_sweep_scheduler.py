@@ -360,3 +360,93 @@ def test_daily_recompute_after_fire_never_repeats(second_of_day: int, now: float
     nxt = s.next_fire_after(fired, last_fire=fired)
     assert nxt > fired
     assert math.isclose(nxt - fired, _DAY)
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the next-fire arithmetic + resume fold.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    behavior-identical to the flag-OFF Python laws (which every OTHER test
+    in this file drives) — including the daily arm's ``int`` return TYPE
+    (the daemon's ``json.dumps`` audit bytes) and every reason string BYTE;
+    ``Schedule.parse`` (regex marshal-land) stays Python on both arms.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _drive() -> list[object]:
+        import json
+
+        interval = Schedule.parse("30m")
+        daily = Schedule.parse("daily@02:30", tz_offset_seconds=IST_OFFSET_SECONDS)
+        now = 1_728_000_000.0
+        outcomes: list[object] = []
+        for schedule in (interval, daily):
+            fire = schedule.next_fire_after(now, last_fire=None)
+            refire = schedule.next_fire_after(float(fire), last_fire=float(fire))
+            outcomes.append((fire, type(fire).__name__, refire, type(refire).__name__))
+            outcomes.append(schedule.seconds_until(now))
+            plan = plan_cycle(
+                now=now,
+                schedule=schedule,
+                checkpoint_view=CheckpointView(
+                    exists=True, sweep_id_matches=True, next_index=3, total_combos=10
+                ),
+            )
+            outcomes.append(
+                json.dumps(
+                    cycle_audit_payload(
+                        cycle_index=0,
+                        fire_at=plan.fire_at,
+                        schedule=schedule,
+                        resume=plan.resume,
+                        once=False,
+                    ),
+                    sort_keys=True,
+                )
+            )
+        views = [
+            CheckpointView(exists=False, sweep_id_matches=False, next_index=0, total_combos=0),
+            CheckpointView(exists=True, sweep_id_matches=False, next_index=3, total_combos=10),
+            CheckpointView(exists=True, sweep_id_matches=True, next_index=10, total_combos=10),
+            CheckpointView(exists=True, sweep_id_matches=True, next_index=3, total_combos=10),
+        ]
+        outcomes.extend(decide_resume(view) for view in views)
+        return outcomes
+
+    def test_flag_on_matches_flag_off_including_audit_bytes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        off = self._drive()
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = self._drive()
+        finally:
+            self._reset_facade()
+        assert on == off
+        # The daily arm's fire epoch is an INT on both arms (audit-bytes law).
+        assert on[3][1] == "int" and on[3][3] == "int"  # type: ignore[index]
+        assert on[0][1] == "float" and on[0][3] == "float"  # type: ignore[index]

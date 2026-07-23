@@ -32,6 +32,7 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.models import CandleBar
+from brutex.engine.exec_grid import build_exec_grid_map
 from brutex.engine.rust_metrics import (
     SWEEP_RUST_METRICS_ENV,
     reset_observability_memo_for_tests,
@@ -101,6 +102,13 @@ def _median_seconds(fn: Callable[[], ResultMetrics], rounds: int) -> float:
 def test_exit_index_fast_path_beats_the_dict_build(monkeypatch: pytest.MonkeyPatch) -> None:
     bars = _bars()
     trades, exit_indices = _trades_with_indices(bars)
+    # The tuple-memoised map the production spine threads (sweep_run builds it
+    # once per tuple via build_exec_grid_map(bars, exec_bars_1m, ...) and
+    # passes exec_map= beside exec_bars_1m=); tf=1minute — the decision
+    # stream IS the execution stream (DEC-FILL-EXEC-GRID-1M-001 §6 fixed
+    # point). Without the map the fast path DEMOTES (a missing exec_map is a
+    # demotion trigger), so the floor gate could never engage.
+    exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
     monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
     reset_observability_memo_for_tests()
     # Steady state (the bounded burn-in self-check excluded — its oracle scan
@@ -108,7 +116,14 @@ def test_exit_index_fast_path_beats_the_dict_build(monkeypatch: pytest.MonkeyPat
     reset_self_check_for_tests(remaining=0)
 
     def _dict_arm() -> ResultMetrics:
-        return metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        return metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=10_000_000,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            exec_map=exec_map,
+        )
 
     def _fast_arm() -> ResultMetrics:
         return metrics_from_trades(
@@ -116,6 +131,8 @@ def test_exit_index_fast_path_beats_the_dict_build(monkeypatch: pytest.MonkeyPat
             trades,
             start_equity_paisa=10_000_000,
             tf_minutes=1,
+            exec_bars_1m=bars,
+            exec_map=exec_map,
             exit_indices=exit_indices,
         )
 
@@ -154,12 +171,24 @@ def test_anti_vacuous_twin_a_demoted_fast_path_trips_the_floor(
     bars = _bars()
     trades, exit_indices = _trades_with_indices(bars)
     demoting_indices = [idx + _N_BARS for idx in exit_indices]  # all out of range
+    # The REAL tuple map (as the gate above threads): the demotion under test
+    # is the INDEX-stream refusal (exit_indices_consistent), never a missing
+    # exec_map — so the twin manufactures exactly the silent
+    # fall-back-to-dict regression the floor exists to catch.
+    exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
     monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
     reset_observability_memo_for_tests()
     reset_self_check_for_tests(remaining=0)  # steady state, as in the gate above
 
     def _dict_arm() -> ResultMetrics:
-        return metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        return metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=10_000_000,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            exec_map=exec_map,
+        )
 
     def _demoted_arm() -> ResultMetrics:
         return metrics_from_trades(
@@ -167,6 +196,8 @@ def test_anti_vacuous_twin_a_demoted_fast_path_trips_the_floor(
             trades,
             start_equity_paisa=10_000_000,
             tf_minutes=1,
+            exec_bars_1m=bars,
+            exec_map=exec_map,
             exit_indices=demoting_indices,
         )
 

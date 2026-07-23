@@ -114,6 +114,7 @@ class _CountingSim:
         *,
         direction: str,
         tf_minutes: int,
+        exec_bars: Sequence[CandleBar],
         stop_loss_paisa: int | None,
         take_profit_paisa: int | None,
     ) -> list[RefTrade]:
@@ -123,6 +124,7 @@ class _CountingSim:
             entry_signals,
             direction=direction,
             tf_minutes=tf_minutes,
+            exec_bars=exec_bars,
             sl_paisa=stop_loss_paisa,
             tp_paisa=take_profit_paisa,
         )
@@ -136,7 +138,7 @@ def _drawdown(
     tf_minutes: int,
 ) -> tuple[int, float, int, float]:
     ref = [t for t in trades if isinstance(t, RefTrade)]
-    return reference_drawdown(ref, n_bars=len(bars), start_equity_paisa=start_equity_paisa)
+    return reference_drawdown(ref, bars=bars, start_equity_paisa=start_equity_paisa)
 
 
 def _sink(mismatch: DiffCheckMismatch) -> None:  # pragma: no cover - matching stubs
@@ -163,6 +165,7 @@ class TestDiffcheckBoundedByK:
             report = _hook(sim).run_for_tuple(
                 bars=bars,
                 bar_bits=bar_bits,
+                exec_bars=bars,
                 tuple_=_Tuple(),
                 grid=_Grid(condition_bits=bits),
                 budget_left=_K,
@@ -176,6 +179,7 @@ class TestDiffcheckBoundedByK:
         report = _hook(sim).run_for_tuple(
             bars=bars,
             bar_bits=bar_bits,
+            exec_bars=bars,
             tuple_=_Tuple(),
             grid=_Grid(condition_bits=_BITS_SMALL),
             budget_left=10_000,
@@ -235,6 +239,7 @@ class TestDiffcheckBoundedByK:
                 report = hook.run_for_tuple(
                     bars=bars,
                     bar_bits=bar_bits,
+                    exec_bars=bars,
                     tuple_=_Tuple(),
                     grid=_Grid(condition_bits=bits),
                     budget_left=_K,

@@ -1434,10 +1434,12 @@ def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
     bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
         assert core.diffcheck is not None
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        # DEC-FILL-EXEC-GRID-1M-001 tf==1minute fixed point: the SAME list is
+        # both the decision and the 1m execution stream.
+        core.diffcheck(bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid)
         assert core.suspect is False  # production == reference on real data
         # Budget exhausted (2 checked) → the next call is a zero-cost no-op.
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        core.diffcheck(bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid)
         run_id = core.run_id
     ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
     assert len(ok_rows) == 1
@@ -1511,7 +1513,8 @@ def test_r45_diffcheck_production_leg_carries_the_bound_run_stamper(
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
         assert core.diffcheck is not None
         core.bind_reference_stamper(stamper)
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        # tf==1minute fixed point: exec stream == decision stream.
+        core.diffcheck(bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid)
         # Compare-neutral: production (stamped) still matches the reference.
         assert core.suspect is False
     assert captured == [stamper, stamper]  # both sampled masks bound the stamper
@@ -1524,7 +1527,10 @@ def test_diffcheck_zero_checked_records_nothing(tmp_path: Path) -> None:
     tuple_ = next(iter_sweep_tuples(grid))
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
         assert core.diffcheck is not None
-        core.diffcheck(bars=_BARS, bar_bits=[0] * len(_BARS), tuple_=tuple_, grid=grid)
+        # tf==1minute fixed point: exec stream == decision stream.
+        core.diffcheck(
+            bars=_BARS, bar_bits=[0] * len(_BARS), exec_bars=_BARS, tuple_=tuple_, grid=grid
+        )
         run_id = core.run_id
     assert not [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
 
@@ -1540,7 +1546,14 @@ def test_r45_diffcheck_closure_forwards_the_executed_population(tmp_path: Path) 
     bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
     with _core(tmp_path, grid, diffcheck_k=4) as (core, _s):
         assert core.diffcheck is not None
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[0b100])
+        core.diffcheck(
+            bars=_BARS,
+            bar_bits=bits,
+            exec_bars=_BARS,
+            tuple_=tuple_,
+            grid=grid,
+            mask_population=[0b100],
+        )
         run_id = core.run_id
     ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
     assert len(ok_rows) == 1
@@ -1561,8 +1574,10 @@ def test_r45_diffcheck_closure_empty_population_skips_and_spends_no_budget(
     bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
         assert core.diffcheck is not None
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid, mask_population=[])
-        core.diffcheck(bars=_BARS, bar_bits=bits, tuple_=tuple_, grid=grid)
+        core.diffcheck(
+            bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid, mask_population=[]
+        )
+        core.diffcheck(bars=_BARS, bar_bits=bits, exec_bars=_BARS, tuple_=tuple_, grid=grid)
         run_id = core.run_id
     ok_rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "DIFFCHECK_OK"]
     assert len(ok_rows) == 1  # the skip recorded nothing; the second call ran
@@ -1864,11 +1879,15 @@ def test_r45_run_one_tuple_invokes_diffcheck_post_persist(tmp_path: Path) -> Non
         *,
         bars: Sequence[CandleBar],
         bar_bits: Sequence[int],
+        exec_bars: Sequence[CandleBar],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
         mask_population: Sequence[int] | None = None,
     ) -> None:
         assert len(bar_bits) == len(bars)
+        # DEC-FILL-EXEC-GRID-1M-001: run_one_tuple threads the 1m execution
+        # stream to the hook; at tf==1minute it is the SAME bars_for feed.
+        assert list(exec_bars) == list(bars)
         assert mask_population is None  # legacy arm — the kwarg is never passed
         calls.append(len(bar_bits))
 
@@ -2134,3 +2153,59 @@ def test_g07_stamp_failure_is_fail_soft_on_both_paths(
     with capture_logs() as logs:
         cw2.run_and_write_from_manifest(tmp_path / "b", bars_for=bars_for2)
     assert [e for e in logs if e["event"] == "cascade_wire.stamp_failed"]
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the two run-core pure folds
+    (DEC-RUST-SWEEP-OPS-001 slice 6).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    behavior-identical to the flag-OFF Python oracles (which every OTHER
+    test in this file drives) — the #1712 run-core context manager, its
+    flock/keep-awake/flight-recorder/G12 composition and every durable
+    write stay Python on both arms; only the D-9 stride + R45 budget
+    folds route.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _drive() -> list[int]:
+        strides = [tuple_record_stride(t) for t in (-1, 0, 1, 9_999, 10_001, 25_000, 100_000)]
+        budgets = [
+            per_tuple_diffcheck_budget(k, total)
+            for k, total in ((0, 10), (-3, 10), (7, 3), (2, 5), (200, 1), (9, 0))
+        ]
+        return strides + budgets
+
+    def test_flag_on_matches_flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        off = self._drive()
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = self._drive()
+        finally:
+            self._reset_facade()
+        assert on == off
+        assert off == [1, 1, 1, 1, 2, 3, 10, 0, 0, 2, 1, 200, 9]

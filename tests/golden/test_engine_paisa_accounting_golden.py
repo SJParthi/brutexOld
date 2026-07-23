@@ -21,6 +21,17 @@ fires) ⇒ **Σ pnl = 12 × −20 = −240 paisa** exactly. For Track-1 signal-o
 spot there is NO brokerage (CLAUDE.md §7), so **net == gross**: the −240-paisa
 gross IS the net.
 
+Re-locked UNCHANGED for the 1-minute execution grid
+(DEC-FILL-EXEC-GRID-1M-001): the run is the ``tf_minutes == 1`` fixed point
+(the same list passed as decision AND execution stream — fill on 1m bar N+1,
+the historical timing) and the two new laws are provably inert here — each
+round-trip's ENTRY bar range [99.95, 100.10] touches neither the SL level
+99.80 (= 100.10 − 0.30) nor the TP level 100.60 (= 100.10 + 0.50), so the
+§2.4 same-bar deferral changes nothing, and every trade exits via TP (never
+end_of_data/session_gap), so the B3 terminal-CLOSE carve-out never applies.
+``holding_bars`` 2 is now a 1-MINUTE count (exit_idx − entry_idx + 1 =
+(base+2) − (base+1) + 1), numerically identical at this fixed point.
+
 Any walker regression (fill timing, the same-bar tie-break, MFE/MAE folding,
 paisa P&L, or float creeping into the Σ) breaks this test (NFR-DET-001
 bit-exactness / Golden Rule #4 reproducibility).
@@ -116,11 +127,13 @@ def _expected_trades() -> list[ClosedTrade]:
 
 def _run() -> list[ClosedTrade]:
     bars, signals = _build_fixture()
+    # tf==1 fixed point: the same list is decision AND execution stream.
     return simulate_trades(
         bars,
         signals,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         stop_loss_paisa=_STOP_LOSS_PAISA,
         take_profit_paisa=_TAKE_PROFIT_PAISA,
     )

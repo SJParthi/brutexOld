@@ -100,9 +100,18 @@ _GRID_RUN = "grid-feedfacefeedface"
 #: reaches the forced window): TP −20 (entry 10_010 → fill 9_990) · SL −45
 #: (entry 10_005 → fill 9_960) · forced −20 (entry 10_020 → fill 10_000) →
 #: net −85; equity close 10_000_000 − 85 = 9_999_915.
+#: RE-LOCKED (AGGS digest ONLY) for DEC-FILL-EXEC-GRID-1M-001: the aggs
+#: sidecar SCHEMA gained the five 1m-grid INT64 counter columns
+#: (``exits_deferred`` · ``signals_dropped_collision`` · ``fill_slid_minutes``
+#: · ``exit_fill_slid_minutes`` · ``forced_fill_slid_minutes``; AGG_COLUMNS
+#: 50 → 55 — this fixture writes ZERO agg records, so the diff is the
+#: embedded parquet schema alone, exactly the #1743 re-lock shape);
+#: canonical/trades/equity digests verified byte-UNCHANGED — on this fixture
+#: no trade exits on its own entry bar, so the same-bar deferral is inert and
+#: every PR-A fill (−20 TP / −45 SL / −20 forced, net −85) stands verbatim.
 _GOLDEN_CANONICAL_SHA256 = "14c24be2f1b8edd6b5d9efde6325eba1476607634a83f8a1b0af1855d08f4303"
 _GOLDEN_TRADES_SHA256 = "a971daddd973bb43b8a4ece8d0acf8962e329c198724c6630d405b4b44cf28a5"
-_GOLDEN_AGGS_SHA256 = "7f213569cdfc7340d98f7d26620ecb4b916a1a52d8ce404b2544c2b57d02b554"
+_GOLDEN_AGGS_SHA256 = "46609f838f249a142cd4bac2bee6bf850aaeb008fc238af60bff5dcb80e06107"
 _GOLDEN_EQUITY_SHA256 = "3260181d028737c7d71065800abb8dde77e6f1432030f87f86ede472a77bad21"
 
 
@@ -145,6 +154,8 @@ def _capture_fixture() -> list[ComboCapture]:
         tp_paisa=50,
         minute_index=index,
         stamper=stamper,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=_BARS,
     )
     zero = capture_combo(
         _row(_RUN_ZERO, 0b10, []),
@@ -155,6 +166,8 @@ def _capture_fixture() -> list[ComboCapture]:
         tp_paisa=50,
         minute_index=index,
         stamper=stamper,
+        # DEC-FILL-EXEC-GRID-1M-001: tf==1minute fixed point.
+        exec_bars_1m=_BARS,
     )
     return [with_trades, zero]
 

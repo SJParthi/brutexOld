@@ -423,3 +423,89 @@ class TestDiscardAndFlag:
         monkeypatch.setattr(Path, "rename", _boom)
         with pytest.raises(StageStampError, match="failed to discard"):
             discard_and_flag(artifact, reason="r", recorder=None)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the ``validate_stage_stamp`` verdict law.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    verdict-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives) — the I/O-derived MISSING/MALFORMED verdicts never
+    reach the routed decision on either arm.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_verdict_matrix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ok = tmp_path / "ok.bin"
+        ok.write_bytes(b"payload")
+        write_stage_stamp(ok, stage="sweep", run_id="r1", extra={SNAPSHOT_EXTRA_KEY: "snap-a"})
+        torn = tmp_path / "torn.bin"
+        torn.write_bytes(b"payload")
+        write_stage_stamp(torn, stage="sweep", run_id="r1")
+        torn.write_bytes(b"tampered")
+        missing_stamp = tmp_path / "nostamp.bin"
+        missing_stamp.write_bytes(b"payload")
+
+        def verdicts() -> list[StampVerdict]:
+            return [
+                validate_stage_stamp(
+                    ok,
+                    expected_stage="sweep",
+                    expected_run_id="r1",
+                    expected_snapshot_hash="snap-a",
+                )[0],
+                validate_stage_stamp(ok, expected_stage="stage3_cell")[0],
+                validate_stage_stamp(ok, expected_stage="sweep", expected_run_id="r2")[0],
+                validate_stage_stamp(ok, expected_stage="sweep", expected_snapshot_hash="snap-b")[
+                    0
+                ],
+                validate_stage_stamp(torn, expected_stage="sweep")[0],
+                validate_stage_stamp(missing_stamp, expected_stage="sweep")[0],
+                validate_stage_stamp(tmp_path / "absent.bin", expected_stage="sweep")[0],
+            ]
+
+        off = verdicts()
+        assert off == [
+            StampVerdict.OK,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.MISSING_STAMP,
+            StampVerdict.MISSING_ARTIFACT,
+        ]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert verdicts() == off
+        finally:
+            self._reset_facade()

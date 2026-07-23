@@ -39,11 +39,7 @@ twins; W-2 the ``lake_heal`` mutation core ``waved_heal_batch`` + the
 per-file scan primitive ``waved_reconcile_file``; W-4 the
 ``lake_invariants`` scan core ``waved_scan_lake``; W-2b the multi-file heal
 port — foreign/option-foreign/drift join the heal engaged set, witnessed by
-``waved_heal_engaged_kinds``); and ``brutex/data/lake_rust_ledger_render.py``
-(ADR-0020 G10 CONVERT, DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md
-#1918) — the window-ledger parquet render
-(``render_ledger_parquet_from_ipc``; ROW-EQUIVALENCE standard, never bytes
-— the #1917 spike's measured-infeasible verdict); and
+``waved_heal_engaged_kinds``); and
 ``brutex/data/detectors_rust.py`` (SLICE T24 PR-1,
 DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948) — the T24
 detector laws (``raw_integrity_blake2b_hex`` / ``interior_barless_runs`` /
@@ -78,7 +74,6 @@ from brutex_lake._brutex_lake import (
     merge_decision_from_ipc,
     pinned_polars_version,
     raw_integrity_blake2b_hex,
-    render_ledger_parquet_from_ipc,
     render_parquet_defaults_from_ipc,
     render_parquet_from_ipc,
     render_stats_shard_json,
@@ -125,7 +120,6 @@ __all__ = [
     "merge_decision_from_ipc",
     "pinned_polars_version",
     "raw_integrity_blake2b_hex",
-    "render_ledger_parquet_from_ipc",
     "render_parquet_defaults_from_ipc",
     "render_parquet_from_ipc",
     "render_stats_shard_json",

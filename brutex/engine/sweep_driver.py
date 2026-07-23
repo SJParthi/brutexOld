@@ -24,8 +24,10 @@ not a hidden assumption.
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import fno_math
@@ -37,6 +39,7 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
+from brutex.engine.exec_grid import ExecGridMap, build_exec_grid_map, exec_window_slice
 from brutex.engine.exit_index import build_ts_index, exit_indices_consistent
 from brutex.engine.rust_metrics import (
     FLAT_DRAWDOWN_STATS,
@@ -58,7 +61,10 @@ from brutex.engine.stage1a import (
     build_bar_bits,
     build_walk_forward_schedule,
 )
-from brutex.engine.trade_sim import simulate_trades_with_exit_indices
+from brutex.engine.trade_sim import (
+    STOP_LOSS_REASON_INDEX,
+    simulate_trades_with_exit_counts,
+)
 from brutex.feed.errors import LookAheadError
 from brutex.feed.lookahead import LookAheadBarrier, LookAheadReport, verify_with_barrier
 
@@ -108,12 +114,17 @@ def build_equity_curve(
 ) -> EquityCurve:
     """Build the per-bar equity curve from a result's closed trades.
 
-    Each trade's realised P&L lands on the bar at which it *closed* (matched by
-    the trade's ``exit_ts`` to a bar ``timestamp``); equity is the running sum of
-    ``start_equity_paisa`` + realised P&L, sampled once per bar. The span is the
-    wall-clock distance from the first to the last bar (floored to one bar's worth
-    of time for a degenerate single-bar / zero-span window, so the
-    :class:`EquityCurve` ``span_years > 0`` invariant always holds).
+    Each trade's realised P&L lands on its OWNING bar — the LAST bar whose
+    label is ``<= exit_ts`` (DEC-FILL-EXEC-GRID-1M-001 design §3.8: exits now
+    resolve on the 1-minute execution grid, so a coarse-TF trade's ``exit_ts``
+    is an INTERIOR instant of its owning decision bucket; the historical
+    exact-timestamp match is the ``exit_ts == label`` special case of the same
+    bisect, byte-identical for tf=1minute / label-aligned exits). Equity is
+    the running sum of ``start_equity_paisa`` + realised P&L, sampled once per
+    bar. The span is the wall-clock distance from the first to the last bar
+    (floored to one bar's worth of time for a degenerate single-bar /
+    zero-span window, so the :class:`EquityCurve` ``span_years > 0`` invariant
+    always holds).
 
     Parameters
     ----------
@@ -122,8 +133,8 @@ def build_equity_curve(
         (non-empty; unique timestamps).
     trades
         The closed trades from :func:`brutex.engine.trade_sim.simulate_trades`
-        over the same ``bars``. Each ``exit_ts`` must be one of the bar
-        timestamps.
+        over the same decision ``bars`` (+ their 1m execution stream). Each
+        ``exit_ts`` must be at-or-after the first bar's label.
     start_equity_paisa
         Notional capital base (paisa, ``> 0``); the percentage-metric denominator.
     tf_minutes
@@ -138,18 +149,20 @@ def build_equity_curve(
     Raises
     ------
     ValueError
-        If ``bars`` is empty, or a trade's ``exit_ts`` is not a bar timestamp.
+        If ``bars`` is empty, or a trade's ``exit_ts`` precedes the first
+        bar's label (out-of-window — refused LOUDLY, never folded).
     """
     if not bars:
         raise ValueError("build_equity_curve: bars must be non-empty")
 
-    ts_to_index = build_ts_index(bars)
+    ts_keys = [bar.timestamp for bar in bars]
     realized_at_bar = [0] * len(bars)
     for trade in trades:
-        idx = ts_to_index.get(trade.exit_ts)
-        if idx is None:
+        idx = bisect_right(ts_keys, trade.exit_ts) - 1
+        if idx < 0:
             raise ValueError(
-                f"build_equity_curve: trade exit_ts {trade.exit_ts!r} is not a bar timestamp"
+                f"build_equity_curve: trade exit_ts {trade.exit_ts!r} precedes the "
+                f"first bar's label {ts_keys[0]!r} — out of window"
             )
         realized_at_bar[idx] += trade.pnl_paisa
 
@@ -179,6 +192,8 @@ def evaluate_combo(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -207,6 +222,13 @@ def evaluate_combo(
         :data:`~brutex.strategies.types.Side.BUY` (long) or ``Side.SELL`` (short).
     tf_minutes
         Bar timeframe in whole minutes (``>= 1``).
+    exec_bars_1m
+        The 1-minute EXECUTION stream (DEC-FILL-EXEC-GRID-1M-001) — REQUIRED,
+        no default (design §3.3: no single-feed call shape survives). At
+        ``tf_minutes == 1`` pass the same sequence as ``bars``.
+    exec_map
+        Optional pre-built :class:`~brutex.engine.exec_grid.ExecGridMap` for
+        this exact stream pair; ``None`` derives it once here.
     stop_loss_paisa, take_profit_paisa
         Stop / target distances from entry in paisa (``> 0``), or ``None`` to
         disable that leg.
@@ -257,6 +279,8 @@ def evaluate_combo(
         required_mask,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
@@ -271,10 +295,13 @@ def metrics_for_mask(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     start_equity_paisa: int,
     reference_stamper: TradeReferenceStamper | None = None,
+    trailing_anchor: datetime | None = None,
 ) -> ResultMetrics:
     """Project one mask onto pre-built ``bar_bits`` → its metrics (the shared core).
 
@@ -285,16 +312,27 @@ def metrics_for_mask(
     those callers need not duplicate the chain (CLAUDE.md §11 COMMON). The
     walker's certified exit indices are threaded into the metrics tail
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) — a pure fast-path hint, results
-    byte-identical with or without it. Every fill follows the ONE hardcoded
+    byte-identical with or without it — and so are the walker's exit-reason
+    counters (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), which feed the
+    metrics' ``sl_hit_rate``. Every fill follows the ONE hardcoded
     worst-case adverse-max law (DEC-FILL-WORST-CASE-ONLY-001) — the retired
-    ``FillPolicy`` threading is deleted with its modes.
+    ``FillPolicy`` threading is deleted with its modes. ``trailing_anchor``
+    (DEC-METRICS-TRAILING-WINDOW-001) passes through to
+    :func:`metrics_from_trades` — the GLOBAL recency anchor; ``None`` (the
+    default) leaves every recency field the honest ``None``.
     """
-    trades, exit_indices = _simulate_window(
+    if exec_map is None:
+        # Derived ONCE per call (the standalone-evaluator arm); the hot sweep
+        # spine threads the tuple's memoised map instead (design §1.5).
+        exec_map = build_exec_grid_map(bars, exec_bars_1m, tf_minutes=tf_minutes)
+    trades, exit_indices, exit_reason_counts = _simulate_window(
         bars,
         bar_bits,
         required_mask,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         reference_stamper=reference_stamper,
@@ -304,7 +342,11 @@ def metrics_for_mask(
         trades,
         start_equity_paisa=start_equity_paisa,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         exit_indices=exit_indices,
+        exit_reason_counts=exit_reason_counts,
+        trailing_anchor=trailing_anchor,
     )
 
 
@@ -315,26 +357,33 @@ def _simulate_window(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     reference_stamper: TradeReferenceStamper | None = None,
-) -> tuple[list[ClosedTrade], list[int] | None]:
+) -> tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]:
     """Project a mask onto ``bar_bits`` and simulate the trades (the shared seam).
 
     The signal→trade half of :func:`metrics_for_mask`, factored out so the
     walk-forward scorer can get a fold's realized trades (to run the P-06
     confinement guard over them) without duplicating the chain or re-simulating
-    (CLAUDE.md §11 COMMON). Returns ``(trades, exit_indices)`` — the walker's
-    certified exit-bar indices (``None`` for an uncertified window,
-    DEC-SWEEP-EXIT-INDEX-FASTPATH-001) so the metrics tail can skip its
-    per-mask ``exit_ts``→index dict build.
+    (CLAUDE.md §11 COMMON). Returns ``(trades, exit_indices,
+    exit_reason_counts)`` — the walker's certified exit-bar indices (``None``
+    for an uncertified window, DEC-SWEEP-EXIT-INDEX-FASTPATH-001) so the
+    metrics tail can skip its per-mask ``exit_ts``→index dict build, plus the
+    walker's per-reason exit counters in
+    :data:`~brutex.engine.trade_sim.EXIT_REASONS` order
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
     """
     entry_signals = mask_to_entry_signals(bar_bits, required_mask)
-    return simulate_trades_with_exit_indices(
+    return simulate_trades_with_exit_counts(
         bars,
         entry_signals,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         reference_stamper=reference_stamper,
@@ -347,7 +396,11 @@ def metrics_from_trades(
     *,
     start_equity_paisa: int,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     exit_indices: Sequence[int] | None = None,
+    exit_reason_counts: Sequence[int] | None = None,
+    trailing_anchor: datetime | None = None,
 ) -> ResultMetrics:
     """Build the equity curve from already-simulated trades and compute metrics.
 
@@ -374,57 +427,118 @@ def metrics_from_trades(
     (golden + property pinned). OFF never touches the kernel machinery: one
     env read, then the pre-#1186 path byte-for-byte.
 
-    ``exit_indices`` (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) is an OPTIONAL
-    fast-path hint — each trade's certified exit bar index, as the trade
-    simulators return alongside the trades. It is consumed ONLY by the
-    kernel arm (validated per trade, demoted to the historical dict build on
-    any inconsistency — never to the Python oracle); the OFF arm ignores it
-    entirely, so results are byte-identical with or without it on BOTH arms.
+    ``exit_indices`` (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 on the 1m grid) is an
+    OPTIONAL fast-path hint — each trade's certified exit bar index WITHIN
+    THE EXECUTION STREAM, as the trade simulators return alongside the
+    trades. It is consumed ONLY by the kernel arm (validated per trade
+    against ``exec_bars_1m``, translated to the owning decision bar via
+    ``exec_map.decision_of``, demoted to the historical owning-bucket fold
+    on any inconsistency — never to the Python oracle); the OFF arm ignores
+    it entirely, so results are byte-identical with or without it on BOTH
+    arms.
+
+    ``exit_reason_counts`` (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is
+    the trade stream's per-reason exit counters in
+    :data:`~brutex.engine.trade_sim.EXIT_REASONS` order, as the counted
+    simulators return alongside the trades. The stop-loss position
+    (:data:`~brutex.engine.trade_sim.STOP_LOSS_REASON_INDEX` — extracted
+    HERE, the engine layer, so the vocabulary position never duplicates
+    into :mod:`brutex.metrics`) feeds the metrics' ``sl_hit_rate`` on BOTH
+    the kernel arm and the Python tail. ``None`` (a legacy caller without
+    reason attribution) yields the honest ``sl_hit_rate=None`` on a
+    non-empty trade set — never a fabricated ``0.0``.
+
+    ``exec_bars_1m`` is REQUIRED (DEC-FILL-EXEC-GRID-1M-001 §7.2): it is the
+    ``time_in_market_pct`` denominator's bar count — ``holding_bars`` is a
+    1-MINUTE count under the execution grid, so a decision-bar denominator
+    would exceed 1 and be silently clamped. ``exec_map`` is the optional
+    pre-built mapping (``None`` skips the exit-index fast path — the
+    owning-bucket fold computes identical pairs).
+
+    ``trailing_anchor`` (DEC-METRICS-TRAILING-WINDOW-001 Stage C) is the
+    GLOBAL recency anchor — the LOADED bar range's end instant, one value
+    per launch, threaded by the persistence spine
+    (``sweep_run._iter_mask_metrics`` passes ``bars[-1].timestamp`` of the
+    tuple's full loaded window). It reaches the metrics layer identically on
+    BOTH the kernel arm and the Python tail (the recency pass is Python-side
+    in either case), so results are byte-identical across arms. ``None``
+    (the default — and deliberately the walk-forward fold scorer, whose
+    ``bars`` are train/test SLICES: a slice-end anchor would violate the
+    GLOBAL-anchor law) leaves every recency field the honest ``None``.
     """
+    sl_exit_count = (
+        None if exit_reason_counts is None else exit_reason_counts[STOP_LOSS_REASON_INDEX]
+    )
     if sweep_rust_metrics_enabled():
         metrics = _metrics_from_trades_via_kernel(
             bars,
             trades,
             start_equity_paisa=start_equity_paisa,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             exit_indices=exit_indices,
+            sl_exit_count=sl_exit_count,
+            trailing_anchor=trailing_anchor,
         )
         if metrics is not None:
             return metrics
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
-    return compute_metrics(trades, equity, total_bars=len(bars))
+    return compute_metrics(
+        trades,
+        equity,
+        total_bars=len(exec_bars_1m),
+        sl_exit_count=sl_exit_count,
+        trailing_anchor=trailing_anchor,
+    )
 
 
 def _exit_pairs(
     bars: Sequence[CandleBar],
     trades: Sequence[ClosedTrade],
     exit_indices: Sequence[int] | None,
+    *,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None,
 ) -> list[tuple[int, int]] | None:
-    """Map each trade to its ``(exit_idx, pnl_paisa)`` kernel pair.
+    """Map each trade to its ``(decision_exit_idx, pnl_paisa)`` kernel pair.
 
-    The FAST PATH (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): a supplied,
+    The FAST PATH (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 on the 1m grid): a
+    supplied index stream — 1-MINUTE exit indices — is
     :func:`~brutex.engine.exit_index.exit_indices_consistent`-validated
-    index stream is consumed directly — ``O(trades)`` per mask, NO
-    ``O(N_bars)`` dict build. An inconsistent stream (a producer/threading
-    bug) is DEMOTED — one warn-once ``exit_indices_demoted`` — to the
-    historical :func:`~brutex.engine.exit_index.build_ts_index` dict path,
-    NEVER to the Python oracle: the dict path computes the identical pairs,
-    so a demotion can never change results, only cost. Returns ``None`` iff
-    a trade's ``exit_ts`` is no bar timestamp — the Python tail then raises
-    ``build_equity_curve``'s exact ValueError (the ``_combo_error``
-    fingerprint feed), never a message duplicated here.
+    against the EXECUTION stream, then translated to each trade's OWNING
+    decision bar via ``exec_map.decision_of`` (one O(1) array read per trade,
+    design §3.8) — ``O(trades)`` per mask. An inconsistent stream (a
+    producer/threading bug), or a missing ``exec_map``, is DEMOTED — one
+    warn-once ``exit_indices_demoted`` — to the owning-bucket bisect fold
+    over the decision labels (the exact :func:`build_equity_curve` law),
+    NEVER to the Python oracle: the fold computes the identical pairs, so a
+    demotion can never change results, only cost. Returns ``None`` iff a
+    trade's ``exit_ts`` precedes the first decision label — the Python tail
+    then raises ``build_equity_curve``'s exact ValueError (the
+    ``_combo_error`` fingerprint feed), never a message duplicated here.
     """
     if exit_indices is not None:
-        if exit_indices_consistent(bars, trades, exit_indices):
-            return [(idx, trade.pnl_paisa) for idx, trade in zip(exit_indices, trades, strict=True)]
+        if exec_map is not None and exit_indices_consistent(exec_bars_1m, trades, exit_indices):
+            decision_of = exec_map.decision_of
+            pairs = [
+                (decision_of[idx], trade.pnl_paisa)
+                for idx, trade in zip(exit_indices, trades, strict=True)
+            ]
+            if all(idx >= 0 for idx, _ in pairs):
+                return pairs
+            # An exit 1m bar OWNED BY NO decision bar (decision_of == -1 —
+            # an exec bar before the first decision label): out-of-window;
+            # let the Python tail raise build_equity_curve's exact error.
+            return None
         warn_fallback_once("exit_indices_demoted", n_trades=len(trades))
-    ts_to_index = build_ts_index(bars)
+    ts_keys = [bar.timestamp for bar in bars]
     exits: list[tuple[int, int]] = []
     for trade in trades:
-        idx = ts_to_index.get(trade.exit_ts)
-        if idx is None:
+        idx = bisect_right(ts_keys, trade.exit_ts) - 1
+        if idx < 0:
             return None
         exits.append((idx, trade.pnl_paisa))
     return exits
@@ -501,7 +615,11 @@ def _metrics_from_trades_via_kernel(
     *,
     start_equity_paisa: int,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     exit_indices: Sequence[int] | None = None,
+    sl_exit_count: int | None = None,
+    trailing_anchor: datetime | None = None,
 ) -> ResultMetrics | None:
     """ON-arm metrics tail: fused Rust drawdown + curve-less compute_metrics.
 
@@ -552,7 +670,9 @@ def _metrics_from_trades_via_kernel(
     if not trades:
         drawdown = FLAT_DRAWDOWN_STATS
     else:
-        exits = _exit_pairs(bars, trades, exit_indices)
+        exits = _exit_pairs(
+            bars, trades, exit_indices, exec_bars_1m=exec_bars_1m, exec_map=exec_map
+        )
         if exits is None:
             # The Python tail raises build_equity_curve's exact ValueError
             # (whose message feeds _combo_error's fingerprint) — fall
@@ -564,10 +684,12 @@ def _metrics_from_trades_via_kernel(
         drawdown = kernel_stats
     return compute_metrics_from_scalars(
         trades,
-        len(bars),
+        len(exec_bars_1m),
         start_equity_paisa=start_equity_paisa,
         span_years=span_years,
         drawdown=drawdown,
+        sl_exit_count=sl_exit_count,
+        trailing_anchor=trailing_anchor,
     )
 
 
@@ -577,6 +699,8 @@ def sweep_masks(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -631,6 +755,9 @@ def sweep_masks(
     """
     if not bars:
         raise ValueError("sweep_masks: bars must be non-empty")
+    if exec_map is None:
+        # ONE map for the whole mask batch (mask-independent, design §1.5).
+        exec_map = build_exec_grid_map(bars, exec_bars_1m, tf_minutes=tf_minutes)
     bar_bits = build_bar_bits(
         bars,
         proximity=proximity,
@@ -653,6 +780,8 @@ def sweep_masks(
                 mask,
                 direction=direction,
                 tf_minutes=tf_minutes,
+                exec_bars_1m=exec_bars_1m,
+                exec_map=exec_map,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
                 start_equity_paisa=start_equity_paisa,
@@ -669,6 +798,8 @@ def rank_sweep(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -700,6 +831,8 @@ def rank_sweep(
             masks,
             direction=direction,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             stop_loss_paisa=stop_loss_paisa,
             take_profit_paisa=take_profit_paisa,
             start_equity_paisa=start_equity_paisa,
@@ -720,6 +853,8 @@ def rank_sweep_over_bits(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -802,6 +937,8 @@ def rank_sweep_over_bits(
         masks,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
@@ -1129,6 +1266,7 @@ def _score_fold(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     start_equity_paisa: int,
@@ -1148,35 +1286,53 @@ def _score_fold(
     in-sample-vs-out-of-sample table (a first-class deliverable a caller inspects,
     not discarded); the aggregate verdict uses the held-out ``test`` side.
     """
+    train_bars = bars[fold.train_start_bar : fold.train_end_bar]
+    # Dual-stream window cut (DEC-FILL-EXEC-GRID-1M-001, design §7.2/Q3): ONE
+    # boundary per fold window applied to BOTH streams — the exec sub-window
+    # runs from the window's first decision label through the end of its last
+    # decision bar's IST session (loss-free: the slide law is session-bounded).
+    train_lo, train_hi = exec_window_slice(train_bars, exec_bars_1m)
+    train_exec = exec_bars_1m[train_lo:train_hi]
     train_metrics = metrics_for_mask(
-        bars[fold.train_start_bar : fold.train_end_bar],
+        train_bars,
         bar_bits[fold.train_start_bar : fold.train_end_bar],
         required_mask,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=train_exec,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
         reference_stamper=reference_stamper,
     )
     test_bars = bars[fold.test_start_bar : fold.test_end_bar]
-    test_trades, test_exit_indices = _simulate_window(
+    test_lo, test_hi = exec_window_slice(test_bars, exec_bars_1m)
+    test_exec = exec_bars_1m[test_lo:test_hi]
+    test_map = build_exec_grid_map(test_bars, test_exec, tf_minutes=tf_minutes)
+    test_trades, test_exit_indices, test_exit_counts = _simulate_window(
         test_bars,
         bar_bits[fold.test_start_bar : fold.test_end_bar],
         required_mask,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=test_exec,
+        exec_map=test_map,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         reference_stamper=reference_stamper,
     )
-    _assert_trades_confined(test_bars, test_trades)
+    # The P-06 confinement guard runs over the fold's EXECUTION sub-window —
+    # every fill (entry AND exit) is a stored 1m bar of exactly this window.
+    _assert_trades_confined(test_exec, test_trades)
     test_metrics = metrics_from_trades(
         test_bars,
         test_trades,
         start_equity_paisa=start_equity_paisa,
         tf_minutes=tf_minutes,
+        exec_bars_1m=test_exec,
+        exec_map=test_map,
         exit_indices=test_exit_indices,
+        exit_reason_counts=test_exit_counts,
     )
     return FoldResult(
         fold_index=fold.fold_index,
@@ -1222,6 +1378,7 @@ def evaluate_combo_walk_forward(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -1298,6 +1455,7 @@ def evaluate_combo_walk_forward(
             required_mask,
             direction=direction,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
             stop_loss_paisa=stop_loss_paisa,
             take_profit_paisa=take_profit_paisa,
             start_equity_paisa=start_equity_paisa,
@@ -1327,6 +1485,7 @@ def walk_forward_sweep(
     *,
     direction: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -1399,6 +1558,7 @@ def walk_forward_sweep(
                 mask,
                 direction=direction,
                 tf_minutes=tf_minutes,
+                exec_bars_1m=exec_bars_1m,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
                 start_equity_paisa=start_equity_paisa,

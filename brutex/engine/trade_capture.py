@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.engine.combo_mask import mask_to_entry_signals
+from brutex.engine.exec_grid import ExecGridMap
 from brutex.engine.minute_path import (
     MinuteIndex,
     PathStatus,
@@ -62,7 +63,7 @@ from brutex.engine.minute_path import (
     trade_excursions_1m,
 )
 from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA
-from brutex.engine.trade_sim import EXIT_REASONS, TradeDetail, simulate_trades
+from brutex.engine.trade_sim import EXIT_REASONS, TradeDetail, TradeSimWalker
 from brutex.models import BruteXError
 from brutex.money import paisa_to_rupees
 from brutex.strategies.types import Side
@@ -194,6 +195,16 @@ class ComboCapture:
     vix_missing_trades: int
     parity_ok: bool
     parity_detail: str
+    #: The walker's per-combo 1m-grid counter family
+    #: (DEC-FILL-EXEC-GRID-1M-001; the ``exits_session_gap`` append-only
+    #: counter idiom, #1743): deferral events (§2.4), B4 collision signal
+    #: drops, and the widened slid-fill trio (§5.2). Zero on a parity-failed
+    #: / degraded capture (no trusted walk to count from).
+    exits_deferred: int = 0
+    signals_dropped_collision: int = 0
+    fill_slid_minutes: int = 0
+    exit_fill_slid_minutes: int = 0
+    forced_fill_slid_minutes: int = 0
 
 
 def derived_exit_fill(direction: Side, entry_fill_paisa: int, pnl_paisa: int) -> int:
@@ -257,6 +268,8 @@ def capture_combo(
     tf_minutes: int,
     sl_paisa: int | None,
     tp_paisa: int | None,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap | None = None,
     minute_index: MinuteIndex | None,
     stamper: TradeReferenceStamper | None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
@@ -306,15 +319,23 @@ def capture_combo(
     """
     side = Side.BUY if row.direction == "bull" else Side.SELL
     detail_sink: list[TradeDetail] = []
-    trades = simulate_trades(
-        bars,
-        mask_to_entry_signals(bar_bits, row.mask_bits),
+    # A DIRECT walker (not the module-level simulate_trades wrapper) so the
+    # per-combo 1m-grid counter family survives the run — the wrapper
+    # discards the walker, and the counters must reach the aggregate columns
+    # (DEC-FILL-EXEC-GRID-1M-001; the #1743 exits_session_gap idiom).
+    walker = TradeSimWalker(
         direction=side,
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
         reference_stamper=stamper,
         detail_sink=detail_sink,
+    )
+    trades = walker.run(
+        bars,
+        exec_bars_1m,
+        mask_to_entry_signals(bar_bits, row.mask_bits),
+        exec_map=exec_map,
     )
     parity = _parity_detail(row, trades)
     if parity:
@@ -390,4 +411,9 @@ def capture_combo(
         vix_missing_trades=vix_missing,
         parity_ok=True,
         parity_detail="",
+        exits_deferred=walker.exits_deferred,
+        signals_dropped_collision=walker.signals_dropped_collision,
+        fill_slid_minutes=walker.fill_slid_minutes,
+        exit_fill_slid_minutes=walker.exit_fill_slid_minutes,
+        forced_fill_slid_minutes=walker.forced_fill_slid_minutes,
     )

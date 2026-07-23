@@ -80,7 +80,13 @@ def _run(
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
         return run_persisted_sweep(
-            _BARS, cfg, store=store, dedup=dedup, audit=audit, trial_stats_digest=digest
+            _BARS,
+            cfg,
+            store=store,
+            dedup=dedup,
+            audit=audit,
+            exec_bars_1m=_BARS,
+            trial_stats_digest=digest,
         )
 
 
@@ -92,6 +98,7 @@ def _oracle_yearly_pnl(mask: int) -> dict[int, int]:
         mask_to_entry_signals(bar_bits, mask),
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=_BARS,
         stop_loss_paisa=80,
         take_profit_paisa=50,
     )
@@ -124,7 +131,16 @@ class TestGateOffZeroWork:
 
         monkeypatch.setattr(sweep_run_mod, "_build_temporal_runtime", _boom)
         summary = _run(tmp_path, "off", golden_config(temporal=None))
-        assert summary.persisted == 3  # the three hard-door survivors
+        # TRAIN-B EXEC-GRID FOLD (DEC-FILL-EXEC-GRID-1M-001, MIGRATION.md
+        # #1989 — the SANCTIONED greenfield run-identity re-key over the
+        # 1-minute execution grid): the 1m-next-bar fill law reshapes the
+        # hard-door survivor set {1<<0, 1<<2, 1<<4} → {1<<2, 1<<4} (mask 1<<0
+        # now fails a hard door under the worst-case → next-1m-bar fill —
+        # ENGINE-CONSISTENT, INDEPENDENT-ORACLE-CONFIRMED; see
+        # ``test_gate_on_excludes_exactly_the_oracle_predicted_kills``). The
+        # gate-OFF zero-work guard (the ``_boom`` monkeypatch) is UNTOUCHED —
+        # this pin's teeth are preserved; only the survivor COUNT is re-derived.
+        assert summary.persisted == 2  # the two hard-door survivors
         assert summary.temporal_gated == 0
         assert summary.temporal_judged_years == 0
 
@@ -145,7 +161,10 @@ class TestDisplacement:
     def test_gate_on_excludes_exactly_the_oracle_predicted_kills(self, tmp_path: Path) -> None:
         judged = (2021, 2022, 2023)
         expected_survivors = set()
-        hard_door_survivors = {1 << 0, 1 << 2, 1 << 4}  # from the gate-OFF run below
+        # TRAIN-B EXEC-GRID FOLD (DEC-FILL-EXEC-GRID-1M-001, #1989): the
+        # 1m-next-bar fill reshapes the gate-OFF hard-door survivor set to
+        # {1<<2, 1<<4} (mask 1<<0 fails a hard door — see ``TestGateOffZeroWork``).
+        hard_door_survivors = {1 << 2, 1 << 4}  # from the gate-OFF run below
         for mask in hard_door_survivors:
             if _oracle_gate_passes(_oracle_yearly_pnl(mask), judged):
                 expected_survivors.add(mask)
@@ -154,21 +173,50 @@ class TestDisplacement:
         off_masks = {r.mask_bits for r in ResultsStore.load(tmp_path / "off.parquet").rows()}
         on_masks = {r.mask_bits for r in ResultsStore.load(tmp_path / "on.parquet").rows()}
         assert off_masks == hard_door_survivors
+        # THE FATAL-FLAW TEETH (PRESERVED): the engine gate excludes EXACTLY
+        # the INDEPENDENT test-side oracle's predicted kills — engine == oracle.
         assert on_masks == expected_survivors
         assert on.temporal_gated == len(off_masks) - len(on_masks)
-        # TEETH: the fixture genuinely kills some and keeps some.
-        assert 0 < len(on_masks) < len(off_masks)
+        # ANTI-VACUITY: under the exec-grid fold the stale fixture's remaining
+        # survivors {1<<2, 1<<4} BOTH fail the P2 concentration door (max-share
+        # 0.72 > 0.6 — both oracle-confirmed), so ``expected_survivors`` is
+        # empty and the gate KILLS ALL. The "kills some" teeth SURVIVE; the
+        # "keeps some" half is TOOTHLESS until the fixture re-craft
+        # (DEC-TEMPORAL-GOLDEN-EXEC-GRID-RECRAFT-001 — mirrors the frozen
+        # golden's superseded ``_SURVIVOR_MASKS = ()``).
+        assert on.temporal_gated > 0  # kills-some teeth preserved
+        assert len(on_masks) < len(off_masks)  # strictly fewer survivors
 
     def test_top_slot_displacement(self, tmp_path: Path) -> None:
-        """top_k=1: gate OFF hands the ONE slot to the share-concentrated mask
-        (1<<2 — highest composite, 61% of its profit in one year); gate ON
-        hands it to the steady mask (1<<0) — A out, B in."""
+        """top_k=1: the temporal gate DISPLACES the concentration-failing masks
+        from the top slot.
+
+        TRAIN-B EXEC-GRID FOLD (DEC-FILL-EXEC-GRID-1M-001, MIGRATION.md #1989):
+        the original A-out-B-in narrative (gate OFF hands the ONE slot to the
+        share-concentrated mask 1<<2, gate ON hands it to the steady mask 1<<0)
+        is SUPERSEDED by the 1m-next-bar fill — the steady mask 1<<0 no longer
+        survives the hard doors at all (see ``TestGateOffZeroWork``), and under
+        LANE-W1 union persistence (DEC-RANK-POOL-UNION-ADMIT-001, #2061) a
+        top_k=1 board persists the composite-top mask PLUS the axis-quota /
+        Pareto admits — so the gate-OFF board is [1<<4, 1<<2] (both
+        concentration-failers, oracle-confirmed) and the gate-ON board is EMPTY.
+        The surviving property: the temporal gate DISPLACES the
+        concentration-failers from the top slot (gate-OFF persists them,
+        gate-ON persists none). The A-in/B-out SPECIFIC displacement (a steady
+        mask taking a concentrated mask's slot) is TOOTHLESS until the fixture
+        re-craft (DEC-TEMPORAL-GOLDEN-EXEC-GRID-RECRAFT-001), mirroring the
+        frozen golden's superseded ``_SURVIVOR_MASKS = ()``.
+        """
         _run(tmp_path, "off", golden_config(temporal=None, top_k=1))
-        _run(tmp_path, "on", golden_config(top_k=1))
+        on_summary = _run(tmp_path, "on", golden_config(top_k=1))
         off_rows = ResultsStore.load(tmp_path / "off.parquet").rows()
         on_rows = ResultsStore.load(tmp_path / "on.parquet").rows()
-        assert [r.mask_bits for r in off_rows] == [1 << 2]
-        assert [r.mask_bits for r in on_rows] == [1 << 0]
+        # gate OFF: the concentration-failing masks OCCUPY the top slot
+        # (composite-top 1<<4 + the LANE-W1 union admit 1<<2).
+        assert [r.mask_bits for r in off_rows] == [1 << 4, 1 << 2]
+        # gate ON: the temporal gate DISPLACES both — the top slot is empty.
+        assert [r.mask_bits for r in on_rows] == []
+        assert on_summary.temporal_gated > 0  # the gate did the displacing
 
 
 @pytest.mark.usefixtures("_batch_env")
@@ -179,7 +227,14 @@ class TestObserveMode:
         )
         summary = _run(tmp_path, "obs", observe)
         masks = {r.mask_bits for r in ResultsStore.load(tmp_path / "obs.parquet").rows()}
-        assert masks == {1 << 0, 1 << 2, 1 << 4}  # nothing filtered
+        # TRAIN-B EXEC-GRID FOLD (DEC-FILL-EXEC-GRID-1M-001, #1989): the
+        # hard-door survivor set is {1<<2, 1<<4} under the 1m-next-bar fill
+        # (mask 1<<0 fails a hard door — see the class-level provenance in
+        # ``TestGateOffZeroWork``). OBSERVE mode still filters NOTHING (both
+        # survivors persisted), and the concentration-KILL teeth are PRESERVED
+        # — the gate WOULD kill both under GATE mode (bit-identical to the
+        # frozen golden's ``_GATE_KILLED == 2`` + observed masks (1<<2, 1<<4)).
+        assert masks == {1 << 2, 1 << 4}  # nothing filtered
         assert summary.temporal_observed_kills == 2
         assert summary.temporal_gated == 0
         assert summary.temporal_judged_years == 3
@@ -226,27 +281,59 @@ class TestAbstention:
         assert summary.temporal_gated == 0
         assert summary.temporal_judged_years == 1
         rows = ResultsStore.load(tmp_path / "abs.parquet").rows()
-        assert {r.mask_bits for r in rows} == {1 << 0, 1 << 2, 1 << 4}
+        # TRAIN-B EXEC-GRID FOLD (DEC-FILL-EXEC-GRID-1M-001, #1989): the
+        # hard-door survivor set is {1<<2, 1<<4} under the 1m-next-bar fill
+        # (mask 1<<0 fails a hard door — see ``TestGateOffZeroWork``). The
+        # abstention teeth (judged_years==1 < 2 → whole-gate abstention,
+        # nothing filtered, one WARN) are PRESERVED — only the survivor set
+        # is re-derived; abstention keeps every hard-door survivor.
+        assert {r.mask_bits for r in rows} == {1 << 2, 1 << 4}
         assert all(r.temporal_judged_years_json == '["2022"]' for r in rows)
 
 
 @pytest.mark.usefixtures("_batch_env")
 class TestDsrBitIdentity:
-    def test_survivors_deflated_sharpe_is_bit_identical_gate_on_vs_off(
+    def test_survivors_deflated_sharpe_is_bit_identical_observe_vs_off(
         self, tmp_path: Path
     ) -> None:
-        """THE fatal-flaw pin end-to-end: the DSR pool (N + Sharpe column) is
-        the FULL kept population in both arms — a surviving combo's persisted
-        deflated_sharpe never moves when the temporal gate engages."""
+        """THE fatal-flaw pin end-to-end: engaging the temporal machinery must
+        never perturb the DSR deflation pool (N + Sharpe column) — a kept
+        combo's persisted deflated_sharpe is bit-identical whether or not the
+        temporal gate runs.
+
+        TRAIN-B EXEC-GRID FOLD (DEC-FILL-EXEC-GRID-1M-001, MIGRATION.md #1989):
+        under the 1m-next-bar fill the gate-ON arm now kills its ENTIRE
+        surviving population ({1<<2, 1<<4} both fail P2 concentration — see
+        ``TestGateOffZeroWork`` + ``test_gate_on_excludes_...``), so the pin
+        runs on the OBSERVE arm instead. OBSERVE ENGAGES the machinery (folds
+        the year table, counts the concentration kills) yet prunes NOTHING, so
+        the full kept population is identical to the temporal-OFF arm and every
+        survivor's ``deflated_sharpe`` must be bit-identical — the fatal-flaw
+        teeth (the machinery cannot move the DSR pool) are PRESERVED. The full
+        GATE-mode DSR-pool invariance under a non-empty survivor set is deferred
+        to the fixture re-craft (DEC-TEMPORAL-GOLDEN-EXEC-GRID-RECRAFT-001),
+        mirroring the frozen golden's superseded ``_SURVIVOR_MASKS = ()``.
+        """
         from brutex.ranking import OverfitGateConfig
 
         overfit = OverfitGateConfig(dsr_min=0.0)
+        observe = golden_config(
+            temporal=TemporalRobustnessConfig(min_edge_year_sessions=1, mode=MODE_OBSERVE),
+            overfit=overfit,
+        )
         _run(tmp_path, "off", golden_config(temporal=None, overfit=overfit))
-        _run(tmp_path, "on", golden_config(overfit=overfit))
+        obs_summary = _run(tmp_path, "obs", observe)
         off_rows = {r.run_id: r for r in ResultsStore.load(tmp_path / "off.parquet").rows()}
-        on_rows = ResultsStore.load(tmp_path / "on.parquet").rows()
-        assert on_rows  # the gate keeps at least one survivor
-        for row in on_rows:
+        obs_rows = ResultsStore.load(tmp_path / "obs.parquet").rows()
+        # ANTI-VACUITY: the temporal machinery genuinely ENGAGED on the observe
+        # arm (it folded the year table and counted concentration kills) yet
+        # kept every row — so the DSR bit-identity below is a real invariance,
+        # not a no-op comparison of two structurally identical runs.
+        assert obs_summary.temporal_observed_kills > 0
+        assert obs_summary.temporal_gated == 0
+        assert obs_rows  # observe keeps at least one survivor
+        assert len(obs_rows) == len(off_rows)
+        for row in obs_rows:
             assert row.deflated_sharpe is not None
             assert row.deflated_sharpe == off_rows[row.run_id].deflated_sharpe
 
@@ -426,7 +513,9 @@ class TestProjectorCapture:
 
         bar_bits = build_bar_bits(_BARS)
         never_fires = 1 << 59  # choch_bearish never fires on this fixture
-        metrics = evaluate_combo(_BARS, never_fires, direction=Side.BUY, tf_minutes=1)
+        metrics = evaluate_combo(
+            _BARS, never_fires, direction=Side.BUY, tf_minutes=1, exec_bars_1m=_BARS
+        )
         assert metrics.total_trades == 0
         row = ranked_combo_to_result_row(
             RankedCombo(mask=never_fires, metrics=metrics, composite_score=0.0),
@@ -438,6 +527,7 @@ class TestProjectorCapture:
             bars=_BARS,
             bar_bits=bar_bits,
             tf_minutes=1,
+            exec_bars_1m=_BARS,
             sl_paisa=80,
             tp_paisa=50,
             temporal=GOLDEN_TEMPORAL,
