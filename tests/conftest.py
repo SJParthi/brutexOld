@@ -177,6 +177,26 @@ os.environ.setdefault("BRUTEX_ALPHA_GATE", "0")
 # env/runner explicitly and stay armed on both arms.
 os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
 
+# DEC-RUST-DEFAULT-ON-WAVE-001 hermeticity belt (the market-hours-guard
+# philosophy — hermetic against the AMBIENT ENVIRONMENT): the sweep-ops
+# facade's flag (`BRUTEX_SWEEP_OPS_RUST`, default ON since the wave) is read
+# per call from the REAL ``os.environ`` and routes 27 pure sweep-ops decision
+# laws across ~22 engine consumer modules (run_layout / sweep_identity /
+# sweep_progress / sweep_audit / ...). Under default-ON the Rust arm runs, so
+# each consumer's verbatim ``_*_python`` OFF-fallback branch (the LIVE parity
+# oracle — nothing deleted) is no longer exercised by the pre-existing engine
+# suites, dropping the `--cov=brutex.engine --cov-fail-under=100` static-list
+# gate below 100% (measured 99.69% — 30 lines across ~19 sweep-family modules).
+# Pin the suite to the explicit "0" kill switch (`setdefault` so an explicit
+# outer choice wins) — the byte-identical oracle arm, wheel-state-independent
+# in every lane; the facade's OWN tests set the flag / delenv EXPLICITLY (both
+# override this setdefault) and stay armed on both arms. Pinned literal (the
+# wheel-free discipline — `brutex.engine.sweep_ops_rust` transitively imports
+# the engine package, which hard-imports the wheels); drift-pinned equal to
+# ``sweep_ops_rust.SWEEP_OPS_RUST_ENV`` by
+# tests/unit/test_engine_sweep_ops_rust.py.
+os.environ.setdefault("BRUTEX_SWEEP_OPS_RUST", "0")
+
 # DEC-RUST-DEFAULT-ON-WAVE-001 hermeticity belt: `BRUTEX_RUST_FRONT` now
 # defaults to AUTO (unset => probe for a built `brutexd` binary; found =>
 # the Rust front topology). On a box WITH a locally built brutexd every
