@@ -210,6 +210,62 @@ os.environ.setdefault("BRUTEX_SWEEP_OPS_RUST", "0")
 # tests/unit/test_rust_front.py.
 os.environ.setdefault("BRUTEX_RUST_FRONT", "off")
 
+# DEC-RUST-DEFAULT-ON-WAVE-001 hermeticity belt — the FULL flipped-facade set
+# (the market-hours-guard philosophy — hermetic against the AMBIENT
+# ENVIRONMENT). Every seam below is read per call from the REAL ``os.environ``
+# and, since the wave, defaults to ON: the Rust arm therefore runs by default,
+# so each module's verbatim ``_*_python`` OFF-fallback branch (the LIVE parity
+# oracle — nothing deleted) stops being exercised by the pre-existing suites in
+# any lane where the crate's wheel is installed (build-wheels installs ALL of
+# them in CI). That (a) drops the per-module ``--cov-fail-under=100`` static/
+# discovery gates below 100% on the dead oracle branch, and (b) flips un-pinned
+# tests across the sharded suites onto the Rust arm. Pin every flipped flag to
+# its explicit "0" kill switch (``setdefault`` so an explicit outer choice
+# wins) — the byte-identical oracle arm, wheel-state-independent in every lane,
+# restoring the proven-green pre-wave default-OFF for un-pinned tests. Each
+# facade's OWN tests stay fully armed on both arms: the default-is-ON pin uses
+# ``monkeypatch.delenv`` (verified present in every facade's dedicated test
+# file) and the ON-arm tests set the flag EXPLICITLY via ``monkeypatch.setenv``
+# — both override this setdefault — so this default disables ONLY the ambient
+# env read, never the tested law. Pinned literals (the wheel-free discipline —
+# importing any of these facades transitively hard-imports the engine/data
+# packages + their wheels); each is drift-pinned equal to its module's own
+# ``*_ENV`` constant by that facade's dedicated test.
+for _wave_flag in (
+    # brutex-core config seams (money / paths / dotenv / hwenv / backupenv)
+    "BRUTEX_CORE_RUST_MONEY",
+    "BRUTEX_CORE_RUST_PATHS",
+    "BRUTEX_CORE_RUST_DOTENV",
+    "BRUTEX_CORE_RUST_HWENV",
+    "BRUTEX_CORE_RUST_BACKUPENV",
+    # brutex-ops facades
+    "BRUTEX_BACKUP_RUST",
+    "BRUTEX_CROSSVERIFY_RUST",
+    "BRUTEX_NIGHTLY_RUST",
+    # brutex-data / fno-math leaf seams
+    "BRUTEX_DATA_RUST",
+    "BRUTEX_GREEKS_RUST_BATCH",
+    "BRUTEX_METRICS_RUST_FOLD",
+    "BRUTEX_STATS_RUST",
+    "BRUTEX_RANK_CVAR_RUST",
+    "BRUTEX_META_GATE",
+    "BRUTEX_NOTIFY_RUST",
+    "BRUTEX_OBSERVABILITY_RUST",
+    # brutex-lake family
+    "BRUTEX_LAKE_RUST_RENDER",
+    "BRUTEX_LAKE_RUST_MERGE",
+    "BRUTEX_LAKE_RUST_LOCKS",
+    "BRUTEX_LAKE_RUST_RESAMPLE",
+    "BRUTEX_LAKE_RUST_RESAMPLE_DAILY",
+    "BRUTEX_LAKE_RUST_STATS_MANIFEST",
+    "BRUTEX_LAKE_RUST_WINDOW_LEDGER",
+    "BRUTEX_LAKE_RUST_RAW_INTEGRITY",
+    "BRUTEX_LAKE_RUST_INTERIOR_GAP",
+    "BRUTEX_LAKE_RUST_PARTIAL_WINDOW",
+):
+    os.environ.setdefault(_wave_flag, "0")
+del _wave_flag
+
 # DEC-BOX-AUTODEPLOY-LANE-001 §12 hermeticity (the env_preflight REGISTRY
 # flags): a HOST env carrying `BRUTEX_SKIP_WHEEL_FRESHNESS` (the CI wheel
 # escape) or a stale `BRUTEX_FILL_MODE` would populate every pre-existing
