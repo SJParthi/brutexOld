@@ -174,7 +174,9 @@ def _dual_arm(bars: list[CandleBar], **kwargs: Any) -> tuple[list[int], list[int
             on = build_bar_bits(bars, **kwargs)
     finally:
         trading_core.stage1a_bar_bits_batch = real  # type: ignore[attr-defined]
-        if prior_env is None:  # pragma: no cover — the conftest belt presets the flag, so prior_env is always "0"
+        if (
+            prior_env is None
+        ):  # pragma: no cover — the conftest belt presets the flag, so prior_env is always "0"
             os.environ.pop(STAGE1A_RUST_ENV, None)
         else:
             os.environ[STAGE1A_RUST_ENV] = prior_env
@@ -337,7 +339,9 @@ def _arm_exception(bars: list[CandleBar], *, flag: bool, **kwargs: Any) -> BaseE
             build_bar_bits(bars, **kwargs)
         return excinfo.value
     finally:
-        if prior_env is None:  # pragma: no cover — the conftest belt presets the flag, so prior_env is always "0"
+        if (
+            prior_env is None
+        ):  # pragma: no cover — the conftest belt presets the flag, so prior_env is always "0"
             os.environ.pop(STAGE1A_RUST_ENV, None)
         else:
             os.environ[STAGE1A_RUST_ENV] = prior_env
