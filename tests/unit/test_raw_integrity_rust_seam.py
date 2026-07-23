@@ -157,6 +157,6 @@ class TestRealWheel:
             mp.setenv(dr.LAKE_RUST_RAW_INTEGRITY_ENV, "1")
             dr.reset_detectors_rust_for_tests(remaining=0)
             routed = hash_payload(payload)
-            mp.delenv(dr.LAKE_RUST_RAW_INTEGRITY_ENV)
+            mp.setenv(dr.LAKE_RUST_RAW_INTEGRITY_ENV, "0")  # kill switch → Python oracle recompute
             assert routed == hash_payload(payload)
         dr.reset_detectors_rust_for_tests()

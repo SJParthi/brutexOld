@@ -228,7 +228,10 @@ class TestOffArmInertness:
         assert len(warns) == 1
         assert bomb.touched == []
 
-    def test_off_arm_matches_oracle_bytes(self) -> None:
+    def test_off_arm_matches_oracle_bytes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # OFF via the explicit "0" kill switch (default flipped ON — DEC-RUST-DEFAULT-ON-WAVE-001);
+        # without it, unset resolves ON and this named OFF-arm contract silently tests the ON path.
+        monkeypatch.setenv("BRUTEX_DATA_RUST", "0")
         for sym in ("BAJAJ-AUTO", "m&m", " nifty "):
             assert lake_keys.stock_drift_fold(sym) == lake_keys._stock_drift_fold_python(sym)
         assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (

@@ -192,7 +192,7 @@ class TestFlagOn:
         """The full write() sequence — fresh, conflict merge, latest-wins
         restate, no-op merge — produces byte-identical partitions and
         field-identical WriteResults ON vs OFF (spot AND Greeks shapes)."""
-        monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+        monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")  # the kill switch → Python fold
         off_results = _run_sequence(tmp_path / "off", greeks=greeks)
 
         monkeypatch.setitem(sys.modules, "brutex_lake", _polars_backed_fake_crate())
@@ -262,7 +262,7 @@ class TestFlagOn:
         import polars as pl
         import polars.exceptions as pl_exc
 
-        monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+        monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")  # the kill switch → Python fold
         off_results = _run_sequence(tmp_path / "off")
 
         fake = types.ModuleType("brutex_lake")
@@ -291,7 +291,7 @@ class TestFlagOn:
         the write completes with the Python fold's exact result."""
         import polars as pl
 
-        monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+        monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")  # the kill switch → Python fold
         off_results = _run_sequence(tmp_path / "off")
 
         fake = types.ModuleType("brutex_lake")

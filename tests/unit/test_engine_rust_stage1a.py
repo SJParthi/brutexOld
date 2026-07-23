@@ -445,7 +445,7 @@ def _arm_error(
     monkeypatch: pytest.MonkeyPatch, bars: list[CandleBar], *, flag: str | None, **kwargs: Any
 ) -> BaseException:
     if flag is None:
-        monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+        monkeypatch.setenv(STAGE1A_RUST_ENV, "0")  # OFF arm = the Python oracle (default flipped ON)
     else:
         monkeypatch.setenv(STAGE1A_RUST_ENV, flag)
     with pytest.raises((ValueError, OverflowError)) as excinfo:
@@ -628,7 +628,7 @@ def test_muhurat_warn_double_emission_during_burn_in_is_bounded(
         on = build_bar_bits(bars, roll_schedule=schedule)
     warns = [e for e in logs if e.get("event") == "stage1a.muhurat_prev_day_anchor_skip"]
     assert len(warns) == 2  # prepass + burn-in oracle
-    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    monkeypatch.setenv(STAGE1A_RUST_ENV, "0")  # kill switch → Python oracle recompute
     assert on == build_bar_bits(bars, roll_schedule=schedule)
 
 

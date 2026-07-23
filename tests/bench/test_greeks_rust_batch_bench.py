@@ -139,7 +139,7 @@ class TestMeasuredOnVsOff:
         a generous no-regression ceiling — never a speedup claim."""
         rows = _rows(_N_ROWS)
         spots = _spots(rows)
-        monkeypatch.delenv(GREEKS_RUST_BATCH_ENV, raising=False)
+        monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "0")  # OFF arm = Python oracle (default flipped ON)
         off = self._run_arm(rows, spots)
         monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "1")
         on = self._run_arm(rows, spots)
@@ -160,7 +160,7 @@ class TestMeasuredOnVsOff:
         take the reuse fast path — the batch must add nothing."""
         base_rows = _rows(_N_ROWS)
         spots = _spots(base_rows)
-        monkeypatch.delenv(GREEKS_RUST_BATCH_ENV, raising=False)
+        monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "0")  # OFF arm = Python oracle (default flipped ON)
         solved, _ = enrich_option_bars(
             base_rows, parts=_parts(), spot_by_ts=spots, rate_source=_RATE, style_flag=1
         )

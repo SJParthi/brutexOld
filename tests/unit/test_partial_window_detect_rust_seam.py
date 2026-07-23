@@ -154,7 +154,7 @@ class TestFlagOnFakeCrate:
         _install_crate(monkeypatch, fake_detectors_crate())
         routed = classify_partial_window(**kwargs)  # type: ignore[arg-type]
         assert routed.reason == reason  # the anti-vacuity tooth per arm
-        monkeypatch.delenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV)
+        monkeypatch.setenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV, "0")  # kill switch → Python oracle
         assert routed == classify_partial_window(**kwargs)  # type: ignore[arg-type]
 
     def test_observed_overlay_threads_into_the_grid(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,7 +163,7 @@ class TestFlagOnFakeCrate:
         overlay = frozenset({date(2024, 1, 31)})
         kwargs = dict(_TRUNCATED_KWARGS)
         routed = classify_partial_window(observed=overlay, **kwargs)  # type: ignore[arg-type]
-        monkeypatch.delenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV)
+        monkeypatch.setenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV, "0")  # kill switch → Python oracle
         assert routed == classify_partial_window(observed=overlay, **kwargs)  # type: ignore[arg-type]
 
     def test_burn_in_poison_cannot_launder_a_truncation(
@@ -193,7 +193,7 @@ class TestFlagOnFakeCrate:
         }
         routed = classify_partial_window(**kwargs)  # type: ignore[arg-type]
         assert routed.verdict == SUSPECTED_PARTIAL  # 2 missing > override 1
-        monkeypatch.delenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV)
+        monkeypatch.setenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV, "0")  # kill switch → Python oracle
         assert routed == classify_partial_window(**kwargs)  # type: ignore[arg-type]
 
 
@@ -276,7 +276,7 @@ class TestPayloadFactory:
             "expiry": date(2070, 1, 1),
         }
         routed = classify_partial_window(**kwargs)  # type: ignore[arg-type]
-        monkeypatch.delenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV)
+        monkeypatch.setenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV, "0")  # kill switch → Python oracle
         assert routed == classify_partial_window(**kwargs)  # type: ignore[arg-type]
 
 

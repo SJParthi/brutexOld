@@ -128,7 +128,7 @@ class TestFlagOnGuards:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bars = _bars()
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch → Python oracle
         expected = ParquetWriter._render_bytes(bars)
 
         monkeypatch.setitem(sys.modules, "brutex_lake", None)  # → ImportError
@@ -145,7 +145,7 @@ class TestFlagOnGuards:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bars = _bars()
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")  # the kill switch → Python oracle
         expected = ParquetWriter._render_bytes(bars)
 
         fake = _polars_backed_fake_crate()
