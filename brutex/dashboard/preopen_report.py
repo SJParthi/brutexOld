@@ -506,7 +506,7 @@ def _daily_prev_close_contiguous(
     day: date,
     *,
     observed: AbstractSet[date] = frozenset(),
-    expected_session: date | None | EllipsisType = ...,
+    expected_session: date | EllipsisType | None = ...,
     on_hole: Callable[[date, date], None] | None = None,
 ) -> Decimal | None:
     """Daily-basis PREV. CLOSE that REFUSES to anchor across a MISSING daily bar.
@@ -589,7 +589,7 @@ def _minute_prev_close_contiguous(
     day: date,
     *,
     observed: AbstractSet[date] = frozenset(),
-    expected_session: date | None | EllipsisType = ...,
+    expected_session: date | EllipsisType | None = ...,
 ) -> Decimal | None:
     """Minute-basis PREV. CLOSE anchored on the checked NSE calendar ALONE.
 
