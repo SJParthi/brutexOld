@@ -160,15 +160,18 @@ class TestFlagResolution:
     def test_junk_is_loud_off_once_per_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(dr.LAKE_RUST_RAW_INTEGRITY_ENV, "banana")
         monkeypatch.setenv(dr.LAKE_RUST_INTERIOR_GAP_ENV, "banana")
+        monkeypatch.setenv(dr.LAKE_RUST_PARTIAL_WINDOW_ENV, "banana")
         with capture_logs() as logs:
             assert dr.raw_integrity_rust_enabled() is False
             assert dr.raw_integrity_rust_enabled() is False
             assert dr.interior_gap_rust_enabled() is False
+            assert dr.partial_window_rust_enabled() is False
         warns = [e for e in logs if e["event"] == "detectors_rust.fallback"]
-        assert len(warns) == 2  # once per VARIABLE, memoised per process
+        assert len(warns) == 3  # once per VARIABLE, memoised per process
         assert {w["env_var"] for w in warns} == {
             dr.LAKE_RUST_RAW_INTEGRITY_ENV,
             dr.LAKE_RUST_INTERIOR_GAP_ENV,
+            dr.LAKE_RUST_PARTIAL_WINDOW_ENV,
         }
 
     def test_env_flag_tristate_is_the_sibling_object(self) -> None:

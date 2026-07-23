@@ -1,8 +1,10 @@
-"""detectors_rust — the default-OFF Rust routing facade for the T24 detector laws.
+"""detectors_rust — the default-ON Rust routing facade for the T24 detector laws.
 
-DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (SLICE T24 PR-1; MIGRATION.md #1948).
-Routes THREE cold data-integrity detector pure laws through the
-``rust/brutex-lake`` crate behind three default-OFF flags, with the verbatim
+DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (SLICE T24 PR-1; MIGRATION.md #1948);
+flipped to default-ON by DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215) —
+the explicit ``0`` value is the OFF kill switch. Routes THREE cold
+data-integrity detector pure laws through the ``rust/brutex-lake`` crate
+behind three default-ON flags, with the verbatim
 Python law retained as the LIVE parity oracle (the ADR-0020
 ``lake_rust_render`` / G8 template, in the G6 ``render_shard`` integration
 shape — the TARGET module gates its own flag and hands this facade zero-arg
@@ -30,8 +32,9 @@ factories, so no verdict dataclass ever has to import back into this module):
 
 ## The fail-closed layers (the PR-1 template, adapted)
 
-* **Flags** — three per-module flags, each default OFF (truthy → ON, falsy →
-  OFF, junk → loud-OFF once; the §11 COMMON :func:`env_flag_tristate`
+* **Flags** — three per-module flags, each default ON (unset/blank/truthy →
+  ON, falsy ``0`` → OFF kill switch, junk → loud-OFF once; the §11 COMMON
+  :func:`env_flag_tristate`
   imported from the sibling facade). The flag gate lives in the TARGET
   modules (the G6 shape) so flag OFF is the literal verbatim oracle call —
   the crate is never imported (bomb-crate spy-pinned).
@@ -72,8 +75,9 @@ factories, so no verdict dataclass ever has to import back into this module):
 Expected payoff ≈ 0 — conversion is for uniformity, not speed. All three
 laws are cold pull-tail / doctor diagnostics; the FFI hop plus the payload
 prep is a small SLOWDOWN, accepted because the surrounding paths are
-vendor-I/O-dominated and the seams ship DEFAULT-OFF (a default flip needs
-its own DEC). These detectors gate REAL ledger demotions
+vendor-I/O-dominated and the seams ship DEFAULT-ON (the explicit ``0`` value
+is the OFF kill switch — DEC-RUST-DEFAULT-ON-WAVE-001). These detectors gate
+REAL ledger demotions
 (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 #1031) —
 decision parity, not speed, is the bar, hence the burn-in + the hostile
 golden/differential corpus. Flags are read per call (one ``os.environ``
@@ -104,7 +108,7 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The raw-integrity digest opt-in flag (default OFF; junk fails loud-OFF).
+#: The raw-integrity digest flag (default ON; falsy ``0`` → OFF, junk loud-OFF).
 LAKE_RUST_RAW_INTEGRITY_ENV: Final[str] = "BRUTEX_LAKE_RUST_RAW_INTEGRITY"
 #: The interior-gap run-walker opt-in flag.
 LAKE_RUST_INTERIOR_GAP_ENV: Final[str] = "BRUTEX_LAKE_RUST_INTERIOR_GAP"
@@ -219,17 +223,17 @@ class PartialWindowPayload:
 
 
 def raw_integrity_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_RAW_INTEGRITY`` (default OFF, junk loud-OFF)."""
+    """Resolve ``BRUTEX_LAKE_RUST_RAW_INTEGRITY`` (default ON, falsy 0 → OFF, junk loud-OFF)."""
     return _flag_enabled(LAKE_RUST_RAW_INTEGRITY_ENV)
 
 
 def interior_gap_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_INTERIOR_GAP`` (default OFF, junk loud-OFF)."""
+    """Resolve ``BRUTEX_LAKE_RUST_INTERIOR_GAP`` (default ON, falsy 0 → OFF, junk loud-OFF)."""
     return _flag_enabled(LAKE_RUST_INTERIOR_GAP_ENV)
 
 
 def partial_window_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_PARTIAL_WINDOW`` (default OFF, junk loud-OFF)."""
+    """Resolve ``BRUTEX_LAKE_RUST_PARTIAL_WINDOW`` (default ON, falsy 0 → OFF, junk loud-OFF)."""
     return _flag_enabled(LAKE_RUST_PARTIAL_WINDOW_ENV)
 
 

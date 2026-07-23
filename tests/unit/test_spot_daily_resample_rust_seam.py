@@ -90,7 +90,10 @@ class TestSpotDailySeamWiring:
     def test_flag_on_with_absent_wheel_equals_the_off_arm_at_candlebar_strength(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        # OFF baseline via the explicit "0" kill switch (default flipped ON —
+        # DEC-RUST-DEFAULT-ON-WAVE-001): an unset flag now resolves ON, so the
+        # oracle expectation must pin "0" to stay the Python arm.
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
         expected = spot_daily_resample.resample_1m_to_daily(_df_1m(), before=_BEFORE)
         monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "1")
         monkeypatch.setitem(sys.modules, "brutex_lake", None)

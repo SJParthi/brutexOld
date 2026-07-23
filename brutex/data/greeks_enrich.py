@@ -74,10 +74,11 @@ the DEEP seam logs (read-dedup warnings, ``spot_key_recovered``) fire inside
 per-target processing and therefore emit CHILD-side in parallel mode —
 honest: log parity is driver-events-only, never claimed for the deep seams.
 
-Rust batch arm (`DEC-GREEKS-RUST-BATCH-001`, default OFF): the env flag
+Rust batch arm (`DEC-GREEKS-RUST-BATCH-001`, flipped default ON by
+DEC-RUST-DEFAULT-ON-WAVE-001 — MIGRATION.md #2215): the env flag
 ``BRUTEX_GREEKS_RUST_BATCH`` (tristate — truthy ``1/true/yes/on`` enables,
-falsy ``0/false/no/off`` disables, unset/blank/unrecognised falls to the
-default OFF, junk warned once per process) routes the screened-SOLVABLE rows
+falsy ``0/false/no/off`` is the OFF kill switch, unset/blank falls to the
+default ON, junk → OFF warned once per process) routes the screened-SOLVABLE rows
 of :func:`enrich_option_bars` through ONE ``trading_core.greeks_batch``
 FFI call per contract (chunk-capped at :data:`GREEKS_BATCH_MAX_ROWS`)
 instead of N scalar calls. Every screen / gate / Decimal / repr / ``exp``
@@ -352,20 +353,23 @@ def greeks_rust_batch_enabled(env: Mapping[str, str] | None = None) -> bool:
     DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23).
 
     Truthy literals enable, falsy literals disable (the kill switch),
-    unset/blank falls to the default silently, and non-blank junk falls to
-    the default with ONE ``greeks_enrich.rust_batch_flag_unrecognised``
-    WARNING per process (the raw value repr'd) — the junk arm keeps its
-    falls-to-the-default law; the burn-in self-check + autorevert latch
-    remain the safety net on the engaged arm.
+    unset/blank falls to the default (ON) silently, and non-blank junk
+    falls OFF with ONE ``greeks_enrich.rust_batch_flag_unrecognised``
+    WARNING per process (the raw value repr'd) — a typo'd opt-in
+    (``ture``, ``0n``) is never silently armed NOR silently dropped, the
+    flip law's junk⇒OFF rule matching every sibling facade; the burn-in
+    self-check + autorevert latch remain the safety net on the engaged arm.
     """
     mapping: Mapping[str, str] = os.environ if env is None else env
     raw = mapping.get(GREEKS_RUST_BATCH_ENV, "")
     verdict = env_flag_tristate(raw)
     if verdict is not None:
         return verdict
-    if raw.strip() and not _RUST_BATCH_STATE.flag_warned:
-        _RUST_BATCH_STATE.flag_warned = True
-        _LOG.warning("greeks_enrich.rust_batch_flag_unrecognised", value=repr(raw))
+    if raw.strip():
+        if not _RUST_BATCH_STATE.flag_warned:
+            _RUST_BATCH_STATE.flag_warned = True
+            _LOG.warning("greeks_enrich.rust_batch_flag_unrecognised", value=repr(raw))
+        return False
     return GREEKS_RUST_BATCH_DEFAULT
 
 

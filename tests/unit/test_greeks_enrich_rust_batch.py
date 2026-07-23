@@ -197,12 +197,13 @@ class TestFlagResolution:
     def test_falsy_disables(self, raw: str) -> None:
         assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: raw}) is False
 
-    def test_junk_falls_to_default_with_exactly_one_warn(self) -> None:
-        # The junk arm keeps its falls-to-the-DEFAULT law — the default is
-        # now ON (DEC-RUST-DEFAULT-ON-WAVE-001), the warn-once stays.
+    def test_junk_falls_off_with_exactly_one_warn(self) -> None:
+        # The junk arm falls OFF (the flip law's junk⇒OFF rule, matching
+        # every sibling facade) — a typo'd opt-in is never silently armed;
+        # the warn-once stays. DEC-RUST-DEFAULT-ON-WAVE-001.
         with capture_logs() as logs:
-            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is True
-            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is True
+            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is False
+            assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is False
         warns = [e for e in logs if e["event"] == "greeks_enrich.rust_batch_flag_unrecognised"]
         assert len(warns) == 1
         assert warns[0]["value"] == repr("maybe?")

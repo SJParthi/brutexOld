@@ -664,7 +664,12 @@ class TestDualArmProperty:
         span: float,
         drawdown: tuple[int, float, int, float],
     ) -> None:
-        prior = os.environ.pop(_FLAG, None)
+        prior = os.environ.get(_FLAG)
+        # The OFF baseline = the explicit "0" kill switch → the Python oracle.
+        # The default is flipped ON (DEC-RUST-DEFAULT-ON-WAVE-001), so popping
+        # the env (unset) would resolve ON and make `on == off` a vacuous
+        # Rust==Rust; "0" pins the genuine oracle arm (the sibling-test idiom).
+        os.environ[_FLAG] = "0"
         try:
             off = _pack_metrics(
                 _compute_metrics_impl(

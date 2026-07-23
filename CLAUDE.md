@@ -4686,16 +4686,18 @@ hostile-review pass._
   `BRUTEX_DATA_RUST` (fno_symbol + lake_keys) · `BRUTEX_GREEKS_RUST_BATCH` ·
   `BRUTEX_METRICS_RUST_FOLD` · `BRUTEX_STATS_RUST` · the `BRUTEX_LAKE_RUST_*`
   family (render · merge · locks · resample · resample_daily · stats-manifest ·
-  window-ledger · the three detector flags) · the `BRUTEX_CORE_RUST_*` config
-  leaves (paths · dotenv · backup-env · hwenv, over the shared `seam_core`) ·
-  the engine Stage-1A money seam. `BRUTEX_RUST_FRONT` becomes AUTO (unset =
+  window-ledger · the three detector flags) · the `BRUTEX_CORE_RUST_*` seams
+  (paths · dotenv · backup-env · hwenv over the shared `seam_core`; plus
+  `BRUTEX_CORE_RUST_MONEY` + `BRUTEX_CORE_RUST_MODELS`) ·
+  `BRUTEX_OPTCOST_TAILS_RUST` · the engine `BRUTEX_SWEEP_RUST_STAGE1A` seam.
+  `BRUTEX_RUST_FRONT` becomes AUTO (unset =
   probe for a built `brutexd` binary → Rust front topology if found, else ONE
   `rust_front.auto_fallback_python` WARN + the verbatim legacy Python topology,
   never fatal; explicit `on` = the strict-fatal arm; `""`/`off` = OFF no probe;
   junk = `RustFrontError` exit 1). ALREADY-ON seams left ON
-  (`BRUTEX_RANK_RUST_SELECT` #2059 · `BRUTEX_REFINE_RUST` #2055 ·
-  `BRUTEX_OPTCOST_TAILS_RUST` · money/models core seams · the wheel-REQUIRED
-  `brutex_feed`/`brutex_identity`/`brutex_refine` families). RETIRED flags stay
+  (`BRUTEX_RANK_RUST_SELECT` #2059 · `BRUTEX_REFINE_RUST` #2055 · the
+  wheel-REQUIRED `brutex_feed`/`brutex_identity`/`brutex_refine` families).
+  RETIRED flags stay
   retired (a SET `BRUTEX_LAKE_RUST_LEDGER_RENDER`/`BRUTEX_LAKE_WAVED_RUST`/
   `BRUTEX_FEED_RUST` still refuses loudly — never re-armed). HERMETICITY:
   `tests/conftest.py` gains suite-wide `os.environ.setdefault(FLAG, "0")` belts

@@ -99,7 +99,10 @@ class TestFnoDailySeamWiring:
         # Decimal REPRS (str(bar.open) etc.), volumes, OI incl. the
         # null-last honest edge.
         for null_last_oi in (False, True):
-            monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+            # OFF baseline via the explicit "0" kill switch (default flipped ON
+            # — DEC-RUST-DEFAULT-ON-WAVE-001): an unset flag now resolves ON, so
+            # the oracle expectation must pin "0" to stay the Python arm.
+            monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
             expected = fno_daily_resample.resample_1m_to_fno_daily(
                 _df_1m(null_last_oi=null_last_oi), before=_BEFORE
             )
@@ -150,7 +153,8 @@ class TestFnoDailySeamWiring:
         # The defensive stamped_has_oi read: an OI-less frame (hand-built /
         # the 1-minute no-op branch) materializes honest None OI on the ON
         # arm exactly like the OFF arm's defensive read.
-        monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
+        # OFF baseline via the explicit "0" kill switch (default flipped ON).
+        monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "0")
         no_oi = _df_1m().drop("open_interest")
         expected = fno_daily_resample.resample_1m_to_fno_daily(no_oi, before=_BEFORE)
         monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "1")
