@@ -45,11 +45,12 @@ never alias an ungated one while the default digest stays byte-stable.
 ACTIVATION (a non-``None`` production config) requires its own DEC +
 operator sign-off on ``docs/measurements/cvar_gate_measurement.md``.
 
-## The optional Rust kernel — ``BRUTEX_RANK_CVAR_RUST`` (default OFF)
+## The optional Rust kernel — ``BRUTEX_RANK_CVAR_RUST`` (default ON per
+## DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23)
 
-Even with the GATE active, the fold runs on the pure-Python oracle unless
-the operator opts into the kernel with ``BRUTEX_RANK_CVAR_RUST=1`` (Pattern
-A tristate via the COMMON
+With the GATE active, the fold runs on the Rust kernel by default;
+``BRUTEX_RANK_CVAR_RUST=0`` is the explicit kill switch back to the
+pure-Python oracle (tristate via the COMMON
 :func:`brutex.engine.sweep_lookahead.env_flag_tristate`, imported LAZILY —
 ranking is imported BY the engine, so a module-scope ranking→engine import
 would cycle; the :mod:`brutex.metrics.rust_stats` precedent). Wheel
@@ -100,9 +101,10 @@ _LOG = structlog.get_logger(__name__)
 CVAR_RUST_ENV: Final[str] = "BRUTEX_RANK_CVAR_RUST"
 
 #: What :func:`cvar_rust_enabled` returns when the flag is unset — DEFAULT
-#: OFF; a flip to ON-by-default is a separate later DEC (the ADR-0017
-#: precedent).
-CVAR_RUST_DEFAULT: Final[bool] = False
+#: ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23; the
+#: ADR-0017 precedent); ``BRUTEX_RANK_CVAR_RUST=0`` stays the explicit
+#: kill switch and the revert is this one constant.
+CVAR_RUST_DEFAULT: Final[bool] = True
 
 #: The STABLE wire token this gate's rejections are counted/logged under
 #: (the ``sweep.cvar_gate`` event + the measurement report). Deliberately
@@ -228,7 +230,8 @@ def cvar_rust_enabled() -> bool:
 
     The exact :func:`brutex.metrics.rust_stats.stats_rust_enabled` law:
     truthy → ``True``, falsy → ``False``, unset/whitespace-empty → the
-    default (OFF), unrecognised → OFF with one warn-once
+    default (ON per DEC-RUST-DEFAULT-ON-WAVE-001), unrecognised → OFF with
+    one warn-once
     ``flag_unrecognised``; the tristate vocabulary is the COMMON
     :func:`~brutex.engine.sweep_lookahead.env_flag_tristate`, imported
     LAZILY (ranking is imported BY the engine — a module-scope back-import

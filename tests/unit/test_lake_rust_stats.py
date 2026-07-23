@@ -75,14 +75,16 @@ class TestFlagParsing:
             assert lake_rust_stats.lake_rust_stats_enabled() is False
         assert logs == []
 
-    def test_unset_and_whitespace_default_off_silently(
+    def test_unset_and_whitespace_default_on_silently(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Default ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+        # 2026-07-23) — unset/blank resolve True silently.
         with capture_logs() as logs:
-            assert lake_rust_stats.lake_rust_stats_enabled() is False
+            assert lake_rust_stats.lake_rust_stats_enabled() is True
         monkeypatch.setenv(lake_rust_stats.LAKE_RUST_STATS_ENV, "   ")
         with capture_logs() as more:
-            assert lake_rust_stats.lake_rust_stats_enabled() is False
+            assert lake_rust_stats.lake_rust_stats_enabled() is True
         assert logs == [] and more == []
 
     def test_junk_fails_loud_off_and_warns_once(self, monkeypatch: pytest.MonkeyPatch) -> None:

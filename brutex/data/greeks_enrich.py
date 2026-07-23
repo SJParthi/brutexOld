@@ -296,9 +296,10 @@ _SPOT_MEMO_CAPACITY: Final[int] = 2
 #: change).
 GREEKS_RUST_BATCH_ENV: Final[str] = "BRUTEX_GREEKS_RUST_BATCH"
 
-#: The batch arm ships INERT — flipping the default needs its own DEC/ADR
-#: with measured evidence (the ``SWEEP_RUST_METRICS_DEFAULT`` precedent).
-GREEKS_RUST_BATCH_DEFAULT: Final[bool] = False
+#: Default ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+#: 2026-07-23, "RUST O(1) so default it as on") — supersedes the ships-INERT
+#: default-OFF posture; ``BRUTEX_GREEKS_RUST_BATCH=0`` stays the kill switch.
+GREEKS_RUST_BATCH_DEFAULT: Final[bool] = True
 
 #: Python-side chunk cap on one ``trading_core.greeks_batch`` crossing —
 #: bounds the FFI allocation envelope deterministically (~4.6 MiB of element
@@ -347,13 +348,15 @@ def reset_rust_batch_for_tests() -> None:
 
 
 def greeks_rust_batch_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Resolve the ``BRUTEX_GREEKS_RUST_BATCH`` tristate (default OFF).
+    """Resolve the ``BRUTEX_GREEKS_RUST_BATCH`` tristate (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23).
 
-    Truthy literals enable, falsy literals disable, unset/blank falls to the
-    default silently, and non-blank junk falls to the default with ONE
-    ``greeks_enrich.rust_batch_flag_unrecognised`` WARNING per process (the
-    raw value repr'd) — under default-OFF the junk fallback is already
-    fail-safe.
+    Truthy literals enable, falsy literals disable (the kill switch),
+    unset/blank falls to the default silently, and non-blank junk falls to
+    the default with ONE ``greeks_enrich.rust_batch_flag_unrecognised``
+    WARNING per process (the raw value repr'd) — the junk arm keeps its
+    falls-to-the-default law; the burn-in self-check + autorevert latch
+    remain the safety net on the engaged arm.
     """
     mapping: Mapping[str, str] = os.environ if env is None else env
     raw = mapping.get(GREEKS_RUST_BATCH_ENV, "")

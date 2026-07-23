@@ -1,7 +1,9 @@
 """Flag-gated Rust seam for the backup DECISION laws — the ops-kernel facade.
 
-DEC-BACKUP-RUST-OPS-001. When — and ONLY when — ``BRUTEX_BACKUP_RUST`` is
-set truthy, the pure decision laws of :mod:`brutex.backup` route through the
+DEC-BACKUP-RUST-OPS-001; default flipped ON by
+DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23). Unless
+``BRUTEX_BACKUP_RUST`` is set explicitly falsy (the kill switch), the pure
+decision laws of :mod:`brutex.backup` route through the
 ``brutex_ops`` crate (``rust/brutex-ops``): the dead-man verdict state
 machine (:func:`brutex.backup.deadman.evaluate_deadman`), the four
 golden-pinned template renderers (:mod:`brutex.backup.schedule_render`), and
@@ -16,11 +18,12 @@ error taxonomy and every logged/raised/alerted string. The retained Python
 implementations are the LIVE PARITY ORACLE — never deleted here (oracle
 retirement is its own later lane), and every degrade path serves them.
 
-## The flag — ``BRUTEX_BACKUP_RUST`` (DEFAULT OFF)
+## The flag — ``BRUTEX_BACKUP_RUST`` (DEFAULT ON — DEC-RUST-DEFAULT-ON-WAVE-001)
 
 Resolved per call (spawn workers read their own inherited environment): a
 truthy literal (``1/true/yes/on``) → ON; a falsy literal
-(``0/false/no/off``) → OFF; unset / whitespace-empty → OFF (the default);
+(``0/false/no/off``) → OFF (the kill switch); unset / whitespace-empty → ON
+(the default per DEC-RUST-DEFAULT-ON-WAVE-001);
 any OTHER value → OFF with one loud ``backup_rust.fallback`` WARN (reason
 ``flag_unrecognised``) per process. The vocabulary is a LOCAL twin of the
 sweep flags' :func:`brutex.engine.sweep_lookahead.env_flag_tristate`
@@ -79,8 +82,9 @@ Expected payoff ≈ 0 — the conversion is for uniformity, not speed (the
 ADR-0020 banner, mandatory verbatim): every routed law runs at
 once-per-backup-run / once-per-hourly-tick / once-per-drill frequency, and
 the engaged path ADDS an env probe + an FFI hop + (during burn-in) a full
-oracle recompute per call. Ships INERT — flag OFF is byte-identical AND
-crate-untouched (bomb-module spy-pinned); a default flip needs its own DEC.
+oracle recompute per call. The explicit-falsy kill switch is byte-identical
+AND crate-untouched (bomb-module spy-pinned); the default is ON per
+DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23).
 The latches + warn memo are the same *documented exception* to the
 no-global-mutable-state rule as ``rust_metrics``'s (plain unlocked writes —
 a racing thread can at worst run an extra burn-in compare or duplicate a
@@ -104,8 +108,9 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The env flag. DEFAULT OFF — the Python laws stay the production path
-#: until a burn-in-proven operator-directed default flip behind a future DEC.
+#: The env flag. DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator
+#: directive 2026-07-23); explicit falsy is the kill switch back to the
+#: Python-oracle path.
 BACKUP_RUST_ENV: Final[str] = "BRUTEX_BACKUP_RUST"
 
 #: Engaged calls compared against the Python oracle PER LAW before crate
@@ -182,11 +187,13 @@ def env_flag_tristate(raw: str) -> bool | None:
 
 
 def backup_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_BACKUP_RUST`` (default OFF, junk fails loud-OFF).
+    """Resolve ``BRUTEX_BACKUP_RUST`` (default ON, junk fails loud-OFF).
 
-    Read per call (one ``os.environ`` probe per routed law call — the
-    once-per-run/tick call frequency makes it immaterial; caching would
-    break the spawn-worker inherit contract).
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23):
+    unset/blank → ON (the default); explicit falsy → OFF (the kill
+    switch); junk → loud-OFF unchanged. Read per call (one ``os.environ``
+    probe per routed law call — the once-per-run/tick call frequency makes
+    it immaterial; caching would break the spawn-worker inherit contract).
     """
     raw = os.environ.get(BACKUP_RUST_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -194,7 +201,8 @@ def backup_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=repr(raw))
-    return False
+        return False
+    return True
 
 
 def backup_rust_disabled() -> bool:

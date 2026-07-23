@@ -319,10 +319,11 @@ class BuildPartsLaw[PartsT: SymbolParts](Protocol):
 
 
 def data_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_DATA_RUST`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_DATA_RUST`` (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23; junk loud-OFF).
 
     Truthy literal → ``True``; falsy literal → ``False``; unset/blank →
-    ``False`` (the default); any OTHER non-empty value → ``False`` with one
+    ``True`` (the default); any OTHER non-empty value → ``False`` with one
     ``fno_symbol_rust.fallback`` WARN (``flag_unrecognised``) per process.
     Read per call so spawn workers resolve their own environment (the
     sibling facades' law, byte-identical vocabulary via the imported
@@ -334,7 +335,8 @@ def data_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def data_rust_disabled() -> bool:

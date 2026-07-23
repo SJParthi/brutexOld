@@ -146,9 +146,11 @@ def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 class TestFlagResolution:
-    def test_default_unset_is_off_without_warn(self) -> None:
+    def test_default_unset_is_on_without_warn(self) -> None:
+        # Default ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+        # 2026-07-23) — unset resolves True silently.
         with capture_logs() as logs:
-            assert fsr.data_rust_enabled() is False
+            assert fsr.data_rust_enabled() is True
         assert logs == []
 
     def test_truthy_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,10 +172,12 @@ class TestFlagResolution:
         assert len(warns) == 1
         assert warns[0]["reason"] == "flag_unrecognised"
 
-    def test_blank_whitespace_is_off_without_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_blank_whitespace_is_on_without_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Whitespace-blank ≡ unset ⇒ the default ON, silently
+        # (DEC-RUST-DEFAULT-ON-WAVE-001).
         monkeypatch.setenv(fsr.DATA_RUST_ENV, "   ")
         with capture_logs() as logs:
-            assert fsr.data_rust_enabled() is False
+            assert fsr.data_rust_enabled() is True
         assert logs == []
 
     def test_env_flag_tristate_is_the_sibling_object(self) -> None:
@@ -211,6 +215,10 @@ class TestOffArmInertness:
                 self.touched.append(name)
                 raise AttributeError(f"flag-OFF path touched crate attr {name!r}")
 
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset now means ON, so the OFF-arm
+        # inertness property is addressed via the explicit kill switch ("0")
+        # — the SAME never-imports/never-touches teeth survive.
+        monkeypatch.setenv(fsr.DATA_RUST_ENV, "0")
         bomb = _BombCrate()
         monkeypatch.setitem(__import__("sys").modules, "brutex_data", bomb)
 

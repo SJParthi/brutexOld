@@ -124,11 +124,13 @@ class ShardRenderPayload:
 
 
 def lake_rust_stats_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_STATS_MANIFEST`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_LAKE_RUST_STATS_MANIFEST`` (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23; junk
+    loud-OFF).
 
-    Truthy → ``True``; falsy → ``False`` (silent explicit OFF); unset /
-    whitespace-empty → ``False`` (the default); any OTHER non-empty value →
-    ``False`` with one ``lake_rust_stats.fallback`` WARN (reason
+    Truthy → ``True``; falsy → ``False`` (the silent explicit kill switch);
+    unset / whitespace-empty → ``True`` (the default); any OTHER non-empty
+    value → ``False`` with one ``lake_rust_stats.fallback`` WARN (reason
     ``flag_unrecognised``) per process. Read per call so spawn workers
     resolve their own inherited environment (the PR-1 posture).
     """
@@ -138,7 +140,8 @@ def lake_rust_stats_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_stats_disabled() -> bool:

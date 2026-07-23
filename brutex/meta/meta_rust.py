@@ -64,7 +64,8 @@ __all__ = [
     "score_probabilities",
 ]
 
-#: The opt-in environment flag (default OFF — Pattern A).
+#: The environment flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001;
+#: falsy is the explicit kill switch).
 META_GATE_ENV: Final[str] = "BRUTEX_META_GATE"
 
 #: ONE structlog event per degrade reason per process (``reason=`` field).
@@ -123,22 +124,28 @@ def _warn_once(reason: str, **fields: object) -> None:
 
 
 def meta_gate_enabled(raw: str | None = None) -> bool:
-    """Return whether the Rust meta kernels are ENABLED (default ``False``).
+    """Return whether the Rust meta kernels are ENABLED (default ``True``).
 
-    Pattern A via the COMMON :func:`env_flag_tristate`: ONLY an explicit
-    truthy literal enables; unset/empty/falsy/junk are OFF. A NON-EMPTY
-    unrecognised value gets one :data:`META_RUST_FLAG_EVENT` warning per
-    process (an operator typo is surfaced, never silently ignored).
+    Via the COMMON :func:`env_flag_tristate`: a truthy literal enables, a
+    falsy literal is the explicit kill switch, unset/whitespace-empty falls
+    to the default — ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator
+    directive 2026-07-23). A NON-EMPTY unrecognised value gets one
+    :data:`META_RUST_FLAG_EVENT` warning per process and fails SAFE to OFF
+    (an operator typo is surfaced, never silently armed).
     """
     value = os.environ.get(META_GATE_ENV) if raw is None else raw
     if value is None:
-        return False
+        return True
     verdict = env_flag_tristate(value)
-    if verdict is None and value.strip() and META_RUST_FLAG_EVENT not in _WARNED:
-        _WARNED.add(META_RUST_FLAG_EVENT)
-        # The env VALUE is operator-typed junk — repr() it (the #907 law).
-        _LOG.warning(META_RUST_FLAG_EVENT, env=META_GATE_ENV, value=repr(value))
-    return verdict is True
+    if verdict is not None:
+        return verdict
+    if value.strip():
+        if META_RUST_FLAG_EVENT not in _WARNED:
+            _WARNED.add(META_RUST_FLAG_EVENT)
+            # The env VALUE is operator-typed junk — repr() it (the #907 law).
+            _LOG.warning(META_RUST_FLAG_EVENT, env=META_GATE_ENV, value=repr(value))
+        return False
+    return True
 
 
 def _resolve_kernel() -> object | None:

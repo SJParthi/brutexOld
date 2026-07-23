@@ -257,7 +257,8 @@ def _flag_enabled(env_var: str) -> bool:
     """The ONE tristate resolution all three flags share (per-call env read).
 
     Truthy literal → ``True``; falsy literal → ``False``; unset/blank →
-    ``False`` (the default); any OTHER non-empty value → ``False`` with one
+    ``True`` (default ON per DEC-RUST-DEFAULT-ON-WAVE-001, operator
+    directive 2026-07-23); any OTHER non-empty value → ``False`` with one
     ``detectors_rust.fallback`` WARN (``flag_unrecognised``, naming the
     variable) per process per variable.
     """
@@ -267,7 +268,8 @@ def _flag_enabled(env_var: str) -> bool:
         return verdict
     if raw.strip():
         _warn_once(f"flag_unrecognised:{env_var}", value=raw, env_var=env_var)
-    return False
+        return False
+    return True
 
 
 def _warn_once(reason: str, **context: object) -> None:

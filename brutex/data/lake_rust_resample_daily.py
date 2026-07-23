@@ -137,13 +137,16 @@ _ENGAGED_KEY: Final[str] = "__engaged__"
 
 
 def lake_rust_resample_daily_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY`` (default OFF, junk fails loud-OFF).
+    """Resolve ``BRUTEX_LAKE_RUST_RESAMPLE_DAILY`` (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23; junk fails
+    loud-OFF).
 
     The exact G5 policy via the SHARED tristate: truthy → ``True``; falsy →
-    ``False``; unset/whitespace-empty → ``False``; any OTHER non-empty
-    value → ``False`` with one loud ``lake_rust_resample_daily.fallback``
-    WARN (``flag_unrecognised``) per process. Read per call so parallel
-    workers resolve their own inherited environment.
+    ``False``; unset/whitespace-empty → ``True`` (the default); any OTHER
+    non-empty value → ``False`` with one loud
+    ``lake_rust_resample_daily.fallback`` WARN (``flag_unrecognised``) per
+    process. Read per call so parallel workers resolve their own inherited
+    environment.
     """
     raw = os.environ.get(LAKE_RUST_RESAMPLE_DAILY_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -151,7 +154,8 @@ def lake_rust_resample_daily_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_resample_daily_disabled() -> bool:

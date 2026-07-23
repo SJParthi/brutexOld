@@ -216,14 +216,17 @@ class _DecisionRefused(Exception):
 
 
 def lake_rust_merge_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_RUST_MERGE`` (default OFF, junk fails loud-OFF).
+    """Resolve ``BRUTEX_LAKE_RUST_MERGE`` (default ON per
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23; junk fails
+    loud-OFF).
 
-    The PR-1 flag law verbatim (via the SHARED
+    The flag law (via the SHARED
     :func:`~brutex.data.lake_rust_render.env_flag_tristate`): truthy → ON;
-    falsy / unset / whitespace-empty → OFF; any other non-empty value → OFF
-    with one loud ``lake_rust_merge.fallback`` WARN (reason
-    ``flag_unrecognised``) per process. Read per call so parallel workers
-    resolve their own inherited environment.
+    falsy → OFF (the kill switch); unset / whitespace-empty → ON (the
+    default); any other non-empty value → OFF with one loud
+    ``lake_rust_merge.fallback`` WARN (reason ``flag_unrecognised``) per
+    process. Read per call so parallel workers resolve their own inherited
+    environment.
     """
     raw = os.environ.get(LAKE_RUST_MERGE_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -231,7 +234,8 @@ def lake_rust_merge_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_merge_disabled() -> bool:

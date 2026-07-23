@@ -4215,18 +4215,25 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
 
     # Rust front flag (Rust-uniformity Wave 1, roadmap PR-1): resolved EAGERLY
     # so a junk BRUTEX_RUST_FRONT value refuses the start loudly BEFORE any
-    # heavy setup (the house env-law; default absent/off = byte-identical
-    # single-process behaviour, no brutexd process spawned). The mechanism
-    # lives in brutex/dashboard/rust_front.py (its own self-contained 100%
-    # line+branch gate); this function only threads the decision.
+    # heavy setup (the house env-law). Default = AUTO
+    # (DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23): with the
+    # flag UNSET the front preconditions are probed at the serve seam below —
+    # brutexd found ⇒ the front topology; missing ⇒ ONE loud WARNING + the
+    # legacy Python-only topology, never a fatal boot. Explicit "on" keeps
+    # today's strict fail-loud semantics; explicit ""/"off" = OFF. The
+    # mechanism lives in brutex/dashboard/rust_front.py (its own
+    # self-contained 100% line+branch gate); this function only threads the
+    # decision.
     from brutex.dashboard.rust_front import (
         RustFrontError,
-        resolve_rust_front,
+        RustFrontMode,
+        probe_auto_front,
+        resolve_rust_front_mode,
         run_with_rust_front,
     )
 
     try:
-        _rust_front_on = resolve_rust_front()
+        _rust_front_mode: RustFrontMode = resolve_rust_front_mode()
     except RustFrontError as exc:
         raise CliUserError(str(exc)) from exc
 
@@ -4577,12 +4584,22 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         # root handlers (console + rotating JSON file) instead of uvicorn's own
         # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
         # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
-        if _rust_front_on:
-            # Two-process topology (BRUTEX_RUST_FRONT=on): brutexd owns the
-            # operator port; uvicorn binds a private loopback port picked inside
-            # run_with_rust_front. A launch refusal (missing binary /
-            # non-loopback host) is a loud CliUserError exit 1, never a
-            # half-started topology.
+        if _rust_front_mode == "auto":
+            # AUTO default (DEC-RUST-DEFAULT-ON-WAVE-001): probe the plan
+            # preconditions HERE (after logging is configured, so the
+            # fallback WARNING lands in the sinks). Preconditions hold ⇒
+            # proceed exactly as explicit "on"; any missing precondition
+            # (no brutexd binary, non-loopback --host, missing static dir)
+            # ⇒ probe_auto_front already emitted ONE loud WARNING naming it
+            # + the cargo remediation, and we run the exact legacy
+            # Python-only topology — NEVER a fatal boot on the AUTO path.
+            _rust_front_mode = "on" if probe_auto_front(host=host, port=port) else "off"
+        if _rust_front_mode == "on":
+            # Two-process topology (BRUTEX_RUST_FRONT=on, or AUTO with the
+            # preconditions proven): brutexd owns the operator port; uvicorn
+            # binds a private loopback port picked inside run_with_rust_front.
+            # A launch refusal (missing binary / non-loopback host) is a loud
+            # CliUserError exit 1, never a half-started topology.
             try:
                 run_with_rust_front(app, host=host, port=port, uvicorn_run=uvicorn.run)
             except RustFrontError as exc:

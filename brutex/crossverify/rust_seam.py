@@ -168,13 +168,15 @@ def env_flag_tristate(raw: str) -> bool | None:
 
 
 def crossverify_rust_enabled() -> bool:
-    """Resolve ``BRUTEX_CROSSVERIFY_RUST`` (default OFF, junk loud-OFF).
+    """Resolve ``BRUTEX_CROSSVERIFY_RUST`` (default ON, junk loud-OFF).
 
-    Truthy → ``True``; falsy → ``False`` (silent explicit OFF); unset /
-    whitespace-empty → ``False`` (the default); any OTHER non-empty value →
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): truthy →
+    ``True``; falsy → ``False`` (the silent explicit kill switch); unset /
+    whitespace-empty → ``True`` (the default); any OTHER non-empty value →
     ``False`` with one ``crossverify_rust.fallback`` WARN (reason
-    ``flag_unrecognised``) per process. Read per call so spawned workers
-    resolve their own inherited environment (the sibling-facade posture).
+    ``flag_unrecognised``) per process — the junk arm is unchanged. Read
+    per call so spawned workers resolve their own inherited environment
+    (the sibling-facade posture).
     """
     raw = os.environ.get(CROSSVERIFY_RUST_ENV, "")
     verdict = env_flag_tristate(raw)
@@ -182,7 +184,8 @@ def crossverify_rust_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return True
 
 
 def rust_seam_disabled() -> bool:

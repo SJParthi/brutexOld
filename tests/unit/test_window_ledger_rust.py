@@ -94,9 +94,11 @@ def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 class TestFlagResolution:
-    def test_default_unset_is_off_without_warn(self) -> None:
+    def test_default_unset_is_on_without_warn(self) -> None:
+        # Default ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive
+        # 2026-07-23) — unset resolves True silently.
         with capture_logs() as logs:
-            assert wlr.window_ledger_rust_enabled() is False
+            assert wlr.window_ledger_rust_enabled() is True
         assert logs == []
 
     def test_truthy_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,10 +120,12 @@ class TestFlagResolution:
         assert len(warns) == 1
         assert warns[0]["reason"] == "flag_unrecognised"
 
-    def test_blank_whitespace_is_off_without_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_blank_whitespace_is_on_without_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Whitespace-blank ≡ unset ⇒ the default ON, silently
+        # (DEC-RUST-DEFAULT-ON-WAVE-001).
         monkeypatch.setenv(wlr.LAKE_RUST_WINDOW_LEDGER_ENV, "   ")
         with capture_logs() as logs:
-            assert wlr.window_ledger_rust_enabled() is False
+            assert wlr.window_ledger_rust_enabled() is True
         assert logs == []
 
     def test_env_flag_tristate_is_the_sibling_object(self) -> None:
@@ -133,6 +137,10 @@ class TestOffArmInertness:
     def test_off_never_imports_crate_and_matches_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset now means ON — the OFF-arm
+        # inertness property is addressed via the explicit kill switch ("0").
+        monkeypatch.setenv(wlr.LAKE_RUST_WINDOW_LEDGER_ENV, "0")
+
         def _bomb(name: str) -> object:
             raise AssertionError(f"flag-OFF path imported {name!r}")
 
@@ -507,6 +515,10 @@ class TestOnArmIntegration:
         assert WindowLedger._key(KEY) == EXPECTED_KEY
 
     def test_flag_off_public_laws_never_import_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: the kill switch ("0") keeps the
+        # public laws crate-free — the SAME never-imports teeth survive.
+        monkeypatch.setenv(wlr.LAKE_RUST_WINDOW_LEDGER_ENV, "0")
+
         def _bomb(name: str) -> object:
             raise AssertionError("flag-OFF public law imported the crate")
 

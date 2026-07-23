@@ -1,20 +1,30 @@
-"""Default-OFF Rust front (``brutexd``) launcher — Rust-uniformity Wave 1.
+"""Default-AUTO-ON Rust front (``brutexd``) launcher — Rust-uniformity Wave 1.
 
 The ONE Python seam of the SERVING track's opener PR (roadmap_final.md §3):
-when — and ONLY when — the fail-loud env flag ``BRUTEX_RUST_FRONT=on`` is
-set, ``brutex dashboard`` binds uvicorn to a PRIVATE loopback port and
-spawns the ``brutexd`` binary on the OPERATOR port. brutexd serves
-``/static/*`` + ``/health`` natively and reverse-proxies every other path
-verbatim to the FastAPI job host (the parity contract is gated by
-``tests/integration/test_sidecar_parity_static.py``).
+under the ``BRUTEX_RUST_FRONT`` flag, ``brutex dashboard`` binds uvicorn to
+a PRIVATE loopback port and spawns the ``brutexd`` binary on the OPERATOR
+port. brutexd serves ``/static/*`` + ``/health`` natively and
+reverse-proxies every other path verbatim to the FastAPI job host (the
+parity contract is gated by ``tests/integration/test_sidecar_parity_static.py``).
 
-Flag law (house env-law — the ``BRUTEX_LOG_LEVEL`` pattern):
+Flag law (house env-law — the ``BRUTEX_LOG_LEVEL`` pattern; default
+**AUTO-ON** per DEC-RUST-DEFAULT-ON-WAVE-001, operator directive
+2026-07-23 — supersedes the default-OFF arm of
+DEC-RUST-FRONT-STATIC-HEALTH-001):
 
-* absent / empty / ``off`` → **OFF** (the default): no brutexd process is
-  spawned, ``cmd_dashboard`` runs uvicorn on the operator port exactly as
-  before this module existed — byte-zero behaviour change, pinned by
-  ``tests/unit/test_rust_front.py``;
-* ``on`` → the two-process front topology above;
+* absent → **AUTO** (the default): the front preconditions are probed
+  (:func:`probe_auto_front` — the :func:`locate_brutexd` ladder, the
+  loopback-host law, the static dir). ALL hold → the two-process front
+  topology, exactly as explicit ``on``; ANY fails → ONE loud WARNING
+  naming the missing precondition + the cargo build remediation, then the
+  exact legacy Python-only topology — NEVER a fatal boot on the AUTO path;
+* empty / ``off`` → **OFF**: no brutexd process is spawned,
+  ``cmd_dashboard`` runs uvicorn on the operator port exactly as before
+  this module existed — pinned by ``tests/unit/test_rust_front.py``;
+* ``on`` → the two-process front topology, STRICT: a missing binary /
+  non-loopback host / missing static dir is the same loud
+  :class:`RustFrontError` fatal refusal as ever — an operator who pins the
+  flag ON must be told loudly, never silently degraded;
 * anything else → :class:`RustFrontError`, mapped to ``CliUserError`` exit 1
   at the CLI boundary — never a silent fallback.
 
@@ -37,7 +47,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import structlog
 
@@ -95,8 +105,14 @@ class ProcessHandle(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub
 
 
-def resolve_rust_front(env: Mapping[str, str] | None = None) -> bool:
-    """Read + validate ``BRUTEX_RUST_FRONT`` (fail-loud on junk).
+#: The three resolved flag states (DEC-RUST-DEFAULT-ON-WAVE-001):
+#: ``"auto"`` (the UNSET default — probe-then-decide), ``"on"`` (strict,
+#: fail-loud) and ``"off"`` (the legacy Python-only topology).
+RustFrontMode = Literal["auto", "on", "off"]
+
+
+def resolve_rust_front_mode(env: Mapping[str, str] | None = None) -> RustFrontMode:
+    """Read + validate ``BRUTEX_RUST_FRONT`` into its tri-state mode.
 
     Parameters
     ----------
@@ -105,29 +121,93 @@ def resolve_rust_front(env: Mapping[str, str] | None = None) -> bool:
 
     Returns
     -------
-    bool
-        ``True`` iff the flag is exactly ``on`` (case-insensitive, stripped).
+    RustFrontMode
+        ``"auto"`` when the flag is ABSENT (the DEC-RUST-DEFAULT-ON-WAVE-001
+        default — the caller probes :func:`probe_auto_front` and falls back
+        gracefully); ``"on"`` for exactly ``on`` (strict fail-loud);
+        ``"off"`` for an EXPLICIT empty/``off`` value (case-insensitive,
+        stripped — a set-but-blank flag is an explicit off, never AUTO).
 
     Raises
     ------
     RustFrontError
         For any value outside ``{"", "on", "off"}`` — the house env-law:
-        a typo must refuse the start loudly, never silently run the
-        default topology.
+        a typo must refuse the start loudly, never silently run some
+        guessed topology (unchanged from the default-OFF era).
     """
     source = os.environ if env is None else env
     raw = source.get(ENV_RUST_FRONT)
     if raw is None:
-        return False
+        return "auto"
     normalized = raw.strip().lower()
     if normalized in ("", "off"):
-        return False
+        return "off"
     if normalized == "on":
-        return True
+        return "on"
     raise RustFrontError(
-        f"invalid {ENV_RUST_FRONT}={raw!r} — must be 'on' or 'off' (default off); "
+        f"invalid {ENV_RUST_FRONT}={raw!r} — must be 'on' or 'off' "
+        "(default auto: on when brutexd is available); "
         "refusing to start rather than guessing the topology"
     )
+
+
+def resolve_rust_front(env: Mapping[str, str] | None = None) -> bool:
+    """Report whether ``BRUTEX_RUST_FRONT`` is EXPLICITLY ``on`` (fail-loud on junk).
+
+    The strict-arm view of :func:`resolve_rust_front_mode` — kept for
+    callers that only care about the explicit pin. The UNSET default is no
+    longer plain OFF: it is AUTO (DEC-RUST-DEFAULT-ON-WAVE-001), resolved by
+    the caller via :func:`resolve_rust_front_mode` + :func:`probe_auto_front`;
+    this helper still returns ``False`` for unset (not explicitly on).
+
+    Raises
+    ------
+    RustFrontError
+        For any value outside ``{"", "on", "off"}`` — the house env-law.
+    """
+    return resolve_rust_front_mode(env) == "on"
+
+
+def probe_auto_front(
+    *,
+    host: str,
+    port: int,
+    env: Mapping[str, str] | None = None,
+    static_dir: Path | None = None,
+) -> bool:
+    """The AUTO arm (DEC-RUST-DEFAULT-ON-WAVE-001): probe the front preconditions.
+
+    Called when ``BRUTEX_RUST_FRONT`` is UNSET. Runs the exact
+    :func:`build_plan` validation — the :func:`locate_brutexd` ladder, the
+    Wave-1 loopback-host law, the static-dir presence — WITHOUT spawning
+    anything (a throwaway ``upstream_port=0`` sentinel keeps the probe from
+    allocating a real port; the launcher re-plans for real).
+
+    Returns ``True`` when every precondition holds (the caller then proceeds
+    exactly as explicit ``on``). On ANY :class:`RustFrontError` it emits ONE
+    loud WARNING naming the missing precondition + the remediation and
+    returns ``False`` — the caller falls back to the exact legacy
+    Python-only topology. This probe never raises for a plan-precondition
+    failure (junk env values are refused earlier by
+    :func:`resolve_rust_front_mode`, never here); a genuine code bug still
+    propagates (no blanket except).
+    """
+    try:
+        build_plan(host=host, port=port, env=env, static_dir=static_dir, upstream_port=0)
+    except RustFrontError as exc:
+        _LOG.warning(
+            "rust_front.auto_fallback_python",
+            reason=str(exc),
+            remediation=(
+                "serving via the legacy Python-only topology; to enable the "
+                "Rust front build brutexd with `cargo build --release "
+                "--manifest-path rust/brutexd/Cargo.toml` (or point "
+                f"{ENV_BRUTEXD_BIN} at a binary); set {ENV_RUST_FRONT}=off "
+                "to silence this warning"
+            ),
+        )
+        return False
+    return True
 
 
 def default_static_dir() -> Path:
@@ -392,13 +472,16 @@ __all__ = [
     "TERMINATE_TIMEOUT_S",
     "ProcessHandle",
     "RustFrontError",
+    "RustFrontMode",
     "RustFrontPlan",
     "allocate_upstream_port",
     "build_command",
     "build_plan",
     "default_static_dir",
     "locate_brutexd",
+    "probe_auto_front",
     "render_listen",
     "resolve_rust_front",
+    "resolve_rust_front_mode",
     "run_with_rust_front",
 ]

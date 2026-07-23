@@ -31,8 +31,8 @@ LAZILY inside the function body so this metrics module never creates a
 metrics→engine import-time cycle; CLAUDE.md §11 COMMON — the truthy/falsy
 vocabulary is never copied). Resolution: a truthy value forces ON, a falsy
 value forces OFF, unset/whitespace-empty falls to :data:`STATS_RUST_DEFAULT`
-(**False — default-OFF**; the flip to ON-by-default is a SEPARATE later ADR,
-the DEC-SWEEP-RUST-METRICS-001 → ADR-0017 precedent), and any OTHER value
+(**True — default-ON** per DEC-RUST-DEFAULT-ON-WAVE-001, operator directive
+2026-07-23; the revert is that one constant), and any OTHER value
 fails SAFE to OFF with one warn-once ``flag_unrecognised`` event. Flag
 resolution itself NEVER raises: a SET flag in an environment where
 ``brutex.engine`` cannot import (its ``__init__`` pulls the trading_core
@@ -176,12 +176,11 @@ _LOG = structlog.get_logger(__name__)
 STATS_RUST_ENV: Final[str] = "BRUTEX_STATS_RUST"
 
 #: The ONE default-arm constant: what :func:`stats_rust_enabled` returns when
-#: the env flag is unset or whitespace-empty. ``False`` = DEFAULT-OFF — every
-#: caller stays on the verbatim pure-Python path unless the operator opts in
-#: with ``BRUTEX_STATS_RUST=1``; the flip to ON-by-default is a SEPARATE
-#: later ADR (the ADR-0017 precedent), licensed only by the PR-6 evidence
-#: bar of the slice design.
-STATS_RUST_DEFAULT: Final[bool] = False
+#: the env flag is unset or whitespace-empty. ``True`` = DEFAULT-ON per
+#: DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23; the
+#: ADR-0017 precedent); ``BRUTEX_STATS_RUST=0`` stays the explicit kill
+#: switch and the revert is this one constant.
+STATS_RUST_DEFAULT: Final[bool] = True
 
 #: Burn-in samples per FUNCTION per process, sized by call cadence × oracle
 #: cost (slice design ruling R8): cpcv runs per candidate with a ~55-59 ms
@@ -238,8 +237,9 @@ def stats_rust_enabled() -> bool:
       surrounding whitespace ignored) → ``True`` — the operator opt-in;
     * a falsy value (``0`` / ``false`` / ``no`` / ``off``) → ``False`` — the
       explicit kill switch, honoured regardless of the default;
-    * unset or whitespace-empty → :data:`STATS_RUST_DEFAULT` (``False`` —
-      the one-constant flip lever);
+    * unset or whitespace-empty → :data:`STATS_RUST_DEFAULT` (``True`` —
+      ON by default per DEC-RUST-DEFAULT-ON-WAVE-001; the one-constant
+      revert lever);
     * any OTHER value → ``False`` with one warn-once ``flag_unrecognised``
       fallback event (never a silently-ignored operator intent).
 
