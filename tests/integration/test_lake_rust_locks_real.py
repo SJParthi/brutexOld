@@ -332,7 +332,7 @@ class TestRoutedEndToEndOnArm:
         byte burn-in: the same payload lands byte-identically on both arms."""
         payload = os.urandom(4096)
         off_dest = tmp_path / "off.parquet"
-        monkeypatch.delenv(lrl.LAKE_RUST_LOCKS_ENV, raising=False)
+        monkeypatch.setenv(lrl.LAKE_RUST_LOCKS_ENV, "0")
         atomic_write_via(off_dest, lambda t: t.write_bytes(payload))
         on_dest = tmp_path / "on.parquet"
         monkeypatch.setenv(lrl.LAKE_RUST_LOCKS_ENV, "1")

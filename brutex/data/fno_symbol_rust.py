@@ -1,9 +1,9 @@
-"""fno_symbol_rust — the default-OFF Rust routing facade for the F&O symbol grammar.
+"""fno_symbol_rust — the default-ON Rust routing facade for the F&O symbol grammar.
 
 DEC-DATA-RUST-PURELAW-001 (ADR-0020 slice T10 PR-1; MIGRATION.md #1940).
 Routes :func:`brutex.data.fno_symbol.parse_fno_symbol` through the
 ``rust/brutex-data`` crate (``brutex_data.parse_fno_symbol_coords``) behind
-the default-OFF ``BRUTEX_DATA_RUST`` flag, with the verbatim Python law
+the default-ON ``BRUTEX_DATA_RUST`` flag (DEC-RUST-DEFAULT-ON-WAVE-001), with the verbatim Python law
 retained as the LIVE parity oracle (``_parse_fno_symbol_python`` — the
 #1913 ``tf_resampler`` seam shape). The FFI is INTEGERS ONLY: Rust returns
 token-role SPANS into the ORIGINAL Python string + the resolved expiry
@@ -22,13 +22,14 @@ pinned by the fresh-interpreter import-order tests + the AST source pin).
 
 ## The fail-closed layers (the ``window_ledger_rust`` template, adapted)
 
-* **Flag** — ``BRUTEX_DATA_RUST`` default OFF (ONE flag for the whole
-  brutex-data crate); truthy → ON, falsy → OFF, unset/blank → OFF
-  silently, any other non-empty value → OFF with ONE loud
-  ``fno_symbol_rust.fallback`` WARN (``flag_unrecognised``). Read per call
-  so spawn workers resolve their own environment. Claim scoping:
-  unset/falsy = byte-identical (the bomb-spy pin's domain); a junk-SET
-  value legitimately emits the ONE new WARN line before behaving OFF.
+* **Flag** — ``BRUTEX_DATA_RUST`` default ON (DEC-RUST-DEFAULT-ON-WAVE-001;
+  ONE flag for the whole brutex-data crate); truthy → ON, falsy (``"0"``/
+  ``"off"``) → OFF, unset/blank → ON (the default), any other non-empty
+  value → OFF with ONE loud ``fno_symbol_rust.fallback`` WARN
+  (``flag_unrecognised``). Read per call so spawn workers resolve their own
+  environment. Claim scoping: the explicit-``"0"`` OFF path is
+  byte-identical (the bomb-spy pin's domain); a junk-SET value legitimately
+  emits the ONE new WARN line before behaving OFF.
 * **ASCII pre-gate** — a non-ASCII symbol routes STRAIGHT to the oracle
   with NO log: CPython ``strptime``'s ``\\d`` and ``int()`` accept Unicode
   digits, so reproducing Unicode Nd tables in Rust would be drift bait for
@@ -64,7 +65,7 @@ pinned by the fresh-interpreter import-order tests + the AST source pin).
   workflows, brutex/, scripts/, Makefile, bootstrap.sh all empty — the OFF
   path was ALREADY locale-variable, a PRE-EXISTING envelope this seam
   surfaces honestly and does not widen), (ii) burn-in if the flip lands
-  within the first 16 engaged calls, (iii) the flag ships default-OFF.
+  within the first 16 engaged calls, (iii) the flag ships default-ON (DEC-RUST-DEFAULT-ON-WAVE-001; explicit "0" is the OFF kill switch).
 * **Degrade set** — ``ValueError``/``RuntimeError`` (the crate's declared
   FFI error surface — the ``catch_unwind`` panic boundary maps panics to
   ``RuntimeError``), ``TypeError``/``OverflowError`` (PyO3 argument
@@ -127,7 +128,7 @@ measurement over a 100k mixed-symbol walk read 6.70 µs/parse OFF vs
 CPython ``strptime`` dominates the oracle's cost — but that is an
 observation, not an SLA; the conversion exists for uniformity).
 Acceptable because the paths are I/O-dominated directory walks and the
-flag ships DEFAULT-OFF. Not on the ~33 B-trial engine mask path; not in
+flag ships DEFAULT-ON (DEC-RUST-DEFAULT-ON-WAVE-001). Not on the ~33 B-trial engine mask path; not in
 run identity on the production spot engine.
 
 Thread-safety posture (the HOUSE posture, mirrored from
@@ -173,7 +174,7 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; junk fails loud-OFF). ONE flag for the
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; explicit "0" OFF; junk fails loud-OFF). ONE flag for the
 #: whole brutex-data crate — a future PR-2 facade imports
 #: :func:`data_rust_enabled` from here (the cross-facade import precedent).
 DATA_RUST_ENV: Final[str] = "BRUTEX_DATA_RUST"

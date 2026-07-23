@@ -191,7 +191,7 @@ def _upsert_drifted_rows(catalog: Catalog) -> None:
 
 
 def _flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(fsr.DATA_RUST_ENV, raising=False)
+    monkeypatch.setenv(fsr.DATA_RUST_ENV, "0")
     lkr.reset_lake_keys_rust_for_tests()
 
 

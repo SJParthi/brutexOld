@@ -186,7 +186,7 @@ class TestResampleCorpusParity:
         self, monkeypatch: pytest.MonkeyPatch, case: str
     ) -> None:
         df_1m = _corpus()[case]
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
         expected = {tf: tf_resampler.resample_1m_to_tf(df_1m, tf) for tf in ALL_TF_MINUTES}
 
         # ON arm: steady state (no burn-in cushion) + the oracle BOMBED so a
@@ -293,7 +293,7 @@ class TestWholePrebuildByteParity:
         lake_off = tmp_path / "lake-off"
         lake_on = tmp_path / "lake-on"
 
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
+        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "0")
         _seed_lake(lake_off)
         _materialize(lake_off)
         off_hashes = _derived_hashes(lake_off)
