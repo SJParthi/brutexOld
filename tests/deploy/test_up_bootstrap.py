@@ -161,21 +161,24 @@ def test_pull_critical_deps_verified_individually(up_text: str) -> None:
 # --------------------------------------------------------------------------- #
 # Step 3 — Rust wheels: probe-first build, honest hard stop without cargo.
 # --------------------------------------------------------------------------- #
-def _up_wheel_specs(up_text: str) -> dict[str, bool]:
-    """Parse up.sh's ``WHEEL_SPECS`` block → ``{crate_dir: required}``.
+def _up_wheel_specs(up_text: str) -> dict[str, tuple[str, bool]]:
+    """Parse up.sh's ``WHEEL_SPECS`` block → ``{crate_dir: (module, required)}``.
 
     Each spec line is ``<module> <rel-path> <required|optional>``; the whole
     set is the single-quoted heredoc string assigned to ``WHEEL_SPECS=``. This
-    is the source both up.sh (build loop) and the drift pins read.
+    is the source both up.sh (build loop) and the drift pins read. The
+    ``module`` (import name) is captured too so the drift pin asserts it against
+    ``WheelSpec.name`` — a module-name typo in up.sh (e.g. ``brutex_pullstate``)
+    is then caught at CI time, not only at runtime by the import-smoke failhard.
     """
     block = up_text.split("WHEEL_SPECS='", 1)[1].split("'", 1)[0]
-    specs: dict[str, bool] = {}
+    specs: dict[str, tuple[str, bool]] = {}
     for line in block.splitlines():
         parts = line.split()
         if len(parts) != 3:
             continue
-        _module, rel_path, tier = parts
-        specs[rel_path] = tier == "required"
+        module, rel_path, tier = parts
+        specs[rel_path] = (module, tier == "required")
     return specs
 
 
@@ -216,11 +219,14 @@ def test_up_sh_wheel_set_mirrors_box_update(up_text: str) -> None:
     from brutex.nightly.box_update import WHEEL_SET
 
     up_specs = _up_wheel_specs(up_text)
-    canonical = {spec.crate_dir: spec.required for spec in WHEEL_SET}
+    canonical = {spec.crate_dir: (spec.name, spec.required) for spec in WHEEL_SET}
     assert up_specs == canonical, (
         "up.sh WHEEL_SPECS drifted from the canonical box_update.WHEEL_SET — "
-        f"up.sh has {up_specs}, WHEEL_SET has {canonical}. Update up.sh Step 3 "
-        "(and the Makefile `run` target) so all three move together."
+        f"up.sh has {up_specs}, WHEEL_SET has {canonical}. Each entry is "
+        "(import-module, required); a mismatch is a crate add/remove, a wrong "
+        "required/optional tier, OR a module-name typo (which would otherwise "
+        "only surface at runtime via the import-smoke failhard). Update up.sh "
+        "Step 3 (and the Makefile `run` target) so all three move together."
     )
 
 
@@ -237,7 +243,7 @@ def test_required_wheel_build_is_a_hard_stop_optional_degrades(up_text: str) -> 
     assert 'failhard "maturin develop --release failed for $crate' in step3
     # The optional loop degrades (never failhard).
     assert "for spec in $missing_optional" in step3
-    assert 'degrade "optional kernel $crate failed to build' in step3
+    assert 'degrade "optional Rust kernel $crate failed to build' in step3
     # Every required kernel is import-smoked after the build (no half-built boot).
     assert "smoke_failed" in step3
     assert "required wheels built but still not importable" in step3
@@ -495,7 +501,11 @@ def test_aws_degradation_does_not_block_the_dashboard(up_text: str) -> None:
     """AWS/SSM failures DEGRADE honestly — the dashboard still starts, loudly labelled."""
     assert "degrade()" in up_text.replace("degrade() ", "degrade()")
     assert "DEGRADED=1" in up_text
-    assert "DEGRADED: an AWS/SSM check failed above" in up_text
+    # The DEGRADED summary honestly surfaces an AWS/SSM failure (a LIVE pull
+    # will fail) without claiming AWS/SSM is the ONLY degrade source — an
+    # optional Rust kernel (brutex_feed) degrade routes through the same helper
+    # and is named distinctly (MINOR-1 cross-wire fix).
+    assert "An AWS/SSM failure means a LIVE pull will fail" in up_text
 
 
 def test_loud_failures_exit_nonzero(up_text: str) -> None:

@@ -422,7 +422,7 @@ else
       ( cd "$REPO_ROOT/$crate" \
         && PATH="$HOME/.cargo/bin:$PATH" VIRTUAL_ENV="$VENV" \
           "$VENV/bin/maturin" develop --release ) \
-        || degrade "optional kernel $crate failed to build — BRUTEX_FEED_RUST is default-OFF, so the feed degrades to the Python oracle and the boot continues. Fix later: cd $crate && maturin develop --release"
+        || degrade "optional Rust kernel $crate failed to build — BRUTEX_FEED_RUST is default-OFF, so the feed degrades to the Python oracle and the boot continues. Fix later: cd $REPO_ROOT/$crate && $VENV/bin/maturin develop --release"
     done
   fi
   # Import-smoke EVERY required kernel — the boot must not proceed half-built.
@@ -432,7 +432,7 @@ else
   done
   [ -z "$smoke_failed" ] \
     || failhard "required wheels built but still not importable ($smoke_failed) — re-run ./up.sh (fallback: make run)"
-  pass "required Rust kernels importable ($required_modules )"
+  pass "required Rust kernels importable (${required_modules# })"
 fi
 
 # ── Step 4/6 — zero-decision lake + persisted config (recorded ONCE) ─────────
@@ -577,7 +577,7 @@ fi
 # ── Step 6/6 — start the dashboard (reuse the existing one-click entry) ──────
 say "Step 6/6 — dashboard"
 if [ "$DEGRADED" -ne 0 ]; then
-  note "DEGRADED: an AWS/SSM check failed above — the dashboard will run, but a LIVE pull will fail until it is fixed (each FAIL line names the exact fix)."
+  note "DEGRADED: one or more optional checks failed above (each FAIL line names the exact fix) — the dashboard will still run. An AWS/SSM failure means a LIVE pull will fail until it is fixed; an optional Rust kernel (brutex_feed) means only that seam degrades to its Python oracle (BRUTEX_FEED_RUST is default-OFF)."
 fi
 # Re-check the fast path: a concurrent ./up.sh may have started the dashboard
 # while this run was setting up — never boot a second instance.
