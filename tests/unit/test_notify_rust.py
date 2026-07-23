@@ -213,6 +213,7 @@ class TestOffArm:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(nr.NOTIFY_RUST_ENV, "0")
+
         # Belt AND suspenders (the feed_rust None-poison house shape —
         # CodeQL-clean, no special-method raise): the bombed import_module
         # explodes loudly on the facade's REAL lazy-import path, and the

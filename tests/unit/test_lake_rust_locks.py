@@ -194,7 +194,9 @@ class TestRustFlockAttempt:
     """The routed one-shot attempt: identity OFF, per-call degrade ON."""
 
     def test_off_returns_python_attempt_identity(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(lrl.LAKE_RUST_LOCKS_ENV, "0")  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
 
         def oracle(_fd: int) -> bool:
             return True
@@ -336,7 +338,9 @@ class TestRustFlockRelease:
     """The routed release: python_close OFF, crate ON, best-effort fallback."""
 
     def test_off_calls_python_close(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(lrl.LAKE_RUST_LOCKS_ENV, "0")  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
         closed: list[int] = []
         lrl.rust_flock_release(11, python_close=closed.append)
         assert closed == [11]
@@ -408,7 +412,9 @@ class TestRustAtomicCommit:
     """The routed commit: oracle OFF, crate ON, fault → oracle over the SAME tmp."""
 
     def test_off_runs_python_commit(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setenv(lrl.LAKE_RUST_LOCKS_ENV, "0")  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
         calls: list[tuple[Path, Path, int | None]] = []
         lrl.rust_atomic_commit(
             tmp_path / "t",
@@ -531,7 +537,9 @@ class TestAtomicIoRoutingSeam:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Flag OFF (the "0" kill switch): the crate is never resolved, bytes land via Python."""
-        monkeypatch.setenv(lrl.LAKE_RUST_LOCKS_ENV, "0")  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
         monkeypatch.setattr(
             lrl,
             "_resolve_crate",
@@ -676,7 +684,9 @@ class TestPartitionLockRoutingSeam:
     def test_off_arm_bomb_crate_never_touched(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.setenv(lrl.LAKE_RUST_LOCKS_ENV, "0")  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
+        monkeypatch.setenv(
+            lrl.LAKE_RUST_LOCKS_ENV, "0"
+        )  # the kill switch (default is ON — DEC-RUST-DEFAULT-ON-WAVE-001)
         monkeypatch.setattr(
             lrl,
             "_resolve_crate",

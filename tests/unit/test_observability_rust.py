@@ -358,7 +358,9 @@ class TestFlagResolution:
         assert warns[0]["value"] == "banana"
 
     def test_flag_is_read_per_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        assert obs.observability_rust_enabled() is True  # unset default (DEC-RUST-DEFAULT-ON-WAVE-001)
+        assert (
+            obs.observability_rust_enabled() is True
+        )  # unset default (DEC-RUST-DEFAULT-ON-WAVE-001)
         monkeypatch.setenv(obs.OBSERVABILITY_RUST_ENV, "1")
         assert obs.observability_rust_enabled() is True
         monkeypatch.setenv(obs.OBSERVABILITY_RUST_ENV, "0")
