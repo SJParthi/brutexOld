@@ -151,8 +151,7 @@ def test_probe_auto_front_non_loopback_host_falls_back(tmp_path: Path) -> None:
     binary.write_bytes(b"#!fake\n")
     with capture_logs() as logs:
         assert (
-            probe_auto_front(host="0.0.0.0", port=9080, env={ENV_BRUTEXD_BIN: str(binary)})
-            is False
+            probe_auto_front(host="0.0.0.0", port=9080, env={ENV_BRUTEXD_BIN: str(binary)}) is False
         )
     warns = [e for e in logs if e["event"] == "rust_front.auto_fallback_python"]
     assert len(warns) == 1

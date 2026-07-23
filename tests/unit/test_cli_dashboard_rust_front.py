@@ -114,9 +114,7 @@ def test_flag_unset_auto_binary_present_routes_through_rust_front(
 
     binary = tmp_path / "brutexd"
     binary.write_bytes(b"#!fake\n")
-    monkeypatch.setattr(
-        rust_front, "locate_brutexd", lambda env=None, *, repo_root=None: binary
-    )
+    monkeypatch.setattr(rust_front, "locate_brutexd", lambda env=None, *, repo_root=None: binary)
 
     calls: list[dict[str, Any]] = []
 
@@ -134,9 +132,7 @@ def test_flag_unset_auto_binary_present_routes_through_rust_front(
     assert probes == {}  # the direct uvicorn.run tail was not taken
 
 
-def test_flag_explicit_off_identity_pin(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_flag_explicit_off_identity_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """EXPLICIT OFF: uvicorn binds the operator host:port directly — no probe,
     no brutexd involvement (byte-identical single-process behaviour)."""
     pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")

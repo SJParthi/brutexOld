@@ -1482,10 +1482,14 @@ class TestResolveFoldsDispatch:
         return [_trade(500, mfe=600, mae=100, holding=3), _trade(-300, mae=400, holding=2)]
 
     def test_flag_off_never_consults_the_kernel_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Default path: the seam is provably untouched (never-routes spy)."""
+        """Explicit "0" kill switch: the seam is provably untouched.
+
+        RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): unset is now
+        default-ON, so the never-routes spy rides the falsy arm.
+        """
         from brutex.metrics import compute_rust
 
-        monkeypatch.delenv(compute_rust.METRICS_RUST_FOLD_ENV, raising=False)
+        monkeypatch.setenv(compute_rust.METRICS_RUST_FOLD_ENV, "0")
 
         def _seam_bomb(*_args: object, **_kwargs: object) -> object:
             raise AssertionError("the default path must never consult the kernel seam")

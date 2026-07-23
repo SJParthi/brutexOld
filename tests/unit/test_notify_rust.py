@@ -132,7 +132,12 @@ def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 class TestFlagMatrix:
-    """``BRUTEX_NOTIFY_RUST`` resolution: default OFF, junk loud-OFF."""
+    """``BRUTEX_NOTIFY_RUST`` resolution: default ON, junk loud-OFF.
+
+    DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): unset /
+    blank are ON; explicit falsy is the kill switch; the junk arm is
+    unchanged (loud-OFF once).
+    """
 
     @pytest.mark.parametrize("value", ["1", "true", "yes", "on", " TRUE ", "On"])
     def test_truthy_is_on(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
@@ -147,14 +152,15 @@ class TestFlagMatrix:
         assert logs == []
 
     @pytest.mark.parametrize("value", ["", "   "])
-    def test_blank_is_off_without_warn(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    def test_blank_is_on_without_warn(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
         monkeypatch.setenv(nr.NOTIFY_RUST_ENV, value)
         with capture_logs() as logs:
-            assert nr.notify_rust_enabled() is False
+            assert nr.notify_rust_enabled() is True
         assert logs == []
 
-    def test_unset_is_off(self) -> None:
-        assert nr.notify_rust_enabled() is False
+    def test_unset_is_on(self) -> None:
+        # The DEC-RUST-DEFAULT-ON-WAVE-001 default pin: unset ⇒ ON.
+        assert nr.notify_rust_enabled() is True
 
     def test_junk_is_loud_off_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(nr.NOTIFY_RUST_ENV, "banana")
@@ -191,11 +197,16 @@ class TestTristateMirrorPin:
 
 
 class TestOffArm:
-    """Flag OFF: the crate is NEVER imported; every law is the verbatim oracle."""
+    """Explicit-falsy kill switch: the crate is NEVER imported; every law is the verbatim oracle.
+
+    Retargeted from the pre-flip unset arm onto the explicit ``"0"`` kill
+    switch (DEC-RUST-DEFAULT-ON-WAVE-001) — the assertions are unchanged.
+    """
 
     def test_off_never_imports_crate_and_matches_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setenv(nr.NOTIFY_RUST_ENV, "0")
         # Belt AND suspenders (the feed_rust None-poison house shape —
         # CodeQL-clean, no special-method raise): the bombed import_module
         # explodes loudly on the facade's REAL lazy-import path, and the
