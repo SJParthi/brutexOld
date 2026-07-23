@@ -196,10 +196,11 @@ class TestFlagOffNeverRoutes:
     def test_flag_off_write_and_heal_never_touch_the_facade(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """R12: flag unset ⇒ the facade's routed entry is NEVER invoked from
+        """R12: flag "0" (the kill switch — the default flipped ON under
+        DEC-RUST-DEFAULT-ON-WAVE-001) ⇒ the facade's routed entry is NEVER invoked from
         any option-writer path, and the stored bytes equal the pre-PR-2
         output (the verbatim legacy union expression rendered inline)."""
-        monkeypatch.delenv(lrr.LAKE_RUST_RENDER_ENV, raising=False)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "0")
 
         def _must_not_route(**_: object) -> bytes:
             raise AssertionError("flag-OFF must never call render_parquet_bytes")

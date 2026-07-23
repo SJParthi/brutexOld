@@ -154,10 +154,12 @@ def _run_sequence(lake_root: Path, *, greeks: bool = False) -> list[WriteResult]
 
 
 class TestFlagOff:
-    def test_default_off_never_touches_the_seam(
+    def test_kill_switch_never_touches_the_seam(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(lrm.LAKE_RUST_MERGE_ENV, raising=False)
+        # OFF is addressed via the explicit "0" kill switch since the
+        # default flipped ON (DEC-RUST-DEFAULT-ON-WAVE-001) — the never-routes teeth survive.
+        monkeypatch.setenv(lrm.LAKE_RUST_MERGE_ENV, "0")
 
         def _must_not_route(*_a: object, **_k: object) -> object:
             raise AssertionError("flag-OFF must never call lake_rust_merge.merge_fold")

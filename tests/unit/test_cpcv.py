@@ -425,7 +425,9 @@ class TestRustStatsDispatch:
         def _forbidden(*args: object, **kwargs: object) -> int:
             raise AssertionError("the seam must not be consulted when the flag is OFF")
 
-        monkeypatch.delenv(rust_stats.STATS_RUST_ENV, raising=False)
+        # RETARGETED (DEC-RUST-DEFAULT-ON-WAVE-001): unset is now
+        # default-ON, so the never-consults pin rides the explicit "0" arm.
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
         monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", _forbidden)
         rate = cpcv_pass_rate(self._RETURNS, n_groups=4, n_test_groups=2)
         assert rate == 1.0 / 6.0
