@@ -15,13 +15,18 @@
 #               probe fails; then verify the pull-critical deps (boto3 / growwapi /
 #               pyotp + the dashboard runtime), one PASS/FAIL line each with the
 #               exact fix.
-#   Step 3/6  — build the fno_math + trading_core PyO3 wheels via maturin when not
-#               importable. They ARE required for the dashboard + pull path
-#               (brutex.indicators.{pivots,fib_levels,ema} import trading_core at
+#   Step 3/6  — build the canonical WHEEL_SET of PyO3 kernels via maturin when
+#               not importable — the REQUIRED set fno_math + trading_core +
+#               brutex_lake + brutex_identity + brutex_refine + brutex_pull_state
+#               (+ the OPTIONAL brutex_feed). They ARE required for the dashboard
+#               + pull path (brutex.engine.results_store imports brutex_identity;
+#               brutex.indicators.{pivots,fib_levels,ema} import trading_core at
 #               module top; brutex.strategies.combo imports fno_math — the same
-#               reason the Makefile `run` target builds both), so wheels-missing +
-#               cargo-absent is an HONEST hard stop with the rustup one-liner, not
-#               a silent skip.
+#               reason the Makefile `run-raw` target + box_update.WHEEL_SET build
+#               the whole set), so a required-wheel-missing + cargo-absent state is an
+#               HONEST hard stop with the rustup one-liner, not a silent skip.
+#               This MIRRORS brutex/nightly/box_update.py WHEEL_SET byte-for-byte
+#               (drift-pinned in tests/deploy/test_up_bootstrap.py).
 #   Step 4/6  — ZERO-DECISION lake location: a persisted config is reused
 #               silently; else an EXISTING lake is auto-detected (the app
 #               default ~/.brutex/lake, or an environment-pointed path) and
@@ -341,18 +346,54 @@ done
 [ "$dep_failed" -eq 0 ] || failhard "dependency verification failed (see the FAIL lines above)"
 
 # ── Step 3/6 — Rust PyO3 wheels (build only when missing) ────────────────────
-say "Step 3/6 — Rust PyO3 wheels (fno_math + trading_core)"
-# HONEST requirement check: both wheels ARE required for the dashboard + pull
-# path — brutex.indicators.{pivots,fib_levels,ema} import trading_core at module
-# top and brutex.strategies.combo imports fno_math, so the dashboard cannot even
-# import without them (mirrors the Makefile `run` target, which builds both).
-# There is no "wheels not required" skip to offer.
-wheels_missing=""
-"$VPY" -c "import fno_math" >/dev/null 2>&1 || wheels_missing="rust/fno-math"
-"$VPY" -c "import trading_core" >/dev/null 2>&1 \
-  || wheels_missing="$wheels_missing rust/trading-core"
-if [ -z "$wheels_missing" ]; then
-  pass "fno_math + trading_core already importable — skipping build"
+say "Step 3/6 — Rust PyO3 wheels (the canonical WHEEL_SET)"
+# HONEST requirement check: the dashboard + pull path import these PyO3 kernels
+# at module top and CANNOT import without the REQUIRED ones —
+# brutex.engine.results_store imports brutex_identity (DEC-RUST-RUNID-STORES-001,
+# the exact bug that crashed a stale box with `ModuleNotFoundError: No module
+# named 'brutex_identity'`), brutex.indicators.{pivots,fib_levels,ema} import
+# trading_core, brutex.strategies.combo imports fno_math, the lake path imports
+# brutex_lake (DEC-RUST-LAKE-WAVED-001), Stage-3 imports brutex_refine, the
+# pull-state plane imports brutex_pull_state. So a REQUIRED-wheel-missing +
+# cargo-absent state is an HONEST hard stop with the rustup one-liner, not a
+# silent skip. This set MIRRORS the canonical WHEEL_SET
+# (brutex/nightly/box_update.py) + the Makefile `run-raw` target byte-for-byte
+# (module + rel-path + tier + ORDER) — drift-pinned by
+# tests/deploy/test_up_bootstrap.py so it can never go stale again. brutex_feed
+# is the ONE OPTIONAL kernel (BRUTEX_FEED_RUST default-OFF; a build failure
+# degrades to the Python oracle, the boot continues).
+#
+# One spec per line: `<module> <rel-path> <required|optional>` (WHEEL_SET order).
+WHEEL_SPECS='fno_math rust/fno-math required
+trading_core rust/trading-core required
+brutex_lake rust/brutex-lake required
+brutex_identity rust/brutex-identity required
+brutex_feed rust/brutex-feed optional
+brutex_refine rust/brutex-refine required
+brutex_pull_state rust/brutex-pull-state required'
+missing_required=""
+missing_optional=""
+required_modules=""
+# First pass — probe every kernel BEFORE any build (idempotent re-run: an
+# all-importable box skips the build entirely). `while read <<EOF` runs in the
+# current shell, so the accumulated lists persist (bash 3.2, no arrays).
+while read -r module rel_path tier; do
+  [ -n "$module" ] || continue
+  if [ "$tier" = "required" ]; then
+    required_modules="$required_modules $module"
+  fi
+  if ! "$VPY" -c "import $module" >/dev/null 2>&1; then
+    if [ "$tier" = "required" ]; then
+      missing_required="$missing_required $module:$rel_path"
+    else
+      missing_optional="$missing_optional $module:$rel_path"
+    fi
+  fi
+done <<EOF
+$WHEEL_SPECS
+EOF
+if [ -z "$missing_required$missing_optional" ]; then
+  pass "all Rust kernels already importable — skipping build"
 else
   CARGO_BIN=""
   if command -v cargo >/dev/null 2>&1; then
@@ -360,21 +401,45 @@ else
   elif [ -x "$HOME/.cargo/bin/cargo" ]; then
     CARGO_BIN="$HOME/.cargo/bin/cargo"
   fi
-  if [ -z "$CARGO_BIN" ]; then
-    failhard "wheels missing ($wheels_missing) and cargo NOT found — the dashboard cannot import without them (brutex.indicators.* import trading_core at module top). fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   — then restart the shell (or: source \$HOME/.cargo/env) and re-run ./up.sh"
+  if [ -n "$missing_required" ] && [ -z "$CARGO_BIN" ]; then
+    failhard "required wheels missing ($missing_required) and cargo NOT found — the dashboard cannot import without them (brutex.engine.results_store imports brutex_identity, brutex.indicators.* import trading_core at module top). fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   — then restart the shell (or: source \$HOME/.cargo/env) and re-run ./up.sh"
   fi
-  [ -x "$VENV/bin/maturin" ] || "$VPY" -m pip install --quiet maturin \
-    || failhard "could not install maturin — fix: check network/proxy, then re-run ./up.sh"
-  for crate in $wheels_missing; do
-    note "building $crate (one-time; uses $CARGO_BIN)"
-    ( cd "$REPO_ROOT/$crate" \
-      && PATH="$HOME/.cargo/bin:$PATH" VIRTUAL_ENV="$VENV" \
-        "$VENV/bin/maturin" develop --release ) \
-      || failhard "maturin develop --release failed for $crate — read the cargo error above, then re-run ./up.sh"
+  # Optional kernel missing + cargo absent: no build can run, so say so ONCE
+  # (the cargo-present path degrades inside the optional loop below; this closes
+  # the one branch where an unbuilt optional wheel would otherwise be silent).
+  if [ -z "$CARGO_BIN" ] && [ -n "$missing_optional" ]; then
+    degrade "optional Rust kernel(s) not built ($missing_optional) — cargo NOT found; BRUTEX_FEED_RUST is default-OFF so the feed degrades to its Python oracle and the boot continues. To build it: install rust (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh), then re-run ./up.sh"
+  fi
+  if [ -n "$CARGO_BIN" ]; then
+    [ -x "$VENV/bin/maturin" ] || "$VPY" -m pip install --quiet maturin \
+      || failhard "could not install maturin — fix: check network/proxy, then re-run ./up.sh"
+    # REQUIRED wheels — a build failure is a hard stop (the box cannot boot).
+    for spec in $missing_required; do
+      crate="${spec#*:}"
+      note "building $crate (REQUIRED; one-time; uses $CARGO_BIN)"
+      ( cd "$REPO_ROOT/$crate" \
+        && PATH="$HOME/.cargo/bin:$PATH" VIRTUAL_ENV="$VENV" \
+          "$VENV/bin/maturin" develop --release ) \
+        || failhard "maturin develop --release failed for $crate — read the cargo error above, then re-run ./up.sh"
+    done
+    # OPTIONAL wheels (brutex_feed) — a build failure DEGRADES, never stops.
+    for spec in $missing_optional; do
+      crate="${spec#*:}"
+      note "building $crate (OPTIONAL; one-time; uses $CARGO_BIN)"
+      ( cd "$REPO_ROOT/$crate" \
+        && PATH="$HOME/.cargo/bin:$PATH" VIRTUAL_ENV="$VENV" \
+          "$VENV/bin/maturin" develop --release ) \
+        || degrade "optional Rust kernel $crate failed to build — BRUTEX_FEED_RUST is default-OFF, so the feed degrades to the Python oracle and the boot continues. Fix later: cd $REPO_ROOT/$crate && $VENV/bin/maturin develop --release"
+    done
+  fi
+  # Import-smoke EVERY required kernel — the boot must not proceed half-built.
+  smoke_failed=""
+  for module in $required_modules; do
+    "$VPY" -c "import $module" >/dev/null 2>&1 || smoke_failed="$smoke_failed $module"
   done
-  "$VPY" -c "import fno_math, trading_core" >/dev/null 2>&1 \
-    || failhard "wheels built but still not importable — re-run ./up.sh (fallback: make run)"
-  pass "wheels built + importable"
+  [ -z "$smoke_failed" ] \
+    || failhard "required wheels built but still not importable ($smoke_failed) — re-run ./up.sh (fallback: make run)"
+  pass "required Rust kernels importable (${required_modules# })"
 fi
 
 # ── Step 4/6 — zero-decision lake + persisted config (recorded ONCE) ─────────
@@ -519,7 +584,7 @@ fi
 # ── Step 6/6 — start the dashboard (reuse the existing one-click entry) ──────
 say "Step 6/6 — dashboard"
 if [ "$DEGRADED" -ne 0 ]; then
-  note "DEGRADED: an AWS/SSM check failed above — the dashboard will run, but a LIVE pull will fail until it is fixed (each FAIL line names the exact fix)."
+  note "DEGRADED: one or more optional checks failed above (each FAIL line names the exact fix) — the dashboard will still run. An AWS/SSM failure means a LIVE pull will fail until it is fixed; an optional Rust kernel (brutex_feed) means only that seam degrades to its Python oracle (BRUTEX_FEED_RUST is default-OFF)."
 fi
 # Re-check the fast path: a concurrent ./up.sh may have started the dashboard
 # while this run was setting up — never boot a second instance.
