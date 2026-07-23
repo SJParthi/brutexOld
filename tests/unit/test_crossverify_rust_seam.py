@@ -177,10 +177,11 @@ class TestFlagVocabulary:
         for raw in ("0", "false", "No", " OFF "):
             monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, raw)
             assert rust_seam.crossverify_rust_enabled() is False
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset/blank ⇒ ON (the default pin).
         monkeypatch.delenv(rust_seam.CROSSVERIFY_RUST_ENV, raising=False)
-        assert rust_seam.crossverify_rust_enabled() is False
+        assert rust_seam.crossverify_rust_enabled() is True
         monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "   ")
-        assert rust_seam.crossverify_rust_enabled() is False
+        assert rust_seam.crossverify_rust_enabled() is True
 
     def test_junk_flag_warns_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "banana")
@@ -216,10 +217,14 @@ class TestFlagVocabulary:
 
 
 class TestFlagOffNeverTouchesCrate:
-    """Flag OFF is byte-identical AND crate-untouched (the bomb spy)."""
+    """The explicit "0" kill switch is byte-identical AND crate-untouched (the bomb spy).
+
+    Retargeted from the pre-flip unset arm (DEC-RUST-DEFAULT-ON-WAVE-001);
+    assertions unchanged.
+    """
 
     def test_all_three_laws_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(rust_seam.CROSSVERIFY_RUST_ENV, raising=False)
+        monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "0")
 
         def bomb() -> None:  # pragma: no cover — detonation IS the failure
             raise AssertionError("flag-OFF touched the crate resolver")

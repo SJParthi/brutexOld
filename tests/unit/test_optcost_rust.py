@@ -195,15 +195,16 @@ class TestFlagParsing:
             assert ocr.optcost_rust_enabled() is False
         assert logs == []
 
-    def test_unset_defaults_off_silently(self) -> None:
+    def test_unset_defaults_on_silently(self) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001: unset ⇒ the seams are ON.
         with capture_logs() as logs:
-            assert ocr.optcost_rust_enabled() is False
+            assert ocr.optcost_rust_enabled() is True
         assert logs == []
 
-    def test_whitespace_defaults_off_silently(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_whitespace_defaults_on_silently(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "   ")
         with capture_logs() as logs:
-            assert ocr.optcost_rust_enabled() is False
+            assert ocr.optcost_rust_enabled() is True
         assert logs == []
 
     def test_junk_fails_loud_off_and_warns_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1049,9 +1050,10 @@ class TestOffDefaultNeverTouchesTheKernel:
     def test_every_gated_call_site_stays_python_with_a_bomb_kernel(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Flag unset + a bomb `fno_math` in sys.modules: every gated public
-        function across the six call-site modules serves byte-identical
-        Python answers and NEVER touches the bomb."""
+        """Flag "0" (the explicit kill switch — unset is default-ON since
+        DEC-RUST-DEFAULT-ON-WAVE-001) + a bomb `fno_math` in sys.modules:
+        every gated public function across the six call-site modules serves
+        byte-identical Python answers and NEVER touches the bomb."""
         touches: list[str] = []
 
         def _bomb_getattr(name: str) -> object:
@@ -1062,7 +1064,7 @@ class TestOffDefaultNeverTouchesTheKernel:
         # PEP 562: a module-level __getattr__ lives in the module's dict.
         bomb.__dict__["__getattr__"] = _bomb_getattr
         monkeypatch.setitem(sys.modules, "fno_math", bomb)
-        monkeypatch.delenv(ocr.OPTCOST_TAILS_RUST_ENV, raising=False)
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "0")
 
         assert rate_for_date(_STT_OPTIONS_REGIMES, date(2024, 10, 1)) == 10_000
         with pytest.raises(UnverifiedCostRegimeError):
@@ -1088,12 +1090,14 @@ class TestOffDefaultNeverTouchesTheKernel:
     def test_off_default_never_imports_fno_math(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The STRICT form of the bomb-spy law (round-1 review): with NO
         ``fno_math`` entry in ``sys.modules`` at all, exercising every gated
-        public entry flag-OFF leaves it genuinely UN-IMPORTED. The PEP-562
-        bomb above proves non-ACCESS (a module ``__getattr__`` fires only on
-        a missing attribute, not on ``import``); this pins the stronger
-        never-imported property the ledger wording claims."""
+        public entry flag-OFF (the explicit "0" kill switch — unset is
+        default-ON since DEC-RUST-DEFAULT-ON-WAVE-001) leaves it genuinely
+        UN-IMPORTED. The PEP-562 bomb above proves non-ACCESS (a module
+        ``__getattr__`` fires only on a missing attribute, not on
+        ``import``); this pins the stronger never-imported property the
+        ledger wording claims."""
         monkeypatch.delitem(sys.modules, "fno_math", raising=False)
-        monkeypatch.delenv(ocr.OPTCOST_TAILS_RUST_ENV, raising=False)
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "0")
 
         assert rate_for_date(_STT_OPTIONS_REGIMES, date(2024, 10, 1)) == 10_000
         assert classify("CE", Decimal("24000"), Decimal("24100"), atm_band=None) is Moneyness.ITM

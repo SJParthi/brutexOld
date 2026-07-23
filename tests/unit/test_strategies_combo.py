@@ -802,11 +802,12 @@ class TestRustSeamOracles:
 
     def test_off_arm_never_imports_the_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The bomb-crate spy at the combo.py level (the #1913/#1915 idiom):
-        # with the flag OFF (the suite default) neither public function may
-        # touch the wheel.
+        # with the flag OFF (the explicit "0" kill switch — unset is
+        # default-ON since DEC-RUST-DEFAULT-ON-WAVE-001) neither public
+        # function may touch the wheel.
         import brutex.strategies.combo_rust as _cr
 
-        monkeypatch.delenv(_cr.STRATEGIES_RUST_COMBO_ENV, raising=False)
+        monkeypatch.setenv(_cr.STRATEGIES_RUST_COMBO_ENV, "0")
 
         def _bomb(name: str) -> Any:
             raise AssertionError(f"flag-OFF combo.py path imported {name!r}")

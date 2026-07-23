@@ -77,7 +77,9 @@ class TestCanonicalFlagOff:
     """Flag OFF runs the verbatim Python bodies in place — crate untouched."""
 
     def test_off_is_identical_and_crate_untouched(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(rust_seam.CROSSVERIFY_RUST_ENV, raising=False)
+        # The explicit "0" kill switch (retargeted from the pre-flip unset
+        # arm — DEC-RUST-DEFAULT-ON-WAVE-001); assertions unchanged.
+        monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "0")
         monkeypatch.setattr(
             rust_seam,
             "_resolve_crate",
