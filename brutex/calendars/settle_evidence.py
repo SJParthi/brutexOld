@@ -54,6 +54,15 @@ from typing import Final, NoReturn
 
 import structlog
 
+from brutex.calendars.calendar_rust import (
+    _LAW_SETTLE,
+    LawOutcome,
+    Raise,
+    Value,
+    routed,
+    unwrap,
+    warn_fallback,
+)
 from brutex.calendars.market_hours import BLOCK_END
 from brutex.data.sidecar_read import read_sidecar_bytes
 
@@ -400,6 +409,133 @@ def validate_evidence_payload(payload: object, *, path: str) -> SettleEvidence:
     )
 
 
+# ── Rust routing (DEC-RUST-CALENDAR-FACADE-FLIP-001) ──────────────────────
+
+#: The ``brutex_calendar.validate_settle_evidence`` return arity —
+#: ``(valid, message, adopted_hhmm, generated_raw)``.
+_SETTLE_CRATE_TUPLE_LEN: Final[int] = 4
+
+
+def _materialize_settle_valid(
+    payload: object,
+    adopted_hhmm: object,
+    generated_raw: object,
+    *,
+    path: str,
+) -> LawOutcome[SettleEvidence] | None:
+    """Re-hydrate a crate ``valid=True`` verdict into :class:`SettleEvidence`.
+
+    The crate DECIDED the payload valid + the two Rust-owned fields
+    (``adopted_hhmm`` / ``generated_raw``); Python PLUCKS the four non-decided
+    fields from the crate-validated payload (cheap ``dict.get`` + type-check —
+    NOT a re-validation, or the oracle would run every call). Any structural
+    surprise (a foreign / broken crate saying ``valid`` over a non-conforming
+    payload — structurally unreachable through the real crate) is REFUSED to the
+    oracle (``None`` + one loud WARN); a malformed ``adopted_hhmm`` reaching
+    :class:`~datetime.time` raises ``ValueError`` UP into the facade degrade set.
+    """
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(adopted_hhmm, str)
+        or not isinstance(generated_raw, str)
+    ):
+        warn_fallback("settle_valid_shape", got=repr((adopted_hhmm, generated_raw)))
+        return None
+    earliest_raw = payload.get("earliest_all_pass_ist")
+    margin = payload.get("margin_minutes")
+    days = payload.get("distinct_trading_days")
+    version = payload.get("probe_script_version")
+    if (
+        earliest_raw is None
+        or isinstance(margin, bool)
+        or not isinstance(margin, int)
+        or isinstance(days, bool)
+        or not isinstance(days, int)
+        or not isinstance(version, str)
+    ):
+        warn_fallback("settle_valid_pluck")
+        return None
+    match = _HHMM_SHAPE.fullmatch(adopted_hhmm)
+    if match is None:
+        warn_fallback("settle_valid_adopted_shape", got=repr(adopted_hhmm))
+        return None
+    adopted = time(int(match.group(1)), int(match.group(2)))
+    return Value(
+        SettleEvidence(
+            adopted=adopted,
+            earliest_all_pass=str(earliest_raw),
+            margin_minutes=margin,
+            distinct_trading_days=days,
+            generated_at_utc=generated_raw,
+            probe_script_version=version,
+            path=path,
+        )
+    )
+
+
+def _materialize_settle(
+    raw_return: object, *, payload: object, path: str
+) -> LawOutcome[SettleEvidence] | None:
+    """Re-hydrate the crate's ``validate_settle_evidence`` return.
+
+    ``None`` = the crate's serde ABSTAIN (bytes CPython's ``json.loads``
+    accepted but the Rust engine refused — NaN/Infinity/lone-surrogate/deep
+    nesting) → serve the Python validator (silent, designed degrade). Otherwise a
+    ``(valid, message, adopted_hhmm, generated_raw)`` 4-tuple: ``valid=False``
+    defers the byte-identical ``ValueError`` (``path_repr`` was passed
+    pre-``repr()``'d, so ``message`` matches the oracle text); ``valid=True``
+    materializes :class:`SettleEvidence`. A wrong SHAPE / leg type is refuse-poison.
+    """
+    if raw_return is None:
+        return None
+    if not isinstance(raw_return, tuple) or len(raw_return) != _SETTLE_CRATE_TUPLE_LEN:
+        warn_fallback("settle_shape", got=repr(raw_return))
+        return None
+    valid, message, adopted_hhmm, generated_raw = raw_return
+    if not isinstance(valid, bool) or not isinstance(message, str):
+        warn_fallback("settle_leg_types", got=repr(raw_return))
+        return None
+    if not valid:
+        return Raise(message)
+    return _materialize_settle_valid(payload, adopted_hhmm, generated_raw, path=path)
+
+
+def routed_validate_evidence_payload(payload: object, *, raw: bytes, path: str) -> SettleEvidence:
+    """Rust-first :func:`validate_evidence_payload` — byte-identical on every input.
+
+    DEC-RUST-CALENDAR-FACADE-FLIP-001. Routes the settle-evidence truth table
+    through the ``brutex_calendar`` crate behind the default-ON
+    ``BRUTEX_CALENDAR_RUST`` flag; the verbatim Python validator is the LIVE
+    parity oracle every degrade / abstain / burn-in-mismatch path serves. Raises
+    the SAME :class:`ValueError` (byte-identical message) on an invalid payload.
+
+    Parameters
+    ----------
+    payload
+        The already-``json.loads``-decoded object (the Python oracle's input).
+    raw
+        The RAW artifact bytes the crate re-parses with serde (never a second
+        Python decode — the crate owns the parse-engine divergence ABSTAIN).
+    path
+        The already-``str()``-ified sidecar path; ``repr(path)`` is handed to
+        the crate pre-computed so every refusal ``message`` embeds it identically.
+    """
+
+    def _oracle() -> LawOutcome[SettleEvidence]:
+        try:
+            return Value(validate_evidence_payload(payload, path=path))
+        except ValueError as exc:
+            return Raise(str(exc))
+
+    outcome = routed(
+        _LAW_SETTLE,
+        rust_call=lambda crate: crate.validate_settle_evidence(raw, repr(path)),
+        materialize=lambda raw_return: _materialize_settle(raw_return, payload=payload, path=path),
+        oracle=_oracle,
+    )
+    return unwrap(outcome)
+
+
 # ── the memoized loader ──────────────────────────────────────────────────
 
 
@@ -463,7 +599,7 @@ def _compute_outcome(path: Path) -> SettleEvidence | str | None:
         # OverflowError an out-of-range numeric.
         return f"undecodable ({str(exc) or type(exc).__name__})"
     try:
-        return validate_evidence_payload(payload, path=str(path))
+        return routed_validate_evidence_payload(payload, raw=result.raw, path=str(path))
     except ValueError as exc:
         return str(exc)
 

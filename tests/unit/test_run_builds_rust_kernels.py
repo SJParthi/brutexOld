@@ -304,23 +304,27 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
         "brutex/backup/backup_rust.py",
         ".github/workflows/ops-rust-parity.yml",
     ),
-    # DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): brutex_calendar is
+    # DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962) crate +
+    # DEC-RUST-CALENDAR-FACADE-FLIP-001 (#2218) facade: brutex_calendar is
     # the calendar-leaf pure-law crate (classify_month_drift /
-    # validate_settle_evidence / parse_observed_sidecar), shipped INERT —
-    # consumed by NOTHING: it has NO Python facade yet (deliberate; the
-    # facade lands with the flip PR — the default-ON BRUTEX_CALENDAR_RUST
-    # facade flip + oracle deletion are a LATER PR). The facade slot is
-    # therefore None, licensed ONLY by the DEC-cited reason in
-    # INERT_FACADELESS_REASONS below. It is deliberately NOT a turnkey
-    # build prerequisite: in NO cargo workspace, built ONLY by its own CI
-    # lane (the `rust-brutex-calendar` job in .github/workflows/ci.yml).
-    # THE FLIP PR MUST UPDATE THIS REGISTRATION: re-point the facade slot
-    # at the real guarded facade (`importlib.import_module("brutex_calendar")`
-    # inside its guard) and delete the INERT_FACADELESS_REASONS entry. A
+    # validate_settle_evidence / parse_observed_sidecar). #2218 FLIPPED it ON
+    # via the guarded Pattern-A facade brutex/calendars/calendar_rust.py
+    # (default-ON BRUTEX_CALENDAR_RUST resolved by env_flag_tristate; the
+    # verbatim Python oracles KEPT LIVE as parity oracles — NOT deleted,
+    # deliberately deviating from #1962's "oracle deletion" token because the
+    # laws are module-top imported into wheel-free-boot-critical paths
+    # (pull-gating via auto_pull_gate→settle_evidence, dashboard, doctor,
+    # indicators), so per #2215's keep-every-safety-layer rule the facade
+    # degrades to the oracle wheel-free instead of a fatal wheel-required
+    # delete). It resolves the crate lazily via
+    # `importlib.import_module("brutex_calendar")` inside its guard; an absent
+    # or stale wheel serves the oracle byte-identical. Deliberately NOT a
+    # turnkey build prerequisite: in NO cargo workspace, built ONLY by its own
+    # CI lane (the `rust-brutex-calendar` job in .github/workflows/ci.yml). A
     # module-top `import brutex_calendar` anywhere in brutex/ would make a
     # clean clone crash-prone — the inverse pin below forbids exactly that.
     "brutex_calendar": (
-        None,
+        "brutex/calendars/calendar_rust.py",
         ".github/workflows/ci.yml",
     ),
     # DEC-RUST-STAGE3-REFINE-001 (MIGRATION.md #2055): brutex_refine is the
@@ -350,13 +354,11 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
 # test_facadeless_optional_kernel_cites_a_dec + the registry-consistency
 # pin). The flip PR that lands a kernel's real facade must DELETE its
 # entry here and re-point the OPTIONAL_KERNELS facade slot.
-INERT_FACADELESS_REASONS: dict[str, str] = {
-    "brutex_calendar": (
-        "DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): PR-1 ships the "
-        "crate INERT — consumed by NOTHING; the guarded Python facade lands "
-        "with the flip PR, which must re-point OPTIONAL_KERNELS at it."
-    ),
-}
+#
+# brutex_calendar's entry was DELETED by DEC-RUST-CALENDAR-FACADE-FLIP-001
+# (#2218) when its guarded facade brutex/calendars/calendar_rust.py landed —
+# the flip-PR obligation the #1962 registration comment named.
+INERT_FACADELESS_REASONS: dict[str, str] = {}
 
 REQUIRED_KERNELS = {
     name: crate_dir for name, crate_dir in KERNELS.items() if name not in OPTIONAL_KERNELS

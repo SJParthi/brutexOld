@@ -27,7 +27,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Generator
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -36,6 +36,7 @@ from typing import Any
 import pytest
 from brutex.calendars import settle_evidence
 from brutex.calendars.auto_pull_gate import PULL_ALL_SETTLE_ENV
+from brutex.calendars.calendar_rust import Raise, Value, unwrap
 from brutex.calendars.market_hours import BLOCK_END
 from brutex.calendars.settle_evidence import (
     DEFAULT_EVIDENCE_RELPATH,
@@ -635,10 +636,12 @@ class TestEvidenceSettleDefaultTier:
         assert isinstance(first, SettleEvidence)
         assert isinstance(second, SettleEvidence)
         assert second.adopted == time(16, 30)
-        assert [e["event"] for e in logs] == [
-            "settle_evidence.valid",
-            "settle_evidence.valid",
-        ]
+        # Scoped to the settle loader's OWN events: the Rust routing facade
+        # (calendar_rust, default-ON DEC-RUST-CALENDAR-FACADE-FLIP-001) emits a
+        # benign one-time ``calendar_rust.engaged`` INFO on the first flag-ON
+        # engaged call — out of THIS loader-contract assertion's scope.
+        settle_events = [e["event"] for e in logs if e["event"].startswith("settle_evidence.")]
+        assert settle_events == ["settle_evidence.valid", "settle_evidence.valid"]
 
     def test_deleted_mid_process_reads_absent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -793,7 +796,10 @@ def test_memo_thread_safety_smoke(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert len(results) == 8
     assert all(isinstance(r, SettleEvidence) for r in results)
     assert len(reads) == 1  # one compute; seven memo hits
-    assert [e["event"] for e in logs] == ["settle_evidence.valid"]
+    # Scoped to the settle loader's OWN events (the routing facade's one-time
+    # ``calendar_rust.engaged`` INFO is out of this loader-contract's scope).
+    settle_events = [e["event"] for e in logs if e["event"].startswith("settle_evidence.")]
+    assert settle_events == ["settle_evidence.valid"]
 
 
 # ── the probe --emit-evidence round-trip (the channel keystone) ──────────
@@ -1050,3 +1056,163 @@ def test_probe_record_keys_drift_pin() -> None:
         if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)
     }
     assert "_RECORD_KEYS" in function_loads
+
+
+# ── the calendar-rust routing seam (DEC-RUST-CALENDAR-FACADE-FLIP-001) ────
+#
+# Direct-call teeth on the two PURE materialize helpers the ``routed(...)`` seam
+# hands the crate return to. These branches are dead wheel-ABSENT (the facade
+# short-circuits to the Python oracle without a crate), so they need crate-free /
+# flag-free unit coverage to hold the per-module 100% line+branch gate on the
+# main (wheel-less) CI test job. No crate, no flag, no monkeypatch — pure input
+# → outcome. (The genuinely-engaged real-crate differential lives in the
+# non-required calendar-rust-parity lane.)
+
+
+class TestCalendarRustSettleSeam:
+    """``_materialize_settle`` / ``_materialize_settle_valid`` refuse-poison + happy."""
+
+    @staticmethod
+    def _warn_reasons(logs: Sequence[Mapping[str, object]]) -> list[object]:
+        return [e["reason"] for e in logs if e["event"] == "calendar_rust.fallback"]
+
+    @pytest.fixture(autouse=True)
+    def _fresh_calendar_rust(self) -> Generator[None]:
+        from brutex.calendars import calendar_rust as _cr
+
+        _cr.reset_calendar_rust_for_tests()
+        yield
+        _cr.reset_calendar_rust_for_tests()
+
+    # ── _materialize_settle (the 4-tuple re-hydrator) ────────────────────
+
+    def test_settle_none_abstains_silently(self) -> None:
+        """serde ABSTAIN (crate ``None``) → ``None`` with NO WARN (designed degrade)."""
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle(None, payload={}, path="p.json")
+        assert out is None
+        assert self._warn_reasons(logs) == []
+
+    def test_settle_non_tuple_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle(["not", "a", "tuple"], payload={}, path="p")
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_shape"]
+
+    def test_settle_wrong_len_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle((True, ""), payload={}, path="p")
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_shape"]
+
+    def test_settle_valid_not_bool_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle((1, "", "17:30", "x"), payload={}, path="p")
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_leg_types"]
+
+    def test_settle_message_not_str_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle(
+                (False, 42, "17:30", "x"), payload={}, path="p"
+            )
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_leg_types"]
+
+    def test_settle_invalid_defers_the_bytewise_valueerror(self) -> None:
+        """``valid=False`` → :class:`Raise` carrying the crate's message VERBATIM."""
+        out = settle_evidence._materialize_settle(
+            (False, "settle evidence 'p.json': boom", "", ""), payload={}, path="p.json"
+        )
+        assert isinstance(out, Raise)
+        with pytest.raises(ValueError, match=r"^settle evidence 'p\.json': boom$"):
+            unwrap(out)
+
+    def test_settle_valid_delegates_to_valid_hydrator(self) -> None:
+        """``valid=True`` over a conforming payload → :class:`SettleEvidence`."""
+        out = settle_evidence._materialize_settle(
+            (True, "", "17:30", "2026-07-13T12:31:04+00:00"),
+            payload=make_evidence_payload(),
+            path="p.json",
+        )
+        assert out == Value(
+            SettleEvidence(
+                adopted=time(17, 30),
+                earliest_all_pass="15:45",
+                margin_minutes=15,
+                distinct_trading_days=5,
+                generated_at_utc="2026-07-13T12:31:04+00:00",
+                probe_script_version="1.1",
+                path="p.json",
+            )
+        )
+
+    # ── _materialize_settle_valid (the valid=True re-hydrator) ───────────
+
+    def test_valid_hydrator_non_dict_payload_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle_valid("nope", "17:30", "x", path="p")
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_valid_shape"]
+
+    def test_valid_hydrator_non_str_adopted_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle_valid(
+                make_evidence_payload(), 1730, "x", path="p"
+            )
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_valid_shape"]
+
+    def test_valid_hydrator_non_str_generated_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle_valid(
+                make_evidence_payload(), "17:30", 42, path="p"
+            )
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_valid_shape"]
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            {"earliest_all_pass_ist": None},
+            {"margin_minutes": True},
+            {"margin_minutes": "15"},
+            {"distinct_trading_days": True},
+            {"distinct_trading_days": "5"},
+            {"probe_script_version": 11},
+        ],
+    )
+    def test_valid_hydrator_bad_pluck_refuses(self, mutation: dict[str, object]) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle_valid(
+                make_evidence_payload(**mutation), "17:30", "x", path="p"
+            )
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_valid_pluck"]
+
+    def test_valid_hydrator_bad_adopted_shape_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = settle_evidence._materialize_settle_valid(
+                make_evidence_payload(), "99-99", "x", path="p"
+            )
+        assert out is None
+        assert self._warn_reasons(logs) == ["settle_valid_adopted_shape"]
+
+    def test_valid_hydrator_builds_settle_evidence(self) -> None:
+        out = settle_evidence._materialize_settle_valid(
+            make_evidence_payload(),
+            "17:30",
+            "2026-07-13T12:31:04+00:00",
+            path="probe.json",
+        )
+        assert out == Value(
+            SettleEvidence(
+                adopted=time(17, 30),
+                earliest_all_pass="15:45",
+                margin_minutes=15,
+                distinct_trading_days=5,
+                generated_at_utc="2026-07-13T12:31:04+00:00",
+                probe_script_version="1.1",
+                path="probe.json",
+            )
+        )

@@ -110,6 +110,15 @@ from typing import Any, Final
 
 import structlog
 
+from brutex.calendars.calendar_rust import (
+    _LAW_CLASSIFY,
+    _LAW_OBSERVED,
+    LawOutcome,
+    Value,
+    routed,
+    unwrap,
+    warn_fallback,
+)
 from brutex.calendars.nse import (
     is_holiday_data_available,
     is_trading_day,
@@ -378,28 +387,84 @@ def load_observed_holidays(lake_root: Path) -> frozenset[date]:
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         _LOG.warning(OVERLAY_LOAD_FAILED_EVENT, path=str(path), error=str(exc))
         return frozenset()
-    if not isinstance(payload, dict) or payload.get("version") != OBSERVED_OVERLAY_VERSION:
-        _LOG.warning(OVERLAY_LOAD_FAILED_EVENT, path=str(path), error="wrong shape or version")
+    days, reason = _routed_classify_observed_payload(payload, raw=raw)
+    if days is None:
+        # The LOADER owns the WARN wording (the pure classifier is log-free so
+        # it can run during burn-in). A crate REJECT (``None``) abstains to the
+        # oracle for the precise sub-reason — the reject decision always serves
+        # the Python oracle; only ACCEPT is Rust-served + burn-in-verified.
+        _LOG.warning(OVERLAY_LOAD_FAILED_EVENT, path=str(path), error=reason)
         return frozenset()
+    return days
+
+
+def _classify_observed_payload(payload: object) -> tuple[frozenset[date] | None, str | None]:
+    """PURE, LOG-FREE overlay validation (the LIVE oracle) — the whole-accept /
+    whole-reject decision half of :func:`load_observed_holidays`.
+
+    Returns ``(frozenset(days), None)`` when the payload passes EVERY rule
+    (``dict`` root, ``version == OBSERVED_OVERLAY_VERSION`` under Python ``==``
+    punning, ``entries`` a list, every entry labeled + canonical via
+    :func:`_valid_entry_day`), or ``(None, reason)`` on the first failure — one
+    bad entry rejects the WHOLE overlay. Log-free so the facade may run it during
+    burn-in without a spurious WARN; the LOADER emits the ``reason`` WARN.
+    """
+    if not isinstance(payload, dict) or payload.get("version") != OBSERVED_OVERLAY_VERSION:
+        return None, "wrong shape or version"
     entries = payload.get("entries")
     if not isinstance(entries, list):
-        _LOG.warning(OVERLAY_LOAD_FAILED_EVENT, path=str(path), error="entries not a list")
-        return frozenset()
+        return None, "entries not a list"
     days: set[date] = set()
     for entry in entries:
         day = _valid_entry_day(entry)
         if day is None:
-            _LOG.warning(
-                OVERLAY_LOAD_FAILED_EVENT,
-                path=str(path),
-                error="invalid or unlabeled entry rejected",
-            )
-            return frozenset()
+            return None, "invalid or unlabeled entry rejected"
         days.add(day)
-    return frozenset(days)
+    return frozenset(days), None
 
 
-def classify_month_drift(
+def _materialize_observed(
+    raw_return: object,
+) -> LawOutcome[tuple[frozenset[date] | None, str | None]] | None:
+    """Re-hydrate the crate's ``parse_observed_sidecar`` return.
+
+    ``None`` = a REJECT decision (one bad entry rejects all) → ABSTAIN to the
+    oracle for the precise WARN sub-reason. A ``list[str]`` of sorted unique ISO
+    days is the ACCEPT verdict → ``Value((frozenset(days), None))``. A wrong
+    SHAPE is refuse-poison; a malformed ISO string reaching
+    :meth:`date.fromisoformat` raises ``ValueError`` UP into the facade degrade
+    set. (The crate RAISES ``ValueError`` on a serde parse divergence — the real
+    parse-engine abstain — which the facade degrade set catches; only the
+    whole-reject decision arrives here as ``None``.)
+    """
+    if raw_return is None:
+        return None
+    if not isinstance(raw_return, list) or any(not isinstance(item, str) for item in raw_return):
+        warn_fallback("observed_shape", got=repr(raw_return))
+        return None
+    return Value((frozenset(date.fromisoformat(item) for item in raw_return), None))
+
+
+def _routed_classify_observed_payload(
+    payload: object, *, raw: bytes
+) -> tuple[frozenset[date] | None, str | None]:
+    """Rust-first overlay validation — byte-identical decision to the Python law.
+
+    DEC-RUST-CALENDAR-FACADE-FLIP-001. Routes the whole-accept / whole-reject
+    overlay decision through the ``brutex_calendar`` crate behind the default-ON
+    ``BRUTEX_CALENDAR_RUST`` flag; :func:`_classify_observed_payload` is the LIVE
+    parity oracle every degrade / abstain / reject / burn-in-mismatch path serves.
+    """
+    outcome = routed(
+        _LAW_OBSERVED,
+        rust_call=lambda crate: crate.parse_observed_sidecar(raw),
+        materialize=_materialize_observed,
+        oracle=lambda: Value(_classify_observed_payload(payload)),
+    )
+    return unwrap(outcome)
+
+
+def _classify_month_drift_python(
     month: date,
     evidence: Sequence[DayEvidence],
     *,
@@ -409,7 +474,7 @@ def classify_month_drift(
     max_overlay_days_per_year: int = MAX_OVERLAY_DAYS_PER_YEAR,
     zero_bar_indices: tuple[str, ...] = (),
 ) -> DriftVerdict:
-    """PURE classifier — admission rule + both hard caps, no I/O.
+    """PURE classifier — admission rule + both hard caps, no I/O (the LIVE oracle).
 
     A candidate is an evidence row with ``zero_bars_all_indices=True``. It is
     ADMITTED iff ``indices_with_month_data == 3`` AND ``clean_success_windows >=``
@@ -462,6 +527,125 @@ def classify_month_drift(
         over_month_cap=over_month,
         over_year_cap=over_year,
     )
+
+
+#: The ``brutex_calendar.classify_month_drift`` return arity —
+#: ``(candidates, flagged, vetoed_failed, no_evidence, over_month_cap, over_year_cap)``.
+_CLASSIFY_CRATE_TUPLE_LEN: Final[int] = 6
+
+
+def _materialize_drift(
+    raw_return: object,
+    *,
+    month: date,
+    detected_at: str,
+    zero_bar_indices: tuple[str, ...],
+) -> LawOutcome[DriftVerdict] | None:
+    """Re-hydrate the crate's ``classify_month_drift`` primitive tuple into a
+    :class:`DriftVerdict` (re-attaching the decision-inert ``month`` /
+    ``detected_at`` / ``zero_bar_indices``).
+
+    The crate echoes day tokens VERBATIM (opaque strings), so each ISO day
+    round-trips through :meth:`date.fromisoformat` exactly. A malformed rust
+    string reaching ``date.fromisoformat`` (a foreign / broken crate — never the
+    real one) raises ``ValueError`` / ``TypeError`` UP into the facade degrade
+    set; a wrong SHAPE / leg type is refuse-poison (``None`` + one WARN).
+    """
+    if not isinstance(raw_return, tuple) or len(raw_return) != _CLASSIFY_CRATE_TUPLE_LEN:
+        warn_fallback("classify_shape", got=repr(raw_return))
+        return None
+    candidates_raw, flagged_raw, vetoed_raw, no_evidence_raw, over_month, over_year = raw_return
+    if (
+        not isinstance(candidates_raw, list)
+        or not isinstance(flagged_raw, list)
+        or not isinstance(vetoed_raw, list)
+        or not isinstance(no_evidence_raw, list)
+        or not isinstance(over_month, bool)
+        or not isinstance(over_year, bool)
+    ):
+        warn_fallback("classify_legs", got=repr(raw_return))
+        return None
+    flagged = tuple(
+        ObservedHoliday(
+            day=date.fromisoformat(day_iso),
+            detected_at=detected_at,
+            zero_bar_indices=zero_bar_indices,
+            clean_success_windows=csw,
+        )
+        for day_iso, csw in flagged_raw
+    )
+    return Value(
+        DriftVerdict(
+            month=month.replace(day=1),
+            candidates=tuple(date.fromisoformat(d) for d in candidates_raw),
+            flagged=flagged,
+            vetoed_failed=tuple(date.fromisoformat(d) for d in vetoed_raw),
+            no_evidence=tuple(date.fromisoformat(d) for d in no_evidence_raw),
+            over_month_cap=over_month,
+            over_year_cap=over_year,
+        )
+    )
+
+
+def classify_month_drift(
+    month: date,
+    evidence: Sequence[DayEvidence],
+    *,
+    existing_year_overlay_days: int,
+    detected_at: str,
+    max_flags_per_month: int = MAX_FLAGS_PER_MONTH,
+    max_overlay_days_per_year: int = MAX_OVERLAY_DAYS_PER_YEAR,
+    zero_bar_indices: tuple[str, ...] = (),
+) -> DriftVerdict:
+    """Rust-first PURE classifier — byte-identical to the Python law on every input.
+
+    DEC-RUST-CALENDAR-FACADE-FLIP-001. Routes the admission → veto →
+    month-cap-first / year-cap-mutually-exclusive core through the
+    ``brutex_calendar`` crate behind the default-ON ``BRUTEX_CALENDAR_RUST``
+    flag; :func:`_classify_month_drift_python` is the LIVE parity oracle every
+    degrade / abstain / burn-in-mismatch path serves. Public signature +
+    :class:`DriftVerdict` output are byte-unchanged (the sibling-facade law) — the
+    crate consumes ``(day_iso, zero_bars_all_indices, indices_with_month_data,
+    clean_success_windows, failed_windows_touching)`` primitive rows in
+    ``DayEvidence`` field order and echoes day tokens verbatim; the decision-inert
+    ``month`` / ``detected_at`` / ``zero_bar_indices`` are re-attached here.
+    """
+    outcome = routed(
+        _LAW_CLASSIFY,
+        rust_call=lambda crate: crate.classify_month_drift(
+            [
+                (
+                    row.day.isoformat(),
+                    row.zero_bars_all_indices,
+                    row.indices_with_month_data,
+                    row.clean_success_windows,
+                    row.failed_windows_touching,
+                )
+                for row in evidence
+            ],
+            existing_year_overlay_days,
+            max_flags_per_month,
+            max_overlay_days_per_year,
+        ),
+        materialize=lambda raw_return: _materialize_drift(
+            raw_return,
+            month=month,
+            detected_at=detected_at,
+            zero_bar_indices=zero_bar_indices,
+        ),
+        oracle=lambda: Value(
+            _classify_month_drift_python(
+                month,
+                evidence,
+                existing_year_overlay_days=existing_year_overlay_days,
+                detected_at=detected_at,
+                max_flags_per_month=max_flags_per_month,
+                max_overlay_days_per_year=max_overlay_days_per_year,
+                zero_bar_indices=zero_bar_indices,
+            )
+        ),
+    )
+    return unwrap(outcome)
 
 
 def _month_bar_dates(lake_root: Path, coord: tuple[str, str, str], month: date) -> set[date]:
