@@ -151,7 +151,7 @@ def hash_payload(payload: Mapping[str, object]) -> str:
     Routing (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, SLICE T24 PR-1): the
     DIGEST leg is served by :func:`_hash_canonical_python` — the verbatim
     ``hashlib.blake2b`` expression, the LIVE parity oracle — via the
-    default-OFF ``BRUTEX_LAKE_RUST_RAW_INTEGRITY`` facade
+    default-ON ``BRUTEX_LAKE_RUST_RAW_INTEGRITY`` facade
     (:mod:`brutex.data.detectors_rust`, an in-crate RFC 7693 blake2b). The
     CANONICALISATION stays Python on BOTH arms (``json.dumps`` is CPython's
     ``float.__repr__`` byte law — raw vendor candles carry float prices;

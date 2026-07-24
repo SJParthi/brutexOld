@@ -126,7 +126,7 @@ def pmset_wake_command(
     this command and NEVER runs it (sudo, system-wide power setting).
     Wraps across midnight (a 00:02 trigger wakes at 23:57).
 
-    Routed through the default-OFF ``brutex_ops`` seam
+    Routed through the default-ON ``brutex_ops`` seam
     (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
     retained oracle :func:`_pmset_wake_command_python`, byte-identical.
     """
@@ -158,7 +158,7 @@ def _parse_at_python(text: str) -> tuple[int, int] | None:
 def parse_at(text: str) -> tuple[int, int]:
     """Parse ``HH:MM`` fail-loud; junk raises :class:`ValueError` naming the value.
 
-    Routed through the default-OFF ``brutex_ops`` seam
+    Routed through the default-ON ``brutex_ops`` seam
     (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
     retained decision core :func:`_parse_at_python`, byte-identical
     (refusal message included — it is minted HERE on both arms). The crate
@@ -214,7 +214,7 @@ def render_launchd_plist(
     (the cross-verify producer, label ``com.brutex.crossverify``) renders
     through this ONE law without clobbering the nightly's log files.
 
-    Routed through the default-OFF ``brutex_ops`` seam
+    Routed through the default-ON ``brutex_ops`` seam
     (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
     retained oracle :func:`_render_launchd_plist_python`, byte-identical.
     On the routed arm the two log paths are PRE-FORMATTED here with the
@@ -446,7 +446,7 @@ def seconds_since_scheduled_fire(*, hour: int, minute: int, now_local: datetime)
     Pure calendar arithmetic: today's fire if already past (or exactly now),
     else yesterday's. Always ``>= 0`` and ``< 24 h``.
 
-    Routed through the default-OFF ``brutex_ops`` seam
+    Routed through the default-ON ``brutex_ops`` seam
     (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
     retained oracle :func:`_seconds_since_scheduled_fire_python`,
     byte-identical. Only *now_local*'s intraday components cross the FFI

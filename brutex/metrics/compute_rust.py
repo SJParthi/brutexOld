@@ -14,7 +14,7 @@ guarantee across libms (the exact MUST-STAY-PYTHON class
 could diverge in the last ulp. The fold uses only IEEE-exact operations, so
 the split ships bit-identity BY CONSTRUCTION instead of by hope.
 
-## The flag — ``BRUTEX_METRICS_RUST_FOLD`` (Pattern A, default OFF)
+## The flag — ``BRUTEX_METRICS_RUST_FOLD`` (Pattern A, default ON)
 
 :func:`metrics_rust_fold_enabled` reads the env PER CALL (the
 ``rust_metrics`` per-call-resolution rationale: no module-global flag state;
@@ -99,9 +99,11 @@ kernel — no Python fence can catch it).
 ## Honest envelope (Golden Rule #10)
 
 * Both arms are ``O(n·log n)`` per fold (the percentile sort dominates) —
-  NO O(1) claim, and NO speedup claim is made: the seam ships INERT
-  (default OFF) as the safe FFI stepping-stone; a default flip needs its
-  own DEC with measured evidence.
+  NO O(1) claim, and NO speedup claim is made: the seam ships ENGAGED
+  (default ON per DEC-RUST-DEFAULT-ON-WAVE-001, operator directive
+  2026-07-23) for uniformity, not speed, with the engaged Rust path
+  guarded by the burn-in + autorevert + degrade-to-oracle layers; the
+  revert is that one ``METRICS_RUST_FOLD_DEFAULT`` constant.
 * The burn-in runs the Python oracle for the first
   :data:`SELF_CHECK_SAMPLES` kernel-served folds per process — a bounded,
   amortised-nil startup cost.

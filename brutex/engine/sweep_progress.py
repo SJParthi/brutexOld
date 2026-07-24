@@ -46,7 +46,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
-# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade. The
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-ON Rust routing facade. The
 # five snapshot derived-metric properties gate on `sweep_ops_rust_enabled()`
 # FIRST so the flag-OFF default path is byte-identical; the verbatim Python
 # property bodies live ONCE below as the `_*_python` module-level laws (the

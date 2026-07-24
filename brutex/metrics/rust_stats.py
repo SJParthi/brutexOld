@@ -261,7 +261,7 @@ def stats_rust_enabled() -> bool:
         # Unset/whitespace-empty short-circuits BEFORE the engine import:
         # ``env_flag_tristate`` would classify it ``None`` → the default
         # anyway (behavior-identical), and skipping the import keeps the
-        # production-default OFF arm free of the ``brutex.engine`` package
+        # production-default ON arm free of the ``brutex.engine`` package
         # (whose ``__init__`` pulls the trading_core wheel) — precisely:
         # the default arm adds no TRADING_CORE-wheel requirement. (Loading
         # ``brutex.metrics`` at all has ALWAYS transitively required the

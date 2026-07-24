@@ -61,7 +61,7 @@ from typing import Final
 
 import structlog
 
-# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade. The
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-ON Rust routing facade. The
 # projection decision gates on `sweep_ops_rust_enabled()` FIRST so the
 # flag-OFF default path is byte-identical; `_sla_decision_python` below is
 # the live oracle. Env parses / validation raises / message rendering / the
@@ -460,7 +460,7 @@ def check_sweep_sla(
     if cells is None:
         # Flat model — exactly the law the DEC-RUST-SWEEP-OPS-001 facade
         # mirrors (`_sla_decision_python` is the live oracle): route through
-        # the default-OFF seam; flag-OFF is the verbatim oracle.
+        # the default-ON seam; flag-OFF is the verbatim oracle.
         weighted = False
         if sweep_ops_rust_enabled():
             projected, decision_token = routed_sla_decision(

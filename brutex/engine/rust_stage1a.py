@@ -1,7 +1,9 @@
 """Flag-gated batch Rust Stage-1A bar-bits seam (``DEC-STAGE1A-RUST-BATCH-001``).
 
 The G1 Rust-conversion slice: :func:`brutex.engine.stage1a.build_bar_bits`
-gains a default-OFF Rust arm that replaces the per-bar Python driver loop
+gains a default-ON Rust arm (flipped by DEC-RUST-DEFAULT-ON-WAVE-001,
+operator directive 2026-07-23; see §"The flag" below) that replaces the
+per-bar Python driver loop
 (one ``evaluate_with_levels`` + ``VwapState.update`` +
 ``MarketStructureState.update`` FFI call PER BAR) with ONE batch
 ``trading_core.stage1a_bar_bits_batch`` call per ``(instrument, tf)`` build.

@@ -33,7 +33,7 @@ N frozen :class:`GreeksSolveRequest` tuples through ONE
 ``trading_core.greeks_batch`` FFI call — the compiled side calls the SAME
 frozen scalar kernel per element, so every outcome is bit-identical to the
 scalar entry's; per-element rejects travel as :class:`GreeksBatchOutcome`
-DATA instead of exceptions. Consumed by the default-OFF
+DATA instead of exceptions. Consumed by the default-ON
 ``BRUTEX_GREEKS_RUST_BATCH`` seam in :mod:`brutex.data.greeks_enrich`.
 """
 

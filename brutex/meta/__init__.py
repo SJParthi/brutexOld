@@ -23,7 +23,7 @@ Module map (each 100% line+branch on its own gate):
 * :mod:`brutex.meta.threshold` — the τ sweep over the fixed 0.50→0.95 grid.
 * :mod:`brutex.meta.abstain` — the abstention gate vocabulary + pure reason
   function + the dormant in-sim refusal knob (stdlib-only leaf).
-* :mod:`brutex.meta.meta_rust` — the default-OFF ``BRUTEX_META_GATE`` facade
+* :mod:`brutex.meta.meta_rust` — the default-ON ``BRUTEX_META_GATE`` facade
   over the ``rust/brutex-meta`` kernels (burn-in bit-compare +
   ship-the-oracle autorevert).
 * :mod:`brutex.meta.annotate` — the ``brutex meta-annotate`` pass writing

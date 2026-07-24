@@ -141,7 +141,7 @@ def _python_commit_replace(tmp: Path, dest: Path, chmod: int | None) -> None:
     The verbatim pre-PR-4 inline sequence, extracted so
     :func:`_atomic_write_core` can route the commit through the Rust twin
     (DEC-LAKE-RUST-LOCKS-ATOMIC-001) while THIS stays the oracle both the
-    default-OFF arm and every degrade path serve: optional ``chmod`` FIRST
+    default-ON arm and every degrade path serve: optional ``chmod`` FIRST
     (dest lands at that mode, never briefly world-readable), the temp's data
     ``fsync``-ed to stable storage, then the atomic ``os.replace``. EVERY
     error propagates unchanged (the core's no-mapping law).

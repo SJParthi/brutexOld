@@ -8,7 +8,7 @@ line 582 (``deflated_sharpe_ratio`` — "Bailey & LdP 2014"). These are
 :mod:`brutex.metrics.rust_stats` seam, matching the deliberate
 no-``polars``/no-``numpy`` design of :mod:`brutex.metrics.types`).
 
-**Rust seam (DEC-METRICS-RUST-STATS-002):** behind the default-OFF
+**Rust seam (DEC-METRICS-RUST-STATS-002):** behind the default-ON
 ``BRUTEX_STATS_RUST`` flag the two computation TAILS (:func:`_psr_tail` +
 :func:`_expected_max_tail`) are served by the ``fno_math`` kernels
 (``stats_psr`` / ``stats_expected_max_sharpe``) through the per-function

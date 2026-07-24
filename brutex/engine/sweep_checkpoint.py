@@ -366,7 +366,7 @@ class SweepCheckpointStore:
             # corruption, same contract as malformed JSON (refuter-confirmed).
             raise SweepCheckpointError(f"Malformed checkpoint JSON at {self._path}: {exc}") from exc
         checkpoint = SweepCheckpoint.from_dict(data)
-        # The adoption VERDICT routes through the default-OFF
+        # The adoption VERDICT routes through the default-ON
         # DEC-RUST-SWEEP-OPS-001 seam (:func:`_adoption_verdict_python` is the
         # LIVE oracle; flag OFF = the verbatim Python decision). Message bytes
         # + the adoption side effect stay HERE.
@@ -520,7 +520,7 @@ class SweepCheckpointStore:
             If ``completed_index`` is outside ``[0, total_combos)``, or the
             atomic write fails.
         """
-        # The advance DECISION routes through the default-OFF
+        # The advance DECISION routes through the default-ON
         # DEC-RUST-SWEEP-OPS-001 seam (:func:`_record_decision_python` is the
         # LIVE oracle; flag OFF = the verbatim Python guards). Message bytes,
         # the high-water mutation and the atomic save stay HERE — the

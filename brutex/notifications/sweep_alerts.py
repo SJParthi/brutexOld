@@ -103,7 +103,7 @@ def _escape_markdown_v2_python(text: str) -> str:
     """The VERBATIM Python escape law — the LIVE parity oracle.
 
     DEC-NOTIFY-RUST-CORE-001: the pre-facade :func:`escape_markdown_v2` body,
-    extracted token-for-token (the Slice-0 idiom) so the default-OFF
+    extracted token-for-token (the Slice-0 idiom) so the default-ON
     ``BRUTEX_NOTIFY_RUST`` routing always has the byte-identical oracle in
     the path — flag OFF returns exactly this.
     """

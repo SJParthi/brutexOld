@@ -23,7 +23,7 @@ mapping), so the unit tests run with zero side effects on the real process env.
 
 Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 — slice T35
 milestone 3): when — and ONLY when — ``BRUTEX_CORE_RUST_DOTENV`` is set
-truthy, the LINE-PARSE law routes through the default-OFF,
+truthy, the LINE-PARSE law routes through the default-ON,
 burn-in-checked, fail-closed, value-REDACTING
 :mod:`brutex.config.dotenv_rust` facade to the ``rust/brutex-core``
 crate. The flag-OFF default is the verbatim ``_parse_dotenv_python``

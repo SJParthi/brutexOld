@@ -17,13 +17,14 @@ decision-kernel shape, not a byte-renderer). This module owns the flag, the
 fail-closed layers and the process-local latches; the crate side lives in
 ``rust/brutex-lake/src/merge.rs``.
 
-## The flag — ``BRUTEX_LAKE_RUST_MERGE`` (DEFAULT OFF)
+## The flag — ``BRUTEX_LAKE_RUST_MERGE`` (DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001)
 
 Resolved per call through the SHARED classifier
 (:func:`brutex.data.lake_rust_render.env_flag_tristate` — imported, never
-copied): truthy → ON; falsy / unset / whitespace-empty → OFF; any OTHER
-value → OFF with one loud ``lake_rust_merge.fallback`` WARN (reason
-``flag_unrecognised``) per process — the PR-1 posture verbatim.
+copied): truthy → ON; falsy → the silent OFF kill switch; unset /
+whitespace-empty → ON (the default); any OTHER value → OFF with one loud
+``lake_rust_merge.fallback`` WARN (reason ``flag_unrecognised``) per
+process — the wave law (DEC-RUST-DEFAULT-ON-WAVE-001).
 
 ## Fail-closed layers (the PR-1 pattern, per-facade latch state)
 
@@ -140,8 +141,10 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.data.lake_rust_merge")
 
-#: The env flag. DEFAULT OFF — the Python fold stays the production path
-#: until a future DEC flips it (the PR-1 posture).
+#: The env flag. DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator
+#: directive 2026-07-23) — the engaged Rust fold is guarded by burn-in +
+#: autorevert + degrade-to-oracle; the explicit-falsy value is the kill
+#: switch.
 LAKE_RUST_MERGE_ENV: Final[str] = "BRUTEX_LAKE_RUST_MERGE"
 
 #: Action-code vocabulary — MUST mirror ``rust/brutex-lake/src/merge.rs``

@@ -20,7 +20,7 @@ the ``on_event`` sink, the clock), so the whole break-law matrix is unit- and
 property-testable without a lake, a vendor, or a filesystem. (Module IMPORT
 stays stdlib-only; since DEC-NIGHTLY-RUST-CORE-001 the three pure laws —
 :func:`first_breaker` · :func:`exit_code_for` ·
-:func:`audit_reconcile_tripwire` — lazily consult the default-OFF
+:func:`audit_reconcile_tripwire` — lazily consult the default-ON
 ``brutex.nightly.nightly_rust`` seam per call, and the verbatim bodies are
 RETAINED as the ``*_python`` live parity oracles the flag-OFF default and
 every degrade path serve.)
@@ -244,7 +244,7 @@ def first_breaker_python(outcomes: Sequence[LinkOutcome]) -> LinkOutcome | None:
 def first_breaker(outcomes: Sequence[LinkOutcome]) -> LinkOutcome | None:
     """Return the first ``REFUSED``/``FAILED`` outcome, or ``None``.
 
-    Routed through the default-OFF ``brutex_ops`` seam
+    Routed through the default-ON ``brutex_ops`` seam
     (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
     retained oracle :func:`first_breaker_python`, byte-identical.
     """
@@ -471,7 +471,7 @@ def exit_code_for(outcomes: Sequence[LinkOutcome], tripwires: Sequence[Tripwire]
     :data:`EXIT_INTERNAL_ERROR` — a SUSPECT run must be cron-RED, never a
     green illusion (Golden Rule #1).
 
-    Routed through the default-OFF ``brutex_ops`` seam
+    Routed through the default-ON ``brutex_ops`` seam
     (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
     retained oracle :func:`exit_code_for_python`, byte-identical.
     """
@@ -545,7 +545,7 @@ def audit_reconcile_tripwire(
 ) -> Tripwire | None:
     """The T2 reconcile law — see :func:`audit_reconcile_tripwire_python`.
 
-    Routed through the default-OFF ``brutex_ops`` seam
+    Routed through the default-ON ``brutex_ops`` seam
     (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
     retained oracle, byte-identical. On the routed arm the problem strings'
     ``repr()`` renderings of the derived lists are PRE-FORMATTED here with

@@ -279,7 +279,7 @@ def _next_ordinal(parent: Path, *, prefix: str = "", suffix: str = "") -> int:
     can never break the scan. O(existing entries); never a wall-clock name (I-2).
 
     The listing runs here (I/O stays Python); the FOLD routes through the
-    default-OFF DEC-RUST-SWEEP-OPS-001 seam with :func:`_next_ordinal_python`
+    default-ON DEC-RUST-SWEEP-OPS-001 seam with :func:`_next_ordinal_python`
     as the LIVE oracle (flag OFF = the verbatim Python fold).
     """
     names = [entry.name for entry in parent.iterdir()] if parent.is_dir() else []

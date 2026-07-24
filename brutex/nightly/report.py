@@ -315,7 +315,7 @@ def summary_lines(report: NightlyReport) -> tuple[list[str], str]:
     chain-order per-link verdicts + the honest counts (``?`` for unknown) and
     the ``--skip-backup`` nag when the operator opted out.
 
-    Routed through the default-OFF ``brutex_ops`` seam
+    Routed through the default-ON ``brutex_ops`` seam
     (DEC-NIGHTLY-RUST-CORE-001); flag OFF — the default — is the verbatim
     retained oracle :func:`_summary_lines_python`, byte-identical. The
     routed arm crosses ONLY flat strings/ints/floats (the report projected

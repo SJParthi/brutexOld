@@ -21,7 +21,7 @@ expiry; the underlying is everything BETWEEN the exchange and the expiry (joined
 through any interior hyphens).
 
 This module is **pure** (stdlib only — no I/O, no clock, no Parquet / DuckDB
-imports — plus the default-OFF Rust seam facade :mod:`brutex.data.fno_symbol_rust`,
+imports — plus the default-ON Rust seam facade :mod:`brutex.data.fno_symbol_rust`,
 which adds ``structlog`` transitively) so it is trivially unit-testable and
 importable from the data layer without
 the P2 data-lake extras. It NEVER raises on a malformed / non-derivative symbol —
@@ -225,7 +225,7 @@ def parse_fno_symbol(symbol: str) -> FnoSymbolParts | None:
     every token between the exchange (token ``0``) and the expiry, joined through any
     interior hyphens so a hyphenated underlying (``BAJAJ-AUTO``) is preserved intact.
 
-    Routed through the default-OFF ``BRUTEX_DATA_RUST`` seam
+    Routed through the default-ON ``BRUTEX_DATA_RUST`` seam
     (:func:`brutex.data.fno_symbol_rust.routed_parse_fno_symbol`,
     DEC-DATA-RUST-PURELAW-001) with :func:`_parse_fno_symbol_python` — the
     verbatim pre-seam body — as the LIVE parity oracle; flag unset/falsy is

@@ -254,7 +254,7 @@ def _parse_stamp(text: str, *, source: Path) -> StageStamp:
     follow-up ``DEC-RUST-OBSERVABILITY-STAMP-PARSE-003``); the post-parse shape checks
     are probed into bools (side-effect-free ``isinstance`` + ``dict.get``,
     hoisted unconditionally above the raises — behavior-identical) and the
-    acceptance ORDER routes through the default-OFF ``observability_rust``
+    acceptance ORDER routes through the default-ON ``observability_rust``
     facade (law D1) with :func:`_stamp_shape_index_python` as the oracle;
     this function materializes the EXACT pre-seam error message for the
     returned reject index.
@@ -439,7 +439,7 @@ def validate_stage_stamp(
         expected_snapshot_hash,
     )
 
-    # The mismatch matrix routes through BOTH default-OFF facades, NESTED so
+    # The mismatch matrix routes through BOTH default-ON facades, NESTED so
     # each lane's flag engages independently: the sweep-ops facade
     # (DEC-RUST-SWEEP-OPS-001) wraps the observability facade
     # (DEC-RUST-OBSERVABILITY-001 law D2) as its oracle, with

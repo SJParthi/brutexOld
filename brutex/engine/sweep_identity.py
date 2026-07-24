@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
-# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-OFF Rust routing facade. The
+# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-ON Rust routing facade. The
 # wired fragment gates on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
 # default path is byte-identical (including attribute-access order); the
 # verbatim Python law below is the live oracle. This law feeds RUN IDENTITY

@@ -47,14 +47,14 @@ the defaults callable) latches ``crate_unavailable`` for BOTH surfaces —
 the lockstep is an ATOMIC pin (crate == repo move together; rebuild per
 ``docs/runbooks/lake-rust-render-lockstep.md``).
 
-## The flag — ``BRUTEX_LAKE_RUST_RENDER`` (DEFAULT OFF)
+## The flag — ``BRUTEX_LAKE_RUST_RENDER`` (DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001)
 
 Resolved per call like the sibling sweep flags: a truthy literal
-(``1/true/yes/on``) → ON; a falsy literal (``0/false/no/off``) → OFF; unset or
-whitespace-empty → the default (OFF); any OTHER value → OFF with one loud
-``lake_rust_render.fallback`` WARN (reason ``flag_unrecognised``) per
-process — a typo'd opt-in is never silently honoured, and (since the
-default is OFF) never silently armed either. The truthy/falsy vocabulary DELIBERATELY mirrors the sweep
+(``1/true/yes/on``) → ON; a falsy literal (``0/false/no/off``) → the silent
+OFF kill switch; unset or whitespace-empty → the default (ON); any OTHER
+value → OFF with one loud ``lake_rust_render.fallback`` WARN (reason
+``flag_unrecognised``) per process — a typo'd flag value is never silently
+honoured; it fails loud-OFF, so a mistyped opt-out lands OFF VISIBLY. The truthy/falsy vocabulary DELIBERATELY mirrors the sweep
 flags' COMMON :func:`brutex.engine.sweep_lookahead.env_flag_tristate`
 byte-for-byte, but the classifier is a LOCAL twin: importing anything under
 ``brutex.engine`` executes ``brutex/engine/__init__.py``, which hard-imports
@@ -225,9 +225,11 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.data.lake_rust_render")
 
-#: The env flag. DEFAULT OFF — the Python render stays the production path
-#: until the lockstep gates (version guard + parity corpus + burn-in) have
-#: an operator-directed default flip behind a future DEC.
+#: The env flag. DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator
+#: directive 2026-07-23) — the engaged Rust render is guarded by the
+#: lockstep gates (version guard + parity corpus + burn-in) with
+#: degrade-to-oracle; the explicit-falsy value is the one-constant kill
+#: switch.
 LAKE_RUST_RENDER_ENV: Final[str] = "BRUTEX_LAKE_RUST_RENDER"
 
 #: Engaged renders byte-compared against the Python oracle per process PER
@@ -471,9 +473,9 @@ def _resolve_crate(*, profile: str) -> ModuleType | None:
     """Import guard (layer 1): return ``brutex_lake``, or latch OFF + ``None``.
 
     An absent wheel (``ImportError``) latches ``crate_unavailable`` — the
-    facade is default-OFF and opt-in, so an operator who set the flag
-    without installing the crate gets ONE loud WARN naming the remedy, and
-    every render serves the Python bytes. A module that IMPORTS but lacks
+    facade is default-ON with degrade-to-oracle, so a box that engaged the
+    default (or explicitly opted in) without a built crate gets ONE loud
+    WARN naming the remedy, and every render serves the Python bytes. A module that IMPORTS but lacks
     any :data:`_CRATE_API` callable (a name collision / hand-broken /
     STALE-PR-1 install) latches the SAME reason — the fail-closed contract
     is "never a new crash class", so an ``AttributeError`` must never leave

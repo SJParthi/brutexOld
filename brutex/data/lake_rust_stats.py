@@ -1,4 +1,4 @@
-"""Default-OFF Rust seam for the stats-manifest shard render (ADR-0020 Wave C).
+"""Default-ON Rust seam for the stats-manifest shard render (ADR-0020 Wave C).
 
 DEC-LAKE-RUST-STATS-MANIFEST-001 (MIGRATION.md #1914). The ONE routed
 surface is :func:`brutex.data.lake_stats_manifest.render_shard` — when
@@ -60,7 +60,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; Pattern A — only explicit truthy enables).
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; the
+#: explicit-falsy value is the kill switch, junk fails loud-OFF).
 LAKE_RUST_STATS_ENV: Final[str] = "BRUTEX_LAKE_RUST_STATS_MANIFEST"
 
 #: Engaged renders bit-compared against the stdlib oracle before crate

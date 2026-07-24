@@ -368,7 +368,7 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
     """
     validate_resample_frame(df_1m, target_tf_minutes)
     if lake_rust_resample_enabled():
-        # ADR-0020 Wave-B seam (DEC-LAKE-RUST-RESAMPLE-001, default OFF):
+        # ADR-0020 Wave-B seam (DEC-LAKE-RUST-RESAMPLE-001, default ON):
         # route the validated frame through the brutex_lake crate, with the
         # verbatim Python body below as the LIVE parity oracle — every
         # guard/degrade/burn-in-mismatch path serves it, so resampled

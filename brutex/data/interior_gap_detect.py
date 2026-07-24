@@ -170,7 +170,7 @@ def _interior_barless_runs(
 
     Routing (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, SLICE T24 PR-1): the
     GROUPING decision is served by :func:`_interior_barless_runs_python` —
-    the verbatim walker, the LIVE parity oracle — via the default-OFF
+    the verbatim walker, the LIVE parity oracle — via the default-ON
     ``BRUTEX_LAKE_RUST_INTERIOR_GAP`` facade
     (:mod:`brutex.data.detectors_rust`). The NSE calendar + observed
     overlay stay PYTHON on both arms: the Rust arm's payload factory walks

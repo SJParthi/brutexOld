@@ -9,7 +9,7 @@ disk is touched — so the module imports and unit-tests with zero side effects.
 Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 — slice T35
 milestone 3): when — and ONLY when — ``BRUTEX_CORE_RUST_PATHS`` is set
 truthy, the lake-root decision + the volume-parent derivation route
-through the default-OFF, burn-in-checked, fail-closed
+through the default-ON, burn-in-checked, fail-closed
 :mod:`brutex.config.paths_rust` facade to the ``rust/brutex-core`` crate
 (strings only cross the FFI). The flag-OFF default is the verbatim
 ``_*_python`` oracle below — behavior-identical AND crate-untouched

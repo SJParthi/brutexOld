@@ -28,7 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-OFF Rust routing facade. The
+# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-ON Rust routing facade. The
 # wired functions gate on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
 # default path is byte-identical (the Python law below is the live oracle).
 from brutex.engine.sweep_ops_rust import routed_run_path, sweep_ops_rust_enabled

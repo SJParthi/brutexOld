@@ -130,7 +130,9 @@ through the caller-passed factories (no-consumer-import AST-pinned).
 Expected payoff ≈ 0 — the conversion is for uniformity, not speed. Every
 routed law is nanosecond-scale in Python and the FFI hop is a small
 SLOWDOWN, acceptable because the seams run per monitor tick / per validate
-call (never a hot mask path) and ship DEFAULT-OFF. ONE lane flag covers all
+call (never a hot mask path) and the engaged Rust path is guarded by the
+burn-in + autorevert + degrade-to-oracle layers above
+(DEC-RUST-DEFAULT-ON-WAVE-001, default ON). ONE lane flag covers all
 five laws (task-mandated; a poisoned-crate autorevert latches ALL five
 together — the window_ledger single-latch precedent, wider here). Flag-ON
 recomposes law A's frozen dataclasses EQUAL but not IDENTICAL to the

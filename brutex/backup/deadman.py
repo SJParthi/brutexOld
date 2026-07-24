@@ -480,7 +480,7 @@ def evaluate_deadman(
     """Evaluate the pure dead-man verdict (see :func:`_evaluate_deadman_python`).
 
     The public entry — signature + behavior byte-identical to the retained
-    Python oracle. Under the default-OFF ``BRUTEX_BACKUP_RUST`` flag the
+    Python oracle. Under the default-ON ``BRUTEX_BACKUP_RUST`` flag the
     verdict DECISION routes through the ``brutex_ops`` crate
     (DEC-BACKUP-RUST-OPS-001): the clock is read ONCE here (exactly one
     ``clock()`` call either way — the ``run_deadman_check`` frozen-now

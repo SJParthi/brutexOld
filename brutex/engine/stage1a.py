@@ -1326,7 +1326,7 @@ def build_bar_bits(
 
     Notes
     -----
-    Under the default-OFF ``BRUTEX_SWEEP_RUST_STAGE1A`` flag
+    Under the default-ON ``BRUTEX_SWEEP_RUST_STAGE1A`` flag
     (``DEC-STAGE1A-RUST-BATCH-001``) the build is served by ONE batch
     ``trading_core.stage1a_bar_bits_batch`` call over a
     :meth:`Stage1AMatrixBuilder.collect_batch_inputs` prepass —

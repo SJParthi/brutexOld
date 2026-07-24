@@ -299,7 +299,7 @@ def normalise_tick_size(raw: float | int | Decimal | str) -> Decimal:
     * ``int`` (or integer-valued float) in ``[1, 1000)`` → interpret as paise
     * After conversion, must be in :data:`VALID_TICK_SIZES_RUPEES`
 
-    When ``BRUTEX_CORE_RUST_MODELS`` is ON (default OFF — slice T35 PR-2)
+    When ``BRUTEX_CORE_RUST_MODELS`` is ON (default ON — slice T35 PR-2)
     the decision law routes through the ``rust/brutex-core`` crate via
     :mod:`brutex.models_rust` (eligibility-gated, burn-in-checked,
     fail-closed to this oracle); the flag-OFF default is the verbatim

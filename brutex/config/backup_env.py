@@ -202,7 +202,7 @@ def _valid_verify_subset(value: str) -> bool:
 
     Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 —
     milestone 3): when — and ONLY when — ``BRUTEX_CORE_RUST_BACKUPENV``
-    is set truthy, the shape law routes through the default-OFF,
+    is set truthy, the shape law routes through the default-ON,
     burn-in-checked, fail-closed :mod:`brutex.config.backup_env_rust`
     facade to the ``rust/brutex-core`` crate; flag-OFF is the verbatim
     ``_valid_verify_subset_python`` oracle — behavior-identical AND

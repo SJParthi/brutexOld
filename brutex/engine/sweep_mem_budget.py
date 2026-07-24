@@ -54,7 +54,7 @@ from typing import Final
 
 from brutex.config.hardware_envelope import memory_budget_bytes
 
-# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade. The
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-ON Rust routing facade. The
 # `plan_rank_memory` decision table gates on `sweep_ops_rust_enabled()` FIRST
 # so the flag-OFF default path is byte-identical; `_rank_plan_decision_python`
 # below is the live oracle. The mode-`on` config raises + the refusal message
