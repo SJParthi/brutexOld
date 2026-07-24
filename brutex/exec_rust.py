@@ -34,10 +34,12 @@ CLAUDE.md §11): a truthy value forces ON, a falsy value (``0``/``false``/
 ``no``/``off`` — the explicit kill switch) forces OFF,
 unset/whitespace-empty falls to :data:`EXEC_RUST_DEFAULT` = **True** since
 the operator RUST-O(1)-EVERYWHERE directive (DEC-RUST-DEFAULT-ON-WAVE-001,
-#2215) — the kernel is ENGAGED by default with the burn-in bit-compare +
-ship-the-oracle autorevert + degrade-to-oracle safety layers untouched —
-and any unrecognised value fails SAFE to OFF with one warn-once
-``exec_rust.flag_unrecognised`` event. Read per CALL so spawn workers
+#2215) — the kernel is ENGAGED by default with the degrade-to-oracle safety
+layer untouched (this seam runs NO Python-side runtime burn-in/autorevert —
+its value parity is guaranteed structurally + at CI, see "The parity
+discipline" below) — and any unrecognised value fails SAFE to OFF with one
+warn-once ``exec_rust.flag_unrecognised`` event. Read per CALL so spawn
+workers
 resolve their own inherited environment (no module-global flag state).
 
 ## The fallback law (mirrors DEC-SWEEP-RUST-METRICS-001)
@@ -71,6 +73,26 @@ resolve their own inherited environment (no module-global flag state).
   run them, while ``TradeCostBreakdown`` carries NO ``__post_init__`` — the
   options-breakdown boundary check is the Rust validation + the gates, not
   a Python-side assert.
+
+## The parity discipline — NO runtime burn-in on this seam (Golden Rule #1)
+
+Unlike the RANKING seam (``brutex.engine.rust_parity_core`` — a 16-call
+burn-in bit-compare + always-on differential + ship-the-oracle autorevert)
+and the SWEEP-ENUM seam (``brutex.engine.rust_enum`` — a width-keyed shadow
+burn-in + per-width autorevert), this EXEC seam runs NO Python-side runtime
+burn-in and NO ship-the-oracle autorevert. That is a DELIBERATE design, not
+an omission: exec is a cold per-FINALIST-trade path, and its Rust↔Python
+value parity is guaranteed by (a) the Rust-side ``ChargeStack::validated()``
+construction check, (b) the frozen-dataclass ``__post_init__`` invariants
+re-run on re-materialization (``TradeInput`` / ``FuturesTradeInput`` /
+``FuturesCostBreakdown``), (c) the seam's :func:`_wire_fault` /
+:func:`_verdict_fault` structural gates + the i64 envelope guard, and
+(d) the CI-time dual-arm / golden / differential parity suites over the
+exact deployed wheel (:class:`StaleExecWheelError` + the EXPECTED_BUILD.json
+freshness gate close the deployed-wheel-differs-from-CI-wheel gap). Any
+deviation degrades to the verbatim Python oracle with one warn-once event;
+there is no runtime bit-compare to autorevert on. Do NOT describe this seam
+as carrying a burn-in/autorevert — it does not.
 
 ## Honest envelope (Golden Rule #10)
 
@@ -127,9 +149,10 @@ _LOG = structlog.get_logger(__name__)
 
 #: The one-constant flip lever — ``True`` since the operator
 #: RUST-O(1)-EVERYWHERE directive (DEC-RUST-DEFAULT-ON-WAVE-001, #2215):
-#: the exec-cost kernel is ENGAGED by default, with the i64-envelope route,
-#: burn-in bit-compare + ship-the-oracle autorevert + degrade-to-oracle
-#: safety layers untouched. The explicit ``0`` env value is the kill switch.
+#: the exec-cost kernel is ENGAGED by default, with the i64-envelope route +
+#: the degrade-to-oracle safety layer untouched (no Python-side runtime
+#: burn-in/autorevert on this seam — see the module docstring's "parity
+#: discipline"). The explicit ``0`` env value is the kill switch.
 EXEC_RUST_DEFAULT: Final[bool] = True
 
 #: The env flag over the default (sibling of ``BRUTEX_SWEEP_RUST_METRICS``).
