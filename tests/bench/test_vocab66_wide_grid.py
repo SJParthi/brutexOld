@@ -384,15 +384,21 @@ def test_trade_sim_u64_vs_u128_same_window_ratio() -> None:
     # The post-flip twin: warm bars (>= 9) gain exactly one ST bit.
     bits_wide = [b | (1 << (64 + (i & 1))) if i >= 9 else b for i, b in enumerate(bits_narrow)]
     masks = [((i * 0x100000001B3) | (1 << (i % 20))) & 0x000F_FFFF for i in range(n_masks)]
+    # The contiguous tf==1 fixed-point arm_source (DEC-FILL-EXEC-GRID-1M-001,
+    # #1989): 1m bar j is the next-1m fill bar of decision bar j-1 (bar 0
+    # unarmed) — the exec-grid 8-arg constructor's 7th positional argument.
+    arm_source = [-1, *range(n_bars - 1)]
 
     sim_u64 = cast(
         "ResidentSweepSim",
-        fno_math.ResidentSweepSim(open_p, high_p, low_p, close_p, forced, session_idx, bits_narrow),
+        fno_math.ResidentSweepSim(
+            open_p, high_p, low_p, close_p, forced, session_idx, arm_source, bits_narrow
+        ),
     )
     sim_u128 = cast(
         "ResidentSweepSimU128",
         fno_math.ResidentSweepSimU128(
-            open_p, high_p, low_p, close_p, forced, session_idx, bits_wide
+            open_p, high_p, low_p, close_p, forced, session_idx, arm_source, bits_wide
         ),
     )
     per_u64 = _per_combo(sim_u64, masks)

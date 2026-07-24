@@ -368,12 +368,22 @@ def ranking_passes_gates(
     win_rate: list[float],
     win_loss_ratio: list[float | None],
     max_consecutive_losses: list[int],
+    streak_threshold: list[int],
+    loss_rate: Sequence[float | None],
+    sl_hit_rate: Sequence[float | None],
+    max_sl_hit_rate: float | None,
 ) -> list[bool]:
     """Batched `brutex.ranking.passes_gates` twin (slice-4 PR-1).
 
     One verdict per candidate, positionally aligned. `None` metric values
     cross as `None` (never NaN-encoded). Raises `ValueError` on unequal
     column lengths.
+
+    Door-5/6 fold-in-Rust/combine-in-Python columns (DEC-METRICS-RUST-STATS-002,
+    the #1544 ranking seam): the transcendental ``streak_threshold`` is the
+    shared Python seam's per-row output (kernel does only host-invariant
+    integer/finite compares), ``loss_rate``/``sl_hit_rate`` feed Door 5/6, and
+    the scalar ``max_sl_hit_rate`` is the opt-in Door-6 knob (``None`` = inert).
     """
     ...
 
@@ -384,10 +394,15 @@ def ranking_gate_reasons(
     win_rate: list[float],
     win_loss_ratio: list[float | None],
     max_consecutive_losses: list[int],
+    streak_threshold: list[int],
+    loss_rate: Sequence[float | None],
+    sl_hit_rate: Sequence[float | None],
+    max_sl_hit_rate: float | None,
 ) -> list[list[str]]:
     """Batched `brutex.ranking.gate_reasons` twin — the exact wire tokens.
 
-    Raises `ValueError` on unequal column lengths.
+    Door-5/6 columns mirror :func:`ranking_passes_gates` (the #1544 ranking
+    seam). Raises `ValueError` on unequal column lengths.
     """
     ...
 

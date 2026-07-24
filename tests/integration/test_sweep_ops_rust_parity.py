@@ -69,6 +69,7 @@ from brutex.engine.sweep_mem_budget import (  # noqa: E402
     plan_rank_memory,
 )
 from brutex.engine.sweep_ops_rust import (  # noqa: E402
+    _U64_CEILING,
     SWEEP_OPS_RUST_ENV,
     reset_sweep_ops_rust_for_tests,
     routed_count_violations,
@@ -1514,10 +1515,21 @@ class TestAprioriJoinParity:
         subset = data.draw(st.sets(st.sampled_from(pool), min_size=1, max_size=min(len(pool), 12)))
         frontier = sorted(subset)
         masks = np.array(sorted(_mask_of(t) for t in frontier), dtype=np.uint64)
+        # The sweep-ops crate's ``apriori_join_prune`` takes ``conflict_masks:
+        # Vec<u64>`` — the 74-bit vocab (V1 #1726) grows conflict pairs on bits
+        # 64-67, so ``_CONFLICT_PAIR_MASKS`` now holds masks >= 2**64 that
+        # OverflowError at the raw FFI. The FACADE's ``routed_apriori_join_prune``
+        # already guards this exact bound (``mask < _U64_CEILING`` degrades the
+        # whole call to the Python oracle), so scope the RAW-crate differential
+        # to the u64 domain the facade would ever forward. Decision-equivalent
+        # for these frontiers (universe <= 9 ⇒ candidate masks carry only bits
+        # 0-8, so a >=2**64 conflict pair can never fire either arm), and the
+        # oracle rebuilds conflicts from the canonical ``has_conflict`` itself.
+        u64_conflict_masks = [m for m in _CONFLICT_PAIR_MASKS if m < _U64_CEILING]
         raw = brutex_sweep_ops.apriori_join_prune(
             [list(t) for t in frontier],
             drop_conflicts,
-            list(_CONFLICT_PAIR_MASKS),
+            u64_conflict_masks,
             375,
             10**15,
             _BUDGET_CHECK_STRIDE,
