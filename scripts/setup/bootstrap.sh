@@ -168,18 +168,27 @@ else
   fi
 fi
 
-# ────────── 6a3. brutex_lake wheel ──────────
-# DEC-BRUTEX-LAKE-BOX-WHEEL-001: the data-lake Rust crate (ADR-0020).
-# Since DEC-RUST-LAKE-WAVED-001 (W-6a) the ``brutex_lake`` wheel is the ONE
-# production arm of the four waved lake cores (a missing/stale wheel is the
-# fail-loud ``LakeRustWavedUnavailableError`` at USE time — the Python cores
-# are deleted), but it is NOT module-top imported by brutex/, so bootstrap
-# keeps this step's shipped WARN-not-abort control flow: a build failure
-# warns loudly and bootstrap proceeds (`import brutex` still works; lake
-# operations refuse loudly until the operator re-runs the build).
+# ────────── 6a3. brutex_lake wheel (REQUIRED) ──────────
+# DEC-BRUTEX-LAKE-BOX-WHEEL-001 (ADR-0020) + DEC-RUST-LAKE-WAVED-001 (W-6a).
+# The ``brutex_lake`` wheel is the ONE production arm of the four waved lake
+# cores (timeframe_materialize / lake_heal / catalog_reconcile /
+# lake_invariants) — their Python oracles were DELETED (#1979), so a
+# missing/stale wheel is the fail-loud ``LakeRustWavedUnavailableError`` at
+# USE time, with NO degrade-to-oracle. A best-effort WARN-and-proceed here
+# would let the box bootstrap "clean" then crash at runtime on the FIRST
+# lake read/heal/scan — the box-crash class (the required-wheel-treated-as-
+# best-effort footgun DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) tightened). So
+# this step is REQUIRED: a build failure ABORTS bootstrap, matching
+# ``make run-raw`` (its brutex_lake block is not warn-only) + the
+# box_update.py ``WHEEL_SET`` ``required=True`` — the three turnkey build
+# paths agree. It is STILL not module-top imported by brutex/ (the
+# never-import inverse pin holds; the render seam ``lake_rust_render.py``
+# keeps its own import-guarded degrade-to-oracle for the default-ON
+# ``BRUTEX_LAKE_RUST_RENDER`` flag — a distinct property from whether the
+# BUILD step aborts).
 # COST: a cold build compiles the rev-pinned polars graph from source —
 # minutes of wall time and ~12 GB of rust/brutex-lake/target/ disk.
-_step "Step 6a3/7 — build + install brutex_lake Rust extension (cold build compiles the pinned polars graph — minutes + ~12 GB target/)"
+_step "Step 6a3/7 — build + install brutex_lake Rust extension (REQUIRED; cold build compiles the pinned polars graph — minutes + ~12 GB target/)"
 if python -c "import brutex_lake" 2>/dev/null; then
   _ok "brutex_lake already importable"
 else
@@ -188,7 +197,8 @@ else
   if python -c "import brutex_lake" 2>/dev/null; then
     _ok "brutex_lake built + installed via maturin"
   else
-    _warn "brutex_lake build failed — lake Rust ops will refuse loudly (LakeRustWavedUnavailableError, DEC-RUST-LAKE-WAVED-001) until it is built; re-run: cd rust/brutex-lake && maturin develop --release"
+    _err "brutex_lake build REQUIRED but failed — the four waved lake cores have no Python oracle (LakeRustWavedUnavailableError at USE time, DEC-RUST-LAKE-WAVED-001); re-run: cd rust/brutex-lake && maturin develop --release"
+    exit 1
   fi
 fi
 

@@ -141,19 +141,27 @@ KERNELS = _discover_maturin_kernels()
 # until the flip PR consciously re-points the registration at a real facade.
 OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
     # DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796 PR-1 / ADR-0020):
-    # brutex_lake is the default-OFF lake render crate. It is consumed ONLY
-    # through the import-guarded facade brutex/data/lake_rust_render.py
-    # (`importlib.import_module("brutex_lake")` inside the guard — an absent
-    # or broken install latches the flag OFF with one loud WARN and the
-    # Python render serves, byte-identical). It stays OPTIONAL (never a
-    # build PREREQUISITE — a build failure must not brick the box) but since
-    # DEC-BRUTEX-LAKE-BOX-WHEEL-001 it IS in the turnkey build path
-    # BEST-EFFORT (warn-only `make run-raw` + `bootstrap.sh` blocks —
-    # pinned by BOX_BUILT_OPTIONAL_KERNELS below); in NO cargo workspace,
-    # gated by its own CI lane (.github/workflows/lake-rust-parity.yml).
-    # A module-top `import brutex_lake` anywhere in brutex/ would make a
-    # clean clone crash-prone again — the inverse pin below forbids exactly
-    # that.
+    # brutex_lake is registered OPTIONAL here for exactly TWO properties: it
+    # is NEVER module-top imported by brutex/ (a module-top `import
+    # brutex_lake` would make a clean clone crash-prone again — the inverse
+    # pin below forbids exactly that) and its render seam
+    # brutex/data/lake_rust_render.py is import-guarded (an absent/broken
+    # install degrades to the byte-identical Python render for the default-ON
+    # `BRUTEX_LAKE_RUST_RENDER` flag). It is in NO cargo workspace, gated by
+    # its own CI lane (.github/workflows/lake-rust-parity.yml).
+    #
+    # BUT the BUILD step is REQUIRED, not best-effort: since
+    # DEC-RUST-LAKE-WAVED-001 (#1979) the four waved lake cores
+    # (timeframe_materialize / lake_heal / catalog_reconcile /
+    # lake_invariants) had their Python oracles DELETED — a missing wheel is
+    # the fail-loud LakeRustWavedUnavailableError at USE time with NO oracle,
+    # so a best-effort skip lets the box bootstrap "clean" then crash at
+    # runtime on the first lake read/heal/scan. So `make run-raw` +
+    # `bootstrap.sh` + box_update.py WHEEL_SET all build it REQUIRED (abort
+    # on failure) — pinned by BOX_BUILT_REQUIRED_KERNELS below +
+    # test_nightly_box_update.py::test_wheel_set_is_the_makefile_mirror.
+    # "OPTIONAL kernel" (facade/never-import) and "REQUIRED build" are
+    # DISTINCT properties; brutex_lake carries both.
     "brutex_lake": (
         "brutex/data/lake_rust_render.py",
         ".github/workflows/lake-rust-parity.yml",
@@ -354,89 +362,108 @@ REQUIRED_KERNELS = {
     name: crate_dir for name, crate_dir in KERNELS.items() if name not in OPTIONAL_KERNELS
 }
 
-# OPTIONAL kernels that are ALSO in the turnkey build path BEST-EFFORT
-# (DEC-BRUTEX-LAKE-BOX-WHEEL-001): `make run-raw` + `bootstrap.sh` build them
-# in the default path with a warn-only failure arm (the brutex_feed shape —
-# `{ cd rust/<crate> && … maturin develop --release; } || echo/_warn`), so a
-# broken toolchain / no-network box still boots while every healthy
-# `make setup` / `make run-raw` produces the wheel. The build-vs-WHEEL_SET
-# coupling is separately drift-pinned by
-# tests/unit/test_nightly_box_update.py::test_wheel_set_is_the_makefile_mirror.
-BOX_BUILT_OPTIONAL_KERNELS: dict[str, str] = {
+# OPTIONAL_KERNELS entries whose BUILD is REQUIRED in the turnkey path
+# (DEC-BRUTEX-LAKE-BOX-WHEEL-001 + DEC-RUST-LAKE-WAVED-001 #1979): brutex_lake
+# is registered OPTIONAL for the facade/never-module-top-import property, but
+# its four waved lake cores had their Python oracles DELETED, so a missing
+# wheel is the fail-loud LakeRustWavedUnavailableError at USE time with NO
+# oracle. A best-effort skip would let the box bootstrap "clean" then crash at
+# runtime on the first lake read/heal/scan (the box-crash class
+# DEC-RUST-DEFAULT-ON-WAVE-001 #2215 tightened) — so `make run-raw` +
+# `bootstrap.sh` + box_update.py WHEEL_SET all build it REQUIRED (abort on
+# failure). The build-vs-WHEEL_SET coupling is separately drift-pinned by
+# tests/unit/test_nightly_box_update.py::test_wheel_set_is_the_makefile_mirror
+# (which classifies required = NOT `|| echo` after the crate's own maturin).
+BOX_BUILT_REQUIRED_KERNELS: dict[str, str] = {
     "brutex_lake": "rust/brutex-lake",
 }
 
 
-@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_OPTIONAL_KERNELS.items()))
-def test_box_built_optional_kernel_is_registered_optional(import_name: str, crate_dir: str) -> None:
-    """The box-built set is a SUBSET of OPTIONAL_KERNELS with matching dirs."""
+def _run_raw_crate_block(crate_dir: str) -> str:
+    """The Makefile run-raw per-crate block, scoped exactly like the canonical
+    ``test_wheel_set_is_the_makefile_mirror`` parser (split on ``@$(VPY) -c``
+    so a later kernel's ``|| echo`` can never bleed into this crate's block)."""
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    for block in makefile.split("@$(VPY) -c")[1:]:
+        if "maturin" not in block or "cd rust/" not in block:
+            continue
+        this_dir = "rust/" + block.split("cd rust/", 1)[1].split(" ", 1)[0]
+        if this_dir == crate_dir:
+            return block
+    return ""
+
+
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_REQUIRED_KERNELS.items()))
+def test_box_built_required_kernel_is_registered_optional(import_name: str, crate_dir: str) -> None:
+    """The box-built-required set stays a SUBSET of OPTIONAL_KERNELS (matching
+    dirs) — brutex_lake carries the facade/never-import OPTIONAL property AND a
+    REQUIRED build; the two are distinct."""
     assert import_name in OPTIONAL_KERNELS, (
-        f"{import_name} is box-built best-effort but not registered OPTIONAL — "
-        "either register it (import-guarded facade + CI lane) or promote it to "
-        "the required class."
+        f"{import_name} is box-built required but not registered OPTIONAL — its "
+        "facade/never-module-top-import property still needs the OPTIONAL "
+        "registration (import-guarded facade + CI lane + inverse pin)."
     )
     assert KERNELS.get(import_name) == crate_dir.removeprefix("rust/"), (
-        f"BOX_BUILT_OPTIONAL_KERNELS maps {import_name} to {crate_dir} but the "
+        f"BOX_BUILT_REQUIRED_KERNELS maps {import_name} to {crate_dir} but the "
         "maturin crate discovery disagrees — fix the stale registration."
     )
 
 
-@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_OPTIONAL_KERNELS.items()))
-def test_make_run_raw_builds_optional_kernel(import_name: str, crate_dir: str) -> None:
-    """``make run-raw`` builds the optional kernel BEST-EFFORT (warn-only).
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_REQUIRED_KERNELS.items()))
+def test_make_run_raw_builds_required_kernel(import_name: str, crate_dir: str) -> None:
+    """``make run-raw`` builds the kernel with the REQUIRED abort shape.
 
-    DEC-BRUTEX-LAKE-BOX-WHEEL-001: the block must carry the feed-template
-    shape — the ``import`` probe, ``cd rust/<crate> … maturin develop``, AND
-    the ``|| echo`` warn-only arm AFTER the maturin invocation (a failure
-    warns, never aborts the box boot — the seams are default-OFF and every
-    facade degrades to the Python law).
+    DEC-RUST-LAKE-WAVED-001: the waved lake cores have no Python oracle, so a
+    build failure must ABORT run-raw (NOT warn-only). The block's own
+    maturin invocation must NOT be followed by a `|| echo` warn arm — scoped
+    per-crate exactly like test_wheel_set_is_the_makefile_mirror so a later
+    kernel's warn arm can never mask a regression here.
     """
-    run_body = _make_target_body(MAKEFILE.read_text(encoding="utf-8"), "run-raw")
-    assert f"import {import_name}" in run_body, (
-        f"Makefile `run-raw` never probes `import {import_name}` — the optional "
-        f"kernel is no longer box-built (DEC-BRUTEX-LAKE-BOX-WHEEL-001)."
+    block = _run_raw_crate_block(crate_dir)
+    assert block, (
+        f"Makefile `run-raw` has no per-crate block probing `cd {crate_dir}` "
+        f"+ maturin — {import_name} is no longer box-built."
     )
-    assert crate_dir in run_body and "maturin" in run_body, (
-        f"Makefile `run-raw` never builds {crate_dir} via maturin."
+    assert f"import {import_name}" in block, (
+        f"Makefile `run-raw` never probes `import {import_name}`."
     )
-    # Warn-only shape: `|| echo` must follow the crate's maturin invocation
-    # (the same after-maturin reading test_wheel_set_is_the_makefile_mirror's
-    # run-raw parser applies — required = NOT warn-only).
-    block = run_body.split(f"cd {crate_dir}", 1)
-    assert len(block) == 2, f"no `cd {crate_dir}` in the run-raw recipe"
-    after_maturin = block[1].split("maturin", 1)
-    assert len(after_maturin) == 2, f"no maturin invocation after `cd {crate_dir}`"
-    assert "|| echo" in after_maturin[1], (
-        f"the {crate_dir} run-raw block is not warn-only (`|| echo` after "
-        "maturin) — a build failure would abort the box boot; the optional "
-        "kernel must stay best-effort."
+    # REQUIRED shape: no `|| echo` after the crate's OWN maturin invocation
+    # (the canonical `test_wheel_set_is_the_makefile_mirror` classifier).
+    after_maturin = block.split("maturin", 2)[-1]
+    assert "|| echo" not in after_maturin, (
+        f"the {crate_dir} run-raw block IS warn-only (`|| echo` after maturin) "
+        "— a build failure would let the box boot with the wheel missing, then "
+        "crash at runtime on the first lake op (LakeRustWavedUnavailableError). "
+        "The build must be REQUIRED (abort on failure)."
     )
 
 
-@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_OPTIONAL_KERNELS.items()))
-def test_bootstrap_builds_optional_kernel(import_name: str, crate_dir: str) -> None:
-    """``bootstrap.sh`` builds the optional kernel BEST-EFFORT (warn-only)."""
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_REQUIRED_KERNELS.items()))
+def test_bootstrap_builds_required_kernel(import_name: str, crate_dir: str) -> None:
+    """``bootstrap.sh`` builds the kernel with the REQUIRED abort shape
+    (`_err` + `exit 1`, never `_warn`) inside the kernel's own step."""
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
     assert f"import {import_name}" in bootstrap, (
-        f"bootstrap.sh never probes `import {import_name}` — the optional "
-        f"kernel is no longer box-built (DEC-BRUTEX-LAKE-BOX-WHEEL-001)."
+        f"bootstrap.sh never probes `import {import_name}` — the kernel is no "
+        f"longer box-built (DEC-BRUTEX-LAKE-BOX-WHEEL-001)."
     )
     assert crate_dir in bootstrap and "maturin" in bootstrap, (
         f"bootstrap.sh never builds {crate_dir} via maturin."
     )
-    # Warn-only shape: the failure arm is `_warn` (never `_err` + `exit 1` —
-    # the required-kernel steps' abort shape) inside the kernel's own step.
+    # REQUIRED shape: the failure arm carries `_err` + `exit 1` (never `_warn`)
+    # inside the kernel's own step (split on the step's first closing `fi`).
     step = bootstrap.split(f"cd {crate_dir}", 1)
     assert len(step) == 2, f"no `cd {crate_dir}` in bootstrap.sh"
     failure_arm = step[1].split("fi", 2)[0]
-    assert "_warn" in failure_arm, (
-        f"the {crate_dir} bootstrap step is not warn-only (`_warn` on build "
-        "failure) — a failure would abort bootstrap; the optional kernel must "
-        "stay best-effort."
+    assert "_err" in failure_arm and "exit 1" in failure_arm, (
+        f"the {crate_dir} bootstrap step is not REQUIRED (`_err` + `exit 1` on "
+        "build failure) — a failure would let the box bootstrap clean then "
+        "crash at runtime on the first lake op (LakeRustWavedUnavailableError, "
+        "DEC-RUST-LAKE-WAVED-001). The build must abort bootstrap."
     )
-    assert "_err" not in failure_arm, (
-        f"the {crate_dir} bootstrap step carries the abort-shape `_err` — the "
-        "optional kernel must warn, never abort."
+    assert "_warn" not in failure_arm, (
+        f"the {crate_dir} bootstrap step still carries the warn-only `_warn` — "
+        "the required kernel must abort, never warn-and-proceed."
     )
 
 
