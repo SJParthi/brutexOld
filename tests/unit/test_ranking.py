@@ -1218,7 +1218,9 @@ class TestRustDispatchSeam:
         from brutex.ranking import rust_ranking
 
         pool = [(0b01, _m(sharpe_ratio=1.0)), (0b10, _m(sharpe_ratio=3.0))]
-        monkeypatch.delenv("BRUTEX_RANKING_RUST", raising=False)
+        # OFF/oracle baseline (#2215: the seam default is ON — an unset flag
+        # would compute ``expected`` via the Rust path, not the Python oracle).
+        monkeypatch.setenv("BRUTEX_RANKING_RUST", "0")
         expected = rank_combos(pool)
         calls: list[int] = []
 
@@ -1234,7 +1236,9 @@ class TestRustDispatchSeam:
     def test_disabled_never_consults_the_rust_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from brutex.ranking import rust_ranking
 
-        monkeypatch.delenv("BRUTEX_RANKING_RUST", raising=False)
+        # OFF is the explicit kill switch (#2215: the seam default is ON, so an
+        # unset flag would engage the seam and trip the _boom guard below).
+        monkeypatch.setenv("BRUTEX_RANKING_RUST", "0")
 
         def _boom(candidates: Any, *, overfit: OverfitGateConfig | None = None) -> None:
             raise AssertionError("rank_combos_via_rust must not run with the flag OFF")

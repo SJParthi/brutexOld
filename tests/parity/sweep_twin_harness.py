@@ -313,6 +313,7 @@ def run_persisted_arm(
                 audit=audit,
                 trial_stats_digest=trial_stats_digest,
                 reference_stamper=reference_stamper,
+                exec_bars_1m=bars,  # the §6 tf=1minute fixed point
             )
     return PersistedArmArtifacts(
         arm=arm.name,

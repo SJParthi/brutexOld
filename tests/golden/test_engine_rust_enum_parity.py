@@ -100,10 +100,15 @@ _SPURIOUS_MIN_HITS = 251
 
 @pytest.fixture(autouse=True)
 def _fresh_rust_enum_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fresh warn-once memo + shadow windows + an UNSET flag per test."""
+    """Fresh warn-once memo + shadow windows + the OFF/oracle arm per test.
+
+    Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the seam default is ON, so the
+    OFF/oracle baseline every ON-vs-OFF parity test compares against must be
+    EXPLICITLY armed ``"0"`` (not an unset flag, which would reveal the ON
+    default and collapse both arms onto the Rust path)."""
     reset_observability_memo_for_tests()
     reset_enum_self_check_for_tests()
-    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "0")
     monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
 
 
@@ -204,7 +209,7 @@ def test_leaderboard_byte_identical_on_vs_off_digest_path(
     pytest.importorskip("polars")  # flush needs the [data] extra
     bars = _bars()
 
-    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "0")  # the OFF/oracle arm (#2215: default is ON)
     off_dir = tmp_path / "off"
     off_dir.mkdir()
     off = _run(off_dir, "cell", bars, k, _DIGEST)
@@ -262,7 +267,7 @@ def test_legacy_no_digest_on_matches_off_and_never_engages(
     bars = _bars()
     k = 2
 
-    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "0")  # the OFF/oracle arm (#2215: default is ON)
     off_dir = tmp_path / "off"
     off_dir.mkdir()
     off = _run(off_dir, "cell", bars, k, None)
@@ -295,7 +300,7 @@ def test_flag_flip_crash_redo_rewrites_byte_identically(
     cell_dir = tmp_path / "cell"
     cell_dir.mkdir()
 
-    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "0")  # the OFF/oracle arm (#2215: default is ON)
     off = _run(cell_dir, "cell", bars, k, _DIGEST)
     store_path = cell_dir / "cell.parquet"
     sidecar_path = trial_stats_sidecar_path(store_path)
@@ -583,7 +588,7 @@ def test_f1_positional_checkpoint_tuple_digest_map_is_arm_identical(
         )
         return [_tuple_digest(t, grid) for t in iter_sweep_tuples(grid)]
 
-    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "0")  # the OFF/oracle arm (#2215: default is ON)
     off_map = _digests()
     monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "1")
     on_map = _digests()

@@ -8,13 +8,14 @@ equality of every wrapper, and the ENGAGEMENT of the real dispatch sites
 (``compute_trade_cost`` / ``compute_futures_trade_cost``) through a counting
 kernel proxy — every line + branch, for the strict standalone 100% gate.
 
-The coordinator's DEFAULT-OFF == TODAY byte-identity pin lives here as
-:func:`test_off_arm_is_todays_python_bytes`: the OFF arm (unset AND the
-explicit ``"0"`` kill switch) is proven to run the verbatim Python oracle
-with the kernel structurally unreachable (a BOMB kernel object) — combined
-with the UNMODIFIED frozen golden suites passing flag-less, that is the
-"OFF arm == today's bytes" license the flip DEC (DEC-EXEC-RUST-FLIP-001)
-requires.
+Since DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215) the seam default is
+ON — an unset flag ENGAGES the kernel; OFF is the explicit kill switch
+(``"0"``/``"off"``). The OFF-arm == TODAY byte-identity pin lives here as
+:func:`test_off_arm_is_todays_python_bytes`: the OFF arm (both explicit kill
+-switch spellings) is proven to run the verbatim Python oracle with the
+kernel structurally unreachable (a BOMB kernel object) — combined with the
+UNMODIFIED frozen golden suites passing on a ``"0"``-armed run, that is the
+"OFF arm == today's bytes" license the default flip requires.
 """
 
 from __future__ import annotations
@@ -79,7 +80,10 @@ _FUTURES_ARGS: dict[str, Any] = {
 
 @pytest.fixture(autouse=True)
 def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Each test sees a fresh warn-once memo and an UNSET flag."""
+    """Each test sees a fresh warn-once memo and an UNSET flag (which, since
+    DEC-RUST-DEFAULT-ON-WAVE-001 (#2215), reveals the true production default
+    — ON). Every OFF-arm/bomb-kernel test explicitly arms ``"0"``/``"off"``;
+    every ON-arm test explicitly arms ``"1"``."""
     exec_rust.reset_warn_memo_for_tests()
     monkeypatch.delenv(exec_rust.ENV_FLAG, raising=False)
     yield
@@ -133,12 +137,13 @@ def test_flag_falsy_values_disable(monkeypatch: pytest.MonkeyPatch, value: str) 
     assert exec_rust.exec_rust_enabled() is False
 
 
-def test_flag_unset_is_off_default() -> None:
-    """The default is OFF — the standing default-OFF law for a kernel where
-    results exist; the flip to ``True`` is DEC-EXEC-RUST-FLIP-001, not this
-    change (the one-constant lever is pinned here)."""
-    assert exec_rust.EXEC_RUST_DEFAULT is False
-    assert exec_rust.exec_rust_enabled() is False
+def test_flag_unset_is_on_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default is ON since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215): the
+    exec-cost kernel is ENGAGED by default (the one-constant lever is pinned
+    here). delenv removes the conftest belt so the true default shows."""
+    monkeypatch.delenv(exec_rust.ENV_FLAG, raising=False)
+    assert exec_rust.EXEC_RUST_DEFAULT is True
+    assert exec_rust.exec_rust_enabled() is True
 
 
 def test_env_flag_literal_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,15 +212,14 @@ def _call_every_wrapper() -> list[object]:
     ]
 
 
-@pytest.mark.parametrize("flag", [None, "0"])
-def test_off_arm_never_touches_the_kernel(
-    monkeypatch: pytest.MonkeyPatch, flag: str | None
-) -> None:
-    """OFF (unset AND the explicit kill switch): every wrapper returns
-    ``None`` BEFORE any kernel attribute access (bomb-kernel structural
-    proof) and emits ZERO warnings."""
-    if flag is not None:
-        monkeypatch.setenv(exec_rust.ENV_FLAG, flag)
+@pytest.mark.parametrize("flag", ["0", "off"])
+def test_off_arm_never_touches_the_kernel(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    """OFF (the explicit kill switch, both spellings ``"0"``/``"off"``):
+    every wrapper returns ``None`` BEFORE any kernel attribute access
+    (bomb-kernel structural proof) and emits ZERO warnings. Since
+    DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) an UNSET flag engages the crate, so
+    OFF is the explicit kill switch — never the unset default."""
+    monkeypatch.setenv(exec_rust.ENV_FLAG, flag)
     bomb = _BombKernel()
     monkeypatch.setattr(exec_rust, "_rust", bomb)
     with capture_logs() as logs:
@@ -1025,24 +1029,23 @@ def _futures_trade() -> FuturesTradeInput:
 
 
 def test_off_arm_is_todays_python_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The coordinator's DEFAULT-OFF == TODAY byte-identity pin.
+    """The OFF-arm (kill switch) == TODAY byte-identity pin.
 
-    Unset AND the explicit ``"0"`` kill switch produce IDENTICAL breakdowns
-    through the REAL dispatch sites with the kernel structurally
+    Both explicit OFF spellings (``"0"`` and ``"off"``) produce IDENTICAL
+    breakdowns through the REAL dispatch sites with the kernel structurally
     unreachable (bomb) — i.e. the OFF arm IS the verbatim Python oracle.
-    The "== today" half is carried by the UNMODIFIED frozen golden suites
-    (test_costs_verified_examples / the executor goldens) passing on the
-    flag-less default run; this pin proves the OFF arm cannot involve the
-    kernel at all, so those suites certify the OFF arm bytes.
+    Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the seam default is ON, so an
+    UNSET flag now engages the crate and is no longer an OFF spelling — OFF is
+    the explicit kill switch. The "== today" half is carried by the UNMODIFIED
+    frozen golden suites (test_costs_verified_examples / the executor goldens)
+    passing on the ``"0"``-armed run; this pin proves the OFF arm cannot
+    involve the kernel at all, so those suites certify the OFF arm bytes.
     """
     bomb = _BombKernel()
     monkeypatch.setattr(exec_rust, "_rust", bomb)
     results: list[tuple[TradeCostBreakdown, FuturesCostBreakdown]] = []
-    for flag in (None, "0"):
-        if flag is None:
-            monkeypatch.delenv(exec_rust.ENV_FLAG, raising=False)
-        else:
-            monkeypatch.setenv(exec_rust.ENV_FLAG, flag)
+    for flag in ("0", "off"):
+        monkeypatch.setenv(exec_rust.ENV_FLAG, flag)
         results.append(
             (compute_trade_cost(_option_trade()), compute_futures_trade_cost(_futures_trade()))
         )

@@ -950,8 +950,8 @@ def rank_combos(
         :func:`_temporal_survivors`).
     """
     # ── The ONE flag-gated Rust dispatch seam (slice 4 PR-1;
-    # ``BRUTEX_RANKING_RUST``, default OFF — :mod:`brutex.ranking.rust_ranking`).
-    # Imported lazily so the (default) OFF arm costs one cached-module import
+    # ``BRUTEX_RANKING_RUST``, default ON (#2215) — :mod:`brutex.ranking.rust_ranking`).
+    # Imported lazily so the arm costs one cached-module import
     # + one env probe (OFF-cost bench-pinned) and the module graph stays
     # cycle-free; a ``None`` return (wheel missing/stale) falls through to
     # the verbatim Python pipeline below, byte-identical by construction.
@@ -972,7 +972,7 @@ def rank_combos(
     # bits were recorded with the ceiling at ``SurvivorColumns.append``).
     #
     # KEEP-BOTH WEAVE (#1544 club-r1-fnomath ranking Rust seam × the Door-6
-    # ceiling): the default-OFF Rust fast-path engages ONLY when NO Door-6
+    # ceiling): the default-ON Rust fast-path engages ONLY when NO Door-6
     # ceiling is active. ``rank_combos_via_rust`` carries neither a temporal
     # NOR a ``max_sl_hit_rate`` parameter (the axis it predates, per the
     # comment above), so — exactly like the temporal arm — an active ceiling

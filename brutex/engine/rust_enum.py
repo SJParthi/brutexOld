@@ -25,10 +25,13 @@ sibling :func:`brutex.engine.rust_metrics.sweep_rust_metrics_enabled` (whose
 ``_TRUTHY`` / ``_FALSY`` literal sets are consumed through the PUBLIC
 :func:`~brutex.engine.sweep_lookahead.env_flag_tristate` classifier, not
 copied — CLAUDE.md §11 COMMON). Resolution: a ``_TRUTHY`` value forces ON, a
-``_FALSY`` value forces OFF, unset/whitespace-empty falls to
-:data:`SWEEP_RUST_ENUM_DEFAULT` (**False — ships inert**; the default-ON flip
-is a SEPARATE later ADR, the rust_metrics/ADR-0017 precedent), and any OTHER
-value fails SAFE to OFF with one warn-once ``flag_unrecognised`` event.
+``_FALSY`` value (the explicit ``0`` kill switch) forces OFF,
+unset/whitespace-empty falls to :data:`SWEEP_RUST_ENUM_DEFAULT`
+(**True since the DEC-RUST-DEFAULT-ON-WAVE-001 flip, #2215** — the operator
+RUST-O(1)-EVERYWHERE directive engages the kernel by default, the parity
+self-check + ship-the-oracle autorevert + degrade-to-Python-generator
+safety layers untouched), and any OTHER value fails SAFE to OFF with one
+warn-once ``flag_unrecognised`` event.
 
 ## The order law (Golden Rule #4 — why bit-identity is load-bearing)
 
@@ -169,12 +172,13 @@ _LOG = structlog.get_logger("brutex.engine.rust_enum")
 SWEEP_RUST_ENUM_ENV: Final[str] = "BRUTEX_SWEEP_RUST_ENUM"
 
 #: The ONE default-arm constant: what :func:`sweep_rust_enum_enabled` returns
-#: when the env flag is unset or whitespace-empty. ``False`` = the kernel
-#: SHIPS INERT (the standing default-OFF contract for new Rust kernels); the
-#: default-ON flip is a SEPARATE later ADR once the residuals are cleared
-#: (the DEC-SWEEP-RUST-METRICS-001 → ADR-0017 lever pattern). Flip = this ONE
-#: constant.
-SWEEP_RUST_ENUM_DEFAULT: Final[bool] = False
+#: when the env flag is unset or whitespace-empty. ``True`` since the
+#: operator RUST-O(1)-EVERYWHERE directive (DEC-RUST-DEFAULT-ON-WAVE-001,
+#: #2215): the enum kernel is ENGAGED by default, with the parity self-check
+#: + ship-the-oracle autorevert + degrade-to-Python-generator safety layers
+#: untouched. The explicit ``0`` env value is the kill switch. Flip = this
+#: ONE constant.
+SWEEP_RUST_ENUM_DEFAULT: Final[bool] = True
 
 #: The enum work-cells knob (design §3): the per-call ``max_work_cells``
 #: budget (enumerated × n_bars, the GIL/liveness bound) AND the numerator of
@@ -294,11 +298,11 @@ def sweep_rust_enum_enabled() -> bool:
       case-insensitive, surrounding whitespace ignored) → ``True``;
     * a ``_FALSY`` value (``0`` / ``false`` / ``no`` / ``off``) → ``False``;
     * unset or whitespace-empty → :data:`SWEEP_RUST_ENUM_DEFAULT` (the
-      one-constant flip lever — ``False``, ships inert);
+      one-constant flip lever — ``True`` since #2215, kernel engaged);
     * any OTHER value → ``False`` with one warn-once ``flag_unrecognised``
-      fallback event. Under a default-OFF kernel the unrecognised arm
-      COINCIDES with the default, but the warn stays: a typo'd ENABLE
-      attempt (``0n``, ``enable``) must be VISIBLE, never silently inert —
+      fallback event. Under the default-ON kernel the unrecognised arm is the
+      fail-SAFE degrade to Python, and the warn stays: a typo'd DISABLE
+      attempt (``0n``, ``disable``) must be VISIBLE, never silently ON —
       the rust_metrics fail-safe law with the direction flipped.
 
     The vocabulary is the SAME ``_TRUTHY`` / ``_FALSY`` pair as every sweep

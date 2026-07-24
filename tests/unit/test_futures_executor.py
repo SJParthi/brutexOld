@@ -990,6 +990,8 @@ class TestMaterializeGateArms:
         assert isinstance(out, RejectedFuturesTrade)
         assert out.reason is FuturesRejectReason.NO_CONTRACT
         assert source.calls == []
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DEC-EXEC-RUST-CORE-001 — the BRUTEX_EXEC_RUST dispatch tail (slice 7 / P8)
 # ─────────────────────────────────────────────────────────────────────────────

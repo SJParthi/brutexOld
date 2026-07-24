@@ -1,7 +1,7 @@
 """Unit gate for :mod:`brutex.ranking.rust_ranking` (slice-4 PR-1).
 
 100% line + branch over the flag-gated Rust ranking binding: the
-``BRUTEX_RANKING_RUST`` resolution (default OFF), the ONE ``rank_combos``
+``BRUTEX_RANKING_RUST`` resolution (default ON since #2215), the ONE ``rank_combos``
 dispatch seam (ON → Rust pipeline; wheel missing/stale → verbatim Python;
 OFF → byte-identical legacy), the per-family parity wiring (burn-in for the
 (a)/(b) families, ALWAYS-ON differential for the (b*) families), the
@@ -131,10 +131,12 @@ def _keys(ranked: list[RankedCombo]) -> list[tuple[int, bytes, object]]:
 
 
 class TestRankingRustFlag:
-    def test_default_is_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # DEC-RUST-DEFAULT-ON-WAVE-001 (#2215): the ranking kernel is engaged
+        # by default; delenv removes the conftest belt so the true default shows.
         monkeypatch.delenv(RANKING_RUST_ENV, raising=False)
-        assert RANKING_RUST_DEFAULT is False
-        assert ranking_rust_enabled() is False
+        assert RANKING_RUST_DEFAULT is True
+        assert ranking_rust_enabled() is True
 
     @pytest.mark.parametrize("value", ["1", "true", "ON"])
     def test_truthy_enables(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
@@ -521,7 +523,7 @@ class TestMutationHardening:
         from brutex.ranking.rust_ranking import _ALL_FAMILIES  # pyright: ignore[reportPrivateUsage]
 
         assert RANKING_RUST_ENV == "BRUTEX_RANKING_RUST"
-        assert RANKING_RUST_DEFAULT is False
+        assert RANKING_RUST_DEFAULT is True
         assert tuple(f.name for f in _ALL_FAMILIES) == (
             "ranking.seam",
             "ranking.gates",

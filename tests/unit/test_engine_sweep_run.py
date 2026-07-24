@@ -4723,10 +4723,15 @@ class TestRustEnumSeam:
 
     @pytest.fixture(autouse=True)
     def _fresh_rust_enum_state(self, monkeypatch: pytest.MonkeyPatch) -> Iterable[None]:
-        """Fresh warn-once memo / burn-in budget / flag per test."""
+        """Fresh warn-once memo / burn-in budget + the OFF/oracle arm per test.
+
+        Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the seam default is ON, so
+        the OFF baseline the ON-vs-OFF parity tests compare against is armed
+        ``"0"`` explicitly (an unset flag would engage the crate on the OFF
+        arm and collapse the parity)."""
         rust_enum.reset_observability_memo_for_tests()
         rust_enum.reset_enum_self_check_for_tests()
-        monkeypatch.delenv(rust_enum.SWEEP_RUST_ENUM_ENV, raising=False)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "0")
         monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
         yield
         rust_enum.reset_observability_memo_for_tests()

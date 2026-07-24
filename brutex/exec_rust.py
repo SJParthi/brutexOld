@@ -24,20 +24,21 @@ inside the dispatching function (the ``materialize_trade`` lazy-import
 precedent) — deferral of the engine-package + one-time ``fno_math`` import
 cost, no longer cycle-avoidance.
 
-## The flag — ``BRUTEX_EXEC_RUST`` over ``EXEC_RUST_DEFAULT`` (OFF)
+## The flag — ``BRUTEX_EXEC_RUST`` over ``EXEC_RUST_DEFAULT`` (ON since #2215)
 
 :func:`exec_rust_enabled` mirrors the sibling
 :func:`brutex.engine.rust_metrics.sweep_rust_metrics_enabled` exactly,
 classified through the COMMON PUBLIC
 :func:`brutex.engine.sweep_lookahead.env_flag_tristate` (never copied —
-CLAUDE.md §11): a truthy value forces ON, a falsy value forces OFF,
-unset/whitespace-empty falls to :data:`EXEC_RUST_DEFAULT` = **False**
-(default-OFF is the standing law for a kernel where results exist; the flip
-to ``True`` is NOT this change — it is its own later coordinator decision,
-DEC-EXEC-RUST-FLIP-001), and any unrecognised value fails SAFE to OFF with
-one warn-once ``exec_rust.flag_unrecognised`` event. Read per CALL so spawn
-workers resolve their own inherited environment (no module-global flag
-state).
+CLAUDE.md §11): a truthy value forces ON, a falsy value (``0``/``false``/
+``no``/``off`` — the explicit kill switch) forces OFF,
+unset/whitespace-empty falls to :data:`EXEC_RUST_DEFAULT` = **True** since
+the operator RUST-O(1)-EVERYWHERE directive (DEC-RUST-DEFAULT-ON-WAVE-001,
+#2215) — the kernel is ENGAGED by default with the burn-in bit-compare +
+ship-the-oracle autorevert + degrade-to-oracle safety layers untouched —
+and any unrecognised value fails SAFE to OFF with one warn-once
+``exec_rust.flag_unrecognised`` event. Read per CALL so spawn workers
+resolve their own inherited environment (no module-global flag state).
 
 ## The fallback law (mirrors DEC-SWEEP-RUST-METRICS-001)
 
@@ -124,9 +125,12 @@ class StaleExecWheelError(RuntimeError):
 
 _LOG = structlog.get_logger(__name__)
 
-#: The one-constant flip lever — OFF until the DEC-EXEC-RUST-FLIP-001
-#: decision flips it (default-OFF where results exist; standing law 3).
-EXEC_RUST_DEFAULT: Final[bool] = False
+#: The one-constant flip lever — ``True`` since the operator
+#: RUST-O(1)-EVERYWHERE directive (DEC-RUST-DEFAULT-ON-WAVE-001, #2215):
+#: the exec-cost kernel is ENGAGED by default, with the i64-envelope route,
+#: burn-in bit-compare + ship-the-oracle autorevert + degrade-to-oracle
+#: safety layers untouched. The explicit ``0`` env value is the kill switch.
+EXEC_RUST_DEFAULT: Final[bool] = True
 
 #: The env flag over the default (sibling of ``BRUTEX_SWEEP_RUST_METRICS``).
 ENV_FLAG: Final[str] = "BRUTEX_EXEC_RUST"
@@ -181,11 +185,11 @@ def _warn_once(event: str, *, reason: str, **kw: object) -> None:
 def exec_rust_enabled() -> bool:
     """Resolve ``BRUTEX_EXEC_RUST`` over :data:`EXEC_RUST_DEFAULT` per call.
 
-    Truthy → ON; falsy → OFF (the explicit operator switch); unset or
-    whitespace-empty → the default (**False** — the flip is
-    DEC-EXEC-RUST-FLIP-001, not this change); any other value → fail-safe
-    OFF with one warn-once ``exec_rust.flag_unrecognised``. Vocabulary via
-    the COMMON :func:`~brutex.engine.sweep_lookahead.env_flag_tristate`.
+    Truthy → ON; falsy → OFF (the explicit ``0`` kill switch); unset or
+    whitespace-empty → the default (**True** since DEC-RUST-DEFAULT-ON-WAVE-001,
+    #2215); any other value → fail-safe OFF with one warn-once
+    ``exec_rust.flag_unrecognised``. Vocabulary via the COMMON
+    :func:`~brutex.engine.sweep_lookahead.env_flag_tristate`.
     """
     raw = os.environ.get(ENV_FLAG, "")
     verdict = env_flag_tristate(raw)

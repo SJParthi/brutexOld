@@ -76,7 +76,11 @@ def _call(
 
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch: pytest.MonkeyPatch) -> Iterable[None]:
-    """Fresh flag/env/shadow/latch/memo state per test (process-global cells)."""
+    """Fresh flag/env/shadow/latch/memo state per test (process-global cells).
+
+    Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) an unset flag reveals the ON
+    default: ON-arm tests use ``@pytest.mark.usefixtures("_on")`` and the OFF
+    arm explicitly arms ``"0"`` — never the unset default."""
     monkeypatch.delenv(rust_enum.SWEEP_RUST_ENUM_ENV, raising=False)
     monkeypatch.delenv(rust_enum.ENUM_WORK_CELLS_ENV, raising=False)
     rust_enum.reset_enum_self_check_for_tests()
@@ -106,10 +110,12 @@ def test_flag_falsy_values_disable(monkeypatch: pytest.MonkeyPatch, value: str) 
     assert rust_enum.sweep_rust_enum_enabled() is False
 
 
-def test_flag_unset_is_off_ships_inert() -> None:
-    """Default-OFF is the ONE flip constant — the kernel ships inert."""
-    assert rust_enum.SWEEP_RUST_ENUM_DEFAULT is False
-    assert rust_enum.sweep_rust_enum_enabled() is False
+def test_flag_unset_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default-ON is the ONE flip constant (DEC-RUST-DEFAULT-ON-WAVE-001, #2215):
+    the kernel is ENGAGED by default. delenv removes the conftest belt."""
+    monkeypatch.delenv(rust_enum.SWEEP_RUST_ENUM_ENV, raising=False)
+    assert rust_enum.SWEEP_RUST_ENUM_DEFAULT is True
+    assert rust_enum.sweep_rust_enum_enabled() is True
 
 
 @pytest.mark.parametrize("value", ["", "   "])
@@ -463,7 +469,10 @@ def test_consume_shadow_floor_unmet_warns_once() -> None:
 
 
 def test_off_arm_is_silent_and_structurally_free(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Flag OFF is the deliberate default state — no warn, no kernel resolve."""
+    """Flag OFF (the explicit kill switch) — no warn, no kernel resolve. Since
+    DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the default is ON, so OFF is armed
+    explicitly ``"0"`` (an unset flag would engage the kernel)."""
+    monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "0")
 
     def _must_not_resolve(width: str) -> NoReturn:
         raise AssertionError("the OFF arm must never resolve the kernel")
@@ -914,8 +923,8 @@ class TestMutationHardening:
         assert rust_enum.SWEEP_RUST_ENUM_ENV == "BRUTEX_SWEEP_RUST_ENUM"
         assert rust_enum.ENUM_WORK_CELLS_ENV == "BRUTEX_SWEEP_CORE_ENUM_CELLS"
 
-    def test_default_is_false(self) -> None:
-        assert rust_enum.SWEEP_RUST_ENUM_DEFAULT is False
+    def test_default_is_true(self) -> None:
+        assert rust_enum.SWEEP_RUST_ENUM_DEFAULT is True
 
     def test_work_cell_constants(self) -> None:
         assert rust_enum.DEFAULT_ENUM_WORK_CELLS == 2**28

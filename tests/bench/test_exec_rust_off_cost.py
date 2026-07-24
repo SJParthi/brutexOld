@@ -71,17 +71,16 @@ def _median(samples: list[float]) -> float:
 
 
 class TestOffModeIsFree:
-    @pytest.mark.parametrize("flag", [None, "0"])
+    @pytest.mark.parametrize("flag", ["0", "off"])
     def test_flag_probe_cost_is_below_one_bare_walk(
-        self, monkeypatch: pytest.MonkeyPatch, flag: str | None
+        self, monkeypatch: pytest.MonkeyPatch, flag: str
     ) -> None:
         """The whole OFF-mode seam addition (one env probe) is nil next to
         even ONE no-op walk over a large list — so it cannot hide a
-        per-trade cost (both OFF spellings: unset default + kill switch)."""
-        if flag is None:
-            monkeypatch.delenv(exec_rust.ENV_FLAG, raising=False)
-        else:
-            monkeypatch.setenv(exec_rust.ENV_FLAG, flag)
+        per-trade cost. Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the seam
+        default is ON, so OFF is an explicit kill-switch value ('0'/'off') —
+        the unset arm now engages the crate and is not an OFF spelling."""
+        monkeypatch.setenv(exec_rust.ENV_FLAG, flag)
         items = list(range(_LARGE))
 
         probe_samples: list[float] = []

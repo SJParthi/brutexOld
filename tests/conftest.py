@@ -277,6 +277,19 @@ for _wave_flag in (
     # teeth arm modes via monkeypatch / direct-call (override this setdefault);
     # the calendar-rust-parity lane sets it "1" explicitly.
     "BRUTEX_CALENDAR_RUST",
+    # the #1544 club fno-math conversion seams, flipped default-ON by
+    # DEC-RUST-DEFAULT-ON-WAVE-001 in this club (ranking gate/rank kernels,
+    # the ranged sweep-enum kernel, the exec-cost / fill cores). An unset
+    # flag now resolves ON, so an OFF-arm parity/golden that delegates-to
+    # (or delenv-pops) the flag would silently route to Rust; the belt pins
+    # each OFF-by-default so the verbatim Python oracle arm stays genuinely
+    # exercised. Each facade's OWN parity/golden/off-cost tests arm modes via
+    # ``monkeypatch.delenv`` (default-ON pin) / ``monkeypatch.setenv`` (ON pin)
+    # — both override this setdefault. Drift-pinned equal to each module's
+    # ``*_ENV`` constant by that facade's dedicated test.
+    "BRUTEX_RANKING_RUST",
+    "BRUTEX_SWEEP_RUST_ENUM",
+    "BRUTEX_EXEC_RUST",
 ):
     os.environ.setdefault(_wave_flag, "0")
 del _wave_flag

@@ -63,7 +63,9 @@ def _probe(bits: list[int], k: int, *, min_hits: int = 0) -> RustEnumResult | No
 def _fresh_state(monkeypatch: pytest.MonkeyPatch) -> None:
     rust_enum.reset_observability_memo_for_tests()
     rust_enum.reset_enum_self_check_for_tests()
-    monkeypatch.delenv(SWEEP_RUST_ENUM_ENV, raising=False)
+    # OFF-arm baseline: since #2215 the seam default is ON, so OFF-cost tests
+    # must explicitly arm "0" (an unset flag would reveal the ON default).
+    monkeypatch.setenv(SWEEP_RUST_ENUM_ENV, "0")
 
 
 def _median_probe_seconds(bits: list[int], k: int, *, rounds: int = 200) -> float:
@@ -157,16 +159,18 @@ class TestOnArmStructure:
             tp_paisa=50,
             min_hits=0,
         )
+        bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "cell.parquet")
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
         with AuditWriter.open(tmp_path / "cell.jsonl") as audit:
             run_persisted_sweep(
-                _trending_bars(),
+                bars,
                 cfg,
                 store=store,
                 dedup=dedup,
                 audit=audit,
                 trial_stats_digest=digest,
+                exec_bars_1m=bars,  # the §6 tf=1minute fixed point
             )
 
     def test_off_arm_iterates_the_python_generator(

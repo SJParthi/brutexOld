@@ -10,13 +10,17 @@ burn-in / always-on-differential / autorevert wrapper core) that serves
 Per-call env resolution through the COMMON tristate vocabulary
 (:func:`brutex.engine.rust_parity_core.env_flag_enabled` — the
 ``rust_metrics`` law): a ``_TRUTHY`` value forces ON, a ``_FALSY`` value
-forces OFF, unset/whitespace-empty falls to :data:`RANKING_RUST_DEFAULT` —
-**OFF at launch** (results exist, so the standing default-OFF law applies;
-the flip is a separate later ADR per the #1531/ADR-0017 two-step, licensed
-only by a measured soak) — and any unrecognised value fails SAFE to OFF
-with one warn-once ``flag_unrecognised``. OFF keeps the caller on the
-verbatim Python path, byte-identical by construction (the dispatch is one
-env-dict probe — pinned by the OFF-cost bench).
+(``0``/``false``/``no``/``off`` — the explicit kill switch) forces OFF,
+unset/whitespace-empty falls to :data:`RANKING_RUST_DEFAULT` — **ON since
+the DEC-RUST-DEFAULT-ON-WAVE-001 flip (#2215)**: the operator
+RUST-O(1)-EVERYWHERE directive engages the kernel by default, protected by
+the SAME safety layers untouched (the always-on differential + burn-in
+bit-compare + ship-the-ORACLE autorevert + refuse-poison gate +
+degrade-to-oracle on a wheel-absent/stale/poisoned crate) — and any
+unrecognised value fails SAFE to OFF with one warn-once
+``flag_unrecognised``. The explicit ``0`` kill switch keeps the caller on
+the verbatim Python path, byte-identical by construction (the dispatch is
+one env-dict probe — pinned by the OFF-cost bench).
 
 ## The ONE dispatch point + per-family parity policies
 
@@ -90,13 +94,15 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.metrics.compute import ResultMetrics
     from brutex.ranking import RankedCombo
 
-#: The env flag (module docstring). Default OFF at launch.
+#: The env flag (module docstring). Default ON since the #2215 wave.
 RANKING_RUST_ENV: Final[str] = "BRUTEX_RANKING_RUST"
 
-#: The ONE default-arm constant — the eventual flip lever (a separate later
-#: ADR with measured soak evidence, per the #1531 → ADR-0017 two-step).
-#: ``False`` = the verbatim Python pipeline serves by default.
-RANKING_RUST_DEFAULT: Final[bool] = False
+#: The ONE default-arm constant — flipped to ``True`` by the operator
+#: RUST-O(1)-EVERYWHERE directive (DEC-RUST-DEFAULT-ON-WAVE-001, #2215):
+#: the ranking kernel serves by default, with the always-on differential +
+#: burn-in bit-compare + ship-the-oracle autorevert + degrade-to-oracle
+#: safety layers untouched. The explicit ``0`` env value is the kill switch.
+RANKING_RUST_DEFAULT: Final[bool] = True
 
 #: The seam-level family: carries the flag/wheel warn-once memos (no kernel
 #: of its own — policy is irrelevant, burn-in chosen as the neutral label).
@@ -132,10 +138,11 @@ _ALL_FAMILIES: Final[tuple[ParityFamily, ...]] = (
 def ranking_rust_enabled() -> bool:
     """Resolve the ranking-Rust flag over :data:`RANKING_RUST_DEFAULT`.
 
-    The COMMON tristate law (module docstring): truthy → ON, falsy → OFF,
-    unset/empty → the default (OFF at launch), unrecognised → OFF with one
-    warn-once ``flag_unrecognised``. Read per call — no global flag state;
-    every parallel worker reads its own environment.
+    The COMMON tristate law (module docstring): truthy → ON, falsy → OFF
+    (the explicit ``0`` kill switch), unset/empty → the default (ON since
+    #2215), unrecognised → OFF with one warn-once ``flag_unrecognised``.
+    Read per call — no global flag state; every parallel worker reads its
+    own environment.
     """
     return env_flag_enabled(RANKING_RUST_ENV, default=RANKING_RUST_DEFAULT, warn_family=_SEAM)
 

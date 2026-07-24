@@ -753,36 +753,41 @@ _DIGEST_VARIANT = "d16e57e0d16e57e0"
 #: digest path adds only the sidecar + sentinel artifacts, which do not enter
 #: the store bytes. Frozen as its OWN literal so a future divergence between
 #: the paths breaks THIS golden by name.
-# RE-PINNED at the 2026-07-19 club-R1 merge-reconcile: main's landed
-#: DEC-FILL-WORST-CASE-ONLY-001 (#1825) re-locked the legacy fixture's
-#: `_GOLDEN_CONTENT_HASH` (worst-case fills moved the store bytes), and this
-#: literal is EQUAL to it by the documented construction — so it moves in
-#: lockstep to main's re-locked value (never a fresh mint).
-_GOLDEN_CONTENT_HASH_DIGEST = "ee874356dcf6d81cf290eb7d8d7e0d516b668cfcf665c45fca94127ecd4c0789"
+# RE-PINNED at the 2026-07-24 club fold: the base's landed
+#: DEC-FILL-EXEC-GRID-1M-001 (#1989) re-locked the legacy fixture's
+#: `_GOLDEN_CONTENT_HASH` (the 1-minute execution grid moved the store bytes)
+#: but MISSED this digest-variant literal, which is EQUAL to it by the
+#: documented construction — so it moves in lockstep to the base's re-locked
+#: value (never a fresh mint; captured equal to `_GOLDEN_CONTENT_HASH` on the
+#: OFF/ENUM-ON/poisoned-OFF arms alike, all three agree by construction).
+_GOLDEN_CONTENT_HASH_DIGEST = "6e15a6540c0ef8997d71daa3342ebeefb60006e56fb005b16c02744b2e22f7f9"
 
 #: The variant's run-identity literal — identical to `_GOLDEN_RUN_ID` (the
 #: run identity is a pure BLAKE3 of its 9 canonical inputs; neither the
 #: digest nor top_k enters it — pinned so a future accidental coupling of
 #: run identity to either would break THIS golden by name).
-# RE-PINNED at the same reconcile: #1825 emits `{"fill_mode": "worst_case"}`
+# RE-PINNED at the same fold: #1989 emits `execution_grid: "1m_next_bar"`
 #: unconditionally in `canonical_trade_params`, so the run identity moved to
-#: main's re-locked `_GOLDEN_RUN_ID` (the retired value is main's
-#: negative-pinned `_PRECISE_ERA_RUN_ID`).
-_GOLDEN_RUN_ID_DIGEST = "715212420d2cca2dd998aa0f716ef5b658d551a212a61af135fe0cf6fae62fc9"
+#: the base's re-locked `_GOLDEN_RUN_ID` (the retired value is the base's
+#: negative-pinned `_PRE_GRID_RUN_ID`). Verified via
+#: `mask_run_id(mask=0b101, params=_PARAMS, **_CTX)` in the OFF-arm test below.
+_GOLDEN_RUN_ID_DIGEST = "caf0cb630c4a1c74d71605f23140a9f35d3b3da2e41543b918723e4a9c9390ca"
 
 
 def _run_digest_variant(tmp_path: Path, tag: str) -> SweepRunSummary:
     """The digest-path variant run: same grid, synthetic digest, top_k=8."""
+    bars = _bars()
     store = ResultsStore(path=tmp_path / f"{tag}.parquet")
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter(path=tmp_path / f"{tag}.jsonl") as audit:
         return run_persisted_sweep(
-            _bars(),
+            bars,
             replace(_config(), top_k=8),
             store=store,
             dedup=dedup,
             audit=audit,
             trial_stats_digest=_DIGEST_VARIANT,
+            exec_bars_1m=bars,  # the §6 tf=1minute fixed point
         )
 
 
@@ -799,12 +804,14 @@ def _reset_enum_state() -> None:
 def test_digest_variant_off_arm_reproduces_the_frozen_literals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """OFF arm (flag unset): the frozen OFF-minted literals reproduce, with
-    ZERO `sweep_rust_enum.engaged` AND ZERO `sweep_rust_core.engaged` events
-    (the negative arm-discriminator pins — bytes are arm-identical by
-    construction, so the events are the ONLY discriminator)."""
+    """OFF arm (the explicit ``"0"`` kill switch): the frozen OFF-minted
+    literals reproduce, with ZERO `sweep_rust_enum.engaged` AND ZERO
+    `sweep_rust_core.engaged` events (the negative arm-discriminator pins —
+    bytes are arm-identical by construction, so the events are the ONLY
+    discriminator). Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the default is
+    ON, so OFF is armed ``"0"`` — an unset flag would engage the kernel."""
     pytest.importorskip("polars")
-    monkeypatch.delenv("BRUTEX_SWEEP_RUST_ENUM", raising=False)
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_ENUM", "0")
     _reset_enum_state()
     with capture_logs() as logs:
         summary = _run_digest_variant(tmp_path, "off")
