@@ -32,22 +32,25 @@ include!("../../source_digest_core.rs");
 const PINNED_LAW_DIGESTS: &[(&str, &str)] = &[
     (
         "brutex/calendars/settle_evidence.py",
-        // Re-pinned 2026-07-20 after the train-a pull-state fold (6a41f28 —
-        // pull-state consumers Rust-only) reworded the `_SETTLE_SHAPE` doc
-        // comments in this file: COMMENT-ONLY delta (11+/10-, `#:` lines),
-        // the converted validation law is byte-untouched, and the
-        // regenerated corpus was BYTE-IDENTICAL (155 settle cases unchanged).
-        "61b37db08e9f8fa999b937e851924c3f14d3b94c32b3007b0d0cedd84d743172",
+        // Re-pinned 2026-07-24 after the Pattern-A facade flip
+        // (DEC-RUST-CALENDAR-FACADE-FLIP-001, #2218) added the
+        // `routed_validate_evidence_payload` routing WRAPPER + the
+        // `calendar_rust` import to this file: the converted validation LAW
+        // (`validate_evidence_payload`) is byte-untouched, and the regenerated
+        // corpus was BYTE-IDENTICAL (155 settle cases unchanged — the routing
+        // wrapper only chooses oracle-vs-crate, the law it wraps is the same).
+        "f2b08613ce4a763afa25a4eaddb9b356749a3fede9888001f9d0c235ea2274e6",
     ),
     (
         "brutex/calendars/observed_sessions.py",
-        // Re-pinned 2026-07-19 after main's lap-8 fold (ace41c7, PR #1654 —
-        // the #1579-class overlay-loader inode/bounded-read hardening) merged
-        // forward: LOADER I/O-tier change only (bounded regular-file-only
-        // sidecar read + oversize/UTF-8/RecursionError belt); the converted
-        // parse/validation + classify laws are byte-untouched, and the
-        // regenerated corpus was BYTE-IDENTICAL (31 observed cases unchanged).
-        "7322897cab72d20c6c26b8c0f529aa9eb7c8dd09bf10c324978312808ff4b34e",
+        // Re-pinned 2026-07-24 after the Pattern-A facade flip
+        // (DEC-RUST-CALENDAR-FACADE-FLIP-001, #2218) added the
+        // `_routed_classify_observed_payload` routing WRAPPER + the
+        // `calendar_rust` import to this file: the converted parse/validation
+        // + classify laws are byte-untouched, and the regenerated corpus was
+        // BYTE-IDENTICAL (31 observed cases unchanged — the routing wrapper
+        // only chooses oracle-vs-crate, the laws it wraps are the same).
+        "5b802cf8cca50061be0ba8d2169cb6fcb018782d50efc6c49e1b6534afdca2bf",
     ),
 ];
 

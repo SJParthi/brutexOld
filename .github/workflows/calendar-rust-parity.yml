@@ -1,0 +1,168 @@
+# calendar-rust-parity.yml — the brutex-calendar crate build + flag-ON parity lane.
+#
+# DEC-RUST-CALENDAR-FACADE-FLIP-001 (MIGRATION.md #2218) — the Pattern-A facade
+# flip of the crate landed INERT by DEC-RUST-CALENDAR-LEAVES-001 (#1962). The
+# THREE pure calendar-leaf laws now route through the rust/brutex-calendar crate
+# behind the default-ON BRUTEX_CALENDAR_RUST flag, with the verbatim Python laws
+# retained as the LIVE parity oracles (the notify_rust template). The main CI
+# test job deliberately never installs this wheel (the facade degrades loudly to
+# the Python oracle when it is absent, so the calendar leaves stay WHEEL-FREE-BOOT
+# critical), so this dedicated lane is where the crate has teeth:
+#
+#   1. cargo fmt / clippy -D warnings / test --release (the 327 Python-generated
+#      goldens + the law-digest staleness pin + the source-digest twin parity)
+#      + the python-feature compile check.
+#   2. maturin wheel build + install beside the caller suites' Python deps
+#      (the LIGHT set — fno-math + trading-core + brutex-identity + the crate;
+#      NO brutex-lake / no polars-graph build — the calendar caller suites do
+#      not import the lake wheel, so the cold run stays dependency-light).
+#   3. The facade suite tests/unit/test_calendar_rust.py at 100% line+branch
+#      with the wheel INSTALLED (its wheel-gated real-crate classes engage
+#      once the wheel is present), plus the calendar caller family suites
+#      re-run VERBATIM under BRUTEX_CALENDAR_RUST=1 (any test failing ONLY
+#      under the flag is a perturbation finding — fix-or-refuse, never a
+#      test edit).
+#
+# NOT a required gate (the lake-lane / notify-lane precedent): it gates the
+# default-ON flip's teeth, not every PR — a red run here blocks re-engaging
+# the flag with confidence, never an unrelated merge.
+#
+# COST HONESTY: the crate is dependency-light (pyo3 + serde_json + build blake3
+# + dev proptest) — a cold run compiles in minutes, not the lake lane's polars
+# graph; the cargo cache makes warm runs cheap.
+
+name: calendar-rust-parity
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+    paths:
+      - "rust/brutex-calendar/**"
+      - "brutex/calendars/calendar_rust.py"
+      - "brutex/calendars/settle_evidence.py"
+      - "brutex/calendars/observed_sessions.py"
+      - "tests/unit/test_calendar_rust.py"
+      - "tests/unit/test_settle_evidence.py"
+      - "tests/unit/test_observed_sessions.py"
+      - ".github/workflows/calendar-rust-parity.yml"
+  pull_request:
+    paths:
+      - "rust/brutex-calendar/**"
+      - "brutex/calendars/calendar_rust.py"
+      - "brutex/calendars/settle_evidence.py"
+      - "brutex/calendars/observed_sessions.py"
+      - "tests/unit/test_calendar_rust.py"
+      - "tests/unit/test_settle_evidence.py"
+      - "tests/unit/test_observed_sessions.py"
+      - ".github/workflows/calendar-rust-parity.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # The crate is stdlib-law-only — ci.yml's RUST_VERSION floor applies
+  # (rust-version = "1.93.1" in the crate manifest, the sibling pin).
+  CALENDAR_RUST_VERSION: "1.93.1"
+  # Cargo network resilience — the ci.yml convention.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONHASHSEED: "0"
+  HYPOTHESIS_PROFILE: "ci"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  calendar-rust-parity:
+    name: brutex-calendar build + flag-ON parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.CALENDAR_RUST_VERSION }}
+          components: rustfmt,clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/brutex-calendar -> target
+
+      - name: cargo fmt --check
+        working-directory: rust/brutex-calendar
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings
+        working-directory: rust/brutex-calendar
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test --release (goldens + law-digest pin + digest parity)
+        working-directory: rust/brutex-calendar
+        run: cargo test --release
+
+      - name: cargo check --features python (PyO3 binding compiles)
+        working-directory: rust/brutex-calendar
+        run: cargo check --features python
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install brutex (dev extra) + the kernel wheels + brutex-calendar
+        # The LIGHT install set: the calendar caller suites reach
+        # brutex.engine.sweep_lookahead (via the flag-vocabulary mirror pins),
+        # whose package __init__ needs the fno_math / trading_core / brutex_identity
+        # wheels — install them like ci.yml's test job does (3-attempt retry
+        # loop, POSIX sh). Deliberately NO brutex-lake (the caller suites never
+        # import it — proven flag-ON with the wheel absent, so the cold run
+        # skips the polars graph).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,data,ui]"
+          pip install maturin
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity ./rust/brutex-calendar; do
+            n=0
+            until pip install "$crate"; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then
+                echo "pip install $crate failed after 3 attempts" >&2
+                exit 1
+              fi
+              echo "pip install $crate failed (attempt $n) — retrying in 10s" >&2
+              sleep 10
+            done
+          done
+
+      - name: Facade suite (wheel INSTALLED — real-crate classes engage) at 100%
+        run: |
+          pytest -rs -q \
+            --cov=brutex.calendars.calendar_rust --cov-branch \
+            --cov-report=term-missing --cov-fail-under=100 \
+            tests/unit/test_calendar_rust.py
+
+      - name: Calendar caller family suites with the Rust seam ENGAGED (flag-ON twin)
+        # The non-perturbation leg: the full calendar caller suites run
+        # VERBATIM (zero test-line edits) with the seam armed + the REAL
+        # wheel installed. Honesty: this proves NON-PERTURBATION (a fully
+        # degrading crate ≡ flag-OFF is itself a pass for that property);
+        # crate-genuinely-engaged teeth live in tests/unit/test_calendar_rust.py
+        # — the wheel-free fake-crate engagement spies (an un-wired law
+        # fails there) + the wheel-gated real-crate differential classes,
+        # whose ON arm asserts engagement, never byte-identity alone.
+        env:
+          BRUTEX_CALENDAR_RUST: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_settle_evidence.py \
+            tests/unit/test_observed_sessions.py

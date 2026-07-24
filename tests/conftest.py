@@ -270,6 +270,13 @@ for _wave_flag in (
     "BRUTEX_SWEEP_RUST_STAGE1A",
     "BRUTEX_CORE_RUST_MODELS",
     "BRUTEX_OPTCOST_TAILS_RUST",
+    # brutex-calendar facade (DEC-RUST-CALENDAR-FACADE-FLIP-001) — default-ON,
+    # so an unset flag resolves ON and (wheel present) would route every
+    # calendar caller suite through Rust; pin it OFF-by-default so the Python
+    # oracle arm stays genuinely exercised. The facade's own test + the seam
+    # teeth arm modes via monkeypatch / direct-call (override this setdefault);
+    # the calendar-rust-parity lane sets it "1" explicitly.
+    "BRUTEX_CALENDAR_RUST",
 ):
     os.environ.setdefault(_wave_flag, "0")
 del _wave_flag

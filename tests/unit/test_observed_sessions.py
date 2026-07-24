@@ -33,6 +33,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 from brutex.calendars import observed_sessions as obs
+from brutex.calendars.calendar_rust import Value
 from brutex.calendars.nse import HolidayDataUnavailableError, is_trading_day
 from brutex.calendars.observed_sessions import (
     MAX_FLAGS_PER_MONTH,
@@ -966,3 +967,124 @@ class TestEngineIndexCountPin:
         # safe direction); this pin turns that silent never-flag into a LOUD
         # failure forcing a conscious update.
         assert len(ENGINE_INDEX_COORDS) == obs._ENGINE_INDEX_COUNT
+
+
+# ── the calendar-rust routing seam (DEC-RUST-CALENDAR-FACADE-FLIP-001) ────
+#
+# Direct-call teeth on the two PURE materialize helpers `classify_month_drift`
+# / `_routed_classify_observed_payload` hand the crate return to. These are dead
+# wheel-ABSENT (the facade short-circuits to the Python oracle without a crate),
+# so they need crate-free / flag-free unit coverage to hold 100% line+branch on
+# the main (wheel-less) CI test job. No crate, no flag, no monkeypatch — pure
+# input → outcome. (The genuinely-engaged real-crate differential lives in the
+# non-required calendar-rust-parity lane.)
+
+
+class TestCalendarRustObservedSeam:
+    """``_materialize_observed`` / ``_materialize_drift`` refuse-poison + happy."""
+
+    @staticmethod
+    def _warn_reasons(logs: Sequence[Mapping[str, object]]) -> list[object]:
+        return [e["reason"] for e in logs if e["event"] == "calendar_rust.fallback"]
+
+    @pytest.fixture(autouse=True)
+    def _fresh_calendar_rust(self) -> Generator[None]:
+        from brutex.calendars import calendar_rust as _cr
+
+        _cr.reset_calendar_rust_for_tests()
+        yield
+        _cr.reset_calendar_rust_for_tests()
+
+    # ── _materialize_observed (the sidecar-overlay accept/reject) ────────
+
+    def test_observed_none_abstains_silently(self) -> None:
+        """A whole-REJECT decision (crate ``None``) → ``None`` with NO WARN."""
+        with capture_logs() as logs:
+            out = obs._materialize_observed(None)
+        assert out is None
+        assert self._warn_reasons(logs) == []
+
+    def test_observed_non_list_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = obs._materialize_observed("not-a-list")
+        assert out is None
+        assert self._warn_reasons(logs) == ["observed_shape"]
+
+    def test_observed_non_str_item_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = obs._materialize_observed(["2026-05-04", 5])
+        assert out is None
+        assert self._warn_reasons(logs) == ["observed_shape"]
+
+    def test_observed_accepts_sorted_iso_days(self) -> None:
+        out = obs._materialize_observed(["2026-05-04", "2026-05-05"])
+        assert out == Value((frozenset({date(2026, 5, 4), date(2026, 5, 5)}), None))
+
+    # ── _materialize_drift (the classify primitive re-hydrator) ──────────
+
+    def test_drift_non_tuple_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = obs._materialize_drift(
+                ["not", "a", "tuple"], month=_MONTH, detected_at="d", zero_bar_indices=()
+            )
+        assert out is None
+        assert self._warn_reasons(logs) == ["classify_shape"]
+
+    def test_drift_wrong_len_refuses(self) -> None:
+        with capture_logs() as logs:
+            out = obs._materialize_drift(
+                ([], [], [], []), month=_MONTH, detected_at="d", zero_bar_indices=()
+            )
+        assert out is None
+        assert self._warn_reasons(logs) == ["classify_shape"]
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            ("not-list", [], [], [], False, False),  # candidates not list
+            ([], "not-list", [], [], False, False),  # flagged not list
+            ([], [], "not-list", [], False, False),  # vetoed not list
+            ([], [], [], "not-list", False, False),  # no_evidence not list
+            ([], [], [], [], 1, False),  # over_month not bool
+            ([], [], [], [], False, 0),  # over_year not bool
+        ],
+    )
+    def test_drift_bad_legs_refuse(self, raw: tuple[object, ...]) -> None:
+        with capture_logs() as logs:
+            out = obs._materialize_drift(raw, month=_MONTH, detected_at="d", zero_bar_indices=())
+        assert out is None
+        assert self._warn_reasons(logs) == ["classify_legs"]
+
+    def test_drift_builds_verdict_reattaching_inert_fields(self) -> None:
+        raw = (
+            ["2026-05-04", "2026-05-05"],  # candidates
+            [("2026-05-04", 2)],  # flagged (day_iso, clean_success_windows)
+            ["2026-05-06"],  # vetoed_failed
+            ["2026-05-07"],  # no_evidence
+            False,  # over_month_cap
+            False,  # over_year_cap
+        )
+        out = obs._materialize_drift(
+            raw,
+            month=_MONTH,
+            detected_at="2026-05-08T00:00:00+00:00",
+            zero_bar_indices=("NSE/INDEX/NIFTY",),
+        )
+        assert out == Value(
+            obs.DriftVerdict(
+                month=date(2026, 5, 1),
+                candidates=(date(2026, 5, 4), date(2026, 5, 5)),
+                flagged=(
+                    obs.ObservedHoliday(
+                        day=date(2026, 5, 4),
+                        detected_at="2026-05-08T00:00:00+00:00",
+                        zero_bar_indices=("NSE/INDEX/NIFTY",),
+                        clean_success_windows=2,
+                    ),
+                ),
+                vetoed_failed=(date(2026, 5, 6),),
+                no_evidence=(date(2026, 5, 7),),
+                over_month_cap=False,
+                over_year_cap=False,
+            )
+        )
