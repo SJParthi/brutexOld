@@ -43,7 +43,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
-# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-OFF Rust routing facade. The
+# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-ON Rust routing facade. The
 # scaled tail gates on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
 # default path is byte-identical; `_scaled_timeout_python` is the live
 # oracle. The fail-loud env parses stay Python.

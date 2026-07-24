@@ -12,11 +12,12 @@ mirror of ``brutex/data/lake_rust_render.py`` (the PR-1 facade) — same flag
 vocabulary, same import/version guards, same burn-in + autorevert machinery,
 compared at FRAME strength instead of byte strength.
 
-## The flag — ``BRUTEX_LAKE_RUST_RESAMPLE`` (DEFAULT OFF)
+## The flag — ``BRUTEX_LAKE_RUST_RESAMPLE`` (DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001)
 
 Resolved per call like the sibling lake/sweep flags: a truthy literal
-(``1/true/yes/on``) → ON; a falsy literal (``0/false/no/off``) → OFF; unset
-or whitespace-empty → the default (OFF); any OTHER value → OFF with one loud
+(``1/true/yes/on``) → ON; a falsy literal (``0/false/no/off``) → the silent
+OFF kill switch; unset or whitespace-empty → the default (ON); any OTHER
+value → OFF with one loud
 ``lake_rust_resample.fallback`` WARN (reason ``flag_unrecognised``) per
 process — a typo'd opt-in is never silently honoured, and (since the default
 is OFF) never silently armed either. The truthy/falsy vocabulary mirrors the
@@ -100,9 +101,11 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.data.lake_rust_resample")
 
-#: The env flag. DEFAULT OFF — the Python resample stays the production path
-#: until the parity gates have an operator-directed default flip behind a
-#: future DEC (honesty banner: expected payoff ≈ 0 — uniformity, not speed).
+#: The env flag. DEFAULT ON per DEC-RUST-DEFAULT-ON-WAVE-001 (operator
+#: directive 2026-07-23) — the engaged Rust resample is guarded by the
+#: parity gates + burn-in + degrade-to-oracle; the explicit-falsy value is
+#: the kill switch (honesty banner: expected payoff ≈ 0 — uniformity, not
+#: speed).
 LAKE_RUST_RESAMPLE_ENV: Final[str] = "BRUTEX_LAKE_RUST_RESAMPLE"
 
 #: Engaged resamples frame-compared against the Python oracle per process
@@ -258,9 +261,9 @@ def _resolve_crate() -> ModuleType | None:
     """Import guard (layer 1): return ``brutex_lake``, or latch OFF + ``None``.
 
     An absent wheel (``ImportError``) latches ``crate_unavailable`` — the
-    facade is default-OFF and opt-in, so an operator who set the flag
-    without installing the crate gets ONE loud WARN naming the remedy, and
-    every resample serves the Python frame. A module that IMPORTS but lacks
+    facade is default-ON with degrade-to-oracle, so a box that engaged the
+    default (or explicitly opted in) without a built crate gets ONE loud
+    WARN naming the remedy, and every resample serves the Python frame. A module that IMPORTS but lacks
     any :data:`_CRATE_API` callable (a name collision / a PRE-Wave-B wheel
     without the resample face / a hand-broken install) latches the SAME
     reason — the fail-closed contract is "never a new crash class", so an

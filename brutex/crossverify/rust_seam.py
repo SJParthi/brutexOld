@@ -64,8 +64,10 @@ writes. A racing thread (a BackgroundPullJob worker beside a CLI run in
 one process, flag ON) can at worst emit a duplicate WARN or run ±1 extra
 burn-in compare (memory-only), NEVER a wrong byte — a burn-in mismatch
 ships the oracle value regardless of which thread observes it, and the
-latch check-then-set race only delays the latch by one call. Default-OFF
-keeps the whole surface latent in production today.
+latch check-then-set race only delays the latch by one call. Default-ON
+(DEC-RUST-DEFAULT-ON-WAVE-001) engages the whole surface in production,
+guarded by the burn-in + autorevert + degrade-to-oracle layers; the
+explicit-falsy kill switch is the one-constant revert.
 
 Cost honesty (Golden Rule #10): a uniformity conversion — the Python side
 still runs the full Decimal/datetime validation + cell pre-formatting in

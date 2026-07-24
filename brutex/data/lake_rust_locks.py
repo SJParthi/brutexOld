@@ -1,4 +1,4 @@
-"""Default-OFF Rust routing for the lake lock/atomic-replace primitives (ADR-0020 PR-4).
+"""Default-ON Rust routing for the lake lock/atomic-replace primitives (ADR-0020 PR-4).
 
 DEC-LAKE-RUST-LOCKS-ATOMIC-001 (MIGRATION.md #1912). The facade leaf for the
 ``rust/brutex-lake`` lock/atomic primitives, cloned from the PR-1 pattern
@@ -14,7 +14,8 @@ DEC-LAKE-RUST-LOCKS-ATOMIC-001 (MIGRATION.md #1912). The facade leaf for the
   ordering, temp cleanup), proven by the unit + integration suites instead
   (the handoff's proof plan; DEC documents the deviation).
 
-WHAT ROUTES (flag ``BRUTEX_LAKE_RUST_LOCKS``, default OFF; junk = loud OFF):
+WHAT ROUTES (flag ``BRUTEX_LAKE_RUST_LOCKS``, default ON per
+DEC-RUST-DEFAULT-ON-WAVE-001; explicit-falsy = kill switch; junk = loud OFF):
 
 * :func:`rust_flock_attempt` — ONE non-blocking ``LOCK_EX`` attempt per
   call. The bounded retry loop, the poll sleep, the progress-beat emission
@@ -82,7 +83,8 @@ __all__ = [
     "rust_locks_disabled",
 ]
 
-#: The opt-in flag. Default OFF; junk values are LOUD-OFF (one WARN).
+#: The env flag. Default ON per DEC-RUST-DEFAULT-ON-WAVE-001; the
+#: explicit-falsy value is the kill switch; junk values are LOUD-OFF (one WARN).
 LAKE_RUST_LOCKS_ENV: Final = "BRUTEX_LAKE_RUST_LOCKS"
 
 #: The crate API surface the import guard verifies — a module that imports
@@ -189,9 +191,9 @@ def _resolve_crate() -> ModuleType | None:
     """Import guard: return ``brutex_lake``, or latch OFF + ``None``.
 
     An absent wheel (``ImportError``) latches ``crate_unavailable`` — the
-    facade is default-OFF and opt-in, so an operator who set the flag
-    without installing the crate gets ONE loud WARN naming the remedy, and
-    every lock/write serves the Python arm. A module that IMPORTS but lacks
+    facade is default-ON with degrade-to-oracle, so a box that engaged the
+    default (or explicitly opted in) without a built crate gets ONE loud
+    WARN naming the remedy, and every lock/write serves the Python arm. A module that IMPORTS but lacks
     any :data:`_CRATE_API` callable (a name collision / hand-broken /
     PRE-PR-4 STALE install missing the lock symbols) latches the SAME
     reason — the fail-closed contract is "never a new crash class", so an

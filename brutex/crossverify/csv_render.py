@@ -260,7 +260,7 @@ def render_day_csv(
     CSV metacharacter. Writes through :class:`FormulaSafeWriter` AFTER the
     validations. O(rows); deterministic bytes.
 
-    DEC-CROSSVERIFY-RUST-CORE: behind the default-OFF
+    DEC-CROSSVERIFY-RUST-CORE: behind the default-ON
     ``BRUTEX_CROSSVERIFY_RUST`` flag the final byte ASSEMBLY is routed
     through :mod:`brutex.crossverify.rust_seam` — the SAME shared
     validation/cell loop runs Python-side FIRST (every refusal raises the

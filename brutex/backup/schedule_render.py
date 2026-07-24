@@ -171,7 +171,7 @@ def _render_cron_lines_python() -> str:
 # ── The BRUTEX_BACKUP_RUST render seam (DEC-BACKUP-RUST-OPS-001) ──────────
 #
 # Each public renderer routes through the ``brutex_ops`` crate twin when the
-# default-OFF flag is ON (the golden plists under
+# default-ON flag is ON (the golden plists under
 # ``docs/runbooks/backup-templates/`` are the cross-language byte pin — the
 # cargo suite pins Rust == golden, the Python golden suite pins Python ==
 # golden, and the seam's burn-in byte-compares Rust == Python per call).

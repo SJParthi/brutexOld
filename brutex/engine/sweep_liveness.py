@@ -33,7 +33,7 @@ from typing import Final
 
 from brutex.engine.sweep_exit_status import RunState
 
-# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade. The
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-ON Rust routing facade. The
 # `progress_verdict` decision TAIL (steps 3-5, after the payload typing + the
 # pid probe) gates on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
 # default path is byte-identical; `_liveness_tail_python` below is the live

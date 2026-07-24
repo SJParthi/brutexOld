@@ -201,7 +201,7 @@ def build_backup_argv(
 ) -> tuple[str, ...]:
     """Build the exact ``restic backup`` argv (pure — shared with the dry-run log).
 
-    Under the default-OFF ``BRUTEX_BACKUP_RUST`` flag the build routes
+    Under the default-ON ``BRUTEX_BACKUP_RUST`` flag the build routes
     through the ``brutex_ops`` twin (DEC-BACKUP-RUST-OPS-001); ``Path``
     rendering (``str(p)``) stays Python-side — only strings cross the FFI.
     """
@@ -519,7 +519,7 @@ def _parse_backup_summary_snapshot_id_python(stdout: str) -> str:
 def parse_backup_summary_snapshot_id(stdout: str) -> str:
     """Extract the ``summary`` line's ``snapshot_id`` (see the ``_python`` oracle).
 
-    DEC-BACKUP-RUST-OPS-001: under the default-OFF ``BRUTEX_BACKUP_RUST``
+    DEC-BACKUP-RUST-OPS-001: under the default-ON ``BRUTEX_BACKUP_RUST``
     flag the scan routes through the ``brutex_ops`` twin. Code 0 (abstain —
     a line serde cannot parse — OR the no-summary raise arm) serves the
     Python oracle VERBATIM, so the raised :class:`BackupError` message stays
@@ -610,7 +610,7 @@ def _parse_snapshots_latest_python(stdout: str) -> SnapshotInfo | None:
 def parse_snapshots_latest(stdout: str) -> SnapshotInfo | None:
     """Parse ``restic snapshots --json --latest 1`` output (see the ``_python`` oracle).
 
-    DEC-BACKUP-RUST-OPS-001: under the default-OFF ``BRUTEX_BACKUP_RUST``
+    DEC-BACKUP-RUST-OPS-001: under the default-ON ``BRUTEX_BACKUP_RUST``
     flag the DECISION routes through the ``brutex_ops`` twin. Code 0 covers
     every raise-shaped arm (each embeds a CPython repr / ``json`` error
     text) AND every serde-dialect abstain — the Python oracle re-runs and
@@ -663,7 +663,7 @@ def _parse_ls_file_paths_python(stdout: str) -> tuple[str, ...]:
 def parse_ls_file_paths(stdout: str) -> tuple[str, ...]:
     """Return the FILE node paths from ``restic ls --json`` output (dirs skipped).
 
-    DEC-BACKUP-RUST-OPS-001: under the default-OFF ``BRUTEX_BACKUP_RUST``
+    DEC-BACKUP-RUST-OPS-001: under the default-ON ``BRUTEX_BACKUP_RUST``
     flag the scan routes through the ``brutex_ops`` twin (``None`` = the
     serde-dialect abstain — the Python oracle serves verbatim).
     """
@@ -700,7 +700,7 @@ def _parse_ls_snapshot_time_python(stdout: str) -> datetime | None:
 def parse_ls_snapshot_time(stdout: str) -> datetime | None:
     """Return the snapshot header's creation time (see the ``_python`` oracle).
 
-    DEC-BACKUP-RUST-OPS-001: under the default-OFF ``BRUTEX_BACKUP_RUST``
+    DEC-BACKUP-RUST-OPS-001: under the default-ON ``BRUTEX_BACKUP_RUST``
     flag the header DECISION routes through the ``brutex_ops`` twin; a code-3
     RAW time string is parsed Python-side under the oracle's own
     ``_parse_snapshot_time`` + ``except BackupError → None`` arm, so values

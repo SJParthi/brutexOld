@@ -1,4 +1,4 @@
-"""Default-OFF Rust routing facade for the three pure ``lake_keys`` laws.
+"""Default-ON Rust routing facade for the three pure ``lake_keys`` laws.
 
 DEC-DATA-RUST-LAKE-KEYS-001 (T10 PR-2) — the sibling facade of
 :mod:`brutex.data.fno_symbol_rust` (PR-1), routing the three pure builder

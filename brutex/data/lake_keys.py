@@ -11,7 +11,7 @@ pattern, cf. ``cli._emit_pull_halt_alert`` → ``sweep_alerts.emit_pull_halt_ale
 
 This module is **intentionally pure** (stdlib only — no file I/O, no clock, no
 polars/duckdb imports; :func:`fno_index_alias_pairs` reads ONE env var,
-defensively) + the default-OFF Rust seam facade (structlog transitively),
+defensively) + the default-ON Rust seam facade (structlog transitively),
 mirroring the :mod:`brutex.data.fno_symbol` precedent, so it is
 importable from anywhere in the data layer without extras.
 
@@ -86,7 +86,7 @@ def stock_drift_fold(symbol: str) -> str:
     ASCII-space-only, ``strip(" ")``, so it cannot launder a tab-/
     newline-wrapped dir past this pledge).
 
-    Delegates through the default-OFF :mod:`brutex.data.lake_keys_rust`
+    Delegates through the default-ON :mod:`brutex.data.lake_keys_rust`
     seam (DEC-DATA-RUST-LAKE-KEYS-001); :func:`_stock_drift_fold_python`
     is the verbatim body — the live parity oracle every degrade path ships.
     """
@@ -124,7 +124,7 @@ def spot_key_candidates(symbol: str, exchange: str) -> tuple[str, ...]:
     tuple[str, ...]
         The drift candidates in recovery-ladder order, identity excluded.
 
-    Delegates through the default-OFF :mod:`brutex.data.lake_keys_rust`
+    Delegates through the default-ON :mod:`brutex.data.lake_keys_rust`
     seam (DEC-DATA-RUST-LAKE-KEYS-001); :func:`_spot_key_candidates_python`
     is the verbatim body — the live parity oracle every degrade path ships.
     """
@@ -272,7 +272,7 @@ def spot_recovery_candidates(
     startswith ``spot_recovery_candidates(u, e)`` (the pinned prefix
     invariant).
 
-    Delegates through the default-OFF :mod:`brutex.data.lake_keys_rust`
+    Delegates through the default-ON :mod:`brutex.data.lake_keys_rust`
     seam (DEC-DATA-RUST-LAKE-KEYS-001): the alias pairs (env read) + the
     ``stock_drift`` dict PROBE run ONCE here and feed BOTH arms, so
     burn-in compares LAWS, not I/O; the fold for the probe rides the

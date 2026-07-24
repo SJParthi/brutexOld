@@ -359,7 +359,7 @@ class TelegramBucket:
         for the whole dedupe window (dedupe-before-send fix, R2-OCLI-F4).
         Caller holds ``self._lock``. The window-table lookup + the cache
         read stay HERE (state); only the pure drop PREDICATE routes through
-        the default-OFF ``BRUTEX_NOTIFY_RUST`` facade
+        the default-ON ``BRUTEX_NOTIFY_RUST`` facade
         (DEC-NOTIFY-RUST-CORE-001) — flag OFF is the byte-identical
         :func:`_dedupe_should_drop_python` oracle.
         """

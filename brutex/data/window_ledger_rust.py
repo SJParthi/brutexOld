@@ -1,9 +1,10 @@
-"""window_ledger_rust — the default-OFF Rust routing facade for the window-ledger PURE laws.
+"""window_ledger_rust — the default-ON Rust routing facade for the window-ledger PURE laws.
 
 DEC-LAKE-RUST-WINDOW-LEDGER-001 (ADR-0020 Wave C-3, slice G8 FIRST CUT;
-MIGRATION.md #1915). Routes the TWO pure window-ledger laws through the
-``rust/brutex-lake`` crate (``brutex_lake.classify_window_status`` +
-``brutex_lake.date_isoformat``) behind the default-OFF
+MIGRATION.md #1915); default flipped ON by DEC-RUST-DEFAULT-ON-WAVE-001
+(operator directive 2026-07-23). Routes the TWO pure window-ledger laws
+through the ``rust/brutex-lake`` crate (``brutex_lake.classify_window_status``
++ ``brutex_lake.date_isoformat``) behind the default-ON
 ``BRUTEX_LAKE_RUST_WINDOW_LEDGER`` flag, with the verbatim Python law
 retained as the LIVE parity oracle (the ADR-0020 / PR-1
 ``lake_rust_render`` template):
@@ -21,9 +22,10 @@ retained as the LIVE parity oracle (the ADR-0020 / PR-1
 
 ## The fail-closed layers (the PR-1 template, adapted)
 
-* **Flag** — ``BRUTEX_LAKE_RUST_WINDOW_LEDGER`` default OFF; truthy → ON,
-  falsy → OFF, any other non-empty value → OFF with ONE loud
-  ``window_ledger_rust.fallback`` WARN (``flag_unrecognised``). OFF returns
+* **Flag** — ``BRUTEX_LAKE_RUST_WINDOW_LEDGER`` default ON per
+  DEC-RUST-DEFAULT-ON-WAVE-001; truthy → ON, unset → ON (the default),
+  falsy → the silent OFF kill switch, any other non-empty value → OFF with
+  ONE loud ``window_ledger_rust.fallback`` WARN (``flag_unrecognised``). OFF returns
   the oracle's result directly — the crate is never imported, so the
   default path is byte-identical to pre-facade behaviour (spy-pinned).
 * **Import guard / SYMBOL handshake** — the laws are polars-free, so the
@@ -56,7 +58,9 @@ retained as the LIVE parity oracle (the ADR-0020 / PR-1
 Expected payoff ≈ 0 — conversion is for uniformity, not speed. Both laws
 are nanosecond-scale in Python and the FFI hop is a small SLOWDOWN;
 acceptable because the seams run per window RECORD / per ledger key (an
-I/O-dominated vendor-fetch path) and ship DEFAULT-OFF. The flag is read
+I/O-dominated vendor-fetch path) and the engaged Rust path is guarded by
+the burn-in + autorevert + degrade-to-oracle layers
+(DEC-RUST-DEFAULT-ON-WAVE-001, default ON). The flag is read
 per call (one ``os.environ`` probe) so spawn workers resolve their own
 inherited environment. The stateful machinery AROUND these laws —
 ``record()``'s streak/tombstone rules, the merge-on-save conflict law
@@ -93,7 +97,8 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The opt-in env flag (default OFF; junk fails loud-OFF).
+#: The env flag (default ON per DEC-RUST-DEFAULT-ON-WAVE-001; the
+#: explicit-falsy value is the kill switch, junk fails loud-OFF).
 LAKE_RUST_WINDOW_LEDGER_ENV: Final[str] = "BRUTEX_LAKE_RUST_WINDOW_LEDGER"
 
 #: Engaged calls PER LAW that are bit-compared against the live Python

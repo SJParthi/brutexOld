@@ -18,7 +18,7 @@ strategy ranking (Golden Rule #10).
 
 Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 — slice T35):
 when — and ONLY when — ``BRUTEX_CORE_RUST_MONEY`` is set truthy, the four
-public laws route through the default-OFF, burn-in-checked, fail-closed
+public laws route through the default-ON, burn-in-checked, fail-closed
 :mod:`brutex.money_rust` facade to the ``rust/brutex-core`` crate (exact
 decimal-STRING arithmetic; strings only cross the FFI). The flag-OFF
 default is the verbatim ``_*_python`` oracle below — byte-identical AND

@@ -30,7 +30,7 @@ from brutex.data.session_density import (
     classify_session_density,
 )
 
-# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-OFF Rust routing facade.
+# DEC-RUST-SWEEP-OPS-001 (slice 1b): the default-ON Rust routing facade.
 # Both pure folds gate on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
 # default path is byte-identical; `_missing_python` / `_stale_python` below
 # are the live oracles. The remediation rendering stays Python.

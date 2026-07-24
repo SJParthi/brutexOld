@@ -187,7 +187,7 @@ def _link_state(
     Extracts the primitives ONCE (verdict token — a non-``StampVerdict``
     mapping value reads as absent, exactly like the pre-extraction identity
     compares — plus the refusal/error strings), then runs the ladder LAW:
-    the default-OFF DEC-RUST-SWEEP-OPS-001 routed seam with
+    the default-ON DEC-RUST-SWEEP-OPS-001 routed seam with
     :func:`_link_state_python` as the LIVE oracle (flag OFF = the verbatim
     Python ladder).
     """

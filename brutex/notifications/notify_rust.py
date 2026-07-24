@@ -74,7 +74,9 @@ retained as the LIVE parity oracle (the ``window_ledger_rust`` /
 Expected payoff ≈ 0 — conversion is for uniformity, not speed. Every law is
 micro/nanosecond-scale in Python, the escape is O(len(text)) either way,
 and the FFI hop is a small SLOWDOWN; acceptable because the laws run per
-ALERT EMIT (a rare, network-I/O-dominated path) and ship DEFAULT-OFF. The
+ALERT EMIT (a rare, network-I/O-dominated path) and the engaged Rust path is
+guarded by the burn-in + autorevert + degrade-to-oracle layers above
+(DEC-RUST-DEFAULT-ON-WAVE-001, default ON). The
 Telegram HTTP send, the notifier thread/queue/atexit lifecycle and the
 wiring singleton STAY Python — network I/O, honestly disclosed as such; the
 ~30 f-string message builders STAY Python too (their 12 fixed-spec float

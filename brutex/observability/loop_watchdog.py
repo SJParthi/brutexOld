@@ -227,7 +227,7 @@ def _check_once_python(
 
     Moved token-for-token (the Slice-0 discipline) for the
     DEC-RUST-OBSERVABILITY-001 seam: :func:`check_once` routes through
-    ``observability_rust`` (default-OFF Rust with this function as the
+    ``observability_rust`` (default-ON Rust with this function as the
     ``python_law`` oracle); flag-OFF returns this function's result
     DIRECTLY, so the default path is byte-identical — including the OK→OK
     arm's state OBJECT identity. See :func:`check_once` for the laws.
@@ -310,7 +310,7 @@ def check_once(
 
     The law body lives verbatim in :func:`_check_once_python` (the LIVE
     parity oracle); this entry point is the branch-free router through the
-    default-OFF ``observability_rust`` facade (DEC-RUST-OBSERVABILITY-001
+    default-ON ``observability_rust`` facade (DEC-RUST-OBSERVABILITY-001
     — ALL flag/guard/burn-in branching lives facade-side).
     """
     return observability_rust.routed_loop_check_once(

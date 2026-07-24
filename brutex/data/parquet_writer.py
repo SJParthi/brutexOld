@@ -1599,7 +1599,7 @@ class ParquetWriter:
         # (DEC-LAKE-WRITE-HALT-001 — "every allocation/failure site is guarded").
         with lake_write_guard():
             # ADR-0020 PR-3 (DEC-LAKE-RUST-MERGE-DEDUP-001): the OPTIONAL
-            # Rust merge/dedup DECISION seam — default OFF; when
+            # Rust merge/dedup DECISION seam — default ON; when
             # BRUTEX_LAKE_RUST_MERGE is truthy the stored + batch bars cross
             # to the brutex_lake crate as 17-column decision frames
             # (`_decision_frame` → `_ipc_bytes`) and the returned per-row
@@ -2751,7 +2751,7 @@ class ParquetWriter:
                 return bio.getvalue()
 
             # ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): the OPTIONAL
-            # Rust render seam — default OFF; when BRUTEX_LAKE_RUST_RENDER is
+            # Rust render seam — default ON; when BRUTEX_LAKE_RUST_RENDER is
             # truthy the frame crosses to the version-lockstepped brutex_lake
             # crate as uncompressed Arrow IPC, guarded by the facade's three
             # fail-closed layers (import guard / version guard / burn-in +

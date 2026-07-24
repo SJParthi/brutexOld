@@ -207,7 +207,7 @@ class SweepAuditEntry:
 
         Python renders every field string (``str(seq)``, the float-repr
         ``str(ts_utc)``, the canonical payload JSON — the repr laws stay
-        Python BY LAW) and the hashing law routes through the default-OFF
+        Python BY LAW) and the hashing law routes through the default-ON
         DEC-RUST-SWEEP-OPS-001 seam with :func:`_entry_hash_python` as the
         LIVE oracle (flag OFF = the verbatim Python hash, byte-identical).
         """
@@ -885,7 +885,7 @@ def verify_chain(path: Path) -> int:
     list first). The three per-entry checks are unchanged: seq ordering,
     ``prev_hash`` linkage, recomputed ``entry_hash`` — expressed as the ONE
     per-entry step decision (:func:`_verify_step_python`, the LIVE oracle the
-    default-OFF DEC-RUST-SWEEP-OPS-001 seam routes; Python renders the field
+    default-ON DEC-RUST-SWEEP-OPS-001 seam routes; Python renders the field
     strings + owns every raise and message byte).
 
     Returns the number of entries verified. ``0`` means the file exists but is

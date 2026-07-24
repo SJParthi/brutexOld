@@ -195,7 +195,7 @@ def write_exit_status(
     # never-launder belt) can no longer reset the start to the suspect-latch
     # instant and truncate a SUSPECT run's reported duration (hostile-review
     # round 3, #1712). ``ended`` alone distinguishes RUNNING (None) from a
-    # terminal state (now). The decision routes through the default-OFF
+    # terminal state (now). The decision routes through the default-ON
     # DEC-RUST-SWEEP-OPS-001 seam with :func:`_resolution_python` as the LIVE
     # oracle (flag OFF = the verbatim Python law; floats cross the FFI as f64
     # bit-exactly, so the rendered json.dumps bytes are identical either arm).

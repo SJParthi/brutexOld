@@ -190,7 +190,7 @@ def canonical_identity(
     exchange/segment outside the contract, or a key-unsafe symbol.
     Case-exact; never raises. O(1) — O(len(symbol)) for the charset check.
 
-    DEC-CROSSVERIFY-RUST-CORE: behind the default-OFF
+    DEC-CROSSVERIFY-RUST-CORE: behind the default-ON
     ``BRUTEX_CROSSVERIFY_RUST`` flag the pure mapping law is routed through
     :mod:`brutex.crossverify.rust_seam` — the F&O grammar stays PYTHON
     (:func:`parse_fno_symbol` is never re-implemented; its parsed fields

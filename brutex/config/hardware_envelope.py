@@ -101,7 +101,7 @@ When — and ONLY when — ``BRUTEX_CORE_RUST_HWENV`` is set truthy, the four
 PURE derivation laws (the :func:`cpu_pool_workers` derivation arm ·
 :func:`library_thread_budget` · :func:`memory_budget_bytes`' post-override
 sentinel/derived arm · :func:`hardware_key`'s render arm) route through
-the default-OFF, burn-in-checked, fail-closed
+the default-ON, burn-in-checked, fail-closed
 :mod:`brutex.config.hardware_envelope_rust` facade to the
 ``rust/brutex-core`` crate. The flag-OFF default is the verbatim
 ``_*_python`` oracle beside each public function — byte-identical AND

@@ -269,7 +269,7 @@ class SLADetector:
                 continue
             if value is None:
                 continue  # provider says "not available yet"
-            # The decision routes through the default-OFF observability_rust
+            # The decision routes through the default-ON observability_rust
             # facade with `_sla_decide_python` as the live oracle
             # (DEC-RUST-OBSERVABILITY-001; branch-free here — all
             # flag/guard/burn-in branching lives facade-side). prev_state is

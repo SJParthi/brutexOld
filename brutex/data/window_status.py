@@ -102,10 +102,13 @@ def classify_window_status(raw_bars: int, error_type: str | None, *, degraded: b
 
     Routing (DEC-LAKE-RUST-WINDOW-LEDGER-001, ADR-0020 Wave C-3 / G8): the
     law is served by :func:`_classify_window_status_python` — the verbatim
-    Python body, the LIVE parity oracle — via the default-OFF
+    Python body, the LIVE parity oracle — via the default-ON (flipped by
+    DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23)
     ``BRUTEX_LAKE_RUST_WINDOW_LEDGER`` facade
-    (:mod:`brutex.data.window_ledger_rust`). Flag OFF (the default) returns
-    the oracle's result directly, byte-identical to the pre-facade law.
+    (:mod:`brutex.data.window_ledger_rust`). Flag ON (the default) serves the
+    burn-in-checked Rust kernel with the oracle as the autorevert/degrade
+    fallback; the explicit-falsy kill switch returns the oracle's result
+    directly, byte-identical to the pre-facade law.
     """
     return routed_classify_window_status(
         raw_bars,
