@@ -836,6 +836,9 @@ class TestCanonicalTradeParams:
             # DEC-FILL-WORST-CASE-ONLY-001: the permanent unconditional key —
             # part of the exact layout, not an express addition.
             "fill_mode": "worst_case",
+            # DEC-FILL-EXEC-GRID-1M-001: likewise permanent + unconditional —
+            # part of the exact layout, not an express addition.
+            "execution_grid": "1m_next_bar",
         }
 
     def test_swing_band_non_default_adds_exactly_one_key(self) -> None:
