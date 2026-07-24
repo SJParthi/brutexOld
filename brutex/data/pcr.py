@@ -12,7 +12,7 @@ Nothing is ever fabricated: a zero denominator is a TYPED sentinel (never
 ``Infinity``), a missing metric cell is excluded + counted, and a corrupt
 negative cell / unknown side / coverage wiring mismatch raises LOUDLY
 (Golden Rules #1/#10; CLAUDE.md §4 narrow-catch philosophy). READ-TIME ONLY
-— never stored, never in the 60-condition vocabulary, never in run identity.
+— never stored, never in the condition vocabulary, never in run identity.
 
 Stdlib-only and cycle-proof: imports NOTHING from ``brutex.dashboard.*`` /
 ``brutex.data.*`` (the :mod:`brutex.data.moneyness` precedent — a shared

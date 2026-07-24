@@ -458,15 +458,21 @@ implemented = true
 
 # ════════════════════════════════════════════════════════════════════════════════
 # NEW bits (>= 52) — DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4.
-# LAYOUT ONLY: every bit below is `implemented = false` — the bit position is
-# RESERVED + declared now, the evaluator emits 0 for it. The indicator math
-# (VWAP, pivot R5/S5, BOS/CHoCH) lands in PR-2, which flips `implemented = true`
-# alongside the real boolean branch. NEVER set true without real math.
+# Grow-only territory: bits here were declared AFTER the original 52. Each
+# condition carries its own `implemented` flag — all are live (VWAP 52-53
+# RETAINED per the operator ruling DEC-VOCAB-VWAP-RETAIN-001 — evaluate when
+# volume exists, abstain when it doesn't; R5/S5 54-55, BOS/CHoCH 56-59,
+# CPR 60-63, SuperTrend 64-65, Gap Midpoint 66-68, Fib/Swing 69-73). NEVER
+# set `implemented = true` without real indicator math.
 # ════════════════════════════════════════════════════════════════════════════════
 
 # ─────────────────────── Group 10: VWAP Position (bits 52-53) ───────────────────
 # Session-anchored intraday futures VWAP (ADR-0012 D12). Masked on 1day
 # (a session VWAP is degenerate with one bar per session) — applies_to_1day=false.
+# RETAINED per the operator ruling (DEC-VOCAB-VWAP-RETAIN-001): evaluate when
+# traded volume exists (futures / broker-provided volume); the VwapState
+# resolves None on a volumeless instrument (a spot index stores volume=0 by
+# construction — MIGRATION #394), so the bits ABSTAIN there.
 [[condition]]
 bit = 52
 name = "close_above_vwap"
@@ -536,5 +542,165 @@ bit = 59
 name = "choch_bearish"
 group = "Market Structure"
 description = "bearish change of character (trend flips down after a higher-high sequence)"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 13: Central Pivot Range (bits 60-63) ─────────────
+# CPR from the SAME prev-day OHLC anchor the floor-trader pivots use (Ochoa /
+# PivotBoss standard): P = (PDH+PDL+PDC)/3 (the pivot P, round-half-even),
+# BC = (PDH+PDL)/2 (round-half-even), TC = 2P − BC — then CANONICALIZED
+# TC = max(tc_raw, bc_raw), BC = min (the raw pair inverts on roughly half of
+# real days). Bits 60/61 are strict comparisons, 62 is the inclusive band
+# (the three form an exact partition), 63 fires iff the relative width
+# (TC−BC)/P is at or under NARROW_CPR_WIDTH_BPS (30 bps — see
+# `indicators/pivots.rs`). No prev-day anchor ⇒ all four cleared upstream via
+# the anchor-dependent clear (never fabricated).
+[[condition]]
+bit = 60
+name = "above_cpr_tc"
+group = "Central Pivot Range"
+description = "close strictly above the CPR top central (TC) level"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 61
+name = "below_cpr_bc"
+group = "Central Pivot Range"
+description = "close strictly below the CPR bottom central (BC) level"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 62
+name = "inside_cpr"
+group = "Central Pivot Range"
+description = "close inside the CPR band (BC <= close <= TC, inclusive)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 63
+name = "narrow_cpr_day"
+group = "Central Pivot Range"
+description = "narrow-CPR day: (TC - BC) is at or under 30 bps of the pivot P (trending-day setup)"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 14: Supertrend (bits 64-65) ──────────────────────
+# IMPLEMENTED (the PR-B flip): the ATR-band trailing stop — TradingView Pine v6
+# ta.supertrend(3, 10) parity, hl2 source, computed by the stateful
+# `indicators::supertrend::SupertrendState` in exact x2-scaled integer paisa
+# (half-paisa resolution, no floats) and threaded into the evaluator as the
+# appended `supertrend_x2_paisa` FFI argument. Both bits are STRICT compares of
+# close x2 vs the line (equality / warm-up None = neither fires), so the pair is
+# mutually exclusive — registered as a conflict pair in
+# brutex/vocabulary/conflicts.py.
+[[condition]]
+bit = 64
+name = "close_above_supertrend"
+group = "Supertrend"
+description = "close strictly above the Supertrend line (ATR-10 Wilder, factor 3, hl2 source)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 65
+name = "close_below_supertrend"
+group = "Supertrend"
+description = "close strictly below the Supertrend line (ATR-10 Wilder, factor 3, hl2 source)"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 15: Gap Midpoint (bits 66-68) ────────────────────
+# Session-edge gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001): on a nonzero
+# gap day (sign of open_of_day − pdc), the level is the round-half-even midpoint
+# of the prior session's LAST TF bar extreme and today's FIRST TF bar extreme —
+# HIGHs on a gap-up day, LOWs on a gap-down day (the ES Trading Academy
+# spreadsheet's (X1+X2)/2, generalized per-timeframe). The level is resolved
+# upstream (Stage-1A per-day state + `indicators::gap_mid::compute_gap_mid`) and
+# threaded into the evaluator as an OPTIONAL level (absent ⇒ the bits stay 0); no
+# level (zero gap / missing X1/X2 / the session's first TF bar — the
+# arm-from-bar-2 law) ⇒ all three bits stay 0. Masked on 1day (each 1day bar IS
+# its session's first TF bar, so the arming ordinal keeps the bits 0 there by
+# construction) — applies_to_1day=false.
+[[condition]]
+bit = 66
+name = "close_above_gap_mid"
+group = "Gap Midpoint"
+description = "close strictly above the session-edge gap-midpoint level"
+applies_to_1day = false
+implemented = true
+
+[[condition]]
+bit = 67
+name = "close_below_gap_mid"
+group = "Gap Midpoint"
+description = "close strictly below the session-edge gap-midpoint level"
+applies_to_1day = false
+implemented = true
+
+[[condition]]
+bit = 68
+name = "near_gap_mid"
+group = "Gap Midpoint"
+description = "close within tolerance of the session-edge gap-midpoint level"
+applies_to_1day = false
+implemented = true
+
+# ─────────────────── Group: Fibonacci Extended (bits 69-71) ─────────────────────
+# DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205): the vendor fib-template
+# expressibility bits. Bits 69/70 read the PDL-anchored BULLISH retracement
+# ladder (DEC-FIB-BULLISH-RETRACE-001 fields — only the asymmetric 23.6/78.6
+# pair adds NEW price levels; bull 38/62 numerically coincide with bearish
+# 62/38 because .382 + .618 = 1.000 exactly in IEEE). Bit 71 reads the 424%
+# extensions (up OR down — the exact OR convention of bits 26-29). All three
+# share the swept `fib_proximity_bps` band (family-scoped, never per-bit) and
+# ride the Group-4 anchor-dependent + fib-cold clears.
+[[condition]]
+bit = 69
+name = "near_fib_bull_236"
+group = "Fibonacci Extended"
+description = "close within tolerance of the bullish 23.6% retracement (PDL-anchored)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 70
+name = "near_fib_bull_786"
+group = "Fibonacci Extended"
+description = "close within tolerance of the bullish 78.6% retracement (PDL-anchored)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 71
+name = "near_fib_424"
+group = "Fibonacci Extended"
+description = "close within tolerance of the 424% extension (up or down variant)"
+applies_to_1day = true
+implemented = true
+
+# ───────────────────── Group: Swing Proximity (bits 72-73) ──────────────────────
+# DEC-FIB-TEMPLATE-EXPRESS-001: "is price AT the structure level" — the
+# retest/approach half the break-EVENT bits 56-59 cannot express. Read the
+# last k-confirmed swing levels from the SAME look-ahead-clean
+# MarketStructureState that resolves BOS/CHoCH (a swing is confirmed only k
+# bars later, all at index <= N); None (no confirmed swing yet, or a
+# contract-roll hard reset) means the bit simply does not fire. Band: the NEW
+# swept `swing_proximity_bps` (default 10 — family-scoped like its siblings).
+[[condition]]
+bit = 72
+name = "near_swing_high"
+group = "Swing Proximity"
+description = "close within tolerance of the last confirmed swing high"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 73
+name = "near_swing_low"
+group = "Swing Proximity"
+description = "close within tolerance of the last confirmed swing low"
 applies_to_1day = true
 implemented = true

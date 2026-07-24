@@ -139,6 +139,7 @@ from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.engine.tuple_complete import missing_tuple_artifacts, resume_store_guard_enabled
 from brutex.execution.fill_mode import FillMode
 from brutex.strategies.types import price_source_params_fragment
+from brutex.vocabulary import DEFAULT_SWING_PROXIMITY_BPS, swing_params_fragment
 
 if TYPE_CHECKING:
     # Annotation-only — keep the `fastbloom_rs` / `lmdb` PyO3 wheels (pulled by
@@ -425,6 +426,18 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
         descriptor["price_source_cells"] = [
             [c.vwap_source.value, c.ema_source.value] for c in grid.price_source_cells
         ]
+    # The swept swing band distinguishes one grid from another
+    # (DEC-FIB-TEMPLATE-EXPRESS-001): a grid that adds/removes a
+    # ``swing_proximity_bps`` cell is a DIFFERENT sweep, so its checkpoint
+    # must not silently resume the old work (the P2-4 law — the review-A
+    # MAJOR-1 fix). DEFAULT-OMITTED: the key is absent when EVERY proximity is
+    # ``None``-or-default-swing (the clean bijection), so a baseline grid's
+    # checkpoint key is byte-identical to the pre-axis grid; the frozen
+    # per-proximity 3-lists above never grow to 4. When present, the list is
+    # index-aligned with ``proximities`` (``None`` for a ``None`` proximity).
+    swing_bps_list = [None if p is None else p.swing_proximity_bps for p in grid.proximities]
+    if any(v is not None and v != DEFAULT_SWING_PROXIMITY_BPS for v in swing_bps_list):
+        descriptor["swing_proximity_bps"] = swing_bps_list
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         descriptor["gate_config"] = gate_config
@@ -528,6 +541,13 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
             tuple_.price_source.vwap_source, tuple_.price_source.ema_source
         )
     )
+    # The swept swing band is part of the tuple identity
+    # (DEC-FIB-TEMPLATE-EXPRESS-001): two tuples differing ONLY by
+    # ``swing_proximity_bps`` evaluate DIFFERENT bits 72-73, so a cache-skip
+    # keyed without it would FALSELY skip the second cell as already-done (the
+    # same P0-1 class — the review-A MAJOR-1 fix). DEFAULT-OMITTED via the ONE
+    # COMMON fragment: absent ⟺ the default 10, byte-identical cache key.
+    params.update(swing_params_fragment(tuple_.proximity))
     # Ruling 3: the GATE config (overfit + Stage-3) re-keys a gated tuple so a
     # cache-skip can never serve an ungated row as a gated winner. Emitted only
     # when active — byte-stable at defaults (the frozen tuple_cache_key golden

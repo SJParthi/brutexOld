@@ -6,7 +6,7 @@ The two compiled PyO3 wheels are the single source of truth (Golden Rule
 
 * ``fno_math``     — ``rust/fno-math``     (popcount / supermask / resident
   bars + sweep-sim / BLAKE3 bit kernels).
-* ``trading_core`` — ``rust/trading-core`` (the shared 52-condition vocabulary
+* ``trading_core`` — ``rust/trading-core`` (the shared condition-vocabulary
   evaluator + pivot/fib indicator math, ``DEC-SHARED-CORE-001`` #441).
 
 This package adds **NO logic** (Golden Rule #11 COMMON — no copy-paste, no

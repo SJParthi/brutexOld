@@ -1,20 +1,26 @@
 //! Evaluate-time indicators the condition vocabulary consumes: Standard Pivot
-//! Points (now incl. R5/S5), Static Daily Fibonacci levels, the EMA 20/200
-//! recurrence (DEC-EMA-RUST-PORT-001), the session-anchored intraday futures
-//! VWAP state (PR-2 — DEC-NIFTY-INDICATORS-001), the BOS/CHoCH market-structure
-//! state (DEC-NIFTY-BOS-CHOCH-001), and the eval-path per-bar METADATA
-//! derivation + near-month roll decision (PR-3 — DEC-NIFTY-ROLL-METADATA-001 —
-//! `metadata`). EMA, VWAP, and market structure are STATE objects whose resolved
-//! (paisa) values are fed into the snapshot; the evaluator still consumes
-//! precomputed `ema20`/`ema200` paisa (BruteX's `_ema_to_paisa` snaps the Rust
-//! EMA's `f64` rupees to paisa), so porting the EMA recurrence here completes
-//! the all-Rust shared indicator core.
+//! Points (incl. R5/S5) + the Central Pivot Range (bits 60-63), Static Daily
+//! Fibonacci levels, the EMA 20/200 recurrence (DEC-EMA-RUST-PORT-001), the
+//! BOS/CHoCH market-structure state (DEC-NIFTY-BOS-CHOCH-001), and the
+//! eval-path per-bar METADATA derivation + near-month roll decision (PR-3 —
+//! DEC-NIFTY-ROLL-METADATA-001 — `metadata`), the session-anchored intraday
+//! futures VWAP state (bits 52-53 — `vwap`, PR-2 — DEC-NIFTY-INDICATORS-001;
+//! RETAINED per the operator ruling DEC-VOCAB-VWAP-RETAIN-001 — evaluate when
+//! volume exists, abstain (`None`) when it doesn't), the SuperTrend ATR-band
+//! trailing stop (bits 64-65 — `supertrend`), and the session-edge gap-midpoint
+//! level (bits 66-68 — `gap_mid`). EMA, VWAP, market structure and SuperTrend
+//! are STATE objects whose resolved (paisa) values are fed into the snapshot;
+//! the evaluator still consumes precomputed `ema20`/`ema200` paisa (BruteX's
+//! `_ema_to_paisa` snaps the Rust EMA's `f64` rupees to paisa) and the
+//! ×2-scaled SuperTrend line.
 
 pub mod ema;
 pub mod fib;
+pub mod gap_mid;
 pub mod market_structure;
 pub mod metadata;
 pub mod pivots;
+pub mod supertrend;
 pub mod vwap;
 
 /// Round-half-to-even (banker's rounding) to `i64` — the exact match for

@@ -741,6 +741,28 @@ class TestTupleDigestGateSelectionIdentity:
         # A disabled Stage-3 pass leaves its knobs INERT → no re-key.
         assert _tuple_digest(_tuple(), _grid(stage3_top_k=999)) == d0
 
+    def test_swing_band_default_omit_and_rekey(self) -> None:
+        """DEC-FIB-TEMPLATE-EXPRESS-001: the store address folds the swept
+        swing band DEFAULT-OMITTED — an explicit default-10 band is
+        byte-stable against the implicit one (no on-disk store re-keys),
+        while a swept 25-bps cell maps to a DIFFERENT Parquet address (two
+        tuples differing only by the band evaluate different bits 72/73)."""
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+        from brutex.vocabulary import ProximityParams
+
+        base_prox = ProximityParams(pivot_proximity_bps=12)
+        d_implicit = _tuple_digest(_tuple(proximity=base_prox), _grid())
+        d_explicit = _tuple_digest(
+            _tuple(proximity=ProximityParams(pivot_proximity_bps=12, swing_proximity_bps=10)),
+            _grid(),
+        )
+        d_swept = _tuple_digest(
+            _tuple(proximity=ProximityParams(pivot_proximity_bps=12, swing_proximity_bps=25)),
+            _grid(),
+        )
+        assert d_implicit == d_explicit
+        assert d_swept != d_implicit
+
     def test_non_default_selection_rekeys_pairwise_distinct(self) -> None:
         from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
         from brutex.engine.sweep_orchestrator import _tuple_digest
@@ -1645,6 +1667,8 @@ class TestHitMemoCellKey:
             None,  # proximity None flattens to None
             grid.prior_n,
             tuple_.fib_anchor.value,
+            tuple_.price_source.vwap_source.value,  # the swept price-source cell
+            tuple_.price_source.ema_source.value,
             (738885,),
             False,  # apply_1day_mask for a spot 1minute tuple
         )
@@ -1662,7 +1686,10 @@ class TestHitMemoCellKey:
         keys = {hit_memo_cell_key(t, grid, None) for t in iter_sweep_tuples(grid)}
         assert len(keys) == 1  # ONE cell across every direction/k/sl/tp tuple
 
-    def test_proximity_flattens_to_bps(self) -> None:
+    def test_proximity_flattens_to_all_five_bps(self) -> None:
+        # DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206) refuter finding: the
+        # flatten must carry the FULL ProximityParams field set — the gap-mid
+        # (bits 66-68) and swing (bits 72/73) bands change bar_bits too.
         from brutex.engine.sweep_orchestrator import hit_memo_cell_key
 
         prox = ProximityParams(pivot_proximity_bps=12)
@@ -1673,7 +1700,32 @@ class TestHitMemoCellKey:
             prox.pivot_proximity_bps,
             prox.pdh_pdl_proximity_bps,
             prox.fib_proximity_bps,
+            prox.gap_mid_proximity_bps,
+            prox.swing_proximity_bps,
         )
+
+    def test_swing_gap_and_price_source_split_the_cell(self) -> None:
+        """Regression teeth (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206):
+        two cells differing ONLY in a swing/gap band or a price source must
+        get DISTINCT memo keys — the pre-fix key under-keyed vs
+        ``ResidentKernelCache`` and would have shared stale hit counts."""
+        import dataclasses
+
+        from brutex.engine.sweep_orchestrator import hit_memo_cell_key
+        from brutex.strategies.types import PriceSource, PriceSourceCell
+
+        grid = _grid(proximities=[ProximityParams()])
+        base = next(iter_sweep_tuples(grid))
+        swing = dataclasses.replace(base, proximity=ProximityParams(swing_proximity_bps=25))
+        gap = dataclasses.replace(base, proximity=ProximityParams(gap_mid_proximity_bps=25))
+        vwap_src = dataclasses.replace(
+            base, price_source=PriceSourceCell(vwap_source=PriceSource.CLOSE)
+        )
+        ema_src = dataclasses.replace(
+            base, price_source=PriceSourceCell(ema_source=PriceSource.OPEN)
+        )
+        keys = [hit_memo_cell_key(t, grid, None) for t in (base, swing, gap, vwap_src, ema_src)]
+        assert len(set(keys)) == 5  # every variant is its OWN cell
 
 
 class TestRunSweepGridAprioriWiring:

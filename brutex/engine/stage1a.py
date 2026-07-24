@@ -1,16 +1,20 @@
 """Stage-1A bitset-matrix builder — the adapter that drives ``evaluate_atoms``.
 
 Per ``docs/TRACK1_BACKTEST_SPEC.md`` the brute-force funnel's first stage
-precomputes, for one ``(instrument, interval)``, the 60 atomic conditions on
-**every** bar so the downstream supermask kernel
+precomputes, for one ``(instrument, interval)``, the 74 ACTIVE atomic
+conditions (the VWAP bits 52/53 are RETAINED per the operator ruling —
+DEC-VOCAB-VWAP-RETAIN-001, reversing the vocab-66 tombstone; the SuperTrend
+bits 64/65 are IMPLEMENTED since the vocab-66 SuperTrend flip, crate 0.5.0) on
+**every** bar so the
+downstream supermask kernel
 (:func:`brutex.engine.combo_mask.count_supermasks`) can count mask hits over a
-resident ``u64[N]`` bitset (u64-limb: bits 0..59 fit u64 today; the u128 mask
+resident ``u64[N]`` bitset (u64-limb: bits 0..63 fit u64 today; the u128 mask
 law + fallback live in ``combo_mask.py``). This module is **that producer**: it walks an
 iterable of :class:`~brutex.data.models.CandleBar` in chronological order,
 constructs one :class:`~brutex.vocabulary.evaluator.IndicatorSnapshot` per bar,
 and calls the **existing**, unit-tested
 :func:`~brutex.vocabulary.evaluator.evaluate_atoms` (it does **not** reimplement
-the 60 conditions — DEC-ENGINE-DRIVER-001 / ``docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md``).
+the conditions — DEC-ENGINE-DRIVER-001 / ``docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md``).
 
 What this module owns is the **adapter layer** between the lake's bar
 representation and the evaluator's snapshot contract:
@@ -27,6 +31,14 @@ representation and the evaluator's snapshot contract:
   :func:`_price_to_paisa` seam.
 * **Running day extremes** (:class:`brutex.indicators.day_extremes.DayExtremesState`),
   reset at each new IST trading day.
+* **SuperTrend** (Group 14, bits 64/65) causal running state — the shared Rust
+  ``trading_core.SupertrendState`` (ATR-10 Wilder, factor 3, hl2 source, Pine-v6
+  parity), fed the bar's high/low/close paisa and threaded into the snapshot as
+  the ×2-scaled line (``None`` over the 9-bar warm-up). NO session/day reset —
+  the state persists across IST days exactly like EMA20/200 (the locked
+  TradingView-parity law: SuperTrend is a continuous series, never
+  session-anchored); it joins the D11 contract-roll TOTAL hard reset like every
+  other stateful member.
 * **open-of-day** captured at each IST day's first bar.
 * **Daily anchors** — pivots / Fib / PDH-PDL computed from the **prior** IST
   trading day's OHLC and broadcast across that day's intraday bars (recomputed
@@ -83,6 +95,7 @@ from brutex.calendars.nse import IST, has_muhurat_session, is_pre_open
 from brutex.indicators.day_extremes import DayExtremesState
 from brutex.indicators.ema import EMAState, compute_ema
 from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
+from brutex.indicators.gap_mid import compute_gap_mid
 from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 from brutex.indicators.prev_day_ohlc import DailyCandle
@@ -142,17 +155,18 @@ _DEFAULT_PRIOR_N: Final[int] = 3
 #: snap rule has one definition (CLAUDE.md §11 COMMON).
 _HLC3_DIVISOR: Final[Decimal] = Decimal(3)
 
-#: Engine-injected contract/session key fed to :class:`VwapState`. The SPOT
-#: path (``roll_schedule=None``) feeds this CONSTANT key, so :class:`VwapState`
-#: resets only on the IST-date change (its ``session_day`` argument) —
-#: byte-identical to the pre-B2 behaviour for the continuous spot-index series.
-#: B2 is CLOSED (DEC-STAGE1A-ROLL-RESET-001): the futures track passes a
-#: ``roll_schedule`` of owning-expiry day-ordinals and the per-bar key becomes
-#: the owning contract's expiry ordinal — a key CHANGE is a roll boundary and
-#: triggers the TOTAL per-contract hard reset (:meth:`_roll_to_new_contract`),
-#: never only the VWAP key (ADR-0012 D11: every session/level indicator
-#: recomputes per-contract). A 2020+ date ordinal (≈ 737,000+) can never
-#: collide with this constant 0 (also the Rust cold-sentinel key).
+#: Engine-injected contract/session key fed to :class:`VwapState` (RETAINED
+#: per DEC-VOCAB-VWAP-RETAIN-001). The SPOT path (``roll_schedule=None``)
+#: feeds this CONSTANT key, so :class:`VwapState` resets only on the IST-date
+#: change (its ``session_day`` argument) — byte-identical to the pre-B2
+#: behaviour for the continuous spot-index series. B2 is CLOSED
+#: (DEC-STAGE1A-ROLL-RESET-001): the futures track passes a ``roll_schedule``
+#: of owning-expiry day-ordinals and the per-bar key becomes the owning
+#: contract's expiry ordinal — a key CHANGE is a roll boundary and triggers
+#: the TOTAL per-contract hard reset (:meth:`_roll_to_new_contract`), never
+#: only the VWAP key (ADR-0012 D11: every session/level indicator recomputes
+#: per-contract). A 2020+ date ordinal (≈ 737,000+) can never collide with
+#: this constant 0 (also the Rust cold-sentinel key).
 _DEFAULT_SESSION_KEY: Final[int] = 0
 
 #: Fractal half-window handed to the batch Rust kernel
@@ -164,7 +178,7 @@ _BATCH_FRACTAL_K: Final[int] = 2
 
 
 def _fib_dependent_bits() -> int:
-    """Build the u128 mask of the Group-4 Fib-proximity bits (19-29).
+    """Build the u128 mask of the Fib-proximity bits (19-29 + 69-71).
 
     These bits depend on the SWEPT Fib anchor (DEC-NIFTY-FIB-AXIS-001). They are
     cleared on a day whose Fib anchor is cold (no prior daily candle for prev-day;
@@ -190,6 +204,14 @@ def _fib_dependent_bits() -> int:
         B.BIT_NEAR_FIB_1618,
         B.BIT_NEAR_FIB_200,
         B.BIT_NEAR_FIB_2618,
+        # Fibonacci Extended (bits 69-71, DEC-FIB-TEMPLATE-EXPRESS-001): the
+        # bullish 23.6/78.6 rungs + the 424 extension read the SAME swept-anchor
+        # FibLevels, so they ride the identical fib-cold / anchor-cold clears.
+        # The Swing-Proximity bits 72/73 are deliberately NOT here — they read
+        # MarketStructureState (None-abstain), exactly like BOS/CHoCH 56-59.
+        B.BIT_NEAR_FIB_BULL_236,
+        B.BIT_NEAR_FIB_BULL_786,
+        B.BIT_NEAR_FIB_424,
     )
     mask = 0
     for bit in fib_bits:
@@ -198,17 +220,20 @@ def _fib_dependent_bits() -> int:
 
 
 def _pivot_dependent_bits() -> int:
-    """Build the u128 mask of the prev-day pivot/PDH/day-type bits.
+    """Build the u128 mask of the prev-day pivot/PDH/day-type/CPR bits.
 
-    Groups 2 (pivot proximity, 6-12), 3 (PDH/PDL, 13-18) and 9 (day type, 48-51)
-    are anchored to the PRIOR completed IST day and are INDEPENDENT of the swept
-    Fib anchor (the Fib axis moves ONLY the Group-4 levels, R-2). They are cleared
-    only when there is no prior day at all (the first day of the stream).
+    Groups 2 (pivot proximity, 6-12), 3 (PDH/PDL, 13-18), 9 (day type, 48-51)
+    and 13 (Central Pivot Range, 60-63) are anchored to the PRIOR completed IST
+    day and are INDEPENDENT of the swept Fib anchor (the Fib axis moves ONLY
+    the Group-4 levels, R-2). They are cleared only when there is no prior day
+    at all (the first day of the stream) — the CPR comparison bits would
+    otherwise fire against the zero placeholder anchors exactly like
+    ``close_above_pdh``.
 
     Returns
     -------
     int
-        u128 bitmask with every prev-day pivot/PDH/day-type bit set.
+        u128 bitmask with every prev-day pivot/PDH/day-type/CPR bit set.
     """
     pivot_bits = (
         # Group 2 — pivot proximity (bits 6-12).
@@ -231,9 +256,43 @@ def _pivot_dependent_bits() -> int:
         B.BIT_GAP_DOWN_DAY,
         B.BIT_INSIDE_DAY,
         B.BIT_OUTSIDE_DAY,
+        # Group 15 — Central Pivot Range (bits 60-63): TC/BC derive from the
+        # SAME prev-day pivot anchor, so they ride the same first-day clear.
+        B.BIT_ABOVE_CPR_TC,
+        B.BIT_BELOW_CPR_BC,
+        B.BIT_INSIDE_CPR,
+        B.BIT_NARROW_CPR_DAY,
     )
     mask = 0
     for bit in pivot_bits:
+        mask |= 1 << bit
+    return mask
+
+
+def _gap_mid_dependent_bits() -> int:
+    """Build the u128 mask of the Group-15 gap-midpoint bits (66-68).
+
+    The gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) needs BOTH the
+    prior session's last-TF-bar edge (X1) AND the prior day's close (the gap
+    direction's ``pdc``), so like the pivot/PDH groups it is undefined until a
+    prior trading day has completed. The bits join the first-day / post-roll
+    :data:`ANCHOR_DEPENDENT_MASK` clear (defense-in-depth — the evaluator's
+    own level-present guard already keeps them 0 whenever no level exists) but
+    deliberately NOT :data:`FIB_DEPENDENT_MASK`: a Fib-cold, pivot-warm day
+    (a cold rolling-weekly week) still has a genuine gap-midpoint level.
+
+    Returns
+    -------
+    int
+        u128 bitmask with every Group-15 gap-midpoint bit set.
+    """
+    gap_bits = (
+        B.BIT_CLOSE_ABOVE_GAP_MID,
+        B.BIT_CLOSE_BELOW_GAP_MID,
+        B.BIT_NEAR_GAP_MID,
+    )
+    mask = 0
+    for bit in gap_bits:
         mask |= 1 << bit
     return mask
 
@@ -244,12 +303,20 @@ FIB_DEPENDENT_MASK: Final[int] = _fib_dependent_bits()
 #: u128 mask of the prev-day pivot/PDH/day-type bits (cleared on the first day).
 PIVOT_DEPENDENT_MASK: Final[int] = _pivot_dependent_bits()
 
+#: u128 mask of the Group-15 gap-midpoint bits (cleared with the pivot anchor —
+#: no prior session ⇒ no X1 and no pdc ⇒ no level; DEC-GAP-MIDPOINT-CONDITIONS-001).
+GAP_MID_DEPENDENT_MASK: Final[int] = _gap_mid_dependent_bits()
+
 #: u128 mask of every bit cleared on the first (no-prior-day) IST day — the union
-#: of the prev-day pivot/PDH/day-type bits AND the Fib-proximity bits. Preserved
-#: (same name + value) so the first-day clear is byte-identical to pre-axis and
-#: the golden fixtures (:mod:`tests.golden.test_engine_nifty_day_golden`) still
-#: pin the exact same matrix.
-ANCHOR_DEPENDENT_MASK: Final[int] = PIVOT_DEPENDENT_MASK | FIB_DEPENDENT_MASK
+#: of the prev-day pivot/PDH/day-type bits, the Fib-proximity bits AND the
+#: Group-15 gap-midpoint bits (DEC-GAP-MIDPOINT-CONDITIONS-001 — the gap trio
+#: joined the set; the pre-gap first-day clear is unchanged in effect, since the
+#: evaluator leaves bits 66-68 at 0 whenever no level exists, so the golden
+#: fixtures (:mod:`tests.golden.test_engine_nifty_day_golden`) still pin the
+#: exact same matrix).
+ANCHOR_DEPENDENT_MASK: Final[int] = (
+    PIVOT_DEPENDENT_MASK | FIB_DEPENDENT_MASK | GAP_MID_DEPENDENT_MASK
+)
 
 #: Complement used to keep only the defined bits on the first day.
 _NON_ANCHOR_MASK: Final[int] = ~ANCHOR_DEPENDENT_MASK
@@ -545,8 +612,8 @@ class Stage1AMatrixBuilder:
         feeds the constant :data:`_DEFAULT_SESSION_KEY`, byte-identical to the
         pre-B2 builder.
     apply_1day_mask
-        D12 honesty flag for a volume-bearing futures ``1day`` grid: when True
-        the FINAL mask is ANDed with
+        D12 honesty flag for a futures ``1day`` grid: when True the FINAL
+        mask is ANDed with
         :data:`brutex.vocabulary.bits.APPLIES_TO_1DAY_MASK` (clears exactly
         the time-of-day bits 44-47 + the VWAP-position bits 52-53). Default
         False — spot is deliberately NOT flipped (its 1day ToD-bit behaviour
@@ -612,11 +679,20 @@ class Stage1AMatrixBuilder:
         # the look-ahead-clean fractal-swing BOS/CHoCH logic) runs IN RUST, never
         # re-implemented in Python, so the backtest is bit-identical to TickVault's
         # native path (DEC-STAGE1A-WIRE-VWAP-BOS-001 — the Rust pyclasses ported in
-        # this PR; same delegation pattern as the EMA recurrence DEC-EMA-RUST-PORT-001).
+        # this PR; same delegation pattern as the EMA recurrence DEC-EMA-RUST-PORT-001.
+        # The VWAP state is RETAINED per the operator ruling —
+        # DEC-VOCAB-VWAP-RETAIN-001, reversing the vocab-66 tombstone).
         # VWAP resets at each new IST trading day via its ``session_day`` argument; the
         # market-structure state is continuous (look-ahead-clean, non-repainting).
         self._vwap = trading_core.VwapState()
         self._structure = trading_core.MarketStructureState()
+        # SuperTrend (Group 14, bits 64/65) — the shared Rust state (ATR-10
+        # Wilder, factor 3, hl2, Pine-v6 parity; the vocab-66 SuperTrend flip,
+        # crate 0.5.0). NO session/day reset — persists across IST days like
+        # EMA20/200 (the locked TradingView-parity law: a continuous series,
+        # never session-anchored); recreated ONLY at the D11 contract-roll
+        # TOTAL hard reset (:meth:`_roll_to_new_contract`).
+        self._supertrend = trading_core.SupertrendState()
         self._current_day: date | None = None
         # OHLC of the IST day currently being walked (None before the 1st bar).
         self._today_ohlc: _DayOHLC | None = None
@@ -631,6 +707,26 @@ class Stage1AMatrixBuilder:
         self._daily_history: OrderedDict[date, DailyCandle] = OrderedDict()
         # Anchors broadcast across the current day, or None on the first day.
         self._anchors: _DayAnchors | None = None
+        # ── Group-15 session-edge gap-midpoint state (bits 66-68,
+        # DEC-GAP-MIDPOINT-CONDITIONS-001) ──
+        # Running (hi, lo) of the CURRENT segment's most recent completed TF
+        # bar — updated AFTER each bar's evaluation (the prior-history
+        # discipline), so at an IST day roll it holds the just-completed
+        # session's LAST TF bar. Read ONLY at the day roll (never by the bar
+        # that wrote it — P-06 backward-looking by construction).
+        self._session_edge: tuple[int, int] | None = None
+        # X1 — the PRIOR regular session's last-TF-bar (hi, lo), promoted at
+        # the day roll under the SAME Muhurat skip law as `_prev_day_ohlc`
+        # (a completed Muhurat session's edge never becomes X1). None on the
+        # first stream day and after a contract roll (D11 cold start).
+        self._prev_session_edge: tuple[int, int] | None = None
+        # The day's gap-midpoint level (int64 paisa), minted ONCE per day at
+        # the roll via the shared Rust `compute_gap_mid` (Python never
+        # re-implements the arithmetic). None ⇒ no level exists (zero gap /
+        # cold X1 / cold pdc) and the Group-15 bits stay 0. The session's
+        # FIRST TF bar additionally evaluates with NO level regardless (the
+        # arm-from-bar-2 law — push() threads None on the roll branch).
+        self._gap_mid_paisa: int | None = None
 
     def build(self, bars: Iterable[CandleBar]) -> list[int]:
         """Consume an iterable of bars and return the full ``bar_bits`` matrix.
@@ -682,7 +778,10 @@ class Stage1AMatrixBuilder:
         warm flags) and, after the walk, the EMA columns via
         per-roll-segment :func:`~brutex.indicators.ema.compute_ema` (the SAME
         Rust ``EmaState`` recurrence the streaming shell drives — batch ≡
-        streaming bit-for-bit) snapped through the SAME :func:`_ema_to_paisa`.
+        streaming bit-for-bit) snapped through the SAME :func:`_ema_to_paisa`,
+        plus the SuperTrend ×2-line column via a fresh per-roll-segment
+        ``trading_core.SupertrendState`` over the high/low/close paisa columns
+        (the SAME Rust state :meth:`push` steps — no day reset, D11-segmented).
 
         Must be called ONCE on a FRESH builder (like :meth:`build` — the walk
         consumes the roll cursor / day state). A bar beyond the roll schedule
@@ -732,6 +831,9 @@ class Stage1AMatrixBuilder:
         day_fib_levels: list[int] = []
         day_has_pivot: list[bool] = []
         day_has_fib: list[bool] = []
+        day_x1_hi: list[int] = []
+        day_x1_lo: list[int] = []
+        day_has_x1: list[bool] = []
         closes_f64: list[float] = []
         reset_indices: list[int] = []
 
@@ -791,6 +893,18 @@ class Stage1AMatrixBuilder:
                 day_fib_levels.extend(fib_levels_list(fib))
                 day_has_pivot.append(has_pivot)
                 day_has_fib.append(has_fib)
+                # Group-15 X1 day row (DEC-GAP-MIDPOINT-CONDITIONS-001): the
+                # roll above already promoted the prior session's edge under
+                # the Muhurat skip law — project it into the batch core's day
+                # table (the `day_pivot_levels` pattern; the (0, 0) cold
+                # placeholder is never read where `day_has_x1` is False). The
+                # batch core re-mints the level in-core from this row + the
+                # day's first bar (X2), so the prepass's own `_gap_mid_paisa`
+                # is not marshalled.
+                edge = self._prev_session_edge
+                day_x1_hi.append(0 if edge is None else edge[0])
+                day_x1_lo.append(0 if edge is None else edge[1])
+                day_has_x1.append(edge is not None)
             else:
                 today_ohlc = self._today_ohlc
                 today_ohlc.absorb(
@@ -835,19 +949,39 @@ class Stage1AMatrixBuilder:
             session_day_col.append(bar_day.toordinal())
             reset_col.append(contract_reset)
             day_index_col.append(len(day_has_pivot) - 1)
+            # push() tail position: the running Group-15 session-edge tracker
+            # (read only by the NEXT bar's `_roll_to_new_day` as X1 — the
+            # SAME builder state the streaming arm updates after evaluation).
+            self._session_edge = (high_paisa, low_paisa)
 
         # EMA columns per roll segment: a contract reset recreates the EMA
         # states in push(), so each segment restarts the warm-up — the batch
         # `compute_ema` drives the SAME Rust `EmaState` core the streaming
         # shell steps ("bit-identical to a streaming update() loop", ema.rs).
+        # The SuperTrend column rides the SAME per-segment law (push()
+        # recreates `SupertrendState` ONLY at the D11 contract reset — never
+        # at an IST-day boundary), driving a fresh Rust state over the
+        # segment's high/low/close paisa columns: streaming ≡ batch
+        # bit-for-bit by construction (the same state, the same inputs).
         ema20_col: list[int | None] = []
         ema200_col: list[int | None] = []
+        supertrend_col: list[int | None] = []
         starts = [0, *reset_indices]
         ends = [*reset_indices, len(open_col)]
         for seg_start, seg_end in zip(starts, ends, strict=True):
             segment = closes_f64[seg_start:seg_end]
             ema20_col.extend(_ema_to_paisa(v) for v in compute_ema(segment, _EMA_FAST_PERIOD))
             ema200_col.extend(_ema_to_paisa(v) for v in compute_ema(segment, _EMA_SLOW_PERIOD))
+            supertrend_state = trading_core.SupertrendState()
+            supertrend_col.extend(
+                supertrend_state.update(seg_high, seg_low, seg_close)
+                for seg_high, seg_low, seg_close in zip(
+                    high_col[seg_start:seg_end],
+                    low_col[seg_start:seg_end],
+                    close_col[seg_start:seg_end],
+                    strict=True,
+                )
+            )
 
         return Stage1ABatchInputs(
             open_paisa=open_col,
@@ -864,13 +998,19 @@ class Stage1AMatrixBuilder:
             day_index=day_index_col,
             ema20_paisa=ema20_col,
             ema200_paisa=ema200_col,
+            supertrend_x2_paisa=supertrend_col,
             day_pivot_levels=day_pivot_levels,
             day_fib_levels=day_fib_levels,
             day_has_pivot=day_has_pivot,
             day_has_fib=day_has_fib,
+            day_x1_hi_paisa=day_x1_hi,
+            day_x1_lo_paisa=day_x1_lo,
+            day_has_x1=day_has_x1,
             pivot_bps=self._proximity.pivot_proximity_bps,
             pdh_pdl_bps=self._proximity.pdh_pdl_proximity_bps,
             fib_bps=self._proximity.fib_proximity_bps,
+            gap_mid_bps=self._proximity.gap_mid_proximity_bps,
+            swing_bps=self._proximity.swing_proximity_bps,
             prior_n=self._prior_n,
             fractal_k=_BATCH_FRACTAL_K,
             apply_1day_mask=self._apply_1day_mask,
@@ -897,10 +1037,15 @@ class Stage1AMatrixBuilder:
         Returns
         -------
         int
-            The u128 condition mask (bits 0-59) for this bar — including the
-            Group-10 VWAP-position bits (52-53) and the Group-12 BOS/CHoCH bits
-            (56-59), now populated from the running ``trading_core.VwapState`` /
-            ``trading_core.MarketStructureState`` (DEC-STAGE1A-WIRE-VWAP-BOS-001).
+            The u128 condition mask (the 74-bit layout, all 74 active) for
+            this bar — including the Group-10 VWAP bits (52-53), populated
+            from the running ``trading_core.VwapState`` (RETAINED —
+            DEC-VOCAB-VWAP-RETAIN-001), the Group-12 BOS/CHoCH bits (56-59),
+            populated from the running ``trading_core.MarketStructureState``
+            (DEC-STAGE1A-WIRE-VWAP-BOS-001), the Group-13 CPR bits
+            (60-63), computed in-core from the prev-day pivot anchor, and the
+            Group-14 SuperTrend bits (64/65), populated from the running
+            ``trading_core.SupertrendState`` line.
         """
         ts_ist = bar.timestamp.astimezone(IST)
         bar_day = ts_ist.date()
@@ -940,11 +1085,20 @@ class Stage1AMatrixBuilder:
             today_ohlc = self._roll_to_new_day(
                 bar_day, open_paisa, high_paisa, low_paisa, close_paisa
             )
+            # This bar is the session's FIRST TF bar (a genuine IST day change,
+            # the stream's first bar, or the post-roll re-seed) — the Group-15
+            # arm-from-bar-2 law keys on exactly this branch
+            # (DEC-GAP-MIDPOINT-CONDITIONS-001): on a 1day-shaped stream EVERY
+            # bar takes it, so bits 66-68 stay dark there BY CONSTRUCTION (the
+            # load-bearing 1day abstain — the manifest applies_to_1day flag is
+            # production-dormant on the spot-only engine).
+            first_bar_of_day = True
         else:
             # Same IST day: the `or` above guarantees _today_ohlc is set here,
             # so mypy narrows it to _DayOHLC (no assert needed).
             today_ohlc = self._today_ohlc
             today_ohlc.absorb(high_paisa=high_paisa, low_paisa=low_paisa, close_paisa=close_paisa)
+            first_bar_of_day = False
 
         # Both EMAs are fed the swept EMA price-source scalar (default CLOSE ==
         # today's ``float(bar.close)`` verbatim, so the (HLC3, CLOSE) baseline is
@@ -1010,6 +1164,25 @@ class Stage1AMatrixBuilder:
             choch_bullish=choch_bull,
             choch_bearish=choch_bear,
         )
+        # Swing-Proximity levels (bits 72/73, DEC-FIB-TEMPLATE-EXPRESS-001):
+        # read strictly POST-update from the SAME look-ahead-clean state via
+        # the PyO3 getters — at bar N the fields can only hold highs/lows of
+        # bars <= N-k. ``None`` until the first k-confirmed swing exists; the
+        # contract-roll hard reset (`_roll_to_new_contract` recreates
+        # ``self._structure``) returns them to ``None`` — no level ever
+        # crosses a roll basis gap (the D11 law holds for swings for free).
+        last_swing_high = self._structure.last_swing_high
+        last_swing_low = self._structure.last_swing_low
+
+        # ── Group 14: SuperTrend position (bits 64/65) ──
+        # The integer TR/Wilder-ATR/band-ratchet/flip law runs IN RUST
+        # (``trading_core.SupertrendState`` — the single source, shared with
+        # TickVault); this builder feeds the bar in and threads the ×2-scaled
+        # line into the snapshot (``None`` over the 9-bar warm-up ⇒ bits 64/65
+        # clear). NO session/day reset — the state deliberately persists across
+        # the IST-day rollover below, exactly like the EMA states (the locked
+        # TV-parity law); the D11 contract-roll reset recreates it. O(1)/bar.
+        supertrend_x2_paisa = self._supertrend.update(high_paisa, low_paisa, close_paisa)
 
         # Two INDEPENDENT warm flags (DEC-NIFTY-FIB-AXIS-001 R-2): the prev-day
         # pivot/PDH/day-type groups are warm once a prior day exists; the Group-4
@@ -1039,6 +1212,13 @@ class Stage1AMatrixBuilder:
             open_of_day_paisa=today_ohlc.open_paisa,
             vwap_paisa=vwap_paisa,
             market_structure=market_structure,
+            supertrend_x2_paisa=supertrend_x2_paisa,
+            # The arm-from-bar-2 law (DEC-GAP-MIDPOINT-CONDITIONS-001): the
+            # session's first TF bar — which MINTS the level from its own
+            # extremes (X2) — evaluates with NO level; later bars carry it.
+            gap_mid_paisa=None if first_bar_of_day else self._gap_mid_paisa,
+            last_swing_high_paisa=last_swing_high,
+            last_swing_low_paisa=last_swing_low,
         )
 
         mask = evaluate_atoms(snapshot, self._proximity, self._prior_history)
@@ -1055,7 +1235,7 @@ class Stage1AMatrixBuilder:
             mask &= _NON_FIB_MASK
 
         if self._apply_1day_mask:
-            # D12 honesty for a volume-bearing 1day grid (ADR-0012 /
+            # D12 honesty for a 1day grid (ADR-0012 /
             # DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): each 1day bar is its own
             # VWAP session, so the intraday-only bits — time-of-day 44-47 +
             # VWAP-position 52-53 — are HONESTLY cleared via the vocabulary's
@@ -1064,6 +1244,10 @@ class Stage1AMatrixBuilder:
 
         # Record this bar's flag AFTER evaluation (close == open → bearish).
         self._prior_history.update(close_paisa > open_paisa)
+        # Running session-edge tracker (Group 15): AFTER evaluation this bar
+        # becomes the segment's most recent completed TF bar — read only at
+        # the NEXT day roll as X1, never by its own evaluation (P-06).
+        self._session_edge = (high_paisa, low_paisa)
         return mask
 
     def _roll_to_new_contract(self) -> None:
@@ -1082,8 +1266,9 @@ class Stage1AMatrixBuilder:
         semantics, reusing the machinery — a level is never compared across
         the basis gap, DEC-STAGE1A-ROLL-RESET-001).
         """
-        self._vwap = trading_core.VwapState()
+        self._vwap = trading_core.VwapState()  # RETAINED — DEC-VOCAB-VWAP-RETAIN-001
         self._structure = trading_core.MarketStructureState()  # no FFI reset() exists
+        self._supertrend = trading_core.SupertrendState()  # Group 14 joins the D11 total reset
         self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
         self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
         self._prior_history = PriorBarHistory(prior_n=self._prior_n)
@@ -1093,6 +1278,14 @@ class Stage1AMatrixBuilder:
         self._prev_day_ohlc = None  # → first-day _NON_ANCHOR_MASK clear fires
         self._daily_history.clear()  # weekly Fib anchors go cold → _NON_FIB_MASK
         self._anchors = None
+        # Group-15 gap-midpoint state joins the D11 enumerated clear list
+        # (DEC-GAP-MIDPOINT-CONDITIONS-001): a stale pre-roll session edge /
+        # level must never survive the roll — post-roll state == fresh-builder
+        # state EXACTLY (the roll-segmentation equivalence oracle), and no
+        # gap-mid level can exist until a post-roll session completes.
+        self._session_edge = None
+        self._prev_session_edge = None
+        self._gap_mid_paisa = None
 
     def _roll_to_new_day(
         self,
@@ -1139,6 +1332,12 @@ class Stage1AMatrixBuilder:
                 # carrying the last regular session forward. Look-ahead-clean: the
                 # decision keys ONLY on the just-completed day's own IST date. One
                 # WARN per skipped session (each completed day rolls exactly once).
+                # The Group-15 session edge rides the SAME skip
+                # (DEC-GAP-MIDPOINT-CONDITIONS-001): `_prev_session_edge` is
+                # left UNTOUCHED, so a completed Muhurat session's last candle
+                # never becomes X1 — the prior REGULAR session's edge carries
+                # through, exactly like `_prev_day_ohlc` above. The one
+                # existing WARN covers the whole roll (no sibling event).
                 _LOG.warning(
                     _MUHURAT_ANCHOR_SKIP_EVENT,
                     completed_day=completed_day.isoformat(),
@@ -1146,6 +1345,9 @@ class Stage1AMatrixBuilder:
                 )
             else:
                 self._prev_day_ohlc = self._today_ohlc
+                # Promote the just-completed session's LAST TF bar to X1 —
+                # the `_prev_day_ohlc` template (DEC-GAP-MIDPOINT-CONDITIONS-001).
+                self._prev_session_edge = self._session_edge
                 # Record the just-completed day into the bounded rolling history —
                 # the source of the multi-day rolling-weekly / weekly-static Fib
                 # anchors. Only needed (and paid) for a non-prev-day anchor; the
@@ -1168,6 +1370,27 @@ class Stage1AMatrixBuilder:
         )
         self._today_ohlc = new_ohlc
         self._anchors = self._compute_anchors(bar_day, self._prev_day_ohlc)
+        # ── Group-15 gap-midpoint mint (DEC-GAP-MIDPOINT-CONDITIONS-001) ──
+        # ONCE per day, from X1 (the promoted prior-session edge) + X2 (THIS
+        # first bar's own high/low) + this bar's open + the prior day's close,
+        # via the shared Rust `compute_gap_mid` (never re-implemented here).
+        # The `_prev_day_ohlc` conjunct mirrors the batch core's
+        # `day_has_pivot` guard: no real pdc ⇒ no gap direction ⇒ no level
+        # (never a placeholder-pdc level). Zero gap (`open == pdc`) ⇒ the
+        # kernel returns None ⇒ no level all day.
+        if self._prev_session_edge is not None and self._prev_day_ohlc is not None:
+            x1_hi_paisa, x1_lo_paisa = self._prev_session_edge
+            gap_mid = compute_gap_mid(
+                x1_hi_paisa=x1_hi_paisa,
+                x1_lo_paisa=x1_lo_paisa,
+                x2_hi_paisa=high_paisa,
+                x2_lo_paisa=low_paisa,
+                open_of_day_paisa=open_paisa,
+                pdc_paisa=self._prev_day_ohlc.close_paisa,
+            )
+            self._gap_mid_paisa = None if gap_mid is None else gap_mid[0]
+        else:
+            self._gap_mid_paisa = None
         return new_ohlc
 
     def _compute_anchors(self, today: date, prev_ohlc: _DayOHLC | None) -> _DayAnchors | None:
@@ -1386,9 +1609,10 @@ def apply_1day_mask_for(instrument: str, tf_label: str) -> bool:
     fields, so the flag needs NO ``canonical_trade_params`` key (no
     double-carry). True iff *instrument* is the pinned NIFTY-futures series
     alias (:data:`brutex.universe.NIFTY_FUTURES_SERIES_SYMBOL`) AND *tf_label*
-    is the lake ``"1day"`` interval — futures 1day partitions carry REAL
-    volume, so bits 52/53 would otherwise fire each 1day bar against its own
-    single-bar VWAP session (a live D12 violation). Spot is deliberately NOT
+    is the lake ``"1day"`` interval — the intraday-only time-of-day bits
+    44-47 would otherwise fire on midnight-stamped 1day bars (a live D12
+    violation; the VWAP-position bits 52-53 are the other intraday-only half,
+    each 1day bar being its own VWAP session). Spot is deliberately NOT
     flipped (named follow-up — DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001).
 
     HONEST limit (Golden Rule #10, review round-8 finding 1): the ``1day``
@@ -1732,6 +1956,7 @@ __all__ = [
     "DEFAULT_WF_TEST_DAYS",
     "DEFAULT_WF_TRAIN_DAYS",
     "FIB_DEPENDENT_MASK",
+    "GAP_MID_DEPENDENT_MASK",
     "PIVOT_DEPENDENT_MASK",
     "FibAnchorKind",
     "Stage1AMatrixBuilder",

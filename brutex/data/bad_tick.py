@@ -7,8 +7,9 @@ screen) rejects only NON-positive / mis-ORDERED bars. A *self-consistent* scaled
 bar — every OHLC field multiplied (or divided) by the same factor, e.g. a NIFTY
 minute printed ``2794`` instead of ``27940`` — is internally ordered and
 strictly positive, so it passes every existing check and then silently flips
-every price-relative condition bit, corrupts the running EMA / VWAP / swing
-ring, and (via ``TodayOHLC.absorb``'s running max/min) poisons the NEXT day's
+every price-relative condition bit, corrupts the running EMA /
+market-structure swing ring (and, before its bits-52/53 retirement, the
+VWAP), and (via ``TodayOHLC.absorb``'s running max/min) poisons the NEXT day's
 PDH/PDL/pivots too. This module adds a conservative, bounded, O(1)/bar screen at
 the SAME engine read mouth the DEC-STORED-DATA-VALIDATION-001 precedent guards,
 so such a bar is SKIPPED-and-COUNTED (never value-edited, never fabricated)

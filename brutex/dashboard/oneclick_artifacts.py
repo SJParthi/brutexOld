@@ -85,6 +85,7 @@ from brutex.engine.trade_store import (
 )
 from brutex.money import format_inr
 from brutex.ranking.tiers import TIER_LABELS
+from brutex.vocabulary.describe import display_condition_names
 
 _LOG = structlog.get_logger(__name__)
 
@@ -1386,6 +1387,32 @@ def _map_top100_metrics(row: dict[str, Any]) -> dict[str, Any]:
     return mapped
 
 
+def _bridge_retired_conditions(row: dict[str, Any]) -> dict[str, Any]:
+    """Tombstone-mark a row's ``conditions`` names at the reader boundary (TOMB-01).
+
+    A PRE-reshape ``top100.json`` persisted plain condition names for masks
+    that carried the now-RETIRED VWAP bits (52/53) — rendering them verbatim
+    presents a dead condition (the evaluator emits 0 forever) as live. This
+    maps each entry through the ONE COMMON
+    :func:`brutex.vocabulary.describe.display_condition_names` authority
+    (CLAUDE.md §11 — the SAME wording the writer/store surfaces use): a plain
+    name of a retired bit gains the ``" (retired)"`` suffix; live names,
+    already-suffixed names (a NEW artifact — idempotent) and unknown/junk
+    strings pass through verbatim. Non-string entries and a non-list
+    ``conditions`` are left untouched (the shape validator already named the
+    latter; never a crash on an old payload).
+    """
+    conditions = row.get("conditions")
+    if not isinstance(conditions, list) or not all(isinstance(c, str) for c in conditions):
+        return row
+    display = display_condition_names(conditions)
+    if display == conditions:
+        return row
+    bridged = dict(row)
+    bridged["conditions"] = display
+    return bridged
+
+
 def _arm_leg_text(value: object) -> str:
     """One SL/TP leg of the arm display string — ``format_inr`` paisa→₹ 2dp.
 
@@ -1909,7 +1936,9 @@ def load_top100(run_dir: Path) -> Top100Result:
                 preset,
                 cascade_join,
             )
-        bridged, dropped = _bridge_cascade(_bridge_top100_arm(_map_top100_metrics(row)))
+        bridged, dropped = _bridge_cascade(
+            _bridge_top100_arm(_bridge_retired_conditions(_map_top100_metrics(row)))
+        )
         if dropped:
             cascade_dropped += 1
         bridged, dropped_tier = _bridge_tier(bridged)

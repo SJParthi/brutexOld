@@ -64,6 +64,12 @@ on:
       # listed nor invoked the files.
       - "tests/bench/test_stats_manifest_write_ab.py"
       - "tests/bench/test_db_paging_o_page.py"
+      # DEC-SUPERTREND-CONDITIONS-001: the vocab-66 wide-grid measurement kit
+      # (>=64-bit count path + the 66-bit sweep-shaped grid + the u64-vs-u128
+      # same-window trade-sim ratio) — the §8 SLA re-derivation inputs are
+      # printed by THIS workflow's run (merge hard-gate (b)).
+      - "tests/bench/test_vocab66_wide_grid.py"
+      - "brutex/engine/combo_mask.py"
       - "tests/bench/test_absolute_baseline.py"
       - "tests/bench/_abs_baseline_registry.py"
       - "tests/bench/baselines/**"
@@ -285,6 +291,24 @@ jobs:
           # (set in the job env) and skips elsewhere. HONEST measurement, not a hard
           # perf gate (the gated body asserts only positive/finite sanity).
           pytest tests/bench/test_m4pro_sweep_walltime.py -q -s -rA --tb=short -p no:cacheprovider
+
+      - name: Run vocab-66 wide-grid measurement kit (DEC-SUPERTREND-CONDITIONS-001)
+        run: |
+          . .venv/bin/activate
+          # The SuperTrend implemented-flip's measurement instruments: (i) the
+          # >=64-bit Stage-2 count path's throughput (the engaged path — numpy
+          # two-limb today, fno_math.ResidentBarsU128 once the enum-kernel
+          # lane lands — is printed honestly), (ii) an end-to-end 66-bit
+          # sweep-shaped grid through the REAL spine (scale via
+          # BRUTEX_VOCAB66_GRID_DAYS, default 2, max 14), (iii) the u64-vs-u128
+          # same-window trade-sim kernel ratio (the flip's own cost), and the
+          # C(60/62/64,k) growth table. -s -rA surface every figure the §8
+          # 2-4-day SLA re-derivation needs (the formula lives in the module
+          # docstring; the re-derivation happens FROM this run's numbers —
+          # DEC-M4PRO-BENCH-SURFACE-001). HONEST measurement, not a hard perf
+          # gate (loose regression floors + linearity ceilings only).
+          BRUTEX_VOCAB66_GRID_DAYS=14 \
+            pytest tests/bench/test_vocab66_wide_grid.py -q -s -rA --tb=short -p no:cacheprovider
 
       - name: Run sweep worker-scaling A/B bench (ADR-0016 §5 deferred core-scaling)
         run: |

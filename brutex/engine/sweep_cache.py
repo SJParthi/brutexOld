@@ -64,8 +64,13 @@ _LOG = structlog.get_logger(__name__)
 
 #: Default Bloom capacity for the sweep dedup cache. ~5M distinct combos at the
 #: default FPR is ~21 MB of bit array — comfortably inside the §8 envelope while
-#: covering a full-vocab K≤4 sweep (C(60,4)=487,635) with large headroom. Tune
-#: up explicitly for a bigger sweep (Bloom FAIL_CLOSEDs past capacity).
+#: covering a full-vocab K≤4 sweep (C(64,4)=635,376 over the 64 active bits —
+#: DEC-SUPERTREND-CONDITIONS-001 lit bits 64/65) with large headroom. HONEST:
+#: a full-vocab K=5 sweep
+#: (C(64,5)=7,624,512) exceeds this default — the documented FAIL_CLOSED
+#: refusal past capacity (the same class at every prior width:
+#: C(60,5)=5,461,512 and C(62,5)=6,471,002 already exceeded it). Tune up explicitly for a bigger
+#: sweep (Bloom FAIL_CLOSEDs past capacity).
 DEFAULT_BLOOM_CAPACITY: Final[int] = 5_000_000
 
 #: Default Bloom false-positive rate. A 1e-7 FPR means ~1 spurious L2 lookup per
@@ -328,7 +333,7 @@ def combo_digest(
     Parameters
     ----------
     mask
-        The strategy mask (which of the 60 conditions the combo requires).
+        The strategy mask (which vocabulary conditions the combo requires).
     instrument, tf, direction
         Context labels (e.g. ``"NIFTY"``, ``"5m"``, ``"bull"``).
     params

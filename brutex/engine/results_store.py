@@ -161,9 +161,14 @@ _INT64_MAX: Final[int] = 2**63 - 1
 #: a single signed Parquet ``Int64`` — so it is persisted as TWO columns
 #: ``mask_bits_lo`` / ``mask_bits_hi`` (the two u64 limbs, each held as an unsigned
 #: value in a signed ``Int64`` via :func:`_to_signed_i64` / :func:`_from_signed_i64`).
-#: A mask is rejected if it sets a bit ``>= TOTAL_CONDITIONS`` (an undefined /
-#: layout-only / reserved bit), so ``condition_names`` decodes to a defined name for
-#: every set bit. (Was ``(1<<52)-1`` pre-u128.)
+#: A mask is rejected ONLY if it sets a bit ``>= TOTAL_CONDITIONS`` (an
+#: undeclared/reserved bit) — a DECLARED-but-unimplemented bit (a RETIRED
+#: tombstone like VWAP 52/53; no layout-only bit exists on today's manifest —
+#: SuperTrend 64/65 went LIVE with DEC-SUPERTREND-CONDITIONS-001) is
+#: ADMITTED here (``mask_bits & ~IMPLEMENTED_MASK`` is NOT refused at this
+#: layer; that refusal lives in ``strategies.spec.StrategySpec``), so
+#: ``condition_names`` decodes to a defined name for every set bit. (Was
+#: ``(1<<52)-1`` pre-u128.)
 MASK_BITS_MAX: Final[int] = (1 << TOTAL_CONDITIONS) - 1
 
 #: Per-limb mask for the two-column u128 split.
@@ -516,9 +521,10 @@ class ResultRow:
         The u128 strategy mask (persisted as the ``mask_bits_lo``/``mask_bits_hi``
         limb columns) — set bits are the required-true atomic conditions
         (``brutex.vocabulary.bits``). Validated ``0 <= mask_bits <= MASK_BITS_MAX``
-        (only the ``TOTAL_CONDITIONS`` = 60 defined condition bits; reserved bits
-        60..127 rejected — the validation reads ``TOTAL_CONDITIONS`` so it can
-        never drift again). This is the machine-readable winning combo;
+        (only the ``TOTAL_CONDITIONS`` = 74 declared condition bits; reserved
+        bits 74..127 rejected — the validation reads ``TOTAL_CONDITIONS`` so it
+        can never drift again; declared-but-unimplemented bits are admitted
+        here, the ``StrategySpec`` layer owns that refusal). This is the machine-readable winning combo;
         ``condition_names`` is its human-readable decode (DEC-SWEEP-WINNERS-BY-NAME-001).
     condition_names
         DERIVED (``init=False``) — the matched condition NAMES of ``mask_bits``, in

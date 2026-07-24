@@ -13,7 +13,9 @@ Feed: a 6-trading-day, 2-roll futures stream (three 2-day contracts with a
 basis bump per roll — a superset of the design's named 3-day/2-roll shape so
 WARM anchors, EMA(20) warm-up completion and the D11 hard reset are all
 inside the frozen corpus), 26 volume-bearing bars per day driving the VWAP +
-BOS/CHoCH state machines through real signal, with DIRECTION-VARIED opens
+BOS/CHoCH state machines through real signal (the five VWAP feed columns are
+RE-EMITTED per DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206 — the wipe-era
+schema-v2 drop is reversed), with DIRECTION-VARIED opens
 (prev-close continuation clamped into range; each day's first bar a doji) so
 the Group-6 prior-flag deque is genuinely exercised — refuter RF-B F1
 regenerated the fixture from this fixed derivation (the original collapsed
@@ -56,7 +58,8 @@ _DAYS: tuple[date, ...] = (
 )
 
 #: The (h, l, c) day script from the roll golden's B1 fire-test — fires the
-#: VWAP-position + BOS/CHoCH bits within one 26-bar day.
+#: VWAP-position + BOS/CHoCH bits within one 26-bar day (the VWAP pair is
+#: LIVE again per DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206).
 _HLC_SCRIPT: tuple[tuple[int, int, int], ...] = (
     (100, 90, 95),
     (95, 85, 90),
@@ -135,7 +138,24 @@ def generate() -> dict[str, object]:
     inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
     masks = Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
     return {
-        "schema": "stage1a-batch-golden-v1",
+        # v3: the vocab-66 SuperTrend implemented-flip (crate 0.5.0) — the
+        # per-bar `supertrend_x2_paisa` column joins the batch ABI (the
+        # 26-bar day script warms the ATR-10 state at bar 9 of each roll
+        # segment, so the frozen corpus genuinely exercises bits 64/65 both
+        # ways) — composed at the train fold with
+        # DEC-FIB-TEMPLATE-EXPRESS-001: the fib day rows widen 15→19
+        # (bull_23/bull_78/ext_up_424/ext_down_424 appended), the config
+        # gains ``swing_bps`` and the masks may carry the express bits 69-73
+        # (72/73 from the kernel's own MarketStructureState swing reads) and
+        # the gap bits 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001 X1 day tables).
+        # Regen re-lock (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206 +
+        # #2204): the schema TOKEN stays v3 — the Rust reader's
+        # `#[serde(default)]` arms make the five VWAP feed columns + the
+        # Group-15 X1 day tables ADDITIVE-tolerant under one schema — but the
+        # regenerated fixture now EMITS them for real (the wipe-era drop
+        # reversed; the pre-gap all-cold X1 materialization arm goes dormant),
+        # so the frozen masks legitimately carry bits 52/53 + 66-68.
+        "schema": "stage1a-batch-golden-v3",
         "columns": {
             "open_paisa": inputs.open_paisa,
             "high_paisa": inputs.high_paisa,
@@ -151,17 +171,26 @@ def generate() -> dict[str, object]:
             "day_index": inputs.day_index,
             "ema20_paisa": inputs.ema20_paisa,
             "ema200_paisa": inputs.ema200_paisa,
+            "supertrend_x2_paisa": inputs.supertrend_x2_paisa,
         },
         "day_tables": {
             "day_pivot_levels": inputs.day_pivot_levels,
             "day_fib_levels": inputs.day_fib_levels,
             "day_has_pivot": inputs.day_has_pivot,
             "day_has_fib": inputs.day_has_fib,
+            "day_x1_hi_paisa": inputs.day_x1_hi_paisa,
+            "day_x1_lo_paisa": inputs.day_x1_lo_paisa,
+            "day_has_x1": inputs.day_has_x1,
         },
         "config": {
             "pivot_bps": inputs.pivot_bps,
             "pdh_pdl_bps": inputs.pdh_pdl_bps,
             "fib_bps": inputs.fib_bps,
+            # Emitted for REAL (DEC-VOCAB-VWAP-RETAIN-001 refuter N2a — the
+            # Rust reader previously hardcoded 10; it now CONSUMES this key,
+            # with `#[serde(default)]` keeping the pre-emit fixture legal).
+            "gap_mid_bps": inputs.gap_mid_bps,
+            "swing_bps": inputs.swing_bps,
             "prior_n": inputs.prior_n,
             "fractal_k": inputs.fractal_k,
             "apply_1day_mask": inputs.apply_1day_mask,

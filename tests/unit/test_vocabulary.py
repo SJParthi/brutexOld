@@ -1,7 +1,10 @@
 """Per-bit unit tests for `brutex.vocabulary.evaluator`.
 
-Tests every one of the 52 atomic conditions in isolation:
-- 9 indicator groups
+Tests every ACTIVE atomic condition in isolation (64 active of the
+66-declared layout — the RETIRED VWAP tombstones 52/53 are pinned inert
+instead; the SuperTrend bits 64/65 are IMPLEMENTED since the vocab-66
+flip, crate 0.5.0 — see ``TestGroup14_SupertrendHandBattery``):
+- the manifest's indicator groups (``bits.GROUP_RANGES``)
 - Each bit verified to fire / not-fire on hand-built scenarios
 - Look-ahead invariant
 - Conflict-pair generator pruning
@@ -14,16 +17,19 @@ IndicatorSnapshot — no real data required.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import ClassVar
 from zoneinfo import ZoneInfo
 
 import pytest
-from brutex.indicators.fib_levels import compute_fib_levels
-from brutex.indicators.pivots import compute_pivot_levels
+from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
+from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 from brutex.vocabulary import (
+    DEFAULT_SWING_PROXIMITY_BPS,
     IndicatorSnapshot,
     PriorBarHistory,
     ProximityParams,
     evaluate_atoms,
+    swing_params_fragment,
 )
 from brutex.vocabulary import bits as B
 from brutex.vocabulary.conflicts import CONFLICT_PAIRS, count_conflicts, has_conflict
@@ -475,8 +481,29 @@ class TestConflicts:
 
     def test_all_conflict_pairs_documented(self) -> None:
         # 24 original − 2 buggy (bullish/bearish-doji, removed in
-        # DEC-STAGE1B-CONFLICT-FIX-001) + 4 verified candle conflicts = 26.
-        assert len(CONFLICT_PAIRS) == 26
+        # DEC-STAGE1B-CONFLICT-FIX-001) + 4 verified candle conflicts +
+        # 3 CPR partition pairs (the 60→66 reshape — bits 60/61/62 are an
+        # exact partition) + 1 SuperTrend strict-inequality pair (64, 65)
+        # (the vocab-66 implemented-flip, crate 0.5.0) + the Group-15
+        # gap-midpoint above/below pair (DEC-GAP-MIDPOINT-CONDITIONS-001)
+        # = 31.
+        assert len(CONFLICT_PAIRS) == 31
+
+    def test_cpr_partition_pairs_present(self) -> None:
+        # The three CPR position bits are pairwise mutually exclusive.
+        assert (B.BIT_ABOVE_CPR_TC, B.BIT_BELOW_CPR_BC) in CONFLICT_PAIRS
+        assert (B.BIT_ABOVE_CPR_TC, B.BIT_INSIDE_CPR) in CONFLICT_PAIRS
+        assert (B.BIT_BELOW_CPR_BC, B.BIT_INSIDE_CPR) in CONFLICT_PAIRS
+
+    def test_gap_mid_above_below_is_a_registered_conflict(self) -> None:
+        # DEC-GAP-MIDPOINT-CONDITIONS-001: strictly-above and strictly-below
+        # the gap-midpoint level cannot co-fire; near_gap_mid is deliberately
+        # NOT conflicting with either (the PDH/PDL co-fire convention).
+        assert (B.BIT_CLOSE_ABOVE_GAP_MID, B.BIT_CLOSE_BELOW_GAP_MID) in CONFLICT_PAIRS
+        mask = (1 << B.BIT_CLOSE_ABOVE_GAP_MID) | (1 << B.BIT_CLOSE_BELOW_GAP_MID)
+        assert has_conflict(mask)
+        assert not has_conflict((1 << B.BIT_CLOSE_ABOVE_GAP_MID) | (1 << B.BIT_NEAR_GAP_MID))
+        assert not has_conflict((1 << B.BIT_CLOSE_BELOW_GAP_MID) | (1 << B.BIT_NEAR_GAP_MID))
 
 
 # ────── Look-ahead invariant ──────
@@ -864,10 +891,15 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
     """Pin the EXACT intraday-only bit set masked out on 1day (ADR-0012 D12).
 
     ``IMPLEMENTED_MASK & ~APPLIES_TO_1DAY_MASK`` must equal exactly the four
-    Time-of-Day bits 44-47 PLUS the two VWAP-position bits 52-53 — built from
+    Time-of-Day bits 44-47 PLUS the session-VWAP pair 52-53 (RETAINED-ACTIVE
+    per DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206 — ``applies_to_1day``
+    stays ``false`` exactly as on the pre-wipe tree, so with the pair back
+    inside IMPLEMENTED_MASK it re-joins this residue) PLUS the three
+    Gap-Midpoint bits 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001 — the
+    session-edge level degenerates when the bar IS the session) — built from
     the named BIT_* constants, never magic numbers — so the bits.py comment
-    (which historically claimed only VWAP was cleared) can never drift from
-    the constant again (DEC-CORP-ACTION-GATE-001 doc-drift fold).
+    can never drift from the constant again (DEC-CORP-ACTION-GATE-001
+    doc-drift fold).
     """
     expected_cleared = (
         (1 << B.BIT_EARLY_MORNING)
@@ -876,10 +908,23 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
         | (1 << B.BIT_AFTERNOON)
         | (1 << B.BIT_CLOSE_ABOVE_VWAP)
         | (1 << B.BIT_CLOSE_BELOW_VWAP)
+        | (1 << B.BIT_CLOSE_ABOVE_GAP_MID)
+        | (1 << B.BIT_CLOSE_BELOW_GAP_MID)
+        | (1 << B.BIT_NEAR_GAP_MID)
     )
     assert expected_cleared == B.IMPLEMENTED_MASK & ~B.APPLIES_TO_1DAY_MASK
-    # And 1day never enables a bit the evaluator does not implement.
+    # The tombstoned VWAP pair sits outside BOTH masks (never 1day-enabled).
+    assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_ABOVE_VWAP) == 0
+    assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_BELOW_VWAP) == 0
+    # Every 1day-applicable bit is IMPLEMENTED: the vocab-66 SuperTrend flip
+    # (crate 0.5.0) put bits 64/65 — 1day-applicable from declaration — into
+    # IMPLEMENTED_MASK, and the fib-template express bits 69-73
+    # (DEC-FIB-TEMPLATE-EXPRESS-001) landed implemented=true from declaration:
+    # the applicable∖implemented residue is empty. (The gap trio 66-68 is
+    # implemented but applies_to_1day=false — the arm-from-bar-2 1day abstain.)
     assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == 0
+    assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_ABOVE_SUPERTREND)
+    assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -893,6 +938,7 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
 # byte-identical to the pre-extraction inline build by construction — the
 # frozen 400-case golden re-pins it end-to-end).
 
+import dataclasses  # noqa: E402
 from datetime import date as _pl_date  # noqa: E402
 
 import trading_core as _tc  # noqa: E402
@@ -922,7 +968,7 @@ def test_pivot_levels_list_frozen_order_and_length() -> None:
 def test_fib_levels_list_frozen_order_and_length() -> None:
     fib = compute_fib_levels(_pl_date(2026, 5, 13), 24_050_00, 23_950_00)
     levels = fib_levels_list(fib)
-    assert len(levels) == _tc.FIB_LEVELS_LEN == 15
+    assert len(levels) == _tc.FIB_LEVELS_LEN == 19
     assert levels == [
         fib.retrace_level_at_pdh_paisa,
         fib.retrace_23_paisa,
@@ -939,11 +985,27 @@ def test_fib_levels_list_frozen_order_and_length() -> None:
         fib.ext_down_162_paisa,
         fib.ext_down_200_paisa,
         fib.ext_down_262_paisa,
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — the four appended-last slots read by
+        # bits 69-71 (bull23 → 69, bull78 → 70, up424/dn424 both → 71). The
+        # original 15 slots above are byte-identical to the pre-express order.
+        fib.retrace_bull_23_paisa,
+        fib.retrace_bull_78_paisa,
+        fib.ext_up_424_paisa,
+        fib.ext_down_424_paisa,
     ]
-    # The bullish-retrace tail (FIB_COMPUTE_LIST_LEN = 19) is deliberately
-    # ABSENT — the evaluator ABI stays the frozen 15.
-    assert fib.retrace_bull_23_paisa not in (None,)  # field exists on the dataclass
-    assert len(levels) != 19
+    # §4.2 constant-pun discipline: FIB_COMPUTE_LIST_LEN (the compute
+    # projection) is ALSO 19 now, but the two projections stay DISTINCT —
+    # this ABI list carries the 424 pair while the compute projection carries
+    # bull_38/bull_62 instead, so equal lengths never imply equal lists
+    # (never merge). bull_23 vs bull_78 asymmetry: for a non-degenerate range
+    # the two appended retrace slots differ (0.55·range apart).
+    assert fib.retrace_bull_23_paisa != fib.retrace_bull_78_paisa
+    assert levels[15:] == [
+        fib.retrace_bull_23_paisa,
+        fib.retrace_bull_78_paisa,
+        fib.ext_up_424_paisa,
+        fib.ext_down_424_paisa,
+    ]
 
 
 def test_evaluate_atoms_delegates_to_the_shared_projections() -> None:
@@ -963,6 +1025,8 @@ def test_evaluate_atoms_delegates_to_the_shared_projections() -> None:
         s.close_paisa,
         s.ema20_paisa,
         s.ema200_paisa,
+        # Session VWAP at its historical mid-list position — bits 52/53
+        # RETAINED per DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206).
         s.vwap_paisa,
         pivot_levels_list(s.pivots),
         fib_levels_list(s.fib),
@@ -978,5 +1042,512 @@ def test_evaluate_atoms_delegates_to_the_shared_projections() -> None:
         s.market_structure.bos_bearish,
         s.market_structure.choch_bullish,
         s.market_structure.choch_bearish,
+        s.supertrend_x2_paisa,
+        s.gap_mid_paisa,
+        prox.gap_mid_proximity_bps,
+        s.last_swing_high_paisa,
+        s.last_swing_low_paisa,
+        prox.swing_proximity_bps,
     )
     assert via_shim == via_raw
+
+
+# ────── Group 13: Central Pivot Range (bits 60-63) — the hand-derived battery ──────
+#
+# G-CPRCOR / the 60→66 reshape: every expected TC/BC below is computed BY HAND
+# with literal integers in the comments — NEVER by calling the production
+# helper (`pivots.rs::compute_cpr_levels` has no Python binding by design; the
+# arithmetic is restated so a shared bug cannot self-certify). Semantics under
+# pin: BC = round_half_even((pdh+pdl)/2); TC = 2·P − BC; canonicalised
+# tc = max, bc = min; bit 60 strict `close > tc`; bit 61 strict `close < bc`;
+# bit 62 inclusive `bc <= close <= tc`; bit 63 (`narrow_cpr_day`) iff
+# `p > 0` and `(tc − bc) · 10_000 <= p · NARROW_CPR_WIDTH_BPS` — the LOCKED
+# **P-relative** denominator (never close-relative).
+
+
+def _pivots_with_literals(*, p: int, pdh: int, pdl: int, pdc: int) -> PivotLevels:
+    """A PivotLevels with hand-set P/PDH/PDL literals (CPR reads only those).
+
+    The R/S rungs are parked far away (±10⁹ paisa) so no `near_*` bit can
+    interfere with the asserted CPR nibble.
+    """
+    far = 1_000_000_000
+    return PivotLevels(
+        trading_day=datetime(2026, 5, 13, tzinfo=IST).date(),
+        pdh_paisa=pdh,
+        pdl_paisa=pdl,
+        pdc_paisa=pdc,
+        r5_paisa=far + 50,
+        r4_paisa=far + 40,
+        r3_paisa=far + 30,
+        r2_paisa=far + 20,
+        r1_paisa=far + 10,
+        p_paisa=p,
+        s1_paisa=-far - 10,
+        s2_paisa=-far - 20,
+        s3_paisa=-far - 30,
+        s4_paisa=-far - 40,
+        s5_paisa=-far - 50,
+    )
+
+
+def _cpr_nibble(*, p: int, pdh: int, pdl: int, pdc: int, close: int) -> int:
+    """Evaluate one bar against hand-set pivot literals; return bits 60-63."""
+    ts = datetime(2026, 5, 13, 10, 30, tzinfo=IST)
+    snap = IndicatorSnapshot(
+        timestamp_ist=ts,
+        open_paisa=close,
+        high_paisa=close,
+        low_paisa=close,
+        close_paisa=close,
+        ema20_paisa=None,
+        ema200_paisa=None,
+        pivots=_pivots_with_literals(p=p, pdh=pdh, pdl=pdl, pdc=pdc),
+        fib=compute_fib_levels(ts.date(), max(pdh, pdl + 1), pdl),
+        day_high_paisa=close,
+        day_low_paisa=close,
+        open_of_day_paisa=close,
+    )
+    mask = evaluate_atoms(snap, _default_proximity(), _empty_history())
+    return (mask >> 60) & 0xF
+
+
+_ABOVE = 0b0001  # bit 60
+_BELOW = 0b0010  # bit 61
+_INSIDE = 0b0100  # bit 62
+_NARROW = 0b1000  # bit 63
+
+
+class TestGroup13_CPRHandBattery:
+    """Hand-computed CPR boundary cases (exact literal arithmetic per case)."""
+
+    # Base anchors: P = 1_000_000; pdh = 1_040_000, pdl = 940_000
+    #   BC = rhe((1_040_000 + 940_000) / 2) = rhe(990_000.0) = 990_000
+    #   TC = 2·1_000_000 − 990_000 = 1_010_000  (tc > bc — not inverted)
+    #   width = 20_000; 20_000·10_000 = 200_000_000 > 1_000_000·30 = 30_000_000
+    #   → NOT narrow.
+    _BASE: ClassVar[dict[str, int]] = {
+        "p": 1_000_000,
+        "pdh": 1_040_000,
+        "pdl": 940_000,
+        "pdc": 1_020_000,
+    }
+
+    def test_above_tc_by_one_paisa(self) -> None:
+        """close = 1_010_001 = TC + 1 → above only (strict >)."""
+        assert _cpr_nibble(**self._BASE, close=1_010_001) == _ABOVE
+
+    def test_exactly_at_tc_is_inside_not_above(self) -> None:
+        """close = 1_010_000 = TC exactly → inside (inclusive), never above."""
+        assert _cpr_nibble(**self._BASE, close=1_010_000) == _INSIDE
+
+    def test_below_bc_by_one_paisa(self) -> None:
+        """close = 989_999 = BC − 1 → below only (strict <)."""
+        assert _cpr_nibble(**self._BASE, close=989_999) == _BELOW
+
+    def test_exactly_at_bc_is_inside_not_below(self) -> None:
+        """close = 990_000 = BC exactly → inside (inclusive), never below."""
+        assert _cpr_nibble(**self._BASE, close=990_000) == _INSIDE
+
+    def test_inverted_raw_pair_is_canonicalised(self) -> None:
+        """Raw TC < BC day: the pair canonicalises tc = max, bc = min.
+
+        P = 1_000_000; pdh = 1_060_000, pdl = 1_000_000:
+          BC_raw = rhe(2_060_000 / 2) = 1_030_000
+          TC_raw = 2_000_000 − 1_030_000 = 970_000  → INVERTED (tc_raw < bc_raw)
+          canonical tc = 1_030_000, bc = 970_000; width = 60_000 (not narrow:
+          600_000_000 > 30_000_000).
+        The three probes pin the CANONICAL boundaries specifically — under an
+        un-canonicalised implementation `close > 970_000` would read "above".
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_060_000, "pdl": 1_000_000, "pdc": 940_000}
+        assert _cpr_nibble(**anchors, close=1_000_000) == _INSIDE  # between raw pair
+        assert _cpr_nibble(**anchors, close=1_030_001) == _ABOVE  # > canonical tc (= raw BC)
+        assert _cpr_nibble(**anchors, close=969_999) == _BELOW  # < canonical bc (= raw TC)
+
+    def test_narrow_exactly_at_30_bps_fires(self) -> None:
+        """The <= tie: width·10_000 == p·30 exactly → narrow FIRES.
+
+        P = 1_000_000; pdh = 1_048_500, pdl = 948_500:
+          BC = rhe(1_997_000 / 2) = 998_500; TC = 2_000_000 − 998_500 = 1_001_500
+          width = 3_000; 3_000·10_000 = 30_000_000 == 1_000_000·30 → fires.
+        P-relative denominator law: the compare is against P (1_000_000), never
+        the close.
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_048_500, "pdl": 948_500, "pdc": 1_003_000}
+        assert _cpr_nibble(**anchors, close=1_000_000) == _INSIDE | _NARROW
+
+    def test_narrow_just_over_30_bps_clears(self) -> None:
+        """The minimal reachable just-over width → narrow CLEAR.
+
+        width = TC − BC = 2·(P − BC) is structurally EVEN, so "30 bps + 1
+        paisa" is unreachable; the minimal just-over is +2.
+        P = 1_000_000; pdh = 1_048_499, pdl = 948_499:
+          BC = rhe(1_996_998 / 2) = 998_499; TC = 2_000_000 − 998_499 = 1_001_501
+          width = 3_002; 3_002·10_000 = 30_020_000 > 30_000_000 → clear.
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_048_499, "pdl": 948_499, "pdc": 1_003_002}
+        assert _cpr_nibble(**anchors, close=1_000_000) == _INSIDE
+
+    def test_p_zero_degenerate_clears_narrow_only(self) -> None:
+        """p == 0 (all-zero placeholder anchors): the p > 0 guard clears ONLY
+        narrow; the position comparisons still fire against the zero levels
+        (close = 50 > tc = 0 → above) — exactly why the CPR bits ride the
+        Stage-1A anchor-dependent clear upstream (the cold-anchor regression
+        in test_engine_stage1a.py pins that clear end-to-end)."""
+        assert _cpr_nibble(p=0, pdh=0, pdl=0, pdc=0, close=50) == _ABOVE
+
+    def test_flat_prev_day_zero_width_is_narrow_by_design(self) -> None:
+        """G-CPRCOR-05: a flat prev day (H == L == C) → width 0 → narrow fires
+        trivially (0 <= threshold) — pinned as INTENDED (a zero-width coil IS
+        maximally narrow; noted for the DEC record).
+
+        pdh = pdl = pdc = 1_000_000 → P = 1_000_000, BC = 1_000_000,
+        TC = 1_000_000, width = 0. close = 1_000_000 → inside + narrow.
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_000_000, "pdl": 1_000_000, "pdc": 1_000_000}
+        assert _cpr_nibble(**anchors, close=1_000_000) == _INSIDE | _NARROW
+
+    def test_bc_half_tie_rounds_half_even(self) -> None:
+        """G-CPRCOR-06: an odd pdh+pdl makes BC a .5 tie — round HALF EVEN.
+
+        pdh = 1_000_000, pdl = 999_997 → sum = 1_999_997; /2 = 999_998.5 →
+        RHE → 999_998 (the even neighbour; HALF-UP would give 999_999).
+        P: pdc = 1_000_003 → (1_999_997 + 1_000_003)/3 = 1_000_000 exact.
+        TC = 2_000_000 − 999_998 = 1_000_002; width = 4 → narrow (40_000 <=
+        30_000_000). The two probes discriminate RHE from HALF-UP: under
+        HALF-UP (BC = 999_999) the close = 999_998 probe would read BELOW.
+        """
+        anchors = {"p": 1_000_000, "pdh": 1_000_000, "pdl": 999_997, "pdc": 1_000_003}
+        assert _cpr_nibble(**anchors, close=999_998) == _INSIDE | _NARROW  # == BC (RHE)
+        assert _cpr_nibble(**anchors, close=999_997) == _BELOW | _NARROW  # BC − 1
+
+    def test_real_nifty_scale_anchor(self) -> None:
+        """A real NIFTY-scale prev day (₹24,000s) — full hand derivation.
+
+        pdh = 2_430_000, pdl = 2_400_000, pdc = 2_412_000:
+          P  = rhe((2_430_000 + 2_400_000 + 2_412_000) / 3)
+             = rhe(7_242_000 / 3) = rhe(2_414_000.0) = 2_414_000
+          BC_raw = rhe(4_830_000 / 2) = 2_415_000
+          TC_raw = 2·2_414_000 − 2_415_000 = 2_413_000 → INVERTED
+          canonical tc = 2_415_000, bc = 2_413_000; width = 2_000
+          narrow: 2_000·10_000 = 20_000_000 <= 2_414_000·30 = 72_420_000 → fires.
+        """
+        anchors = {"p": 2_414_000, "pdh": 2_430_000, "pdl": 2_400_000, "pdc": 2_412_000}
+        assert _cpr_nibble(**anchors, close=2_414_000) == _INSIDE | _NARROW
+        assert _cpr_nibble(**anchors, close=2_415_001) == _ABOVE | _NARROW
+        assert _cpr_nibble(**anchors, close=2_412_999) == _BELOW | _NARROW
+
+    def test_position_bits_partition_every_warm_case(self) -> None:
+        """Exactly ONE of above/below/inside per evaluation (the conflicts-table
+        justification for the (60,61)/(60,62)/(61,62) pairs)."""
+        for close in (989_999, 990_000, 1_000_000, 1_010_000, 1_010_001):
+            nibble = _cpr_nibble(**self._BASE, close=close)
+            position = nibble & (_ABOVE | _BELOW | _INSIDE)
+            assert bin(position).count("1") == 1
+
+
+def _st_bits(*, close: int, supertrend_x2: int | None) -> int:
+    """Evaluate one bar against a hand-set SuperTrend ×2 line; return bits 64-65."""
+    ts = datetime(2026, 5, 13, 10, 30, tzinfo=IST)
+    snap = IndicatorSnapshot(
+        timestamp_ist=ts,
+        open_paisa=close,
+        high_paisa=close,
+        low_paisa=close,
+        close_paisa=close,
+        ema20_paisa=None,
+        ema200_paisa=None,
+        pivots=_pivots_with_literals(p=1_000_000, pdh=1_040_000, pdl=940_000, pdc=1_020_000),
+        fib=compute_fib_levels(ts.date(), 1_040_000, 940_000),
+        day_high_paisa=close,
+        day_low_paisa=close,
+        open_of_day_paisa=close,
+        supertrend_x2_paisa=supertrend_x2,
+    )
+    mask = evaluate_atoms(snap, _default_proximity(), _empty_history())
+    return (mask >> 64) & 0b11
+
+
+_ST_ABOVE = 0b01  # bit 64
+_ST_BELOW = 0b10  # bit 65
+
+
+class TestGroup14_SupertrendHandBattery:
+    """Hand-computed SuperTrend position cases (the vocab-66 implemented-flip).
+
+    The evaluator's Group-14 law is a PURE strict comparison in the ×2-scaled
+    paisa domain: ``close×2 > line`` → bit 64, ``close×2 < line`` → bit 65,
+    equality or a ``None`` line → both clear. The line's own derivation
+    (ATR-10 Wilder / bands / flip) lives in ``trading_core.SupertrendState``
+    and is pinned by its Rust unit suite + the engine goldens; this battery
+    pins the COMPARISON boundary exactly.
+    """
+
+    def test_close_above_by_half_paisa_fires_above(self) -> None:
+        """close = 10_000 paisa (close×2 = 20_000) vs line 19_999 (odd —
+        a genuine half-paisa line only the ×2 domain can express) → above."""
+        assert _st_bits(close=10_000, supertrend_x2=19_999) == _ST_ABOVE
+
+    def test_close_below_by_half_paisa_fires_below(self) -> None:
+        """close×2 = 20_000 vs line 20_001 → below (strict <)."""
+        assert _st_bits(close=10_000, supertrend_x2=20_001) == _ST_BELOW
+
+    def test_exact_equality_clears_both(self) -> None:
+        """close×2 == line exactly → NEITHER bit (strict inequalities)."""
+        assert _st_bits(close=10_000, supertrend_x2=20_000) == 0
+
+    def test_none_line_clears_both(self) -> None:
+        """A warm-up ``None`` line → NEITHER bit (the 9-bar warm-up law)."""
+        assert _st_bits(close=10_000, supertrend_x2=None) == 0
+
+    def test_mutual_exclusion_by_construction(self) -> None:
+        """One strict comparison can never set both bits — the (64, 65)
+        conflict pair's justification, probed across the boundary."""
+        for line in (19_998, 19_999, 20_000, 20_001, 20_002):
+            bits = _st_bits(close=10_000, supertrend_x2=line)
+            assert bits != (_ST_ABOVE | _ST_BELOW)
+
+    def test_omitted_field_defaults_to_none_and_clears_both(self) -> None:
+        """A snapshot built WITHOUT the field (every pre-flip caller) keeps
+        bits 64/65 clear — the defaulted-None ABI-additivity contract."""
+        ts = datetime(2026, 5, 13, 10, 30, tzinfo=IST)
+        snap = IndicatorSnapshot(
+            timestamp_ist=ts,
+            open_paisa=10_000,
+            high_paisa=10_000,
+            low_paisa=10_000,
+            close_paisa=10_000,
+            ema20_paisa=None,
+            ema200_paisa=None,
+            pivots=_pivots_with_literals(p=1_000_000, pdh=1_040_000, pdl=940_000, pdc=1_020_000),
+            fib=compute_fib_levels(ts.date(), 1_040_000, 940_000),
+            day_high_paisa=10_000,
+            day_low_paisa=10_000,
+            open_of_day_paisa=10_000,
+        )
+        assert snap.supertrend_x2_paisa is None
+        mask = evaluate_atoms(snap, _default_proximity(), _empty_history())
+        assert (mask >> 64) & 0b11 == 0
+
+
+def test_narrow_cpr_width_bps_cross_pin() -> None:
+    """DRIFT PIN: ``trading_core.NARROW_CPR_WIDTH_BPS`` is LOCKED at 30.
+
+    The authoritative narrow-CPR threshold (supersedes an earlier 50 lock).
+    The constant sits inside ``indicator_version``-governed behaviour — it
+    moves bit 63 on every bar, hence run identity — so a silent change is
+    FORBIDDEN: any re-lock is a deliberate, decision-ID'd act that must
+    update this pin, the hand battery above and the golden fixtures together.
+    """
+    import trading_core
+
+    assert trading_core.NARROW_CPR_WIDTH_BPS == 30
+
+
+# ────── Fib-Template Express: Fibonacci Extended (69-71) + Swing (72-73) ──────
+#
+# DEC-FIB-TEMPLATE-EXPRESS-001. Every case drives the REAL evaluate_atoms
+# (the Rust core via the shim). Fails-before: none of these bits exist at the
+# pre-express merge-base (TOTAL_CONDITIONS was 66) — the entire class fails
+# to import BIT_NEAR_FIB_BULL_236 there.
+
+
+class TestExpressFibExtended:
+    """Bits 69-71: bull-236/bull-786 retracements + the two-sided 424."""
+
+    def _fib(self) -> FibLevels:
+        return compute_fib_levels(_pl_date(2026, 5, 13), 24_050_00, 23_950_00)
+
+    def test_near_fib_bull_236_fires_on_exact_level(self) -> None:
+        fib = self._fib()
+        s = _make_snapshot(close_paisa=fib.retrace_bull_23_paisa)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_FIB_BULL_236)
+
+    def test_near_fib_bull_236_clear_just_outside_band(self) -> None:
+        # close < level by MORE than the close-anchored tolerance: the gap is
+        # level*bps//10⁴ + 2 while tol(close) <= level*bps//10⁴ (close < level).
+        fib = self._fib()
+        level = fib.retrace_bull_23_paisa
+        close = level - (level * 10) // 10_000 - 2
+        s = _make_snapshot(close_paisa=close)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert not _bit(m, B.BIT_NEAR_FIB_BULL_236)
+
+    def test_near_fib_bull_786_fires_and_is_not_bull_236(self) -> None:
+        # Asymmetric-ladder fixture: the two bull slots differ by 0.55·range,
+        # so a close snapped onto bull_78 fires 70 and NOT 69 (kills the
+        # retrace_bull_23 ↔ retrace_bull_78 field-swap mutant).
+        fib = self._fib()
+        assert fib.retrace_bull_23_paisa != fib.retrace_bull_78_paisa
+        s = _make_snapshot(close_paisa=fib.retrace_bull_78_paisa)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_FIB_BULL_786)
+        assert not _bit(m, B.BIT_NEAR_FIB_BULL_236)
+
+    def test_near_fib_424_fires_on_up_variant_only(self) -> None:
+        # Near ONLY ext_up_424 (far from ext_down_424) — kills the OR→AND
+        # mutant on the two-sided bit-71 predicate.
+        fib = self._fib()
+        assert abs(fib.ext_up_424_paisa - fib.ext_down_424_paisa) > 100_00
+        s = _make_snapshot(close_paisa=fib.ext_up_424_paisa)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_FIB_424)
+
+    def test_near_fib_424_fires_on_down_variant_only(self) -> None:
+        fib = self._fib()
+        s = _make_snapshot(close_paisa=fib.ext_down_424_paisa)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_FIB_424)
+
+    def test_near_fib_424_clear_between_variants(self) -> None:
+        # Midway between the up/down 424 extensions — near NEITHER.
+        fib = self._fib()
+        mid = (fib.ext_up_424_paisa + fib.ext_down_424_paisa) // 2
+        s = _make_snapshot(close_paisa=mid)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert not _bit(m, B.BIT_NEAR_FIB_424)
+
+    def test_bull_bits_use_the_fib_band_not_the_swing_band(self) -> None:
+        # Distinct band values: at fib_bps=50 the offset close classifies
+        # near bull_23; at fib_bps=5 it does not — swing_bps huge either way
+        # (kills a fib_bps → swing_proximity_bps band-field swap on 69-71).
+        fib = self._fib()
+        level = fib.retrace_bull_23_paisa
+        close = level + (level * 30) // 10_000  # ~30 bps away
+        wide = ProximityParams(fib_proximity_bps=50, swing_proximity_bps=5000)
+        narrow = ProximityParams(fib_proximity_bps=5, swing_proximity_bps=5000)
+        m_wide = evaluate_atoms(_make_snapshot(close_paisa=close), wide, _empty_history())
+        m_narrow = evaluate_atoms(_make_snapshot(close_paisa=close), narrow, _empty_history())
+        assert _bit(m_wide, B.BIT_NEAR_FIB_BULL_236)
+        assert not _bit(m_narrow, B.BIT_NEAR_FIB_BULL_236)
+
+
+class TestExpressSwingProximity:
+    """Bits 72/73: last-confirmed-swing proximity (None-abstain law)."""
+
+    _CLOSE = 24_000_00
+    _TOL_10BPS = (24_000_00 * 10) // 10_000  # 24_000 paisa at the default band
+
+    def test_bits_never_fire_on_none_swings(self) -> None:
+        # fire-on-None mutant killer: no confirmed swing ⇒ bits 72/73 CLEAR
+        # even though close would be trivially "near" any fabricated level.
+        s = _make_snapshot(close_paisa=self._CLOSE)
+        assert s.last_swing_high_paisa is None and s.last_swing_low_paisa is None
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert not _bit(m, B.BIT_NEAR_SWING_HIGH)
+        assert not _bit(m, B.BIT_NEAR_SWING_LOW)
+
+    def test_snapshot_defaults_are_none_and_mask_is_byte_identical(self) -> None:
+        # Snapshot-defaults pin: omitting the swing kwargs ≡ explicit None/None
+        # — the whole mask (every other bit included) byte-identical.
+        s_default = _make_snapshot(close_paisa=self._CLOSE)
+        s_explicit = dataclasses.replace(
+            s_default, last_swing_high_paisa=None, last_swing_low_paisa=None
+        )
+        m1 = evaluate_atoms(s_default, _default_proximity(), _empty_history())
+        m2 = evaluate_atoms(s_explicit, _default_proximity(), _empty_history())
+        assert m1 == m2
+
+    def test_near_swing_high_exact_band_edge_in_and_out(self) -> None:
+        # The exact tolerance law: tol = close*bps//10⁴ with close FIXED, the
+        # free swing level placed AT the edge (fires) and one paisa past (clear).
+        close = self._CLOSE
+        tol = self._TOL_10BPS
+        s_in = _make_snapshot(close_paisa=close)
+        s_in = dataclasses.replace(s_in, last_swing_high_paisa=close + tol)
+        m_in = evaluate_atoms(s_in, _default_proximity(), _empty_history())
+        assert _bit(m_in, B.BIT_NEAR_SWING_HIGH)
+        s_out = dataclasses.replace(s_in, last_swing_high_paisa=close + tol + 1)
+        m_out = evaluate_atoms(s_out, _default_proximity(), _empty_history())
+        assert not _bit(m_out, B.BIT_NEAR_SWING_HIGH)
+
+    def test_near_swing_low_exact_band_edge_in_and_out(self) -> None:
+        close = self._CLOSE
+        tol = self._TOL_10BPS
+        base = _make_snapshot(close_paisa=close)
+        s_in = dataclasses.replace(base, last_swing_low_paisa=close - tol)
+        m_in = evaluate_atoms(s_in, _default_proximity(), _empty_history())
+        assert _bit(m_in, B.BIT_NEAR_SWING_LOW)
+        s_out = dataclasses.replace(base, last_swing_low_paisa=close - tol - 1)
+        m_out = evaluate_atoms(s_out, _default_proximity(), _empty_history())
+        assert not _bit(m_out, B.BIT_NEAR_SWING_LOW)
+
+    def test_swing_high_and_low_are_not_swapped(self) -> None:
+        # Asymmetric fixture: ONLY the high is near ⇒ ONLY bit 72; then ONLY
+        # the low is near ⇒ ONLY bit 73 (kills the hi↔lo swap mutant).
+        base = _make_snapshot(close_paisa=self._CLOSE)
+        s_high = dataclasses.replace(
+            base, last_swing_high_paisa=self._CLOSE + 5_00, last_swing_low_paisa=20_000_00
+        )
+        m_high = evaluate_atoms(s_high, _default_proximity(), _empty_history())
+        assert _bit(m_high, B.BIT_NEAR_SWING_HIGH)
+        assert not _bit(m_high, B.BIT_NEAR_SWING_LOW)
+        s_low = dataclasses.replace(
+            base, last_swing_high_paisa=28_000_00, last_swing_low_paisa=self._CLOSE - 5_00
+        )
+        m_low = evaluate_atoms(s_low, _default_proximity(), _empty_history())
+        assert _bit(m_low, B.BIT_NEAR_SWING_LOW)
+        assert not _bit(m_low, B.BIT_NEAR_SWING_HIGH)
+
+    def test_swing_bits_use_the_swing_band_not_the_fib_band(self) -> None:
+        # Distinct band values (band off-by-one/field-swap killer): the level
+        # sits ~30 bps off close — inside swing_bps=50, outside swing_bps=5 —
+        # with fib_bps pinned OPPOSITE each time.
+        close = self._CLOSE
+        level = close + (close * 30) // 10_000
+        base = _make_snapshot(close_paisa=close)
+        s = dataclasses.replace(base, last_swing_high_paisa=level)
+        wide = ProximityParams(fib_proximity_bps=5, swing_proximity_bps=50)
+        narrow = ProximityParams(fib_proximity_bps=50, swing_proximity_bps=5)
+        assert _bit(evaluate_atoms(s, wide, _empty_history()), B.BIT_NEAR_SWING_HIGH)
+        assert not _bit(evaluate_atoms(s, narrow, _empty_history()), B.BIT_NEAR_SWING_HIGH)
+
+    def test_default_swing_band_constant_cross_pin(self) -> None:
+        assert DEFAULT_SWING_PROXIMITY_BPS == 10
+        assert ProximityParams().swing_proximity_bps == 10
+
+
+def test_abi_and_compute_fib_projections_are_distinct() -> None:
+    """§4.2 constant-pun discipline: 19 == 19 yet the two lists DIFFER.
+
+    ``fib_levels_list`` (the evaluator ABI, FIB_LEVELS_LEN) appends
+    bull23/bull78/up424/dn424; the ``compute_fib_levels`` FFI projection
+    (FIB_COMPUTE_LIST_LEN) carries bull_38/bull_62 instead of the 424 pair —
+    equal lengths never imply mergeable lists.
+    """
+    fib = compute_fib_levels(_pl_date(2026, 5, 13), 24_050_00, 23_950_00)
+    abi = fib_levels_list(fib)
+    compute_projection = list(_tc.compute_fib_levels(24_050_00, 23_950_00))
+    assert len(abi) == len(compute_projection) == 19
+    assert abi != compute_projection
+    # The pdh/pdl retrace anchors are ABI-only slots (the compute projection
+    # starts at retrace_23 and derives the anchors caller-side); slot 0 alone
+    # proves the orders can never pun (bull_38 vs bearish-62 is an IEEE
+    # coincidence, so field-level membership is deliberately NOT the probe).
+    assert abi[0] == fib.retrace_level_at_pdh_paisa
+    assert fib.retrace_level_at_pdh_paisa not in compute_projection
+    assert abi[0] != compute_projection[0]
+
+
+class TestSwingParamsFragment:
+    """The ONE COMMON default-omit identity fragment (DEC-FIB-TEMPLATE-EXPRESS-001).
+
+    Direct unit coverage of ``vocabulary.swing_params_fragment`` — the emit law
+    every identity builder (canonical_trade_params / _grid_descriptor /
+    _tuple_cache_params / _tuple_digest) delegates to.  The builder-side pins
+    live in the engine suites; this covers the fragment's own three arms so the
+    ci.yml ``brutex.vocabulary.evaluator`` 100% gate holds from this file alone.
+    """
+
+    def test_none_proximity_emits_nothing(self) -> None:
+        assert swing_params_fragment(None) == {}
+
+    def test_default_band_emits_nothing(self) -> None:
+        prox = ProximityParams(swing_proximity_bps=DEFAULT_SWING_PROXIMITY_BPS)
+        assert swing_params_fragment(prox) == {}
+
+    def test_non_default_band_emits_exactly_one_key(self) -> None:
+        prox = ProximityParams(swing_proximity_bps=25)
+        assert swing_params_fragment(prox) == {"swing_proximity_bps": 25}

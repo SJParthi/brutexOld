@@ -20,7 +20,7 @@ via ``build_app`` + ``TestClient`` and pins:
 * one-shot failures route through the BXUI errorCard with Retry and
   "Loading…" is never a terminal element state (F-M4);
 * the ticker strip is on all three pages (R36 "always visible");
-* stale "52-condition" display copy is gone from EVERY template (60 now);
+* stale "52-condition" display copy is gone from EVERY template (74 declared / 74 active now);
 * the hostile fixture's strings survive ONLY as JSON data through the routes
   and the new templates carry ZERO string-to-DOM assignment sinks (F-M2).
 
@@ -826,7 +826,7 @@ class TestFailureLaw:
 
 
 # ---------------------------------------------------------------------------
-# Stale copy sweep: "52-condition" → 60
+# Stale copy sweep: "52-condition" → the 74-declared / 74-active wording
 # ---------------------------------------------------------------------------
 
 
@@ -837,9 +837,19 @@ class TestVocabularyCopy:
             assert "52-condition" not in text, path.name
             assert "52 condition" not in text, path.name
 
-    def test_welcome_says_60_condition_u128(self) -> None:
+    def test_welcome_says_74_declared_74_active_u128(self) -> None:
+        # The honest wording (the vocab-train finish — the SuperTrend flip
+        # #2203, gap-midpoint #2204, fib-express #2205 growth to 74 and the
+        # VWAP retention DEC-VOCAB-VWAP-RETAIN-001 #2206): 74 DECLARED bit
+        # positions, 74 ACTIVE — never a bare count that reads dead bits as
+        # live, never a stale 64/66 that predates the train.
         html = _template("welcome.html")
-        assert "60-condition" in html
+        assert "74-condition" in html
+        assert "74 active" in html
+        assert "64 active" not in html
+        assert "62 active" not in html
+        assert "66-condition" not in html
+        assert "60-condition" not in html
         assert "u128" in html
         assert "u64" not in html
 
@@ -1034,7 +1044,8 @@ class TestRoutesEndToEnd:
 # ---------------------------------------------------------------------------
 
 
-def test_app_leaderboard_docstring_says_60_condition() -> None:
+def test_app_leaderboard_docstring_carries_no_stale_vocab_count() -> None:
     app_src = (_REPO / "brutex" / "dashboard" / "app.py").read_text(encoding="utf-8")
     assert "the 52-condition vocabulary" not in app_src
-    assert "the 60-condition vocabulary" in app_src
+    assert "the 60-condition vocabulary" not in app_src  # count-free scope prose now
+    assert "the condition vocabulary" in app_src

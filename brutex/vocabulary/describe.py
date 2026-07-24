@@ -20,9 +20,30 @@ DEC-VOCAB-U128-CODEGEN-001).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Final
 
-from brutex.vocabulary.bits import BIT_TO_NAME, GROUP_RANGES, TOTAL_CONDITIONS
+from brutex.vocabulary.bits import (
+    BIT_TO_NAME,
+    GROUP_RANGES,
+    NAME_TO_BIT,
+    RETIRED_MASK,
+    TOTAL_CONDITIONS,
+)
+
+#: Display suffix for a RETIRED (tombstoned) condition bit — a bit whose math
+#: was deliberately deleted (``reserved = true`` in ``conditions.toml``).
+#: NONE exists on today's 74/74 layout: the VWAP bits 52/53 — the class's
+#: one historical member — are RETAINED-ACTIVE again per
+#: DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206), so the suffix currently
+#: renders nowhere; the machinery stays for any future tombstone (a retired
+#: bit's evaluator emits 0 forever, and rendering its plain name would
+#: present a dead condition as live — TOMB-01). ONE suffix authority
+#: (CLAUDE.md §11 COMMON): every renderer goes through
+#: :func:`condition_display_name` / :func:`display_condition_names`, never a
+#: copied literal.
+RETIRED_SUFFIX: Final[str] = " (retired)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,10 +86,79 @@ def _check_group_invariants(groups: tuple[tuple[str, range], ...], total: int) -
 _check_group_invariants(GROUP_RANGES, TOTAL_CONDITIONS)
 
 
+def condition_display_name(bit: int) -> str:
+    """Return the display name of condition *bit* — tombstone-aware (TOMB-01).
+
+    The ONE rendering authority for a condition bit's human-readable name: a
+    RETIRED bit (:data:`~brutex.vocabulary.bits.RETIRED_MASK` — ``reserved =
+    true`` tombstones whose math was deleted; NONE on today's 74/74 layout —
+    the VWAP bits 52/53 left that class at the retention,
+    DEC-VOCAB-VWAP-RETAIN-001 / MIGRATION.md #2206, so the suffix currently
+    renders nowhere) would read ``"<name> (retired)"`` so a persisted mask
+    never presents a dead condition as live; every other declared bit —
+    implemented AND LAYOUT-ONLY (declared-but-unimplemented, which no
+    persisted mask can carry: :class:`~brutex.strategies.spec.StrategySpec`
+    refuses them; also none on today's layout) — reads its plain name.
+
+    Parameters
+    ----------
+    bit
+        A declared condition bit (``0 <= bit < TOTAL_CONDITIONS``).
+
+    Returns
+    -------
+    str
+        The display name (suffixed for tombstoned bits only).
+
+    Raises
+    ------
+    KeyError
+        If *bit* is not a declared condition bit.
+    """
+    name = BIT_TO_NAME[bit]
+    if (RETIRED_MASK >> bit) & 1:
+        return f"{name}{RETIRED_SUFFIX}"
+    return name
+
+
+def display_condition_names(names: Iterable[str]) -> list[str]:
+    """Map RAW condition names (e.g. a persisted artifact's) to display names.
+
+    The read-side twin of :func:`condition_display_name` for surfaces that
+    persisted plain condition-NAME strings before the tombstone reshape (the
+    one-click ``top100.json`` ``conditions`` arrays): a plain name that maps
+    to a RETIRED bit gains the ``" (retired)"`` suffix; every other entry —
+    live names, already-suffixed names, and unknown/junk strings alike —
+    passes through VERBATIM (an old payload must never crash or be dropped
+    here; idempotent by construction).
+
+    Parameters
+    ----------
+    names
+        Raw condition-name strings (possibly from an old persisted payload).
+
+    Returns
+    -------
+    list[str]
+        The display names, in input order.
+    """
+    out: list[str] = []
+    for name in names:
+        bit = NAME_TO_BIT.get(name)
+        out.append(name if bit is None else condition_display_name(bit))
+    return out
+
+
 def matched_condition_names(mask: int) -> list[str]:
-    """Return the condition names a mask requires, in ascending bit order.
+    """Return the condition DISPLAY names a mask requires, in ascending bit order.
 
     Bits ``>= TOTAL_CONDITIONS`` are ignored, so a forward-compatible mask is safe.
+    Tombstone-aware (TOMB-01): a RETIRED bit renders through
+    :func:`condition_display_name` (``"<name> (retired)"``) — a pre-reshape
+    persisted mask carrying the dead VWAP bits reads honestly, never as a live
+    condition. New sweeps never mint retired bits (the default grid derives
+    from ``IMPLEMENTED_MASK`` and :class:`~brutex.strategies.spec.StrategySpec`
+    refuses them), so current-era output is byte-identical.
 
     Parameters
     ----------
@@ -78,9 +168,9 @@ def matched_condition_names(mask: int) -> list[str]:
     Returns
     -------
     list[str]
-        The matched condition names (empty for the no-condition mask ``0``).
+        The matched condition display names (empty for the no-condition mask ``0``).
     """
-    return [BIT_TO_NAME[bit] for bit in range(TOTAL_CONDITIONS) if (mask >> bit) & 1]
+    return [condition_display_name(bit) for bit in range(TOTAL_CONDITIONS) if (mask >> bit) & 1]
 
 
 def describe_mask(mask: int) -> list[MaskGroup]:
@@ -103,7 +193,7 @@ def describe_mask(mask: int) -> list[MaskGroup]:
     """
     result: list[MaskGroup] = []
     for group, rng in GROUP_RANGES:
-        names = tuple(BIT_TO_NAME[bit] for bit in rng if (mask >> bit) & 1)
+        names = tuple(condition_display_name(bit) for bit in rng if (mask >> bit) & 1)
         if names:
             result.append(MaskGroup(group=group, conditions=names))
     return result
@@ -111,7 +201,10 @@ def describe_mask(mask: int) -> list[MaskGroup]:
 
 __all__ = [
     "GROUP_RANGES",
+    "RETIRED_SUFFIX",
     "MaskGroup",
+    "condition_display_name",
     "describe_mask",
+    "display_condition_names",
     "matched_condition_names",
 ]

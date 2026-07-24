@@ -29,7 +29,7 @@ the PDH/PDL lookup already satisfies (P-06-clean by construction).
 If there are fewer than 5 prior trading sessions (rolling-weekly) or no completed
 prior ISO week (weekly-static), the anchor is not warm → the producer returns
 ``None``. The engine treats a ``None`` anchor as **combo ineligible** for that bar
-(no signal), NOT as a degenerate zero — mirroring the EMA/VWAP warm-up contract.
+(no signal), NOT as a degenerate zero — mirroring the EMA warm-up contract.
 PR-2 supplies the ``None``; PR-4/PR-5 enforce the eligibility gate.
 
 ## Muhurat / short weeks (ADR-0012 §4.5 #7)

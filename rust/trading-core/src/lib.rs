@@ -9,10 +9,18 @@
 //! The vocabulary mask is a `u128` (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4 —
 //! the DEC-PLUGIN-001-gated u64→u128 widening for headroom). The bit LAYOUT
 //! ([`bits`]) is GENERATED from `conditions.toml` by `scripts/codegen_vocab.py`
-//! (the same manifest emits the Python twin). Bits 52..=55 (VWAP/R5-S5) became
+//! (the same manifest emits the Python twin). Bits 54..=55 (R5/S5) became
 //! `implemented=true` in PR-2; bits 56..=59 (BOS/CHoCH) became `implemented=true`
 //! in DEC-NIFTY-BOS-CHOCH-001 (the stateful look-ahead-clean
-//! [`MarketStructureState`] resolves the four booleans the evaluator reads).
+//! [`MarketStructureState`] resolves the four booleans the evaluator reads);
+//! bits 60..=63 (Central Pivot Range) are implemented off the same prev-day
+//! pivot anchor; bits 64..=65 (Supertrend) are implemented off the stateful
+//! ×2-scaled-integer [`SupertrendState`] line (ATR-10 Wilder, factor 3, hl2).
+//! Bits 52..=53 (VWAP) are implemented off the stateful session-anchored
+//! [`VwapState`] and RETAINED per the operator ruling
+//! (DEC-VOCAB-VWAP-RETAIN-001): they evaluate when traded volume exists
+//! (futures / broker-provided volume) and ABSTAIN (`None` → bits clear) on
+//! volumeless instruments such as the spot indices.
 //!
 //! The pure-Rust core ([`evaluate_atoms`] + the [`indicators`]) is dependency-free
 //! and is proven identical to the Python source against the language-neutral
@@ -45,12 +53,19 @@ pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluat
 pub use greeks::{GreeksOut, black76_price, greeks};
 pub use indicators::ema::{EmaState, compute_ema, ema_alpha, ema_seed, ema_step};
 pub use indicators::fib::{FibLevels, compute_fib_levels};
+pub use indicators::gap_mid::{GapDirection, compute_gap_mid};
 pub use indicators::market_structure::{MarketStructureSignal, MarketStructureState, Trend};
 pub use indicators::metadata::{
     BarMetadata, derive_bar_metadata, minute_of_session, resolve_near_month, seconds_of_day,
     weekday_from_ordinal,
 };
-pub use indicators::pivots::{PivotLevels, compute_pivot_levels};
+pub use indicators::pivots::{
+    CprLevels, NARROW_CPR_WIDTH_BPS, PivotLevels, compute_cpr_levels, compute_pivot_levels,
+};
+pub use indicators::supertrend::{
+    SUPERTREND_ATR_PERIOD, SUPERTREND_DIR_DOWN, SUPERTREND_DIR_UP, SUPERTREND_FACTOR,
+    SupertrendState, compute_supertrend,
+};
 pub use indicators::vwap::VwapState;
 pub use spec::{Direction, SPEC_SCHEMA_VERSION, Signal, StrategySpec, evaluate};
 

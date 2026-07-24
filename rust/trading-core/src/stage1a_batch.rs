@@ -41,10 +41,11 @@
 //! `FIB_DEPENDENT_MASK` / `APPLIES_TO_1DAY_MASK` constants and this core
 //! complements in-width (`mask & !dep`) — Python's `mask & ~DEP` on an
 //! arbitrary-precision int is identical for any mask `< 2^128` (unit-pinned
-//! below), and the masks the evaluator emits occupy bits 0..=59 only.
+//! below), and the masks the evaluator emits occupy bits 0..=63 only.
 
 use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 use crate::indicators::fib::FibLevels;
+use crate::indicators::gap_mid::compute_gap_mid;
 use crate::indicators::market_structure::MarketStructureState;
 use crate::indicators::pivots::PivotLevels;
 use crate::indicators::vwap::VwapState;
@@ -54,10 +55,12 @@ use crate::indicators::vwap::VwapState;
 /// two constants equal): `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]`.
 pub const PIVOT_ROW_LEN: usize = 12;
 
-/// Entries per day-table fib row — mirrors the FROZEN `evaluate_with_levels`
-/// fib ABI (`python.rs::FIB_LEVELS_LEN`): `[retrace@pdh, r23, r38, r50, r62,
-/// r78, retrace@pdl, up127, up162, up200, up262, dn127, dn162, dn200, dn262]`.
-pub const FIB_ROW_LEN: usize = 15;
+/// Entries per day-table fib row — mirrors the `evaluate_with_levels`
+/// fib ABI (`python.rs::FIB_LEVELS_LEN`, 15 → 19 under
+/// DEC-FIB-TEMPLATE-EXPRESS-001): `[retrace@pdh, r23, r38, r50, r62,
+/// r78, retrace@pdl, up127, up162, up200, up262, dn127, dn162, dn200, dn262,
+/// bull23, bull78, up424, dn424]` (the four new slots APPENDED last).
+pub const FIB_ROW_LEN: usize = 19;
 
 /// The valid `prior_n` domain (Group-6 look-back ∈ {1, 2, 3, 4} — the same
 /// domain `Stage1AMatrixBuilder` sweeps; `docs/TRACK1_VOCABULARY.md` Group 6).
@@ -126,6 +129,13 @@ pub struct Stage1aBatchInputs<'a> {
     pub ema20_paisa: &'a [Option<i64>],
     /// Prepass-computed EMA(200) column — see [`Stage1aBatchInputs::ema20_paisa`].
     pub ema200_paisa: &'a [Option<i64>],
+    /// Prepass-computed SuperTrend line column (×2-scaled paisa, `None` during
+    /// the 9-bar warm-up — `indicators::supertrend`), or `None` for NO column
+    /// (every bar absent — the pre-Supertrend caller shape; bits 64-65 stay
+    /// clear). When present, length `N` like every per-bar column. The prepass
+    /// owns the state lifecycle (incl. the D11 contract-roll recreation),
+    /// exactly as it owns the EMA columns.
+    pub supertrend_x2_paisa: Option<&'a [Option<i64>]>,
     /// `PIVOT_ROW_LEN * D` flattened pivot rows, evaluator ABI order.
     pub day_pivot_levels: &'a [i64],
     /// `FIB_ROW_LEN * D` flattened fib rows, evaluator ABI order.
@@ -142,6 +152,10 @@ pub struct Stage1aBatchInputs<'a> {
     pub pdh_pdl_bps: i64,
     /// Group-4 fib proximity tolerance (bps).
     pub fib_bps: i64,
+    /// Swing proximity tolerance for the near-swing bits 72/73 (bps —
+    /// DEC-FIB-TEMPLATE-EXPRESS-001; domain-checked by the SAME reused
+    /// `check_evaluate_inputs` boundary guard in `python.rs`).
+    pub swing_bps: i64,
     /// Group-6 prior-bar look-back (∈ `MIN_PRIOR_N..=MAX_PRIOR_N`).
     pub prior_n: usize,
     /// Fractal half-window for [`MarketStructureState`] (`>= 1`; the pyclass
@@ -157,6 +171,21 @@ pub struct Stage1aBatchInputs<'a> {
     pub fib_dependent_mask: u128,
     /// POSITIVE `bits.APPLIES_TO_1DAY_MASK` (an AND mask — applied directly).
     pub applies_to_1day_mask: u128,
+    /// Per-day prior-session-edge X1 HIGH (int64 paisa) — the HIGH of the
+    /// prior session's LAST completed TF bar, prepass-RESOLVED per day exactly
+    /// like `day_pivot_levels` (the Muhurat skip + first-day/post-roll cold
+    /// start are Python-side decisions; DEC-GAP-MIDPOINT-CONDITIONS-001).
+    /// Read only where [`Stage1aBatchInputs::day_has_x1`] is true.
+    pub day_x1_hi_paisa: &'a [i64],
+    /// Per-day prior-session-edge X1 LOW — see
+    /// [`Stage1aBatchInputs::day_x1_hi_paisa`].
+    pub day_x1_lo_paisa: &'a [i64],
+    /// Per-day X1 warm flag (`False` ⇒ no gap-midpoint level exists that day —
+    /// the Group-15 bits 66-68 stay 0; the `day_has_pivot` twin for the
+    /// session-edge anchor).
+    pub day_has_x1: &'a [bool],
+    /// Group-15 gap-midpoint proximity tolerance (bps).
+    pub gap_mid_bps: i64,
 }
 
 /// Validate every STRUCTURAL invariant of *inp*; return the bar count `N`.
@@ -164,7 +193,8 @@ pub struct Stage1aBatchInputs<'a> {
 /// `Err(String)` on any violation (never a panic — G-2: a marshal-desynced
 /// day table must never silently serve shifted anchors):
 ///
-/// * all 14 per-bar columns share one length `N`;
+/// * all 14 required per-bar columns (and the optional `supertrend_x2_paisa`
+///   column when supplied) share one length `N`;
 /// * `day_pivot_levels` / `day_fib_levels` / `day_has_fib` sizes agree with
 ///   `D = day_has_pivot.len()` (checked multiplication — total for any `D`);
 /// * `N == 0` requires empty day tables (and yields `Ok(0)`);
@@ -177,7 +207,7 @@ pub struct Stage1aBatchInputs<'a> {
 ///   unreachable; refuter RF-B F2).
 pub fn validate_structure(inp: &Stage1aBatchInputs<'_>) -> Result<usize, String> {
     let n = inp.open_paisa.len();
-    for (name, len) in [
+    let mut lengths = vec![
         ("high_paisa", inp.high_paisa.len()),
         ("low_paisa", inp.low_paisa.len()),
         ("close_paisa", inp.close_paisa.len()),
@@ -191,7 +221,11 @@ pub fn validate_structure(inp: &Stage1aBatchInputs<'_>) -> Result<usize, String>
         ("day_index", inp.day_index.len()),
         ("ema20_paisa", inp.ema20_paisa.len()),
         ("ema200_paisa", inp.ema200_paisa.len()),
-    ] {
+    ];
+    if let Some(st) = inp.supertrend_x2_paisa {
+        lengths.push(("supertrend_x2_paisa", st.len()));
+    }
+    for (name, len) in lengths {
         if len != n {
             return Err(format!(
                 "stage1a_batch: {name} length {len} != open_paisa length {n}"
@@ -204,6 +238,17 @@ pub fn validate_structure(inp: &Stage1aBatchInputs<'_>) -> Result<usize, String>
             "stage1a_batch: day_has_fib length {} != day_has_pivot length {n_days}",
             inp.day_has_fib.len()
         ));
+    }
+    for (name, len) in [
+        ("day_x1_hi_paisa", inp.day_x1_hi_paisa.len()),
+        ("day_x1_lo_paisa", inp.day_x1_lo_paisa.len()),
+        ("day_has_x1", inp.day_has_x1.len()),
+    ] {
+        if len != n_days {
+            return Err(format!(
+                "stage1a_batch: {name} length {len} != day_has_pivot length {n_days}"
+            ));
+        }
     }
     let want_pivot = PIVOT_ROW_LEN
         .checked_mul(n_days)
@@ -299,8 +344,10 @@ fn pivots_from_row(row: &[i64]) -> PivotLevels {
 }
 
 /// Assemble one day row's [`FibLevels`] exactly like
-/// `evaluate_with_levels_impl` does (pdh/pdl/range/424s/bull tail zero-filled
-/// — the conditions never read them; pinned by the differential test).
+/// `evaluate_with_levels_impl` does (pdh/pdl/range/bull_38/bull_62
+/// zero-filled — the conditions never read them; pinned by the differential
+/// test). Slots 15..=18 carry the DEC-FIB-TEMPLATE-EXPRESS-001 appended ABI
+/// tail (`bull23, bull78, up424, dn424` — bits 69-71 read these).
 fn fib_from_row(row: &[i64]) -> FibLevels {
     FibLevels {
         retrace_level_at_pdh_paisa: row[0],
@@ -318,15 +365,15 @@ fn fib_from_row(row: &[i64]) -> FibLevels {
         ext_down_162_paisa: row[12],
         ext_down_200_paisa: row[13],
         ext_down_262_paisa: row[14],
+        retrace_bull_23_paisa: row[15],
+        retrace_bull_78_paisa: row[16],
+        ext_up_424_paisa: row[17],
+        ext_down_424_paisa: row[18],
         pdh_paisa: 0,
         pdl_paisa: 0,
         range_paisa: 0,
-        ext_up_424_paisa: 0,
-        ext_down_424_paisa: 0,
-        retrace_bull_23_paisa: 0,
         retrace_bull_38_paisa: 0,
         retrace_bull_62_paisa: 0,
-        retrace_bull_78_paisa: 0,
     }
 }
 
@@ -335,7 +382,7 @@ fn fib_from_row(row: &[i64]) -> FibLevels {
 ///
 /// The loop body mirrors `Stage1AMatrixBuilder.push` step-for-step:
 ///
-/// 1. `contract_reset[i]` ⇒ recreate [`VwapState`] / [`MarketStructureState`],
+/// 1. `contract_reset[i]` ⇒ recreate [`MarketStructureState`],
 ///    clear the prior-flag deque, void the current day (D11 — the prepass
 ///    emits the flag from the SAME cursor that fires `_roll_to_new_contract`;
 ///    the EMA hard reset is a prepass concern — EMA arrives as a column).
@@ -346,15 +393,26 @@ fn fib_from_row(row: &[i64]) -> FibLevels {
 /// 3. Absorb high/low into the running day extremes (with the defensive
 ///    `high >= low` `Err` arm mirroring `DayExtremesState.update`'s
 ///    `ValueError` — unreachable through a validated `CandleBar`).
-/// 4. Feed the SAME core [`VwapState`] the pyclass wraps.
-/// 5. Feed the SAME core [`MarketStructureState`].
-/// 6. [`evaluate_atoms`] — the ONE frozen evaluator, in-crate.
-/// 7. The clears, in `push()`'s exact order: cold pivot anchor ⇒
+/// 4. Feed the SAME core [`MarketStructureState`].
+/// 5. [`evaluate_atoms`] — the ONE frozen evaluator, in-crate (the optional
+///    per-bar `supertrend_x2_paisa` value passes through verbatim, like EMA).
+/// 6. The clears, in `push()`'s exact order: cold pivot anchor ⇒
 ///    `mask &= !anchor_dependent_mask`; else cold fib ⇒
 ///    `mask &= !fib_dependent_mask`; then the optional D12
 ///    `mask &= applies_to_1day_mask`.
-/// 8. AFTER evaluation: push `close > open` into the prior deque, trimmed to
+/// 7. AFTER evaluation: push `close > open` into the prior deque, trimmed to
 ///    `prior_n` (a doji records bearish — the evaluator.py:119-123 law).
+/// 9. Gap-midpoint (Group 15, DEC-GAP-MIDPOINT-CONDITIONS-001): on the day
+///    branch the day's level is minted from the prepass-resolved X1 day row +
+///    THIS first bar's own high/low (X2) + its open and the day row's `pdc`
+///    (direction = the exact sign of `open − pdc`; zero gap ⇒ no level) via
+///    the shared [`compute_gap_mid`]; the first bar of the day evaluates with
+///    NO level (the arm-from-bar-2 law — on 1day EVERY bar is its session's
+///    first TF bar, so the bits stay 0 there by construction), later bars of
+///    the day carry it. A mid-day `contract_reset` (structurally legal,
+///    never emitted by the sanctioned prepass — the RF-I F2(c) defensive
+///    class) SUPPRESSES the level for the remainder of that day, mirroring
+///    the Python D11 hard reset's cleared `prev_session_edge`.
 pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u128>, String> {
     let n = validate_structure(inp)?;
     if n == 0 {
@@ -364,6 +422,8 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
         pivot_proximity_bps: inp.pivot_bps,
         pdh_pdl_proximity_bps: inp.pdh_pdl_bps,
         fib_proximity_bps: inp.fib_bps,
+        gap_mid_proximity_bps: inp.gap_mid_bps,
+        swing_proximity_bps: inp.swing_bps,
     };
     let mut vwap = VwapState::new();
     let mut structure = MarketStructureState::new(inp.fractal_k);
@@ -376,6 +436,15 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
     // twin), so `pivots`/`fib`/extremes are always day-seeded before use; the
     // initial literals below are never read (row 0 loads at bar 0).
     let mut current_day: Option<u32> = None;
+    // Gap-midpoint state (Group 15). `prev_day_loaded` is deliberately NOT
+    // cleared by a contract reset — it distinguishes a GENUINE new day row
+    // (clears the suppression) from a mid-day reset re-seeding the SAME day
+    // (keeps it), so the defensive same-day-reset shape mirrors Python's
+    // cleared `prev_session_edge` (no level for the rest of that day).
+    let mut prev_day_loaded: Option<u32> = None;
+    let mut gap_suppressed = false;
+    let mut day_gap_mid: Option<i64> = None;
+    let mut first_bar_of_day = false;
     let mut day_high: i64 = 0;
     let mut day_low: i64 = 0;
     let mut open_of_day: i64 = 0;
@@ -389,6 +458,11 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
             structure = MarketStructureState::new(inp.fractal_k);
             prior.flags.clear();
             current_day = None;
+            // The Python twin's `_roll_to_new_contract` clears the prior
+            // session's edge, so no gap-mid level can exist until the next
+            // GENUINE day row (whose X1 the prepass resolves post-roll).
+            gap_suppressed = true;
+            day_gap_mid = None;
         }
         let open = inp.open_paisa[i];
         let high = inp.high_paisa[i];
@@ -414,6 +488,35 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
                 &inp.day_pivot_levels[du * PIVOT_ROW_LEN..(du + 1) * PIVOT_ROW_LEN],
             );
             fib = fib_from_row(&inp.day_fib_levels[du * FIB_ROW_LEN..(du + 1) * FIB_ROW_LEN]);
+            // Gap-midpoint mint (step 9). A GENUINE new day row clears the
+            // reset suppression (the day table is the authority there — the
+            // prepass emits `day_has_x1 = false` for the post-roll day); a
+            // same-day reset re-seed keeps it. X2 = THIS first bar's own
+            // high/low; direction = sign(open − pdc) off the just-loaded day
+            // row. The `day_has_pivot` conjunct mirrors the Python law that
+            // the level needs a real `pdc` (a cold-pivot day has no prev-day
+            // anchor, so no direction exists — never a placeholder-pdc level).
+            if prev_day_loaded != Some(d) {
+                prev_day_loaded = Some(d);
+                gap_suppressed = false;
+            }
+            first_bar_of_day = true;
+            day_gap_mid = if inp.day_has_x1[du] && inp.day_has_pivot[du] && !gap_suppressed {
+                let x1_hi = inp.day_x1_hi_paisa[du];
+                let x1_lo = inp.day_x1_lo_paisa[du];
+                if x1_hi < x1_lo {
+                    // Defensive Err arm (never a panic — the totality law):
+                    // `compute_gap_mid` would assert; unreachable through the
+                    // sanctioned prepass, which emits real candle extremes.
+                    return Err(format!(
+                        "stage1a_batch: day {du} X1 high < low: high={x1_hi} low={x1_lo}"
+                    ));
+                }
+                compute_gap_mid(x1_hi, x1_lo, high, low, open, pivots.pdc_paisa)
+                    .map(|(level, _direction)| level)
+            } else {
+                None
+            };
         } else {
             day_high = day_high.max(high);
             day_low = day_low.min(low);
@@ -442,6 +545,16 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
             day_low_paisa: day_low,
             open_of_day_paisa: open_of_day,
             market_structure,
+            supertrend_x2_paisa: inp.supertrend_x2_paisa.and_then(|col| col[i]),
+            // The arm-from-bar-2 law: the session's first TF bar (which
+            // MINTS the level from its own extremes) evaluates with NO level.
+            gap_mid_paisa: if first_bar_of_day { None } else { day_gap_mid },
+            // Read strictly POST-update from the kernel's OWN state — the
+            // exact bits-56-59 seam discipline (a swing is confirmed only k
+            // bars later, all at index <= i; the D11 reset above returns the
+            // fields to None across a roll — DEC-FIB-TEMPLATE-EXPRESS-001).
+            last_swing_high_paisa: structure.last_swing_high(),
+            last_swing_low_paisa: structure.last_swing_low(),
         };
         let mut mask = evaluate_atoms(&snapshot, &proximity, &prior);
         let du = d as usize;
@@ -459,6 +572,8 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
         if prior.flags.len() > inp.prior_n {
             prior.flags.remove(0);
         }
+        // The gap-mid level arms from the SECOND bar of the day onward.
+        first_bar_of_day = false;
         out.push(mask);
     }
     Ok(out)
@@ -490,6 +605,10 @@ mod tests {
         day_fibs: Vec<i64>,
         day_has_pivot: Vec<bool>,
         day_has_fib: Vec<bool>,
+        supertrend_x2: Option<Vec<Option<i64>>>,
+        day_x1_hi: Vec<i64>,
+        day_x1_lo: Vec<i64>,
+        day_has_x1: Vec<bool>,
     }
 
     fn cols(n: usize) -> Cols {
@@ -514,6 +633,10 @@ mod tests {
             day_fibs: vec![0; FIB_ROW_LEN * n_days],
             day_has_pivot: vec![false; n_days],
             day_has_fib: vec![false; n_days],
+            supertrend_x2: None,
+            day_x1_hi: vec![0; n_days],
+            day_x1_lo: vec![0; n_days],
+            day_has_x1: vec![false; n_days],
         }
     }
 
@@ -537,15 +660,21 @@ mod tests {
             day_fib_levels: &c.day_fibs,
             day_has_pivot: &c.day_has_pivot,
             day_has_fib: &c.day_has_fib,
+            supertrend_x2_paisa: c.supertrend_x2.as_deref(),
             pivot_bps: 10,
             pdh_pdl_bps: 10,
             fib_bps: 10,
+            swing_bps: 10,
             prior_n: 3,
             fractal_k: 2,
             apply_1day_mask: false,
             anchor_dependent_mask: crate::bits::IMPLEMENTED_MASK, // any positive mask
             fib_dependent_mask: 0,
             applies_to_1day_mask: crate::bits::IMPLEMENTED_MASK,
+            day_x1_hi_paisa: &c.day_x1_hi,
+            day_x1_lo_paisa: &c.day_x1_lo,
+            day_has_x1: &c.day_has_x1,
+            gap_mid_bps: 10,
         }
     }
 
@@ -560,13 +689,21 @@ mod tests {
         );
     }
 
+    /// Resize every per-day table (incl. the Group-15 X1 tables) to `d` rows.
+    fn resize_day_tables(c: &mut Cols, d: usize) {
+        c.day_has_pivot = vec![false; d];
+        c.day_has_fib = vec![false; d];
+        c.day_pivots = vec![0; PIVOT_ROW_LEN * d];
+        c.day_fibs = vec![0; FIB_ROW_LEN * d];
+        c.day_x1_hi = vec![0; d];
+        c.day_x1_lo = vec![0; d];
+        c.day_has_x1 = vec![false; d];
+    }
+
     #[test]
     fn empty_bars_with_day_rows_rejected() {
         let mut c = cols(0);
-        c.day_has_pivot = vec![false];
-        c.day_has_fib = vec![false];
-        c.day_pivots = vec![0; PIVOT_ROW_LEN];
-        c.day_fibs = vec![0; FIB_ROW_LEN];
+        resize_day_tables(&mut c, 1);
         let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
         assert!(err.contains("empty bar stream"), "got: {err}");
     }
@@ -646,39 +783,27 @@ mod tests {
         // First row must be 0.
         let mut c = cols(2);
         c.day_index = vec![1, 1];
-        c.day_has_pivot = vec![false, false];
-        c.day_has_fib = vec![false, false];
-        c.day_pivots = vec![0; PIVOT_ROW_LEN * 2];
-        c.day_fibs = vec![0; FIB_ROW_LEN * 2];
+        resize_day_tables(&mut c, 2);
         let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
         assert!(err.contains("start at 0"), "got: {err}");
 
         // Steps of 2 (a skipped day row) are a desync.
         let mut c = cols(2);
         c.day_index = vec![0, 2];
-        c.day_has_pivot = vec![false; 3];
-        c.day_has_fib = vec![false; 3];
-        c.day_pivots = vec![0; PIVOT_ROW_LEN * 3];
-        c.day_fibs = vec![0; FIB_ROW_LEN * 3];
+        resize_day_tables(&mut c, 3);
         let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
         assert!(err.contains("must step by 0 or 1"), "got: {err}");
 
         // A DECREASING step is a desync.
         let mut c = cols(3);
         c.day_index = vec![0, 1, 0];
-        c.day_has_pivot = vec![false; 2];
-        c.day_has_fib = vec![false; 2];
-        c.day_pivots = vec![0; PIVOT_ROW_LEN * 2];
-        c.day_fibs = vec![0; FIB_ROW_LEN * 2];
+        resize_day_tables(&mut c, 2);
         let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
         assert!(err.contains("must step by 0 or 1"), "got: {err}");
 
         // The G-2 terminal check: an unconsumed trailing day row.
         let mut c = cols(2);
-        c.day_has_pivot = vec![false, false];
-        c.day_has_fib = vec![false, false];
-        c.day_pivots = vec![0; PIVOT_ROW_LEN * 2];
-        c.day_fibs = vec![0; FIB_ROW_LEN * 2];
+        resize_day_tables(&mut c, 2);
         let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
         assert!(err.contains("every day row must be consumed"), "got: {err}");
     }
@@ -747,9 +872,15 @@ mod tests {
         let fib_row = [
             10_100, 10_053, 10_024, 10_000, 9_976, 9_943, 9_900, 10_154, 10_224, 10_300, 10_424,
             9_846, 9_776, 9_700, 9_576,
+            // DEC-FIB-TEMPLATE-EXPRESS-001 appended tail (bull23/bull78/424s)
+            // — deliberately OUTSIDE the 10 bps band around close 10_050.
+            9_794, 10_014, 11_395, 8_005,
         ];
         c.day_pivots = [[0i64; PIVOT_ROW_LEN].as_slice(), pivot_row.as_slice()].concat();
         c.day_fibs = [[0i64; FIB_ROW_LEN].as_slice(), fib_row.as_slice()].concat();
+        c.day_x1_hi = vec![0, 0];
+        c.day_x1_lo = vec![0, 0];
+        c.day_has_x1 = vec![false, false];
         c
     }
 
@@ -795,6 +926,32 @@ mod tests {
         let cold_masks = stage1a_bar_bits_batch_impl(&v).unwrap();
         assert_eq!(cold_masks[2] & fib_bit, 0, "cold fib: bit cleared");
         assert_ne!(cold_masks[2] & pdl_bit, 0, "warm pivots survive");
+    }
+
+    #[test]
+    fn cpr_bits_ride_the_anchor_dependent_clear() {
+        // The CPR comparison bits (60-62) fire against a COLD day's zero
+        // placeholder row (close 10_050 > tc 0 — the close_above_pdh class),
+        // so they MUST be in the anchor-dependent clear; on the WARM day they
+        // evaluate off the real row. Day-1 row: pdh=10_100, pdl=9_900,
+        // p=10_000 ⇒ bc = round((10_100+9_900)/2) = 10_000, tc = 2·10_000 −
+        // 10_000 = 10_000 (a width-0 CPR: narrow fires too); close 10_050 >
+        // tc ⇒ bit 60.
+        let c = two_day_cols();
+        let mut v = view(&c);
+        const CPR_FAMILY: u128 = 0xF << 60;
+        v.anchor_dependent_mask = REAL_ANCHOR_DEP;
+        v.fib_dependent_mask = REAL_FIB_DEP;
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        // Day 0 (cold): every CPR bit cleared — never a fabricated verdict
+        // off the placeholder zeros.
+        assert_eq!(masks[0] & CPR_FAMILY, 0);
+        assert_eq!(masks[1] & CPR_FAMILY, 0);
+        // Day 1 (warm): above-TC + narrow fire off the real anchor row.
+        assert_ne!(masks[2] & (1u128 << crate::bits::BIT_ABOVE_CPR_TC), 0);
+        assert_ne!(masks[2] & (1u128 << crate::bits::BIT_NARROW_CPR_DAY), 0);
+        assert_eq!(masks[2] & (1u128 << crate::bits::BIT_INSIDE_CPR), 0);
+        assert_eq!(masks[2] & (1u128 << crate::bits::BIT_BELOW_CPR_BC), 0);
     }
 
     #[test]
@@ -845,11 +1002,15 @@ mod tests {
 
     /// The three POSITIVE dependency masks exactly as the Python dispatch
     /// sends them (`stage1a.ANCHOR_DEPENDENT_MASK` / `FIB_DEPENDENT_MASK` /
-    /// `bits.APPLIES_TO_1DAY_MASK` — frozen vocabulary constants), so the
-    /// oracle-derived probe masks below replay under the REAL clears.
-    const REAL_ANCHOR_DEP: u128 = 0xf00003fffffc0;
+    /// `bits.APPLIES_TO_1DAY_MASK`). Updated for the 66-bit reshape: the
+    /// anchor mask GAINS the CPR bits 60-63 (they compare against the SAME
+    /// prev-day anchor and would otherwise fire against a cold-day zero row —
+    /// the stage1a.py `_pivot_dependent_bits` update ships with the Python
+    /// half of this change) and the applies-1day mask gains bits 60-65
+    /// (all six new conditions are 1day-applicable in the manifest).
+    const REAL_ANCHOR_DEP: u128 = 0xf00f_0000_3fff_ffc0;
     const REAL_FIB_DEP: u128 = 0x3ff80000;
-    const REAL_APPLIES_1DAY: u128 = 0xfcf0fffffffffff;
+    const REAL_APPLIES_1DAY: u128 = 0x3ffcf0fffffffffff;
 
     /// The pin-1 columns (directions B,B,B,R,R,R,B,B on 2024-01-02) — shared
     /// by the rolling-window pin and the RF-I F1 `apply_1day_mask` pin.
@@ -876,7 +1037,14 @@ mod tests {
     }
 
     /// The Python-oracle masks for [`pin1_cols`] under the REAL dependency
-    /// masks (`Stage1AMatrixBuilder(prior_n=3).build`, derived once).
+    /// masks (`Stage1AMatrixBuilder(prior_n=3).build`, derived once for the
+    /// 60-bit layout; the wipe-era `old & !(0b11 << 52)` re-derivation is
+    /// INVERTED at the VWAP retention (DEC-VOCAB-VWAP-RETAIN-001) — bits
+    /// 52/53 return with the restored VWAP columns, so the original oracle
+    /// literals hold verbatim; the CPR bits 60-63 stay cleared on this COLD
+    /// (day_has_pivot = false) stream by REAL_ANCHOR_DEP, and the
+    /// gap/swing/Supertrend groups are structurally dark here — no ST
+    /// column, cold X1, no near-swing close).
     const PIN1_MASKS: [u128; 8] = [
         0x10040240000000,
         0x10140240000000,
@@ -971,6 +1139,8 @@ mod tests {
         v.fib_dependent_mask = REAL_FIB_DEP;
         v.applies_to_1day_mask = REAL_APPLIES_1DAY;
         let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        // Oracle-derived literals (VWAP bits restored per
+        // DEC-VOCAB-VWAP-RETAIN-001 — see the PIN1_MASKS provenance note).
         assert_eq!(
             masks,
             vec![
@@ -996,9 +1166,13 @@ mod tests {
     /// (and need not) be distinguished.
     #[test]
     fn each_fib_row_slot_feeds_exactly_its_own_near_bit() {
-        const EXPECTED_BIT: [u32; FIB_ROW_LEN] =
-            [19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 26, 27, 28, 29];
-        const FIB_BIT_FAMILY: u128 = 0x3ff8_0000; // bits 19..=29
+        const EXPECTED_BIT: [u32; FIB_ROW_LEN] = [
+            19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 26, 27, 28, 29, 69, 70, 71, 71,
+        ];
+        // Bits 19..=29 plus the Fibonacci-Extended bits 69..=71
+        // (DEC-FIB-TEMPLATE-EXPRESS-001; slots 17/18 share bit 71 — the
+        // up/down 424 pair ORs exactly like the 26..=29 extension pairs).
+        const FIB_BIT_FAMILY: u128 = 0x3ff8_0000 | (0b111 << 69);
         for (slot, expected_bit) in EXPECTED_BIT.iter().enumerate() {
             let mut c = cols(1);
             c.day_has_pivot = vec![true];
@@ -1150,6 +1324,10 @@ mod tests {
             day_fibs: c.day_fibs[FIB_ROW_LEN..].to_vec(),
             day_has_pivot: vec![c.day_has_pivot[1]],
             day_has_fib: vec![c.day_has_fib[1]],
+            supertrend_x2: None,
+            day_x1_hi: vec![c.day_x1_hi[1]],
+            day_x1_lo: vec![c.day_x1_lo[1]],
+            day_has_x1: vec![c.day_has_x1[1]],
         };
         let standalone = stage1a_bar_bits_batch_impl(&view(&b)).unwrap();
         assert_eq!(&full[2..], standalone.as_slice());
@@ -1199,9 +1377,299 @@ mod tests {
                 day_fibs: c.day_fibs[..FIB_ROW_LEN].to_vec(),
                 day_has_pivot: c.day_has_pivot[..1].to_vec(),
                 day_has_fib: c.day_has_fib[..1].to_vec(),
+                supertrend_x2: c.supertrend_x2.clone(),
+                day_x1_hi: c.day_x1_hi[..1].to_vec(),
+                day_x1_lo: c.day_x1_lo[..1].to_vec(),
+                day_has_x1: c.day_has_x1[..1].to_vec(),
             };
             let prefix = stage1a_bar_bits_batch_impl(&view(&p)).unwrap();
             assert_eq!(prefix.as_slice(), &full[..k], "prefix k={k}");
+        }
+    }
+
+    // ── Supertrend column (bits 64-65) ─────────────────────────────────
+
+    #[test]
+    fn supertrend_column_length_is_validated() {
+        let mut c = cols(3);
+        c.supertrend_x2 = Some(vec![None; 2]); // desynced length
+        let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
+        assert!(err.contains("supertrend_x2_paisa"), "got: {err}");
+        assert!(err.contains("length"), "got: {err}");
+    }
+
+    #[test]
+    fn absent_supertrend_column_keeps_bits_64_65_clear() {
+        let c = cols(2); // supertrend_x2 = None (no column)
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        const ST_FAMILY: u128 = 0b11 << 64;
+        for (i, m) in masks.iter().enumerate() {
+            assert_eq!(m & ST_FAMILY, 0, "bar {i}: ST bits must stay clear");
+        }
+    }
+
+    // ── Group-15 gap-midpoint semantics (DEC-GAP-MIDPOINT-CONDITIONS-001) ──
+
+    const GAP_ABOVE: u128 = 1u128 << crate::bits::BIT_CLOSE_ABOVE_GAP_MID;
+    const GAP_BELOW: u128 = 1u128 << crate::bits::BIT_CLOSE_BELOW_GAP_MID;
+    const GAP_NEAR: u128 = 1u128 << crate::bits::BIT_NEAR_GAP_MID;
+    const GAP_FAMILY: u128 = GAP_ABOVE | GAP_BELOW | GAP_NEAR;
+
+    /// A single warm day whose X1/pivot rows mint a gap-UP level.
+    ///
+    /// Day pivot row pdc = 10_000 < opens 10_020 ⇒ gap-UP; X1 high = 10_060,
+    /// X2 high = bar-0 high; the per-test bar columns pick the verdicts.
+    fn gap_day_cols(n: usize) -> Cols {
+        let mut c = cols(n);
+        c.day_has_pivot = vec![true];
+        c.day_has_fib = vec![true];
+        // pdc (slot 9) = 10_000; every other level far away so only the gap
+        // family is in play for the assertions below.
+        c.day_pivots = (0..PIVOT_ROW_LEN as i64)
+            .map(|i| 50_000 + 1_000 * i)
+            .collect();
+        c.day_pivots[9] = 10_000;
+        c.day_fibs = (0..FIB_ROW_LEN as i64)
+            .map(|i| 80_000 + 1_000 * i)
+            .collect();
+        c.day_has_x1 = vec![true];
+        c.day_x1_hi = vec![10_060];
+        c.day_x1_lo = vec![9_950];
+        c.open = vec![10_020; n];
+        c.high = vec![10_100; n]; // X2 high = 10_100 ⇒ level = (10_060+10_100)/2 = 10_080
+        c.low = vec![9_990; n];
+        c.close = vec![10_050; n];
+        c
+    }
+
+    #[test]
+    fn gap_mid_arms_from_the_second_bar_of_the_day() {
+        // Bar 0 mints the level (10_080) from its OWN high but must evaluate
+        // with NO level (arm-from-bar-2); bar 1 close 10_050 < 10_080 ⇒ BELOW.
+        let masks = stage1a_bar_bits_batch_impl(&view(&gap_day_cols(3))).unwrap();
+        assert_eq!(
+            masks[0] & GAP_FAMILY,
+            0,
+            "first bar of the day must be unarmed"
+        );
+        assert_eq!(masks[1] & GAP_FAMILY, GAP_BELOW);
+        assert_eq!(masks[2] & GAP_FAMILY, GAP_BELOW);
+    }
+
+    #[test]
+    fn gap_mid_above_and_near_fire_per_the_evaluator_laws() {
+        // Level = 10_080. A later bar closing 10_085 is ABOVE and (10 bps of
+        // 10_085 = 10 paisa ≥ |10_085 − 10_080|) NEAR — the strict bit and the
+        // near bit legally co-fire (the PDH/PDL family convention).
+        let mut c = gap_day_cols(2);
+        c.close[1] = 10_085;
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        assert_eq!(masks[1] & GAP_FAMILY, GAP_ABOVE | GAP_NEAR);
+        // An exactly-at-level close fires ONLY near (strict above/below are
+        // mutually exclusive and both false at equality).
+        let mut c = gap_day_cols(2);
+        c.close[1] = 10_080;
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        assert_eq!(masks[1] & GAP_FAMILY, GAP_NEAR);
+    }
+
+    #[test]
+    fn gap_down_day_uses_the_low_pair() {
+        // Opens 9_980 < pdc 10_000 ⇒ gap-DOWN ⇒ level = midpoint of the LOWs
+        // = (9_950 + 9_910) / 2 = 9_930; bar-1 close 9_950 > 9_930 ⇒ ABOVE.
+        let mut c = gap_day_cols(2);
+        c.open = vec![9_980; 2];
+        c.high = vec![10_000; 2];
+        c.low = vec![9_910; 2];
+        c.close = vec![9_950; 2];
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        assert_eq!(masks[1] & GAP_FAMILY, GAP_ABOVE);
+    }
+
+    #[test]
+    fn zero_gap_day_never_arms() {
+        // open_of_day == pdc exactly ⇒ compute_gap_mid yields None ⇒ the
+        // whole day stays dark on the gap family.
+        let mut c = gap_day_cols(3);
+        c.open = vec![10_000; 3];
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        for (i, m) in masks.iter().enumerate() {
+            assert_eq!(m & GAP_FAMILY, 0, "bar {i} armed on a zero-gap day");
+        }
+    }
+
+    #[test]
+    fn supertrend_column_drives_bits_64_65_per_bar() {
+        // close = 10_050 ⇒ close_x2 = 20_100. Bar 0: line BELOW the close ⇒
+        // bit 64 (above); bar 1: line ABOVE ⇒ bit 65 (below); bar 2: line
+        // EXACTLY equal ⇒ neither; bar 3: warm-up None ⇒ neither.
+        let mut c = cols(4);
+        c.supertrend_x2 = Some(vec![Some(20_099), Some(20_101), Some(20_100), None]);
+        let mut v = view(&c);
+        v.anchor_dependent_mask = 0; // ST is NOT anchor-dependent; disarm anyway
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        let above = 1u128 << crate::bits::BIT_CLOSE_ABOVE_SUPERTREND;
+        let below = 1u128 << crate::bits::BIT_CLOSE_BELOW_SUPERTREND;
+        assert_eq!(masks[0] & (above | below), above);
+        assert_eq!(masks[1] & (above | below), below);
+        assert_eq!(masks[2] & (above | below), 0, "equality sets neither");
+        assert_eq!(masks[3] & (above | below), 0, "warm-up None sets neither");
+    }
+
+    #[test]
+    fn supertrend_bits_survive_a_cold_anchor_but_not_the_1day_clear_when_excluded() {
+        // ST is NOT anchor-dependent (the addendum law): a cold pivot day with
+        // the REAL anchor mask must keep bit 64 set.
+        let mut c = cols(1); // day_has_pivot = [false] — a COLD day
+        c.supertrend_x2 = Some(vec![Some(20_099)]);
+        let mut v = view(&c);
+        v.anchor_dependent_mask = REAL_ANCHOR_DEP; // excludes bits 64-65
+        v.fib_dependent_mask = REAL_FIB_DEP;
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_ne!(
+            masks[0] & (1u128 << crate::bits::BIT_CLOSE_ABOVE_SUPERTREND),
+            0,
+            "a cold pivot anchor must NOT clear the (anchor-independent) ST bit"
+        );
+        // The manifest declares 64-65 applies_to_1day=true, so the REAL 1day
+        // mask KEEPS them under the D12 AND.
+        v.apply_1day_mask = true;
+        v.applies_to_1day_mask = REAL_APPLIES_1DAY;
+        let masks_1d = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_ne!(
+            masks_1d[0] & (1u128 << crate::bits::BIT_CLOSE_ABOVE_SUPERTREND),
+            0,
+            "bits 64-65 are 1day-applicable in the manifest"
+        );
+    }
+
+    #[test]
+    fn cold_x1_day_never_arms() {
+        let mut c = gap_day_cols(2);
+        c.day_has_x1 = vec![false];
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        assert_eq!(masks[1] & GAP_FAMILY, 0, "no X1 ⇒ no level");
+    }
+
+    #[test]
+    fn warm_x1_with_cold_pivot_never_arms() {
+        // X1 warm but the pivot anchor cold ⇒ no real pdc exists ⇒ no
+        // direction ⇒ no level (the placeholder-pdc guard), independent of
+        // the anchor-dependent clear (disarmed here so the guard is the ONLY
+        // thing keeping the family dark).
+        let mut c = gap_day_cols(2);
+        c.day_has_pivot = vec![false];
+        let mut v = view(&c);
+        v.anchor_dependent_mask = 0;
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_eq!(masks[1] & GAP_FAMILY, 0, "cold pivot ⇒ no pdc ⇒ no level");
+    }
+
+    #[test]
+    fn mid_day_contract_reset_suppresses_the_level() {
+        // A reset WITHOUT a day_index bump (structurally legal, never emitted
+        // by the sanctioned prepass — the RF-I F2(c) defensive class) mirrors
+        // the Python D11 hard reset's cleared prev_session_edge: no level for
+        // the remainder of that day, even though the day row's X1 is warm.
+        let mut c = gap_day_cols(4);
+        c.contract_reset = vec![false, false, true, false];
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        assert_eq!(masks[1] & GAP_FAMILY, GAP_BELOW, "pre-reset bar armed");
+        assert_eq!(masks[2] & GAP_FAMILY, 0, "reset bar re-seeds unarmed");
+        assert_eq!(
+            masks[3] & GAP_FAMILY,
+            0,
+            "suppressed for the rest of the day"
+        );
+    }
+
+    #[test]
+    fn reset_paired_with_a_genuine_new_day_clears_the_suppression() {
+        // The SANCTIONED roll shape: reset + a new day row. The new day's
+        // level minting is governed by ITS day table (X1 warm here), so the
+        // suppression must not leak past the genuine day boundary.
+        let mut c = gap_day_cols(4);
+        c.day_index = vec![0, 0, 1, 1];
+        c.contract_reset = vec![false, false, true, false];
+        resize_day_tables(&mut c, 2);
+        c.day_has_pivot = vec![true, true];
+        c.day_has_fib = vec![true, true];
+        let mut pivots: Vec<i64> = (0..PIVOT_ROW_LEN as i64)
+            .map(|i| 50_000 + 1_000 * i)
+            .collect();
+        pivots[9] = 10_000;
+        c.day_pivots = [pivots.as_slice(), pivots.as_slice()].concat();
+        let fibs: Vec<i64> = (0..FIB_ROW_LEN as i64)
+            .map(|i| 80_000 + 1_000 * i)
+            .collect();
+        c.day_fibs = [fibs.as_slice(), fibs.as_slice()].concat();
+        c.day_x1_hi = vec![10_060, 10_060];
+        c.day_x1_lo = vec![9_950, 9_950];
+        c.day_has_x1 = vec![true, true];
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        assert_eq!(
+            masks[2] & GAP_FAMILY,
+            0,
+            "post-roll day's first bar unarmed"
+        );
+        assert_eq!(
+            masks[3] & GAP_FAMILY,
+            GAP_BELOW,
+            "post-roll day arms from bar 2"
+        );
+    }
+
+    #[test]
+    fn corrupt_x1_row_is_a_clean_err() {
+        // X1 high < low would assert inside compute_gap_mid — the batch core
+        // must reject it as an Err (totality law), never a panic.
+        let mut c = gap_day_cols(2);
+        c.day_x1_hi = vec![9_000];
+        c.day_x1_lo = vec![9_950];
+        let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
+        assert!(err.contains("X1 high < low"), "got: {err}");
+    }
+
+    #[test]
+    fn x1_table_lengths_are_validated() {
+        for which in 0..3 {
+            let mut c = gap_day_cols(2);
+            match which {
+                0 => c.day_x1_hi.push(0),
+                1 => c.day_x1_lo.push(0),
+                _ => c.day_has_x1.push(false),
+            }
+            let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
+            assert!(err.contains("length"), "table {which}: {err}");
+        }
+    }
+
+    #[test]
+    fn one_day_bars_stay_dark_via_the_arming_ordinal() {
+        // On TF=1day every bar is its session's FIRST TF bar (one day row per
+        // bar), so the arm-from-bar-2 ordinal keeps the family dark WITHOUT
+        // relying on the applies_to_1day mask (the design's load-bearing
+        // ordinal law) — apply_1day_mask stays false here on purpose.
+        let mut c = gap_day_cols(3);
+        c.day_index = vec![0, 1, 2];
+        resize_day_tables(&mut c, 3);
+        c.day_has_pivot = vec![true; 3];
+        c.day_has_fib = vec![true; 3];
+        let mut pivots: Vec<i64> = (0..PIVOT_ROW_LEN as i64)
+            .map(|i| 50_000 + 1_000 * i)
+            .collect();
+        pivots[9] = 10_000;
+        c.day_pivots = [pivots.as_slice(), pivots.as_slice(), pivots.as_slice()].concat();
+        let fibs: Vec<i64> = (0..FIB_ROW_LEN as i64)
+            .map(|i| 80_000 + 1_000 * i)
+            .collect();
+        c.day_fibs = [fibs.as_slice(), fibs.as_slice(), fibs.as_slice()].concat();
+        c.day_x1_hi = vec![10_060; 3];
+        c.day_x1_lo = vec![9_950; 3];
+        c.day_has_x1 = vec![true; 3];
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        for (i, m) in masks.iter().enumerate() {
+            assert_eq!(m & GAP_FAMILY, 0, "1day-shaped bar {i} must stay dark");
         }
     }
 }

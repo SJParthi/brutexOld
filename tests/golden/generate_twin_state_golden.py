@@ -8,8 +8,12 @@ per-bar `.update()` derivation of the two stateful indicator machines —
 the Rust `trading_core` classes. This fixture froze the two machines'
 per-bar contract while hand-synced Python twins still mirrored them in
 `brutex/indicators/` (DEC-SHARED-CORE-001 / ADR-0012 D7); the twins were
-deleted by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 and the SAME frozen
-fixture (never regenerated) now pins the single Rust source.
+deleted by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 and the frozen fixture
+now pins the single Rust source. Regenerated EXACTLY ONCE since: the
+vocab-train Regen re-lock under DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md
+#2206) — the wipe-era v2 (MS-only) fixture regains its VWAP half (this
+generator restored verbatim from the pre-wipe tree; the MS half must
+reproduce the wipe-era fixture byte-for-byte — the regen run's self-check).
 
 HOW THE EXPECTED VALUES ARE COMPUTED (Golden Rule #1):
 

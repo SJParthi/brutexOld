@@ -5,7 +5,7 @@ Track 1 stamps each completed trade with the **level of a reference series**
 **REFERENCE ONLY** (CLAUDE.md §1/§3): it is fetched + stored and carried as
 ``vix_at_entry`` / ``vix_at_exit`` on every :class:`~brutex.metrics.types.ClosedTrade`,
 but it is **NEVER** part of the brute-force pattern combinations or the
-60-condition vocabulary (DEC-VIX-TRADE-STAMP-001, ``docs/MIGRATION.md``). The
+condition vocabulary (DEC-VIX-TRADE-STAMP-001, ``docs/MIGRATION.md``). The
 stamp is a downstream *filter* surface — "did this strategy only win when VIX
 was low?" — not a signal input.
 

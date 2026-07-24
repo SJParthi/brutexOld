@@ -1,6 +1,6 @@
 """Dual-layer (Simple + Pro) human-readable decoder for a winning combo.
 
-A brute-force winner is a u128 condition mask (each set bit ``0..59`` is one
+A brute-force winner is a u128 condition mask (each set bit ``0..65`` is one
 atomic condition from the shared vocabulary :mod:`brutex.vocabulary.bits`).
 This module turns that opaque number into TWO plain-English readings of the
 SAME rule so the operator can show a winner to anyone:
@@ -12,11 +12,11 @@ SAME rule so the operator can show a winner to anyone:
 Read-side ONLY. No bar evaluation, no I/O, no engine/vocab mutation. The
 decoder keys every label off the canonical condition NAMES in
 :data:`brutex.vocabulary.bits.NAME_TO_BIT`, so it stays in lock-step with the
-manifest — a coverage test asserts every one of the 60 names has BOTH a Pro
+manifest — a coverage test asserts every one of the 66 names has BOTH a Pro
 and a Simple label, so a future condition added to the manifest without a
 label fails the build (no silent gaps; CLAUDE.md §11 COMMON).
 
-O(1) per condition: a bounded scan of the at-most-60 condition bits,
+O(1) per condition: a bounded scan of the at-most-66 condition bits,
 independent of bar count (CLAUDE.md §2 Rule 5).
 """
 
@@ -29,7 +29,7 @@ from brutex.vocabulary.bits import BIT_TO_NAME, NAME_TO_BIT, TOTAL_CONDITIONS
 
 # ─────────────────────────── Dual-label dictionary ───────────────────────────
 #
-# Every one of the 60 vocabulary condition names maps to (pro_label,
+# Every one of the 66 vocabulary condition names maps to (pro_label,
 # simple_label). The Pro label is the precise trader phrase; the Simple label
 # is the everyday-words phrase. A coverage test asserts this dict's keys are
 # EXACTLY ``NAME_TO_BIT.keys()`` — so this table can never silently drift from
@@ -102,9 +102,16 @@ _CONDITION_LABELS: Final[dict[str, tuple[str, str]]] = {
     "gap_down_day": ("gap-down day", "gapped down at open"),
     "inside_day": ("inside day", "quiet day (inside yesterday's range)"),
     "outside_day": ("outside day", "big day (engulfs yesterday)"),
-    # ── VWAP Position ──
-    "close_above_vwap": ("close>VWAP", "price beats the day's average price"),
-    "close_below_vwap": ("close<VWAP", "price loses to the day's average price"),
+    # ── VWAP Position (RETIRED tombstones — bits 52/53 never fire on
+    # current runs; labels kept honest for OLD artifacts' masks) ──
+    "close_above_vwap": (
+        "close>VWAP (retired)",
+        "price beats the day's average price (retired condition)",
+    ),
+    "close_below_vwap": (
+        "close<VWAP (retired)",
+        "price loses to the day's average price (retired condition)",
+    ),
     # ── Pivot Proximity Extended ──
     "near_pivot_r5": ("near R5", "at a far ceiling (resistance)"),
     "near_pivot_s5": ("near S5", "at a far floor (support)"),
@@ -113,12 +120,38 @@ _CONDITION_LABELS: Final[dict[str, tuple[str, str]]] = {
     "bos_bearish": ("BOS↓", "strong break (sellers took control)"),
     "choch_bullish": ("CHoCH↑", "trend just flipped up"),
     "choch_bearish": ("CHoCH↓", "trend just flipped down"),
+    # ── Central Pivot Range ──
+    "above_cpr_tc": ("close>CPR-TC", "above the pivot-range ceiling"),
+    "below_cpr_bc": ("close<CPR-BC", "below the pivot-range floor"),
+    "inside_cpr": ("inside CPR", "inside the pivot range"),
+    "narrow_cpr_day": ("narrow CPR day", "tight coil day (narrow pivot range)"),
+    # ── Supertrend (bits 64/65 — IMPLEMENTED since the vocab-66 SuperTrend
+    # flip, crate 0.5.0: ATR-10 Wilder, factor 3, hl2 source) ──
+    "close_above_supertrend": (
+        "close>SuperTrend",
+        "price above the SuperTrend line (up-trend hold)",
+    ),
+    "close_below_supertrend": (
+        "close<SuperTrend",
+        "price below the SuperTrend line (down-trend hold)",
+    ),
+    # ── Gap Midpoint (DEC-GAP-MIDPOINT-CONDITIONS-001) ──
+    "close_above_gap_mid": ("close>gap-mid", "price above the opening-gap midpoint"),
+    "close_below_gap_mid": ("close<gap-mid", "price below the opening-gap midpoint"),
+    "near_gap_mid": ("near gap-mid", "at the opening-gap midpoint"),
+    # ── Fibonacci Extended + Swing Proximity (DEC-FIB-TEMPLATE-EXPRESS-001,
+    # bits 69-73) ──
+    "near_fib_bull_236": ("bull Fib 23.6%", "at the bullish 23.6% pullback zone"),
+    "near_fib_bull_786": ("bull Fib 78.6%", "at the bullish 78.6% pullback zone"),
+    "near_fib_424": ("Fib 424% ext", "at the far 424% breakout target"),
+    "near_swing_high": ("near swing high", "retesting the last swing high"),
+    "near_swing_low": ("near swing low", "retesting the last swing low"),
 }
 
 #: Readable grouping order for composing a sentence: trend → level →
 #: candle/structure → time. Each entry is (group-label, set-of-condition-names).
 #: A condition not in any of these groups would be dropped from the sentence,
-#: so a coverage test asserts these four sets partition all 60 names exactly.
+#: so a coverage test asserts these four sets partition all 69 names exactly.
 _TREND_NAMES: Final[frozenset[str]] = frozenset(
     {
         "close_above_ema20",
@@ -129,6 +162,8 @@ _TREND_NAMES: Final[frozenset[str]] = frozenset(
         "ema20_below_ema200",
         "close_above_vwap",
         "close_below_vwap",
+        "close_above_supertrend",
+        "close_below_supertrend",
     }
 )
 _LEVEL_NAMES: Final[frozenset[str]] = frozenset(
@@ -159,6 +194,22 @@ _LEVEL_NAMES: Final[frozenset[str]] = frozenset(
         "near_fib_1618",
         "near_fib_200",
         "near_fib_2618",
+        "above_cpr_tc",
+        "below_cpr_bc",
+        "inside_cpr",
+        "narrow_cpr_day",
+        # Gap-midpoint (DEC-GAP-MIDPOINT-CONDITIONS-001): a price LEVEL family
+        # like PDH/PDL — the session-edge reversal level.
+        "close_above_gap_mid",
+        "close_below_gap_mid",
+        "near_gap_mid",
+        # DEC-FIB-TEMPLATE-EXPRESS-001: the express fib/swing proximity
+        # bits (69-73) are all level conditions.
+        "near_fib_bull_236",
+        "near_fib_bull_786",
+        "near_fib_424",
+        "near_swing_high",
+        "near_swing_low",
     }
 )
 _STRUCTURE_NAMES: Final[frozenset[str]] = frozenset(
@@ -212,7 +263,7 @@ class ConditionLabel:
     Attributes
     ----------
     bit
-        The condition's bit position (``0..59``).
+        The condition's bit position (``0..65``).
     technical_name
         The canonical snake_case condition name (the ``NAME_TO_BIT`` key).
     pro_label
@@ -325,7 +376,7 @@ def decode_combo(condition_mask: int, direction: str, timeframe: str) -> ComboEx
     Parameters
     ----------
     condition_mask
-        The u128 strategy mask. Bits ``0..59`` are the live conditions; bits
+        The u128 strategy mask. Bits ``0..65`` are the declared conditions; bits
         ``>= TOTAL_CONDITIONS`` (forward-compat headroom) are ignored.
     direction
         The trade direction (``"long"`` / ``"short"`` / ``"buy"`` / ``"sell"``,

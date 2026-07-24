@@ -420,6 +420,15 @@ def canonical_spec_params(
     double-carry them, so one logical run can never mint two identities (or two
     runs one).
 
+    The swept ``swing_proximity_bps`` band (DEC-FIB-TEMPLATE-EXPRESS-001) is
+    deliberately NOT a spec-axis knob: :class:`StrategySpec` carries only the
+    frozen bps triple and its 57-byte ``canonical_bytes`` encode never
+    serializes a swing band, so the spec path always evaluates at the
+    production default (10) and this builder emits NO swing key (absent ⟺ the
+    default — trivially, since no spec caller can pass a non-default). A
+    spec-axis swing sweep would need its own DEC + a ``SPEC_SCHEMA_VERSION``
+    bump.
+
     Parameters
     ----------
     sl_paisa, tp_paisa

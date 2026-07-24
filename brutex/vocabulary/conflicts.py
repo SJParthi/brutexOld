@@ -24,22 +24,28 @@ from __future__ import annotations
 from typing import Final
 
 from brutex.vocabulary.bits import (
+    BIT_ABOVE_CPR_TC,
     BIT_AFTERNOON,
     BIT_BAR_BEARISH,
     BIT_BAR_BULLISH,
     BIT_BAR_DOJI,
     BIT_BAR_LARGE_BODY,
     BIT_BAR_SMALL_BODY,
+    BIT_BELOW_CPR_BC,
     BIT_CLOSE_ABOVE_EMA20,
     BIT_CLOSE_ABOVE_EMA200,
+    BIT_CLOSE_ABOVE_GAP_MID,
     BIT_CLOSE_ABOVE_PDH,
     BIT_CLOSE_ABOVE_PDL,
+    BIT_CLOSE_ABOVE_SUPERTREND,
     BIT_CLOSE_AT_DAY_HIGH,
     BIT_CLOSE_AT_DAY_LOW,
     BIT_CLOSE_BELOW_EMA20,
     BIT_CLOSE_BELOW_EMA200,
+    BIT_CLOSE_BELOW_GAP_MID,
     BIT_CLOSE_BELOW_PDH,
     BIT_CLOSE_BELOW_PDL,
+    BIT_CLOSE_BELOW_SUPERTREND,
     BIT_CLOSE_IN_LOWER_THIRD,
     BIT_CLOSE_IN_UPPER_THIRD,
     BIT_EARLY_MORNING,
@@ -47,6 +53,7 @@ from brutex.vocabulary.bits import (
     BIT_EMA20_BELOW_EMA200,
     BIT_GAP_DOWN_DAY,
     BIT_GAP_UP_DAY,
+    BIT_INSIDE_CPR,
     BIT_INSIDE_DAY,
     BIT_LONG_LOWER_WICK,
     BIT_LONG_UPPER_WICK,
@@ -108,6 +115,44 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         # Group 9: Day type mutual exclusions
         (BIT_GAP_UP_DAY, BIT_GAP_DOWN_DAY),
         (BIT_INSIDE_DAY, BIT_OUTSIDE_DAY),
+        # Group 15: the CPR position bits form an EXACT partition by
+        # construction (evaluator.rs:422-431 — bit 60 strict `close > TC`,
+        # bit 61 strict `close < BC`, bit 62 inclusive `BC <= close <= TC`
+        # over the canonicalised `tc >= bc` pair of
+        # pivots.rs::compute_cpr_levels), so the three are pairwise mutually
+        # exclusive; `narrow_cpr_day` (63) is orthogonal (co-occurs with any).
+        # The VWAP position bits (52/53) are ACTIVE (RETAINED per
+        # DEC-VOCAB-VWAP-RETAIN-001) but carry NO conflict pair — matching the
+        # pre-reshape main design, which never listed one (the table stays 31
+        # pairs). This is deliberate: the sweep discovers their opposition for
+        # free, and no legal mask is wrongly pruned.
+        (BIT_ABOVE_CPR_TC, BIT_BELOW_CPR_BC),
+        (BIT_ABOVE_CPR_TC, BIT_INSIDE_CPR),
+        (BIT_BELOW_CPR_BC, BIT_INSIDE_CPR),
+        # Group 14: the Supertrend position bits are DIRECT OPPOSITION by the
+        # strict-inequality law (evaluator.rs Group 14 — close·2 > line fires
+        # 64, close·2 < line fires 65, equality/absent fires NEITHER), so the
+        # two can never co-occur — registered with the bits 64/65
+        # implemented-flip (the PR-B vocab-66 SuperTrend DEC; the rung-1
+        # layout-only declaration deliberately omitted the pair because an
+        # unimplemented bit never fires).
+        (BIT_CLOSE_ABOVE_SUPERTREND, BIT_CLOSE_BELOW_SUPERTREND),
+        # Group 15: Gap-midpoint direct opposition (DEC-GAP-MIDPOINT-CONDITIONS-001,
+        # the (GAP_UP_DAY, GAP_DOWN_DAY) precedent above). Strictly-above and
+        # strictly-below the level cannot co-fire; `near_gap_mid` is deliberately
+        # NOT conflicting with either — a close can be strictly above AND within
+        # the near band (the same convention as the PDH/PDL family, where
+        # close_above_pdh and near_pdh co-fire legally).
+        (BIT_CLOSE_ABOVE_GAP_MID, BIT_CLOSE_BELOW_GAP_MID),
+        # DEC-FIB-TEMPLATE-EXPRESS-001 (bits 69-73): deliberately NO new
+        # pairs — none exist. The bullish 23.6/78.6 retracements (69/70) are
+        # DISTINCT levels from the bearish ladder (proximity to one never
+        # excludes another under a wide band); the two-sided 424 bit (71) is
+        # a single OR'd bit; near-swing high/low (72/73) coincide only
+        # degenerately (a tight structure where both confirmed levels sit
+        # inside one band — legal, not impossible). conflicts.py needs no
+        # functional change here: bits 69-73 add no pairs (the re-stacked
+        # gap-midpoint (66,67) pair is already registered above).
     }
 )
 
@@ -116,7 +161,7 @@ def has_conflict(mask: int) -> bool:
     """Return True if `mask` contains any conflict pair.
 
     Args:
-        mask: u128 strategy mask (60 bits used — ``TOTAL_CONDITIONS``).
+        mask: u128 strategy mask (``TOTAL_CONDITIONS`` = 74 declared bits).
 
     Returns:
         True if mask has any conflict pair (i.e., the strategy is

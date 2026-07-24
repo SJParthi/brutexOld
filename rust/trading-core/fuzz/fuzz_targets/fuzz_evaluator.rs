@@ -1,12 +1,15 @@
 #![no_main]
-//! Fuzz target for the 60-condition u128 evaluator
+//! Fuzz target for the u128 condition evaluator
 //! `trading_core::evaluate_atoms` (`src/evaluator.rs`) — the bit-identical
 //! Stage-3 vocabulary core shared by BruteX (PyO3) and TickVault (native).
 //!
-//! Reconciled to the u64→u128 widening (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012
-//! D4) + the PR-2/PR-2b snapshot growth: `vwap_paisa` (bits 52-53) and the
-//! resolved `market_structure` flags (bits 56-59) are now part of
-//! `IndicatorSnapshot`, and all 60 bits (0..=59) can fire.
+//! Reconciled to the woven 74-bit vocabulary: the VWAP bits 52-53 are
+//! RETAINED (DEC-VOCAB-VWAP-RETAIN-001 — `vwap_paisa` is an `Option` input,
+//! `None` = abstain), the Central Pivot Range bits 60-63 are implemented off
+//! the SAME prev-day pivot anchor, and the Supertrend bits 64-65 read the
+//! resolved ×2-scaled line. The Group-15 gap-midpoint (66-68) and fib/swing
+//! (69-73) inputs are held at `None`/zero here (bits dark — fuzz arms for
+//! them are a named Reconcile-phase obligation; no member authored them).
 //!
 //! On arbitrary bytes it builds a STRUCTURALLY VALID, in-domain bar snapshot
 //! (see the domain note in `fuzz_pivot_fib.rs`: prices capped at `MAX_PAISA`,
@@ -14,16 +17,20 @@
 //! prev-day OHLC, proximity bps in `[0, 10000]`) and asserts the evaluator:
 //!
 //! 1. **Never panics / overflows** — all internal products
-//!    (`close·bps`, `body·10`, `(c−day_low)·3`, `pdc·50`, …) stay far below
-//!    `i64::MAX` within the realistic envelope.
-//! 2. **Only sets bits 0..=59** — bits 60-127 are always clear (reserved).
+//!    (`close·bps`, `body·10`, `(c−day_low)·3`, `pdc·50`, the i128 narrow-CPR
+//!    width test, …) stay in range within the realistic envelope.
+//! 2. **Only sets IMPLEMENTED bits** — the reserved headroom (74-127) is
+//!    always clear.
 //! 3. **Honours every mutually-exclusive condition pair** — a bar cannot be
 //!    both above and below the same level (EMA20/EMA200/VWAP/PDH/PDL), both
 //!    bullish and bearish, both a gap-up and a gap-down day, in both the
 //!    upper and lower third, etc. The four time-of-day buckets are an
-//!    `else if` chain → at most one fires.
+//!    `else if` chain → at most one fires; the three CPR position bits
+//!    (60-62) form an exact partition — exactly ONE fires.
 //! 4. **Mirrors the resolved market-structure flags exactly** — the Group-12
-//!    bits (56-59) are a pure pass-through of `snapshot.market_structure`
+//!    bits (56-59) are a pure pass-through of `snapshot.market_structure`;
+//!    the Supertrend bits (64-65) mirror the strict close-vs-line compare of
+//!    the resolved `supertrend_x2_paisa` (`None` ⇒ both clear)
 //!    (the stateful machine resolves them upstream; the evaluator must never
 //!    invent or drop one).
 //!
@@ -33,6 +40,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use trading_core::bits;
+use trading_core::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS;
 use trading_core::{
     IndicatorSnapshot, MarketStructureSignal, PriorBarHistory, ProximityParams, compute_fib_levels,
     compute_pivot_levels, evaluate_atoms,
@@ -141,6 +149,18 @@ fuzz_target!(|data: &[u8]| {
         choch_bearish: ms_raw & 0b0100 == 0 && ms_raw & 0b1000 != 0,
     };
 
+    // ── Resolved SuperTrend line (Group 14): None (warm-up / unwired) half
+    // the time, else an arbitrary in-domain ×2 value around the price band so
+    // the strict compare sees both sides and the exact tie.
+    let supertrend_x2_paisa = {
+        let v = r.u64();
+        match v & 0b11 {
+            0 => None,
+            1 => Some(close * 2), // the exact equality edge
+            _ => Some(1 + ((v >> 2) % (2 * MAX_PAISA) as u64) as i64),
+        }
+    };
+
     let snapshot = IndicatorSnapshot {
         tod_seconds: (r.u64() % 86_400) as u32,
         open_paisa: open,
@@ -156,11 +176,23 @@ fuzz_target!(|data: &[u8]| {
         day_low_paisa: day_low,
         open_of_day_paisa: open_of_day,
         market_structure,
+        supertrend_x2_paisa,
+        // Groups 15 + swing: abstain inputs (bits dark) — fuzz draw arms for
+        // 66-68/72-73 were never authored by their member PRs; a named
+        // Reconcile-phase obligation, not silently invented here.
+        gap_mid_paisa: None,
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let params = ProximityParams {
         pivot_proximity_bps: r.bps(),
         pdh_pdl_proximity_bps: r.bps(),
         fib_proximity_bps: r.bps(),
+        // Gap/swing bands at the pyo3 signature defaults: the group inputs
+        // above are abstain (None), so these knobs are inert here (the fuzz
+        // draw arms are the named Reconcile-phase obligation).
+        gap_mid_proximity_bps: DEFAULT_GAP_MID_PROXIMITY_BPS,
+        swing_proximity_bps: 10,
     };
     // Prior-bar window of length prior_n in [0, 8], flags from the next bits.
     let prior_n = (r.u64() % 9) as usize;
@@ -171,8 +203,12 @@ fuzz_target!(|data: &[u8]| {
     // ── 1. Never panics / overflows ──
     let mask = evaluate_atoms(&snapshot, &params, &prior);
 
-    // ── 2. Only bits 0..=59 may be set ──
-    assert_eq!(mask >> 60, 0, "evaluator set a reserved bit (>= 60)");
+    // ── 2. Only IMPLEMENTED bits may be set ──
+    assert_eq!(
+        mask & !trading_core::bits::IMPLEMENTED_MASK,
+        0,
+        "evaluator set a non-implemented bit (reserved >= 74)"
+    );
 
     // ── 3. Mutually-exclusive condition pairs ──
     assert!(
@@ -215,6 +251,10 @@ fuzz_target!(|data: &[u8]| {
         !(has(mask, bits::BIT_CLOSE_IN_UPPER_THIRD) && has(mask, bits::BIT_CLOSE_IN_LOWER_THIRD)),
         "close cannot be in both the upper and lower third"
     );
+    assert!(
+        !(has(mask, bits::BIT_CLOSE_ABOVE_SUPERTREND) && has(mask, bits::BIT_CLOSE_BELOW_SUPERTREND)),
+        "close cannot be both above and below the Supertrend line"
+    );
 
     // A warm-up (None) VWAP must fire NEITHER Group-10 bit.
     if snapshot.vwap_paisa.is_none() {
@@ -223,6 +263,19 @@ fuzz_target!(|data: &[u8]| {
             "VWAP bits must not fire during warm-up (vwap_paisa = None)"
         );
     }
+
+    // The three CPR position bits (60-62) form an EXACT PARTITION: the
+    // canonicalized band (tc >= bc) makes any close strictly above TC,
+    // strictly below BC, or inside the inclusive band — exactly one fires.
+    let cpr_pos = [
+        bits::BIT_ABOVE_CPR_TC,
+        bits::BIT_BELOW_CPR_BC,
+        bits::BIT_INSIDE_CPR,
+    ]
+    .iter()
+    .filter(|&&b| has(mask, b))
+    .count();
+    assert_eq!(cpr_pos, 1, "exactly one CPR position bit must fire");
 
     // Time-of-day buckets are an else-if chain → at most one is set.
     let tod_set = [
@@ -257,4 +310,29 @@ fuzz_target!(|data: &[u8]| {
         market_structure.choch_bearish,
         "CHoCH-bearish bit must mirror the resolved flag"
     );
+
+    // ── 5. Group-14: the ST bits mirror the exact strict ×2 compare ──
+    match supertrend_x2_paisa {
+        None => {
+            assert!(
+                !has(mask, bits::BIT_CLOSE_ABOVE_SUPERTREND)
+                    && !has(mask, bits::BIT_CLOSE_BELOW_SUPERTREND),
+                "an absent Supertrend line must clear both Group-14 bits"
+            );
+        }
+        Some(st) => {
+            let close_x2 = i128::from(close) * 2;
+            let st = i128::from(st);
+            assert_eq!(
+                has(mask, bits::BIT_CLOSE_ABOVE_SUPERTREND),
+                close_x2 > st,
+                "close-above-Supertrend must be the strict ×2 compare"
+            );
+            assert_eq!(
+                has(mask, bits::BIT_CLOSE_BELOW_SUPERTREND),
+                close_x2 < st,
+                "close-below-Supertrend must be the strict ×2 compare"
+            );
+        }
+    }
 });

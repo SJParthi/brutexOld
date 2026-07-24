@@ -62,7 +62,7 @@ process — the anti-vacuous-gate signal the golden suite asserts.
   and never a "Rust ⇒ O(1)" claim.
 * The engaged arm still pays the Python prepass (tz/snap/roll/day/anchor
   resolution + the EMA columns) — the amortised win is the removal of the
-  per-bar 22-arg FFI marshal + snapshot/dataclass construction.
+  per-bar 21-arg FFI marshal + snapshot/dataclass construction.
 * Burn-in tax: ≤ :data:`SELF_CHECK_BUILDS` full oracle builds per process.
 * The latch / counters / memo are single-cell mutable module state — the same
   documented exception to the no-global-mutable-state rule as
@@ -137,7 +137,7 @@ class Stage1ABatchInputs:
     Filled by ``Stage1AMatrixBuilder.collect_batch_inputs`` (the prepass that
     drives the builder's OWN roll/day/anchor machinery) and consumed 1:1 by
     ``trading_core.stage1a_bar_bits_batch``. Per-bar columns share one length
-    ``N``; the day tables carry ``12·D`` / ``15·D`` flattened evaluator-ABI
+    ``N``; the day tables carry ``12·D`` / ``19·D`` flattened evaluator-ABI
     rows plus per-day warm flags. The three ``*_mask`` fields are the POSITIVE
     Python constants (``stage1a.ANCHOR_DEPENDENT_MASK`` /
     ``stage1a.FIB_DEPENDENT_MASK`` / ``bits.APPLIES_TO_1DAY_MASK``) — Rust
@@ -159,13 +159,26 @@ class Stage1ABatchInputs:
     day_index: list[int]
     ema20_paisa: list[int | None]
     ema200_paisa: list[int | None]
+    supertrend_x2_paisa: list[int | None]
     day_pivot_levels: list[int]
     day_fib_levels: list[int]
     day_has_pivot: list[bool]
     day_has_fib: list[bool]
+    # Group-15 X1 day tables (DEC-GAP-MIDPOINT-CONDITIONS-001): the prior
+    # session's last-TF-bar high/low per day row (the `day_pivot_levels`
+    # pattern — Muhurat skip + first-day/post-roll cold start stay PREPASS
+    # decisions), plus the `near_gap_mid` bps knob. The values are (0, 0)
+    # placeholders wherever `day_has_x1` is False — never read there.
+    day_x1_hi_paisa: list[int]
+    day_x1_lo_paisa: list[int]
+    day_has_x1: list[bool]
     pivot_bps: int
     pdh_pdl_bps: int
     fib_bps: int
+    gap_mid_bps: int
+    #: Swing-proximity band for the near-swing bits 72/73
+    #: (DEC-FIB-TEMPLATE-EXPRESS-001) — beside the sibling bps scalars.
+    swing_bps: int
     prior_n: int
     fractal_k: int
     apply_1day_mask: bool
@@ -363,12 +376,21 @@ def rust_bar_bits_or_none(
             inputs.pivot_bps,
             inputs.pdh_pdl_bps,
             inputs.fib_bps,
+            inputs.swing_bps,
             inputs.prior_n,
             inputs.anchor_dependent_mask,
             inputs.fib_dependent_mask,
             inputs.applies_to_1day_mask,
             inputs.apply_1day_mask,
             inputs.fractal_k,
+            inputs.supertrend_x2_paisa,
+            # Group-15 gap-midpoint (appended-last FFI law,
+            # DEC-GAP-MIDPOINT-CONDITIONS-001): the bps knob + the X1 day
+            # tables the batch core mints the per-day level from.
+            inputs.gap_mid_bps,
+            inputs.day_x1_hi_paisa,
+            inputs.day_x1_lo_paisa,
+            inputs.day_has_x1,
         )
     except (ValueError, TypeError, OverflowError) as exc:
         # The boundary's own guard ValueErrors + PyO3 conversion failures

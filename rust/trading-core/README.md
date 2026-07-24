@@ -77,4 +77,4 @@ The pure-Rust core links **no** Python (the PyO3 surface is behind the optional
   adoption (Phase 3) is 0%** — no TickVault code references this crate yet (it
   needs the TickVault repo). The **strategy / brute-force sweep / SL-TP / fills**
   are BruteX-only and NOT shared. So "common" today = the 52→60-condition
-  evaluator + pivots + Fib + VWAP + market structure + EMA, nothing more.
+  evaluator + pivots + Fib + market structure + EMA, nothing more.

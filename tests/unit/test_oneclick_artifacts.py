@@ -705,6 +705,76 @@ class TestTop100ArmBridge:
         assert loaded["arm"] == "SL ₹1.00 · TP ₹2.00"
         assert loaded["arm_raw"] == "keep-me"
 
+    # ── TOMB-01: retired-condition marking at the reader boundary ──
+
+    def test_retained_vwap_conditions_read_plain(self, tmp_path: Path) -> None:
+        """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): a LIVE retained
+        name passes through the display bridge PLAIN (RETIRED_MASK == 0 — no
+        "(retired)" suffix renders anywhere); unknown strings pass through
+        verbatim (never a crash). The retired-arm teeth live at the ONE
+        display authority's monkeypatched pin in
+        ``test_vocabulary_describe.py``."""
+        row = _top100_row(1, conditions=["close_above_vwap", "bar_bullish", "PDH_CROSS_UP"])
+        _write_top100(tmp_path, [row])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        assert result.rows[0]["conditions"] == [
+            "close_above_vwap",
+            "bar_bullish",
+            "PDH_CROSS_UP",
+        ]
+
+    def test_future_tombstone_rewrite_arm_bridges_and_copies(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Branch teeth for the REWRITE arm of the reader bridge — keeps the
+        §11 display-bridge machinery covered while ``RETIRED_MASK == 0`` per
+        DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): under a simulated
+        FUTURE tombstone (the same authority-chain monkeypatch as
+        ``test_vocabulary_describe.py``'s retired-arm pin — the bridge
+        consults ``describe.RETIRED_MASK`` through
+        ``display_condition_names``) a plain persisted name is REWRITTEN
+        with the "(retired)" suffix, and the bridge returns a dict COPY —
+        the caller's row object is never mutated."""
+        from brutex.vocabulary import describe as describe_mod
+        from brutex.vocabulary.bits import BIT_CLOSE_ABOVE_VWAP
+
+        monkeypatch.setattr(describe_mod, "RETIRED_MASK", 1 << BIT_CLOSE_ABOVE_VWAP)
+        # End-to-end: the public reader serves the bridged row.
+        row = _top100_row(1, conditions=["close_above_vwap", "bar_bullish"])
+        _write_top100(tmp_path, [row])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        assert result.rows[0]["conditions"] == [
+            "close_above_vwap (retired)",
+            "bar_bullish",
+        ]
+        # The dict-copy law, pinned on the bridge itself: the input row
+        # object is untouched (the `dict(row)` rewrite arm).
+        original = {"conditions": ["close_above_vwap"], "other": 1}
+        bridged = oc._bridge_retired_conditions(original)
+        assert bridged is not original
+        assert bridged["conditions"] == ["close_above_vwap (retired)"]
+        assert bridged["other"] == 1
+        assert original["conditions"] == ["close_above_vwap"]
+
+    def test_new_artifact_suffixed_conditions_are_idempotent(self, tmp_path: Path) -> None:
+        """A NEW artifact (writer already suffixes) is not double-marked."""
+        row = _top100_row(1, conditions=["close_below_vwap (retired)", "narrow_cpr_day"])
+        _write_top100(tmp_path, [row])
+        assert oc.load_top100(tmp_path).rows[0]["conditions"] == [
+            "close_below_vwap (retired)",
+            "narrow_cpr_day",
+        ]
+
+    def test_non_string_condition_entries_pass_through(self, tmp_path: Path) -> None:
+        """A hand-edited row with non-string entries is left untouched — the
+        bridge never crashes an old payload (the list shape itself already
+        passed the required-keys validator)."""
+        row = _top100_row(1, conditions=["close_above_vwap", 7])
+        _write_top100(tmp_path, [row])
+        assert oc.load_top100(tmp_path).rows[0]["conditions"] == ["close_above_vwap", 7]
+
 
 # ── preflight fixture loader ────────────────────────────────────────────
 

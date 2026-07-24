@@ -8,11 +8,13 @@ truth — by ``scripts/codegen_vocab.py`` (DEC-VOCAB-U128-CODEGEN-001). The Rust
 twin ``rust/trading-core/src/bits.rs`` is generated from the same manifest, so
 BruteX (PyO3) and TickVault (native) share an identical bit layout.
 
-The strategy mask is a u128 (ADR-0012 D4); bits 0..59
+The strategy mask is a u128 (ADR-0012 D4); bits 0..73
 are the live conditions. Never renumber a bit (grow-only, DEC-PLUGIN-001):
 new conditions append at the next free bit. LAYOUT-ONLY bits
-(``implemented=false`` in the manifest) declare a position but the evaluator
-emits 0 for them until a later PR supplies the math.
+(``implemented=false``, ``reserved=false``) declare a position but the
+evaluator emits 0 for them until a later PR supplies the math; RETIRED bits
+(``reserved=true``) are tombstones — the position is held forever, the
+evaluator emits 0, and NO later PR ever supplies math for them.
 """
 
 from __future__ import annotations
@@ -22,27 +24,33 @@ from typing import Final
 __all__ = [
     "ALL_CONDITION_NAMES",
     "APPLIES_TO_1DAY_MASK",
+    "BIT_ABOVE_CPR_TC",
     "BIT_AFTERNOON",
     "BIT_BAR_BEARISH",
     "BIT_BAR_BULLISH",
     "BIT_BAR_DOJI",
     "BIT_BAR_LARGE_BODY",
     "BIT_BAR_SMALL_BODY",
+    "BIT_BELOW_CPR_BC",
     "BIT_BOS_BEARISH",
     "BIT_BOS_BULLISH",
     "BIT_CHOCH_BEARISH",
     "BIT_CHOCH_BULLISH",
     "BIT_CLOSE_ABOVE_EMA20",
     "BIT_CLOSE_ABOVE_EMA200",
+    "BIT_CLOSE_ABOVE_GAP_MID",
     "BIT_CLOSE_ABOVE_PDH",
     "BIT_CLOSE_ABOVE_PDL",
+    "BIT_CLOSE_ABOVE_SUPERTREND",
     "BIT_CLOSE_ABOVE_VWAP",
     "BIT_CLOSE_AT_DAY_HIGH",
     "BIT_CLOSE_AT_DAY_LOW",
     "BIT_CLOSE_BELOW_EMA20",
     "BIT_CLOSE_BELOW_EMA200",
+    "BIT_CLOSE_BELOW_GAP_MID",
     "BIT_CLOSE_BELOW_PDH",
     "BIT_CLOSE_BELOW_PDL",
+    "BIT_CLOSE_BELOW_SUPERTREND",
     "BIT_CLOSE_BELOW_VWAP",
     "BIT_CLOSE_IN_LOWER_THIRD",
     "BIT_CLOSE_IN_UPPER_THIRD",
@@ -51,22 +59,28 @@ __all__ = [
     "BIT_EMA20_BELOW_EMA200",
     "BIT_GAP_DOWN_DAY",
     "BIT_GAP_UP_DAY",
+    "BIT_INSIDE_CPR",
     "BIT_INSIDE_DAY",
     "BIT_LONG_LOWER_WICK",
     "BIT_LONG_UPPER_WICK",
     "BIT_MIDDAY",
     "BIT_MID_MORNING",
+    "BIT_NARROW_CPR_DAY",
     "BIT_NEAR_FIB_0",
     "BIT_NEAR_FIB_50",
     "BIT_NEAR_FIB_100",
     "BIT_NEAR_FIB_200",
     "BIT_NEAR_FIB_236",
     "BIT_NEAR_FIB_382",
+    "BIT_NEAR_FIB_424",
     "BIT_NEAR_FIB_618",
     "BIT_NEAR_FIB_786",
     "BIT_NEAR_FIB_1272",
     "BIT_NEAR_FIB_1618",
     "BIT_NEAR_FIB_2618",
+    "BIT_NEAR_FIB_BULL_236",
+    "BIT_NEAR_FIB_BULL_786",
+    "BIT_NEAR_GAP_MID",
     "BIT_NEAR_PDH",
     "BIT_NEAR_PDL",
     "BIT_NEAR_PIVOT_P",
@@ -78,6 +92,8 @@ __all__ = [
     "BIT_NEAR_PIVOT_S2",
     "BIT_NEAR_PIVOT_S3",
     "BIT_NEAR_PIVOT_S5",
+    "BIT_NEAR_SWING_HIGH",
+    "BIT_NEAR_SWING_LOW",
     "BIT_OUTSIDE_DAY",
     "BIT_PRIOR_ALTERNATING",
     "BIT_PRIOR_N_BEARISH",
@@ -87,6 +103,7 @@ __all__ = [
     "IMPLEMENTED_MASK",
     "MASK_WIDTH",
     "NAME_TO_BIT",
+    "RETIRED_MASK",
     "TOTAL_CONDITIONS",
 ]
 
@@ -162,24 +179,57 @@ BIT_BOS_BULLISH: Final[int] = 56
 BIT_BOS_BEARISH: Final[int] = 57
 BIT_CHOCH_BULLISH: Final[int] = 58
 BIT_CHOCH_BEARISH: Final[int] = 59
+# ────── Central Pivot Range ──────
+BIT_ABOVE_CPR_TC: Final[int] = 60
+BIT_BELOW_CPR_BC: Final[int] = 61
+BIT_INSIDE_CPR: Final[int] = 62
+BIT_NARROW_CPR_DAY: Final[int] = 63
+# ────── Supertrend ──────
+BIT_CLOSE_ABOVE_SUPERTREND: Final[int] = 64
+BIT_CLOSE_BELOW_SUPERTREND: Final[int] = 65
+# ────── Gap Midpoint ──────
+BIT_CLOSE_ABOVE_GAP_MID: Final[int] = 66
+BIT_CLOSE_BELOW_GAP_MID: Final[int] = 67
+BIT_NEAR_GAP_MID: Final[int] = 68
+# ────── Fibonacci Extended ──────
+BIT_NEAR_FIB_BULL_236: Final[int] = 69
+BIT_NEAR_FIB_BULL_786: Final[int] = 70
+BIT_NEAR_FIB_424: Final[int] = 71
+# ────── Swing Proximity ──────
+BIT_NEAR_SWING_HIGH: Final[int] = 72
+BIT_NEAR_SWING_LOW: Final[int] = 73
 
 # ────── Metadata ──────
-TOTAL_CONDITIONS: Final[int] = 60
+TOTAL_CONDITIONS: Final[int] = 74
 #: The strategy-mask width in bits (u128 — ADR-0012 D4).
 MASK_WIDTH: Final[int] = 128
 
 #: Bitmask of conditions whose evaluator computes a real boolean. LAYOUT-ONLY
 #: bits (``implemented=false``) are 0 here; the evaluator emits 0 for them.
-IMPLEMENTED_MASK: Final[int] = 1152921504606846975
+IMPLEMENTED_MASK: Final[int] = 18889465931478580854783
+
+#: Bitmask of the RETIRED tombstone bits (``reserved = true`` in the manifest).
+#: Positions held forever (grow-only law), evaluator emits 0, NO later PR ever
+#: supplies math. Disjoint from ``IMPLEMENTED_MASK``; the declared-but-
+#: unimplemented remainder (``implemented = false``, ``reserved = false``) is
+#: LAYOUT-ONLY, not retired. Python-only export (no Rust consumer exists yet;
+#: the manifest stays the single source — TOMB-01 renderer support).
+RETIRED_MASK: Final[int] = 0
 
 #: Bitmask of conditions valid on the 1day timeframe (ADR-0012 D12). Relative
-#: to ``IMPLEMENTED_MASK`` it clears the SIX intraday-only bits: the four
-#: Time-of-Day bits 44-47 (``BIT_EARLY_MORNING`` / ``BIT_MID_MORNING`` /
-#: ``BIT_MIDDAY`` / ``BIT_AFTERNOON`` — a 1day bar has no time-of-day bucket)
-#: AND the two VWAP-position bits 52-53 (``BIT_CLOSE_ABOVE_VWAP`` /
-#: ``BIT_CLOSE_BELOW_VWAP`` — the session-anchored VWAP is intraday-only).
+#: to the FULL declared layout it clears the 9 intraday-only bit(s)
+#: (derived from the manifest's ``applies_to_1day = false`` rows):
+#:   bit 44 ``BIT_EARLY_MORNING``
+#:   bit 45 ``BIT_MID_MORNING``
+#:   bit 46 ``BIT_MIDDAY``
+#:   bit 47 ``BIT_AFTERNOON``
+#:   bit 52 ``BIT_CLOSE_ABOVE_VWAP``
+#:   bit 53 ``BIT_CLOSE_BELOW_VWAP``
+#:   bit 66 ``BIT_CLOSE_ABOVE_GAP_MID``
+#:   bit 67 ``BIT_CLOSE_BELOW_GAP_MID``
+#:   bit 68 ``BIT_NEAR_GAP_MID``
 #: Test-pinned exactly in ``tests/unit/test_vocabulary.py``.
-APPLIES_TO_1DAY_MASK: Final[int] = 1139146822934069247
+APPLIES_TO_1DAY_MASK: Final[int] = 18372943322733040631807
 
 NAME_TO_BIT: Final[dict[str, int]] = {
     "close_above_ema20": BIT_CLOSE_ABOVE_EMA20,
@@ -242,6 +292,20 @@ NAME_TO_BIT: Final[dict[str, int]] = {
     "bos_bearish": BIT_BOS_BEARISH,
     "choch_bullish": BIT_CHOCH_BULLISH,
     "choch_bearish": BIT_CHOCH_BEARISH,
+    "above_cpr_tc": BIT_ABOVE_CPR_TC,
+    "below_cpr_bc": BIT_BELOW_CPR_BC,
+    "inside_cpr": BIT_INSIDE_CPR,
+    "narrow_cpr_day": BIT_NARROW_CPR_DAY,
+    "close_above_supertrend": BIT_CLOSE_ABOVE_SUPERTREND,
+    "close_below_supertrend": BIT_CLOSE_BELOW_SUPERTREND,
+    "close_above_gap_mid": BIT_CLOSE_ABOVE_GAP_MID,
+    "close_below_gap_mid": BIT_CLOSE_BELOW_GAP_MID,
+    "near_gap_mid": BIT_NEAR_GAP_MID,
+    "near_fib_bull_236": BIT_NEAR_FIB_BULL_236,
+    "near_fib_bull_786": BIT_NEAR_FIB_BULL_786,
+    "near_fib_424": BIT_NEAR_FIB_424,
+    "near_swing_high": BIT_NEAR_SWING_HIGH,
+    "near_swing_low": BIT_NEAR_SWING_LOW,
 }
 
 BIT_TO_NAME: Final[dict[int, str]] = {v: k for k, v in NAME_TO_BIT.items()}
@@ -264,6 +328,11 @@ GROUP_RANGES: Final[tuple[tuple[str, range], ...]] = (
     ("VWAP Position", range(52, 54)),
     ("Pivot Proximity Extended", range(54, 56)),
     ("Market Structure", range(56, 60)),
+    ("Central Pivot Range", range(60, 64)),
+    ("Supertrend", range(64, 66)),
+    ("Gap Midpoint", range(66, 69)),
+    ("Fibonacci Extended", range(69, 72)),
+    ("Swing Proximity", range(72, 74)),
 )
 
 

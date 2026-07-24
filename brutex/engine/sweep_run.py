@@ -185,7 +185,7 @@ from brutex.strategies.types import (
     price_source_params_fragment,
 )
 from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
-from brutex.vocabulary import ProximityParams, has_conflict
+from brutex.vocabulary import ProximityParams, has_conflict, swing_params_fragment
 
 if TYPE_CHECKING:
     # Annotation-only imports — kept out of the runtime import graph so the
@@ -541,7 +541,7 @@ class SweepRunConfig:
         ``HOLD`` is rejected by :func:`run_persisted_sweep`, not here, so the
         config stays a pure data holder).
     condition_bits
-        The condition bit positions (of the 60-condition vocabulary) to
+        The condition bit positions (of the declared condition vocabulary) to
         brute-force over; duplicates
         are ignored (set semantics) for both the enumeration and the ``k`` bound.
     k
@@ -720,7 +720,7 @@ class SweepRunConfig:
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
         if self.tf_minutes < 1:
             raise ValueError(f"SweepRunConfig.tf_minutes must be >= 1, got {self.tf_minutes}")
-        # Validate every condition bit is in the u64 vocabulary range AT CONFIG
+        # Validate every condition bit is in the u128 mask range AT CONFIG
         # TIME (DEC-SWEEP-DEDUP-LMDB-001): an out-of-range bit otherwise slips
         # past the k-bound check and fails LATE as a bare ValueError raised from
         # the lazy ``iter_masks_k_of_bits`` generator mid-enumeration, aborting
@@ -934,6 +934,12 @@ def canonical_trade_params(
     # DEFAULT-OMIT the price-source axis (Override 1) via the ONE COMMON fragment
     # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical identity.
     params.update(price_source_params_fragment(vwap_source, ema_source))
+    # DEFAULT-OMIT the swept swing band (DEC-FIB-TEMPLATE-EXPRESS-001) via the
+    # ONE COMMON fragment: the ``proximity_bps`` 3-list layout above is FROZEN
+    # (never grows to 4 — that would re-key every existing non-None-proximity
+    # run); a non-default ``swing_proximity_bps`` adds exactly ONE top-level
+    # key, absent ⟺ the default 10 (clean bijection).
+    params.update(swing_params_fragment(proximity))
     if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
         params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
     # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model, and the
@@ -2239,8 +2245,10 @@ def run_persisted_sweep(
                 f"{cfg.roll_schedule!r} — the kernel must match this tuple's schedule"
             )
         # D12 twin (review round-1 finding 5): a kernel built under the wrong
-        # ``apply_1day_mask`` flag carries intraday-only bits (ToD 44-47 /
-        # VWAP 52-53) on a futures ``1day`` grid — unreachable through the
+        # ``apply_1day_mask`` flag carries intraday-only bits (ToD 44-47 + the
+        # retained session-VWAP 52-53 — LIVE again per
+        # DEC-VOCAB-VWAP-RETAIN-001, both families 1day-cleared by
+        # ``APPLIES_TO_1DAY_MASK``) on a futures ``1day`` grid — unreachable through the
         # production cache (the flag is a pure function of instrument+tf,
         # both in its key) but guarded for a hand-built kernel, exactly like
         # the schedule twin above.

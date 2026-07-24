@@ -1,8 +1,8 @@
 """O(k) bench pin for :func:`brutex.ranking.phrases.reason_for_mask` (WP3, R33).
 
 The assembly cost must scale with the mask's FIRED-bit count k, never with
-the 128-bit mask width or the 60-entry table size: the per-fired-bit latency
-of a DENSE 60-bit mask must stay flat vs a SPARSE 2-bit mask (ratio under the
+the 128-bit mask width or the 66-entry table size: the per-fired-bit latency
+of a DENSE mask must stay flat vs a SPARSE 2-bit mask (ratio under the
 shared-CI cache-tier ceiling). Manual ``perf_counter_ns`` loops with warm-up —
 the house ratio-gate idiom (not pytest-benchmark).
 """

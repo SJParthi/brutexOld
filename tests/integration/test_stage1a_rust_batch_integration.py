@@ -3,8 +3,9 @@
 Two REAL end-to-end proofs on top of the unit/property/golden layers:
 
 * **Fire-test flag-ON twin** — the B1 engineered script that fires all six
-  resurrected bits (VWAP 52-53 + BOS/CHoCH 56-59) through the real ``push()``
-  path fires them IDENTICALLY through the flag-ON batch arm.
+  stateful bits (BOS/CHoCH 56-59 + the RETAINED-LIVE VWAP pair 52-53,
+  DEC-VOCAB-VWAP-RETAIN-001 #2206) through the real ``push()`` path fires
+  them IDENTICALLY through the flag-ON batch arm.
 * **The G-5 second half** — a REAL 2-worker SPAWN ``run_parallel_grid`` with
   ``BRUTEX_SWEEP_RUST_STAGE1A=1`` produces a byte-identical results tree to
   the flag-OFF SEQUENTIAL supervised run, and the workers' own
@@ -45,10 +46,13 @@ def _fresh_seam_state(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyp
     reset_observability_memo_for_tests()
 
 
-def test_fire_script_six_bits_fire_identically_flag_on(
+def test_fire_script_structure_bits_fire_identically_flag_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bits 52-53 + 56-59 fire at the SAME bars under the batch arm."""
+    """Bits 56-59 AND the RETAINED-LIVE VWAP pair (52/53) fire at the SAME
+    bars under the batch arm (DEC-VOCAB-VWAP-RETAIN-001 #2206 — the wipe-era
+    tombstone-inert pin is flipped to live-fire teeth binding the five
+    re-inserted VWAP feed columns through the kernel)."""
     from brutex.vocabulary import bits as B
 
     bars = [_bar(m, h, low, c) for m, (h, low, c) in enumerate(_HLC_SCRIPT)]
@@ -59,12 +63,12 @@ def test_fire_script_six_bits_fire_identically_flag_on(
     assert [e for e in logs if e.get("event") == "rust_stage1a.engaged"]
     assert batch_masks == push_masks
     for bit in (
-        B.BIT_CLOSE_ABOVE_VWAP,
-        B.BIT_CLOSE_BELOW_VWAP,
         B.BIT_BOS_BULLISH,
         B.BIT_BOS_BEARISH,
         B.BIT_CHOCH_BULLISH,
         B.BIT_CHOCH_BEARISH,
+        B.BIT_CLOSE_ABOVE_VWAP,
+        B.BIT_CLOSE_BELOW_VWAP,
     ):
         fired = _fired_bits(batch_masks, bit)
         assert fired, f"bit {bit} never fired on the batch arm"

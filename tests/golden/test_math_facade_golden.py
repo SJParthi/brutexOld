@@ -98,12 +98,21 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "GREEKS_VEGA_ADMISSION_FLOOR",
         "IMPLEMENTED_MASK",
         "MarketStructureState",
+        "NARROW_CPR_WIDTH_BPS",
         "PIVOT_LEVELS_LEN",
         "SPEC_SCHEMA_VERSION",
+        # The vocab-66 SuperTrend flip (crate 0.5.0) — the Group-14 state
+        # joined trading_core.__all__; a deliberate, reviewed surface change.
+        "SupertrendState",
         "TOTAL_CONDITIONS",
+        # The VWAP retention (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206;
+        # crate 0.6.0) — the Group-10 state RESTORED to trading_core.__all__;
+        # a deliberate, reviewed surface change (the 0.4.0 reshape's removal
+        # reversed).
         "VwapState",
         "compute_ema",
         "compute_fib_levels",
+        "compute_gap_mid",
         "compute_pivot_levels",
         "derive_bar_metadata",
         "ema_alpha",

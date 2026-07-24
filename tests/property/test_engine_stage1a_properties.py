@@ -6,9 +6,12 @@ bar sequence):
 * **Determinism** (Golden Rule #4) — the same bars always produce the same
   ``bar_bits`` matrix, bit-for-bit; a fresh builder is stateless across runs.
 * **1:1 shape** — exactly one mask per input bar; every mask uses only the
-  IMPLEMENTED condition bits (bits 0-55 after PR-2 DEC-NIFTY-INDICATORS-001 —
-  the original 52 plus VWAP 52/53 and pivot R5/S5 54/55; the layout-only
-  BOS/CHoCH bits 56-59 and the u128 headroom stay always-zero).
+  IMPLEMENTED condition bits (``IMPLEMENTED_MASK`` — the 64 ACTIVE bits of
+  the 66-declared layout after the vocab-66 reshape + the SuperTrend
+  implemented-flip: the original 52 minus the RETIRED VWAP tombstones 52/53,
+  plus pivot R5/S5 54/55, the LIVE BOS/CHoCH 56-59, CPR 60-63 and SuperTrend
+  64/65 (DEC-SUPERTREND-CONDITIONS-001); the tombstones and the u128
+  headroom stay always-zero).
 * **No look-ahead** (CLAUDE.md §4) — mutating bars STRICTLY AFTER index ``k``
   never changes any mask at index ``≤ k`` (at bar N the builder reads only
   bars ``0..N``).
@@ -111,9 +114,10 @@ def test_deterministic_and_one_to_one(bars: list[CandleBar]) -> None:
     assert first == second
     assert len(first) == len(bars)
     # Only IMPLEMENTED condition bits may fire — every other bit is always zero.
-    # PR-2 (DEC-NIFTY-INDICATORS-001) flipped bits 52-55 (VWAP + pivot R5/S5) to
-    # implemented, so the bound is now ``IMPLEMENTED_MASK`` (bits 0-55); the still
-    # layout-only BOS/CHoCH bits (56-59) and the unused u128 headroom stay clear.
+    # The bound is ``IMPLEMENTED_MASK``: 64 active bits of the 66-declared
+    # layout (BOS/CHoCH 56-59, CPR 60-63 AND SuperTrend 64/65 are LIVE —
+    # DEC-SUPERTREND-CONDITIONS-001; the RETIRED VWAP tombstones 52/53 and
+    # the unused u128 headroom stay clear).
     assert all(0 <= m <= IMPLEMENTED_MASK for m in first)
     assert all(m & ~IMPLEMENTED_MASK == 0 for m in first)
 

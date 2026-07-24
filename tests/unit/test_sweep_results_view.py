@@ -216,6 +216,46 @@ def test_conditions_decoded_from_mask(tmp_path: Path) -> None:
     assert by_mask[0b11] != ""  # two condition names, joined
 
 
+def test_retained_vwap_mask_conditions_read_plain(tmp_path: Path) -> None:
+    """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): bit 52 is a LIVE
+    member again — a persisted mask carrying it renders the PLAIN name on
+    /results, and NO "(retired)" suffix renders anywhere (``RETIRED_MASK ==
+    0`` on the 74/74 layout). Teeth for the retired-render class live at the
+    ONE display authority (the monkeypatched retired-arm pin in
+    ``test_vocabulary_describe.py``)."""
+    _write_store(
+        tmp_path,
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        rows=[_row(seed=1, mask_bits=(1 << 52) | 1), _row(seed=2, mask_bits=0b11)],
+    )
+    board = build_sweep_leaderboard(tmp_path)
+    by_mask = {r["mask_bits"]: r["conditions"] for r in board.rows}
+    assert "close_above_vwap" in by_mask[(1 << 52) | 1]
+    assert all("(retired)" not in r["conditions"] for r in board.rows)
+
+
+def test_mask_hex_field_is_lossless(tmp_path: Path) -> None:
+    """G-SIGNBI-01 — every row carries the additive 32-hex ``mask_hex`` beside
+    the raw ``mask_bits`` number (which a double-based JSON consumer corrupts
+    past 2**53 — bit 63 is a valid mask bit today); round-trips exactly."""
+    mask = (1 << 63) | (1 << 60) | 0b101
+    _write_store(
+        tmp_path,
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        rows=[_row(seed=1, mask_bits=mask)],
+    )
+    board = build_sweep_leaderboard(tmp_path)
+    row = board.rows[0]
+    assert row["mask_bits"] == mask  # back-compat raw number kept
+    assert row["mask_hex"] == f"{mask:032x}"
+    assert int(row["mask_hex"], 16) == mask
+    assert len(row["mask_hex"]) == 32
+
+
 def test_top_n_clamped(tmp_path: Path) -> None:
     """``top_n`` is clamped into [1, MAX_TOP_N]."""
     _write_store(

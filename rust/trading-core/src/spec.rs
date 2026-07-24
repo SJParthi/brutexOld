@@ -70,8 +70,9 @@ impl Direction {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StrategySpec {
-    /// Entry required-bits SUPERSET over the same 60-condition `u128` vocabulary
-    /// as [`crate::bits`]. The spec fires on a bar iff EVERY set bit here is also
+    /// Entry required-bits SUPERSET over the same `u128` condition vocabulary
+    /// as [`crate::bits`] (74 declared positions; only IMPLEMENTED bits may be
+    /// required). The spec fires on a bar iff EVERY set bit here is also
     /// set in the bar's `evaluate_atoms` mask. Serialized as a HEX STRING
     /// (`condition_mask` as a JSON number loses precision past bit 52).
     #[cfg_attr(feature = "serde", serde(with = "crate::spec::mask_hex"))]
@@ -141,6 +142,14 @@ impl StrategySpec {
     /// two runs that mean the same strategy hash identically (Golden Rule #4/#7).
     /// `prior_n` is encoded as a fixed `u64` (not the platform-sized `usize`) so
     /// the bytes are identical on a 32-bit and a 64-bit target.
+    ///
+    /// FROZEN at [`SPEC_SCHEMA_VERSION`] = 1: exactly THREE proximity bps are
+    /// encoded — `gap_mid_proximity_bps` (DEC-GAP-MIDPOINT-CONDITIONS-001) is
+    /// deliberately NOT here (every pre-gap run_id stays byte-identical);
+    /// BruteX carries a swept non-default value in run identity via the
+    /// default-omit `canonical_trade_params` key instead (the
+    /// DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override-1 pattern). Growing this
+    /// layout requires a coordinator-brokered `SPEC_SCHEMA_VERSION` bump.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + 16 + 1 + 24 + 8 + 4);
@@ -245,6 +254,8 @@ mod tests {
             pivot_proximity_bps: 50,
             pdh_pdl_proximity_bps: 10,
             fib_proximity_bps: 25,
+            gap_mid_proximity_bps: crate::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS,
+            swing_proximity_bps: 10,
         }
     }
 
@@ -308,6 +319,10 @@ mod tests {
             day_low_paisa: 990_000,
             open_of_day_paisa: 1_000_000,
             market_structure: MarketStructureSignal::default(),
+            supertrend_x2_paisa: None,
+            gap_mid_paisa: None,
+            last_swing_high_paisa: None,
+            last_swing_low_paisa: None,
         }
     }
 
@@ -356,10 +371,24 @@ mod tests {
 
     #[test]
     fn new_rejects_a_reserved_bit() {
-        // Bit 60 is the first reserved/un-evaluated bit (TOTAL_CONDITIONS == 60).
-        let reserved = 1u128 << 60;
+        // Bit 74 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 74;
+        // DEC-FIB-TEMPLATE-EXPRESS-001 appended the fib/swing bits 69-73 on the
+        // gap-midpoint re-stack — bits 64-73 are all IMPLEMENTED, so 74 is the
+        // first reserved position).
+        let reserved = 1u128 << 74;
         let err = StrategySpec::new(reserved, Direction::Long, proximity(), 1, 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
+        // Bits 52/53 (VWAP) are IMPLEMENTED again — RETAINED per the operator
+        // ruling (DEC-VOCAB-VWAP-RETAIN-001): a mask requiring them is ACCEPTED
+        // (the reverse pin of the wipe-era tombstone refusal).
+        let vwap_52 = 1u128 << 52;
+        assert!(StrategySpec::new(vwap_52, Direction::Long, proximity(), 1, 0).is_ok());
+        let vwap_53 = 1u128 << 53;
+        assert!(StrategySpec::new(vwap_53, Direction::Long, proximity(), 1, 0).is_ok());
+        // Bit 64 (Supertrend) is IMPLEMENTED since the vocab-66 flip — a mask
+        // requiring it is ACCEPTED (the reverse pin of the old layout-only refusal).
+        let supertrend = 1u128 << 64;
+        assert!(StrategySpec::new(supertrend, Direction::Long, proximity(), 1, 0).is_ok());
     }
 
     #[test]
@@ -394,6 +423,8 @@ mod tests {
                 pivot_proximity_bps: 51,
                 pdh_pdl_proximity_bps: 10,
                 fib_proximity_bps: 25,
+                gap_mid_proximity_bps: crate::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS,
+                swing_proximity_bps: 10,
             },
             2,
             1,
@@ -405,6 +436,24 @@ mod tests {
         assert_ne!(b, by_prior.canonical_bytes());
         assert_ne!(b, by_symbol.canonical_bytes());
         assert_ne!(b, by_prox.canonical_bytes());
+    }
+
+    /// Bit 63 (`narrow_cpr_day`) is the u64 SIGN bit — cheap insurance that a
+    /// mask/bar_bits word with it set survives the canonical-bytes encode
+    /// unchanged (everything here is u128/unsigned; a signed-i64 round-trip
+    /// anywhere in the encode would corrupt exactly this bit).
+    #[test]
+    fn bit_63_mask_round_trips_canonical_bytes_unchanged() {
+        let mask = (1u128 << 63) | 0b1010;
+        assert_eq!(mask & IMPLEMENTED_MASK, mask, "bit 63 must be implemented");
+        let spec = StrategySpec::new(mask, Direction::Long, proximity(), 2, 9).unwrap();
+        let bytes = spec.canonical_bytes();
+        // The mask occupies bytes 4..20 little-endian — recover it verbatim.
+        let mut le = [0u8; 16];
+        le.copy_from_slice(&bytes[4..20]);
+        assert_eq!(u128::from_le_bytes(le), mask);
+        // And the encode is stable across calls (no sign-dependent drift).
+        assert_eq!(spec.canonical_bytes(), bytes);
     }
 
     // ── evaluate superset semantics (thin-wrapper proof) ───────────────────
@@ -463,6 +512,51 @@ mod tests {
         let back: StrategySpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, spec);
         assert_eq!(back.canonical_bytes(), spec.canonical_bytes());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_bit_63_mask_hex_round_trips_unchanged() {
+        // The u64-sign-bit insurance, serde half: a spec whose mask carries
+        // bit 63 serialises through the `mask_hex` STRING adapter and parses
+        // back bit-identically (no signedness/precision loss).
+        let mask = (1u128 << 63) | (1u128 << 60) | 1;
+        let spec = StrategySpec::new(mask, Direction::Short, proximity(), 1, 4).unwrap();
+        let json = serde_json::to_string(&spec).expect("serialize");
+        assert!(
+            json.contains("\"00000000000000009000000000000001\""),
+            "hex string must carry bit 63 verbatim, got: {json}"
+        );
+        let back: StrategySpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.condition_mask, mask);
+        assert_eq!(back.canonical_bytes(), spec.canonical_bytes());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_pre_gap_spec_json_loads_the_default_gap_bps() {
+        // Back-compat law (DEC-GAP-MIDPOINT-CONDITIONS-001): a spec serialized
+        // BEFORE the gap_mid_proximity_bps field existed must deserialize with
+        // the 10-bps default — old TickVault spec JSON stays readable and
+        // evaluates exactly as it always did.
+        let pre_gap_json = r#"{
+            "condition_mask": "0000000000000000000000000000001f",
+            "direction": "Long",
+            "proximity": {
+                "pivot_proximity_bps": 50,
+                "pdh_pdl_proximity_bps": 10,
+                "fib_proximity_bps": 25
+            },
+            "prior_n": 3,
+            "symbol_id": 1
+        }"#;
+        let spec: StrategySpec = serde_json::from_str(pre_gap_json).expect("pre-gap JSON loads");
+        assert_eq!(
+            spec.proximity.gap_mid_proximity_bps,
+            crate::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS
+        );
+        // …and the FROZEN v1 encode is unaffected by the defaulted field.
+        assert_eq!(spec.canonical_bytes().len(), 57);
     }
 
     #[cfg(feature = "serde")]

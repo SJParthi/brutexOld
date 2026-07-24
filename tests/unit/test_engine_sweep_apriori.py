@@ -1160,6 +1160,68 @@ def test_driver_reports_breaker_trip_as_tuple_failed(
     assert "TUPLE_FAILED" in audit_text
 
 
+def test_driver_reports_supertrend_bit_tuple_as_tuple_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 66-bit-vocab-shaped pin (DEC-SUPERTREND-CONDITIONS-001): an
+    Apriori-ON tuple whose ``condition_bits`` include a LIVE ``>= 64`` bit
+    (SuperTrend bit 64) refuses via ``SweepAprioriUnsupportedError`` and the
+    REAL sequential grid driver skips the tuple GRACEFULLY — counted in
+    ``tuples_failed`` + a ``TUPLE_FAILED`` audit line, never a crash and never
+    a corrupt store. This is the accepted interim production story for
+    Apriori over the post-flip DEFAULT pool (which now contains bits 64/65);
+    the u128 two-limb frontier is the named follow-up.
+    """
+    pytest.importorskip("polars")  # store construction needs the [data] extra
+    from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.sweep_orchestrator import (
+        SweepGridConfig,
+        Timeframe,
+        make_store_for,
+        run_sweep_grid,
+    )
+    from brutex.engine.sweep_run import ComboDedup
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.strategies.types import Side
+
+    bars = _mini_bars()
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY],
+        k_values=[1],
+        condition_bits=[0, 1, 64],  # bit 64 is LIVE (close_above_supertrend)
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        mode="A",
+        data_snapshot_hash="snap",
+        indicator_version="iv",
+        code_commit_sha="cc",
+        min_hits=0,
+    )
+    monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+    monkeypatch.delenv(MAX_MASK_BARS_ENV, raising=False)
+
+    dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+    with AuditWriter.open(tmp_path / "grid.jsonl") as audit:
+        summary = run_sweep_grid(
+            grid,
+            bars_for=lambda _i, _t: bars,
+            store_for=make_store_for(tmp_path / "results", grid),
+            dedup=dedup,
+            audit=audit,
+        )
+
+    # Graceful per-tuple refusal: counted as failed, nothing persisted, the
+    # TUPLE_FAILED audit line names the guard — never an unhandled raise.
+    assert summary.tuples_failed == 1
+    assert summary.persisted == 0
+    audit_text = (tmp_path / "grid.jsonl").read_text(encoding="utf-8")
+    assert "TUPLE_FAILED" in audit_text
+    assert "vocab bit 64 >= 64" in audit_text
+
+
 # ─────────── FOLD 1: Apriori-aware max_combos guardrail (effective_max_combos) ───────────
 
 

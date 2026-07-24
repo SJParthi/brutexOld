@@ -1,6 +1,6 @@
 """Unit suite for :mod:`brutex.ranking.phrases` (DEC-SWEEP-RESULTS-DEPTH-001, WP3).
 
-Pins the 60-entry table's structural invariants (bit==index, names cross-pinned
+Pins the 74-entry table's structural invariants (bit==index, names cross-pinned
 against the generated vocabulary), every :func:`check_phrase_invariants` raise
 branch via tampered tables, the mechanical assembly for k=1/3/5 masks, the
 honest-empty mask-0 answer, the reserved-headroom ignore contract and the
@@ -24,7 +24,7 @@ from brutex.vocabulary.describe import matched_condition_names
 
 class TestTableInvariants:
     def test_exactly_one_entry_per_condition_bit(self) -> None:
-        assert len(PHRASE_TABLE) == TOTAL_CONDITIONS == 60
+        assert len(PHRASE_TABLE) == TOTAL_CONDITIONS == 74
 
     def test_bit_equals_index(self) -> None:
         for index, entry in enumerate(PHRASE_TABLE):
@@ -38,7 +38,7 @@ class TestTableInvariants:
     def test_every_plain_phrase_is_nonblank_and_distinct(self) -> None:
         plains = [entry.plain for entry in PHRASE_TABLE]
         assert all(plain.strip() for plain in plains)
-        # 60 conditions ⇒ 60 distinct meanings — a copy-paste dup is a bug.
+        # 74 conditions ⇒ 74 distinct meanings — a copy-paste dup is a bug.
         assert len(set(plains)) == len(plains)
 
     def test_shipped_table_passes_the_checker(self) -> None:
@@ -47,7 +47,7 @@ class TestTableInvariants:
 
 class TestCheckerRaiseBranches:
     def test_wrong_length_rejected(self) -> None:
-        with pytest.raises(AssertionError, match="exactly 60 entries"):
+        with pytest.raises(AssertionError, match="exactly 74 entries"):
             check_phrase_invariants(PHRASE_TABLE[:-1])
 
     def test_bit_not_index_rejected(self) -> None:
@@ -56,18 +56,18 @@ class TestCheckerRaiseBranches:
             check_phrase_invariants(tampered)
 
     def test_wrong_name_rejected(self) -> None:
-        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(59, "not_a_condition", "words"))
+        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(73, "not_a_condition", "words"))
         with pytest.raises(AssertionError, match="does not resolve to bit"):
             check_phrase_invariants(tampered)
 
     def test_swapped_name_rejected(self) -> None:
         # A REAL vocabulary name on the WRONG bit must also fail the cross-pin.
-        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(59, "close_above_ema20", "words"))
+        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(73, "close_above_ema20", "words"))
         with pytest.raises(AssertionError, match="does not resolve to bit"):
             check_phrase_invariants(tampered)
 
     def test_blank_plain_rejected(self) -> None:
-        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(59, "choch_bearish", "   "))
+        tampered = (*PHRASE_TABLE[:-1], PhraseEntry(73, "near_swing_low", "   "))
         with pytest.raises(AssertionError, match="blank plain phrase"):
             check_phrase_invariants(tampered)
 
@@ -82,7 +82,14 @@ class TestReasonAssembly:
     def test_three_bit_mask_joins_in_ascending_bit_order(self) -> None:
         mask = (1 << 13) | (1 << 8) | (1 << 52)
         reason = reason_for_mask(mask)
+        # DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): bit 52 is LIVE
+        # again — both legs read the PLAIN live form through the ONE
+        # describe.condition_display_name authority, and NO "(retired)"
+        # suffix renders anywhere (RETIRED_MASK == 0; the retired-arm teeth
+        # live at the authority's monkeypatched pin in
+        # test_vocabulary_describe.py).
         assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap"
+        assert "(retired)" not in reason.technical
         assert reason.plain == (
             "price was near resistance level R2"
             "; and the candle closed above yesterday's high"
@@ -122,8 +129,8 @@ class TestReasonAssembly:
             1,
             0b101,
             (1 << 59) | (1 << 19) | (1 << 44),
-            (1 << 60) - 1,
-            0x5A5A5A5A5A5A5A5A & ((1 << 60) - 1),
+            (1 << 63) - 1,
+            0x5A5A5A5A5A5A5A5A & ((1 << 63) - 1),
         ],
     )
     def test_technical_names_match_the_common_decoder(self, mask: int) -> None:

@@ -11,7 +11,7 @@ via the SAME :class:`~brutex.engine.results_store.ResultsStore` the sweep wrote 
 source of truth — CLAUDE.md §11 COMMON; no re-implemented Parquet schema), ranks the
 rows to a top-N leaderboard, and projects each row into a display dict.
 
-READ-ONLY (CLAUDE.md §3): this NEVER touches the brute-force engine, the 52-condition
+READ-ONLY (CLAUDE.md §3): this NEVER touches the brute-force engine, the shared condition
 vocabulary, or the pull/rate path — it only displays results the operator already
 produced. The brute-force ENGINE stays NIFTY/BANKNIFTY/SENSEX; this changes no
 storage, scope, vocabulary, or rate.
@@ -1668,6 +1668,13 @@ def _project_row(
         "direction": row.direction,
         "mode": row.mode,
         "mask_bits": row.mask_bits,
+        # Wire hygiene (G-SIGNBI-01): ``mask_bits`` above stays the raw JSON
+        # number for back-compat, but a u128 mask past 2**53 (bit 63 —
+        # ``narrow_cpr_day`` — is a VALID mask bit today) silently loses low
+        # bits in any IEEE-double JSON consumer. ``mask_hex`` is the exact
+        # lossless form (the top100 ``mask:%032x`` convention) — clients
+        # should prefer it.
+        "mask_hex": f"{row.mask_bits:032x}",
         "conditions": row.condition_names,
         "net_pnl": format_inr(row.net_pnl_paisa),
         "net_pnl_rupees": float(paisa_to_rupees(row.net_pnl_paisa)),

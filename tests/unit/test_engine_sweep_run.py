@@ -808,6 +808,70 @@ class TestCanonicalTradeParams:
         assert params["proximity_bps"] == [5, 10, 25]
         assert params["sl_paisa"] is None and params["tp_paisa"] is None
 
+    def test_swing_band_default_omitted_exact_key_set(self) -> None:
+        """DEC-FIB-TEMPLATE-EXPRESS-001: the default swing band emits NO key —
+        the EXACT pre-express key-set (dict equality, not just absence), so
+        every pre-express run identity stays byte-stable; ``proximity_bps``
+        stays the FROZEN 3-list (never grows to 4)."""
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=ProximityParams(
+                pivot_proximity_bps=5,
+                pdh_pdl_proximity_bps=10,
+                fib_proximity_bps=25,
+                swing_proximity_bps=10,  # the default — omitted
+            ),
+            start_equity_paisa=10_000_000,
+        )
+        assert params == {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "proximity_bps": [5, 10, 25],
+            "fib_anchor": "prev_day",
+            "start_equity_paisa": 10_000_000,
+            # DEC-FILL-WORST-CASE-ONLY-001: the permanent unconditional key —
+            # part of the exact layout, not an express addition.
+            "fill_mode": "worst_case",
+        }
+
+    def test_swing_band_non_default_adds_exactly_one_key(self) -> None:
+        """A swept ``swing_proximity_bps=25`` cell adds EXACTLY one top-level
+        key and re-keys the run identity (bits 72/73 evaluate differently)."""
+        common: dict[str, object] = {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "start_equity_paisa": 10_000_000,
+        }
+        default = canonical_trade_params(
+            proximity=ProximityParams(pivot_proximity_bps=5),
+            **common,  # type: ignore[arg-type]
+        )
+        swept = canonical_trade_params(
+            proximity=ProximityParams(pivot_proximity_bps=5, swing_proximity_bps=25),
+            **common,  # type: ignore[arg-type]
+        )
+        assert set(swept) - set(default) == {"swing_proximity_bps"}
+        assert swept["swing_proximity_bps"] == 25
+        assert swept["proximity_bps"] == default["proximity_bps"] == [5, 10, 10]
+        assert mask_run_id(mask=1, params=default, **_CTX) != mask_run_id(
+            mask=1, params=swept, **_CTX
+        )
+
+    def test_none_proximity_emits_no_swing_key(self) -> None:
+        # proximity=None means every band is defaulted — no swing key either.
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+        )
+        assert "swing_proximity_bps" not in params
+
     def test_sweep_config_identity_routes_through_it(self) -> None:
         # §11 COMMON: the sweep's run-identity params ARE this helper's output —
         # the Stage-3 cell recovery re-derives identities through the same
@@ -2621,9 +2685,10 @@ class TestResidentKernelRollScheduleMismatch:
     def test_kernel_built_with_other_1day_mask_flag_raises(self, tmp_path: Path) -> None:
         # The D12 twin (review round-1 finding 5): a hand-built kernel whose
         # ``apply_1day_mask`` flag disagrees with the tuple's derived flag
-        # carries bar_bits with the intraday-only bits (ToD 44-47 / VWAP
-        # 52-53) wrongly set/cleared — fail-fast, exactly like the schedule
-        # guard (unreachable via the production cache, whose key contains
+        # carries bar_bits with the intraday-only bits (ToD 44-47; the
+        # RETIRED VWAP tombstones 52/53 are always 0 regardless) wrongly
+        # set/cleared — fail-fast, exactly like the schedule guard
+        # (unreachable via the production cache, whose key contains
         # instrument+tf, the flag's only inputs).
         from brutex.engine.stage1a import apply_1day_mask_for
 
@@ -3160,30 +3225,52 @@ class TestU128EnvelopeThroughSweep:
     ) -> None:
         # Bit 1 FIRES on `_trending_bars` AND its mask passes the ranking
         # gates under the one worst-case law (bit 0's all-winner pool reads
-        # profit_factor=None → gate-rejected), bits 64/65 never fire — the
-        # wide masks now PROMOTE the batch to the u128 kernel (no call
-        # fallback), and the byte-equality below compares stores with REAL
-        # trade rows, never two degenerate zero-trade stores (the
-        # vacuous-equality trap).
+        # profit_factor=None → gate-rejected, DEC-FILL-WORST-CASE-ONLY-001),
+        # and — since the vocab-66 SuperTrend implemented-flip (crate 0.5.0)
+        # — the LIVE bits 64/65 fire too (the up-trend stream warms the
+        # ATR-10 state at bar 9), so the resident bar_bits are ALREADY
+        # u128-wide (and per DEC-GAP-MIDPOINT-CONDITIONS-001 the IMPLEMENTED
+        # gap-midpoint bits 66-68 fire on this fixture too — `_trending_bars`
+        # restarts every day at 100.0 while the prior day closes higher):
+        # the sim builds the u128 sibling kernel at CONSTRUCTION
+        # (`_rust_is_wide`), the per-call PROMOTION arm is structurally
+        # bypassed (zero `wide_kernel_promoted` events here — that arm keeps
+        # its dedicated coverage in test_engine_rust_trade_sim.py over
+        # hand-built u64-resident windows), and the byte-equality below
+        # compares stores with REAL trade rows, never two degenerate
+        # zero-trade stores (the vacuous-equality trap).
         bars = _trending_bars()
         cfg = _make_config(condition_bits=[1, 64, 65], k=1, min_hits=0)
+        # The premise made explicit: the bar_bits genuinely widen the window.
+        assert any(b > (1 << 64) - 1 for b in build_bar_bits(bars))
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
-        # NOT a fallback any more: the wide sibling kernel was promoted once.
+        # Never a fallback: the wide masks ride the construction-wide kernel.
         fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
         assert fallbacks == []
+        # DEC-FIB-TEMPLATE-EXPRESS-001 u128 pin: the express bull-fib bits
+        # (69/70) FIRE on this trending feed, so the bar_bits word already
+        # exceeds u64 and the u128 kernel is resident from CONSTRUCTION — the
+        # lazy wide PROMOTION never runs (0 events; the promotion path itself
+        # stays covered by test_engine_rust_trade_sim.py over synthetic
+        # ≤u64 bar_bits). Pre-express this feed promoted lazily (1 event).
+        assert any(b > (1 << 64) - 1 for b in build_bar_bits(bars))
         promotions = [e for e in logs if e["event"] == "rust_trade_sim.wide_kernel_promoted"]
-        assert len(promotions) == 1
+        assert promotions == []  # wide from construction — nothing to promote
         # The sweep-level path signal reads RUST for the wide-mask tuple.
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is True
-        # Non-vacuous: the ranking gate drops the two zero-trade u128-bit
-        # masks, so EXACTLY the firing mask 0b10 persists — the byte-equality
-        # below compares stores carrying a real trade-bearing row, never two
-        # empty/degenerate stores. Its trades are pinned via the independent
+        # Non-vacuous: all THREE masks fire real trades on the trending
+        # stream, and TWO persist — bit 1 (pf ≈ 2.75) and bit 65 (28W/9L,
+        # pf ≈ 2.85) pass the gates, while bit 64's pool is ALL-WINNER under
+        # the worst-case fill law (36W/0L → profit_factor=None →
+        # gate-rejected, the same DEC-FILL-WORST-CASE-ONLY-001 class that
+        # rejects bit 0's pool). The byte-equality below compares stores
+        # carrying real trade-bearing rows, never two empty/degenerate
+        # stores. Mask 0b10's trades are pinned via the independent
         # metrics oracle.
         assert wired.evaluated == 3
-        assert wired.persisted == 1
+        assert wired.persisted == 2
         direct = metrics_for_mask(
             bars,
             build_bar_bits(bars),
@@ -3198,7 +3285,7 @@ class TestU128EnvelopeThroughSweep:
         assert direct.total_trades > 0
         monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
         fallback = _run_sweep(tmp_path, "f", bars, cfg)
-        assert wired.persisted == fallback.persisted == 1
+        assert wired.persisted == fallback.persisted == 2
         assert wired.store_content_hash == fallback.store_content_hash
         assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
 

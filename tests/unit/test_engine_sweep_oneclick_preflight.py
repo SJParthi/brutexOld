@@ -682,7 +682,47 @@ def test_free_disk_not_blocked_is_silent(tmp_path: Path) -> None:
 # ── VWAP dead-bits flag-and-run (gap-hunt #8) ───────────────────────────────
 
 
-def test_vwap_dead_bit_clamp_present_for_index_segment(tmp_path: Path) -> None:
+def test_vwap_dead_bit_clamp_fires_for_index_segment_on_retention_layout(
+    tmp_path: Path,
+) -> None:
+    """74/74 retention layout (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md
+    #2206): the VWAP bits 52/53 are IMPLEMENTED again yet structurally dead
+    on zero-volume INDEX spot candles, so the gap-hunt-#8 annotation
+    SELF-REVIVED — the condition_count clamp row FIRES with effective ==
+    nominal - 2 (flag-and-run; the swept vocabulary itself is never
+    reduced). The absent arm keeps its teeth in the FNO sibling below."""
+    _touch_partition(
+        tmp_path,
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        year=2026,
+        month=1,
+    )
+    verdict = run_oneclick_preflight(
+        **_base_kwargs(lake_root=tmp_path, results_root=tmp_path / "sweeps")
+    )
+    rows = [c for c in verdict.clamps if c.field == "condition_count"]
+    assert len(rows) == 1
+    assert verdict.estimator.nominal_condition_count == 74
+    assert verdict.estimator.effective_condition_count == 72
+    assert rows[0].applied == "72 effective (flag-and-run)"
+
+
+def test_vwap_dead_bit_clamp_fires_when_a_dead_bit_is_implemented(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag-and-run clamp arm stays LIVE: if a volume-dependent bit ever
+    returns to the implemented set, ``effective < nominal`` on INDEX and the
+    clamp row fires. Driven via a monkeypatched annotation (no such bit
+    exists on the tombstoned 66 layout — the mechanism must not rot)."""
+    from brutex.engine import sweep_estimator
+
+    def _fake(*, segment: str, n: int = sweep_estimator.SWEPT_CONDITIONS) -> tuple[int, int]:
+        return (n, n - 2) if segment.upper() == "INDEX" else (n, n)
+
+    monkeypatch.setattr(sweep_estimator, "effective_condition_count", _fake)
     _touch_partition(
         tmp_path,
         exchange="NSE",

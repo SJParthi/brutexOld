@@ -176,6 +176,10 @@ def test_fib_value_lookup_is_o1_in_days_loaded() -> None:
     )
 
 
+# RESTORED (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206): the VWAP-update
+# O(1) bench died with the `VwapState` pyclass at the vocab-66 wipe (crate
+# 0.4.0) and comes back verbatim now that the retention revived the class at
+# crate 0.6.0 (bits 52/53 LIVE again).
 def _time_vwap_update(prefilled_bars: int) -> float:
     """Mean ns per ``trading_core.VwapState.update`` AFTER the session already
     accumulated ``prefilled_bars`` bars — proving the running-sum cost is O(1)

@@ -22,7 +22,7 @@ pure.
 
 **Scope (CLAUDE.md §3):** the contracts these functions resolve are
 **LAKE / REFERENCE_ONLY** (DEC-P0-063) — never the brute-force engine or the
-52-condition vocabulary.
+shared condition vocabulary.
 """
 
 from __future__ import annotations

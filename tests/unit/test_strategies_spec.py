@@ -198,6 +198,70 @@ class TestStrategySpecValidation:
     def test_full_implemented_mask_accepted(self) -> None:
         assert make_spec(condition_mask=IMPLEMENTED_MASK).condition_mask == IMPLEMENTED_MASK
 
+    @pytest.mark.parametrize(
+        "bit",
+        [
+            pytest.param(52, id="bit52-live-vwap-above"),
+            pytest.param(53, id="bit53-live-vwap-below"),
+        ],
+    )
+    def test_retained_vwap_bits_accepted(self, bit: int) -> None:
+        """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): the bits-52/53 wipe
+        is REVERSED — the VWAP-position pair is LIVE in ``IMPLEMENTED_MASK``
+        again, so a mask requiring either constructs — alone AND mixed with
+        valid bits (the wipe-era refusal pin is consciously flipped)."""
+        assert (IMPLEMENTED_MASK >> bit) & 1  # genuinely implemented again
+        assert make_spec(condition_mask=1 << bit).condition_mask == 1 << bit
+        mixed = (1 << bit) | 0x1F
+        assert make_spec(condition_mask=mixed).condition_mask == mixed
+
+    @pytest.mark.parametrize(
+        "bit",
+        [
+            pytest.param(74, id="bit74-first-out-of-range"),
+            pytest.param(75, id="bit75-out-of-range"),
+        ],
+    )
+    def test_out_of_range_bits_rejected(self, bit: int) -> None:
+        """Teeth preserved for the refusal class (DEC-VOCAB-VWAP-RETAIN-001
+        #2206 moved 52/53 back into ``IMPLEMENTED_MASK``): the first bits
+        BEYOND the 74/74 vocabulary must refuse at construction, alone AND
+        mixed with valid bits — the exact-boundary refusal probe the retired
+        pair used to carry."""
+        assert not (IMPLEMENTED_MASK >> bit) & 1  # genuinely unimplemented
+        with pytest.raises(StrategyError, match="unimplemented/reserved"):
+            make_spec(condition_mask=1 << bit)
+        with pytest.raises(StrategyError, match="unimplemented/reserved"):
+            make_spec(condition_mask=(1 << bit) | 0x1F)
+
+    @pytest.mark.parametrize(
+        "bit",
+        [
+            pytest.param(64, id="bit64-live-supertrend-above"),
+            pytest.param(65, id="bit65-live-supertrend-below"),
+        ],
+    )
+    def test_live_supertrend_bits_accepted(self, bit: int) -> None:
+        """The vocab-66 SuperTrend implemented-flip ACCEPTANCE pins (crate
+        0.5.0): bits 64/65 joined ``IMPLEMENTED_MASK``, so a mask requiring
+        them constructs — alone AND mixed with valid bits (the former
+        declared-only refusal is consciously retired)."""
+        assert (IMPLEMENTED_MASK >> bit) & 1  # genuinely implemented now
+        mask = (1 << bit) | 0b101
+        assert make_spec(condition_mask=mask).condition_mask == mask
+
+    @pytest.mark.parametrize(
+        "bit",
+        [
+            pytest.param(60, id="bit60-live-above-cpr-tc"),
+            pytest.param(63, id="bit63-live-narrow-cpr-day-sign-bit"),
+        ],
+    )
+    def test_live_cpr_bits_accepted(self, bit: int) -> None:
+        """The LIVE CPR bits construct — incl. bit 63, the u64 sign bit."""
+        mask = (1 << bit) | 0b101
+        assert make_spec(condition_mask=mask).condition_mask == mask
+
     def test_non_direction_rejected(self) -> None:
         with pytest.raises(StrategyError) as exc:
             make_spec(direction="long")
@@ -578,7 +642,10 @@ class TestSpecIdentityDedupChain:
             prior_n=0,
             symbol_label="NSE-NIFTY",
         )
-        # One REAL evaluate_spec call (the 24-arg pre-built-levels ABI): the
+        # One REAL evaluate_spec call (the retention pre-built-levels ABI —
+        # the vwap arg is BACK at its pre-wipe slot per
+        # DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206; the swing pair +
+        # band ride appended-last, DEC-FIB-TEMPLATE-EXPRESS-001): the
         # empty mask is a subset of every bar's bits, so it always fires.
         bar_bits, fires, direction_u8 = trading_core.evaluate_spec(
             f"{spec.condition_mask:032x}",
@@ -590,9 +657,9 @@ class TestSpecIdentityDedupChain:
             105_00,  # close
             None,  # ema20
             None,  # ema200
-            None,  # vwap
+            None,  # vwap_paisa — the retained slot (#2206); None = abstain
             [100_00] * 12,  # pivot levels (p,r1..r3,s1..s3,pdh,pdl,pdc,r5,s5)
-            [100_00] * 15,  # fib levels
+            [100_00] * 19,  # fib levels (15 + the express bull23/bull78/424s)
             110_00,  # day_high
             90_00,  # day_low
             100_00,  # open_of_day
@@ -605,6 +672,9 @@ class TestSpecIdentityDedupChain:
             False,
             False,
             False,
+            last_swing_high_paisa=None,  # no confirmed swing
+            last_swing_low_paisa=None,
+            swing_bps=10,  # the spec path's production default
         )
         assert fires is True
         assert direction_u8 == 0
