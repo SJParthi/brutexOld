@@ -416,7 +416,13 @@ __all__ = [
     "_LAW_CLASSIFY",
     "_LAW_OBSERVED",
     "_LAW_SETTLE",
-    "LawOutcome",
+    # NOTE: ``LawOutcome`` (the PEP 695 ``type`` alias at module scope) is
+    # deliberately NOT re-exported here — CodeQL's Python extractor does not
+    # model ``type X = …`` statements as name bindings and false-flags it as an
+    # undefined export (py/undefined-export). The alias remains defined and
+    # importable by name (`from … import LawOutcome`), which is how the two
+    # caller modules + the test suite consume it; ``__all__`` only governs
+    # ``import *``, which no consumer uses for it.
     "Raise",
     "Value",
     "calendar_rust_enabled",
