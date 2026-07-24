@@ -60,6 +60,28 @@ def _load(name: str) -> ModuleType:
     return importlib.import_module(name)
 
 
+def _logic_ceiling_kib(driver: ModuleType, *, margin_kib: int = 2 * 1024 * 1024) -> int:
+    """RSS ceiling for the IN-PROCESS logic tests: ambient process RSS + margin.
+
+    The driver's default ``soak.rss_ceiling`` is an ABSOLUTE whole-process hard
+    gate sized for a DEDICATED standalone soak (4 GiB on the self-hosted tier).
+    Run in-process inside a large pytest shard, the enclosing process can
+    already sit at/near that absolute ceiling (this shard peaks ~4.1 GiB after
+    importing every module + native extension), so a no-op ``--dry`` run would
+    false-breach on the AMBIENT footprint — not on anything the soak did. These
+    tests assert the soak LOGIC (a clean dry-run adds no breach; an env-move is
+    a retry, not a fail), so they gate on a ceiling that floats ABOVE where the
+    process already is (a 2 GiB self-inflicted leak in a 3-window dry-run would
+    still breach — a real bug worth catching). The absolute-ceiling DEFAULT
+    path and the explicit ``--rss-ceiling-kib 1`` loudly-breach test keep the
+    driver's PRODUCTION absolute semantics under test unchanged.
+    """
+    ambient, _fd = driver._probe()
+    if ambient is None:  # platform abstain: no RSS reading → the gate cannot fire
+        return 1 << 40
+    return int(ambient) + margin_kib
+
+
 @pytest.fixture(name="registry")
 def _registry() -> ModuleType:
     return _load("flag_registry")
@@ -838,6 +860,11 @@ class TestDriftDriverDry:
                 "--out",
                 str(out),
                 "--dry",
+                "--rss-ceiling-kib",
+                # Float the absolute RSS gate above this pytest shard's ambient
+                # footprint — this test gates on the soak LOGIC, not on the
+                # enclosing process's absolute RSS (see _logic_ceiling_kib).
+                str(_logic_ceiling_kib(driver)),
                 "--max-windows",
                 "3",
                 "--window-seconds",
@@ -978,6 +1005,11 @@ class TestDriftRetryEnvMoved:
             scale="default",
             dry=True,  # dry so the ambient env is never mutated; runner overrides
             max_windows=2,
+            # Float the absolute RSS gate above this pytest shard's ambient
+            # footprint — these legs gate on the soak LOGIC (retry/breach
+            # counting), not on the enclosing process's absolute RSS
+            # (see _logic_ceiling_kib).
+            rss_ceiling_kib=_logic_ceiling_kib(driver),
             window_runner=runner,  # type: ignore[arg-type]
         )
 
