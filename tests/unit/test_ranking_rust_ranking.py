@@ -312,6 +312,28 @@ class TestRankCombosViaRust:
             (e["reason"], e["family"]) for e in events
         }
 
+    def test_junk_loss_rate_row_computes_the_door5_sentinel(self) -> None:
+        """A non-finite ``loss_rate`` row computes the Door-5 sentinel
+        (``_row_streak_threshold``'s junk branch — ``return
+        _MAX_CONSECUTIVE_LOSSES``) that the kernel's own junk guard never
+        consumes: the row is gated ``non_finite_input`` and excluded, so only
+        the finite survivor ranks — wire-identical to the verbatim OFF arm.
+
+        The (``ranking.gates``) fold computes ``streak_threshold`` for EVERY
+        row of the pool before the kernel applies its own junk guard, so this
+        exercises the sentinel path directly (the twin of ``passes_gates``
+        short-circuiting before Door 5)."""
+        import math
+
+        pool = [
+            (0b01, _m(loss_rate=math.nan)),
+            (0b10, _m(sharpe_ratio=3.0)),
+        ]
+        on = rank_combos_via_rust(pool)
+        assert on is not None
+        assert _keys(on) == _keys(_rank_off(pool))
+        assert [rc.mask for rc in on] == [0b10]
+
 
 # ── refuse-poison validators + divergence laws ──────────────────────────
 

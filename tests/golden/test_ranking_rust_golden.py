@@ -117,11 +117,15 @@ def test_flag_on_off_renders_are_byte_identical(monkeypatch: pytest.MonkeyPatch)
     assert on == off == _GOLDEN
 
 
-def test_flag_off_default_never_emits_parity_events() -> None:
-    """The default (flag ABSENT) arm never touches the parity machinery."""
-    import os
+def test_off_arm_never_emits_parity_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The explicit ``"0"`` kill-switch arm never touches the parity machinery,
+    yet renders the byte-frozen golden.
 
-    assert os.environ.get(RANKING_RUST_ENV) is None
+    Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the ranking seam is default-ON, so
+    an ABSENT flag ENGAGES (and emits ``rust_parity.*`` on an identity host). The
+    parity-free proof therefore arms the explicit OFF kill switch — the operator's
+    one lever to force the verbatim Python pipeline; the render is byte-identical."""
+    monkeypatch.setenv(RANKING_RUST_ENV, "0")
     with capture_logs() as logs:
         ranked = rank_combos(_candidates(), overfit=OverfitGateConfig(dsr_min=0.95))
     assert _render(ranked) == _GOLDEN

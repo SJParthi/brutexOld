@@ -487,6 +487,9 @@ class TestFlipSoakScript:
         stub = tmp_path / "stub.py"
         stub.write_text(_STUB, encoding="utf-8")
         env = dict(os.environ)
+        for key in list(env):
+            if key.startswith("BRUTEX_SWEEP_RUST") or key.startswith("BRUTEX_TEST_DIFF"):
+                env.pop(key)  # a clean ambient env — the harness refuses presets
         env["FLIP_SOAK_ARM_CMD"] = f"{sys.executable} {stub}"
         env["FLIP_SOAK_PYTHON"] = sys.executable
         result = subprocess.run(
@@ -813,7 +816,13 @@ class TestPassSchema:
 
 
 class TestDriftDriverDry:
-    def test_dry_run_produces_clean_fragment(self, tmp_path: Path) -> None:
+    def test_dry_run_produces_clean_fragment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The conftest wave OFF-belt pins BRUTEX_SWEEP_RUST_ENUM="0" in the
+        # ambient env; the driver's one-flag-at-a-time law refuses a pre-set
+        # registry flag. Present a clean env (the harness's own contract).
+        monkeypatch.delenv("BRUTEX_SWEEP_RUST_ENUM", raising=False)
         driver = _load("flip_soak_driver")
         out = tmp_path / "drift.json"
         rc = driver.main(
@@ -842,8 +851,13 @@ class TestDriftDriverDry:
         assert fragment["hard_gate_breaches"] == 0
         assert fragment["run_failures"] == 0
 
-    def test_dry_run_rss_ceiling_breach_fails_loudly(self, tmp_path: Path) -> None:
+    def test_dry_run_rss_ceiling_breach_fails_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A 1-KiB ceiling must breach on any real process — the hard gate."""
+        # Clean env (the conftest wave OFF-belt pins the flag; the driver
+        # refuses a pre-set registry flag — the one-flag-at-a-time law).
+        monkeypatch.delenv("BRUTEX_SWEEP_RUST_ENUM", raising=False)
         driver = _load("flip_soak_driver")
         out = tmp_path / "drift.json"
         rc = driver.main(

@@ -298,6 +298,7 @@ def test_sweep_hot_kernel_resident_sweep_sim_sign_bit_mask() -> None:
         [10_000] * n,
         [False] * n,
         [0] * n,
+        [-1, *range(n - 1)],  # tf==1 fixed-point arm_source (DEC-FILL-EXEC-GRID-1M-001)
         bar_bits,
     )
     # Pure-Python reference: exactly one bar is a superset of the mask.
