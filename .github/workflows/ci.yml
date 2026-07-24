@@ -365,7 +365,17 @@ jobs:
     # 75 → 90 (TRAIN A, red-team mandate): the diff-scoped coverage gate
     # wall-kills at 75 on a ~35-PR integration diff; W2's on-record raise
     # (living in #1699 as a cherry of the same edit) authorizes 90.
-    timeout-minutes: 90
+    # 90 → 130 (#1751 club — DEC-VOCAB-U128-CODEGEN-001 74-bit vocab):
+    # the 60→74-condition u128 mask makes the sweep/mask compute tests
+    # meaningfully heavier under --cov=brutex --cov-branch. Measured on a
+    # single-process, all-263-shard-3-files local reproduction: 28 min
+    # WITHOUT coverage; under coverage the heaviest shard lands in the
+    # ~85–100 min band, brushing the 90 cap — an INTERMITTENT boundary
+    # TIMEOUT (all tests PASS; every faithful local reproduction is green,
+    # no-cov 7891 passed / 0 failed and all four --cov chunks green), not a
+    # test defect. 130 clears the band with ~30–45 min margin; a genuine
+    # hang still trips it (each test keeps its own deadline guards).
+    timeout-minutes: 130
     strategy:
       fail-fast: false
       matrix:
