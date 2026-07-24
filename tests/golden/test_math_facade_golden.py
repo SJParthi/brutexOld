@@ -34,32 +34,61 @@ def _fresh_real_facade() -> Any:
 # ``__version__``) plus the facade's own ``kernel_versions`` helper.
 _EXPECTED_SURFACE: frozenset[str] = frozenset(
     {
-        # fno_math (rust/fno-math)
+        "FIB_LEVELS_LEN",
+        "GREEKS_DELTA_ADMISSION_FLOOR",
+        "GREEKS_IV_CLAMP_MAX",
+        "GREEKS_IV_CLAMP_MIN",
+        "GREEKS_T_FLOOR_YEARS",
+        "GREEKS_VEGA_ADMISSION_FLOOR",
+        "IMPLEMENTED_MASK",
+        "MarketStructureState",
+        "NARROW_CPR_WIDTH_BPS",
+        "PIVOT_LEVELS_LEN",
         "ResidentBars",
-        # DEC-ENUM-KERNEL-U128-001 — the u128 enum/count kernel twins (a
-        # deliberate, reviewed surface addition; fenced additive entries).
         "ResidentBarsU128",
+        "ResidentSweepEnum",
+        "ResidentSweepEnumU128",
         "ResidentSweepSim",
         "ResidentSweepSimU128",
+        "SPEC_SCHEMA_VERSION",
+        "SupertrendState",
+        "TOTAL_CONDITIONS",
+        "VwapState",
         "add_u64",
-        # DEC-ALPHA-BUYHOLD-METRIC-001 — the ALPHA-vs-BUY&HOLD benchmark
-        # scalar (a deliberate, reviewed surface addition; fenced additive).
         "alpha_vs_buyhold_pct",
         "bitand_count_u64s",
         "bitcount_u64s",
         "blake3_hash",
+        "compute_ema",
+        "compute_fib_levels",
+        "compute_gap_mid",
+        "compute_pivot_levels",
         "count_supermask_u128s",
         "count_supermask_u64s",
         "count_supermasks_u128s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
+        "derive_bar_metadata",
+        "ema_alpha",
+        "ema_seed",
+        "ema_step",
+        "evaluate_from_raw",
+        "evaluate_spec",
+        "evaluate_with_levels",
+        "exec_apply_futures_fill",
+        "exec_apply_slippage",
+        "exec_futures_charge_stack",
+        "exec_futures_materialize",
+        "exec_option_charge_stack",
+        "exec_options_materialize",
+        "exec_round_to_paisa",
+        "exec_round_to_rupee",
+        "greeks",
+        "greeks_batch",
+        "kernel_versions",
         "metrics_fold_recency",
         "metrics_fold_trades",
-        # DEC-OPTCOST-TAILS-RUST-001 (MIGRATION.md #2054, renumbered from #1962) — the 11 optcost
-        # tail-kernel pyfunctions (a deliberate, reviewed surface addition;
-        # fenced additive entries — the facade rebuilds ``__all__`` from
-        # ``fno_math.__all__``, so the shim's append-only optcost symbols
-        # reach this frozen contract by construction).
+        "minute_of_session",
         "optcost_atm_offset",
         "optcost_grid_around_atm",
         "optcost_history_lookup",
@@ -72,67 +101,32 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "optcost_strike_offset_from_atm",
         "optcost_strike_step",
         "popcount_bytes",
-        # LANE W1 (DEC-RANK-PARETO-PERSIST-001 family) — the multi-key
-        # selection kernels (a deliberate, reviewed surface addition; fenced
-        # additive entries).
         "rank_axis_topm",
         "rank_dd_band_indices",
         "rank_pareto_frontier",
+        "ranking_composite_scores",
+        "ranking_composite_term_inputs",
+        "ranking_cr_div_i64",
+        "ranking_dsr_z_contributions",
+        "ranking_gate_reasons",
+        "ranking_overfit_verdicts",
+        "ranking_passes_gates",
+        "ranking_rank_order",
+        "ranking_zscores",
+        "resolve_near_month",
+        "seconds_of_day",
+        "spec_canonical_bytes",
+        "stage1a_bar_bits_batch",
         "stats_cpcv_pass_count",
-        # DEC-RANK-CVAR-TAIL-GATE-001 — the integer-exact CVaR worst-k tail
-        # fold (a deliberate, reviewed surface addition).
         "stats_cvar_tail_fold",
-        # DEC-METRICS-RUST-STATS-002 — the stats-tail kernels (a deliberate,
-        # reviewed surface addition; fenced additive entries).
         "stats_expected_max_sharpe",
         "stats_pbo_cscv",
         "stats_psr",
         "stats_wfo_pass_count",
         "sweep_drawdown_stats",
-        # trading_core (rust/trading-core)
-        "FIB_LEVELS_LEN",
-        "GREEKS_DELTA_ADMISSION_FLOOR",
-        "GREEKS_IV_CLAMP_MAX",
-        "GREEKS_IV_CLAMP_MIN",
-        "GREEKS_T_FLOOR_YEARS",
-        "GREEKS_VEGA_ADMISSION_FLOOR",
-        "IMPLEMENTED_MASK",
-        "MarketStructureState",
-        "NARROW_CPR_WIDTH_BPS",
-        "PIVOT_LEVELS_LEN",
-        "SPEC_SCHEMA_VERSION",
-        # The vocab-66 SuperTrend flip (crate 0.5.0) — the Group-14 state
-        # joined trading_core.__all__; a deliberate, reviewed surface change.
-        "SupertrendState",
-        "TOTAL_CONDITIONS",
-        # The VWAP retention (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206;
-        # crate 0.6.0) — the Group-10 state RESTORED to trading_core.__all__;
-        # a deliberate, reviewed surface change (the 0.4.0 reshape's removal
-        # reversed).
-        "VwapState",
-        "compute_ema",
-        "compute_fib_levels",
-        "compute_gap_mid",
-        "compute_pivot_levels",
-        "derive_bar_metadata",
-        "ema_alpha",
-        "ema_seed",
-        "ema_step",
-        "evaluate_from_raw",
-        "evaluate_spec",
-        "evaluate_with_levels",
-        "greeks",
-        "greeks_batch",
-        "minute_of_session",
-        "resolve_near_month",
-        "seconds_of_day",
-        "spec_canonical_bytes",
-        "stage1a_bar_bits_batch",
         "total_conditions",
         "version",
         "weekday_from_ordinal",
-        # facade-own
-        "kernel_versions",
     }
 )
 

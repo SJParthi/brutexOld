@@ -418,7 +418,7 @@ def combo_digest(
             "(non-finite float such as NaN/inf, or a circular reference): "
             f"{exc}"
         ) from exc
-    return blake3.blake3(canonical.encode("utf-8")).digest()
+    return bytes(blake3.blake3(canonical.encode("utf-8")).digest())
 
 
 class SweepCache:

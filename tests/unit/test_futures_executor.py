@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -989,3 +990,225 @@ class TestMaterializeGateArms:
         assert isinstance(out, RejectedFuturesTrade)
         assert out.reason is FuturesRejectReason.NO_CONTRACT
         assert source.calls == []
+# ─────────────────────────────────────────────────────────────────────────────
+# DEC-EXEC-RUST-CORE-001 — the BRUTEX_EXEC_RUST dispatch tail (slice 7 / P8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestExecRustDispatch:
+    """ON-arm parity of ``_materialize_tail_rust`` through the REAL
+    ``materialize_futures_trade`` entry point.
+
+    The flag-less default (every test above) is the Python tail; these flip
+    ``BRUTEX_EXEC_RUST=1`` and prove: the kernel-served trade (cost-free
+    index / zerodha / synthetic-cited cost-bearing arms) is WHOLE-OBJECT
+    equal to the OFF arm (engagement-spied), the stale verdict maps onto the
+    SAME reject + single WARN, and every fallback shape lands byte-
+    identically on the Python tail.
+    """
+
+    def _off(self, monkeypatch: pytest.MonkeyPatch, window: FuturesBarWindow, **kw: Any) -> object:
+        from brutex import exec_rust
+
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        return materialize_futures_trade(
+            kw.pop("signal", _signal()),
+            resolver=_Resolver(),
+            source=_Source(window=window),
+            **kw,
+        )
+
+    def test_on_arm_trade_equals_off_arm_and_engages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import fno_math
+        from brutex import exec_rust
+
+        window = _window()
+        off = self._off(monkeypatch, window)
+
+        calls: dict[str, int] = {}
+        real = fno_math.exec_futures_materialize
+
+        def _spy(*a: Any) -> object:
+            calls["exec_futures_materialize"] = calls.get("exec_futures_materialize", 0) + 1
+            return real(*a)
+
+        monkeypatch.setattr(
+            exec_rust, "_rust", type("K", (), {"exec_futures_materialize": staticmethod(_spy)})()
+        )
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = materialize_futures_trade(
+            _signal(), resolver=_Resolver(), source=_Source(window=window)
+        )
+        assert calls == {"exec_futures_materialize": 1}
+        assert isinstance(on, MaterializedFuturesTrade)
+        assert on == off
+        assert on.cost_free is True
+
+    def test_on_arm_zerodha_equals_off_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex import exec_rust
+
+        window = _window()
+        off = self._off(monkeypatch, window, broker="zerodha")
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = materialize_futures_trade(
+            _signal(), resolver=_Resolver(), source=_Source(window=window), broker="zerodha"
+        )
+        assert isinstance(on, MaterializedFuturesTrade)
+        assert on == off
+
+    def test_on_arm_short_side_equals_off_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex import exec_rust
+
+        window = _window()
+        signal = _signal(direction=TradeDirection.BEAR)
+        off = self._off(monkeypatch, window, signal=signal)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = materialize_futures_trade(signal, resolver=_Resolver(), source=_Source(window=window))
+        assert isinstance(on, MaterializedFuturesTrade)
+        assert on == off
+
+    def test_on_arm_cost_bearing_synthetic_cited_equals_off_arm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cost-bearing rate-resolution arm (STT → ETC → NSE-IPFT →
+        stamp) under the sanctioned synthetic-cited regime fixture + the
+        synthetic stock lot (no in-repo stock lot history)."""
+        from brutex import exec_rust
+        from brutex.costs import futures_costs as fc
+        from brutex.costs.constants import RegimeRow, validate_regime_table
+
+        synth_etc = validate_regime_table(
+            (RegimeRow(date(2024, 10, 1), 173, "SYNTHETIC test circular — never shipped"),),
+            label="synthetic ETC futures",
+        )
+        synth_ipft = validate_regime_table(
+            (RegimeRow(date(2024, 10, 1), 10, "SYNTHETIC test circular — never shipped"),),
+            label="synthetic IPFT futures",
+        )
+        synth_stamp = validate_regime_table(
+            (RegimeRow(date(2024, 10, 1), 200, "SYNTHETIC test circular — never shipped"),),
+            label="synthetic stamp futures",
+        )
+        monkeypatch.setattr(executor_module, "futures_lot_size", lambda *_a: 500)
+        monkeypatch.setitem(fc._ETC_FUTURES_REGIMES_BY_EXCHANGE, "NSE", synth_etc)
+        monkeypatch.setattr(fc, "_NSE_IPFT_FUTURES_REGIMES", synth_ipft)
+        monkeypatch.setattr(fc, "_STAMP_FUTURES_REGIMES", synth_stamp)
+
+        window = _window()
+        signal = _signal(instrument="RELIANCE")
+        off = self._off(monkeypatch, window, signal=signal)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = materialize_futures_trade(signal, resolver=_Resolver(), source=_Source(window=window))
+        assert isinstance(on, MaterializedFuturesTrade)
+        assert on == off
+        assert on.cost_free is False
+        assert on.total_charges_paisa > 0
+
+    def test_on_arm_stale_bar_unconditional_matches_off_arm_with_one_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex import exec_rust
+
+        window = _window(entry_volume=0)
+        off = self._off(monkeypatch, window)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        with capture_logs() as logs:
+            on = materialize_futures_trade(
+                _signal(), resolver=_Resolver(), source=_Source(window=window)
+            )
+        assert isinstance(on, RejectedFuturesTrade)
+        assert on.reason is FuturesRejectReason.STALE_BAR
+        assert on == off
+        events = [x for x in logs if x["event"] == "futures.reject.stale_bar"]
+        assert len(events) == 1
+        assert events[0]["entry_volume"] == 0
+
+    @pytest.mark.parametrize(
+        "tail_result",
+        [None, ("bogus_kind", None, 0, 0), ("trade", None, 0, 0)],
+        ids=["tail-none", "unknown-kind", "trade-without-stack"],
+    )
+    def test_fallback_shapes_land_on_the_python_tail(
+        self, monkeypatch: pytest.MonkeyPatch, tail_result: object
+    ) -> None:
+        from brutex import exec_rust
+
+        window = _window()
+        off = self._off(monkeypatch, window)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        monkeypatch.setattr(exec_rust, "materialize_futures_tail", lambda *a, **k: tail_result)
+        on = materialize_futures_trade(
+            _signal(), resolver=_Resolver(), source=_Source(window=window)
+        )
+        assert isinstance(on, MaterializedFuturesTrade)
+        assert on == off
+
+    def test_prep_or_kernel_raise_falls_back_to_the_python_tail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex import exec_rust
+
+        window = _window()
+        off = self._off(monkeypatch, window)
+
+        def _boom(*a: object, **k: object) -> object:
+            raise TypeError("kernel prep fault")
+
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        monkeypatch.setattr(exec_rust, "materialize_futures_tail", _boom)
+        on = materialize_futures_trade(
+            _signal(), resolver=_Resolver(), source=_Source(window=window)
+        )
+        assert isinstance(on, MaterializedFuturesTrade)
+        assert on == off
+
+    @pytest.mark.parametrize(
+        "wire",
+        [
+            list(range(16)),
+            list(range(17)),
+            list(range(18)),
+            list(range(20)),
+            list("abcdefghijklmnopqrs"),  # the pinned length 19, junk element types
+        ],
+        ids=["len-16", "len-17", "len-18", "len-20", "len-19-wrong-type"],
+    )
+    def test_malformed_kernel_wire_warns_and_serves_the_python_arm(
+        self, monkeypatch: pytest.MonkeyPatch, wire: list[object]
+    ) -> None:
+        """Review round 2 (R2-MINOR/R3-F2): a 17/18-slot futures wire from
+        the KERNEL previously raised an UNCAUGHT ``IndexError`` out of
+        ``materialize_futures_trade`` (a raw crash — outside the seam catch
+        AND this executor's broad catch), and a 20-slot wire was silently
+        truncated-adopted. Every malformed shape now lands on the
+        byte-identical Python arm with ONE loud seam-side
+        ``exec_rust.kernel_fallback`` (``KernelWireFault``)."""
+        import fno_math
+        from brutex import exec_rust
+
+        window = _window()
+        off = self._off(monkeypatch, window)
+        exec_rust.reset_warn_memo_for_tests()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        # Malformed ONLY at the tail symbol; every other kernel entry
+        # delegates to the real wheel (the Python tail's own inner
+        # charge-stack dispatch must not trip the stale-wheel guard).
+        fake = SimpleNamespace(
+            exec_futures_materialize=lambda *_a: ("trade", wire),
+            **{
+                n: getattr(fno_math, n)
+                for n in ("exec_futures_charge_stack", "exec_apply_futures_fill")
+            },
+        )
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with capture_logs() as logs:
+            on = materialize_futures_trade(
+                _signal(), resolver=_Resolver(), source=_Source(window=window)
+            )
+        assert isinstance(on, MaterializedFuturesTrade)
+        assert on == off
+        events = [x for x in logs if x["event"] == "exec_rust.kernel_fallback"]
+        assert len(events) == 1
+        assert events[0]["site"] == "materialize_futures_tail"
+        assert events[0]["error_type"] == "KernelWireFault"
+        exec_rust.reset_warn_memo_for_tests()

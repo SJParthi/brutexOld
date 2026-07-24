@@ -1,0 +1,721 @@
+{
+  "schema_version": 1,
+  "pools": [
+    {
+      "name": "near_tie_identical_metrics",
+      "overfit_dsr_min": null,
+      "rows": [
+        {
+          "mask": 9,
+          "metrics": {
+            "sharpe_ratio": "1.5"
+          }
+        },
+        {
+          "mask": 3,
+          "metrics": {
+            "sharpe_ratio": "1.5"
+          }
+        },
+        {
+          "mask": 12,
+          "metrics": {
+            "sharpe_ratio": "1.5"
+          }
+        },
+        {
+          "mask": 1,
+          "metrics": {
+            "sharpe_ratio": "1.5"
+          }
+        },
+        {
+          "mask": 7,
+          "metrics": {
+            "sharpe_ratio": "1.5"
+          }
+        }
+      ]
+    },
+    {
+      "name": "signed_zero_composites",
+      "overfit_dsr_min": null,
+      "rows": [
+        {
+          "mask": 2,
+          "metrics": {}
+        },
+        {
+          "mask": 5,
+          "metrics": {}
+        },
+        {
+          "mask": 3,
+          "metrics": {}
+        }
+      ]
+    },
+    {
+      "name": "beyond_2_53_paisa",
+      "overfit_dsr_min": null,
+      "rows": [
+        {
+          "mask": 1,
+          "metrics": {
+            "avg_mfe_paisa": 9007199254740993,
+            "avg_mae_paisa": 3
+          }
+        },
+        {
+          "mask": 2,
+          "metrics": {
+            "avg_mfe_paisa": 9007199254740995,
+            "avg_mae_paisa": 3
+          }
+        },
+        {
+          "mask": 4,
+          "metrics": {
+            "avg_mfe_paisa": 1152921504606846983,
+            "avg_mae_paisa": 18014398509481989
+          }
+        },
+        {
+          "mask": 8,
+          "metrics": {
+            "avg_mfe_paisa": 1000,
+            "avg_mae_paisa": 7
+          }
+        }
+      ]
+    },
+    {
+      "name": "none_heavy",
+      "overfit_dsr_min": null,
+      "rows": [
+        {
+          "mask": 1,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": null,
+            "calmar_ratio": null
+          }
+        },
+        {
+          "mask": 2,
+          "metrics": {
+            "profit_factor": null
+          }
+        },
+        {
+          "mask": 4,
+          "metrics": {
+            "win_loss_ratio": null,
+            "recovery_factor": null
+          }
+        },
+        {
+          "mask": 8,
+          "metrics": {
+            "sharpe_ratio": "2.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "nan_inf_gate_inputs",
+      "overfit_dsr_min": null,
+      "rows": [
+        {
+          "mask": 1,
+          "metrics": {
+            "profit_factor": "nan"
+          }
+        },
+        {
+          "mask": 2,
+          "metrics": {
+            "max_drawdown_pct": "inf"
+          }
+        },
+        {
+          "mask": 4,
+          "metrics": {
+            "win_rate": "-inf"
+          }
+        },
+        {
+          "mask": 8,
+          "metrics": {
+            "win_loss_ratio": "nan"
+          }
+        },
+        {
+          "mask": 16,
+          "metrics": {
+            "sharpe_ratio": "1.25"
+          }
+        }
+      ]
+    },
+    {
+      "name": "at_threshold_gates",
+      "overfit_dsr_min": null,
+      "rows": [
+        {
+          "mask": 1,
+          "metrics": {
+            "total_trades": 30,
+            "profit_factor": "1.2",
+            "max_drawdown_pct": "30.0"
+          }
+        },
+        {
+          "mask": 2,
+          "metrics": {
+            "total_trades": 29
+          }
+        },
+        {
+          "mask": 4,
+          "metrics": {
+            "win_rate": "0.25",
+            "win_loss_ratio": "0.0"
+          }
+        },
+        {
+          "mask": 8,
+          "metrics": {
+            "max_consecutive_losses": 10
+          }
+        },
+        {
+          "mask": 16,
+          "metrics": {
+            "max_consecutive_losses": 11
+          }
+        }
+      ]
+    },
+    {
+      "name": "overfit_gate_pool",
+      "overfit_dsr_min": 0.95,
+      "rows": [
+        {
+          "mask": 1,
+          "metrics": {
+            "sharpe_ratio": "2.0",
+            "sortino_ratio": "1.8",
+            "calmar_ratio": "1.2"
+          }
+        },
+        {
+          "mask": 2,
+          "metrics": {
+            "sharpe_ratio": "2.5",
+            "sortino_ratio": "2.0",
+            "calmar_ratio": "1.5"
+          }
+        },
+        {
+          "mask": 4,
+          "metrics": {
+            "sharpe_ratio": "3.0",
+            "sortino_ratio": "2.4",
+            "calmar_ratio": "1.8"
+          }
+        },
+        {
+          "mask": 8,
+          "metrics": {
+            "sharpe_ratio": "1.0",
+            "sortino_ratio": "0.9",
+            "calmar_ratio": "0.5"
+          }
+        },
+        {
+          "mask": 16,
+          "metrics": {
+            "sharpe_ratio": "0.8",
+            "skewness": "-0.5",
+            "kurtosis": "1.5"
+          }
+        }
+      ]
+    },
+    {
+      "name": "seeded_random_0",
+      "overfit_dsr_min": null,
+      "rows": [
+        {
+          "mask": 1267650600228699395063535190962,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": null,
+            "calmar_ratio": null,
+            "profit_factor": "2.5230061354219533",
+            "recovery_factor": "2.619586315141806",
+            "win_rate": "0.6404835705949475",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "7.804610085577553",
+            "total_trades": 25,
+            "max_consecutive_losses": 13,
+            "avg_mfe_paisa": 120433095,
+            "avg_mae_paisa": 165783,
+            "skewness": "-0.35539401010719107",
+            "kurtosis": "4.419158230376215"
+          }
+        },
+        {
+          "mask": 132400508081139591,
+          "metrics": {
+            "sharpe_ratio": "2.027683349771489",
+            "sortino_ratio": "0.09951465771353352",
+            "calmar_ratio": null,
+            "profit_factor": "2.3650474848332212",
+            "recovery_factor": null,
+            "win_rate": "0.12635940506932097",
+            "win_loss_ratio": "3.6741001627002",
+            "max_drawdown_pct": "2.635833997683705",
+            "total_trades": 35,
+            "max_consecutive_losses": 14,
+            "avg_mfe_paisa": 461763279,
+            "avg_mae_paisa": 847712,
+            "skewness": "-0.9644732792317221",
+            "kurtosis": "2.7826845828005893"
+          }
+        },
+        {
+          "mask": 502653721341778491,
+          "metrics": {
+            "sharpe_ratio": "0.9480258112793329",
+            "sortino_ratio": "-0.2523485817539637",
+            "calmar_ratio": "-0.5272392054259816",
+            "profit_factor": null,
+            "recovery_factor": "1.0746080575627182",
+            "win_rate": "0.5378677478675584",
+            "win_loss_ratio": "1.2475599455717363",
+            "max_drawdown_pct": "30.306195553778746",
+            "total_trades": 45,
+            "max_consecutive_losses": 8,
+            "avg_mfe_paisa": 238073351,
+            "avg_mae_paisa": 743401,
+            "skewness": null,
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 687151009122664545,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": null,
+            "calmar_ratio": "2.37442087527372",
+            "profit_factor": "3.901525883345502",
+            "recovery_factor": null,
+            "win_rate": "0.025234001576896037",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "44.75772254551656",
+            "total_trades": 75,
+            "max_consecutive_losses": 10,
+            "avg_mfe_paisa": 720135326,
+            "avg_mae_paisa": 155475,
+            "skewness": "0.486438245498956",
+            "kurtosis": "3.034906258431416"
+          }
+        },
+        {
+          "mask": 430861477750770145,
+          "metrics": {
+            "sharpe_ratio": "-0.5578569949310466",
+            "sortino_ratio": null,
+            "calmar_ratio": "1.4225506694406937",
+            "profit_factor": "2.756297805607696",
+            "recovery_factor": "2.7663271745012388",
+            "win_rate": "0.06205909635869156",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "9.268600549052298",
+            "total_trades": 41,
+            "max_consecutive_losses": 6,
+            "avg_mfe_paisa": 771047041,
+            "avg_mae_paisa": 784068,
+            "skewness": "0.9930239909003609",
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 472785819790050655,
+          "metrics": {
+            "sharpe_ratio": "-1.7531875751742079",
+            "sortino_ratio": null,
+            "calmar_ratio": "1.6801683138720644",
+            "profit_factor": null,
+            "recovery_factor": "4.975875316133507",
+            "win_rate": "0.5146088837841734",
+            "win_loss_ratio": "3.6816180330760444",
+            "max_drawdown_pct": "32.5094726498222",
+            "total_trades": 21,
+            "max_consecutive_losses": 10,
+            "avg_mfe_paisa": 260649464,
+            "avg_mae_paisa": 607878,
+            "skewness": null,
+            "kurtosis": "2.9438867810261216"
+          }
+        },
+        {
+          "mask": 725052293582136782,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": "3.325024194069785",
+            "calmar_ratio": "1.8111553726811866",
+            "profit_factor": null,
+            "recovery_factor": "2.2656249175342413",
+            "win_rate": "0.18013507861379463",
+            "win_loss_ratio": "2.9799811028254393",
+            "max_drawdown_pct": "17.05523054376377",
+            "total_trades": 77,
+            "max_consecutive_losses": 8,
+            "avg_mfe_paisa": 364324289,
+            "avg_mae_paisa": 359944,
+            "skewness": null,
+            "kurtosis": "1.3408403146452166"
+          }
+        },
+        {
+          "mask": 1119717314726423965,
+          "metrics": {
+            "sharpe_ratio": "0.06518053867083884",
+            "sortino_ratio": null,
+            "calmar_ratio": "0.9249810429154532",
+            "profit_factor": "3.594526762854209",
+            "recovery_factor": null,
+            "win_rate": "0.7151906664247785",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "44.73198399278519",
+            "total_trades": 40,
+            "max_consecutive_losses": 13,
+            "avg_mfe_paisa": 148895356,
+            "avg_mae_paisa": 124909,
+            "skewness": "-1.6641889630351456",
+            "kurtosis": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "seeded_random_1",
+      "overfit_dsr_min": 0.9,
+      "rows": [
+        {
+          "mask": 1267650600229314806679914649763,
+          "metrics": {
+            "sharpe_ratio": "-1.9144340765712275",
+            "sortino_ratio": null,
+            "calmar_ratio": "-0.3790607356644049",
+            "profit_factor": "3.1025403324783087",
+            "recovery_factor": "3.396291553670782",
+            "win_rate": "0.833730860932678",
+            "win_loss_ratio": "3.2300856912202685",
+            "max_drawdown_pct": "30.492600665117997",
+            "total_trades": 32,
+            "max_consecutive_losses": 1,
+            "avg_mfe_paisa": 1006983441,
+            "avg_mae_paisa": 559078,
+            "skewness": "0.7863358892125794",
+            "kurtosis": "0.13035458357527974"
+          }
+        },
+        {
+          "mask": 206058357357704254,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": null,
+            "calmar_ratio": "1.6646706691665654",
+            "profit_factor": "3.6443066487686617",
+            "recovery_factor": null,
+            "win_rate": "0.7624016950517003",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "2.522166696641421",
+            "total_trades": 66,
+            "max_consecutive_losses": 10,
+            "avg_mfe_paisa": 685254619,
+            "avg_mae_paisa": 437861,
+            "skewness": null,
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 145041879463685398,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": "-0.3709733243336242",
+            "calmar_ratio": null,
+            "profit_factor": null,
+            "recovery_factor": "3.231937049558592",
+            "win_rate": "0.20751444488938764",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "41.22833960615543",
+            "total_trades": 22,
+            "max_consecutive_losses": 5,
+            "avg_mfe_paisa": 721666096,
+            "avg_mae_paisa": 38520,
+            "skewness": null,
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 810274109077974221,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": null,
+            "calmar_ratio": "0.9110047190122312",
+            "profit_factor": null,
+            "recovery_factor": null,
+            "win_rate": "0.24816462973632203",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "23.693417786544156",
+            "total_trades": 30,
+            "max_consecutive_losses": 14,
+            "avg_mfe_paisa": 455508687,
+            "avg_mae_paisa": 868765,
+            "skewness": "1.9364650221379556",
+            "kurtosis": "4.877976600270651"
+          }
+        },
+        {
+          "mask": 190480065351222908,
+          "metrics": {
+            "sharpe_ratio": "3.7740027720595375",
+            "sortino_ratio": null,
+            "calmar_ratio": null,
+            "profit_factor": null,
+            "recovery_factor": null,
+            "win_rate": "0.8643772433540902",
+            "win_loss_ratio": "4.147707373382467",
+            "max_drawdown_pct": "10.720699213290661",
+            "total_trades": 54,
+            "max_consecutive_losses": 8,
+            "avg_mfe_paisa": 432025375,
+            "avg_mae_paisa": 656586,
+            "skewness": null,
+            "kurtosis": "4.971909442984405"
+          }
+        },
+        {
+          "mask": 918148120721981584,
+          "metrics": {
+            "sharpe_ratio": "3.0036769174652997",
+            "sortino_ratio": null,
+            "calmar_ratio": null,
+            "profit_factor": "0.8841753992550783",
+            "recovery_factor": "1.9009911394337442",
+            "win_rate": "0.5678192811160411",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "17.13357197608272",
+            "total_trades": 27,
+            "max_consecutive_losses": 9,
+            "avg_mfe_paisa": 424694381,
+            "avg_mae_paisa": 634048,
+            "skewness": "1.140563554870131",
+            "kurtosis": "-0.3116274758081544"
+          }
+        },
+        {
+          "mask": 816393792366834556,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": "1.5622071181259294",
+            "calmar_ratio": "-0.278935044935668",
+            "profit_factor": null,
+            "recovery_factor": null,
+            "win_rate": "0.2844113649826455",
+            "win_loss_ratio": "2.222743052904134",
+            "max_drawdown_pct": "12.33090085767873",
+            "total_trades": 51,
+            "max_consecutive_losses": 8,
+            "avg_mfe_paisa": 156498761,
+            "avg_mae_paisa": 681281,
+            "skewness": "-1.5204050350392806",
+            "kurtosis": "2.353801174183844"
+          }
+        },
+        {
+          "mask": 138810561049157107,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": "-2.442428385547186",
+            "calmar_ratio": "-1.049034175404604",
+            "profit_factor": "2.6420910250590928",
+            "recovery_factor": "1.487745832754197",
+            "win_rate": "0.8589136785566013",
+            "win_loss_ratio": "0.4016644981849682",
+            "max_drawdown_pct": "13.139275545868367",
+            "total_trades": 40,
+            "max_consecutive_losses": 5,
+            "avg_mfe_paisa": 479889808,
+            "avg_mae_paisa": 986263,
+            "skewness": null,
+            "kurtosis": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "seeded_random_2",
+      "overfit_dsr_min": 0.9,
+      "rows": [
+        {
+          "mask": 1267650600229314692375933839933,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": null,
+            "calmar_ratio": null,
+            "profit_factor": "1.6461469578601642",
+            "recovery_factor": "3.7327314625731116",
+            "win_rate": "0.9207149197103208",
+            "win_loss_ratio": "3.183487646719409",
+            "max_drawdown_pct": "9.389170937177516",
+            "total_trades": 73,
+            "max_consecutive_losses": 1,
+            "avg_mfe_paisa": 850302707,
+            "avg_mae_paisa": 156656,
+            "skewness": null,
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 91948123720687933,
+          "metrics": {
+            "sharpe_ratio": "-1.0807392892515826",
+            "sortino_ratio": null,
+            "calmar_ratio": null,
+            "profit_factor": "1.0657809760652692",
+            "recovery_factor": null,
+            "win_rate": "0.4171958874292293",
+            "win_loss_ratio": "1.6848088367417524",
+            "max_drawdown_pct": "35.90028775999353",
+            "total_trades": 20,
+            "max_consecutive_losses": 2,
+            "avg_mfe_paisa": 985342246,
+            "avg_mae_paisa": 262401,
+            "skewness": null,
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 21464765015178754,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": null,
+            "calmar_ratio": "1.7858513810471268",
+            "profit_factor": "1.1034852719592485",
+            "recovery_factor": null,
+            "win_rate": "0.05033495937247745",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "7.858923026847475",
+            "total_trades": 75,
+            "max_consecutive_losses": 3,
+            "avg_mfe_paisa": 989135838,
+            "avg_mae_paisa": 747222,
+            "skewness": null,
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 681082560823931372,
+          "metrics": {
+            "sharpe_ratio": "1.7576328885820311",
+            "sortino_ratio": null,
+            "calmar_ratio": "-0.5077648588926957",
+            "profit_factor": null,
+            "recovery_factor": null,
+            "win_rate": "0.5954408961267302",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "33.70708462492815",
+            "total_trades": 62,
+            "max_consecutive_losses": 4,
+            "avg_mfe_paisa": 1009483401,
+            "avg_mae_paisa": 39034,
+            "skewness": "-1.3714699761280427",
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 546928852723071906,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": "1.5808979722581569",
+            "calmar_ratio": "1.6117634062997617",
+            "profit_factor": null,
+            "recovery_factor": null,
+            "win_rate": "0.37631189189276937",
+            "win_loss_ratio": "4.575937946856574",
+            "max_drawdown_pct": "19.057029693138663",
+            "total_trades": 31,
+            "max_consecutive_losses": 7,
+            "avg_mfe_paisa": 1042114945,
+            "avg_mae_paisa": 1035706,
+            "skewness": "-1.7391556864716047",
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 587350249498083581,
+          "metrics": {
+            "sharpe_ratio": null,
+            "sortino_ratio": "-1.0741629686004353",
+            "calmar_ratio": null,
+            "profit_factor": "0.9225857381753837",
+            "recovery_factor": "3.4340424111850365",
+            "win_rate": "0.893886612096175",
+            "win_loss_ratio": null,
+            "max_drawdown_pct": "15.920862564930246",
+            "total_trades": 69,
+            "max_consecutive_losses": 12,
+            "avg_mfe_paisa": 22744745,
+            "avg_mae_paisa": 145315,
+            "skewness": "-1.89779411034075",
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 1095089362789212403,
+          "metrics": {
+            "sharpe_ratio": "2.9075544552239663",
+            "sortino_ratio": "0.3900367015457733",
+            "calmar_ratio": "1.4271755893472071",
+            "profit_factor": "0.9718005861125196",
+            "recovery_factor": null,
+            "win_rate": "0.44085981440180466",
+            "win_loss_ratio": "3.525020401662426",
+            "max_drawdown_pct": "25.225385725135084",
+            "total_trades": 45,
+            "max_consecutive_losses": 14,
+            "avg_mfe_paisa": 122435406,
+            "avg_mae_paisa": 427114,
+            "skewness": null,
+            "kurtosis": null
+          }
+        },
+        {
+          "mask": 963586217068295922,
+          "metrics": {
+            "sharpe_ratio": "2.535765809394979",
+            "sortino_ratio": "-0.7183182138072661",
+            "calmar_ratio": null,
+            "profit_factor": null,
+            "recovery_factor": "0.5391217458250841",
+            "win_rate": "0.5635984682444357",
+            "win_loss_ratio": "1.7796093911122535",
+            "max_drawdown_pct": "23.465407429526287",
+            "total_trades": 46,
+            "max_consecutive_losses": 11,
+            "avg_mfe_paisa": 518142544,
+            "avg_mae_paisa": 892148,
+            "skewness": "-0.11986657121915689",
+            "kurtosis": "-0.06065734044382243"
+          }
+        }
+      ]
+    }
+  ]
+}
