@@ -1,6 +1,6 @@
 [project]
 name = "brutex"
-version = "0.2.0a0"
+version = "0.1.0"
 description = "Extreme drill-down brute-force backtesting engine for Indian spot indexes (NIFTY / BANKNIFTY / SENSEX)"
 readme = "README.md"
 requires-python = ">=3.12"
