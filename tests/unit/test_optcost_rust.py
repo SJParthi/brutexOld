@@ -460,6 +460,66 @@ class TestHonestEnvelopeDisclosure:
         assert not ocr.optcost_rust_disabled()  # and no latch ever forms
 
 
+class TestPanicBeltHonesty:
+    """DEC-OPTCOST-PANIC-BELT-HONESTY-001 — the ``kernel_panic`` arm's REACH
+    must stay honestly scoped (CLAUDE.md Golden Rule #10).
+
+    The shipped ``fno_math`` wheel is built ``panic = "abort"``, so a real
+    Rust panic aborts the process before the belt's ``except`` can run: the
+    arm is a DEV-BUILD (unwind ``cargo test``) + defence-in-depth path, NOT
+    a shipped-wheel rail. Two doc-pins keep the prose honest and two
+    TRIGGER-FACT pins fail loudly if the underlying crate facts change, so
+    the disclosure is mechanically verified rather than merely asserted.
+    """
+
+    def test_docstring_scopes_the_panic_belt_to_dev_builds(self) -> None:
+        doc = ocr.__doc__
+        assert doc is not None
+        section = " ".join(doc[doc.index("## Panic-belt honesty") :].split())
+        assert 'panic = "abort"' in section
+        assert "ABORTS the host process" in section
+        assert "DEV-BUILD" in section
+        assert "defence-in-depth" in section
+        assert "NOT a shipped-wheel rail" in section
+        # The retained-not-removed rationale must survive a reflow too.
+        assert "retained, not removed" in section
+
+    def test_layer_four_defers_to_the_honesty_section(self) -> None:
+        """Layer 4 must not re-assert unqualified reach on its own."""
+        doc = ocr.__doc__
+        assert doc is not None
+        layers = " ".join(
+            doc[doc.index("## Fail-closed layers") : doc.index("## Panic-belt honesty")].split()
+        )
+        assert "NOT a shipped-wheel rail" in layers
+        assert '"Panic-belt honesty" below' in layers
+
+    def test_fno_math_release_profile_still_aborts_on_panic(self) -> None:
+        """TRIGGER-FACT pin: if the crate ever leaves ``panic = "abort"`` the
+        honesty section above becomes over-cautious and must be re-read.
+
+        Deliberately NOT a licence to flip the profile — the finance-safety
+        choice is DEC-RUST-CRATES-HARDEN-001 (#965); this only forces the
+        prose and the profile to move together.
+        """
+        manifest = (_REPO_ROOT / "rust" / "fno-math" / "Cargo.toml").read_text(encoding="utf-8")
+        release = manifest[manifest.index("[profile.release]") :]
+        release = (
+            release[: release.index("[profile.", 1)] if "[profile." in release[1:] else release
+        )
+        assert 'panic = "abort"' in release
+
+    def test_fno_math_carries_no_catch_unwind_wrapper(self) -> None:
+        """TRIGGER-FACT pin: the docstring claims fno-math has no
+        ``catch_unwind`` FFI wrapper of its own (unlike ``brutex-lake``)."""
+        hits = [
+            path.name
+            for path in (_REPO_ROOT / "rust" / "fno-math" / "src").rglob("*.rs")
+            if "catch_unwind" in path.read_text(encoding="utf-8")
+        ]
+        assert hits == []
+
+
 # ─────────────────────────────────────────────────────────────────
 # Outcome plumbing + pure helpers
 # ─────────────────────────────────────────────────────────────────
