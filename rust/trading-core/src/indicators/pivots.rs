@@ -87,16 +87,23 @@ pub struct PivotLevels {
 ///
 /// Only the central pivot `p` uses floating point (`(pdh+pdl+pdc)/3.0` then
 /// round-half-even); every R/S level is pure integer arithmetic on the rounded
-/// integer `p` — exactly mirroring `pivots.py:136-152`.
+/// integer `p`. This kernel IS the single source of that math —
+/// `pivots.py::compute_pivot_levels` validates its inputs and then DELEGATES
+/// here (DEC-SHARED-CORE-001), so there is nothing to mirror in the other
+/// direction.
 ///
-/// The Python source raises on `pdh < pdl` or `pdc` outside `[pdl, pdh]`; the
-/// golden inputs always satisfy these, so the guards are `debug_assert!`s
-/// (invalid-input handling is out of Phase-1 scope).
+/// Like `compute_gap_mid`, corrupt prev-day OHLC (`pdh < pdl`, or `pdc`
+/// outside `[pdl, pdh]`) fails LOUD via an always-on `assert!` — never a
+/// silent wrong level; the PyO3 boundary pre-validates and raises a clean
+/// `ValueError` instead (`python.rs::py_compute_pivot_levels`). That boundary
+/// is behind the optional `python` feature, so a native rlib consumer
+/// (TickVault) reaches the `assert!` directly.
 #[must_use]
 pub fn compute_pivot_levels(pdh_paisa: i64, pdl_paisa: i64, pdc_paisa: i64) -> PivotLevels {
     // `assert!` (always-on, incl. release) so corrupt prev-day OHLC fails LOUD —
-    // matching Python's `ValueError` (`pivots.py:124-132`). A `debug_assert!`
-    // would be compiled out in release and silently produce a wrong result.
+    // matching the `ValueError` guard in `pivots.py::compute_pivot_levels`. A
+    // `debug_assert!` would be compiled out in release and silently produce a
+    // wrong result.
     assert!(pdh_paisa >= pdl_paisa, "PDH must be >= PDL");
     assert!(
         pdl_paisa <= pdc_paisa && pdc_paisa <= pdh_paisa,
