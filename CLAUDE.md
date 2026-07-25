@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-23 (DEC-RUST-DEFAULT-ON-WAVE-001, MIGRATION.md #2215,
+_Last updated: 2026-07-25 (DEC-AUTOMERGE-M4PRO-NONBLOCK-002, MIGRATION.md #2254,
+branch `claude/brutex-sole-coordinator-msdsyb` — `auto-merge.yml`'s `ci-check`
+scan exempts the NON-required self-hosted `m4pro-absolute-throughput` bench
+check, closing the LAST gate that could refuse EVERY auto-merge repo-wide while
+that runner is red. #1753 encoded the non-blocking law at `pre-merge-check.sh`
+and honestly scoped its claim to "THIS GATE's verdict only" in five places
+because the auto-merge scan upstream still refused
+failure|cancelled|timed_out|action_required|stale for m4pro; those five sites
+are reconciled here and the two gates now AGREE end-to-end. ONE awk conjunct
+(`&& $2 != "m4pro-absolute-throughput"`), exactly one hardcoded name — the
+sibling `bless-baseline` stays deliberately NON-exempt on both gates (its
+#1753 NAMED RESIDUAL survives unchanged), every REQUIRED check still blocks,
+and the PENDING shape was already non-blocking. Proven by running the SHIPPED
+awk against synthetic rows (failed m4pro ⇒ empty; failed required check beside
+a cancelled m4pro ⇒ still blocks; failed `bless-baseline` ⇒ still blocks; the
+same input on the pre-fix awk reproduces the refusal) + two new redteam pins
+that extract the program from the live workflow rather than re-typing it, both
+fails-before-proven while all 20 pre-existing pins still pass. CI-workflow +
+one script comment + redteam tests + docs ONLY — ZERO `brutex/` source change;
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change. This header carries the pointer, never the story — the full record
+lives in the §1 Active-branch blurb + MIGRATION.md #2254.)
+Earlier: 2026-07-23 (DEC-RUST-DEFAULT-ON-WAVE-001, MIGRATION.md #2215,
 branch `claude/rust-default-on-wave` — the operator RUST-O(1)-EVERYWHERE flip:
 every default-OFF Rust facade seam (~28) ships ENGAGED, the exact inverse of
 the pre-wave Pattern-A default-OFF (unset ⇒ ON · explicit-truthy ⇒ ON ·
@@ -1869,9 +1891,11 @@ named in #1753, documented not broadened per the operator only-m4pro
 constraint) and
 auto-merge.yml's caller-SET `IGNORE_CHECK_NAMES` cannot clobber the exemption —
 while a FAILED m4pro is surfaced as a WARN-only line that never affects the
-exit code AT THIS GATE (auto-merge's own untouched ci-check still refuses a
-FAILED/CANCELLED m4pro — pre-existing; the PENDING shape is non-blocking
-end-to-end) and every REQUIRED check still blocks fully (redteam-pinned incl.
+exit code AT THIS GATE (the auto-merge ci-check residual named here is CLOSED
+by DEC-AUTOMERGE-M4PRO-NONBLOCK-002, MIGRATION.md #2254 — that scan now carries
+the same one-name exemption, so the FAILED/CANCELLED/TIMED_OUT tolerance is
+end-to-end; the PENDING shape always was) and every REQUIRED check still
+blocks fully (redteam-pinned incl.
 the pending-`CI OK (aggregate gate)`-still-blocks + failed-required cases;
 fails-before-proven against the baseline script). The check is genuinely
 NON-required: not in ci.yml's `ci-ok` needs; MIGRATION.md #382 + #1534 — a
@@ -4666,7 +4690,65 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-default-on-wave`
+- **Active branch:** `claude/brutex-sole-coordinator-msdsyb`
+  (**DEC-AUTOMERGE-M4PRO-NONBLOCK-002, MIGRATION.md #2254** — `auto-merge.yml`'s
+  `ci-check` scan exempts the NON-required self-hosted `m4pro-absolute-throughput`
+  bench check, closing the LAST gate that could refuse EVERY auto-merge repo-wide
+  while that runner is red. ROOT: the scan refuses on ANY check whose conclusion
+  is in `failure|cancelled|timed_out|action_required|stale`, exempting exactly one
+  name — this workflow's OWN check (the `failing` awk at
+  `.github/workflows/auto-merge.yml` lines 290-291 pre-change / 305-308 after).
+  `m4pro-absolute-throughput` is NOT in `ci.yml`'s `ci-ok` needs and NOT among
+  branch protection's 22 required contexts, and MIGRATION.md #382 + #1534 both
+  state a bench regression is caught POST-merge, never as a merge blocker —
+  which DEC-PREMERGE-M4PRO-NONBLOCK-001 (#1753) encoded at `pre-merge-check.sh`
+  while honestly scoping its claim to "THIS GATE's verdict only" in FIVE places,
+  because this scan upstream still refused those conclusions; with the bench
+  runner red (or a stuck run cancelled) NO PR merges automatically until an
+  operator intervenes — the exact failure the §11 AUTOMATED posture exists to
+  prevent. NOT reachable today, and that is itself the honest finding: PR
+  #1754's head carried NO m4pro check run at all (the runner is unregistered),
+  which is precisely why auto-merge could fire — the blocker arms itself the
+  moment that runner registers and goes red. FIX: one awk conjunct
+  (`&& $2 != "m4pro-absolute-throughput"`, POSIX `&&`-newline form) + a 15-line
+  in-file WHY comment so a future reader cannot blind-revert it. HONEST envelope:
+  EXACTLY one hardcoded name — the sibling `bench-m4pro.yml` job `bless-baseline`
+  stays deliberately NON-exempt on BOTH gates (the #1753 operator authorization
+  covers exactly this one check; broadening needs its own DEC), so #1753's NAMED
+  RESIDUAL — a manually-cancelled bench run surfacing a cancelled `bless-baseline`
+  — SURVIVES UNCHANGED with the same remediation (push a fresh head SHA, or a new
+  DEC); every REQUIRED check still blocks fully; no gate is widened for anything
+  in `ci-ok` or branch protection; the PENDING shape was already non-blocking
+  end-to-end (a queued check carries no conclusion for either scan to match).
+  PROVEN, not asserted: the SHIPPED awk run against synthetic check-run rows —
+  a FAILED m4pro alone ⇒ EMPTY failing set (the fix); a CANCELLED m4pro beside a
+  `failure` on `Unit tests + coverage (100% gate)` ⇒ exactly that required check
+  (fail-closed preserved — a name filter, never a short-circuit); a FAILED
+  `bless-baseline` ⇒ still blocks; the SAME input on the pre-fix awk ⇒
+  `m4pro-absolute-throughput = failure`, reproducing the refusal. FIVE HONESTY
+  SITES RECONCILED in the same change (the #1753 scoping is history, so its
+  ledger entry is APPENDED to, never rewritten): `scripts/ci/pre-merge-check.sh`
+  (the round-3 SCOPE comment records the amendment + the corrected line cite),
+  CLAUDE.md ×3 (this file's #1753 header blurb + the §1 Earlier-chain and §3
+  branch-chain blurbs), and `docs/MIGRATION.md` #1753 (a bracketed
+  SUPERSEDED-IN-PART note carrying the closure + the 282-289 → 290-291 citation
+  correction; the entry otherwise byte-preserved). TESTS: two new redteam pins in
+  `tests/redteam/test_redteam_automerge_safety.py` that drive the SHIPPED program
+  — `_ci_check_failing_awk_program()` extracts the awk source from the live
+  workflow YAML (a shape change fails loudly with a "re-derive, never delete"
+  message) and `_run_failing_scan()` pipes rows through the REAL `awk` binary;
+  one pins the empty result across all five failing conclusions + the fail-closed
+  preservation + the non-exempt `bless-baseline`, the other pins the exemption
+  CENSUS to exactly the two sanctioned names and refuses an `||` anywhere in the
+  program. FAILS-BEFORE: with ONLY the workflow reverted, both new pins FAIL while
+  all 20 pre-existing pins still PASS. GATES: redteam automerge 22 passed; the
+  29-test `test_redteam_premerge_guard.py` green UNMODIFIED (its #1753 m4pro pins
+  untouched and still valid — this adds a gate, never relaxes that one); YAML
+  parses; `bash -n` clean; ledger validator green. CI-workflow + one script
+  comment + redteam tests + docs ONLY — ZERO `brutex/` source change; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; no
+  new routes, no new env vars.)
+  Earlier: `claude/rust-default-on-wave`
   (**DEC-RUST-DEFAULT-ON-WAVE-001, MIGRATION.md #2215** — the operator
   RUST-O(1)-EVERYWHERE flip (verbatim directive: "I clearly told you everywhere
   as RUST O(1) so default it as ON and convert to rust dude okay?"): THE FLIP
@@ -10461,13 +10543,15 @@ hostile-review pass._
   shape can never refuse a merge AND auto-merge.yml's
   caller-SET `IGNORE_CHECK_NAMES` ("Auto-merge on green CI") cannot clobber
   the exemption; a FAILED/CANCELLED m4pro is surfaced as a WARN-only line
-  that never affects the exit code — the round-3 claim-scoping: that
-  tolerance is THIS gate's verdict only, since on the auto-merge path the
-  workflow's own EARLIER ci-check `failing` scan (deliberately untouched —
-  outside this change's file-set) still refuses a FAILED/CANCELLED/
-  TIMED_OUT m4pro, while the PENDING shape (the motivating incident) is
-  non-blocking end-to-end because a queued check carries no conclusion for
-  that scan to match; the sibling `bench-m4pro.yml`
+  that never affects the exit code — the round-3 claim-scoping said that
+  tolerance was THIS gate's verdict only, since the auto-merge path's
+  EARLIER ci-check `failing` scan still refused a FAILED/CANCELLED/
+  TIMED_OUT m4pro (deliberately untouched then — outside that change's
+  file-set); that residual is CLOSED by DEC-AUTOMERGE-M4PRO-NONBLOCK-002
+  (MIGRATION.md #2254), which adds the same one-name exemption to that
+  scan, so the tolerance is now end-to-end (the PENDING shape — the
+  motivating incident — always was, a queued check carrying no conclusion
+  for either scan to match); the sibling `bench-m4pro.yml`
   `bless-baseline` job is deliberately NOT exempted (the round-2 NAMED
   RESIDUAL — operator authorization covers exactly
   `m4pro-absolute-throughput`, broadening requires a new DEC; live-run
@@ -14883,7 +14967,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-default-on-wave`
+- **Active feature branch:** `claude/brutex-sole-coordinator-msdsyb`
+  (DEC-AUTOMERGE-M4PRO-NONBLOCK-002, MIGRATION.md #2254 — `auto-merge.yml`'s
+  `ci-check` scan exempts the NON-required self-hosted
+  `m4pro-absolute-throughput` bench check (ONE awk conjunct + a WHY comment),
+  closing the LAST gate that could refuse EVERY auto-merge repo-wide while that
+  runner is red; #1753's five honesty sites scoping the tolerance to "THIS
+  GATE's verdict only" are reconciled here and the two gates now AGREE
+  end-to-end; exactly one hardcoded name — `bless-baseline` stays NON-exempt on
+  both gates and #1753's NAMED RESIDUAL survives unchanged, every REQUIRED
+  check still blocks; proven by running the SHIPPED awk against synthetic rows
+  (both directions) + two fails-before-proven redteam pins that extract the
+  program from the live workflow; CI-workflow + one script comment + redteam
+  tests + docs ONLY — ZERO `brutex/` source change; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #2254 for the full blurb)
+  Earlier: `claude/rust-default-on-wave`
   (DEC-RUST-DEFAULT-ON-WAVE-001, MIGRATION.md #2215 — the operator
   RUST-O(1)-EVERYWHERE flip: every default-OFF Rust facade seam (~28) ships
   ENGAGED (unset ⇒ ON · explicit-truthy ⇒ ON · explicit-falsy ⇒ silent OFF kill
@@ -16545,9 +16644,10 @@ hostile-review pass._
   `scripts/ci/pre-merge-check.sh`, UNIONED with the caller's
   `IGNORE_CHECK_NAMES` at all three rollup scan sites so auto-merge.yml's
   caller-SET value cannot clobber it; a FAILED m4pro warns, never blocks
-  at this gate (auto-merge's own untouched ci-check still refuses a
-  FAILED/CANCELLED m4pro — pre-existing; PENDING is non-blocking
-  end-to-end);
+  at this gate (the auto-merge ci-check residual named here is CLOSED by
+  DEC-AUTOMERGE-M4PRO-NONBLOCK-002, MIGRATION.md #2254 — that scan carries
+  the same exemption, so FAILED/CANCELLED/TIMED_OUT is end-to-end; PENDING
+  always was);
   the offline-runner pending-forever shape can never refuse a merge (the
   manual-cancel `bless-baseline` residual is named in #1753 — documented,
   not broadened, per the operator only-m4pro constraint);

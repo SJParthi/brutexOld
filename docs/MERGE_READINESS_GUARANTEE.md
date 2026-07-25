@@ -100,7 +100,11 @@ that row's status.
    `has_hooks` (GitHub-Enterprise-only pre-receive hooks; not expected
    on github.com) or any future value. Red checks are refused UPSTREAM
    by the all-green ci-check (DEC-AUTOMERGE-ALLGREEN-001: ANY failing
-   check run refuses; EVERY `CI OK (aggregate gate)` instance must be
+   check run refuses — **except exactly one NON-REQUIRED self-hosted
+   bench check, `m4pro-absolute-throughput`, exempted on BOTH gates
+   under DEC-PREMERGE-M4PRO-NONBLOCK-001 (#1753) +
+   DEC-AUTOMERGE-M4PRO-NONBLOCK-002 (#2254); every REQUIRED check still
+   refuses**; EVERY `CI OK (aggregate gate)` instance must be
    success) **plus the CI-runs-complete rule (same DEC-ID): every
    push/pull_request CI run on the head must be COMPLETED and at least
    one pull_request-event CI run must be SUCCESS** — added because
@@ -111,12 +115,15 @@ that row's status.
    therefore carries only pending NON-CI checks (the gate's own check
    run and/or advisory third-party/nightly checks, whose completion
    fires no auto-merge trigger and whose FAILURE the failing-check
-   filter refuses). **Known blind spot (disclosed, not guarded):**
+   filter refuses — with the single `m4pro-absolute-throughput`
+   exemption named above, which a FAILED/CANCELLED/TIMED_OUT bench run
+   can now legitimately occupy). **Known blind spot (disclosed, not guarded):**
    legacy commit STATUSES (the pre-check-runs API) are invisible to
    ci-check; no workflow in this repo posts them today — re-verify this
    envelope if a status-posting integration (e.g. codecov) is ever
    added. Pre-G2 no surface may claim "never merges over red" as an
-   absolute; the claim is "no failing check run, no missing CI verdict,
+   absolute; the claim is "no failing REQUIRED check run (the one exempted
+   non-required bench check named above aside), no missing CI verdict,
    no conflict/stale/blocked/uncomputed state at merge time".
    **Ratchet:** when G2 lands, tighten the allow-list to `clean` only
    (tracked under the same DEC-ID). Pinned by

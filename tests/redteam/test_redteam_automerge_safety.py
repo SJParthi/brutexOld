@@ -19,6 +19,8 @@ network, no GitHub API — and assert the wiring is present.
 
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,20 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 AUTO_MERGE_YML = REPO_ROOT / ".github" / "workflows" / "auto-merge.yml"
+BENCH_M4PRO_YML = REPO_ROOT / ".github" / "workflows" / "bench-m4pro.yml"
+
+# The EXACT `failing` awk program the ci-check step ships, whitespace-normalised.
+# Frozen deliberately (DEC-AUTOMERGE-M4PRO-NONBLOCK-002): a per-name census over
+# `$2 != "..."` is evadable — a `$2 !~ /^(Unit tests|CodeQL)/` conjunct exempts
+# arbitrary REQUIRED checks while leaving that census green (demonstrated in the
+# #2254 security review, MINOR-1). Freezing the whole program means NO construct
+# can enter this fail-closed merge gate without a red test that says so.
+EXPECTED_FAILING_AWK_PROGRAM = (
+    "$1 ~ /^(failure|cancelled|timed_out|action_required|stale)$/ "
+    '&& $2 != "Auto-merge on green CI" '
+    '&& $2 != "m4pro-absolute-throughput" '
+    '{print $2" = "$1}'
+)
 CHARTER_MD = REPO_ROOT / "docs" / "MERGE_READINESS_GUARANTEE.md"
 
 
@@ -193,6 +209,160 @@ def test_ci_check_requires_all_green_not_head_1() -> None:
     assert "CI OK (aggregate gate)" in run and "grep -qvx success" in run, (
         "ci-check no longer requires EVERY CI OK run to be success — a single "
         "green run could mask a red one"
+    )
+
+
+def _ci_check_failing_awk_program() -> str:
+    """Return the ``failing`` awk program EXACTLY as the ci-check step runs it.
+
+    Extracted from the live workflow (never re-typed here) so these pins test
+    the shipped program, not a copy that could drift away from it.
+    """
+    jobs = _load_jobs(AUTO_MERGE_YML)
+    steps = jobs["auto-merge"]["steps"]
+    ci_step = next(s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "ci-check")
+    run = str(ci_step.get("run", ""))
+    match = re.search(r"failing=\$\(printf[^\n]*awk -F'\\t' \\\n(.*?)'\)\n", run, re.DOTALL)
+    assert match is not None, (
+        "could not locate the ci-check `failing` awk scan in auto-merge.yml — "
+        "the shape changed; these DEC-AUTOMERGE-M4PRO-NONBLOCK-002 pins must be "
+        "re-derived against the new shape, never deleted"
+    )
+    program = match.group(1)
+    assert program.lstrip().startswith("'"), "unexpected awk quoting shape"
+    return program.lstrip()[1:]
+
+
+def _bless_baseline_check_run_name() -> str:
+    """Return the check-run name GitHub emits for bench-m4pro's ``bless-baseline``.
+
+    Read from the workflow (never re-typed) so a rename cannot silently make the
+    named-residual pin below assert a string GitHub no longer produces.
+    """
+    jobs = _load_jobs(BENCH_M4PRO_YML)
+    name = str(jobs["bless-baseline"].get("name", "")).strip()
+    assert name, "bench-m4pro.yml's bless-baseline job lost its `name:` — re-derive this pin"
+    return name
+
+
+BLESS_BASELINE_CHECK_RUN_NAME = _bless_baseline_check_run_name()
+
+
+def _run_failing_scan(rows: list[tuple[str, str]]) -> list[str]:
+    """Feed ``(conclusion, name)`` rows through the REAL extracted awk program.
+
+    Argv note: the workflow writes ``awk -F'\\t'`` inside a shell single-quoted
+    word, so the shell hands awk the two characters ``\\t``, which awk's own
+    ``-F`` escape processing turns into a TAB. Here the argv list is built
+    directly (no shell), so a literal TAB is passed instead — the SAME field
+    separator awk ends up using, just without the round trip. The program under
+    test is extracted VERBATIM from the workflow; only this one delimiter
+    spelling differs, and it is behaviourally identical under mawk 1.3.4 (the
+    ``/usr/bin/awk`` on the ``ubuntu-24.04`` runner the workflow declares).
+    """
+    stdin = "".join(f"{conclusion}\t{name}\n" for conclusion, name in rows)
+    proc = subprocess.run(
+        ["awk", "-F\t", _ci_check_failing_awk_program()],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def test_ci_check_exempts_the_nonblocking_m4pro_bench_check() -> None:
+    """DEC-AUTOMERGE-M4PRO-NONBLOCK-002 (MIGRATION.md #2254).
+
+    ``m4pro-absolute-throughput`` runs ONLY on the self-hosted M4-Pro runner and
+    is NOT required (absent from ci.yml's ``ci-ok`` needs and from branch
+    protection's 22 contexts — MIGRATION.md #382 + #1534), so a bench regression
+    is caught POST-merge, never as a merge blocker. DEC-PREMERGE-M4PRO-NONBLOCK-001
+    (#1753) taught ``pre-merge-check.sh`` that, but left THIS scan matching — so a
+    FAILED / CANCELLED / TIMED_OUT m4pro refused auto-merge upstream of that gate
+    and the whole zero-touch merge lane stalled on a red bench runner.
+
+    This pin runs the SHIPPED awk program, not a copy of it.
+    """
+    # THE FIX: a failed m4pro alone no longer refuses the merge.
+    assert (
+        _run_failing_scan(
+            [("failure", "m4pro-absolute-throughput"), ("success", "CI OK (aggregate gate)")]
+        )
+        == []
+    ), "ci-check still blocks on a FAILED m4pro (regression of #2254)"
+    # …for every conclusion in the failing regex, not just `failure`.
+    for conclusion in ("cancelled", "timed_out", "action_required", "stale"):
+        assert _run_failing_scan([(conclusion, "m4pro-absolute-throughput")]) == [], (
+            f"ci-check still blocks on a {conclusion.upper()} m4pro (regression of #2254)"
+        )
+    # FAIL-CLOSED PRESERVED: a real required check still blocks, even when a
+    # cancelled m4pro sits beside it (the exemption is a name filter, never a
+    # short-circuit that swallows the rest of the scan).
+    assert _run_failing_scan(
+        [
+            ("cancelled", "m4pro-absolute-throughput"),
+            ("failure", "Unit tests + coverage (100% gate)"),
+        ]
+    ) == ["Unit tests + coverage (100% gate) = failure"], (
+        "the m4pro exemption swallowed a genuinely failing REQUIRED check — "
+        "no green must still mean no merge"
+    )
+    # NAMED RESIDUAL (#1753, re-affirmed by #2254): the sibling `bless-baseline`
+    # job is EQUALLY non-required yet deliberately NOT exempted — the operator
+    # authorization covers exactly one name. Broadening needs a new DEC.
+    #
+    # Pin BOTH identifiers. `bless-baseline` is only the JOB ID; the check-run
+    # name GitHub actually emits is bench-m4pro.yml's `name:` for that job, so a
+    # pin on the job id alone would prove "some unlisted name blocks" rather than
+    # "the named residual blocks" (DEC-AUTOMERGE-M4PRO-NONBLOCK-002 review,
+    # MINOR-2).
+    for residual in ("bless-baseline", BLESS_BASELINE_CHECK_RUN_NAME):
+        assert _run_failing_scan([("failure", residual)]) == [f"{residual} = failure"], (
+            f"the named residual {residual!r} was silently exempted — that needs its own DEC"
+        )
+
+
+def test_ci_check_exemption_set_is_exactly_two_names() -> None:
+    """DEC-AUTOMERGE-M4PRO-NONBLOCK-002: the exemption set may not grow quietly.
+
+    A name filter is the weakest link in a fail-closed gate: every added name is
+    a check that can go red without refusing a merge. Pin the census to EXACTLY
+    the two sanctioned names — this workflow's OWN check (which would otherwise
+    self-block) and the non-required self-hosted bench check — so a third entry
+    fails loudly and forces a conscious, DEC'd decision.
+
+    HONEST LIMIT of the census alone (found by the #2254 security review, and the
+    reason for the frozen-program assert below): ``$2 != "..."`` is only ONE way
+    to exempt a name. A ``$2 !~ /^(Unit tests|CodeQL)/`` conjunct exempts
+    arbitrary REQUIRED checks while the census stays green — demonstrated, not
+    hypothesised. So the census is kept as the precise diagnostic and the WHOLE
+    program is frozen as the actual teeth: nothing enters this fail-closed merge
+    gate — no regex form, no ``index()``/``substr()``, no ``system()``/
+    ``getline`` escape hatch — without a red test naming it.
+    """
+    program = _ci_check_failing_awk_program()
+    # THE TEETH: byte-freeze the program (whitespace-normalised so a pure
+    # re-indent of the YAML block scalar is not a false alarm).
+    assert " ".join(program.split()) == EXPECTED_FAILING_AWK_PROGRAM, (
+        "the ci-check `failing` awk program changed. This is the fail-closed scan "
+        "that decides whether a red check refuses an auto-merge — ANY edit needs a "
+        "new DEC and a re-derived EXPECTED_FAILING_AWK_PROGRAM, never a quiet "
+        f"update.\n  shipped:  {' '.join(program.split())!r}\n"
+        f"  expected: {EXPECTED_FAILING_AWK_PROGRAM!r}"
+    )
+    exempted = sorted(re.findall(r'\$2\s*!=\s*"([^"]+)"', program))
+    assert exempted == ["Auto-merge on green CI", "m4pro-absolute-throughput"], (
+        f"the ci-check exemption set changed to {exempted!r} — every name here is "
+        "a check that can be RED without blocking a merge. Adding one requires a "
+        "new DEC (see DEC-PREMERGE-M4PRO-NONBLOCK-001 / -002 for the standard of "
+        "evidence: not in ci-ok needs, not in branch protection's required set)."
+    )
+    # The exemptions must AND with the conclusion match — an `||` would exempt
+    # every check whose conclusion is failing.
+    assert "||" not in program, (
+        "the failing scan gained an `||` — the exemptions must be conjunctive, "
+        "or a single clause can neutralise the whole fail-closed scan"
     )
 
 
